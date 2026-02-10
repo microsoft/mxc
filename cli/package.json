@@ -1,0 +1,45 @@
+{
+  "name": "wxc-cli",
+  "version": "0.1.0",
+  "description": "TypeScript CLI for invoking the WXC (Windows eXecution Container)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "wxc-cli": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node dist/cli.js",
+    "dev": "ts-node src/cli.ts",
+    "test": "jest",
+    "lint": "eslint src --ext .ts",
+    "clean": "rimraf dist"
+  },
+  "keywords": [
+    "wxc",
+    "python",
+    "sandbox",
+    "security",
+    "appcontainer",
+    "cli"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^8.26.0",
+    "@typescript-eslint/parser": "^8.26.0",
+    "eslint": "^9.26.0",
+    "globals": "^17.3.0",
+    "rimraf": "^5.0.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.54.0"
+  },
+  "dependencies": {
+    "@shschaefer/wxc-sdk": "file:../sdk",
+    "commander": "^11.1.0"
+  }
+}

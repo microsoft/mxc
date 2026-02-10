@@ -1,0 +1,20 @@
+{
+  "role": "user",
+  "content": [
+    {
+      "type": "text",
+      "text": "Write a Python program that reads a list of integers from input, sorts them in ascending order, and prints the result."
+    },
+    {
+      "type": "code",
+      "language": "python",
+      "name": "sort_numbers.py",
+      "content": "# This file will be executed in the sandbox\nnumbers = list(map(int, input('Enter numbers separated by space: ').split()))\nprint(sorted(numbers))"
+    },
+    {
+      "type": "sandbox",
+      "command": "python3 sort_numbers.py",
+      "stdin": "5 3 8 1 2"
+    }
+  ]
+}

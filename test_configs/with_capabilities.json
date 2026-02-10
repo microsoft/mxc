@@ -1,0 +1,10 @@
+{
+  "script": "python -c \"import sys; import os; print(f'Python version: {sys.version}'); print(f'Current directory: {os.getcwd()}'); print('Script executed successfully')\"",
+  "timeout": 15000,
+  "executionMode": "appContainer",
+  "appContainer": {
+    "name": "CLI-CAP-Test",
+    "learningMode": true,
+    "capabilities": [ "registryRead" ]
+  }
+}
