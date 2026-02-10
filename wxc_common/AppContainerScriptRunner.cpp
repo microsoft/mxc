@@ -50,6 +50,27 @@ std::wstring AppContainerScriptRunner::GetPrincipalId()
 
 ScriptResponse AppContainerScriptRunner::RunInternal(const CodexRequest& request, WXC::Logger& logger)
 {
+    // Validate that permissiveLearningMode is not used in release builds
+    for (const auto& cap : request.policy.capabilities)
+    {
+        if (cap == L"permissiveLearningMode")
+        {
+#ifdef _DEBUG
+            logger << L"*** SECURITY WARNING ***\n";
+            logger << L"permissiveLearningMode capability is ENABLED.\n";
+            logger << L"AppContainer access restrictions will be LOGGED but NOT ENFORCED.\n";
+            logger << L"This is a DEBUG BUILD ONLY feature and provides NO SECURITY.\n";
+            logger << L"*** DO NOT USE IN PRODUCTION ***\n\n";
+#else
+            logger << L"*** SECURITY ERROR ***\n";
+            logger << L"permissiveLearningMode capability is NOT ALLOWED in release builds.\n";
+            logger << L"This capability completely bypasses AppContainer security.\n";
+            logger << L"Refusing to execute. Rebuild in debug mode if learning mode is required.\n";
+            return CreateErrorResponse(L"SECURITY: permissiveLearningMode not allowed in release builds");
+#endif
+        }
+    }
+
     // Load capabilities from configuration
     std::vector<UniqueLocalAlloc> capabilitySids;
     std::vector<SID_AND_ATTRIBUTES> capabilities;

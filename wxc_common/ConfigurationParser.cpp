@@ -185,10 +185,31 @@ bool LoadRequest(std::wstring_view requestInput, CodexRequest& codexRequest, WXC
 
         // Default capability if appContainer section not specified
         if (ac.contains("learningMode"))
+        {
+#ifdef _DEBUG
             codexRequest.policy.capabilities.push_back(L"permissiveLearningMode");
+            logger << L"WARNING: 'learningMode' enabled - AppContainer restrictions will NOT be enforced (DEBUG BUILD ONLY)\n";
+#else
+            logger << L"SECURITY: 'learningMode' is disabled in release builds. This capability has been removed.\n";
+#endif
+        }
 
         // Add capabilities if defined
         ParseStringArray(ac, "capabilities", codexRequest.policy.capabilities);
+
+        // SECURITY: Remove permissiveLearningMode capability in release builds
+#ifndef _DEBUG
+        auto& caps = codexRequest.policy.capabilities;
+        auto it = std::remove_if(caps.begin(), caps.end(), [&logger](const std::wstring& cap) {
+            if (cap == L"permissiveLearningMode")
+            {
+                logger << L"SECURITY: Removed 'permissiveLearningMode' capability (not allowed in release builds)\n";
+                return true;
+            }
+            return false;
+        });
+        caps.erase(it, caps.end());
+#endif
     }
 
     // Parse filesystem configuration

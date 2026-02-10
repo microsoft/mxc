@@ -1,7 +1,7 @@
 @echo off
 echo.
 echo Building WXC...
-msbuild wxc.sln /p:Configuration=Debug /p:Platform=x64 /t:Rebuild /m /verbosity:minimal
+msbuild wxc.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild /m /verbosity:minimal
 
 echo.
 echo Build npm SDK package...
