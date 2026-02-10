@@ -108,7 +108,7 @@ export function spawnSandbox(
   containerName?: string,
 ): pty.IPty {
   // Check platform support
-  if (!getPlatformSupport()) {
+  if (!getPlatformSupport().isSupported) {
     throw new Error('WXC is currently only supported on Windows 11');
   }
 

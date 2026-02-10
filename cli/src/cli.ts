@@ -23,7 +23,7 @@ program
   .command('run')
   .description('Run Python code with WXC sandbox')
   .argument('<config>', 'Path to JSON configuration file or base64-encoded config')
-  .option('--base64', 'Treat config argument as base64-encoded JSON')
+  .option('--config-base64', 'Treat config argument as base64-encoded JSON')
   .option('--debug', 'Enable debug output')
   .option('--wxc-path <path>', 'Path to wxc-exec.exe executable', path.join(__dirname, '..', '..', 'x64', 'Debug', 'wxc-exec.exe'))
   .action(async (config: string, options: { base64?: boolean; debug?: boolean; wxcPath: string }) => {

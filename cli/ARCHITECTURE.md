@@ -29,7 +29,7 @@ The command-line interface built with Commander.js provides three main commands:
 
 - **run**: Execute scruot code with WXC
   - Accepts config file path or base64-encoded config
-  - Supports --base64 and --debug flags
+  - Supports --config-base64 and --debug flags
   - Allows custom WXC executable path
 
 - **validate**: Validate configuration file
@@ -87,7 +87,7 @@ CLI Command
             │
             ├─> Build command-line arguments
             │   • config path or base64 string
-            │   • --base64 flag (if needed)
+            │   • --config-base64 flag (if needed)
             │   • --debug flag (if requested)
             │
             ├─> spawn() WXC process
@@ -108,7 +108,7 @@ JSON file → Read → Parse → Pass path to WXC → WXC loads & validates
 
 ### Base64-encoded Configuration
 ```
-JSON file → Read → Encode to base64 → Pass to WXC with --base64 → WXC decodes & validates
+JSON file → Read → Encode to base64 → Pass to WXC with --config-base64 → WXC decodes & validates
 ```
 
 ## Error Handling

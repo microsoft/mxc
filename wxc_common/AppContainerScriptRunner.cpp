@@ -228,6 +228,8 @@ ScriptResponse AppContainerScriptRunner::RunInternal(const CodexRequest& request
     HANDLE threads[] = {hThread1.get(), hThread2.get(), hThread3.get()};
     WaitForMultipleObjects(3, threads, TRUE, 1000);
 
+    // TODO: If the process is still running after timeout, terminate it
+
     // TODO: Decide if we need one shot still and script response, or just error code and logging
     ScriptResponse result;
     result.ExitCode = static_cast<int>(exitCode);

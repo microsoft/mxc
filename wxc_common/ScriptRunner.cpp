@@ -42,10 +42,20 @@ ScriptResponse ScriptRunner::Run(const CodexRequest& request, WXC::Logger& logge
     // ACL logic only works for AppContainer execution mode
     std::wstring principalId = GetPrincipalId();
     FileSystemBfsManager bfsManager(request.policy.appContainerName, logger);
-    bfsManager.Configure(request.policy, errorMessage);
+    if (!bfsManager.Configure(request.policy, errorMessage))
+    {
+        const std::wstring message =
+            errorMessage.empty() ? std::wstring(L"Failed to configure filesystem policies.") : errorMessage;
+        return CreateErrorResponse(message);
+    }
 
     NetworkFirewallManager firewallManager;
-    firewallManager.ApplyFirewallRules(principalId, request.policy, logger);
+    if (!firewallManager.ApplyFirewallRules(principalId, request.policy, logger))
+    {
+        const std::wstring message =
+            errorMessage.empty() ? std::wstring(L"Failed to apply network firewall rules.") : errorMessage;
+        return CreateErrorResponse(message);
+    }
 
     // Run the script implementation and guard against unexpected exceptions.
     ScriptResponse response;

@@ -9,6 +9,9 @@
 #include <string_view>
 #include <vector>
 
+#include "CodexModels.h"
+#include "Logger.h"
+
 // Manages Windows Firewall rules for AppContainer network isolation
 class NetworkFirewallManager
 {

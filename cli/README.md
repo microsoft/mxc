@@ -29,7 +29,7 @@ The CLI now supports two modes of operation:
 npm start run examples/01_hello_world.json
 
 # Run with base64-encoded config
-npm start run <base64-string> --base64
+npm start run <base64-string> --config-base64
 
 # Run with debug output
 npm start run config.json --debug

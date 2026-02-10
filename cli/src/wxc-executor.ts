@@ -32,7 +32,7 @@ export class WxcExecutor {
 
       // Add base64 flag if needed
       if (options.isBase64) {
-        args.push('--base64');
+        args.push('--config-base64');
       }
 
       // Add debug flag if needed

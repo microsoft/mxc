@@ -6,7 +6,7 @@ msbuild wxc_tests\wxc_tests.vcxproj /p:Configuration=Debug /p:Platform=x64 /m /v
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo Running tests...
-    wxc_tests\x64\Debug\wxc_tests.exe
+    outputs\wxc_tests\x64\Debug\wxc_tests.exe
 )
 
 echo.

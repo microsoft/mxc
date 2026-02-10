@@ -27,11 +27,11 @@ void PrintUsage(WXC::Logger& logger)
 {
     logger << L"Usage: wxc-exec.exe [--debug] [--config] <config.json>\n";
     logger << L"  or:  wxc-exec.exe [--debug] --config-base64 <base64-encoded-json>\n";
-    logger << L"  or:  wxc-exec.exe --delete --containerName <containerName>\n";
+    logger << L"  or:  wxc-exec.exe --delete --containername <containerName>\n";
     logger << L"\nOptions:\n";
     logger << L"  --debug            Enable console output (default: silent)\n";
     logger << L"  --delete           Delete a container profile and its file access policy\n";
-    logger << L"  --containerName    Specify container name (required with --delete)\n";
+    logger << L"  --containername    Specify container name (required with --delete)\n";
 }
 
 // Parse command line arguments and return config file path or base64 string
@@ -46,7 +46,7 @@ bool ParseCommandLine(int argc, wchar_t* argv[], std::wstring& outConfigData, bo
         return false;
     }
 
-    // First, scan for --debug, --delete, and --containerName flags
+    // First, scan for --debug, --delete, and --containername flags
     outDebugMode = false;
     outDeleteMode = false;
     outAppId.clear();
@@ -87,7 +87,7 @@ bool ParseCommandLine(int argc, wchar_t* argv[], std::wstring& outConfigData, bo
     {
         if (outAppId.empty())
         {
-            logger << L"--delete requires --containerName to be specified\n";
+            logger << L"--delete requires --containername to be specified\n";
             PrintUsage(logger);
             return false;
         }
