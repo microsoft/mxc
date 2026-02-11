@@ -1,0 +1,12 @@
+{
+  "script": "cmd /c echo Test AppContainer for deletion",
+  "appContainer": {
+    "name": "TestDeleteContainer",
+    "learningMode": true
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\temp\\test"
+    ]
+  }
+}

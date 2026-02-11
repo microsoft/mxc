@@ -1,0 +1,36 @@
+{
+  "name": "@shschaefer/wxc-sdk",
+  "version": "0.1.1",
+  "description": "TypeScript SDK for WXC (Windows eXecution Container) - spawn sandboxed processes on Windows",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [ "bin/", "dist/" ],
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "clean": "rimraf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "wxc",
+    "sandbox",
+    "security",
+    "appcontainer",
+    "windows",
+    "node-pty"
+  ],
+  "author": "Microsoft Corporation",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "rimraf": "^5.0.5",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "os": ["win32"]
+}

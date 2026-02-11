@@ -1,0 +1,102 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36811.4
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "wxc", "wxc\wxc.vcxproj", "{DF32124B-F682-43DE-B79F-BA3802A963C8}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "wxc_tests", "wxc_tests\wxc_tests.vcxproj", "{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC943}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{8EC462FD-D22E-90A8-E5CE-7E832BA40C5D}"
+	ProjectSection(SolutionItems) = preProject
+		parse_access_check_log.ps1 = parse_access_check_log.ps1
+		run_examples.bat = run_examples.bat
+		run_test_configs.bat = run_test_configs.bat
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "examples", "examples", "{02EA681E-C7D8-13C7-8484-4AC65E1B71E8}"
+	ProjectSection(SolutionItems) = preProject
+		examples\01_hello_world.json = examples\01_hello_world.json
+		examples\02_filesystem_access.json = examples\02_filesystem_access.json
+		examples\03_network_restricted.json = examples\03_network_restricted.json
+		examples\04_combined_restrictions.json = examples\04_combined_restrictions.json
+		examples\05_custom_python.json = examples\05_custom_python.json
+		examples\06_network_capabilities_only.json = examples\06_network_capabilities_only.json
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "test_configs", "test_configs", "{483D189D-C4F1-4361-871D-78CC5DFD31C7}"
+	ProjectSection(SolutionItems) = preProject
+		test_configs\basic_appcontainer.json = test_configs\basic_appcontainer.json
+		test_configs\basic_lpac.json = test_configs\basic_lpac.json
+		test_configs\basic_permissive.json = test_configs\basic_permissive.json
+		test_configs\network_firewall_test.json = test_configs\network_firewall_test.json
+		test_configs\with_capabilities.json = test_configs\with_capabilities.json
+	EndProjectSection
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "wxc_test_driver", "wxc_test_driver\wxc_test_driver.vcxproj", "{B5128BB1-3F4E-4F12-84FC-3A8C4EC09601}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "wxc_common", "wxc_common\wxc_common.vcxproj", "{C9A3B326-19D4-4F2A-8C5E-9B1D4E5F6A7B}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "test_scripts", "test_scripts", "{1162EAC0-A88D-4913-A35B-33E693214AA9}"
+	ProjectSection(SolutionItems) = preProject
+		test_scripts\run_basicac_test.bat = test_scripts\run_basicac_test.bat
+		test_scripts\run_lpacac_test.bat = test_scripts\run_lpacac_test.bat
+		test_scripts\run_filesystem_bfsreadonly_test.bat = test_scripts\run_filesystem_bfsreadonly_test.bat
+		test_scripts\run_filesystem_bfs_test.bat = test_scripts\run_filesystem_bfs_test.bat
+		test_scripts\run_test_configs.bat = test_scripts\run_test_configs.bat
+		test_scripts\run_examples.bat = test_scripts\run_examples.bat
+	EndProjectSection
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Debug|ARM64 = Debug|ARM64
+		Release|x64 = Release|x64
+		Release|ARM64 = Release|ARM64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{DF32124B-F682-43DE-B79F-BA3802A963C8}.Debug|x64.ActiveCfg = Debug|x64
+		{DF32124B-F682-43DE-B79F-BA3802A963C8}.Debug|x64.Build.0 = Debug|x64
+		{DF32124B-F682-43DE-B79F-BA3802A963C8}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{DF32124B-F682-43DE-B79F-BA3802A963C8}.Debug|ARM64.Build.0 = Debug|ARM64
+		{DF32124B-F682-43DE-B79F-BA3802A963C8}.Release|x64.ActiveCfg = Release|x64
+		{DF32124B-F682-43DE-B79F-BA3802A963C8}.Release|x64.Build.0 = Release|x64
+		{DF32124B-F682-43DE-B79F-BA3802A963C8}.Release|ARM64.ActiveCfg = Release|ARM64
+		{DF32124B-F682-43DE-B79F-BA3802A963C8}.Release|ARM64.Build.0 = Release|ARM64
+		{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC943}.Debug|x64.ActiveCfg = Debug|x64
+		{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC943}.Debug|x64.Build.0 = Debug|x64
+		{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC943}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC943}.Debug|ARM64.Build.0 = Debug|ARM64
+		{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC943}.Release|x64.ActiveCfg = Release|x64
+		{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC943}.Release|x64.Build.0 = Release|x64
+		{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC943}.Release|ARM64.ActiveCfg = Release|ARM64
+		{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC943}.Release|ARM64.Build.0 = Release|ARM64
+		{B5128BB1-3F4E-4F12-84FC-3A8C4EC09601}.Debug|x64.ActiveCfg = Debug|x64
+		{B5128BB1-3F4E-4F12-84FC-3A8C4EC09601}.Debug|x64.Build.0 = Debug|x64
+		{B5128BB1-3F4E-4F12-84FC-3A8C4EC09601}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{B5128BB1-3F4E-4F12-84FC-3A8C4EC09601}.Debug|ARM64.Build.0 = Debug|ARM64
+		{B5128BB1-3F4E-4F12-84FC-3A8C4EC09601}.Release|x64.ActiveCfg = Release|x64
+		{B5128BB1-3F4E-4F12-84FC-3A8C4EC09601}.Release|x64.Build.0 = Release|x64
+		{B5128BB1-3F4E-4F12-84FC-3A8C4EC09601}.Release|ARM64.ActiveCfg = Release|ARM64
+		{B5128BB1-3F4E-4F12-84FC-3A8C4EC09601}.Release|ARM64.Build.0 = Release|ARM64
+		{C9A3B326-19D4-4F2A-8C5E-9B1D4E5F6A7B}.Debug|x64.ActiveCfg = Debug|x64
+		{C9A3B326-19D4-4F2A-8C5E-9B1D4E5F6A7B}.Debug|x64.Build.0 = Debug|x64
+		{C9A3B326-19D4-4F2A-8C5E-9B1D4E5F6A7B}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{C9A3B326-19D4-4F2A-8C5E-9B1D4E5F6A7B}.Debug|ARM64.Build.0 = Debug|ARM64
+		{C9A3B326-19D4-4F2A-8C5E-9B1D4E5F6A7B}.Release|x64.ActiveCfg = Release|x64
+		{C9A3B326-19D4-4F2A-8C5E-9B1D4E5F6A7B}.Release|x64.Build.0 = Release|x64
+		{C9A3B326-19D4-4F2A-8C5E-9B1D4E5F6A7B}.Release|ARM64.ActiveCfg = Release|ARM64
+		{C9A3B326-19D4-4F2A-8C5E-9B1D4E5F6A7B}.Release|ARM64.Build.0 = Release|ARM64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{02EA681E-C7D8-13C7-8484-4AC65E1B71E8} = {8EC462FD-D22E-90A8-E5CE-7E832BA40C5D}
+		{483D189D-C4F1-4361-871D-78CC5DFD31C7} = {8EC462FD-D22E-90A8-E5CE-7E832BA40C5D}
+		{1162EAC0-A88D-4913-A35B-33E693214AA9} = {8EC462FD-D22E-90A8-E5CE-7E832BA40C5D}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {10560090-C415-4486-B98E-5D9E9508013F}
+	EndGlobalSection
+EndGlobal

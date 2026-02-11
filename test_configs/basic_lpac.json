@@ -1,0 +1,11 @@
+{
+  "script": "python -c \"print('import sys; Testing LPAC (Least Privilege AppContainer) mode'); print(f'Python: {sys.version}')\"",
+  "timeout": 30000,
+  "appContainer": {
+    "name": "CLI-LPAC-Test",
+    "leastPrivilege": true
+  },
+  "filesystem": {
+    "readwritePaths": [ "C:\\Users\\AdminUser\\AppData\\Local\\Programs" ]
+  }
+}

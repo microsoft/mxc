@@ -1,0 +1,3 @@
+@echo off
+echo Building WXC solution with test project...
+msbuild wxc.sln /p:Configuration=Debug /p:Platform=x64 /t:Build
