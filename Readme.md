@@ -1,6 +1,6 @@
-# Windows eXecution Container (WXC)
+# Microsoft eXecution Container (MXC)
 
-WXC is a sandboxed code execution environment for Windows that uses AppContainer or Restricted Token isolation to run untrusted code safely.
+MXC is a sandboxed code execution environment.  It currently implements WXC for Windows that uses AppContainer to run untrusted code safely.  We will be adding support for VMs, WSL and other platforms shortly.
 
 ## Features
 
