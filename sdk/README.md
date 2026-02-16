@@ -16,16 +16,17 @@ The WXC SDK provides a Node.js interface for running processes in sandboxed envi
 
 ## Installation
 
+The WXC SDK is currently published to a private registry hosted with NPM.  To use this registry, you must have an access token with permission to read from this scope and will need to explicitly install the SDK into your local node modules.
+
 ```bash
-npm install @shschaefer/wxc-sdk
+npm install --save @shschaefer/wxc-sdk
 ```
 
 **Requirements**:
-- **Windows Build**: Build 26559 or later on branch `ge_current_directwinai`
+- **Windows Build**: Build 26559 or later on branch `ge_current_directwinai` or a derivative
   - The SDK checks the registry key `HKLM\Software\Microsoft\Windows NT\CurrentVersion\BuildLab`
   - Format: `buildNumber.branch.buildDate` (e.g., `26559.ge_current_directwinai.260130-1453`)
   - Minimum build number: 26559
-  - Required branch: ge_current_directwinai
 - **wxc-exec.exe**: Must be built and available (see WXC project root for build instructions)
 
 **Platform Support**:
@@ -411,7 +412,7 @@ npm run clean
 
 ## License
 
-MIT
+TODO:
 
 ## Contributing
 
