@@ -5,8 +5,7 @@ WXC uses a JSON configuration file with the following structure:
 
 ```json
 {
-  "script": {
-    "code": "print('Hello')",            // Required: Script code to execute
+    "script": "print('Hello')",            // Required: Script code to execute
     "workingDirectory": "C:\\temp",      // Optional: initial working directory
     "timeout": 30000                     // Optional: timeout in milliseconds (default is no timeout)
   },

@@ -136,9 +136,7 @@ console.log('Exit code:', result.exitCode);
 
 ```json
 {
-  "script": {
-    "code": "print('Hello World')"
-  }
+  "script": "print('Hello World')"
 }
 ```
 
@@ -146,9 +144,7 @@ console.log('Exit code:', result.exitCode);
 
 ```json
 {
-  "script": {
-    "code": "import urllib.request; print(urllib.request.urlopen('https://api.github.com').read())"
-  },
+  "script": "import urllib.request; print(urllib.request.urlopen('https://api.github.com').read())",
   "network": {
     "defaultPolicy": "block",
     "allowedHosts": ["api.github.com"]
@@ -160,42 +156,10 @@ console.log('Exit code:', result.exitCode);
 
 ```json
 {
-  "script": {
-    "code": "with open('C:\\\\temp\\\\output.txt', 'w') as f: f.write('test')"
-  },
+  "script": "with open('C:\\\\temp\\\\output.txt', 'w') as f: f.write('test')",
   "filesystem": {
-    "allowedPaths": ["C:\\temp"],
+    "readwritePaths": ["C:\\temp"],
     "deniedPaths": ["C:\\Windows\\System32"]
-  }
-}
-```
-
-### Full Configuration
-
-```json
-{
-  "script": {
-    "code": "import sys; print(sys.version)",
-    "timeout": 30000
-  },
-  "executionMode": "appContainer",
-  "appContainer": {
-    "name": "MyApp",
-    "leastPrivilegeMode": true,
-    "capabilities": ["internetClient", "documentsLibrary"]
-  },
-  "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "both",
-    "allowedHosts": ["api.example.com"]
-  },
-  "filesystem": {
-    "allowedPaths": ["C:\\temp"],
-    "restoreAclsOnExit": true
-  },
-  "python": {
-    "executablePath": "C:\\Python\\python.exe",
-    "workingDirectory": "C:\\Projects"
   }
 }
 ```
@@ -283,7 +247,7 @@ Both APIs provide helper functions:
 
 - `createMinimalConfig(code: string)` - Create minimal valid config
 - `createNetworkRestrictedConfig(code: string, allowedHosts: string[])` - Create network-restricted config
-- `createFilesystemRestrictedConfig(code: string, allowedPaths: string[], deniedPaths?: string[])` - Create filesystem-restricted config
+- `createFilesystemRestrictedConfig(code: string, readonlyPaths: string[], readwritePaths: string[], deniedPaths?: string[])` - Create filesystem-restricted config
 
 ## Development
 

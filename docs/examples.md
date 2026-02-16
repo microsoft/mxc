@@ -34,9 +34,7 @@ For a more comprehensive list of examples, look in the examples\ directory.
 ### Network Restricted Execution
 ```json
 {
-  "script": {
-    "code": "import urllib.request\nurllib.request.urlopen('https://api.github.com')"
-  },
+  "script": "import urllib.request\nurllib.request.urlopen('https://api.github.com')",
   "network": {
     "defaultPolicy": "block",
     "enforcementMode": "firewall",
