@@ -122,29 +122,10 @@ export function findWxcExecutable(): string | null {
   const arch = os.arch(); // 'x64' or 'arm64'
   const platformDir = arch === 'arm64' ? 'ARM64' : 'x64';
   
-  const possiblePaths = [
-    // In SDK bin directory (deployed by build)
-    path.join(__dirname, '..', 'bin', platformDir, 'wxc-exec.exe'),
-    // Relative to SDK directory when used as a dependency
-    path.join(__dirname, '..', '..', '..', 'outputs', 'wxc', platformDir, 'Debug', 'wxc-exec.exe'),
-    path.join(__dirname, '..', '..', '..', 'outputs', 'wxc', platformDir, 'Release', 'wxc-exec.exe'),
-    // Relative to SDK directory in development
-    path.join(__dirname, '..', '..', 'outputs', 'wxc', platformDir, 'Debug', 'wxc-exec.exe'),
-    path.join(__dirname, '..', '..', 'outputs', 'wxc', platformDir, 'Release', 'wxc-exec.exe'),
-    // Legacy x64 paths
-    path.join(__dirname, '..', '..', '..', 'x64', 'Debug', 'wxc-exec.exe'),
-    path.join(__dirname, '..', '..', '..', 'x64', 'Release', 'wxc-exec.exe'),
-    path.join(__dirname, '..', '..', 'x64', 'Debug', 'wxc-exec.exe'),
-    path.join(__dirname, '..', '..', 'x64', 'Release', 'wxc-exec.exe'),
-    // Absolute paths in common installation locations
-    'C:\\Program Files\\WXC\\wxc-exec.exe',
-    'C:\\Program Files (x86)\\WXC\\wxc-exec.exe',
-  ];
-
-  for (const wxcPath of possiblePaths) {
-    if (verifyWxcExecutable(wxcPath)) {
-      return wxcPath;
-    }
+  // In SDK bin directory (deployed by build)
+  const possiblePath = path.join(__dirname, '..', 'bin', platformDir, 'wxc-exec.exe');
+  if (verifyWxcExecutable(possiblePath)) {
+    return possiblePath;
   }
 
   return null;

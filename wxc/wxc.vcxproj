@@ -151,8 +151,8 @@ copy "$(TargetDir)wxc-exec.exe" "$(SolutionDir)sdk\bin\$(Platform)\wxc-exec.exe"
       <AdditionalDependencies>$(CoreLibraryDependencies);Userenv.lib;onecoreuap_apiset.lib;ole32.lib;oleaut32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>if not exist "$(SolutionDir)sdk\bin" mkdir "$(SolutionDir)sdk\bin"
-copy "$(TargetDir)wxc-exec.exe" "$(SolutionDir)sdk\bin\wxc-exec.exe"</Command>
+      <Command>if not exist "$(SolutionDir)sdk\bin\$(Platform)" mkdir "$(SolutionDir)sdk\bin\$(Platform)"
+copy "$(TargetDir)wxc-exec.exe" "$(SolutionDir)sdk\bin\$(Platform)\wxc-exec.exe"</Command>
     </PostBuildEvent>
     <PostBuildEvent>
       <Message>binplace the bootstrap executable into the npm wrapper package</Message>
