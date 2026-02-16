@@ -1,4 +1,8 @@
 @echo off
+rem echo.
+rem Setting up vcpkg build integration...
+rem vckpg integrate install
+
 echo.
 echo Building WXC...
 msbuild wxc.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild /m /verbosity:minimal

@@ -40,7 +40,7 @@ function queryWindowsRegistry(key: string, valueName: string): string | null {
  * Requirements:
  * - Registry key HKLM\Software\Microsoft\Windows NT\CurrentVersion\BuildLab must exist
  * - BuildLab format: buildNumber.branch.buildDate
- * - Branch must be "ge_current_directwinai"
+ * - Branch must be "ge_current_directwinai*"
  * - Build number must be >= 26559
  * 
  * @returns true if Windows build meets requirements, false otherwise
@@ -66,7 +66,7 @@ function checkWindowsBuildVersion(): boolean {
   const branch = parts[1];
 
   // Check branch
-  if (branch !== 'ge_current_directwinai') {
+  if (!branch.startsWith('ge_current_directwinai')) {
     return false;
   }
 
