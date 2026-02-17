@@ -146,8 +146,10 @@ program
       console.log('Spawning sandboxed process using SDK...');
 
       // Spawn the process
+      // NOTE: For now, we will force winpty.
       const pty = spawnSandbox(config.script, policy, {
-        debug: options.debug ?? false
+        debug: options.debug ?? false,
+        useConpty: false
       }, config.workingDirectory, config.appContainer?.name);
 
       // Handle output
