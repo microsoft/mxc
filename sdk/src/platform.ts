@@ -122,10 +122,17 @@ export function findWxcExecutable(): string | null {
   const arch = os.arch(); // 'x64' or 'arm64'
   const platformDir = arch === 'arm64' ? 'ARM64' : 'x64';
   
-  // In SDK bin directory (deployed by build)
-  const possiblePath = path.join(__dirname, '..', 'bin', platformDir, 'wxc-exec.exe');
-  if (verifyWxcExecutable(possiblePath)) {
-    return possiblePath;
+  const possiblePaths = [
+    // In SDK bin directory (deployed by build)
+    path.join(__dirname, '..', 'bin', platformDir, 'wxc-exec.exe'),
+    // Relative to project when used as a node module
+    path.join(__dirname, '..', 'node_modules', '@shschaefer', 'wxc-sdk', 'bin', platformDir, 'wxc-exec.exe'),
+  ];
+
+  for (const wxcPath of possiblePaths) {
+    if (verifyWxcExecutable(wxcPath)) {
+      return wxcPath;
+    }
   }
 
   return null;
