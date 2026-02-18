@@ -13,13 +13,12 @@ language compiled to FlatBuffers for efficient runtime consumption.
 - [2. Seccomp-BPF Filters](#2-seccomp-bpf-filters)
 - [3. Linux Landlock](#3-linux-landlock)
 - [4. Windows Equivalents](#4-windows-equivalents)
-- [5. Syscalls vs IOCTLs](#5-syscalls-vs-ioctls)
-- [6. Common Policy Dimensions](#6-common-policy-dimensions)
-- [7. macOS Seatbelt Profile Language](#7-macos-seatbelt-profile-language)
-- [8. Proposed Cross-Platform JSON Policy Language](#8-proposed-cross-platform-json-policy-language)
-- [9. FlatBuffer Compiled Format](#9-flatbuffer-compiled-format)
-- [10. Authoring Format: Why JSONC over YAML](#10-authoring-format-why-jsonc-over-yaml)
-- [11. JSONC Parser Landscape](#11-jsonc-parser-landscape)
+- [5. Common Policy Dimensions](#5-common-policy-dimensions)
+- [6. macOS Seatbelt Profile Language](#6-macos-seatbelt-profile-language)
+- [7. Proposed Cross-Platform JSON Policy Language](#7-proposed-cross-platform-json-policy-language)
+- [8. FlatBuffer Compiled Format](#8-flatbuffer-compiled-format)
+- [9. Authoring Format: Why JSONC over YAML](#9-authoring-format-why-jsonc-over-yaml)
+- [10. JSONC Parser Landscape](#10-jsonc-parser-landscape)
 
 ---
 
@@ -467,67 +466,7 @@ desktop apps. Aims to close the gap with Linux/macOS app sandboxing for non-Stor
 
 ---
 
-## 5. Syscalls vs IOCTLs
-
-Linux syscalls and Windows IOCTLs are often confused but operate at different layers.
-
-### The Layered Picture
-
-```
-         Linux                              Windows
-  ┌─────────────────┐              ┌──────────────────────┐
-  │  libc / glibc   │              │  Win32 API (kernel32) │   ← user-friendly wrappers
-  │  open(), read()  │              │  CreateFile, ReadFile  │
-  └───────┬─────────┘              └──────────┬───────────┘
-          │                                   │
-          │ (thin wrapper)                    │ (thin wrapper)
-          ▼                                   ▼
-  ┌─────────────────┐              ┌──────────────────────┐
-  │  Syscall interface│              │  NT syscall interface │   ← THE EQUIVALENT LAYER
-  │  (int 0x80 /     │              │  (ntdll.dll)          │
-  │   syscall instr)  │              │  NtCreateFile,        │
-  │  __NR_open = 2    │              │  NtReadFile, etc.     │
-  │  __NR_read = 0    │              │  Syscall numbers too  │
-  └───────┬─────────┘              └──────────┬───────────┘
-          │                                   │
-          ▼                                   ▼
-  ┌─────────────────┐              ┌──────────────────────┐
-  │  Linux Kernel    │              │  NT Kernel (ntoskrnl) │
-  └─────────────────┘              └──────────────────────┘
-```
-
-**Linux syscalls ≈ Windows NT system calls** (the `Nt*`/`Zw*` functions in ntdll.dll).
-Both are the fundamental gate between user mode and kernel mode.
-
-**IOCTLs exist on *both* platforms** and serve the same purpose: a generic escape
-hatch for driver/device-specific operations that don't fit neatly into read/write.
-
-| | Linux | Windows |
-|---|---|---|
-| **Syscall** | `ioctl(fd, TCSETS, &termios)` | `NtDeviceIoControlFile(...)` |
-| **User API** | `ioctl()` — a single syscall | `DeviceIoControl()` — a Win32 wrapper |
-| **Purpose** | Send a control code + data to a driver via a file descriptor | Send a control code + data to a driver via a handle |
-
-### Key Differences: Syscalls vs IOCTLs
-
-| Dimension | Syscalls (Linux) / NT calls (Windows) | IOCTLs (both platforms) |
-|---|---|---|
-| **Scope** | The *entire* kernel API — files, memory, processes, networking, signals | Device/driver-specific operations only |
-| **Dispatch** | Numbered table in kernel; every call goes through one gate | Routed through a file/handle to a specific driver |
-| **Stability** | Stable ABI (Linux guarantees syscall numbers don't change) | Driver-defined; can change between driver versions |
-| **Count** | ~450 on Linux; ~460 on Windows NT | Unlimited — every driver defines its own |
-
-### The Analogy Summarized
-
-```
-Linux syscalls        ≈  Windows Nt* system calls    (kernel entry gate)
-Linux ioctl()         ≈  Windows DeviceIoControl()   (driver-specific escape hatch)
-Linux libc (glibc)    ≈  Windows Win32 API (kernel32) (user-friendly wrappers)
-```
-
----
-
-## 6. Common Policy Dimensions
+## 5. Common Policy Dimensions
 
 When you look across all these systems, common policy dimensions emerge. They don't
 all cover every dimension, but they draw from the same well.
@@ -622,7 +561,7 @@ Every sandboxing policy answers the same five questions:
 
 ---
 
-## 7. macOS Seatbelt Profile Language
+## 6. macOS Seatbelt Profile Language
 
 Profiles are written in an S-expression (Lisp-like) syntax and stored as `.sb` text
 files. Apple ships built-in ones at `/usr/share/sandbox/` (e.g., `sshd.sb`, `mds.sb`,
@@ -779,7 +718,7 @@ sandbox-exec -p '(version 1)(deny default)(allow file-read* (subpath "/tmp"))' /
 
 ---
 
-## 8. Proposed Cross-Platform JSON Policy Language
+## 7. Proposed Cross-Platform JSON Policy Language
 
 ### Design Principles
 
@@ -1003,7 +942,7 @@ sandbox-exec -p '(version 1)(deny default)(allow file-read* (subpath "/tmp"))' /
 
 ---
 
-## 9. FlatBuffer Compiled Format
+## 8. FlatBuffer Compiled Format
 
 ### Why FlatBuffers
 
@@ -1361,7 +1300,7 @@ be trusted:
 
 ---
 
-## 10. Authoring Format: Why JSONC over YAML
+## 9. Authoring Format: Why JSONC over YAML
 
 ### Why YAML Is Problematic for Security Policy
 
@@ -1422,7 +1361,7 @@ The pipeline:
 
 ---
 
-## 11. JSONC Parser Landscape
+## 10. JSONC Parser Landscape
 
 ### C++
 
