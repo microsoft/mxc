@@ -29,9 +29,9 @@ private:
     WXC::Logger& _logger;
     bool _configured = false;
 
-    bool AddBfsPath(std::wstring_view path, std::wstring& errorMsg);
+    bool AddBfsPath(std::wstring_view path, std::wstring& errorMsg, bool inherit = true);
 
-    bool AddReadOnlyBfsPath(std::wstring_view path, std::wstring& errorMsg);
+    bool AddReadOnlyBfsPath(std::wstring_view path, std::wstring& errorMsg, bool inherit = true);
 
     bool RemoveConfiguration(std::wstring& errorMsg);
 
@@ -41,4 +41,7 @@ private:
 
     // Helper: Run bfscfg.exe with arguments
     std::wstring RunBfsCfg(std::span<std::wstring_view> args, std::wstring& errorMsg);
+
+    // Helper: Test a path to see if it is the root of a drive
+    bool TestForRootPath(std::wstring_view path);
 };

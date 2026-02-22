@@ -16,7 +16,8 @@ bool FileSystemBfsManager::Configure(ContainerPolicy policy, std::wstring& error
     // Configure BFS for allowed paths
     for (const auto& path : policy.readwritePaths)
     {
-        if (!AddBfsPath(path, errorMsg))
+        bool inherit = TestForRootPath(path);
+        if (!AddBfsPath(path, errorMsg, inherit))
         {
             RemoveConfiguration();
             return false;
@@ -30,7 +31,8 @@ bool FileSystemBfsManager::Configure(ContainerPolicy policy, std::wstring& error
     // Configure BFS for allowed read-only paths
     for (const auto& path : policy.readonlyPaths)
     {
-        if (!AddReadOnlyBfsPath(path, errorMsg))
+        bool inherit = TestForRootPath(path);
+        if (!AddReadOnlyBfsPath(path, errorMsg, inherit))
         {
             RemoveConfiguration();
             return false;
@@ -81,24 +83,39 @@ bool FileSystemBfsManager::ExecuteBfsCfgOperation(std::span<std::wstring_view> a
     return true;
 }
 
-bool FileSystemBfsManager::AddBfsPath(std::wstring_view path, std::wstring& errorMsg)
+bool FileSystemBfsManager::AddBfsPath(std::wstring_view path, std::wstring& errorMsg, bool inherit)
 {
     std::vector<std::wstring_view> args = {
-        L"--addpolicy", L"--policybroker", L"--filename", path, L"--appid", _appContainerName, L"--containerinherit",
+        L"--addpolicy", L"--policybroker", 
+        L"--filename", path, L"--appid", _appContainerName
     };
+    if (inherit)
+    {
+        args.push_back(L"--containerinherit");
+    }
     return ExecuteBfsCfgOperation(
         args, L"Failed to add BFS path " + std::wstring{path} + L" for AppContainer " + _appContainerName, errorMsg);
 }
 
-bool FileSystemBfsManager::AddReadOnlyBfsPath(std::wstring_view path, std::wstring& errorMsg)
+bool FileSystemBfsManager::AddReadOnlyBfsPath(std::wstring_view path, std::wstring& errorMsg, bool inherit)
 {
     std::vector<std::wstring_view> args = {
-        L"--addpolicy", L"--policybrokerreadonly", L"--filename",         path,
-        L"--appid",     _appContainerName,         L"--containerinherit",
+        L"--addpolicy", L"--policybrokerreadonly", 
+        L"--filename", path, L"--appid",     _appContainerName
     };
+    if (inherit)
+    {
+        args.push_back(L"--containerinherit");
+    }
     return ExecuteBfsCfgOperation(
         args, L"Failed to add read-only BFS path " + std::wstring{path} + L" for AppContainer " + _appContainerName,
         errorMsg);
+}
+
+bool FileSystemBfsManager::TestForRootPath(std::wstring_view path)
+{
+    // Test to see if the path is "C:\", if so DO NOT inherit
+    return (path == L"C:\\") ? false: true;
 }
 
 bool FileSystemBfsManager::RemoveConfiguration(std::wstring& errorMsg)
