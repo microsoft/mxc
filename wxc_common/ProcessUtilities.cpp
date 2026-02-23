@@ -19,11 +19,13 @@ DWORD WINAPI PipeThread(LPVOID param)
 
     while (true)
     {
+        // If the process has closed the pipe or an error occurs, exit the loop
         if (!ReadFile(hRead, buffer, BUFFER_SIZE, &bytesRead, nullptr) || bytesRead == 0)
         {
             break;
         }
 
+        // Write to the destination pipe. If an error occurs, exit the loop.
         if (!WriteFile(hWrite, buffer, bytesRead, &bytesWritten, nullptr) || bytesWritten != bytesRead)
         {
             break;
