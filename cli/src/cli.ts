@@ -148,8 +148,7 @@ program
       // Spawn the process
       // NOTE: For now, we will force winpty.
       const pty = spawnSandbox(config.script, policy, {
-        debug: options.debug ?? false,
-        useConpty: false
+        debug: options.debug ?? false
       }, config.workingDirectory, config.appContainer?.name);
 
       // Handle output

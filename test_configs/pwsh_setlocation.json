@@ -1,0 +1,17 @@
+{
+  "script": "pwsh.exe -nop -nol -c \"Set-PSReadLineOption -HistorySaveStyle SaveNothing; Set-Location c:\\temp\"; Get-ChildItem",
+  "appContainer": {
+    "name": "CLI-Pwsh"
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\Program Files\\PowerShell\\7",
+      "C:\\temp",
+      "C:\\Users",
+      "C:\\Users\\st\\AppData\\Roaming\\Microsoft\\Windows\\PowerShell\\PSReadLine"
+    ],
+    "readonlyPaths": [
+      "C:\\"
+    ]
+  }
+}

@@ -67,12 +67,6 @@ export interface SandboxSpawnOptions {
    */
   debug?: boolean;
 
-  /** 
-   * Use the conpty DLL instead of the default winpty backend on Windows 11.
-   * This may provide better performance and compatibility.
-   */
-  useConpty?: boolean;
-
   /**
    * PTY options to pass to node-pty
    */
@@ -158,7 +152,6 @@ export function spawnSandbox(
     rows: 80,
     cwd: workingDirectory || process.cwd(),
     env: process.env,
-    useConpty: options.useConpty,
     ...options.ptyOptions,
   };
 

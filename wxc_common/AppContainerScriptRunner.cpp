@@ -146,8 +146,8 @@ ScriptResponse AppContainerScriptRunner::RunInternal(const CodexRequest& request
     siEx.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
     siEx.StartupInfo.lpDesktop = const_cast<LPWSTR>(L"winsta0\\default");
 
-    // Initialize attribute list (security caps + optional LPAC policy)
-    DWORD attrCount = request.policy.leastPrivilegeMode ? 2 : 1;
+    // Initialize attribute list (security caps + handle list + optional LPAC policy)
+    DWORD attrCount = request.policy.leastPrivilegeMode ? 3 : 2;
     SIZE_T attributeListSize = 0;
     ::InitializeProcThreadAttributeList(nullptr, attrCount, 0, &attributeListSize);
 
@@ -183,6 +183,16 @@ ScriptResponse AppContainerScriptRunner::RunInternal(const CodexRequest& request
         {
             return CreateErrorResponse(L"Failed to update ALL_APPLICATION_PACKAGES_POLICY attribute.");
         }
+    }
+
+    // Explicitly list only the pipe handles the child container needs to inherit.
+    // This lets us pass bInheritHandles=TRUE to CreateProcessW while still tightly
+    // controlling which handles the child can access.
+    HANDLE inheritHandles[] = {hStdInRead.get(), hStdOutWrite.get(), hStdErrWrite.get()};
+    if (!::UpdateProcThreadAttribute(siEx.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritHandles,
+                                     sizeof(inheritHandles), nullptr, nullptr))
+    {
+        return CreateErrorResponse(L"Failed to update HANDLE_LIST attribute.");
     }
 
     // Create the process
@@ -239,19 +249,34 @@ ScriptResponse AppContainerScriptRunner::RunInternal(const CodexRequest& request
     params3.hWrite = hParentStdErr;
     hThread3.reset(::CreateThread(nullptr, 0, WXC::PipeThread, &params3, 0, nullptr));
 
-    // Wait for child process to exit
-    ::WaitForSingleObject(hProcess.get(), GetTimeoutMilliseconds(request.scriptTimeout));
+    // Wait for the child process to exit, or for an output relay thread to finish.
+    // Threads 2 and 3 exit when the child closes its stdout/stderr (which happens on exit),
+    // so any of these handles signaling indicates the child session is over.
+    HANDLE completionHandles[] = {hProcess.get(), hThread2.get(), hThread3.get()};
+    DWORD waitResult = ::WaitForMultipleObjects(3, completionHandles, FALSE,
+                                                GetTimeoutMilliseconds(request.scriptTimeout));
+
+    if (waitResult == WAIT_TIMEOUT)
+    {
+        // Timeout elapsed before the child exited: forcibly terminate it.
+        ::TerminateProcess(hProcess.get(), static_cast<UINT>(-1));
+        // Block until the OS confirms the process is gone so GetExitCodeProcess is valid.
+        ::WaitForSingleObject(hProcess.get(), INFINITE);
+    }
+
+    // Shut down Thread 1 (stdin relay). CancelSynchronousIo interrupts its blocking
+    // ReadFile call, causing PipeThread to break out of its loop. Closing hStdInWrite
+    // ensures that any WriteFile already in flight also fails promptly.
+    ::CancelSynchronousIo(hThread1.get());
+    hStdInWrite.reset();
+
+    // Wait for all relay threads to finish draining and exit cleanly.
+    HANDLE allThreads[] = {hThread1.get(), hThread2.get(), hThread3.get()};
+    ::WaitForMultipleObjects(3, allThreads, TRUE, 2000);
 
     DWORD exitCode = 0;
     ::GetExitCodeProcess(hProcess.get(), &exitCode);
 
-    // Wait for threads to finish (with 1 second timeout)
-    HANDLE threads[] = {hThread1.get(), hThread2.get(), hThread3.get()};
-    WaitForMultipleObjects(3, threads, TRUE, 1000);
-
-    // TODO: If the process is still running after timeout, terminate it
-
-    // TODO: Decide if we need one shot still and script response, or just error code and logging
     ScriptResponse result;
     result.ExitCode = static_cast<int>(exitCode);
 
