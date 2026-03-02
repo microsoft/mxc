@@ -100,6 +100,7 @@ export function spawnSandbox(
   options: SandboxSpawnOptions = {},
   workingDirectory?: string,
   containerName?: string,
+  env?: { [key: string]: string | undefined }
 ): pty.IPty {
   // Check platform support
   if (!getPlatformSupport().isSupported) {
@@ -151,8 +152,7 @@ export function spawnSandbox(
     cols: 120,
     rows: 80,
     cwd: workingDirectory || process.cwd(),
-    env: process.env,
-    ...options.ptyOptions,
+    env: env
   };
 
   // Spawn wxc-exec with node-pty
