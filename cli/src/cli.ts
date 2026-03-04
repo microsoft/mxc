@@ -5,12 +5,13 @@ import { WxcExecutor } from './wxc-executor';
 import {
   spawnSandbox,
   getPlatformSupport,
-  SandboxPolicy
-} from '@shschaefer/wxc-sdk';
+  SandboxPolicy,
+  getAvailableToolsPolicy
+} from '@microsoft/mxc-sdk';
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { WxcConfiguration } from '@shschaefer/wxc-sdk/dist/types';
+import { WxcConfiguration } from '@microsoft/mxc-sdk/dist/types';
 
 const program = new Command();
 
@@ -142,6 +143,27 @@ program
             clearPolicyOnExit: config.filesystem?.clearPolicyOnExit ?? true,
         } : undefined,
       };
+
+      // Discover tool paths from the current environment and merge them
+      const toolsPolicy = getAvailableToolsPolicy(process.env);
+      if (toolsPolicy.readonlyPaths.length > 0) {
+        if (!policy.filesystem) {
+          policy.filesystem = {};
+        }
+        policy.filesystem.readonlyPaths = [
+          ...(policy.filesystem.readonlyPaths ?? []),
+          ...toolsPolicy.readonlyPaths,
+        ];
+      }
+      if (toolsPolicy.readwritePaths.length > 0) {
+        if (!policy.filesystem) {
+          policy.filesystem = {};
+        }
+        policy.filesystem.readwritePaths = [
+          ...(policy.filesystem.readwritePaths ?? []),
+          ...toolsPolicy.readwritePaths,
+        ];
+      }
 
       console.log('Spawning sandboxed process using SDK...');
 

@@ -1,4 +1,4 @@
-import { WxcConfiguration } from '@shschaefer/wxc-sdk/dist/types';
+import { WxcConfiguration } from '@microsoft/mxc-sdk/dist/types';
 
 /**
  * Helper function to create a minimal valid configuration

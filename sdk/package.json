@@ -1,7 +1,7 @@
 {
-  "name": "@shschaefer/wxc-sdk",
-  "version": "0.1.4",
-  "description": "TypeScript SDK for WXC (Windows eXecution Container) - spawn sandboxed processes on Windows",
+  "name": "@microsoft/mxc-sdk",
+  "version": "0.1.5",
+  "description": "TypeScript SDK for MXC (Micfosoft eXecution Containers)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [ "bin/", "dist/" ],

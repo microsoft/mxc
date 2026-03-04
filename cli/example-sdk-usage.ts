@@ -1,5 +1,5 @@
 /**
- * Example: Using the WXC SDK from the CLI package
+ * Example: Using the MXC SDK from the CLI package
  *
  * This demonstrates how to use the SDK exports from the CLI package
  * for both interactive and non-interactive sandboxed process spawning.
@@ -19,7 +19,7 @@ import {  // Platform detection
   spawnSandboxAsync,
   // Types
   SandboxPolicy
-} from '@shschaefer/wxc-sdk';
+} from '@microsoft/mxc-sdk';
 
 /**
  * Example 1: Platform Detection

@@ -1,6 +1,6 @@
-# WXC CLI
+# MXC CLI
 
-TypeScript-based Node.js CLI for invoking the WXC (Windows eXecution Container).
+TypeScript-based Node.js CLI for invoking the MXC (Microsoft eXecution Container).
 
 ## Features
 

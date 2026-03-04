@@ -6,7 +6,7 @@
  *
  * @example
  * ```typescript
- * import { spawnSandbox, SandboxConfig, getPlatformSupport } from '@shschaefer/wxc-sdk';
+ * import { spawnSandbox, SandboxConfig, getPlatformSupport } from '@microsoft/mxc-sdk';
  *
  * if (getPlatformSupport().isSupported) {
  *   const config: SandboxConfig = {
@@ -44,3 +44,12 @@ export {
   spawnSandboxAsync,
   SandboxSpawnOptions
 } from './sandbox';
+
+// Export policy discovery functions
+export {
+  getAvailableToolsPolicy,
+  getUserProfilePolicy,
+  getTemporaryFilesPolicy,
+  FilesystemPolicyResult,
+  ToolsPolicyOptions,
+} from './policy';
