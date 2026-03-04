@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <aclapi.h>
 #include <sddl.h>
 #include <userenv.h>
 
@@ -26,6 +27,96 @@ using WXC::UniqueHandle;
 using WXC::UniqueHeapAlloc;
 using WXC::UniqueLocalAlloc;
 using WXC::UniqueSid;
+
+namespace
+{
+
+// Grant an AppContainer SID read/write access to the Windows NUL device (\\.\NUL).
+//
+// Many runtimes unconditionally open the NUL device during stdio initialization:
+//   - Node.js v19+ (and Electron v29+) in PlatformInit()
+//   - Python subprocess with DEVNULL
+//   - C/C++ programs redirecting to NUL
+//
+// AppContainers block device path access by default, causing these runtimes to
+// crash before they can use the perfectly valid stdio pipes that WXC provides.
+// Since NUL is a data sink (discards writes, returns EOF on reads), granting
+// access carries no security risk.
+//
+// The original DACL is saved so it can be restored after the child process exits.
+WXC::UniqueHandle GrantNulDeviceAccess(PSID appContainerSid, PACL& pOriginalDacl,
+                                       PSECURITY_DESCRIPTOR& pSD, WXC::Logger& logger)
+{
+    pOriginalDacl = nullptr;
+    pSD = nullptr;
+
+    HANDLE hRaw = ::CreateFileW(L"\\\\.\\NUL", WRITE_DAC | READ_CONTROL,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hRaw == INVALID_HANDLE_VALUE)
+    {
+        logger << L"Warning: Could not open NUL device for DACL modification\n";
+        return WXC::UniqueHandle();
+    }
+
+    WXC::UniqueHandle hNul(hRaw);
+
+    if (::GetSecurityInfo(hNul.get(), SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+                          nullptr, nullptr, &pOriginalDacl, nullptr, &pSD) != ERROR_SUCCESS)
+    {
+        logger << L"Warning: Could not read NUL device security descriptor\n";
+        return WXC::UniqueHandle();
+    }
+
+    EXPLICIT_ACCESS_W ea = {};
+    ea.grfAccessPermissions = GENERIC_READ | GENERIC_WRITE;
+    ea.grfAccessMode = SET_ACCESS;
+    ea.grfInheritance = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName = reinterpret_cast<LPWSTR>(appContainerSid);
+
+    PACL pNewDacl = nullptr;
+    if (::SetEntriesInAclW(1, &ea, pOriginalDacl, &pNewDacl) != ERROR_SUCCESS)
+    {
+        logger << L"Warning: Could not create new ACL for NUL device\n";
+        ::LocalFree(pSD);
+        pSD = nullptr;
+        return WXC::UniqueHandle();
+    }
+
+    if (::SetSecurityInfo(hNul.get(), SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+                          nullptr, nullptr, pNewDacl, nullptr) != ERROR_SUCCESS)
+    {
+        logger << L"Warning: Could not set NUL device DACL\n";
+        ::LocalFree(pNewDacl);
+        ::LocalFree(pSD);
+        pSD = nullptr;
+        return WXC::UniqueHandle();
+    }
+
+    ::LocalFree(pNewDacl);
+    logger << L"Granted AppContainer access to NUL device\n";
+    return hNul;
+}
+
+// Restore the NUL device's original security descriptor after the child exits.
+void RestoreNulDeviceSecurity(WXC::UniqueHandle& hNul, PACL pOriginalDacl,
+                              PSECURITY_DESCRIPTOR pSD, WXC::Logger& logger)
+{
+    if (hNul && pOriginalDacl)
+    {
+        ::SetSecurityInfo(hNul.get(), SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+                          nullptr, nullptr, pOriginalDacl, nullptr);
+        logger << L"Restored NUL device security\n";
+    }
+    if (pSD)
+    {
+        ::LocalFree(pSD);
+    }
+}
+
+} // anonymous namespace
 
 AppContainerScriptRunner::AppContainerScriptRunner()
     : ScriptRunner(&_validator)
@@ -195,6 +286,12 @@ ScriptResponse AppContainerScriptRunner::RunInternal(const CodexRequest& request
         return CreateErrorResponse(L"Failed to update HANDLE_LIST attribute.");
     }
 
+    // Grant AppContainer access to the NUL device for runtime stdio initialization.
+    // This must happen before CreateProcessW so the child can open \\.\NUL on startup.
+    PACL pOriginalNulDacl = nullptr;
+    PSECURITY_DESCRIPTOR pNulSD = nullptr;
+    auto hNulDevice = GrantNulDeviceAccess(_appContainerSid.get(), pOriginalNulDacl, pNulSD, logger);
+
     // Create the process
     std::vector<wchar_t> cmdLineBuffer(request.scriptCode.begin(), request.scriptCode.end());
     cmdLineBuffer.push_back(L'\0');
@@ -276,6 +373,9 @@ ScriptResponse AppContainerScriptRunner::RunInternal(const CodexRequest& request
 
     DWORD exitCode = 0;
     ::GetExitCodeProcess(hProcess.get(), &exitCode);
+
+    // Restore the NUL device's original security now that the child has exited
+    RestoreNulDeviceSecurity(hNulDevice, pOriginalNulDacl, pNulSD, logger);
 
     ScriptResponse result;
     result.ExitCode = static_cast<int>(exitCode);
