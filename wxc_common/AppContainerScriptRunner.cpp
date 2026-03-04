@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <aclapi.h>
 #include <sddl.h>
 #include <userenv.h>
 
@@ -26,6 +27,146 @@ using WXC::UniqueHandle;
 using WXC::UniqueHeapAlloc;
 using WXC::UniqueLocalAlloc;
 using WXC::UniqueSid;
+
+// RAII guard that grants an AppContainer SID access to the NUL device (\Device\Null).
+// The NUL device driver doesn't support WRITE_DAC via CreateFile, so we use
+// SetSecurityInfo on a handle obtained with ACCESS_SYSTEM_SECURITY after enabling
+// the required privilege.
+class NullDeviceAccessGuard
+{
+public:
+    NullDeviceAccessGuard() = default;
+    ~NullDeviceAccessGuard() { Restore(); }
+
+    NullDeviceAccessGuard(const NullDeviceAccessGuard&) = delete;
+    NullDeviceAccessGuard& operator=(const NullDeviceAccessGuard&) = delete;
+
+    bool Grant(PSID appContainerSid, WXC::Logger& logger)
+    {
+        // Enable SeRestorePrivilege which implicitly grants WRITE_DAC
+        HANDLE hToken = nullptr;
+        if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+        {
+            logger << L"Warning: Could not open process token (error " << ::GetLastError() << L")\n";
+            return false;
+        }
+
+        TOKEN_PRIVILEGES tp = {};
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (!::LookupPrivilegeValueW(nullptr, SE_RESTORE_NAME, &tp.Privileges[0].Luid))
+        {
+            logger << L"Warning: Could not lookup SeRestorePrivilege\n";
+            ::CloseHandle(hToken);
+            return false;
+        }
+
+        // Save old state so we can restore the privilege later
+        TOKEN_PRIVILEGES oldTp = {};
+        DWORD oldTpSize = sizeof(oldTp);
+        BOOL adjusted = ::AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), &oldTp, &oldTpSize);
+        DWORD adjustError = ::GetLastError();
+        ::CloseHandle(hToken);
+
+        if (!adjusted || adjustError == ERROR_NOT_ALL_ASSIGNED)
+        {
+            logger << L"Warning: Could not enable SeRestorePrivilege (error " << adjustError << L")\n";
+            return false;
+        }
+
+        _privilegeWasEnabled = (oldTp.Privileges[0].Attributes & SE_PRIVILEGE_ENABLED) != 0;
+
+        // Now open NUL — with SeRestorePrivilege enabled, the system grants WRITE_DAC
+        _hNul.reset(::CreateFileW(L"NUL", WRITE_DAC | READ_CONTROL,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr));
+        if (!_hNul || _hNul.get() == INVALID_HANDLE_VALUE)
+        {
+            logger << L"Warning: Could not open NUL device with WRITE_DAC (error " << ::GetLastError() << L")\n";
+            _hNul.reset();
+            return false;
+        }
+
+        // Read the current DACL
+        PACL currentDacl = nullptr;
+        PSECURITY_DESCRIPTOR pSD = nullptr;
+        DWORD result = ::GetSecurityInfo(_hNul.get(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                         nullptr, nullptr, &currentDacl, nullptr, &pSD);
+        if (result != ERROR_SUCCESS)
+        {
+            logger << L"Warning: Could not read NUL DACL (error " << result << L")\n";
+            _hNul.reset();
+            return false;
+        }
+        _pOriginalSD = pSD;
+
+        // Add an ACE for the AppContainer SID
+        EXPLICIT_ACCESS_W ea = {};
+        ea.grfAccessPermissions = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
+        ea.grfAccessMode = GRANT_ACCESS;
+        ea.grfInheritance = NO_INHERITANCE;
+        ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        ea.Trustee.ptstrName = static_cast<LPWSTR>(appContainerSid);
+
+        PACL pNewDacl = nullptr;
+        result = ::SetEntriesInAclW(1, &ea, currentDacl, &pNewDacl);
+        if (result != ERROR_SUCCESS)
+        {
+            logger << L"Warning: Could not build new DACL for NUL (error " << result << L")\n";
+            ::LocalFree(pSD);
+            _pOriginalSD = nullptr;
+            _hNul.reset();
+            return false;
+        }
+
+        // Apply
+        result = ::SetSecurityInfo(_hNul.get(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                   nullptr, nullptr, pNewDacl, nullptr);
+        ::LocalFree(pNewDacl);
+
+        if (result != ERROR_SUCCESS)
+        {
+            logger << L"Warning: Could not apply DACL to NUL device (error " << result << L")\n";
+            ::LocalFree(pSD);
+            _pOriginalSD = nullptr;
+            _hNul.reset();
+            return false;
+        }
+
+        logger << L"Granted AppContainer access to NUL device\n";
+        _granted = true;
+        return true;
+    }
+
+    void Restore()
+    {
+        if (_granted && _hNul && _pOriginalSD)
+        {
+            BOOL daclPresent = FALSE;
+            PACL originalDacl = nullptr;
+            BOOL daclDefaulted = FALSE;
+            if (::GetSecurityDescriptorDacl(_pOriginalSD, &daclPresent, &originalDacl, &daclDefaulted))
+            {
+                ::SetSecurityInfo(_hNul.get(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                  nullptr, nullptr, originalDacl, nullptr);
+            }
+        }
+
+        if (_pOriginalSD)
+        {
+            ::LocalFree(_pOriginalSD);
+            _pOriginalSD = nullptr;
+        }
+
+        _hNul.reset();
+        _granted = false;
+    }
+
+private:
+    UniqueHandle _hNul;
+    PSECURITY_DESCRIPTOR _pOriginalSD = nullptr;
+    bool _granted = false;
+    bool _privilegeWasEnabled = false;
+};
 
 AppContainerScriptRunner::AppContainerScriptRunner()
     : ScriptRunner(&_validator)
@@ -186,14 +327,18 @@ ScriptResponse AppContainerScriptRunner::RunInternal(const CodexRequest& request
     }
 
     // Explicitly list only the pipe handles the child container needs to inherit.
-    // This lets us pass bInheritHandles=TRUE to CreateProcessW while still tightly
-    // controlling which handles the child can access.
     HANDLE inheritHandles[] = {hStdInRead.get(), hStdOutWrite.get(), hStdErrWrite.get()};
     if (!::UpdateProcThreadAttribute(siEx.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritHandles,
                                      sizeof(inheritHandles), nullptr, nullptr))
     {
         return CreateErrorResponse(L"Failed to update HANDLE_LIST attribute.");
     }
+
+    // Grant the AppContainer SID access to \Device\Null (NUL device).
+    // Electron/Chromium opens NUL by name internally and the default DACL doesn't include
+    // AppContainer ACEs. The guard restores the original DACL when it goes out of scope.
+    NullDeviceAccessGuard nulGuard;
+    nulGuard.Grant(_appContainerSid.get(), logger);
 
     // Create the process
     std::vector<wchar_t> cmdLineBuffer(request.scriptCode.begin(), request.scriptCode.end());
