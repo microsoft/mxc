@@ -150,12 +150,21 @@ std::wstring FileSystemBfsManager::RunBfsCfg(std::span<std::wstring_view> args, 
 
     PROCESS_INFORMATION pi = {};
 
-    // Create std::wstring command line from args
+    // Create std::wstring command line from args, quoting any that contain spaces
     std::wstring commandLine{BfsCfgExe};
     for (const auto& arg : args)
     {
         commandLine += L" ";
-        commandLine += arg;
+        if (arg.find(L' ') != std::wstring_view::npos)
+        {
+            commandLine += L"\"";
+            commandLine += arg;
+            commandLine += L"\"";
+        }
+        else
+        {
+            commandLine += arg;
+        }
     }
 
     std::vector<wchar_t> commandLineBuffer(commandLine.begin(), commandLine.end());
