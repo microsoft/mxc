@@ -19,7 +19,7 @@ The WXC SDK provides a Node.js interface for running processes in sandboxed envi
 The WXC SDK is currently published to a private registry hosted with NPM.  To use this registry, you must have an access token with permission to read from this scope and will need to explicitly install the SDK into your local node modules.
 
 ```bash
-npm install --save @shschaefer/wxc-sdk
+npm install --save @microsoft/mxc-sdk
 ```
 
 **Requirements**:
@@ -43,7 +43,7 @@ npm install --save @shschaefer/wxc-sdk
 ## Quick Start
 
 ```typescript
-import { spawnSandbox, SandboxConfig, getPlatformSupport } from '@shschaefer/wxc-sdk';
+import { spawnSandbox, SandboxConfig, getPlatformSupport } from '@microsoft/mxc-sdk';
 
 // Check platform support
 if (!getPlatformSupport().supported) {
@@ -82,7 +82,7 @@ pty.onExit((event: { exitCode: number }) => {
 Returns detailed platform support information including available sandboxing methods and the reason for any unsupported status.
 
 ```typescript
-import { getPlatformSupport } from '@shschaefer/wxc-sdk';
+import { getPlatformSupport } from '@microsoft/mxc-sdk';
 
 const support = getPlatformSupport();
 console.log('Platform:', support.platform);
@@ -136,7 +136,7 @@ Spawns a sandboxed process and returns a node-pty `IPty` object for interactive 
 **Throws**: Error if platform is not supported or wxc-exec is not found
 
 ```typescript
-import { spawnSandbox, SandboxConfig } from '@shschaefer/wxc-sdk';
+import { spawnSandbox, SandboxConfig } from '@microsoft/mxc-sdk';
 
 const config: SandboxConfig = {
   script: 'python -c "print(\'Hello!\')"',
@@ -160,7 +160,7 @@ pty.onExit((e) => console.log('Exit code:', e.exitCode));
 Spawns a sandboxed process and returns a promise that resolves with the output. This is a convenience wrapper for non-interactive use cases.
 
 ```typescript
-import { spawnSandboxAsync, SandboxConfig } from '@shschaefer/wxc-sdk';
+import { spawnSandboxAsync, SandboxConfig } from '@microsoft/mxc-sdk';
 
 async function runSandboxed() {
   const config: SandboxConfig = {
@@ -224,7 +224,7 @@ interface SandboxConfig {
 Creates a minimal valid configuration with just a script command.
 
 ```typescript
-import { createMinimalConfig, spawnSandbox } from '@shschaefer/wxc-sdk';
+import { createMinimalConfig, spawnSandbox } from '@microsoft/mxc-sdk';
 
 const config = createMinimalConfig('python -c "print(\'Hello\')"');
 const pty = spawnSandbox(config);
@@ -234,7 +234,7 @@ const pty = spawnSandbox(config);
 Creates a configuration with network restrictions (blocks all except allowed hosts).
 
 ```typescript
-import { createNetworkRestrictedConfig, spawnSandbox } from '@shschaefer/wxc-sdk';
+import { createNetworkRestrictedConfig, spawnSandbox } from '@microsoft/mxc-sdk';
 
 const config = createNetworkRestrictedConfig(
   'python -c "import requests; print(requests.get(\'https://api.github.com\').status_code)"',
@@ -248,7 +248,7 @@ const pty = spawnSandbox(config);
 Creates a configuration with filesystem restrictions.
 
 ```typescript
-import { createFilesystemRestrictedConfig, spawnSandbox } from '@shschaefer/wxc-sdk';
+import { createFilesystemRestrictedConfig, spawnSandbox } from '@microsoft/mxc-sdk';
 
 const config = createFilesystemRestrictedConfig(
   'python script.py',
@@ -264,7 +264,7 @@ const pty = spawnSandbox(config);
 ### Minimal Configuration
 
 ```typescript
-import { createMinimalConfig, spawnSandbox } from '@shschaefer/wxc-sdk';
+import { createMinimalConfig, spawnSandbox } from '@microsoft/mxc-sdk';
 
 const config = createMinimalConfig('python -c "print(\'Hello World\')"');
 const pty = spawnSandbox(config);
@@ -276,7 +276,7 @@ pty.onExit((e) => console.log('Done!'));
 ### Network Restrictions
 
 ```typescript
-import { SandboxConfig, spawnSandboxAsync } from '@shschaefer/wxc-sdk';
+import { SandboxConfig, spawnSandboxAsync } from '@microsoft/mxc-sdk';
 
 const config: SandboxConfig = {
   script: 'python -c "import urllib.request; print(urllib.request.urlopen(\'https://api.github.com\').read())"',
@@ -293,7 +293,7 @@ console.log(result.stdout);
 ### Filesystem Restrictions
 
 ```typescript
-import { SandboxConfig, spawnSandbox } from '@shschaefer/wxc-sdk';
+import { SandboxConfig, spawnSandbox } from '@microsoft/mxc-sdk';
 
 const config: SandboxConfig = {
   script: 'python script.py',
@@ -311,7 +311,7 @@ const pty = spawnSandbox(config);
 ### Advanced Configuration
 
 ```typescript
-import { SandboxConfig, spawnSandbox } from '@shschaefer/wxc-sdk';
+import { SandboxConfig, spawnSandbox } from '@microsoft/mxc-sdk';
 
 const config: SandboxConfig = {
   script: 'node app.js',
@@ -391,7 +391,7 @@ import {
   PlatformSupport,
   SandboxingMethod,
   SandboxSpawnOptions
-} from '@shschaefer/wxc-sdk';
+} from '@microsoft/mxc-sdk';
 ```
 
 ## Development

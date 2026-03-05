@@ -1,8 +1,8 @@
-# WXC CLI Architecture
+# MXC CLI Architecture
 
 ## Overview
 
-The WXC CLI is a TypeScript-based Node.js wrapper for the Restricted Codex Executor (WXC). It provides both a command-line interface and a programmatic API for invoking WXC with type-safe configuration.
+The MXC CLI is a TypeScript-based Node.js wrapper for the Microsoft eXecution Containers (MXC) restricted container environment. It provides both a command-line interface and a programmatic API for invoking MXC with type-safe configuration.
 
 ## Project Structure
 
@@ -27,7 +27,7 @@ cli/
 
 The command-line interface built with Commander.js provides three main commands:
 
-- **run**: Execute scruot code with WXC
+- **run**: Execute script code with WXC
   - Accepts config file path or base64-encoded config
   - Supports --config-base64 and --debug flags
   - Allows custom WXC executable path
