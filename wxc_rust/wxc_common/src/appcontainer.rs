@@ -1,0 +1,455 @@
+use std::ptr;
+use std::thread;
+
+use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree, WAIT_OBJECT_0};
+use windows::Win32::Security::Isolation::{
+    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
+};
+use windows::Win32::Security::PSID;
+use windows::Win32::System::Threading::{
+    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, UpdateProcThreadAttribute, LPPROC_THREAD_ATTRIBUTE_LIST,
+    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+};
+use windows_core::{PCWSTR, PWSTR};
+
+use crate::error::WxcError;
+use crate::logger::Logger;
+use crate::models::{
+    CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse,
+};
+use crate::process_util::{
+    create_std_pipes, get_capability_sid_from_name, read_from_pipe, suppress_python_location_error,
+    OwnedHandle,
+};
+use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
+use crate::string_util;
+
+// Attribute list constants (not always exported by the windows crate)
+const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES: usize = 0x0002_0009;
+const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
+const PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY: usize = 0x0002_000F;
+const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
+const EXTENDED_STARTUPINFO_PRESENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0008_0000);
+
+/// SE_GROUP_ENABLED attribute value for SID_AND_ATTRIBUTES.
+const SE_GROUP_ENABLED: u32 = 0x0000_0004;
+
+/// HRESULT value for ERROR_ALREADY_EXISTS (183 / 0xB7).
+const HRESULT_ERROR_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32;
+
+/// Wrapper to send Windows HANDLEs across threads.
+/// SAFETY: Windows HANDLEs are process-wide and safe to use from any thread.
+#[allow(dead_code)]
+struct SendHandle(HANDLE);
+unsafe impl Send for SendHandle {}
+
+/// A `SID_AND_ATTRIBUTES`-compatible struct used to build the capabilities array.
+/// Using a manual struct avoids issues with conditional availability of
+/// `windows::Win32::Security::SID_AND_ATTRIBUTES`.
+#[repr(C)]
+struct SidAndAttributes {
+    sid: PSID,
+    attributes: u32,
+}
+
+/// A `SECURITY_CAPABILITIES`-compatible struct for `UpdateProcThreadAttribute`.
+#[repr(C)]
+struct SecurityCapabilities {
+    app_container_sid: PSID,
+    capabilities: *mut SidAndAttributes,
+    capability_count: u32,
+    reserved: u32,
+}
+
+/// Script runner that executes commands inside a Windows AppContainer.
+pub struct AppContainerScriptRunner {
+    app_container_name: String,
+    app_container_sid: PSID,
+}
+
+impl AppContainerScriptRunner {
+    pub fn new() -> Self {
+        Self {
+            app_container_name: String::new(),
+            app_container_sid: PSID(ptr::null_mut()),
+        }
+    }
+
+    /// Create or derive an AppContainer SID for the given container name.
+    fn create_app_container_sid(name: &str) -> Result<PSID, WxcError> {
+        let wide_name = string_util::to_wide(name);
+        let pcwstr_name = PCWSTR(wide_name.as_ptr());
+
+        let display = string_util::to_wide("Agent scripting container");
+        let pcwstr_display = PCWSTR(display.as_ptr());
+
+        let desc = string_util::to_wide("Profile for agentic script execution");
+        let pcwstr_desc = PCWSTR(desc.as_ptr());
+
+        let result = unsafe {
+            CreateAppContainerProfile(pcwstr_name, pcwstr_display, pcwstr_desc, None)
+        };
+
+        match result {
+            Ok(sid) => Ok(sid),
+            Err(e) if e.code().0 == HRESULT_ERROR_ALREADY_EXISTS => {
+                // Profile already exists — derive the SID from the name.
+                let sid = unsafe {
+                    DeriveAppContainerSidFromAppContainerName(pcwstr_name).map_err(|e2| {
+                        WxcError::Initialization(format!(
+                            "DeriveAppContainerSidFromAppContainerName failed: {}",
+                            e2
+                        ))
+                    })?
+                };
+                Ok(sid)
+            }
+            Err(e) => Err(WxcError::Initialization(format!(
+                "CreateAppContainerProfile failed: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Core implementation of `run_internal`, returning `Result` for ergonomic error handling.
+    fn run_internal_impl(
+        &self,
+        request: &CodexRequest,
+        logger: &mut Logger,
+    ) -> Result<ScriptResponse, WxcError> {
+        // --- Validate permissiveLearningMode ---
+        for cap in &request.policy.capabilities {
+            if cap == "permissiveLearningMode" {
+                #[cfg(debug_assertions)]
+                {
+                    logger.log_line("*** SECURITY WARNING ***");
+                    logger.log_line(
+                        "permissiveLearningMode is ENABLED. \
+                         Container will learn and record access patterns.",
+                    );
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    return Ok(ScriptResponse::error(
+                        "SECURITY: permissiveLearningMode not allowed in release builds",
+                    ));
+                }
+            }
+        }
+
+        // --- Build capability list ---
+        let mut capabilities_to_add: Vec<String> = request.policy.capabilities.clone();
+        capabilities_to_add.push("AgenticAppContainer".to_string());
+
+        let use_capabilities_for_network = matches!(
+            request.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
+        );
+        if use_capabilities_for_network
+            && request.policy.default_network_policy == NetworkPolicy::Allow
+        {
+            if !capabilities_to_add.iter().any(|c| c == "internetClient") {
+                capabilities_to_add.push("internetClient".to_string());
+            }
+        }
+
+        // --- Derive SIDs for each capability ---
+        let mut capability_sid_ptrs: Vec<*mut core::ffi::c_void> = Vec::new();
+        let mut sid_attrs: Vec<SidAndAttributes> = Vec::new();
+
+        for cap_name in &capabilities_to_add {
+            match get_capability_sid_from_name(cap_name) {
+                Ok(sid_ptr) => {
+                    sid_attrs.push(SidAndAttributes {
+                        sid: PSID(sid_ptr),
+                        attributes: SE_GROUP_ENABLED,
+                    });
+                    capability_sid_ptrs.push(sid_ptr);
+                }
+                Err(e) => {
+                    logger.log_line(&format!(
+                        "Warning: could not get SID for capability '{}': {}",
+                        cap_name, e
+                    ));
+                }
+            }
+        }
+
+        // --- Setup SECURITY_CAPABILITIES ---
+        let security_capabilities = SecurityCapabilities {
+            app_container_sid: self.app_container_sid,
+            capabilities: if sid_attrs.is_empty() {
+                ptr::null_mut()
+            } else {
+                sid_attrs.as_mut_ptr()
+            },
+            capability_count: sid_attrs.len() as u32,
+            reserved: 0,
+        };
+
+        // --- Create pipes ---
+        let (stdin_read, stdin_write) =
+            create_std_pipes(false).map_err(|e| WxcError::Process(format!("stdin pipe: {}", e)))?;
+        let (stdout_read, stdout_write) = create_std_pipes(true)
+            .map_err(|e| WxcError::Process(format!("stdout pipe: {}", e)))?;
+        let (stderr_read, stderr_write) = create_std_pipes(true)
+            .map_err(|e| WxcError::Process(format!("stderr pipe: {}", e)))?;
+
+        let inherit_handles = [stdin_read.get(), stdout_write.get(), stderr_write.get()];
+
+        // --- Allocate and initialize attribute list ---
+        let attr_count = if request.policy.least_privilege_mode {
+            3u32
+        } else {
+            2u32
+        };
+        let mut attr_list_size: usize = 0;
+
+        // First call to get the required buffer size.
+        unsafe {
+            let _ = InitializeProcThreadAttributeList(
+                LPPROC_THREAD_ATTRIBUTE_LIST(ptr::null_mut()),
+                attr_count,
+                0,
+                &mut attr_list_size,
+            );
+        }
+
+        let mut attr_list_buf: Vec<u8> = vec![0u8; attr_list_size];
+        let attr_list =
+            LPPROC_THREAD_ATTRIBUTE_LIST(attr_list_buf.as_mut_ptr() as *mut _);
+
+        unsafe {
+            InitializeProcThreadAttributeList(attr_list, attr_count, 0, &mut attr_list_size)
+                .map_err(|e| {
+                    WxcError::Process(format!("InitializeProcThreadAttributeList: {}", e))
+                })?;
+        }
+
+        // RAII guard to call DeleteProcThreadAttributeList on exit.
+        struct AttrListGuard(LPPROC_THREAD_ATTRIBUTE_LIST);
+        impl Drop for AttrListGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    DeleteProcThreadAttributeList(self.0);
+                }
+            }
+        }
+        let _attr_guard = AttrListGuard(attr_list);
+
+        // --- Update attributes ---
+
+        // 1. SECURITY_CAPABILITIES
+        unsafe {
+            UpdateProcThreadAttribute(
+                attr_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                Some(
+                    &security_capabilities as *const SecurityCapabilities
+                        as *const core::ffi::c_void,
+                ),
+                std::mem::size_of::<SecurityCapabilities>(),
+                None,
+                None,
+            )
+            .map_err(|e| {
+                WxcError::Process(format!(
+                    "UpdateProcThreadAttribute(SECURITY_CAPABILITIES): {}",
+                    e
+                ))
+            })?;
+        }
+
+        // 2. ALL_APPLICATION_PACKAGES_POLICY (LPAC mode)
+        let lpac_value = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
+        if request.policy.least_privilege_mode {
+            unsafe {
+                UpdateProcThreadAttribute(
+                    attr_list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+                    Some(&lpac_value as *const u32 as *const core::ffi::c_void),
+                    std::mem::size_of::<u32>(),
+                    None,
+                    None,
+                )
+                .map_err(|e| {
+                    WxcError::Process(format!("UpdateProcThreadAttribute(LPAC): {}", e))
+                })?;
+            }
+        }
+
+        // 3. HANDLE_LIST
+        unsafe {
+            UpdateProcThreadAttribute(
+                attr_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                Some(inherit_handles.as_ptr() as *const core::ffi::c_void),
+                std::mem::size_of_val(&inherit_handles),
+                None,
+                None,
+            )
+            .map_err(|e| {
+                WxcError::Process(format!("UpdateProcThreadAttribute(HANDLE_LIST): {}", e))
+            })?;
+        }
+
+        // --- Setup STARTUPINFOEXW ---
+        let mut desktop_wide = string_util::to_wide("winsta0\\default");
+
+        let si_ex = STARTUPINFOEXW {
+            StartupInfo: STARTUPINFOW {
+                cb: std::mem::size_of::<STARTUPINFOEXW>() as u32,
+                hStdInput: stdin_read.get(),
+                hStdOutput: stdout_write.get(),
+                hStdError: stderr_write.get(),
+                dwFlags: STARTF_USESTDHANDLES,
+                lpDesktop: PWSTR(desktop_wide.as_mut_ptr()),
+                ..Default::default()
+            },
+            lpAttributeList: attr_list,
+        };
+
+        // --- Build command line ---
+        let mut cmd_line_wide: Vec<u16> = request.script_code.encode_utf16().chain(std::iter::once(0)).collect();
+
+        let working_dir_wide = string_util::to_wide(&request.working_directory);
+        let working_dir_pcwstr = if request.working_directory.is_empty() {
+            PCWSTR::null()
+        } else {
+            PCWSTR(working_dir_wide.as_ptr())
+        };
+
+        // --- Create process ---
+        let mut pi = PROCESS_INFORMATION::default();
+
+        unsafe {
+            CreateProcessW(
+                PCWSTR::null(),
+                PWSTR(cmd_line_wide.as_mut_ptr()),
+                None,
+                None,
+                true,
+                EXTENDED_STARTUPINFO_PRESENT,
+                None,
+                working_dir_pcwstr,
+                &si_ex.StartupInfo,
+                &mut pi,
+            )
+            .map_err(|e| WxcError::Process(format!("CreateProcessW failed: {}", e)))?;
+        }
+
+        // --- Close child-side handles in the parent ---
+        drop(stdin_read);
+        drop(stdin_write);
+        drop(stdout_write);
+        drop(stderr_write);
+
+        let process_handle = OwnedHandle::new(pi.hProcess);
+        let _thread_handle = OwnedHandle::new(pi.hThread);
+
+        // --- Spawn reader threads ---
+        // Convert HANDLEs to usize to satisfy Send bounds; usize is always Send.
+        let stdout_raw = stdout_read.get().0 as usize;
+        let stderr_raw = stderr_read.get().0 as usize;
+
+        let stdout_thread = thread::spawn(move || {
+            read_from_pipe(HANDLE(stdout_raw as *mut core::ffi::c_void))
+        });
+        let stderr_thread = thread::spawn(move || {
+            read_from_pipe(HANDLE(stderr_raw as *mut core::ffi::c_void))
+        });
+
+        // --- Wait for process ---
+        let timeout_ms = get_timeout_milliseconds(request.script_timeout);
+        let wait_result = unsafe { WaitForSingleObject(process_handle.get(), timeout_ms) };
+
+        let free_capability_sids = |sids: &[*mut core::ffi::c_void]| {
+            for &sid in sids {
+                unsafe {
+                    let _ = LocalFree(HLOCAL(sid));
+                }
+            }
+        };
+
+        if wait_result != WAIT_OBJECT_0 {
+            unsafe {
+                let _ = TerminateProcess(process_handle.get(), 1);
+            }
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            free_capability_sids(&capability_sid_ptrs);
+            return Ok(ScriptResponse {
+                exit_code: -1,
+                standard_out: String::new(),
+                standard_err: "Process timed out".to_string(),
+                error_message: "Process timed out".to_string(),
+            });
+        }
+
+        let stdout_output = stdout_thread.join().unwrap_or_default();
+        let mut stderr_output = stderr_thread.join().unwrap_or_default();
+        suppress_python_location_error(&mut stderr_output);
+
+        let mut exit_code: u32 = 0;
+        unsafe {
+            GetExitCodeProcess(process_handle.get(), &mut exit_code)
+                .map_err(|_| WxcError::Process("GetExitCodeProcess failed".into()))?;
+        }
+
+        free_capability_sids(&capability_sid_ptrs);
+
+        Ok(ScriptResponse {
+            exit_code: exit_code as i32,
+            standard_out: stdout_output,
+            standard_err: stderr_output,
+            error_message: String::new(),
+        })
+    }
+}
+
+impl Default for AppContainerScriptRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScriptRunner for AppContainerScriptRunner {
+    fn initialize(&mut self, request: &CodexRequest) -> Result<(), WxcError> {
+        self.app_container_sid =
+            Self::create_app_container_sid(&request.policy.app_container_name)?;
+        self.app_container_name = request.policy.app_container_name.clone();
+        Ok(())
+    }
+
+    fn get_principal_id(&self) -> String {
+        if self.app_container_sid.0.is_null() {
+            return "unknown-sid".to_string();
+        }
+        unsafe { string_util::sid_to_string(self.app_container_sid.0, "unknown-sid") }
+    }
+
+    fn run_internal(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+        match self.run_internal_impl(request, logger) {
+            Ok(response) => response,
+            Err(e) => ScriptResponse::error(&e.to_string()),
+        }
+    }
+}
+
+impl Drop for AppContainerScriptRunner {
+    fn drop(&mut self) {
+        if !self.app_container_sid.0.is_null() {
+            unsafe {
+                // AppContainer SIDs from CreateAppContainerProfile /
+                // DeriveAppContainerSidFromAppContainerName must be freed with FreeSid.
+                windows::Win32::Security::FreeSid(self.app_container_sid);
+            }
+            self.app_container_sid = PSID(ptr::null_mut());
+        }
+    }
+}

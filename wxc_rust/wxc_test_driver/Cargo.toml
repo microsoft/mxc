@@ -1,0 +1,11 @@
+[package]
+name = "wxc_test_driver"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "wxc-test-driver"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
