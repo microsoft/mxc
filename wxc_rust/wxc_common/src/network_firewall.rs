@@ -84,11 +84,16 @@ impl NetworkFirewallManager {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        let secs = now.as_secs();
-        let hours = (secs / 3600) % 24;
-        let minutes = (secs / 60) % 60;
-        let seconds = secs % 60;
-        let rule_prefix = format!("WXC_{}_{}{}{}", principal_id, hours, minutes, seconds);
+        let millis = now.as_millis();
+        let mut sanitized_principal_id: String = principal_id
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        const MAX_PRINCIPAL_ID_LEN: usize = 64;
+        if sanitized_principal_id.len() > MAX_PRINCIPAL_ID_LEN {
+            sanitized_principal_id.truncate(MAX_PRINCIPAL_ID_LEN);
+        }
+        let rule_prefix = format!("WXC_{}_{}", sanitized_principal_id, millis);
 
         if default_policy == DefaultPolicy::Block {
             let block_all_name = format!("{}_BlockAll", rule_prefix);
