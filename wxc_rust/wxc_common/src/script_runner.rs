@@ -70,3 +70,19 @@ pub trait ScriptRunner {
 pub fn get_timeout_milliseconds(timeout: u32) -> u32 {
     if timeout == 0 { u32::MAX } else { timeout }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::get_timeout_milliseconds;
+    #[test]
+    fn timeout_zero_returns_u32_max() {
+        let result = get_timeout_milliseconds(0);
+        assert_eq!(result, u32::MAX);
+    }
+    #[test]
+    fn timeout_non_zero_returns_same_value() {
+        let value = 1500u32;
+        let result = get_timeout_milliseconds(value);
+        assert_eq!(result, value);
+    }
+}

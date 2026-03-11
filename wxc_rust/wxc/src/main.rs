@@ -92,7 +92,7 @@ fn main() {
         (path.clone(), false)
     } else if !cli.delete {
         eprintln!("Error: No config provided. Use a positional path, --config, or --config-base64");
-        process::exit(-1);
+        process::exit(1);
     } else {
         (String::new(), false)
     };
@@ -109,12 +109,12 @@ fn main() {
             Some(ref n) => n.as_str(),
             None => {
                 eprintln!("Error: --containername is required with --delete");
-                process::exit(-1);
+                process::exit(1);
             }
         };
         let success = delete_app_container_profile(name, &mut logger);
         print!("{}", logger.get_buffer());
-        process::exit(if success { 0 } else { -1 });
+        process::exit(if success { 0 } else { 1 });
     }
 
     // Load request
@@ -122,7 +122,7 @@ fn main() {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());
-            process::exit(-1);
+            process::exit(1);
         }
     };
 

@@ -11,6 +11,9 @@ pub enum WxcError {
     #[error("Process error: {0}")]
     Process(String),
 
+    #[error("IO error: {0}")]
+    Io(String),
+
     #[error("Firewall error: {0}")]
     Firewall(String),
 
@@ -32,6 +35,6 @@ impl From<serde_json::Error> for WxcError {
 
 impl From<std::io::Error> for WxcError {
     fn from(err: std::io::Error) -> Self {
-        WxcError::ConfigParse(err.to_string())
+        WxcError::Io(err.to_string())
     }
 }
