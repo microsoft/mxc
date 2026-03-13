@@ -8,7 +8,10 @@ use serde::Deserialize;
 
 use crate::error::WxcError;
 use crate::logger::Logger;
-use crate::models::{CodexRequest, ContainerPolicy, NetworkEnforcementMode, NetworkPolicy};
+use crate::models::{
+    CodexRequest, ContainmentBackend, ContainerPolicy, NetworkEnforcementMode, NetworkPolicy,
+    SandboxConfig,
+};
 use crate::string_util::base64_decode;
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -54,13 +57,24 @@ struct RawNetwork {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawSandbox {
+    #[serde(rename = "idleTimeout")]
+    idle_timeout: Option<u32>,
+    #[serde(rename = "daemonPipeName")]
+    daemon_pipe_name: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawConfig {
     script: Option<String>,
+    containment: Option<String>,
     #[serde(rename = "workingDirectory")]
     working_directory: Option<String>,
     timeout: Option<u32>,
     #[serde(rename = "appContainer")]
     app_container: Option<RawAppContainer>,
+    sandbox: Option<RawSandbox>,
     filesystem: Option<RawFilesystem>,
     network: Option<RawNetwork>,
 }
@@ -130,6 +144,31 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
 
     let working_directory = raw.working_directory.unwrap_or_default();
     let script_timeout = raw.timeout.unwrap_or(0);
+
+    // Containment backend selection
+    let containment = match raw.containment.as_deref() {
+        None | Some("appcontainer") => ContainmentBackend::AppContainer,
+        Some("sandbox") => ContainmentBackend::Sandbox,
+        Some(other) => {
+            let msg = format!(
+                "Invalid containment value '{}' (must be 'appcontainer' or 'sandbox')",
+                other
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+    };
+
+    // Sandbox configuration
+    let mut sandbox_config = SandboxConfig::default();
+    if let Some(sb) = raw.sandbox {
+        if let Some(t) = sb.idle_timeout {
+            sandbox_config.idle_timeout_ms = t;
+        }
+        if let Some(name) = sb.daemon_pipe_name {
+            sandbox_config.daemon_pipe_name = name;
+        }
+    }
 
     let mut policy = ContainerPolicy::default();
 
@@ -240,7 +279,9 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         script_code,
         working_directory,
         script_timeout,
+        containment,
         policy,
+        sandbox_config,
     })
 }
 
@@ -637,5 +678,77 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_timeout, 0);
+    }
+
+    // ====== Containment backend selection tests ======
+
+    #[test]
+    fn default_containment_is_appcontainer() {
+        let json = r#"{"script": "echo hello"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::AppContainer);
+    }
+
+    #[test]
+    fn explicit_appcontainer_containment() {
+        let json = r#"{"script": "echo hello", "containment": "appcontainer"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::AppContainer);
+    }
+
+    #[test]
+    fn sandbox_containment() {
+        let json = r#"{"script": "echo hello", "containment": "sandbox"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::Sandbox);
+    }
+
+    #[test]
+    fn invalid_containment_value() {
+        let json = r#"{"script": "echo hello", "containment": "docker"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sandbox_config_defaults() {
+        let json = r#"{"script": "echo hello", "containment": "sandbox"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.sandbox_config.idle_timeout_ms, 300_000);
+        assert_eq!(req.sandbox_config.daemon_pipe_name, "wxc-sandbox");
+    }
+
+    #[test]
+    fn sandbox_config_custom_values() {
+        let json = r#"{
+            "script": "echo hello",
+            "containment": "sandbox",
+            "sandbox": {
+                "idleTimeout": 60000,
+                "daemonPipeName": "my-custom-pipe"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::Sandbox);
+        assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
+        assert_eq!(req.sandbox_config.daemon_pipe_name, "my-custom-pipe");
     }
 }

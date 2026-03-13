@@ -9,6 +9,7 @@ pub mod logger;
 pub mod models;
 pub mod network_firewall;
 pub mod process_util;
+pub mod sandbox_protocol;
 pub mod script_runner;
 pub mod string_util;
 pub mod validator;

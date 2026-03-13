@@ -1,7 +1,38 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
+
+/// Selects which containment backend to use for script execution.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ContainmentBackend {
+    #[default]
+    /// Windows AppContainer — process-level isolation on the host.
+    AppContainer,
+    /// Windows Sandbox — full VM isolation via a long-lived sandbox daemon.
+    Sandbox,
+}
+
+/// Configuration specific to the Windows Sandbox backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxConfig {
+    /// Idle timeout in milliseconds before the daemon tears down the sandbox VM.
+    /// Default: 300 000 (5 minutes). 0 = no timeout.
+    pub idle_timeout_ms: u32,
+    /// Named pipe name the daemon listens on (without `\\.\pipe\` prefix).
+    pub daemon_pipe_name: String,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            idle_timeout_ms: 300_000,
+            daemon_pipe_name: "wxc-sandbox".to_string(),
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -62,7 +93,12 @@ pub struct CodexRequest {
     pub script_code: String,
     pub working_directory: String,
     pub script_timeout: u32,
+    /// Which containment backend to use. Default: AppContainer.
+    pub containment: ContainmentBackend,
+    /// AppContainer-specific policy (used when containment == AppContainer).
     pub policy: ContainerPolicy,
+    /// Sandbox-specific configuration (used when containment == Sandbox).
+    pub sandbox_config: SandboxConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
