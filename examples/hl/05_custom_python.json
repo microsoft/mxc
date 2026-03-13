@@ -1,0 +1,19 @@
+{
+  "script": "python -c \"import sys\nimport os\nimport platform\n\nprint('Python Environment Information')\nprint('=' * 60)\nprint(f'Python Version: {sys.version}')\nprint(f'Python Executable: {sys.executable}')\nprint(f'Platform: {platform.platform()}')\nprint(f'Architecture: {platform.architecture()}')\nprint()\nprint('Working Directory:')\nprint(f'  Current: {os.getcwd()}')\nprint()\nprint('Python Path:')\nfor i, path in enumerate(sys.path, 1):\n    print(f'  {i}. {path}')\nprint()\nprint('Environment Variables (sample):')\nfor key in ['PATH', 'PYTHONPATH', 'USERPROFILE']:\n    value = os.environ.get(key, '(not set)')\n    if len(value) > 100:\n        value = value[:100] + '...'\n    print(f'  {key}: {value}')\nprint('=' * 60)\"",
+  "timeout": 10000,
+  "hyperLight": {
+    "name": "CLI-CustomPython"
+  },
+  "fileSystem": {
+    "executablePath": "C:\\Users\\AdminUser\\AppData\\Local\\anaconda3\\python.exe",
+    "workingDirectory": "C:\\Users\\AdminUser\\AppData\\Local\\anaconda3"
+  },
+  "registry": {
+      "readKeys": [
+        "HKEY_CURRENT_USER",
+        "HKEY_LOCAL_MACHINE",
+        "HKEY_USERS",
+        "HKEY_CLASSES_ROOT",
+        "HKEY_CURRENT_CONFIG"
+  }
+}
