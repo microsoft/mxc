@@ -1,0 +1,15 @@
+[package]
+name = "wxc_common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+windows.workspace = true
+windows-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
