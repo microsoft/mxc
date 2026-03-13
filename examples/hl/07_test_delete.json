@@ -1,0 +1,11 @@
+{
+  "script": "cmd /c echo Test AppContainer for deletion",
+  "hyperlight": {
+    "name": "TestDeleteContainer"
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\temp\\test"
+    ]
+  }
+}
