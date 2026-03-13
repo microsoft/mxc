@@ -62,6 +62,14 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
 
 :: Build npm packages
 echo.
+echo Staging sandbox agent binary...
+if not exist outputs mkdir outputs
+copy /Y src\target\release\wxc-exec.exe outputs\ >nul
+copy /Y src\target\release\wxc-sandbox-agent.exe outputs\ >nul
+copy /Y src\target\release\wxc-sandbox-daemon.exe outputs\ >nul
+copy /Y src\target\release\wxc-test-driver.exe outputs\ >nul
+
+echo.
 echo Building npm SDK package...
 pushd sdk
 call npm install & call npm run build

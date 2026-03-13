@@ -11,6 +11,7 @@ use wxc_common::config_parser::load_request;
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
+use wxc_common::sandbox_runner::SandboxScriptRunner;
 use wxc_common::script_runner::ScriptRunner;
 
 #[derive(Parser)]
@@ -133,10 +134,7 @@ fn main() {
     // Run script in selected containment backend
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
-        ContainmentBackend::Sandbox => {
-            eprintln!("Error: Sandbox backend is not yet implemented");
-            process::exit(1);
-        }
+        ContainmentBackend::Sandbox => Box::new(SandboxScriptRunner::new(&request.sandbox_config)),
     };
     let response = runner.run(&request, &mut logger);
     display_script_results(&response, &mut logger);
