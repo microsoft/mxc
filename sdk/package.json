@@ -32,5 +32,8 @@
   "engines": {
     "node": ">=16.0.0"
   },
-  "os": ["win32"]
+  "os": ["win32"],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
 }
