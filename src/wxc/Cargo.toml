@@ -1,0 +1,14 @@
+[package]
+name = "wxc"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "wxc-exec"
+path = "src/main.rs"
+
+[dependencies]
+wxc_common = { path = "../wxc_common" }
+anyhow.workspace = true
+clap.workspace = true
+windows.workspace = true

@@ -17,24 +17,29 @@ MXC is a container wrapper and a TypeScript based SDK for Node/Electron projects
 
 ### Requirements
 
-You will need Visual Studio 2022 with the C++ Desktop Development workload.  It relies upon the use of vcpkg for managing external C++ dependencies.  vcpkg can be installed as part of VS or as a separate binary.  It must be integrated into VS for the build.
-
-```cmd
-vcpkg integrate install
-```
+You will need the [Rust toolchain](https://rustup.rs/) (stable) installed.  The WXC native components are built with Cargo, the Rust package manager and build system.
 
 You will also need Node.js 20.10+ and must ensure that the node dependencies are resolved.  We recommend going into the SDK and CLI folders and running npm install.
 
 A copy of Python 3.x is needed for executing test scripts.
 
-### Build Automation
+### Building WXC
 
-There is a simple build script for now, build.bat, that will produce:
+From the `src` directory, build the Rust workspace with Cargo:
 
-* WXC binary
-* WXC tests
-* WXC SDK npm library
-* WXC CLI test program
+```bash
+cd src
+cargo build --release
+```
+
+This will produce the `wxc-exec.exe` binary and the `wxc_test_driver.exe` test program in `src/target/release/`.
+
+For the SDK npm library, go into the SDK folder and build:
+
+```bash
+cd sdk
+npm install && npm run build
+```
 
 ## Usage
 

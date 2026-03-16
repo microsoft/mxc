@@ -1,14 +1,13 @@
 @echo off
-rem echo.
-rem Setting up vcpkg build integration...
-rem vckpg integrate install
 
 echo.
-echo Building WXC...
-msbuild wxc.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild /m /verbosity:minimal
+echo Building WXC (Rust)...
+pushd src
+cargo build --release
+popd
 
 echo.
-echo Build npm SDK package...
+echo Building npm SDK package...
 pushd sdk
 call npm install & call npm run build
 popd

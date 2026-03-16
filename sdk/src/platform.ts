@@ -118,15 +118,11 @@ export function getPlatformSupport(): PlatformSupport {
  * @returns Path to wxc-exec.exe if found, null otherwise
  */
 export function findWxcExecutable(): string | null {
-  // Detect current architecture
-  const arch = os.arch(); // 'x64' or 'arm64'
-  const platformDir = arch === 'arm64' ? 'ARM64' : 'x64';
-  
   const possiblePaths = [
-    // In SDK bin directory (deployed by build)
-    path.join(__dirname, '..', 'bin', platformDir, 'wxc-exec.exe'),
-    // Relative to project when used as a node module
-    path.join(__dirname, '..', 'node_modules', '@shschaefer', 'wxc-sdk', 'bin', platformDir, 'wxc-exec.exe'),
+    // Rust release build output
+    path.join(__dirname, '..', '..', 'src', 'target', 'release', 'wxc-exec.exe'),
+    // Rust debug build output
+    path.join(__dirname, '..', '..', 'src', 'target', 'debug', 'wxc-exec.exe'),
   ];
 
   for (const wxcPath of possiblePaths) {

@@ -26,7 +26,7 @@ program
   .argument('<config>', 'Path to JSON configuration file or base64-encoded config')
   .option('--config-base64', 'Treat config argument as base64-encoded JSON')
   .option('--debug', 'Enable debug output')
-  .option('--wxc-path <path>', 'Path to wxc-exec.exe executable', path.join(__dirname, '..', '..', 'x64', 'Debug', 'wxc-exec.exe'))
+  .option('--wxc-path <path>', 'Path to wxc-exec.exe executable', path.join(__dirname, '..', '..', 'src', 'target', 'debug', 'wxc-exec.exe'))
   .action(async (config: string, options: { base64?: boolean; debug?: boolean; wxcPath: string }) => {
     try {
       const executor = new WxcExecutor(options.wxcPath);

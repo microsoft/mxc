@@ -27,7 +27,7 @@ npm install --save @microsoft/mxc-sdk
   - The SDK checks the registry key `HKLM\Software\Microsoft\Windows NT\CurrentVersion\BuildLab`
   - Format: `buildNumber.branch.buildDate` (e.g., `26559.ge_current_directwinai.260130-1453`)
   - Minimum build number: 26559
-- **wxc-exec.exe**: Must be built and available (see WXC project root for build instructions)
+- **wxc-exec.exe**: Must be built and available (build with `cargo build --release` from the `src` directory)
 
 **Platform Support**:
 - ✅ Windows x64 (specific build required - see above)

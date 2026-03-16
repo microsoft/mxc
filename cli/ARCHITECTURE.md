@@ -59,7 +59,7 @@ The `WxcExecutor` class handles process spawning and communication:
 
 ### 3. Type Definitions (`types.ts`)
 
-TypeScript interfaces that mirror the C++ WxcConfiguration structure:
+TypeScript interfaces that mirror the WXC Rust configuration structure:
 
 - `WxcConfiguration` - Root configuration object
 - `WxcScriptConfig` - Script code, input, timeout

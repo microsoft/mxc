@@ -10,7 +10,7 @@ import * as fs from 'fs';
 
 async function main() {
   // Path to WXC executable (adjust as needed)
-  const wxcPath = path.join(__dirname, '..', 'x64', 'Debug', 'wxc-exec.exe');
+  const wxcPath = path.join(__dirname, '..', 'src', 'target', 'debug', 'wxc-exec.exe');
 
   if (!fs.existsSync(wxcPath)) {
     console.error(`WXC executable not found at: ${wxcPath}`);
