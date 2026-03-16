@@ -32,7 +32,7 @@ fn main() -> anyhow::Result<()> {
     for entry in fs::read_dir(config_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().map_or(false, |e| e == "json") {
+        if path.extension().is_some_and(|e| e == "json") {
             let output = Command::new(&wxc_path).arg(&path).output()?;
             let exit_code = output.status.code().unwrap_or(-1);
 

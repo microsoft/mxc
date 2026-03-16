@@ -100,7 +100,13 @@ impl NetworkFirewallManager {
 
         if default_policy == DefaultPolicy::Block {
             let block_all_name = format!("{}_BlockAll", rule_prefix);
-            if !self.create_rule(&block_all_name, principal_id, NET_FW_ACTION_BLOCK, "", logger)? {
+            if !self.create_rule(
+                &block_all_name,
+                principal_id,
+                NET_FW_ACTION_BLOCK,
+                "",
+                logger,
+            )? {
                 return Ok(false);
             }
             self.created_rule_names.push(block_all_name);
@@ -186,9 +192,8 @@ impl NetworkFirewallManager {
             }
         };
 
-        let rules = unsafe { fw_policy.Rules() }.map_err(|e| {
-            WxcError::Firewall(format!("Failed to get firewall rules: {}", e))
-        })?;
+        let rules = unsafe { fw_policy.Rules() }
+            .map_err(|e| WxcError::Firewall(format!("Failed to get firewall rules: {}", e)))?;
 
         let mut all_success = true;
         for rule_name in &self.created_rule_names {
@@ -290,14 +295,12 @@ impl NetworkFirewallManager {
             .as_ref()
             .ok_or_else(|| WxcError::Firewall("Firewall policy not initialized".into()))?;
 
-        let rules = unsafe { fw_policy.Rules() }.map_err(|e| {
-            WxcError::Firewall(format!("Failed to get firewall rules: {}", e))
-        })?;
+        let rules = unsafe { fw_policy.Rules() }
+            .map_err(|e| WxcError::Firewall(format!("Failed to get firewall rules: {}", e)))?;
 
         let rule: windows::Win32::NetworkManagement::WindowsFirewall::INetFwRule =
-            unsafe { CoCreateInstance(&NetFwRule, None, CLSCTX_INPROC_SERVER) }.map_err(|e| {
-                WxcError::Firewall(format!("Failed to create NetFwRule: {}", e))
-            })?;
+            unsafe { CoCreateInstance(&NetFwRule, None, CLSCTX_INPROC_SERVER) }
+                .map_err(|e| WxcError::Firewall(format!("Failed to create NetFwRule: {}", e)))?;
 
         let rule3: INetFwRule3 = rule.cast().map_err(|e| {
             WxcError::Firewall(format!("Failed to get INetFwRule3 interface: {}", e))
@@ -312,9 +315,7 @@ impl NetworkFirewallManager {
 
             rule3
                 .SetLocalAppPackageId(&BSTR::from(principal_id))
-                .map_err(|e| {
-                    WxcError::Firewall(format!("put_LocalAppPackageId failed: {}", e))
-                })?;
+                .map_err(|e| WxcError::Firewall(format!("put_LocalAppPackageId failed: {}", e)))?;
 
             rule.SetDirection(NET_FW_RULE_DIR_OUT)
                 .map_err(|e| WxcError::Firewall(format!("put_Direction failed: {}", e)))?;
@@ -339,7 +340,10 @@ impl NetworkFirewallManager {
             match rules.Add(&rule) {
                 Ok(()) => Ok(true),
                 Err(e) => {
-                    _logger.log_line(&format!("Failed to add firewall rule '{}': {}", rule_name, e));
+                    _logger.log_line(&format!(
+                        "Failed to add firewall rule '{}': {}",
+                        rule_name, e
+                    ));
                     Ok(false)
                 }
             }
@@ -366,9 +370,7 @@ pub fn resolve_hostname(hostname: &str) -> Result<String, WxcError> {
         .to_socket_addrs()
         .map_err(|e| WxcError::Firewall(format!("Failed to resolve '{}': {}", hostname, e)))?
         .next()
-        .ok_or_else(|| {
-            WxcError::Firewall(format!("No addresses found for '{}'", hostname))
-        })?;
+        .ok_or_else(|| WxcError::Firewall(format!("No addresses found for '{}'", hostname)))?;
 
     Ok(addr.ip().to_string())
 }
@@ -440,7 +442,8 @@ mod tests {
             default_network_policy: NetworkPolicy::Block,
             ..Default::default()
         };
-        let (default_policy, use_fw) = NetworkFirewallManager::initialize_policy(&policy, &mut logger);
+        let (default_policy, use_fw) =
+            NetworkFirewallManager::initialize_policy(&policy, &mut logger);
         assert!(use_fw);
         assert_eq!(default_policy, DefaultPolicy::Block);
     }
@@ -452,7 +455,8 @@ mod tests {
             network_enforcement_mode: NetworkEnforcementMode::Capabilities,
             ..Default::default()
         };
-        let (default_policy, use_fw) = NetworkFirewallManager::initialize_policy(&policy, &mut logger);
+        let (default_policy, use_fw) =
+            NetworkFirewallManager::initialize_policy(&policy, &mut logger);
         assert!(!use_fw);
         assert_eq!(default_policy, DefaultPolicy::Allow);
     }
@@ -466,7 +470,8 @@ mod tests {
             allowed_hosts: vec!["example.com".to_string()],
             ..Default::default()
         };
-        let (default_policy, use_fw) = NetworkFirewallManager::initialize_policy(&policy, &mut logger);
+        let (default_policy, use_fw) =
+            NetworkFirewallManager::initialize_policy(&policy, &mut logger);
         assert!(use_fw);
         assert_eq!(default_policy, DefaultPolicy::Allow);
     }

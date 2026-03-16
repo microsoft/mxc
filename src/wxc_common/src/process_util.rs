@@ -5,13 +5,11 @@ use crate::error::WxcError;
 use crate::string_util;
 
 use windows::Win32::Foundation::{
-    CloseHandle, BOOL, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, HLOCAL, LocalFree,
-    SetHandleInformation,
+    CloseHandle, LocalFree, SetHandleInformation, BOOL, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
+    HLOCAL,
 };
-use windows::Win32::Security::{
-    DeriveCapabilitySidsFromName, PSID, SECURITY_ATTRIBUTES,
-};
-use windows::Win32::Storage::FileSystem::{ReadFile};
+use windows::Win32::Security::{DeriveCapabilitySidsFromName, PSID, SECURITY_ATTRIBUTES};
+use windows::Win32::Storage::FileSystem::ReadFile;
 use windows::Win32::System::Pipes::CreatePipe;
 use windows_core::PCWSTR;
 
@@ -112,7 +110,7 @@ pub fn read_from_pipe(pipe: HANDLE) -> String {
 /// If `no_inherit_read` is true, the read end is made non-inheritable;
 /// otherwise the write end is made non-inheritable.
 pub fn create_std_pipes(no_inherit_read: bool) -> Result<(OwnedHandle, OwnedHandle), WxcError> {
-    let mut sa = SECURITY_ATTRIBUTES {
+    let sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         bInheritHandle: BOOL::from(true),
         lpSecurityDescriptor: std::ptr::null_mut(),
@@ -121,16 +119,15 @@ pub fn create_std_pipes(no_inherit_read: bool) -> Result<(OwnedHandle, OwnedHand
     let mut h_write = HANDLE::default();
 
     unsafe {
-        CreatePipe(&mut h_read, &mut h_write, Some(&mut sa), 0)
+        CreatePipe(&mut h_read, &mut h_write, Some(&sa), 0)
             .map_err(|_| WxcError::Process("Failed to create pipe".into()))?;
 
         let h_dup = if no_inherit_read { h_read } else { h_write };
-        SetHandleInformation(h_dup, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0))
-            .map_err(|_| {
-                let _ = CloseHandle(h_read);
-                let _ = CloseHandle(h_write);
-                WxcError::Process("Failed to set handle information on pipe".into())
-            })?;
+        SetHandleInformation(h_dup, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)).map_err(|_| {
+            let _ = CloseHandle(h_read);
+            let _ = CloseHandle(h_write);
+            WxcError::Process("Failed to set handle information on pipe".into())
+        })?;
     }
 
     Ok((OwnedHandle::new(h_read), OwnedHandle::new(h_write)))
@@ -150,9 +147,7 @@ pub fn suppress_python_location_error(stderr: &mut String) {
 
 /// Derive the capability SID for a given capability name.
 /// Returns the raw SID pointer. The caller is responsible for freeing it with `LocalFree`.
-pub fn get_capability_sid_from_name(
-    name: &str,
-) -> Result<*mut core::ffi::c_void, WxcError> {
+pub fn get_capability_sid_from_name(name: &str) -> Result<*mut core::ffi::c_void, WxcError> {
     let wide_name = string_util::to_wide(name);
     let pcwstr = PCWSTR(wide_name.as_ptr());
 
@@ -169,12 +164,7 @@ pub fn get_capability_sid_from_name(
             &mut capability_sids,
             &mut capability_sid_count,
         )
-        .map_err(|_| {
-            WxcError::Process(format!(
-                "DeriveCapabilitySidsFromName({}) failed",
-                name
-            ))
-        })?;
+        .map_err(|_| WxcError::Process(format!("DeriveCapabilitySidsFromName({}) failed", name)))?;
 
         // Free group SIDs
         for i in 0..group_sid_count {
