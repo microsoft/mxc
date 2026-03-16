@@ -33,6 +33,12 @@ jobs:
       - name: Build C++ solution
         run: msbuild wxc.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild /m /verbosity:minimal
 
+      - name: Set SDK build version
+        working-directory: sdk
+        run: |
+          $timestamp = Get-Date -Format "yyyyMMdd.HHmmss"
+          npm version "$(node -p "require('./package.json').version")-build.$timestamp" --no-git-tag-version
+
       - name: Install and build SDK
         working-directory: sdk
         run: |

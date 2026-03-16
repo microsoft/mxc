@@ -27,18 +27,6 @@ jobs:
           registry-url: 'https://npm.pkg.github.com'
           scope: '@microsoft'
 
-      - name: Set build version
-        run: |
-          $tgz = Get-Item sdk/*.tgz
-          $extractDir = "sdk-package"
-          mkdir $extractDir
-          tar -xzf $tgz.FullName -C $extractDir
-          $pkg = Get-Content "$extractDir/package/package.json" | ConvertFrom-Json
-          $pkg.version = "$($pkg.version)-build.${{ github.run_number }}"
-          $pkg | ConvertTo-Json -Depth 10 | Set-Content "$extractDir/package/package.json"
-          tar -czf $tgz.FullName -C $extractDir package
-          echo "Publishing version $($pkg.version)"
-
       - name: Publish SDK
         run: npm publish sdk/*.tgz
         env:
