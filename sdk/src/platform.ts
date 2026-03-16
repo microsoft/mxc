@@ -113,16 +113,41 @@ export function getPlatformSupport(): PlatformSupport {
 }
 
 /**
+ * Get the Rust target triple for the current machine architecture.
+ * @returns The Rust target triple string
+ */
+function getRustTargetTriple(): string {
+  const arch = os.arch();
+  switch (arch) {
+    case 'arm64':
+      return 'aarch64-pc-windows-msvc';
+    case 'x64':
+    default:
+      return 'x86_64-pc-windows-msvc';
+  }
+}
+
+/**
  * Find the wxc-exec executable
- * Searches in common locations relative to the SDK package
+ * Searches in common locations relative to the SDK package,
+ * selecting the build matching the current machine architecture.
  * @returns Path to wxc-exec.exe if found, null otherwise
  */
 export function findWxcExecutable(): string | null {
+  const targetTriple = getRustTargetTriple();
+  const targetDir = path.join(__dirname, '..', '..', 'src', 'target');
+
   const possiblePaths = [
-    // Rust release build output
-    path.join(__dirname, '..', '..', 'src', 'target', 'release', 'wxc-exec.exe'),
-    // Rust debug build output
-    path.join(__dirname, '..', '..', 'src', 'target', 'debug', 'wxc-exec.exe'),
+    // Bundled in the SDK package (e.g. when installed via npm)
+    path.join(__dirname, '..', 'bin', targetTriple, 'wxc-exec.exe'),
+    // Architecture-specific release build output (monorepo dev)
+    path.join(targetDir, targetTriple, 'release', 'wxc-exec.exe'),
+    // Architecture-specific debug build output (monorepo dev)
+    path.join(targetDir, targetTriple, 'debug', 'wxc-exec.exe'),
+    // Fallback: default Cargo release build output (no explicit --target)
+    path.join(targetDir, 'release', 'wxc-exec.exe'),
+    // Fallback: default Cargo debug build output (no explicit --target)
+    path.join(targetDir, 'debug', 'wxc-exec.exe'),
   ];
 
   for (const wxcPath of possiblePaths) {

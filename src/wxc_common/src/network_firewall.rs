@@ -4,7 +4,6 @@
 use std::net::{IpAddr, ToSocketAddrs};
 
 use windows::core::BSTR;
-use windows::core::VARIANT;
 use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::NetworkManagement::WindowsFirewall::{
     INetFwPolicy2, INetFwRule3, NetFwPolicy2, NetFwRule, NET_FW_ACTION, NET_FW_ACTION_ALLOW,
@@ -15,6 +14,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
     COINIT_APARTMENTTHREADED,
 };
+use windows::Win32::System::Variant::VARIANT;
 use windows_core::Interface;
 
 use crate::error::WxcError;

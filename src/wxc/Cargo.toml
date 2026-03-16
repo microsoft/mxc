@@ -8,7 +8,7 @@ name = "wxc-exec"
 path = "src/main.rs"
 
 [dependencies]
-wxc_common = { path = "../wxc_common" }
+wxc_common.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 windows.workspace = true
