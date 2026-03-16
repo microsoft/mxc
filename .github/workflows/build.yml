@@ -5,6 +5,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_call:
 
 jobs:
   build:
@@ -29,6 +30,12 @@ jobs:
       - name: Run Rust tests
         working-directory: src
         run: cargo test --release
+
+      - name: Set SDK build version
+        working-directory: sdk
+        run: |
+          $timestamp = Get-Date -Format "yyyyMMdd.HHmmss"
+          npm version "$(node -p "require('./package.json').version")-build.$timestamp" --no-git-tag-version
 
       - name: Install and build SDK
         working-directory: sdk
