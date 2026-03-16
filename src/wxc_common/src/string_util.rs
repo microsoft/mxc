@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
