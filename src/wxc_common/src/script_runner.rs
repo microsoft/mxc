@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use crate::error::WxcError;
 use crate::filesystem_bfs::FileSystemBfsManager;
 use crate::logger::Logger;

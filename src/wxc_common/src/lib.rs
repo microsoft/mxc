@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 pub mod appcontainer;
 pub mod config_parser;
 pub mod error;

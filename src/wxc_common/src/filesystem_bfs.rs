@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use std::process::{Command, Stdio};
 
 use crate::error::WxcError;
