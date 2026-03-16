@@ -141,11 +141,17 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
         // Tear down any leftover sandbox from a previous daemon run.
         sandbox_vm::teardown().await;
 
+        // Discover the host Python installation.
+        let python_dir = sandbox_vm::find_host_python()
+            .context("Python is required on the host for sandbox execution")?;
+        eprintln!("[daemon] host Python found at {:?}", python_dir);
+
         // Generate .wsb and launch sandbox.
         let temp_dir = std::env::temp_dir().join("wxc-sandbox-config");
         std::fs::create_dir_all(&temp_dir).context("create .wsb config dir")?;
 
-        let wsb_path = sandbox_vm::generate_wsb(&agent_dir, &rendezvous_dir, &temp_dir)?;
+        let wsb_path =
+            sandbox_vm::generate_wsb(&agent_dir, &rendezvous_dir, &python_dir, &temp_dir)?;
         sandbox_vm::launch(&wsb_path).await?;
         s.sandbox_running = true;
         eprintln!("[daemon] sandbox VM launched");
