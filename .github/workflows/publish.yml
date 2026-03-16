@@ -21,6 +21,19 @@ jobs:
           registry-url: 'https://npm.pkg.github.com'
           scope: '@microsoft'
 
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install vcpkg dependencies
+        run: |
+          vcpkg integrate install
+          vcpkg install --triplet x64-windows
+        env:
+          VCPKG_ROOT: C:\vcpkg
+
+      - name: Build native executable
+        run: msbuild wxc.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild /m /verbosity:minimal
+
       - name: Install and publish SDK
         working-directory: sdk
         run: |
