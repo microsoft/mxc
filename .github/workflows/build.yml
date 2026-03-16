@@ -9,7 +9,7 @@ on:
 
 jobs:
 
-  # Check formatting and linting for the WXC Rust code
+  # Check formatting and linting for the Rust code
   wxc-exec-lint:
     name: WXC Exec Lint
     runs-on: windows-latest
@@ -39,9 +39,9 @@ jobs:
         run: exit 1
 
 
-  # Build and run Rust tests on x64 and ARM64
-  wxc-exec-test:
-    name: WXC Exec Rust tests
+  # Build and test Rust on x64 and ARM64, upload binaries
+  wxc-exec-build:
+    name: WXC Exec Build (${{ matrix.target }})
     strategy:
       matrix:
         include:
@@ -64,13 +64,22 @@ jobs:
           rustup update stable
           rustup target add ${{ matrix.target }}
 
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+
       - name: Run tests
-        run: cargo test --workspace --target ${{ matrix.target }}
+        run: cargo test --release --target ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wxc-exec-${{ matrix.target }}
+          path: src/target/${{ matrix.target }}/release/wxc-exec.exe
 
 
-  # Build and package the TypeScript SDK
+  # Build and package the TypeScript SDK with bundled wxc-exec binaries
   wxc-typescript-sdk:
     name: WXC TypeScript SDK
+    needs: wxc-exec-build
     runs-on: windows-latest
 
     defaults:
@@ -84,6 +93,23 @@ jobs:
         with:
           node-version: 20
 
+      - name: Download wxc-exec (x64)
+        uses: actions/download-artifact@v4
+        with:
+          name: wxc-exec-x86_64-pc-windows-msvc
+          path: sdk/bin/x86_64-pc-windows-msvc
+
+      - name: Download wxc-exec (arm64)
+        uses: actions/download-artifact@v4
+        with:
+          name: wxc-exec-aarch64-pc-windows-msvc
+          path: sdk/bin/aarch64-pc-windows-msvc
+
+      - name: Set build version
+        run: |
+          $timestamp = Get-Date -Format "yyyyMMdd.HHmmss"
+          npm version "$(node -p "require('./package.json').version")-build.$timestamp" --no-git-tag-version
+
       - name: Install dependencies
         run: npm ci
 
@@ -95,15 +121,19 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sdk-npm-package
+          name: npm-packages
           path: sdk/*.tgz
 
 
-# Build and package the TypeScript CLI (needs SDK built first)
+  # Build and package the TypeScript CLI
   wxc-typescript-cli:
     name: WXC TypeScript CLI
     needs: wxc-typescript-sdk
     runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: cli
 
     steps:
       - uses: actions/checkout@v4
@@ -115,39 +145,19 @@ jobs:
       - name: Download SDK package
         uses: actions/download-artifact@v4
         with:
-          name: sdk-npm-package
-          path: sdk-artifact
+          name: npm-packages
+          path: sdk-pkg
 
-      - name: Build Rust workspace
-        working-directory: src
-        run: cargo build --release
-
-      - name: Run Rust tests
-        working-directory: src
-        run: cargo test --release
-
-      - name: Set SDK build version
-        working-directory: sdk
+      - name: Install CLI dependencies using SDK artifact
         run: |
-          $timestamp = Get-Date -Format "yyyyMMdd.HHmmss"
-          npm version "$(node -p "require('./package.json').version")-build.$timestamp" --no-git-tag-version
-
-      - name: Install and build SDK
-        working-directory: sdk
-        run: |
+          $sdkTgz = (Get-Item ..\sdk-pkg\*.tgz).FullName
           npm ci
-          npm run build
-
-      - name: Install CLI dependencies
-        working-directory: cli
-        run: npm ci
+          npm install $sdkTgz
 
       - name: Build CLI
-        working-directory: cli
         run: npm run build
 
       - name: Pack npm package
-        working-directory: cli
         run: npm pack
 
       - uses: actions/upload-artifact@v4

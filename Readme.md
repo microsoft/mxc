@@ -23,23 +23,55 @@ You will also need Node.js 20.10+ and must ensure that the node dependencies are
 
 A copy of Python 3.x is needed for executing test scripts.
 
+### Project Structure
+
+```
+src/            Rust workspace (wxc-exec native binary + wxc_common library)
+sdk/            TypeScript SDK (@microsoft/mxc-sdk npm package)
+cli/            TypeScript CLI (mxc-cli npm package, depends on SDK)
+docs/           Schema and configuration documentation
+examples/       Example configurations
+test_configs/   Test JSON configurations
+test_scripts/   Test scripts for exercising WXC
+```
+
 ### Building WXC
 
-From the `src` directory, build the Rust workspace with Cargo:
+The easiest way to build everything is with `build.bat` from the repo root:
+
+```bash
+build.bat              # Release build for your machine's architecture
+build.bat --debug      # Debug build for your machine's architecture
+build.bat --all        # Release build for both x64 and ARM64
+build.bat --help       # Show all options
+```
+
+This will:
+1. Build the Rust `wxc-exec.exe` binary for the selected architecture(s)
+2. Copy the binary into `sdk/bin/<target-triple>/` so it is bundled with the SDK package
+3. Build the TypeScript SDK
+
+#### Building components individually
+
+To build just the Rust workspace:
 
 ```bash
 cd src
-cargo build --release
+cargo build --release --target x86_64-pc-windows-msvc    # x64
+cargo build --release --target aarch64-pc-windows-msvc   # ARM64
 ```
 
-This will produce the `wxc-exec.exe` binary and the `wxc_test_driver.exe` test program in `src/target/release/`.
+This produces `wxc-exec.exe` in `src/target/<target-triple>/release/`.
 
-For the SDK npm library, go into the SDK folder and build:
+For the SDK npm library:
 
 ```bash
 cd sdk
 npm install && npm run build
 ```
+
+> **Note:** If building the SDK separately, you must first copy `wxc-exec.exe` into
+> `sdk/bin/<target-triple>/` for it to be included in the npm package.
 
 ## Usage
 

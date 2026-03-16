@@ -20,6 +20,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: npm-packages
+          path: packages
 
       - uses: actions/setup-node@v4
         with:
@@ -29,7 +30,7 @@ jobs:
 
       - name: Publish SDK
         run: |
-          $tgz = (Get-Item sdk\*.tgz).FullName
+          $tgz = (Get-Item packages\*.tgz).FullName
           echo "Publishing $tgz"
           npm publish $tgz
         env:

@@ -66,8 +66,7 @@ fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
 
     // Delete the AppContainer profile
     let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let hstring =
-        windows::core::HSTRING::from_wide(&wide_name[..wide_name.len() - 1]).unwrap_or_default();
+    let hstring = windows::core::HSTRING::from_wide(&wide_name[..wide_name.len() - 1]);
     match unsafe { DeleteAppContainerProfile(&hstring) } {
         Ok(()) => {
             logger.log_line(&format!("Deleted AppContainer profile: {}", name));

@@ -67,7 +67,7 @@ impl Drop for CapabilitySidGuard {
     fn drop(&mut self) {
         for &sid in &self.0 {
             unsafe {
-                let _ = LocalFree(HLOCAL(sid));
+                let _ = LocalFree(Some(HLOCAL(sid)));
             }
         }
     }
@@ -226,22 +226,20 @@ impl AppContainerScriptRunner {
 
         // First call to get the required buffer size.
         unsafe {
-            let _ = InitializeProcThreadAttributeList(
-                LPPROC_THREAD_ATTRIBUTE_LIST(ptr::null_mut()),
-                attr_count,
-                0,
-                &mut attr_list_size,
-            );
+            let _ = InitializeProcThreadAttributeList(None, attr_count, None, &mut attr_list_size);
         }
 
         let mut attr_list_buf: Vec<u8> = vec![0u8; attr_list_size];
         let attr_list = LPPROC_THREAD_ATTRIBUTE_LIST(attr_list_buf.as_mut_ptr() as *mut _);
 
         unsafe {
-            InitializeProcThreadAttributeList(attr_list, attr_count, 0, &mut attr_list_size)
-                .map_err(|e| {
-                    WxcError::Process(format!("InitializeProcThreadAttributeList: {}", e))
-                })?;
+            InitializeProcThreadAttributeList(
+                Some(attr_list),
+                attr_count,
+                None,
+                &mut attr_list_size,
+            )
+            .map_err(|e| WxcError::Process(format!("InitializeProcThreadAttributeList: {}", e)))?;
         }
 
         // RAII guard to call DeleteProcThreadAttributeList on exit.
@@ -350,14 +348,14 @@ impl AppContainerScriptRunner {
         unsafe {
             CreateProcessW(
                 PCWSTR::null(),
-                PWSTR(cmd_line_wide.as_mut_ptr()),
+                Some(PWSTR(cmd_line_wide.as_mut_ptr())),
                 None,
                 None,
                 true,
                 EXTENDED_STARTUPINFO_PRESENT,
                 None,
                 working_dir_pcwstr,
-                &si_ex.StartupInfo,
+                &si_ex.StartupInfo as *const STARTUPINFOW,
                 &mut pi,
             )
             .map_err(|e| WxcError::Process(format!("CreateProcessW failed: {}", e)))?;

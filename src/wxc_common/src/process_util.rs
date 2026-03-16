@@ -5,12 +5,12 @@ use crate::error::WxcError;
 use crate::string_util;
 
 use windows::Win32::Foundation::{
-    CloseHandle, LocalFree, SetHandleInformation, BOOL, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
-    HLOCAL,
+    CloseHandle, LocalFree, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, HLOCAL,
 };
 use windows::Win32::Security::{DeriveCapabilitySidsFromName, PSID, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::ReadFile;
 use windows::Win32::System::Pipes::CreatePipe;
+use windows_core::BOOL;
 use windows_core::PCWSTR;
 
 const BUFFER_SIZE: u32 = 4096;
@@ -164,17 +164,19 @@ pub fn get_capability_sid_from_name(name: &str) -> Result<*mut core::ffi::c_void
             &mut capability_sids,
             &mut capability_sid_count,
         )
-        .map_err(|_| WxcError::Process(format!("DeriveCapabilitySidsFromName({}) failed", name)))?;
+        .map_err(|e| {
+            WxcError::Process(format!("DeriveCapabilitySidsFromName({name}) failed: {e}"))
+        })?;
 
         // Free group SIDs
         for i in 0..group_sid_count {
             let sid = *group_sids.add(i as usize);
-            let _ = LocalFree(HLOCAL(sid.0));
+            let _ = LocalFree(Some(HLOCAL(sid.0)));
         }
-        let _ = LocalFree(HLOCAL(group_sids as *mut _));
+        let _ = LocalFree(Some(HLOCAL(group_sids as *mut _)));
 
         if capability_sid_count == 0 {
-            let _ = LocalFree(HLOCAL(capability_sids as *mut _));
+            let _ = LocalFree(Some(HLOCAL(capability_sids as *mut _)));
             return Err(WxcError::Process(format!(
                 "No capability SID returned for {}",
                 name
@@ -187,9 +189,9 @@ pub fn get_capability_sid_from_name(name: &str) -> Result<*mut core::ffi::c_void
         // Free remaining capability SIDs (index 1+)
         for i in 1..capability_sid_count {
             let sid = *capability_sids.add(i as usize);
-            let _ = LocalFree(HLOCAL(sid.0));
+            let _ = LocalFree(Some(HLOCAL(sid.0)));
         }
-        let _ = LocalFree(HLOCAL(capability_sids as *mut _));
+        let _ = LocalFree(Some(HLOCAL(capability_sids as *mut _)));
 
         Ok(result_sid)
     }

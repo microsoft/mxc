@@ -34,3 +34,6 @@ vcpkg_installed/
 # build artifacts
 output
 **/target/
+
+# Copilot
+.copilot/

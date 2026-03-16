@@ -27,6 +27,10 @@ pub fn from_wide(wide: &[u16]) -> String {
 /// # Safety
 /// The caller must ensure `sid` points to a valid SID structure.
 pub unsafe fn sid_to_string(sid: *mut std::ffi::c_void, default_value: &str) -> String {
+    if sid.is_null() {
+        return default_value.to_string();
+    }
+
     let mut string_sid = windows_core::PWSTR::null();
     let psid = PSID(sid);
 
@@ -38,7 +42,7 @@ pub unsafe fn sid_to_string(sid: *mut std::ffi::c_void, default_value: &str) -> 
     let result = unsafe { string_sid.to_string() }.unwrap_or_else(|_| default_value.to_string());
 
     unsafe {
-        let _ = LocalFree(HLOCAL(string_sid.0 as *mut std::ffi::c_void));
+        let _ = LocalFree(Some(HLOCAL(string_sid.0 as *mut std::ffi::c_void)));
     }
 
     result
