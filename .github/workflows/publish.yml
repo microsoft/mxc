@@ -10,10 +10,16 @@ permissions:
   packages: write
 
 jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
   publish:
+    needs: build
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-packages
 
       - uses: actions/setup-node@v4
         with:
@@ -21,23 +27,7 @@ jobs:
           registry-url: 'https://npm.pkg.github.com'
           scope: '@microsoft'
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Install vcpkg dependencies
-        run: |
-          vcpkg integrate install
-          vcpkg install --triplet x64-windows
-        env:
-          VCPKG_ROOT: C:\vcpkg
-
-      - name: Build native executable
-        run: msbuild wxc.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild /m /verbosity:minimal
-
-      - name: Install and publish SDK
-        working-directory: sdk
-        run: |
-          npm install
-          npm publish
+      - name: Publish SDK
+        run: npm publish sdk/*.tgz
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
