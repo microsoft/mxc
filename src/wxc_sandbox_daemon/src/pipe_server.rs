@@ -138,6 +138,9 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
     rendezvous::cleanup(&rendezvous_dir).await?;
 
     if !s.sandbox_running {
+        // Tear down any leftover sandbox from a previous daemon run.
+        sandbox_vm::teardown().await;
+
         // Generate .wsb and launch sandbox.
         let temp_dir = std::env::temp_dir().join("wxc-sandbox-config");
         std::fs::create_dir_all(&temp_dir).context("create .wsb config dir")?;
