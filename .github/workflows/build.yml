@@ -8,20 +8,115 @@ on:
   workflow_call:
 
 jobs:
-  build:
+
+  # Check formatting and linting for the WXC Rust code
+  wxc-exec-lint:
+    name: WXC Exec Lint
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: src
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup update stable
+          rustup component add rustfmt clippy
+
+      - name: Check formatting
+        id: fmt
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Fail if formatting check failed
+        if: steps.fmt.outcome == 'failure'
+        run: exit 1
+
+
+  # Build and run Rust tests on x64 and ARM64
+  wxc-exec-test:
+    name: WXC Exec Rust tests
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+
+    runs-on: ${{ matrix.runner }}
+
+    defaults:
+      run:
+        working-directory: src
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup update stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Run tests
+        run: cargo test --workspace --target ${{ matrix.target }}
+
+
+  # Build and package the TypeScript SDK
+  wxc-typescript-sdk:
+    name: WXC TypeScript SDK
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: sdk
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Pack npm package
+        run: npm pack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-npm-package
+          path: sdk/*.tgz
+
+
+# Build and package the TypeScript CLI (needs SDK built first)
+  wxc-typescript-cli:
+    name: WXC TypeScript CLI
+    needs: wxc-typescript-sdk
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
-      - name: Setup Rust toolchain
-        run: rustup default stable
+      - name: Download SDK package
+        uses: actions/download-artifact@v4
+        with:
+          name: sdk-npm-package
+          path: sdk-artifact
 
       - name: Build Rust workspace
         working-directory: src
@@ -40,21 +135,22 @@ jobs:
       - name: Install and build SDK
         working-directory: sdk
         run: |
-          npm install
+          npm ci
           npm run build
-          npm pack
 
-      - name: Install and build CLI
+      - name: Install CLI dependencies
         working-directory: cli
-        run: |
-          npm install
-          npm run build
-          npm pack
+        run: npm ci
 
-      - name: Upload npm packages
-        uses: actions/upload-artifact@v4
+      - name: Build CLI
+        working-directory: cli
+        run: npm run build
+
+      - name: Pack npm package
+        working-directory: cli
+        run: npm pack
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: npm-packages
-          path: |
-            sdk/*.tgz
-            cli/*.tgz
+          name: cli-npm-package
+          path: cli/*.tgz

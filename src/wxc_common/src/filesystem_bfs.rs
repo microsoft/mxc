@@ -59,10 +59,8 @@ impl FileSystemBfsManager {
     }
 
     pub fn remove_configuration(&mut self, logger: &mut Logger) -> bool {
-        if self.configured {
-            if self.remove_configuration_inner(logger).is_ok() {
-                self.configured = false;
-            }
+        if self.configured && self.remove_configuration_inner(logger).is_ok() {
+            self.configured = false;
         }
         !self.configured
     }
@@ -76,12 +74,7 @@ impl FileSystemBfsManager {
         self.execute_bfscfg_operation(&args, &description, logger)
     }
 
-    fn add_bfs_path(
-        &self,
-        path: &str,
-        inherit: bool,
-        logger: &mut Logger,
-    ) -> Result<(), WxcError> {
+    fn add_bfs_path(&self, path: &str, inherit: bool, logger: &mut Logger) -> Result<(), WxcError> {
         let mut args = vec![
             "--addpolicy",
             "--policybroker",

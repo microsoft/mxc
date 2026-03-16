@@ -3,31 +3,21 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkPolicy {
+    #[default]
     Allow,
     Block,
 }
 
-impl Default for NetworkPolicy {
-    fn default() -> Self {
-        NetworkPolicy::Allow
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkEnforcementMode {
+    #[default]
     Capabilities,
     Firewall,
     Both,
-}
-
-impl Default for NetworkEnforcementMode {
-    fn default() -> Self {
-        NetworkEnforcementMode::Capabilities
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,24 +56,13 @@ impl Default for ContainerPolicy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodexRequest {
     pub script_code: String,
     pub working_directory: String,
     pub script_timeout: u32,
     pub policy: ContainerPolicy,
-}
-
-impl Default for CodexRequest {
-    fn default() -> Self {
-        Self {
-            script_code: String::new(),
-            working_directory: String::new(),
-            script_timeout: 0,
-            policy: ContainerPolicy::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

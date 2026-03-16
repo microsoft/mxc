@@ -4,24 +4,22 @@
 use std::ptr;
 use std::thread;
 
-use windows::Win32::Foundation::{HLOCAL, LocalFree, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{LocalFree, HLOCAL, WAIT_OBJECT_0};
 use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::PSID;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, UpdateProcThreadAttribute, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-    STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+    InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 use windows_core::{PCWSTR, PWSTR};
 
 use crate::error::WxcError;
 use crate::logger::Logger;
-use crate::models::{
-    CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse,
-};
+use crate::models::{CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
 use crate::process_util::{
     create_std_pipes, get_capability_sid_from_name, read_from_pipe, suppress_python_location_error,
     OwnedHandle, SendOwnedHandle,
@@ -109,9 +107,8 @@ impl AppContainerScriptRunner {
         let desc = string_util::to_wide("Profile for agentic script execution");
         let pcwstr_desc = PCWSTR(desc.as_ptr());
 
-        let result = unsafe {
-            CreateAppContainerProfile(pcwstr_name, pcwstr_display, pcwstr_desc, None)
-        };
+        let result =
+            unsafe { CreateAppContainerProfile(pcwstr_name, pcwstr_display, pcwstr_desc, None) };
 
         match result {
             Ok(sid) => Ok(sid),
@@ -170,10 +167,9 @@ impl AppContainerScriptRunner {
         );
         if use_capabilities_for_network
             && request.policy.default_network_policy == NetworkPolicy::Allow
+            && !capabilities_to_add.iter().any(|c| c == "internetClient")
         {
-            if !capabilities_to_add.iter().any(|c| c == "internetClient") {
-                capabilities_to_add.push("internetClient".to_string());
-            }
+            capabilities_to_add.push("internetClient".to_string());
         }
 
         // --- Derive SIDs for each capability ---
@@ -213,10 +209,10 @@ impl AppContainerScriptRunner {
         // --- Create pipes ---
         let (stdin_read, stdin_write) =
             create_std_pipes(false).map_err(|e| WxcError::Process(format!("stdin pipe: {}", e)))?;
-        let (mut stdout_read, stdout_write) = create_std_pipes(true)
-            .map_err(|e| WxcError::Process(format!("stdout pipe: {}", e)))?;
-        let (mut stderr_read, stderr_write) = create_std_pipes(true)
-            .map_err(|e| WxcError::Process(format!("stderr pipe: {}", e)))?;
+        let (mut stdout_read, stdout_write) =
+            create_std_pipes(true).map_err(|e| WxcError::Process(format!("stdout pipe: {}", e)))?;
+        let (mut stderr_read, stderr_write) =
+            create_std_pipes(true).map_err(|e| WxcError::Process(format!("stderr pipe: {}", e)))?;
 
         let inherit_handles = [stdin_read.get(), stdout_write.get(), stderr_write.get()];
 
@@ -239,8 +235,7 @@ impl AppContainerScriptRunner {
         }
 
         let mut attr_list_buf: Vec<u8> = vec![0u8; attr_list_size];
-        let attr_list =
-            LPPROC_THREAD_ATTRIBUTE_LIST(attr_list_buf.as_mut_ptr() as *mut _);
+        let attr_list = LPPROC_THREAD_ATTRIBUTE_LIST(attr_list_buf.as_mut_ptr() as *mut _);
 
         unsafe {
             InitializeProcThreadAttributeList(attr_list, attr_count, 0, &mut attr_list_size)
@@ -336,7 +331,11 @@ impl AppContainerScriptRunner {
         };
 
         // --- Build command line ---
-        let mut cmd_line_wide: Vec<u16> = request.script_code.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut cmd_line_wide: Vec<u16> = request
+            .script_code
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
 
         let working_dir_wide = string_util::to_wide(&request.working_directory);
         let working_dir_pcwstr = if request.working_directory.is_empty() {

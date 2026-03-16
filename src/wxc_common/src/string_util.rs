@@ -4,7 +4,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
-use windows::Win32::Foundation::{HLOCAL, LocalFree};
+use windows::Win32::Foundation::{LocalFree, HLOCAL};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::PSID;
 
@@ -101,10 +101,7 @@ mod tests {
 
     #[test]
     fn base64_decode_valid() {
-        assert_eq!(
-            base64_decode("SGVsbG8gV29ybGQ=").unwrap(),
-            b"Hello World"
-        );
+        assert_eq!(base64_decode("SGVsbG8gV29ybGQ=").unwrap(), b"Hello World");
     }
 
     #[test]
@@ -251,10 +248,7 @@ mod tests {
 
     #[test]
     fn from_wide_emoji() {
-        let wide: Vec<u16> = "Test 😀"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let wide: Vec<u16> = "Test 😀".encode_utf16().chain(std::iter::once(0)).collect();
         assert_eq!(from_wide(&wide), "Test 😀");
     }
 
@@ -274,10 +268,7 @@ mod tests {
     #[test]
     fn from_wide_large_string() {
         let original = "A".repeat(10_000);
-        let wide: Vec<u16> = original
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let wide: Vec<u16> = original.encode_utf16().chain(std::iter::once(0)).collect();
         assert_eq!(from_wide(&wide), original);
     }
 
@@ -337,5 +328,4 @@ mod tests {
         let result = unsafe { sid_to_string(std::ptr::null_mut(), "") };
         assert_eq!(result, "");
     }
-
 }

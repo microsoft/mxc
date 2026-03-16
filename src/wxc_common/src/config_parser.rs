@@ -320,7 +320,10 @@ mod tests {
         assert_eq!(req.script_timeout, 3000);
         assert_eq!(req.policy.app_container_name, "TestProfile");
         assert!(req.policy.least_privilege_mode);
-        assert!(req.policy.capabilities.contains(&"internetClient".to_string()));
+        assert!(req
+            .policy
+            .capabilities
+            .contains(&"internetClient".to_string()));
         assert_eq!(req.policy.readwrite_paths, vec!["C:\\rw"]);
         assert_eq!(req.policy.readonly_paths, vec!["C:\\ro"]);
         assert_eq!(req.policy.denied_paths, vec!["C:\\denied"]);
@@ -491,8 +494,7 @@ mod tests {
 
     #[test]
     fn network_enforcement_mode_capabilities() {
-        let json =
-            r#"{"script": "print('test')", "network": {"enforcementMode": "capabilities"}}"#;
+        let json = r#"{"script": "print('test')", "network": {"enforcementMode": "capabilities"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 

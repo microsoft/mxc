@@ -34,8 +34,7 @@ pub trait ScriptRunner {
 
         let principal_id = self.get_principal_id();
 
-        let mut bfs_manager =
-            FileSystemBfsManager::new(request.policy.app_container_name.clone());
+        let mut bfs_manager = FileSystemBfsManager::new(request.policy.app_container_name.clone());
         if let Err(e) = bfs_manager.configure(&request.policy, logger) {
             return ScriptResponse::error(&e.to_string());
         }
@@ -71,7 +70,11 @@ pub trait ScriptRunner {
 
 /// Convert a timeout value to milliseconds, treating 0 as infinite (INFINITE = `u32::MAX`).
 pub fn get_timeout_milliseconds(timeout: u32) -> u32 {
-    if timeout == 0 { u32::MAX } else { timeout }
+    if timeout == 0 {
+        u32::MAX
+    } else {
+        timeout
+    }
 }
 
 #[cfg(test)]
