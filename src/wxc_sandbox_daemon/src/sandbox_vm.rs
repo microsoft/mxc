@@ -25,20 +25,47 @@ pub fn generate_wsb(
     // Write the bootstrap script into the rendezvous dir (read-write inside
     // the sandbox) so it can be executed by the LogonCommand.
     let bootstrap_content = r#"@echo off
-echo [bootstrap] Installing Python via winget...
-winget install Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent --disable-interactivity 2>nul
+set "LOG=C:\sandbox-rendezvous\bootstrap.log"
+
+echo [bootstrap] Starting at %date% %time% >> "%LOG%" 2>&1
+
+echo [bootstrap] Installing Python via winget... >> "%LOG%" 2>&1
+where winget >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
-    echo [bootstrap] winget install returned %ERRORLEVEL%, trying with --force...
-    winget install Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent --disable-interactivity --force 2>nul
+    echo [bootstrap] winget not found, waiting for App Installer... >> "%LOG%" 2>&1
+    REM Windows Sandbox may need a moment for the Store to register winget
+    timeout /t 15 /nobreak >nul
 )
 
-echo [bootstrap] Refreshing PATH...
+winget install Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent --disable-interactivity >> "%LOG%" 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [bootstrap] First winget attempt returned %ERRORLEVEL%, retrying with --force... >> "%LOG%" 2>&1
+    winget install Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent --disable-interactivity --force >> "%LOG%" 2>&1
+)
+
+echo [bootstrap] Refreshing PATH... >> "%LOG%" 2>&1
 for /f "tokens=2*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do set "SYS_PATH=%%B"
 for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "USR_PATH=%%B"
 set "PATH=%SYS_PATH%;%USR_PATH%"
 
-echo [bootstrap] Starting sandbox agent...
-C:\sandbox-agent\wxc-sandbox-agent.exe
+echo [bootstrap] PATH=%PATH% >> "%LOG%" 2>&1
+
+where python >> "%LOG%" 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [bootstrap] python not on PATH, checking common locations... >> "%LOG%" 2>&1
+    if exist "C:\Users\WDAGUtilityAccount\AppData\Local\Programs\Python\Python312\python.exe" (
+        set "PATH=%PATH%;C:\Users\WDAGUtilityAccount\AppData\Local\Programs\Python\Python312"
+        echo [bootstrap] Added user Python to PATH >> "%LOG%" 2>&1
+    )
+    if exist "C:\Program Files\Python312\python.exe" (
+        set "PATH=%PATH%;C:\Program Files\Python312"
+        echo [bootstrap] Added system Python to PATH >> "%LOG%" 2>&1
+    )
+)
+
+echo [bootstrap] Starting sandbox agent... >> "%LOG%" 2>&1
+C:\sandbox-agent\wxc-sandbox-agent.exe >> "%LOG%" 2>&1
+echo [bootstrap] Agent exited with code %ERRORLEVEL% >> "%LOG%" 2>&1
 "#;
     let bootstrap_path = rendezvous_dir.join("bootstrap.cmd");
     std::fs::write(&bootstrap_path, bootstrap_content)
