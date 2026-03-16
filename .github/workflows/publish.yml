@@ -1,20 +1,14 @@
 name: Publish SDK to GPR
 
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
   packages: write
 
 jobs:
-  build:
-    uses: ./.github/workflows/build.yml
-
   publish:
-    needs: build
     runs-on: windows-latest
     steps:
       - uses: actions/download-artifact@v4
