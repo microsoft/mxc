@@ -27,13 +27,11 @@ pub async fn connect_to_guest(
     addr: SocketAddr,
     timeout: std::time::Duration,
 ) -> Result<GuestConnection> {
-    let connect = |label: &'static str| {
-        async move {
-            tokio::time::timeout(timeout, TcpStream::connect(addr))
-                .await
-                .with_context(|| format!("timeout connecting {} to {}", label, addr))?
-                .with_context(|| format!("connect {} to {}", label, addr))
-        }
+    let connect = |label: &'static str| async move {
+        tokio::time::timeout(timeout, TcpStream::connect(addr))
+            .await
+            .with_context(|| format!("timeout connecting {} to {}", label, addr))?
+            .with_context(|| format!("connect {} to {}", label, addr))
     };
 
     let control = connect("control").await?;

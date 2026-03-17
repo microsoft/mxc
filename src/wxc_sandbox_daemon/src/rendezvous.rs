@@ -35,8 +35,8 @@ pub async fn wait_for_rendezvous(
                     eprintln!("[daemon] rendezvous: guest at {}", addr);
                     return Ok(addr);
                 }
-             }
-          }
+            }
+        }
 
         tokio::time::sleep(poll_interval).await;
     }
