@@ -48,27 +48,27 @@ if "%BUILD_ALL%"=="1" (
 )
 popd
 
-:: Copy wxc-exec binaries into SDK package
+:: Copy binaries into SDK package
 echo.
-echo Copying wxc-exec binaries into SDK package...
+echo Copying binaries into SDK package...
 for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
-    set "SRC_EXE=src\target\%%T\%BUILD_CONFIG%\wxc-exec.exe"
-    if exist "!SRC_EXE!" (
+    set "BIN_DIR=src\target\%%T\%BUILD_CONFIG%"
+    if exist "!BIN_DIR!\wxc-exec.exe" (
         if not exist "sdk\bin\%%T" mkdir "sdk\bin\%%T"
-        copy /Y "!SRC_EXE!" "sdk\bin\%%T\wxc-exec.exe" >nul
+        copy /Y "!BIN_DIR!\wxc-exec.exe" "sdk\bin\%%T\" >nul
         echo   Copied %%T\wxc-exec.exe
+        if exist "!BIN_DIR!\wxc-sandbox-agent.exe" (
+            copy /Y "!BIN_DIR!\wxc-sandbox-agent.exe" "sdk\bin\%%T\" >nul
+            echo   Copied %%T\wxc-sandbox-agent.exe
+        )
+        if exist "!BIN_DIR!\wxc-sandbox-daemon.exe" (
+            copy /Y "!BIN_DIR!\wxc-sandbox-daemon.exe" "sdk\bin\%%T\" >nul
+            echo   Copied %%T\wxc-sandbox-daemon.exe
+        )
     )
 )
 
 :: Build npm packages
-echo.
-echo Staging sandbox agent binary...
-if not exist outputs mkdir outputs
-copy /Y src\target\release\wxc-exec.exe outputs\ >nul
-copy /Y src\target\release\wxc-sandbox-agent.exe outputs\ >nul
-copy /Y src\target\release\wxc-sandbox-daemon.exe outputs\ >nul
-copy /Y src\target\release\wxc-test-driver.exe outputs\ >nul
-
 echo.
 echo Building npm SDK package...
 pushd sdk
