@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, ContainmentBackend, ContainerPolicy, NetworkEnforcementMode, NetworkPolicy,
+    CodexRequest, ContainerPolicy, ContainmentBackend, NetworkEnforcementMode, NetworkPolicy,
     SandboxConfig,
 };
 use crate::string_util::base64_decode;

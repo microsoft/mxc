@@ -48,7 +48,10 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(300_000);
 
-    eprintln!("[daemon] starting, pipe={}, idle_timeout={}ms", pipe_name, idle_timeout_ms);
+    eprintln!(
+        "[daemon] starting, pipe={}, idle_timeout={}ms",
+        pipe_name, idle_timeout_ms
+    );
 
     let state = Arc::new(Mutex::new(DaemonState::new()));
 

@@ -81,8 +81,7 @@ impl SandboxScriptRunner {
             .map_err(|e| format!("spawn daemon: {}", e))?;
 
         // Poll until the daemon's IPC port is reachable.
-        let deadline =
-            std::time::Instant::now() + Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
         loop {
             if std::time::Instant::now() >= deadline {
                 return Err("timed out waiting for daemon to start".to_string());
@@ -96,11 +95,7 @@ impl SandboxScriptRunner {
     }
 
     /// Send an execution request to the daemon and read the result.
-    fn execute_via_daemon(
-        &self,
-        request: &CodexRequest,
-        logger: &mut Logger,
-    ) -> ScriptResponse {
+    fn execute_via_daemon(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         // Ensure daemon is up.
         if let Err(e) = self.ensure_daemon_running(logger) {
             return ScriptResponse::error(&e);
@@ -136,8 +131,7 @@ impl SandboxScriptRunner {
         }
 
         let response_line = response_line.trim();
-        if response_line.starts_with("RESULT ") {
-            let rest = &response_line["RESULT ".len()..];
+        if let Some(rest) = response_line.strip_prefix("RESULT ") {
             // First token is exit code, rest is error message.
             let (code_str, error_msg) = match rest.find(' ') {
                 Some(pos) => (&rest[..pos], rest[pos + 1..].to_string()),

@@ -14,15 +14,14 @@ use tokio::process::Command;
 /// Returns the directory containing `python.exe`.
 pub fn find_host_python() -> Result<PathBuf> {
     // Try PATH first via `where python`.
-    if let Ok(output) = std::process::Command::new("where")
-        .arg("python")
-        .output()
-    {
+    if let Ok(output) = std::process::Command::new("where").arg("python").output() {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
                 let p = PathBuf::from(line.trim());
-                if p.exists() && p.file_name().map(|f| f.to_ascii_lowercase()) == Some("python.exe".into()) {
+                if p.exists()
+                    && p.file_name().map(|f| f.to_ascii_lowercase()) == Some("python.exe".into())
+                {
                     if let Some(dir) = p.parent() {
                         return Ok(dir.to_path_buf());
                     }
@@ -49,20 +48,22 @@ pub fn find_host_python() -> Result<PathBuf> {
 
     // User-scoped installs.
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let base = PathBuf::from(local_app_data).join("Programs").join("Python");
+        let base = PathBuf::from(local_app_data)
+            .join("Programs")
+            .join("Python");
         if base.exists() {
-            for entry in std::fs::read_dir(&base).into_iter().flatten() {
-                if let Ok(e) = entry {
-                    let dir = e.path();
-                    if dir.join("python.exe").exists() {
-                        return Ok(dir);
-                    }
+            for e in std::fs::read_dir(&base).into_iter().flatten().flatten() {
+                let dir = e.path();
+                if dir.join("python.exe").exists() {
+                    return Ok(dir);
                 }
             }
         }
     }
 
-    anyhow::bail!("Python installation not found on host. Install Python and ensure python.exe is on PATH.")
+    anyhow::bail!(
+        "Python installation not found on host. Install Python and ensure python.exe is on PATH."
+    )
 }
 
 /// Generate a .wsb configuration file in `output_dir` and a bootstrap script
@@ -191,8 +192,7 @@ mod tests {
         std::fs::create_dir_all(&rendezvous_dir).unwrap();
         std::fs::create_dir_all(&python_dir).unwrap();
 
-        let wsb_path =
-            generate_wsb(&agent_dir, &rendezvous_dir, &python_dir, dir.path()).unwrap();
+        let wsb_path = generate_wsb(&agent_dir, &rendezvous_dir, &python_dir, dir.path()).unwrap();
         assert!(wsb_path.exists());
 
         let content = std::fs::read_to_string(&wsb_path).unwrap();

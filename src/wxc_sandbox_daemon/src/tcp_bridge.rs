@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use wxc_common::sandbox_protocol::{
-    ControlMessage, DecodeResult, ExecRequest, decode_message, encode_message,
+    decode_message, encode_message, ControlMessage, DecodeResult, ExecRequest,
 };
 
 /// Four TCP connections to the guest agent.

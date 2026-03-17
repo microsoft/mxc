@@ -20,15 +20,16 @@ pub async fn lockdown(host_ip: IpAddr, listen_port: u16) -> Result<()> {
     let port = listen_port.to_string();
 
     // Delete all existing firewall rules.
-    run_netsh(&[
-        "advfirewall", "firewall", "delete", "rule", "name=all",
-    ])
-    .await
-    .context("delete existing rules")?;
+    run_netsh(&["advfirewall", "firewall", "delete", "rule", "name=all"])
+        .await
+        .context("delete existing rules")?;
 
     // Allow inbound from host to our listen port.
     run_netsh(&[
-        "advfirewall", "firewall", "add", "rule",
+        "advfirewall",
+        "firewall",
+        "add",
+        "rule",
         "name=WxcAgentIn",
         "dir=in",
         "action=allow",
@@ -41,7 +42,10 @@ pub async fn lockdown(host_ip: IpAddr, listen_port: u16) -> Result<()> {
 
     // Allow outbound to host.
     run_netsh(&[
-        "advfirewall", "firewall", "add", "rule",
+        "advfirewall",
+        "firewall",
+        "add",
+        "rule",
         "name=WxcAgentOut",
         "dir=out",
         "action=allow",
@@ -53,7 +57,10 @@ pub async fn lockdown(host_ip: IpAddr, listen_port: u16) -> Result<()> {
 
     // Block everything else.
     run_netsh(&[
-        "advfirewall", "set", "allprofiles", "firewallpolicy",
+        "advfirewall",
+        "set",
+        "allprofiles",
+        "firewallpolicy",
         "blockinbound,blockoutbound",
     ])
     .await

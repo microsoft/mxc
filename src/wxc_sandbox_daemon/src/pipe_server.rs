@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 use crate::tcp_bridge;
-use crate::{DaemonState, rendezvous, sandbox_vm};
+use crate::{rendezvous, sandbox_vm, DaemonState};
 
 /// Run the named-pipe server loop.
 ///
@@ -60,17 +60,14 @@ async fn handle_client(
 
     let line = line.trim();
     if !line.starts_with("EXEC ") {
-        writer
-            .write_all(b"ERROR unknown command\n")
-            .await
-            .ok();
+        writer.write_all(b"ERROR unknown command\n").await.ok();
         return Ok(());
     }
     let json_payload = &line["EXEC ".len()..];
 
     // Parse the execution request.
-    let req: ClientExecRequest = serde_json::from_str(json_payload)
-        .context("parse client exec request")?;
+    let req: ClientExecRequest =
+        serde_json::from_str(json_payload).context("parse client exec request")?;
 
     // Ensure sandbox is running and we have a guest connection.
     ensure_sandbox_ready(&state).await?;
@@ -84,10 +81,7 @@ async fn handle_client(
     // Execute on the guest.
     let (exit_code, error_message) = {
         let mut s = state.lock().await;
-        let conn = s
-            .guest_connection
-            .as_mut()
-            .context("no guest connection")?;
+        let conn = s.guest_connection.as_mut().context("no guest connection")?;
 
         let exec_id = uuid::Uuid::new_v4().to_string();
         tcp_bridge::execute_on_guest(
@@ -131,8 +125,7 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
 
     let agent_dir = exe_dir.clone();
     let rendezvous_dir = std::env::temp_dir().join("wxc-sandbox-rendezvous");
-    std::fs::create_dir_all(&rendezvous_dir)
-        .context("create rendezvous dir")?;
+    std::fs::create_dir_all(&rendezvous_dir).context("create rendezvous dir")?;
 
     // Clean up stale rendezvous file.
     rendezvous::cleanup(&rendezvous_dir).await?;
@@ -169,12 +162,9 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
     .context("rendezvous failed")?;
 
     // Connect to the guest agent.
-    let conn = tcp_bridge::connect_to_guest(
-        guest_addr,
-        std::time::Duration::from_secs(30),
-    )
-    .await
-    .context("connect to guest agent")?;
+    let conn = tcp_bridge::connect_to_guest(guest_addr, std::time::Duration::from_secs(30))
+        .await
+        .context("connect to guest agent")?;
 
     let mut s = state.lock().await;
     s.guest_connection = Some(conn);
@@ -184,7 +174,9 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
 
 /// Deterministic port derived from the pipe name, in the ephemeral range.
 fn pipe_name_to_port(name: &str) -> u16 {
-    let hash: u32 = name.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    let hash: u32 = name
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
     // Map to port range 49152-65535 (IANA ephemeral range).
     let range = 65535 - 49152;
     49152 + (hash % range) as u16

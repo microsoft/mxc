@@ -9,7 +9,7 @@ use tokio::net::TcpStream;
 use tokio::process::Command;
 
 use wxc_common::sandbox_protocol::{
-    ControlMessage, DecodeResult, ExitNotification, decode_message, encode_message,
+    decode_message, encode_message, ControlMessage, DecodeResult, ExitNotification,
 };
 
 /// Main command loop.  Reads control messages from the host and executes
@@ -21,9 +21,11 @@ pub async fn run_command_loop(
     stderr_stream: TcpStream,
 ) -> Result<()> {
     // Signal readiness to the host.
-    let ready_frame = encode_message(&ControlMessage::Ready)
-        .context("encode Ready")?;
-    control.write_all(&ready_frame).await.context("send Ready")?;
+    let ready_frame = encode_message(&ControlMessage::Ready).context("encode Ready")?;
+    control
+        .write_all(&ready_frame)
+        .await
+        .context("send Ready")?;
 
     // Wrap stdio streams in Option so we can take ownership per execution.
     let mut stdin_stream = Some(stdin_stream);
@@ -75,11 +77,14 @@ pub async fn run_command_loop(
                             let frame = encode_message(&exit_msg).context("encode Exit")?;
                             control.write_all(&frame).await.context("send Exit")?;
 
-                            eprintln!("[agent] exec {} finished with code {}", req.exec_id, exit_code);
+                            eprintln!(
+                                "[agent] exec {} finished with code {}",
+                                req.exec_id, exit_code
+                            );
                         }
                         ControlMessage::Ping => {
-                            let frame = encode_message(&ControlMessage::Pong)
-                                .context("encode Pong")?;
+                            let frame =
+                                encode_message(&ControlMessage::Pong).context("encode Pong")?;
                             control.write_all(&frame).await.context("send Pong")?;
                         }
                         other => {
