@@ -1,5 +1,5 @@
 [workspace]
-members = ["wxc", "wxc_common", "wxc_test_driver"]
+members = ["wxc", "wxc_common", "wxc_test_driver", "wxc_sandbox_agent", "wxc_sandbox_daemon"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -29,3 +29,5 @@ anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 wxc_common = { path = "wxc_common" }
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }

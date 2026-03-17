@@ -46,6 +46,7 @@ mod tests {
                 app_container_name: "Test".to_string(),
                 ..Default::default()
             },
+            ..Default::default()
         };
         assert!(validate_request(&req).is_ok());
     }
