@@ -154,8 +154,8 @@ impl SandboxScriptRunner {
                     error_message: error_msg,
                 }
             }
-        } else if response_line.starts_with("ERROR ") {
-            ScriptResponse::error(&response_line["ERROR ".len()..])
+        } else if let Some(stripped) = response_line.strip_prefix("ERROR ") {
+            ScriptResponse::error(stripped)
         } else {
             ScriptResponse::error(&format!("unexpected daemon response: {}", response_line))
         }

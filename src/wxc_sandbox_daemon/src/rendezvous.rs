@@ -29,17 +29,14 @@ pub async fn wait_for_rendezvous(
         }
 
         if file_path.exists() {
-            match tokio::fs::read_to_string(&file_path).await {
-                Ok(content) => {
-                    let trimmed = content.trim();
-                    if let Ok(addr) = trimmed.parse::<SocketAddr>() {
-                        eprintln!("[daemon] rendezvous: guest at {}", addr);
-                        return Ok(addr);
-                    }
+            if let Ok(content) = tokio::fs::read_to_string(&file_path).await {
+                let trimmed = content.trim();
+                if let Ok(addr) = trimmed.parse::<SocketAddr>() {
+                    eprintln!("[daemon] rendezvous: guest at {}", addr);
+                    return Ok(addr);
                 }
-                Err(_) => {} // File may be partially written; retry.
-            }
-        }
+             }
+          }
 
         tokio::time::sleep(poll_interval).await;
     }

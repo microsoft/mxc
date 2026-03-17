@@ -28,7 +28,6 @@ pub async fn connect_to_guest(
     timeout: std::time::Duration,
 ) -> Result<GuestConnection> {
     let connect = |label: &'static str| {
-        let addr = addr;
         async move {
             tokio::time::timeout(timeout, TcpStream::connect(addr))
                 .await
