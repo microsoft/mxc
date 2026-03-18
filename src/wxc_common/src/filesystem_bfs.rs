@@ -1,14 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::process::{Command, Stdio};
-
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::ContainerPolicy;
+use crate::process_util;
 
 const BFSCFG_EXE: &str = "bfscfg.exe";
 const UNABLE_TO_PERFORM: &str = "Unable to perform policy operation";
+const BFSCFG_TIMEOUT_MS: u32 = 10_000;
 
 pub struct FileSystemBfsManager {
     app_container_name: String,
@@ -139,27 +139,31 @@ impl FileSystemBfsManager {
     }
 
     fn run_bfscfg(&self, args: &[&str]) -> Result<String, WxcError> {
-        let output = Command::new(BFSCFG_EXE)
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| {
-                WxcError::FilesystemPolicy(format!("Failed to run {}: {}", BFSCFG_EXE, e))
-            })?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        let mut combined = stdout.into_owned();
-        if !stderr.is_empty() {
-            if !combined.is_empty() {
-                combined.push('\n');
-            }
-            combined.push_str(&stderr);
+        // Build a command line: "bfscfg.exe arg1 arg2 ..."
+        let mut cmd_line = BFSCFG_EXE.to_string();
+        for arg in args {
+            cmd_line.push(' ');
+            cmd_line.push_str(arg);
         }
 
-        Ok(combined)
+        let output = process_util::run_process_with_captured_output(&cmd_line, BFSCFG_TIMEOUT_MS)?;
+
+        let stdout = output.stdout;
+        let stderr = output.stderr;
+
+        // Only include stderr if the process failed (non-zero exit code)
+        if output.exit_code != 0 {
+            let mut combined = stdout;
+            if !stderr.is_empty() {
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(&stderr);
+            }
+            return Ok(combined);
+        }
+
+        Ok(stdout)
     }
 }
 

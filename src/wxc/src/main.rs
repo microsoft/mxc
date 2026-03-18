@@ -139,7 +139,13 @@ fn main() {
     let response = runner.run(&request, &mut logger);
     display_script_results(&response, &mut logger);
 
-    print!("{}", response.standard_out);
-    eprint!("{}", response.standard_err);
+    // Output was already relayed to the console by pipe threads.
+    // Only print captured output if present (e.g. from error paths).
+    if !response.standard_out.is_empty() {
+        print!("{}", response.standard_out);
+    }
+    if !response.standard_err.is_empty() {
+        eprint!("{}", response.standard_err);
+    }
     process::exit(response.exit_code);
 }
