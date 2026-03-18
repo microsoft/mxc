@@ -119,8 +119,9 @@ program
   .action(async (configPath: string, options: { debug?: boolean; wxcPath?: string }) => {
     try {
       // Check platform support
-      if (!getPlatformSupport().isSupported) {
-        console.error('Error: WXC is only supported on Windows');
+      const platformInfo = getPlatformSupport();
+      if (!platformInfo.isSupported) {
+        console.error(`Error: MXC is not supported on this platform: ${platformInfo.reason}`);
         process.exit(1);
       }
 
@@ -196,7 +197,7 @@ program
     try {
       const support = getPlatformSupport();
 
-      console.log('WXC Platform Support Information');
+      console.log('MXC Platform Support Information');
       console.log('='.repeat(50));
       console.log(`Supported: ${support.isSupported ? 'Yes' : 'No'}`);
 

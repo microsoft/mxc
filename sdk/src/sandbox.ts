@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { randomBytes } from "crypto";
 import { SandboxPolicy, WxcConfiguration } from './types';
-import { findWxcExecutable, getPlatformSupport } from './platform';
+import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -27,8 +27,37 @@ export function buildSandboxPayload(
     workingDirectory?: string,
     containerName?: string,
 ): WxcConfiguration {
-    // Build capabilities array
-    // NOTE: We can add the "permissiveLearningMode" cap here if we add a sandbox debugging flag.
+    const platform = os.platform();
+
+    if (platform === 'linux') {
+        // Build LXC payload
+        const config: WxcConfiguration = {
+            script,
+            containment: 'lxc',
+            workingDirectory,
+            lxc: {
+                containerName: containerName ?? generateRandomContainerName(),
+                destroyOnExit: true,
+            },
+            filesystem: {
+                readwritePaths: policy.filesystem?.readwritePaths,
+                readonlyPaths: policy.filesystem?.readonlyPaths,
+                deniedPaths: policy.filesystem?.deniedPaths,
+                clearPolicyOnExit: true,
+            },
+        };
+
+        // Add network config if specified
+        if (policy.network) {
+            config.network = {
+                defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
+            };
+        }
+
+        return config;
+    }
+
+    // Existing Windows payload
     const capabilities: string[] = [];
 
     if (policy.network?.allowOutbound) {
@@ -103,51 +132,57 @@ export function spawnSandbox(
   env?: { [key: string]: string | undefined }
 ): pty.IPty {
   // Check platform support
-  if (!getPlatformSupport().isSupported) {
-    throw new Error('WXC is currently only supported on Windows 11');
+  const platformSupport = getPlatformSupport();
+  if (!platformSupport.isSupported) {
+    throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
-  // Determine wxc-exec path
-  const wxcPath = findWxcExecutable();
-  if (!wxcPath) {
-    throw new Error(
-      'wxc-exec.exe not found. Please specify the path using options.wxcPath or ensure it exists in a standard location'
-    );
+  // Determine executable path based on platform
+  const platform = os.platform();
+  let executablePath: string | null;
+
+  if (platform === 'linux') {
+    executablePath = findLxcExecutable();
+    if (!executablePath) {
+      throw new Error(
+        'lxc-exec not found. Ensure it is built and available in a standard location.'
+      );
+    }
+  } else {
+    executablePath = findWxcExecutable();
+    if (!executablePath) {
+      throw new Error(
+        'wxc-exec.exe not found. Please specify the path or ensure it exists in a standard location.'
+      );
+    }
   }
 
-  // Prepare the sandbox policy for wxc-exec
+  // Build config
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
 
-  // Prepare arguments for wxc-exec
+  // Prepare arguments
   const args: string[] = [];
   const useBase64 = options.debug ?? true;
 
   if (useBase64) {
-    // Use base64 encoding (no temp files)
     const configJson = JSON.stringify(config);
     const configBase64 = Buffer.from(configJson, 'utf-8').toString('base64');
     args.push('--config-base64', configBase64);
   } else {
-    // Create temporary config file
     const tempDir = os.tmpdir();
     const tempFile = path.join(
       tempDir,
-      `wxc-config-${Date.now()}-${Math.random().toString(36).substring(7)}.json`
+      `mxc-config-${Date.now()}-${Math.random().toString(36).substring(7)}.json`
     );
     fs.writeFileSync(tempFile, JSON.stringify(config, null, 2), 'utf-8');
     args.push('--config', tempFile);
-
-    // Note: temp file will be orphaned, but OS will clean it up eventually
-    // For better cleanup, user should handle the IPty 'exit' event
   }
 
-  // Add debug flag if requested
   if (options.debug) {
     args.push('--debug');
   }
 
-  // Merge PTY options with defaults
-  const ptyOpts: pty.IWindowsPtyForkOptions = {
+  const ptyOpts: pty.IPtyForkOptions = {
     name: "xterm-color",
     cols: 120,
     rows: 80,
@@ -155,9 +190,7 @@ export function spawnSandbox(
     env: env
   };
 
-  // Spawn wxc-exec with node-pty
-  const ptyProcess = pty.spawn(wxcPath, args, ptyOpts);
-
+  const ptyProcess = pty.spawn(executablePath, args, ptyOpts);
   return ptyProcess;
 }
 

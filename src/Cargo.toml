@@ -1,5 +1,5 @@
 [workspace]
-members = ["wxc", "wxc_common", "wxc_test_driver", "wxc_sandbox_agent", "wxc_sandbox_daemon"]
+members = ["wxc", "wxc_common", "wxc_test_driver", "wxc_sandbox_agent", "wxc_sandbox_daemon", "lxc", "lxc_common"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -31,3 +31,6 @@ clap = { version = "4", features = ["derive"] }
 wxc_common = { path = "wxc_common" }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+nix = { version = "0.29", features = ["mount", "sched", "signal", "net", "process", "user"] }
+lxc_common = { path = "lxc_common" }
