@@ -73,7 +73,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wxc-exec-${{ matrix.target }}
-          path: src/target/${{ matrix.target }}/release/wxc-exec.exe
+          path: |
+            src/target/${{ matrix.target }}/release/wxc-exec.exe
+            src/target/${{ matrix.target }}/release/winhttp-proxy-shim.exe
 
 
   # Build and package the TypeScript SDK with bundled wxc-exec binaries

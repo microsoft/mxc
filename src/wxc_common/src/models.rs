@@ -51,6 +51,24 @@ pub enum NetworkEnforcementMode {
     Both,
 }
 
+/// Proxy configuration for the network section.
+///
+/// When present with a non-zero port, wxc routes AppContainer traffic through
+/// an already-running proxy at `127.0.0.1:<port>`. The proxy is responsible
+/// for any domain filtering.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// Port of the already-running localhost proxy.
+    pub localhost: u16,
+}
+
+impl ProxyConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.localhost > 0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContainerPolicy {
@@ -66,6 +84,7 @@ pub struct ContainerPolicy {
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
     pub remove_firewall_rules_on_exit: bool,
+    pub network_proxy: ProxyConfig,
 }
 
 impl Default for ContainerPolicy {
@@ -83,6 +102,7 @@ impl Default for ContainerPolicy {
             allowed_hosts: Vec::new(),
             blocked_hosts: Vec::new(),
             remove_firewall_rules_on_exit: true,
+            network_proxy: ProxyConfig::default(),
         }
     }
 }

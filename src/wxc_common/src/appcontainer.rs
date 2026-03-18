@@ -90,6 +90,7 @@ struct SecurityCapabilities {
 pub struct AppContainerScriptRunner {
     app_container_name: String,
     app_container_sid: PSID,
+    proxy_port: u16,
 }
 
 impl AppContainerScriptRunner {
@@ -97,6 +98,7 @@ impl AppContainerScriptRunner {
         Self {
             app_container_name: String::new(),
             app_container_sid: PSID(ptr::null_mut()),
+            proxy_port: 0,
         }
     }
 
@@ -346,10 +348,28 @@ impl AppContainerScriptRunner {
             PCWSTR(working_dir_wide.as_ptr())
         };
 
+        // When proxy is active, temporarily set proxy env vars in our process
+        // so the child inherits them. Restore originals right after CreateProcessW.
+        let proxy_vars = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
+        let proxy_backup: Option<Vec<(String, Option<String>)>> = if self.proxy_port > 0 {
+            let proxy_url = format!("http://127.0.0.1:{}", self.proxy_port);
+            let backup: Vec<_> = proxy_vars
+                .iter()
+                .map(|name| (name.to_string(), std::env::var(name).ok()))
+                .collect();
+            std::env::set_var("HTTP_PROXY", &proxy_url);
+            std::env::set_var("HTTPS_PROXY", &proxy_url);
+            std::env::remove_var("NO_PROXY");
+            std::env::remove_var("ALL_PROXY");
+            Some(backup)
+        } else {
+            None
+        };
+
         // --- Create process ---
         let mut pi = PROCESS_INFORMATION::default();
 
-        unsafe {
+        let create_result = unsafe {
             CreateProcessW(
                 PCWSTR::null(),
                 Some(PWSTR(cmd_line_wide.as_mut_ptr())),
@@ -362,8 +382,21 @@ impl AppContainerScriptRunner {
                 &si_ex.StartupInfo as *const STARTUPINFOW,
                 &mut pi,
             )
-            .map_err(|e| WxcError::Process(format!("CreateProcessW failed: {}", e)))?;
+        };
+
+        // Restore original env vars immediately.
+        if let Some(backup) = proxy_backup {
+            for (name, original) in backup {
+                if let Some(value) = original {
+                    std::env::set_var(&name, value);
+                } else {
+                    std::env::remove_var(&name);
+                }
+            }
         }
+
+        create_result
+            .map_err(|err| WxcError::Process(format!("CreateProcessW failed: {}", err)))?;
 
         logger.log_line(&format!(
             "Process created successfully (PID: {})",
@@ -499,10 +532,10 @@ impl Default for AppContainerScriptRunner {
 }
 
 impl ScriptRunner for AppContainerScriptRunner {
-    /// Template method: validate → initialize → configure FS → configure network → run → cleanup.
     fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         use crate::filesystem_bfs::FileSystemBfsManager;
         use crate::network_firewall::NetworkFirewallManager;
+        use crate::network_proxy::NetworkProxyManager;
         use crate::validator::validate_request;
 
         if let Err(e) = validate_request(request) {
@@ -519,13 +552,32 @@ impl ScriptRunner for AppContainerScriptRunner {
             return ScriptResponse::error(&e.to_string());
         }
 
+        let mut network_proxy_manager = NetworkProxyManager::new();
+        if request.policy.network_proxy.is_enabled() {
+            match network_proxy_manager.start(
+                &request.policy,
+                &principal_id,
+                self.app_container_sid,
+                logger,
+            ) {
+                Ok(()) => {
+                    self.proxy_port = network_proxy_manager.proxy_port();
+                }
+                Err(err) => {
+                    return ScriptResponse::error(&err.to_string());
+                }
+            }
+        }
+
         let mut fw_manager = NetworkFirewallManager::new();
         match fw_manager.apply_firewall_rules(&principal_id, &request.policy, logger) {
             Ok(true) => {}
             Ok(false) => {
+                network_proxy_manager.stop(logger);
                 return ScriptResponse::error("Failed to apply network firewall rules.");
             }
             Err(e) => {
+                network_proxy_manager.stop(logger);
                 return ScriptResponse::error(&e.to_string());
             }
         }
@@ -539,6 +591,9 @@ impl ScriptRunner for AppContainerScriptRunner {
 
         if fw_manager.rules_applied() && request.policy.remove_firewall_rules_on_exit {
             let _ = fw_manager.remove_firewall_rules(logger);
+        }
+        if network_proxy_manager.is_active() {
+            network_proxy_manager.stop(logger);
         }
         if bfs_manager.configured() && request.policy.clear_policy_on_exit {
             bfs_manager.remove_configuration(logger);

@@ -26,6 +26,9 @@ pub enum WxcError {
     #[error("Initialization error: {0}")]
     Initialization(String),
 
+    #[error("Network proxy error: {0}")]
+    NetworkProxy(String),
+
     #[error("String conversion error: {0}")]
     StringConversion(String),
 }
