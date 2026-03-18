@@ -2,27 +2,31 @@
 // Licensed under the MIT License.
 
 use std::ptr;
-use std::thread;
 
-use windows::Win32::Foundation::{LocalFree, HLOCAL, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{LocalFree, HLOCAL, WAIT_EVENT, WAIT_OBJECT_0};
 use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::PSID;
+use windows::Win32::System::Console::{
+    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
+    WaitForMultipleObjects, WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST,
+    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    STARTUPINFOW,
 };
+use windows::Win32::System::IO::CancelSynchronousIo;
 use windows_core::{PCWSTR, PWSTR};
 
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
 use crate::process_util::{
-    create_std_pipes, get_capability_sid_from_name, read_from_pipe, suppress_python_location_error,
-    OwnedHandle, SendOwnedHandle,
+    create_relay_thread, create_std_pipes, get_capability_sid_from_name, OwnedHandle,
+    PipeRelayParams,
 };
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::string_util;
@@ -207,11 +211,11 @@ impl AppContainerScriptRunner {
         };
 
         // --- Create pipes ---
-        let (stdin_read, stdin_write) =
+        let (stdin_read, mut stdin_write) =
             create_std_pipes(false).map_err(|e| WxcError::Process(format!("stdin pipe: {}", e)))?;
-        let (mut stdout_read, stdout_write) =
+        let (stdout_read, stdout_write) =
             create_std_pipes(true).map_err(|e| WxcError::Process(format!("stdout pipe: {}", e)))?;
-        let (mut stderr_read, stderr_write) =
+        let (stderr_read, stderr_write) =
             create_std_pipes(true).map_err(|e| WxcError::Process(format!("stderr pipe: {}", e)))?;
 
         let inherit_handles = [stdin_read.get(), stdout_write.get(), stderr_write.get()];
@@ -361,46 +365,94 @@ impl AppContainerScriptRunner {
             .map_err(|e| WxcError::Process(format!("CreateProcessW failed: {}", e)))?;
         }
 
+        logger.log_line(&format!(
+            "Process created successfully (PID: {})",
+            pi.dwProcessId
+        ));
+
         // --- Close child-side handles in the parent ---
         drop(stdin_read);
-        drop(stdin_write);
         drop(stdout_write);
         drop(stderr_write);
 
         let process_handle = OwnedHandle::new(pi.hProcess);
         let _thread_handle = OwnedHandle::new(pi.hThread);
 
-        // --- Spawn reader threads ---
-        // Transfer ownership to threads via SendOwnedHandle so handle lifetimes
-        // are tied to thread completion rather than function scope.
-        let stdout_send = SendOwnedHandle::take(&mut stdout_read);
-        let stderr_send = SendOwnedHandle::take(&mut stderr_read);
+        // --- Get parent console handles ---
+        let parent_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
+            .map_err(|e| WxcError::Process(format!("GetStdHandle(stdin): {}", e)))?;
+        let parent_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
+            .map_err(|e| WxcError::Process(format!("GetStdHandle(stdout): {}", e)))?;
+        let parent_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
+            .map_err(|e| WxcError::Process(format!("GetStdHandle(stderr): {}", e)))?;
 
-        let stdout_thread = thread::spawn(move || read_from_pipe(stdout_send.get()));
-        let stderr_thread = thread::spawn(move || read_from_pipe(stderr_send.get()));
+        // --- Create relay threads ---
+        // Thread 1: Parent stdin → Child stdin
+        let mut stdin_params = PipeRelayParams {
+            h_read: parent_stdin,
+            h_write: stdin_write.get(),
+        };
+        // Thread 2: Child stdout → Parent stdout
+        let mut stdout_params = PipeRelayParams {
+            h_read: stdout_read.get(),
+            h_write: parent_stdout,
+        };
+        // Thread 3: Child stderr → Parent stderr
+        let mut stderr_params = PipeRelayParams {
+            h_read: stderr_read.get(),
+            h_write: parent_stderr,
+        };
 
-        // --- Wait for process ---
+        let stdin_relay = unsafe { create_relay_thread(&mut stdin_params)? };
+        let stdout_relay = unsafe { create_relay_thread(&mut stdout_params)? };
+        let stderr_relay = unsafe { create_relay_thread(&mut stderr_params)? };
+
+        // --- Wait for process or output relay completion ---
+        // Any of: process exit, stdout relay done, or stderr relay done signals
+        // that the child session is over.
         let timeout_ms = get_timeout_milliseconds(request.script_timeout);
-        let wait_result = unsafe { WaitForSingleObject(process_handle.get(), timeout_ms) };
+        let completion_handles = [process_handle.get(), stdout_relay.get(), stderr_relay.get()];
 
-        if wait_result != WAIT_OBJECT_0 {
+        let wait_result = unsafe { WaitForMultipleObjects(&completion_handles, false, timeout_ms) };
+
+        if wait_result != WAIT_OBJECT_0
+            && wait_result != WAIT_EVENT(WAIT_OBJECT_0.0 + 1)
+            && wait_result != WAIT_EVENT(WAIT_OBJECT_0.0 + 2)
+        {
+            // Timeout or error: forcibly terminate the child process.
             unsafe {
-                let _ = TerminateProcess(process_handle.get(), 1);
+                let _ = TerminateProcess(
+                    process_handle.get(),
+                    u32::MAX, // 0xFFFFFFFF — matches C++ behavior
+                );
+                // Block until the OS confirms the process is gone.
+                let _ = WaitForSingleObject(process_handle.get(), u32::MAX);
             }
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
-            return Ok(ScriptResponse {
-                exit_code: -1,
-                standard_out: String::new(),
-                standard_err: "Process timed out".to_string(),
-                error_message: "Process timed out".to_string(),
-            });
         }
 
-        let stdout_output = stdout_thread.join().unwrap_or_default();
-        let mut stderr_output = stderr_thread.join().unwrap_or_default();
-        suppress_python_location_error(&mut stderr_output);
+        // --- Shut down stdin relay thread ---
+        // CancelSynchronousIo interrupts the blocking ReadFile on parent stdin,
+        // causing the relay thread to break out of its loop. Closing the write
+        // handle ensures any in-flight WriteFile also fails.
+        unsafe {
+            let _ = CancelSynchronousIo(stdin_relay.get());
+        }
+        // Closing stdin_write causes the child's stdin pipe to break, which is
+        // fine since the child has already exited (or been terminated).
+        stdin_write.take();
 
+        // --- Wait for all relay threads to finish draining ---
+        // Use INFINITE because all pipe endpoints are closed at this point
+        // (child is dead, stdin_write is closed, CancelSynchronousIo was called),
+        // so the threads will exit promptly. We must wait for them to finish
+        // because PipeRelayParams are stack-allocated and would become dangling
+        // pointers if this function returned early.
+        let all_threads = [stdin_relay.get(), stdout_relay.get(), stderr_relay.get()];
+        unsafe {
+            let _ = WaitForMultipleObjects(&all_threads, true, u32::MAX);
+        }
+
+        // --- Get exit code ---
         let mut exit_code: u32 = 0;
         unsafe {
             GetExitCodeProcess(process_handle.get(), &mut exit_code)
@@ -409,8 +461,8 @@ impl AppContainerScriptRunner {
 
         Ok(ScriptResponse {
             exit_code: exit_code as i32,
-            standard_out: stdout_output,
-            standard_err: stderr_output,
+            standard_out: String::new(),
+            standard_err: String::new(),
             error_message: String::new(),
         })
     }
