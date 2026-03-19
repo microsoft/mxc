@@ -32,8 +32,11 @@ Both paths converge here:
     │     WslcContainerInitSettings() → init from image name
     │     WslcContainerSettingsAddVolume()  → mount host paths
     │     WslcContainerSettingsSetNetworkingMode() → network policy
+    │     WslcProcessInitSettings()   → configure executable, args, env, cwd
+    │     WslcContainerSettingsSetInitProcess() → attach process to container
     │     WslcContainerCreate(session, settings) → create container in session
     │     WslcContainerStart()        → start container
+    │     WslcContainerGetInitProcess() → get process handle
     │     WslcProcessGetIOHandles()   → get stdout/stderr Win32 HANDLEs
     │     ReadFile(stdout/stderr)     → capture output → ScriptResponse
     │     WslcContainerStop()         → teardown
@@ -234,15 +237,18 @@ Session APIs:
 
 Container APIs:
 - `WslcContainerInitSettings()` / `WslcContainerCreate(session, settings)` / `WslcContainerStart()` — lifecycle (note: `WslcContainerCreate` takes the session handle as its first parameter — a container always belongs to a session)
+- `WslcContainerSettingsSetInitProcess()` — attach process settings to container settings before creation (required — the container needs to know what process to run)
 - `WslcContainerSettingsSetNetworkingMode()` — NONE (isolated) or BRIDGED (NAT)
 - `WslcContainerSettingsAddVolume()` — mount Windows paths into Linux container
 - `WslcContainerSettingsSetPortMapping()` — host↔container port forwarding
 - `WslcContainerSettingsSetFlags()` — GPU passthrough, privileged mode, auto-remove
+- `WslcContainerGetInitProcess()` — retrieve the `WslcProcess` handle after container start (needed to access I/O handles and exit status)
 - `WslcContainerStop()` / `WslcContainerDelete()` / `WslcContainerRelease()` — teardown
 
 Process APIs:
-- `WslcProcessInitSettings()` — configure executable, args, env, cwd
+- `WslcProcessInitSettings()` — initialize process settings struct
 - `WslcProcessSettingsSetExecutable()` / `WslcProcessSettingsSetCmdLineArgs()` — command setup
+- `WslcProcessSettingsSetCurrentDirectory()` — set working directory inside the container
 - `WslcProcessSettingsSetEnvVariables()` — environment variables
 - `WslcProcessGetIOHandles()` — get native Win32 HANDLEs for stdin/stdout/stderr
 - `WslcProcessGetExitCode()` — retrieve exit code after process completes
@@ -262,11 +268,13 @@ Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
    - Check if image exists via `WslcSessionImageList()`; if not found, fail fast with a clear error message (MXC does not pull images — container management is handled externally)
 
 2. `run_internal()`:
-   - Initialize container settings from image name
+   - Initialize container settings from image name via `WslcContainerInitSettings()`
    - Apply policy: set networking mode, add volume mounts, configure port mappings
-   - Configure init process: executable, args, env vars, working directory
-   - Call `WslcContainerCreate(session, settings)` + `WslcContainerStart()`
-   - Get stdout/stderr HANDLEs via `WslcProcessGetIOHandles()`
+   - Configure init process: `WslcProcessInitSettings()` → `WslcProcessSettingsSetExecutable()` → `WslcProcessSettingsSetCmdLineArgs()` → `WslcProcessSettingsSetCurrentDirectory()` → `WslcProcessSettingsSetEnvVariables()`
+   - Attach process to container: `WslcContainerSettingsSetInitProcess(containerSettings, processSettings)`
+   - Call `WslcContainerCreate(session, containerSettings)` + `WslcContainerStart()`
+   - Retrieve the process handle: `WslcContainerGetInitProcess(container, &process)`
+   - Get stdout/stderr HANDLEs via `WslcProcessGetIOHandles(process, ...)`
    - Read stdout/stderr using Win32 `ReadFile()` in a loop (same pattern as the WSLC SDK sample code)
    - Wait for process exit via `WslcProcessGetExitEvent()` or `WslcProcessGetExitCode()`
    - Return `ScriptResponse` with captured stdout/stderr and exit code
