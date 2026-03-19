@@ -61,7 +61,7 @@ impl NetworkIptablesManager {
 
         // Parse the output for the host-side veth name
         // LXC names host-side veth interfaces as "veth<XXXX>"
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _stdout = String::from_utf8_lossy(&output.stdout);
         // Try to find the veth from /sys/class/net/
         if let Ok(entries) = std::fs::read_dir("/sys/class/net/") {
             for entry in entries.flatten() {
