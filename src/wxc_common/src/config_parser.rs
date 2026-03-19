@@ -6,13 +6,13 @@ use std::fs;
 
 use serde::Deserialize;
 
+use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     CodexRequest, ContainerPolicy, ContainmentBackend, LxcConfig, NetworkEnforcementMode,
     NetworkPolicy, SandboxConfig,
 };
-use crate::encoding::base64_decode;
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
 
@@ -313,8 +313,8 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logger::Mode;
     use crate::encoding::base64_encode;
+    use crate::logger::Mode;
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)

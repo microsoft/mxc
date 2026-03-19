@@ -74,10 +74,7 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
             true
         }
         Err(e) => {
-            logger.log_line(&format!(
-                "Failed to delete LXC container '{}': {}",
-                name, e
-            ));
+            logger.log_line(&format!("Failed to delete LXC container '{}': {}", name, e));
             false
         }
     }

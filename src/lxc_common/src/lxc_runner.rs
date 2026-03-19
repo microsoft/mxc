@@ -38,14 +38,14 @@ impl LxcScriptRunner {
     }
 
     /// Core execution logic.
-    fn run_internal(
-        &self,
-        request: &CodexRequest,
-        logger: &mut Logger,
-    ) -> ScriptResponse {
+    fn run_internal(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         let container_name = self.resolve_container_name();
         let _ = writeln!(logger, "Container name: {}", container_name);
-        let _ = writeln!(logger, "Distribution: {}:{}", self.config.distribution, self.config.release);
+        let _ = writeln!(
+            logger,
+            "Distribution: {}:{}",
+            self.config.distribution, self.config.release
+        );
 
         // Create container handle
         let container = LxcContainer::new(&container_name, None);
@@ -62,11 +62,9 @@ impl LxcScriptRunner {
         }
 
         // Configure filesystem mounts
-        if let Err(e) = filesystem_mounts::configure_filesystem_mounts(
-            &container,
-            &request.policy,
-            logger,
-        ) {
+        if let Err(e) =
+            filesystem_mounts::configure_filesystem_mounts(&container, &request.policy, logger)
+        {
             let _ = container.destroy();
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
         }

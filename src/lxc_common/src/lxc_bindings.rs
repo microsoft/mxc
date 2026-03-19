@@ -55,18 +55,25 @@ impl LxcContainer {
     /// Create the container from a template/distribution.
     pub fn create(&self, distribution: &str, release: &str) -> Result<(), String> {
         let mut cmd = std::process::Command::new("lxc-create");
-        cmd.arg("-n").arg(&self.name)
-            .arg("-t").arg("download")
+        cmd.arg("-n")
+            .arg(&self.name)
+            .arg("-t")
+            .arg("download")
             .arg("--")
-            .arg("-d").arg(distribution)
-            .arg("-r").arg(release)
-            .arg("-a").arg(Self::current_arch());
+            .arg("-d")
+            .arg(distribution)
+            .arg("-r")
+            .arg(release)
+            .arg("-a")
+            .arg(Self::current_arch());
 
         if let Some(ref path) = self.config_path {
             cmd.arg("-P").arg(path);
         }
 
-        let output = cmd.output().map_err(|e| format!("Failed to run lxc-create: {}", e))?;
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run lxc-create: {}", e))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -100,7 +107,9 @@ impl LxcContainer {
             cmd.arg("-P").arg(path);
         }
 
-        let output = cmd.output().map_err(|e| format!("Failed to run lxc-start: {}", e))?;
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run lxc-start: {}", e))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -127,7 +136,9 @@ impl LxcContainer {
 
         cmd.arg("--").arg("/bin/sh").arg("-c").arg(command);
 
-        let output = cmd.output().map_err(|e| format!("Failed to run lxc-execute: {}", e))?;
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run lxc-execute: {}", e))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -151,7 +162,9 @@ impl LxcContainer {
 
         cmd.arg("--").arg("/bin/sh").arg("-c").arg(command);
 
-        let output = cmd.output().map_err(|e| format!("Failed to run lxc-attach: {}", e))?;
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run lxc-attach: {}", e))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -169,7 +182,9 @@ impl LxcContainer {
             cmd.arg("-P").arg(path);
         }
 
-        let output = cmd.output().map_err(|e| format!("Failed to run lxc-stop: {}", e))?;
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run lxc-stop: {}", e))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -192,7 +207,9 @@ impl LxcContainer {
             cmd.arg("-P").arg(path);
         }
 
-        let output = cmd.output().map_err(|e| format!("Failed to run lxc-destroy: {}", e))?;
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run lxc-destroy: {}", e))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -211,10 +228,16 @@ impl LxcContainer {
     /// Get the current system architecture string for LXC templates.
     fn current_arch() -> &'static str {
         #[cfg(target_arch = "x86_64")]
-        { "amd64" }
+        {
+            "amd64"
+        }
         #[cfg(target_arch = "aarch64")]
-        { "arm64" }
+        {
+            "arm64"
+        }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        { "amd64" }
+        {
+            "amd64"
+        }
     }
 }

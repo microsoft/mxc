@@ -41,11 +41,11 @@ pub fn configure_filesystem_mounts(
     for host_path in &policy.readwrite_paths {
         validate_path(host_path)?;
         let container_path = host_path.trim_start_matches('/');
-        let mount_entry = format!(
-            "{} {} none bind,create=dir 0 0",
+        let mount_entry = format!("{} {} none bind,create=dir 0 0", host_path, container_path);
+        logger.log_line(&format!(
+            "Adding rw bind mount: {} -> /{}",
             host_path, container_path
-        );
-        logger.log_line(&format!("Adding rw bind mount: {} -> /{}", host_path, container_path));
+        ));
         container.set_config_item("lxc.mount.entry", &mount_entry)?;
     }
 
@@ -57,7 +57,10 @@ pub fn configure_filesystem_mounts(
             "{} {} none bind,ro,create=dir 0 0",
             host_path, container_path
         );
-        logger.log_line(&format!("Adding ro bind mount: {} -> /{}", host_path, container_path));
+        logger.log_line(&format!(
+            "Adding ro bind mount: {} -> /{}",
+            host_path, container_path
+        ));
         container.set_config_item("lxc.mount.entry", &mount_entry)?;
     }
 
@@ -65,10 +68,7 @@ pub fn configure_filesystem_mounts(
     for host_path in &policy.denied_paths {
         validate_path(host_path)?;
         let container_path = host_path.trim_start_matches('/');
-        let mount_entry = format!(
-            "tmpfs {} tmpfs ro,size=0,create=dir 0 0",
-            container_path
-        );
+        let mount_entry = format!("tmpfs {} tmpfs ro,size=0,create=dir 0 0", container_path);
         logger.log_line(&format!("Masking denied path: /{}", container_path));
         container.set_config_item("lxc.mount.entry", &mount_entry)?;
     }
@@ -81,10 +81,7 @@ pub fn configure_filesystem_mounts(
 /// For LXC, mounts are part of the container config and are automatically
 /// cleaned up when the container is destroyed. This function is provided
 /// for symmetry with the Windows `FileSystemBfsManager`.
-pub fn remove_filesystem_mounts(
-    _container: &LxcContainer,
-    logger: &mut Logger,
-) {
+pub fn remove_filesystem_mounts(_container: &LxcContainer, logger: &mut Logger) {
     logger.log_line("Filesystem mounts will be cleaned up with container destruction.");
 }
 

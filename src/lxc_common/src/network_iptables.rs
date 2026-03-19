@@ -142,19 +142,43 @@ impl NetworkIptablesManager {
         )?;
         Self::run_iptables(
             &[
-                "-A", &self.chain_name, "-m", "state", "--state",
-                "ESTABLISHED,RELATED", "-j", "ACCEPT",
+                "-A",
+                &self.chain_name,
+                "-m",
+                "state",
+                "--state",
+                "ESTABLISHED,RELATED",
+                "-j",
+                "ACCEPT",
             ],
             logger,
         )?;
 
         // Allow DNS (needed for hostname resolution)
         Self::run_iptables(
-            &["-A", &self.chain_name, "-p", "udp", "--dport", "53", "-j", "ACCEPT"],
+            &[
+                "-A",
+                &self.chain_name,
+                "-p",
+                "udp",
+                "--dport",
+                "53",
+                "-j",
+                "ACCEPT",
+            ],
             logger,
         )?;
         Self::run_iptables(
-            &["-A", &self.chain_name, "-p", "tcp", "--dport", "53", "-j", "ACCEPT"],
+            &[
+                "-A",
+                &self.chain_name,
+                "-p",
+                "tcp",
+                "--dport",
+                "53",
+                "-j",
+                "ACCEPT",
+            ],
             logger,
         )?;
 
@@ -167,10 +191,7 @@ impl NetworkIptablesManager {
             }
             for ip in &ips {
                 logger.log_line(&format!("Allowing host: {} ({})", host, ip));
-                Self::run_iptables(
-                    &["-A", &self.chain_name, "-d", ip, "-j", "ACCEPT"],
-                    logger,
-                )?;
+                Self::run_iptables(&["-A", &self.chain_name, "-d", ip, "-j", "ACCEPT"], logger)?;
             }
         }
 
@@ -183,10 +204,7 @@ impl NetworkIptablesManager {
             }
             for ip in &ips {
                 logger.log_line(&format!("Blocking host: {} ({})", host, ip));
-                Self::run_iptables(
-                    &["-A", &self.chain_name, "-d", ip, "-j", "DROP"],
-                    logger,
-                )?;
+                Self::run_iptables(&["-A", &self.chain_name, "-d", ip, "-j", "DROP"], logger)?;
             }
         }
 
@@ -196,10 +214,7 @@ impl NetworkIptablesManager {
             NetworkPolicy::Allow => "ACCEPT",
         };
         logger.log_line(&format!("Default network policy: {}", default_action));
-        Self::run_iptables(
-            &["-A", &self.chain_name, "-j", default_action],
-            logger,
-        )?;
+        Self::run_iptables(&["-A", &self.chain_name, "-j", default_action], logger)?;
 
         // Hook the chain into FORWARD for the container's traffic
         if let Some(ref iface) = self.veth_interface {
@@ -212,7 +227,7 @@ impl NetworkIptablesManager {
             // Refuse to apply host-wide rules to avoid affecting all host traffic.
             logger.log_line(
                 "Warning: No veth interface set for container. \
-                 Cannot scope iptables rules. Skipping FORWARD hook."
+                 Cannot scope iptables rules. Skipping FORWARD hook.",
             );
         }
 
