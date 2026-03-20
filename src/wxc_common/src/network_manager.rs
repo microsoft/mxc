@@ -20,6 +20,7 @@ use windows_core::Interface;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{ContainerPolicy, NetworkEnforcementMode, NetworkPolicy};
+use crate::proxy_coordinator::ProxyCoordinator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultPolicy {
@@ -27,20 +28,22 @@ pub enum DefaultPolicy {
     Block,
 }
 
-pub struct NetworkFirewallManager {
+pub struct NetworkManager {
     fw_policy: Option<INetFwPolicy2>,
     created_rule_names: Vec<String>,
     com_initialized: bool,
     wsa_initialized: bool,
+    proxy_coordinator: ProxyCoordinator,
 }
 
-impl NetworkFirewallManager {
+impl NetworkManager {
     pub fn new() -> Self {
         Self {
             fw_policy: None,
             created_rule_names: Vec::new(),
             com_initialized: false,
             wsa_initialized: false,
+            proxy_coordinator: ProxyCoordinator::new(),
         }
     }
 
@@ -181,6 +184,59 @@ impl NetworkFirewallManager {
     /// Returns `true` if any firewall rules have been created and are currently active.
     pub fn rules_applied(&self) -> bool {
         !self.created_rule_names.is_empty()
+    }
+
+    /// Returns the proxy address if a proxy is active.
+    pub fn proxy_address(&self) -> Option<&crate::models::ProxyAddress> {
+        self.proxy_coordinator.address()
+    }
+
+    /// Start the proxy (if configured) and apply firewall rules.
+    ///
+    /// This is the single entry point for all network setup. It handles:
+    /// 1. Launching the builtin test proxy or configuring the external proxy
+    /// 2. Setting WinHTTP proxy policy via the elevated shim
+    /// 3. Creating Windows Firewall rules for host allow/block lists
+    pub fn start(
+        &mut self,
+        principal_id: &str,
+        policy: &ContainerPolicy,
+        script_sid: windows::Win32::Security::PSID,
+        logger: &mut Logger,
+    ) -> Result<(), WxcError> {
+        if policy.network_proxy.is_enabled() {
+            self.proxy_coordinator.start(
+                &policy.network_proxy,
+                &policy.app_container_name,
+                principal_id,
+                script_sid,
+                logger,
+            )?;
+        }
+
+        match self.apply_firewall_rules(principal_id, policy, logger) {
+            Ok(true) => Ok(()),
+            other => {
+                self.proxy_coordinator.stop(logger);
+                match other {
+                    Ok(false) => Err(WxcError::Firewall(
+                        "Failed to apply network firewall rules.".into(),
+                    )),
+                    Err(err) => Err(err),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    /// Stop all network resources: firewall rules, proxy policy, test proxy.
+    pub fn stop_all(&mut self, policy: &ContainerPolicy, logger: &mut Logger) {
+        if self.rules_applied() && policy.remove_firewall_rules_on_exit {
+            let _ = self.remove_firewall_rules(logger);
+        }
+        if self.proxy_coordinator.is_active() {
+            self.proxy_coordinator.stop(logger);
+        }
     }
 
     pub fn remove_firewall_rules(&mut self, logger: &mut Logger) -> Result<bool, WxcError> {
@@ -351,13 +407,13 @@ impl NetworkFirewallManager {
     }
 }
 
-impl Default for NetworkFirewallManager {
+impl Default for NetworkManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Drop for NetworkFirewallManager {
+impl Drop for NetworkManager {
     fn drop(&mut self) {
         self.cleanup_firewall();
         self.cleanup_wsa();
@@ -442,8 +498,7 @@ mod tests {
             default_network_policy: NetworkPolicy::Block,
             ..Default::default()
         };
-        let (default_policy, use_fw) =
-            NetworkFirewallManager::initialize_policy(&policy, &mut logger);
+        let (default_policy, use_fw) = NetworkManager::initialize_policy(&policy, &mut logger);
         assert!(use_fw);
         assert_eq!(default_policy, DefaultPolicy::Block);
     }
@@ -455,8 +510,7 @@ mod tests {
             network_enforcement_mode: NetworkEnforcementMode::Capabilities,
             ..Default::default()
         };
-        let (default_policy, use_fw) =
-            NetworkFirewallManager::initialize_policy(&policy, &mut logger);
+        let (default_policy, use_fw) = NetworkManager::initialize_policy(&policy, &mut logger);
         assert!(!use_fw);
         assert_eq!(default_policy, DefaultPolicy::Allow);
     }
@@ -470,15 +524,14 @@ mod tests {
             allowed_hosts: vec!["example.com".to_string()],
             ..Default::default()
         };
-        let (default_policy, use_fw) =
-            NetworkFirewallManager::initialize_policy(&policy, &mut logger);
+        let (default_policy, use_fw) = NetworkManager::initialize_policy(&policy, &mut logger);
         assert!(use_fw);
         assert_eq!(default_policy, DefaultPolicy::Allow);
     }
 
     #[test]
     fn test_default_creates_new_manager() {
-        let mgr = NetworkFirewallManager::default();
+        let mgr = NetworkManager::default();
         assert!(mgr.fw_policy.is_none());
         assert!(mgr.created_rule_names.is_empty());
         assert!(!mgr.com_initialized);

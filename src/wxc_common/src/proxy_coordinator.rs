@@ -8,12 +8,14 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::Security::PSID;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CreateEventW, OpenProcess, SetEvent, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+};
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
 use crate::error::WxcError;
 use crate::logger::Logger;
-use crate::models::ContainerPolicy;
+use crate::models::ProxyConfig;
 use crate::process_util::OwnedHandle;
 use crate::string_util;
 
@@ -123,7 +125,7 @@ fn enable_loopback(container_sid: PSID) -> Result<(), WxcError> {
 }
 
 /// Find a sibling executable next to the current exe.
-fn find_sibling_exe(name: &str) -> Result<String, WxcError> {
+fn find_sibling_exe(name: &str) -> Result<PathBuf, WxcError> {
     let exe_dir = std::env::current_exe()
         .map_err(|err| WxcError::NetworkProxy(format!("Failed to get current exe path: {}", err)))?
         .parent()
@@ -139,7 +141,7 @@ fn find_sibling_exe(name: &str) -> Result<String, WxcError> {
         )));
     }
 
-    Ok(path.to_string_lossy().to_string())
+    Ok(path)
 }
 
 /// Generate a unique identifier for event and file naming.
@@ -190,64 +192,106 @@ fn launch_elevated(
     Ok(OwnedHandle::new(shell_info.hProcess))
 }
 
-/// Poll for the ready file that the shim writes after setting the proxy policy.
+/// Poll for a ready file written by a child process.
 ///
-/// Also checks whether the shim process exited prematurely (e.g. access denied).
+/// Also checks whether the child process exited prematurely.
 fn poll_for_ready_file(
     ready_path: &Path,
-    shim_handle: &OwnedHandle,
+    child_handle: &OwnedHandle,
     timeout_seconds: u32,
     logger: &mut Logger,
+    label: &str,
 ) -> Result<(), WxcError> {
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_seconds as u64);
 
     loop {
         if ready_path.exists() {
-            logger.log_line("winhttp-proxy-shim reported ready.");
+            logger.log_line(&format!("{} reported ready.", label));
             return Ok(());
         }
 
         if start.elapsed() > timeout {
-            return Err(WxcError::NetworkProxy(
-                "Timed out waiting for winhttp-proxy-shim to set proxy policy".to_string(),
-            ));
+            return Err(WxcError::NetworkProxy(format!(
+                "Timed out waiting for {} to become ready",
+                label
+            )));
         }
 
-        // Check if the shim exited before writing the ready file.
-        let wait_result = unsafe { WaitForSingleObject(shim_handle.get(), 0) };
+        let wait_result = unsafe { WaitForSingleObject(child_handle.get(), 0) };
         if wait_result == WAIT_OBJECT_0 {
-            return Err(WxcError::NetworkProxy(
-                "winhttp-proxy-shim exited before setting proxy policy — check for elevation errors"
-                    .to_string(),
-            ));
+            return Err(WxcError::NetworkProxy(format!(
+                "{} exited before becoming ready",
+                label
+            )));
         }
 
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
-/// Manages the network proxy policy for sandboxed AppContainer workloads.
+/// Manages the network proxy lifecycle for sandboxed AppContainer workloads.
 ///
-/// Routes AppContainer traffic through an already-running localhost proxy
-/// specified by port number. WinHTTP proxy policy is set by an elevated
-/// `winhttp-proxy-shim` process launched via UAC, which binds the script's
-/// AppContainer SID to the proxy's address and port.
-pub struct NetworkProxyManager {
+/// Handles two proxy modes:
+/// - **External proxy**: user provides a `localhost` port in the config
+/// - **Builtin test server**: wxc launches `wxc-test-proxy.exe` itself to get
+///   an OS-assigned port (for integration testing only)
+///
+/// In both cases, WinHTTP proxy policy is set by an elevated
+/// `winhttp-proxy-shim` process launched via UAC.
+pub struct ProxyCoordinator {
     proxy_address: Option<crate::models::ProxyAddress>,
     shim_process_handle: Option<OwnedHandle>,
-    cleanup_event_handle: Option<OwnedHandle>,
-    ready_file_path: Option<PathBuf>,
+    shim_cleanup_event: Option<OwnedHandle>,
+    shim_ready_file_path: Option<PathBuf>,
+    test_proxy_handle: Option<OwnedHandle>,
+    test_proxy_cleanup_event: Option<OwnedHandle>,
+    test_proxy_ready_file_path: Option<PathBuf>,
     loopback_container_name: Option<String>,
 }
 
-impl NetworkProxyManager {
+/// Signal a child process to exit via its cleanup event and wait for it.
+fn signal_process_cleanup(
+    event: Option<OwnedHandle>,
+    process: Option<OwnedHandle>,
+    label: &str,
+    logger: &mut Logger,
+) {
+    let event_handle = match event {
+        Some(ref handle) => handle,
+        None => return,
+    };
+
+    logger.log_line(&format!("Signaling {} to clean up...", label));
+    let set_result = unsafe { SetEvent(event_handle.get()) };
+    if let Err(err) = set_result {
+        logger.log_line(&format!("Warning: failed to signal {}: {}", label, err));
+        return;
+    }
+
+    if let Some(ref proc_handle) = process {
+        let wait_result = unsafe { WaitForSingleObject(proc_handle.get(), 5000) };
+        if wait_result == WAIT_OBJECT_0 {
+            logger.log_line(&format!("{} exited.", label));
+        } else {
+            logger.log_line(&format!(
+                "Warning: {} did not exit within 5 seconds.",
+                label
+            ));
+        }
+    }
+}
+
+impl ProxyCoordinator {
     pub fn new() -> Self {
         Self {
             proxy_address: None,
             shim_process_handle: None,
-            cleanup_event_handle: None,
-            ready_file_path: None,
+            shim_cleanup_event: None,
+            shim_ready_file_path: None,
+            test_proxy_handle: None,
+            test_proxy_cleanup_event: None,
+            test_proxy_ready_file_path: None,
             loopback_container_name: None,
         }
     }
@@ -262,11 +306,15 @@ impl NetworkProxyManager {
         self.proxy_address.as_ref()
     }
 
-    /// Set the WinHTTP proxy policy for the AppContainer and configure
-    /// loopback access so the script can reach the localhost proxy.
+    /// Activate the proxy based on the given config.
+    ///
+    /// If `builtin_test_server` is set, launches `wxc-test-proxy.exe` first to
+    /// obtain a port. Then sets up loopback exemption and WinHTTP proxy policy
+    /// via the elevated shim.
     pub fn start(
         &mut self,
-        policy: &ContainerPolicy,
+        proxy_config: &ProxyConfig,
+        container_name: &str,
         principal_id: &str,
         script_sid: PSID,
         logger: &mut Logger,
@@ -277,23 +325,25 @@ impl NetworkProxyManager {
             ));
         }
 
-        let proxy_config = &policy.network_proxy;
-        let address = if let Some(ref addr) = proxy_config.address {
+        let address = if proxy_config.builtin_test_server {
+            let port = self.launch_test_proxy(logger)?;
+            crate::models::ProxyAddress::new(port)
+        } else if let Some(ref addr) = proxy_config.address {
             addr.clone()
         } else {
             return Ok(());
         };
 
-        self.proxy_address = Some(address.clone());
+        self.proxy_address = Some(address);
 
         if let Err(err) = enable_loopback(script_sid) {
-            self.cleanup_on_failure(logger);
+            self.stop(logger);
             return Err(err);
         }
-        self.loopback_container_name = Some(policy.app_container_name.clone());
+        self.loopback_container_name = Some(container_name.to_string());
 
         if let Err(err) = self.launch_shim(principal_id, logger) {
-            self.cleanup_on_failure(logger);
+            self.stop(logger);
             return Err(err);
         }
 
@@ -304,6 +354,91 @@ impl NetworkProxyManager {
         ));
 
         Ok(())
+    }
+
+    /// Launch `wxc-test-proxy.exe` and read its port from the ready file.
+    fn launch_test_proxy(&mut self, logger: &mut Logger) -> Result<u16, WxcError> {
+        logger.log_line(
+            "WARNING: Starting builtin test proxy — this is for integration testing only, \
+             NOT for production use.",
+        );
+
+        let unique_id = generate_unique_id();
+        let ready_file_path =
+            std::env::temp_dir().join(format!("wxc-test-proxy-ready-{}.tmp", unique_id));
+        let event_name = format!("Local\\wxc-test-proxy-{}", unique_id);
+        let event_name_wide = string_util::to_wide(&event_name);
+
+        let event_handle =
+            unsafe { CreateEventW(None, true, false, PCWSTR(event_name_wide.as_ptr())) }.map_err(
+                |err| {
+                    WxcError::NetworkProxy(format!(
+                        "Failed to create test proxy cleanup event: {}",
+                        err
+                    ))
+                },
+            )?;
+
+        self.test_proxy_cleanup_event = Some(OwnedHandle::new(event_handle));
+        self.test_proxy_ready_file_path = Some(ready_file_path.clone());
+
+        let proxy_exe = find_sibling_exe("wxc-test-proxy.exe")?;
+
+        let mut child = std::process::Command::new(&proxy_exe)
+            .args([
+                "--ready-file",
+                &ready_file_path.to_string_lossy(),
+                "--cleanup-event",
+                &event_name,
+                "--parent-pid",
+                &std::process::id().to_string(),
+            ])
+            .stderr(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::null())
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .map_err(|err| {
+                WxcError::NetworkProxy(format!("Failed to launch wxc-test-proxy.exe: {}", err))
+            })?;
+
+        let child_pid = child.id();
+        let process_handle = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, child_pid) } {
+            Ok(handle) => handle,
+            Err(err) => {
+                let _ = child.kill();
+                return Err(WxcError::NetworkProxy(format!(
+                    "Failed to open handle for test proxy process: {}",
+                    err
+                )));
+            }
+        };
+        self.test_proxy_handle = Some(OwnedHandle::new(process_handle));
+
+        poll_for_ready_file(
+            &ready_file_path,
+            self.test_proxy_handle.as_ref().unwrap(),
+            15,
+            logger,
+            "wxc-test-proxy",
+        )?;
+
+        let content = std::fs::read_to_string(&ready_file_path).map_err(|err| {
+            WxcError::NetworkProxy(format!("Failed to read test proxy ready file: {}", err))
+        })?;
+
+        let port: u16 = content.trim().parse().map_err(|err| {
+            WxcError::NetworkProxy(format!(
+                "Invalid port in test proxy ready file '{}': {}",
+                content.trim(),
+                err
+            ))
+        })?;
+
+        // All fallible steps succeeded — take ownership of the child process
+        // via the raw handle and cleanup event so Child::drop won't kill it.
+        std::mem::forget(child);
+
+        Ok(port)
     }
 
     /// Launch the elevated winhttp-proxy-shim to set the per-AppContainer
@@ -320,8 +455,8 @@ impl NetworkProxyManager {
                 |err| WxcError::NetworkProxy(format!("Failed to create cleanup event: {}", err)),
             )?;
 
-        self.cleanup_event_handle = Some(OwnedHandle::new(event_handle));
-        self.ready_file_path = Some(ready_file_path.clone());
+        self.shim_cleanup_event = Some(OwnedHandle::new(event_handle));
+        self.shim_ready_file_path = Some(ready_file_path.clone());
 
         let shim_path = find_sibling_exe("winhttp-proxy-shim.exe")?;
         let addr = self.proxy_address.as_ref().unwrap();
@@ -342,7 +477,7 @@ impl NetworkProxyManager {
             addr.to_url()
         ));
 
-        let shim_handle = launch_elevated(&shim_path, &shim_args, logger)?;
+        let shim_handle = launch_elevated(&shim_path.to_string_lossy(), &shim_args, logger)?;
         self.shim_process_handle = Some(shim_handle);
 
         poll_for_ready_file(
@@ -350,54 +485,30 @@ impl NetworkProxyManager {
             self.shim_process_handle.as_ref().unwrap(),
             30,
             logger,
+            "winhttp-proxy-shim",
         )
     }
 
-    /// Clean up any partially-initialized resources when start() fails.
-    fn cleanup_on_failure(&mut self, logger: &mut Logger) {
-        self.stop(logger);
-    }
-
-    /// Stop the proxy: signal shim cleanup, remove loopback exemption.
+    /// Stop the proxy: signal shim and test proxy cleanup, remove loopback exemption.
     pub fn stop(&mut self, logger: &mut Logger) {
-        self.signal_shim_cleanup(logger);
-        self.release_resources();
-    }
-
-    /// Signal the winhttp-proxy-shim to delete the proxy policy and wait for it.
-    fn signal_shim_cleanup(&self, logger: &mut Logger) {
-        let event_handle = if let Some(ref handle) = self.cleanup_event_handle {
-            handle
-        } else {
-            return;
-        };
-
-        logger.log_line("Signaling winhttp-proxy-shim to clean up...");
-        unsafe {
-            let _ = SetEvent(event_handle.get());
-        }
-
-        if let Some(ref shim_handle) = self.shim_process_handle {
-            let wait_result = unsafe { WaitForSingleObject(shim_handle.get(), 5000) };
-            if wait_result == WAIT_OBJECT_0 {
-                logger.log_line("winhttp-proxy-shim exited.");
-            } else {
-                logger.log_line(
-                    "Warning: winhttp-proxy-shim did not exit within 5 seconds \
-                     — proxy policy may still be set",
-                );
-            }
-        }
-    }
-
-    /// Release all owned resources (handles, files, loopback exemption).
-    /// Shared by both stop() and Drop.
-    fn release_resources(&mut self) {
-        self.cleanup_event_handle = None;
-        self.shim_process_handle = None;
+        signal_process_cleanup(
+            self.shim_cleanup_event.take(),
+            self.shim_process_handle.take(),
+            "winhttp-proxy-shim",
+            logger,
+        );
+        signal_process_cleanup(
+            self.test_proxy_cleanup_event.take(),
+            self.test_proxy_handle.take(),
+            "wxc-test-proxy",
+            logger,
+        );
         self.proxy_address = None;
 
-        if let Some(path) = self.ready_file_path.take() {
+        if let Some(path) = self.shim_ready_file_path.take() {
+            let _ = std::fs::remove_file(&path);
+        }
+        if let Some(path) = self.test_proxy_ready_file_path.take() {
             let _ = std::fs::remove_file(&path);
         }
         if let Some(container_name) = self.loopback_container_name.take() {
@@ -406,24 +517,17 @@ impl NetworkProxyManager {
     }
 }
 
-impl Default for NetworkProxyManager {
+impl Default for ProxyCoordinator {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Drop for NetworkProxyManager {
+impl Drop for ProxyCoordinator {
     fn drop(&mut self) {
-        // Signal shim without logger (best-effort during drop).
-        if let Some(ref event_handle) = self.cleanup_event_handle {
-            unsafe {
-                let _ = SetEvent(event_handle.get());
-            }
-            if let Some(ref shim_handle) = self.shim_process_handle {
-                let _ = unsafe { WaitForSingleObject(shim_handle.get(), 5000) };
-            }
-        }
-        self.release_resources();
+        // Best-effort cleanup without a logger.
+        let mut logger = Logger::new(crate::logger::Mode::Buffer);
+        self.stop(&mut logger);
     }
 }
 
@@ -433,19 +537,19 @@ mod tests {
 
     #[test]
     fn test_new_manager() {
-        let mgr = NetworkProxyManager::new();
+        let mgr = ProxyCoordinator::new();
         assert!(!mgr.is_active());
     }
 
     #[test]
     fn test_default_manager() {
-        let mgr = NetworkProxyManager::default();
+        let mgr = ProxyCoordinator::default();
         assert!(!mgr.is_active());
     }
 
     #[test]
     fn test_stop_when_not_active() {
-        let mut mgr = NetworkProxyManager::new();
+        let mut mgr = ProxyCoordinator::new();
         let mut logger = Logger::new(crate::logger::Mode::Buffer);
         mgr.stop(&mut logger);
         assert!(!mgr.is_active());
@@ -455,7 +559,6 @@ mod tests {
     fn test_generate_unique_id() {
         let id = generate_unique_id();
         assert!(!id.is_empty());
-        // Format: <pid>-<timestamp_nanos>
         let parts: Vec<&str> = id.split('-').collect();
         assert_eq!(parts.len(), 2, "ID should be in format 'pid-timestamp'");
         assert!(

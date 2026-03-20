@@ -82,18 +82,39 @@ struct RawConfig {
 
 // ---------- Public API ----------
 
-/// Parse the `proxy` field: `{ "localhost": <port> }`.
+/// Parse the `proxy` field.
+///
+/// Accepts either `{ "localhost": <port> }` for an external localhost proxy,
+/// or `{ "builtinTestServer": true }` to have wxc launch its own test proxy.
+/// When `builtinTestServer` is set it must be the only key in the object.
 fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError> {
     let obj = value
         .as_object()
         .ok_or_else(|| WxcError::ConfigParse("network.proxy must be an object".to_string()))?;
+
+    if let Some(builtin_value) = obj.get("builtinTestServer") {
+        if builtin_value.as_bool() != Some(true) {
+            return Err(WxcError::ConfigParse(
+                "network.proxy.builtinTestServer must be true when present".to_string(),
+            ));
+        }
+        if obj.len() != 1 {
+            return Err(WxcError::ConfigParse(
+                "When builtinTestServer is true, no other proxy options may be set".to_string(),
+            ));
+        }
+        return Ok(ProxyConfig {
+            address: None,
+            builtin_test_server: true,
+        });
+    }
 
     let port_value = obj
         .get("localhost")
         .and_then(|val| val.as_u64())
         .ok_or_else(|| {
             WxcError::ConfigParse(
-                "network.proxy requires a 'localhost' port (only localhost is currently supported)"
+                "network.proxy requires either 'localhost' port or 'builtinTestServer: true'"
                     .to_string(),
             )
         })?;
@@ -105,7 +126,8 @@ fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError
     }
 
     Ok(ProxyConfig {
-        address: Some(ProxyAddress::Localhost(port_value as u16)),
+        address: Some(ProxyAddress::new(port_value as u16)),
+        builtin_test_server: false,
     })
 }
 
@@ -877,6 +899,54 @@ mod tests {
     #[test]
     fn proxy_rejects_non_object() {
         let json = r#"{"script":"x","network":{"proxy":true}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_builtin_test_server() {
+        let json = r#"{
+            "script": "echo test",
+            "network": {
+                "proxy": { "builtinTestServer": true }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(req.policy.network_proxy.builtin_test_server);
+        assert!(req.policy.network_proxy.address.is_none());
+    }
+
+    #[test]
+    fn proxy_builtin_test_server_rejects_extra_keys() {
+        let json =
+            r#"{"script":"x","network":{"proxy":{"builtinTestServer":true,"localhost":8080}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_builtin_test_server_rejects_false() {
+        let json = r#"{"script":"x","network":{"proxy":{"builtinTestServer":false}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_builtin_test_server_rejected_with_sandbox() {
+        let json = r#"{"script":"x","containment":"sandbox","network":{"proxy":{"builtinTestServer":true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 

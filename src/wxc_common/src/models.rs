@@ -51,43 +51,43 @@ pub enum NetworkEnforcementMode {
     Both,
 }
 
-/// Proxy address — currently only localhost is supported.
+/// Localhost proxy address (host is always 127.0.0.1).
 #[derive(Debug, Clone)]
-pub enum ProxyAddress {
-    Localhost(u16),
-    // Custom(String, u16) — future: user-specified host:port
+pub struct ProxyAddress {
+    port: u16,
 }
 
 impl ProxyAddress {
+    pub fn new(port: u16) -> Self {
+        Self { port }
+    }
+
     pub fn host(&self) -> &str {
-        match self {
-            ProxyAddress::Localhost(_) => "127.0.0.1",
-        }
+        "127.0.0.1"
     }
 
     pub fn port(&self) -> u16 {
-        match self {
-            ProxyAddress::Localhost(port) => *port,
-        }
+        self.port
     }
 
     pub fn to_url(&self) -> String {
-        format!("http://{}:{}", self.host(), self.port())
+        format!("http://127.0.0.1:{}", self.port)
     }
 }
 
-/// Proxy configuration for the network section.
-///
-/// When enabled, wxc routes AppContainer traffic through an already-running
-/// proxy. The proxy is responsible for any application-layer filtering.
+/// Proxy configuration parsed from the `network.proxy` JSON field.
 #[derive(Debug, Default, Clone)]
 pub struct ProxyConfig {
+    /// Localhost port for an external proxy (`"localhost": <port>`).
     pub address: Option<ProxyAddress>,
+    /// When true, wxc launches its own test proxy on an OS-assigned port
+    /// (`"builtinTestServer": true`). Mutually exclusive with `address`.
+    pub builtin_test_server: bool,
 }
 
 impl ProxyConfig {
     pub fn is_enabled(&self) -> bool {
-        self.address.is_some()
+        self.address.is_some() || self.builtin_test_server
     }
 }
 
