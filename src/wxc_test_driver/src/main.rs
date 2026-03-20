@@ -61,12 +61,13 @@ fn run_configs(
         entries
     };
 
-    for path in &configs {
+    for (index, path) in configs.iter().enumerate() {
         // When --proxy is used, patch the config's proxy.localhost with the actual port.
         let config_arg = if let Some(port) = proxy_port {
             let content = fs::read_to_string(path)?;
             let patched = patch_proxy_port(&content, port);
-            let temp = env::temp_dir().join("wxc-test-patched.json");
+            let temp =
+                env::temp_dir().join(format!("wxc-test-{}-{}.json", std::process::id(), index));
             fs::write(&temp, &patched)?;
             temp
         } else {
@@ -101,6 +102,11 @@ fn run_configs(
         if !output.stderr.is_empty() {
             println!("STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
         }
+
+        // Clean up patched temp config.
+        if proxy_port.is_some() {
+            let _ = fs::remove_file(&config_arg);
+        }
     }
 
     Ok(())
@@ -109,10 +115,11 @@ fn run_configs(
 /// Patch a JSON config string to set network.proxy.localhost to the given port.
 fn patch_proxy_port(json_str: &str, port: u16) -> String {
     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json_str) {
-        if let Some(network) = value.get_mut("network") {
-            network["proxy"] = serde_json::json!({ "localhost": port });
+        let proxy = serde_json::json!({ "localhost": port });
+        if let Some(network) = value.get_mut("network").and_then(|val| val.as_object_mut()) {
+            network.insert("proxy".to_string(), proxy);
         } else {
-            value["network"] = serde_json::json!({ "proxy": { "localhost": port } });
+            value["network"] = serde_json::json!({ "proxy": proxy });
         }
         serde_json::to_string_pretty(&value).unwrap_or_else(|_| json_str.to_string())
     } else {

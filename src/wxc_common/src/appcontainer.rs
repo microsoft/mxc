@@ -37,12 +37,54 @@ const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
 const PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY: usize = 0x0002_000F;
 const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
 const EXTENDED_STARTUPINFO_PRESENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0008_0000);
+const CREATE_UNICODE_ENVIRONMENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0000_0400);
 
 /// SE_GROUP_ENABLED attribute value for SID_AND_ATTRIBUTES.
 const SE_GROUP_ENABLED: u32 = 0x0000_0004;
 
 /// HRESULT value for ERROR_ALREADY_EXISTS (183 / 0xB7).
 const HRESULT_ERROR_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32;
+
+/// Proxy-related env var names to strip/override when building the child env block.
+const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
+
+/// Build a Unicode environment block for CreateProcessW with proxy env vars injected.
+///
+/// Copies the current process environment, strips any existing proxy vars
+/// (case-insensitive), injects HTTP_PROXY/HTTPS_PROXY pointing to the
+/// localhost proxy, and returns a double-null-terminated UTF-16 block.
+fn build_proxy_env_block(proxy_port: u16) -> Vec<u16> {
+    let proxy_url = format!("http://127.0.0.1:{}", proxy_port);
+    let mut entries: Vec<(String, String)> = Vec::new();
+
+    for (key, value) in std::env::vars_os() {
+        let key_str = key.to_string_lossy();
+        let is_proxy_var = PROXY_VAR_NAMES
+            .iter()
+            .any(|name| key_str.eq_ignore_ascii_case(name));
+        if !is_proxy_var {
+            entries.push((key_str.into_owned(), value.to_string_lossy().into_owned()));
+        }
+    }
+
+    entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
+    entries.push(("HTTPS_PROXY".to_string(), proxy_url));
+
+    // Sort case-insensitively by key (required by CreateProcessW).
+    entries.sort_by(|(key_a, _), (key_b, _)| {
+        key_a.to_ascii_uppercase().cmp(&key_b.to_ascii_uppercase())
+    });
+
+    let mut block = Vec::new();
+    for (key, value) in &entries {
+        for ch in format!("{}={}", key, value).encode_utf16() {
+            block.push(ch);
+        }
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
 
 /// A `SID_AND_ATTRIBUTES`-compatible struct used to build the capabilities array.
 /// Using a manual struct avoids issues with conditional availability of
@@ -348,55 +390,42 @@ impl AppContainerScriptRunner {
             PCWSTR(working_dir_wide.as_ptr())
         };
 
-        // When proxy is active, temporarily set proxy env vars in our process
-        // so the child inherits them. Restore originals right after CreateProcessW.
-        let proxy_vars = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
-        let proxy_backup: Option<Vec<(String, Option<String>)>> = if self.proxy_port > 0 {
-            let proxy_url = format!("http://127.0.0.1:{}", self.proxy_port);
-            let backup: Vec<_> = proxy_vars
-                .iter()
-                .map(|name| (name.to_string(), std::env::var(name).ok()))
-                .collect();
-            std::env::set_var("HTTP_PROXY", &proxy_url);
-            std::env::set_var("HTTPS_PROXY", &proxy_url);
-            std::env::remove_var("NO_PROXY");
-            std::env::remove_var("ALL_PROXY");
-            Some(backup)
+        // Build an explicit environment block when proxy is active.
+        // This avoids mutating process-global env vars (which isn't thread-safe).
+        let env_block: Option<Vec<u16>> = if self.proxy_port > 0 {
+            Some(build_proxy_env_block(self.proxy_port))
         } else {
             None
+        };
+
+        let env_ptr = env_block
+            .as_ref()
+            .map(|block| block.as_ptr() as *const core::ffi::c_void);
+
+        let creation_flags = if env_block.is_some() {
+            PROCESS_CREATION_FLAGS(EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_UNICODE_ENVIRONMENT.0)
+        } else {
+            EXTENDED_STARTUPINFO_PRESENT
         };
 
         // --- Create process ---
         let mut pi = PROCESS_INFORMATION::default();
 
-        let create_result = unsafe {
+        unsafe {
             CreateProcessW(
                 PCWSTR::null(),
                 Some(PWSTR(cmd_line_wide.as_mut_ptr())),
                 None,
                 None,
                 true,
-                EXTENDED_STARTUPINFO_PRESENT,
-                None,
+                creation_flags,
+                env_ptr,
                 working_dir_pcwstr,
                 &si_ex.StartupInfo as *const STARTUPINFOW,
                 &mut pi,
             )
-        };
-
-        // Restore original env vars immediately.
-        if let Some(backup) = proxy_backup {
-            for (name, original) in backup {
-                if let Some(value) = original {
-                    std::env::set_var(&name, value);
-                } else {
-                    std::env::remove_var(&name);
-                }
-            }
         }
-
-        create_result
-            .map_err(|err| WxcError::Process(format!("CreateProcessW failed: {}", err)))?;
+        .map_err(|err| WxcError::Process(format!("CreateProcessW failed: {}", err)))?;
 
         logger.log_line(&format!(
             "Process created successfully (PID: {})",

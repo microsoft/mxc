@@ -17,7 +17,7 @@
 
 use clap::Parser;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED};
 use windows::Win32::System::Threading::{
     OpenEventW, OpenProcess, WaitForMultipleObjects, EVENT_ALL_ACCESS, PROCESS_SYNCHRONIZE,
 };
@@ -80,9 +80,12 @@ fn open_parent_process(parent_pid: u32) -> Result<HANDLE, String> {
 /// Block until the cleanup event is signaled or the parent process exits.
 fn wait_for_cleanup_signal(event_handle: HANDLE, parent_handle: HANDLE) {
     let handles = [event_handle, parent_handle];
-    unsafe {
-        // Returns when *either* handle is signaled (bWaitAll = false).
-        let _ = WaitForMultipleObjects(&handles, false, u32::MAX);
+    let result = unsafe { WaitForMultipleObjects(&handles, false, u32::MAX) };
+    if result == WAIT_FAILED {
+        eprintln!(
+            "[winhttp-proxy-shim] WaitForMultipleObjects failed: {}",
+            std::io::Error::last_os_error()
+        );
     }
 }
 

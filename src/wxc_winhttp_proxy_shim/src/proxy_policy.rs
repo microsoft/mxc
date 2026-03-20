@@ -220,19 +220,6 @@ fn free_sid(psid: PSID) {
     }
 }
 
-fn clear_stale_entries(
-    session: &WinHttpSession,
-    functions: &WinHttpProxyFunctions,
-    logger: &mut Logger,
-) {
-    // Policies are permanent (not tied to session handle). Delete all entries
-    // for our tag to clear stale state from previous runs or crashes.
-    unsafe {
-        (functions.delete_policy)(session.as_ptr(), WinHttpConnectionPolicyTag::Wwwpt);
-    }
-    logger.log_line("Cleared stale policy entries.");
-}
-
 fn set_policy_entries(
     session: &WinHttpSession,
     functions: &WinHttpProxyFunctions,
@@ -374,8 +361,6 @@ impl ActiveProxyPolicy {
 
         let (psid, sid_len) = sid_string_to_raw(principal_id)?;
         let proxy_url = format!("http://{}:{}", proxy_address, proxy_port);
-
-        clear_stale_entries(&session, &functions, logger);
 
         if let Err(err) = set_policy_entries(
             &session,

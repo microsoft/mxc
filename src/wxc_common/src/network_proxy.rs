@@ -7,7 +7,7 @@ use std::ptr;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::Security::PSID;
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
@@ -36,19 +36,18 @@ fn remove_loopback_exemption(container_name: &str) {
         .status();
 }
 
-/// Enable loopback network access for one or more AppContainers.
+/// Enable loopback network access for a single AppContainer.
 ///
 /// Preserves existing exemptions by reading the current list first.
-fn enable_loopback_for_containers(container_sids: &[PSID]) -> Result<(), WxcError> {
+fn enable_loopback(container_sid: PSID) -> Result<(), WxcError> {
     type FnGetConfig =
         unsafe extern "system" fn(count: *mut u32, entries: *mut *mut SidAndAttributes) -> u32;
     type FnSetConfig =
         unsafe extern "system" fn(count: u32, entries: *const SidAndAttributes) -> u32;
 
     let dll_name = string_util::to_wide("FirewallAPI.dll");
-    let module = unsafe { LoadLibraryW(PCWSTR(dll_name.as_ptr())) }.map_err(|err| {
-        WxcError::NetworkProxy(format!("Failed to load FirewallAPI.dll: {}", err))
-    })?;
+    let module = unsafe { GetModuleHandleW(PCWSTR(dll_name.as_ptr())) }
+        .map_err(|err| WxcError::NetworkProxy(format!("FirewallAPI.dll not loaded: {}", err)))?;
 
     let get_proc = unsafe {
         GetProcAddress(
@@ -68,7 +67,7 @@ fn enable_loopback_for_containers(container_sids: &[PSID]) -> Result<(), WxcErro
         ));
     };
 
-    unsafe {
+    let result = unsafe {
         let get_fn: FnGetConfig =
             std::mem::transmute::<unsafe extern "system" fn() -> isize, FnGetConfig>(get_proc);
         let set_fn: FnSetConfig =
@@ -93,16 +92,13 @@ fn enable_loopback_for_containers(container_sids: &[PSID]) -> Result<(), WxcErro
                 });
             }
         }
-        for sid in container_sids {
-            combined.push(SidAndAttributes {
-                sid: *sid,
-                attributes: 0,
-            });
-        }
+        combined.push(SidAndAttributes {
+            sid: container_sid,
+            attributes: 0,
+        });
 
         let set_result = set_fn(combined.len() as u32, combined.as_ptr());
 
-        // Free the buffer allocated by NetworkIsolationGetAppContainerConfig.
         if !existing_entries.is_null() {
             if let Ok(heap) = windows::Win32::System::Memory::GetProcessHeap() {
                 let _ = windows::Win32::System::Memory::HeapFree(
@@ -113,12 +109,14 @@ fn enable_loopback_for_containers(container_sids: &[PSID]) -> Result<(), WxcErro
             }
         }
 
-        if set_result != 0 {
-            return Err(WxcError::NetworkProxy(format!(
-                "Failed to set loopback exemption: 0x{:08x}",
-                set_result
-            )));
-        }
+        set_result
+    };
+
+    if result != 0 {
+        return Err(WxcError::NetworkProxy(format!(
+            "Failed to set loopback exemption: 0x{:08x}",
+            result
+        )));
     }
 
     Ok(())
@@ -286,7 +284,7 @@ impl NetworkProxyManager {
 
         self.proxy_port = proxy_config.localhost;
 
-        if let Err(err) = enable_loopback_for_containers(&[script_sid]) {
+        if let Err(err) = enable_loopback(script_sid) {
             self.cleanup_on_failure(logger);
             return Err(err);
         }
