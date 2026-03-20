@@ -42,3 +42,24 @@ For a more comprehensive list of examples, look in the examples\ directory.
   }
 }
 ```
+
+### Network Proxy
+
+Route AppContainer traffic through an already-running localhost proxy. The
+proxy is responsible for application-layer filtering such as domain allow/deny
+lists, request inspection, and logging. Supported with the `appcontainer`
+containment backend only.
+
+```json
+{
+  "script": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
+  "timeout": 30000,
+  "appContainer": {
+    "name": "CLI-Proxy",
+    "capabilities": ["internetClient"]
+  },
+  "network": {
+    "proxy": { "localhost": 8080 }
+  }
+}
+```

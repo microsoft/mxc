@@ -1,0 +1,14 @@
+[package]
+name = "wxc_winhttp_proxy_shim"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "winhttp-proxy-shim"
+path = "src/main.rs"
+
+[dependencies]
+wxc_common.workspace = true
+clap.workspace = true
+windows.workspace = true
+windows-core.workspace = true
