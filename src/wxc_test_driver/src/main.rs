@@ -114,15 +114,18 @@ fn run_configs(
 
 /// Patch a JSON config string to set network.proxy.localhost to the given port.
 fn patch_proxy_port(json_str: &str, port: u16) -> String {
-    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json_str) {
-        let proxy = serde_json::json!({ "localhost": port });
-        if let Some(network) = value.get_mut("network").and_then(|val| val.as_object_mut()) {
-            network.insert("proxy".to_string(), proxy);
-        } else {
-            value["network"] = serde_json::json!({ "proxy": proxy });
-        }
-        serde_json::to_string_pretty(&value).unwrap_or_else(|_| json_str.to_string())
-    } else {
-        json_str.to_string()
+    let mut value = match serde_json::from_str::<serde_json::Value>(json_str) {
+        Ok(val) => val,
+        Err(_) => return json_str.to_string(),
+    };
+
+    let proxy = serde_json::json!({ "localhost": port });
+
+    if let Some(network) = value.get_mut("network").and_then(|val| val.as_object_mut()) {
+        network.insert("proxy".to_string(), proxy);
+    } else if let Some(root) = value.as_object_mut() {
+        root.insert("network".to_string(), serde_json::json!({ "proxy": proxy }));
     }
+
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| json_str.to_string())
 }
