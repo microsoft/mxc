@@ -6,14 +6,14 @@ MXC (Microsoft eXecution Container) runs untrusted code in sandboxed environment
 
 ## Proposed Solution
 
-Add a **WSL Container backend** directly into the existing `wxc-exec.exe` Rust binary, using the **[WSL Container SDK (WSLC SDK)](https://microsoft-my.sharepoint-df.com/:w:/p/richfr/cQp13XN0n_AURL9yxz2qBILYEgUCvFhTO6rwSfNlSVE6lUjBxQ?CID=4cb4ab01-ef3a-6ce4-1676-4706077e81ca)** as the container runtime interface. When the JSON config specifies `"containment": "containerd"`, the binary routes to a new `LinuxContainerRunner` instead of `AppContainerScriptRunner`. The runner calls WSLC SDK C APIs (via Rust FFI bindings) to manage sessions, containers, and process I/O — eliminating the need to build a custom containerd gRPC client or OCI spec builder. This leverages the existing `ScriptRunner` trait and keeps everything in a single binary.
+Add a **WSL Container backend** directly into the existing `wxc-exec.exe` Rust binary, using the **[WSL Container SDK (WSLC SDK)](https://microsoft-my.sharepoint-df.com/:w:/p/richfr/cQp13XN0n_AURL9yxz2qBILYEgUCvFhTO6rwSfNlSVE6lUjBxQ?CID=4cb4ab01-ef3a-6ce4-1676-4706077e81ca)** as the container runtime interface. When the JSON config specifies `"containment": "containerd"`, the binary routes to a new `WSLContainerRunner` instead of `AppContainerScriptRunner`. The runner calls WSLC SDK C APIs (via Rust FFI bindings) to manage sessions, containers, and process I/O — eliminating the need to build a custom containerd gRPC client or OCI spec builder. This leverages the existing `ScriptRunner` trait and keeps everything in a single binary.
 
 ## How It Works
 
 ```
 Path A — CLI (direct):
   User: wxc-exec.exe --container --image python:3.12 "python3 my_app.py"
-    └── Clap parses args → builds JSON config internally → dispatches to LinuxContainerRunner
+    └── Clap parses args → builds JSON config internally → dispatches to WSLContainerRunner
 
 Path B — SDK (programmatic):
   App calls: spawnSandbox("python3 my_app.py", policy, { containment: "containerd" })
@@ -24,9 +24,11 @@ Path B — SDK (programmatic):
 Both paths converge here:
   wxc-exec.exe (Rust — single binary, three backends)
     ├── Parses JSON config → sees containment = "containerd"
-    ├── Creates LinuxContainerRunner (via existing Box<dyn ScriptRunner> dispatch)
+    ├── Creates WSLContainerRunner (via existing Box<dyn ScriptRunner> dispatch)
     ├── Calls WSLC SDK via Rust FFI bindings:
     │     WslcCanRun()                → preflight check
+    │     WslcSessionInitSettings()   → init session settings (with storagePath)
+    │     WslcSessionSettingsSetCpuCount() / SetMemory() / SetTimeout() → configure session
     │     WslcSessionCreate()         → create WSL2 micro-VM session
     │     WslcSessionImageList()      → verify image exists (fail if not found)
     │     WslcContainerInitSettings() → init from image name
@@ -75,7 +77,7 @@ let mut runner: Box<dyn ScriptRunner> = match request.containment {
     ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
     ContainmentBackend::Sandbox => Box::new(SandboxScriptRunner::new(&request.sandbox_config)),
     // NEW — add this arm:
-    ContainmentBackend::Containerd => Box::new(LinuxContainerRunner::new(&request.container_config)),
+    ContainmentBackend::Containerd => Box::new(WSLContainerRunner::new(&request.container_config)),
 };
 ```
 
@@ -83,7 +85,7 @@ let mut runner: Box<dyn ScriptRunner> = match request.containment {
 
 | WLXC Pattern | MXC Implementation |
 |---|---|
-| Container lifecycle model (`daemon.rs:505-953`) | Adapted into `LinuxContainerRunner` — but calling WSLC SDK APIs instead of containerd gRPC |
+| Container lifecycle model (`daemon.rs:505-953`) | Adapted into `WSLContainerRunner` — but calling WSLC SDK APIs instead of containerd gRPC |
 | Backend enum + routing (`backend.rs`, `daemon.rs:220-279`) | Already exists: `ContainmentBackend` enum + `match` dispatch in `main.rs` (the SandboxRunner work) |
 | Policy → mount translation (`policy.rs`) | `wxc_common/src/policy_mapping.rs` — maps to `WslcContainerSettingsAddVolume()` calls |
 | `setup-containerd.ps1` setup script | Replaced by WSLC SDK's `WslcInstallWithDependencies()` + lightweight setup script |
@@ -157,7 +159,7 @@ Entry point (`wxc/src/main.rs`):
 let mut runner: Box<dyn ScriptRunner> = match request.containment {
     ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
     ContainmentBackend::Sandbox => Box::new(SandboxScriptRunner::new(&request.sandbox_config)),
-    ContainmentBackend::Containerd => Box::new(LinuxContainerRunner::new(&request.container_config)),
+    ContainmentBackend::Containerd => Box::new(WSLContainerRunner::new(&request.container_config)),
 };
 ```
 
@@ -177,7 +179,7 @@ let mut runner: Box<dyn ScriptRunner> = match request.containment {
 }
 ```
 
-**Note on the `appContainer` section:** Existing configs may include an `appContainer` section (name, capabilities, leastPrivilege). When `containment` is `"containerd"`, this section is ignored — `LinuxContainerRunner` reads from the `container` section
+**Note on the `appContainer` section:** Existing configs may include an `appContainer` section (name, capabilities, leastPrivilege). When `containment` is `"containerd"`, this section is ignored — `WSLContainerRunner` reads from the `container` section
 instead. No error is raised if both are present, making configs forward/backward compatible.
 
 **WLXC reference:** WLXC's `Backend` enum (`backend.rs:24-28`) and `ContainerType` proto enum (`wlxc.proto:34-37`). We're expressing the same concepts in TypeScript as `SandboxingMethod` and `TargetOs`. The JSON `container` section maps to WSLC SDK settings calls (session CPU/memory, container image/networking, process executable/args).
@@ -186,7 +188,7 @@ instead. No error is raised if both are present, making configs forward/backward
 
 ### Phase 3 — WSLC SDK Backend (Core Work)
 
-**Goal:** Implement `LinuxContainerRunner` — a new `ScriptRunner` implementation that uses the WSL Container SDK (WSLC SDK) to manage Linux container lifecycle, I/O, and cleanup. This is added directly to `wxc_common` as new modules alongside the existing AppContainer code.
+**Goal:** Implement `WSLContainerRunner` — a new `ScriptRunner` implementation that uses the WSL Container SDK (WSLC SDK) to manage Linux container lifecycle, I/O, and cleanup. This is added directly to `wxc_common` as new modules alongside the existing AppContainer code.
 
 **Why WSLC SDK instead of raw containerd:** The WSLC SDK is a first-party Microsoft C API that abstracts away containerd, OCI spec building, namespace setup, and image management behind a clean Session → Container → Process model. This eliminates the need to build a custom gRPC client, OCI spec builder, or image snapshot manager. The SDK provides native Win32 HANDLEs for stdout/stderr, avoiding gRPC stream bridging.
 
@@ -198,13 +200,13 @@ instead. No error is raised if both are present, making configs forward/backward
 mxc/src/
 ├── Cargo.toml                    # Add workspace deps: windows-sys (for Win32 types)
 ├── wxc/
-│   ├── Cargo.toml                # No new deps (imports LinuxContainerRunner from wxc_common)
+│   ├── Cargo.toml                # No new deps (imports WSLContainerRunner from wxc_common)
 │   └── src/main.rs               # Backend selection (Phase 2)
 ├── wxc_common/
 │   ├── Cargo.toml                # Add windows-sys dep (for HANDLE, HRESULT, ReadFile)
-│   ├── build.rs                  # NEW — link against WslcSDK.lib
+│   ├── build.rs                  # NEW — link against WslcSDK.lib (sourced from WSLC SDK NuGet package)
 │   └── src/
-│       ├── lib.rs                # Add: pub mod wslc_bindings; pub mod linux_container_runner;
+│       ├── lib.rs                # Add: pub mod wslc_bindings; pub mod wsl_container_runner;
 │       │                         #      pub mod policy_mapping;
 │       ├── appcontainer.rs       # UNCHANGED
 │       ├── config_parser.rs      # Extended (Phase 2)
@@ -213,13 +215,13 @@ mxc/src/
 │       ├── sandbox_runner.rs     # UNCHANGED (The existing Sandbox backend)
 │       ├── sandbox_protocol.rs   # UNCHANGED (The existing IPC protocol)
 │       ├── wslc_bindings.rs      # NEW — Rust FFI bindings to WslcSDK.h
-│       ├── linux_container_runner.rs  # NEW — LinuxContainerRunner impl
+│       ├── wsl_container_runner.rs  # NEW — WSLContainerRunner impl
 │       └── policy_mapping.rs     # NEW — SandboxPolicy → WSLC settings translation
 └── wxc_test_driver/              # UNCHANGED
 ```
 
 **ScriptRunner trait — no refactor needed:**
-The existing `SandboxScriptRunner` already overrides `run()` entirely (it bypasses the default BFS/firewall orchestration). This proves the pattern works. `LinuxContainerRunner` does the same — override `run()` with its own lifecycle:
+The existing `SandboxScriptRunner` already overrides `run()` entirely (it bypasses the default BFS/firewall orchestration). This proves the pattern works. `WSLContainerRunner` does the same — override `run()` with its own lifecycle:
 `session → container → process → I/O → cleanup`. No changes to
 `script_runner.rs` or `AppContainerScriptRunner` are required.
 
@@ -255,9 +257,9 @@ Process APIs:
 - `WslcProcessGetExitEvent()` — get Win32 event HANDLE to wait on process exit
 - `WslcProcessRelease()` — cleanup
 
-Key dependency: `windows-sys` crate for Win32 types (`HANDLE`, `HRESULT`, `BOOL`, `PCWSTR`, `PCSTR`). Link against `WslcSDK.lib` at build time.
+Key dependency: `windows-sys` crate for Win32 types (`HANDLE`, `HRESULT`, `BOOL`, `PCWSTR`, `PCSTR`). Link against `WslcSDK.lib` at build time — `WslcSDK.lib` and `WslcSDK.h` are sourced from the WSLC SDK NuGet package. The `build.rs` script references the NuGet package output path to locate the lib and header files.
 
-**Component B — LinuxContainerRunner** (`linux_container_runner.rs`)
+**Component B — WSLContainerRunner** (`wsl_container_runner.rs`)
 Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
 
 1. `initialize()`:
@@ -288,7 +290,7 @@ Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
    - `WslcSessionRelease()`
 
 **I/O and process behavior:**
-- `LinuxContainerRunner` captures stdout/stderr from native Win32 HANDLEs returned by `WslcProcessGetIOHandles()` and returns them in `ScriptResponse`, matching the current `AppContainerScriptRunner` behavior
+- `WSLContainerRunner` captures stdout/stderr from native Win32 HANDLEs returned by `WslcProcessGetIOHandles()` and returns them in `ScriptResponse`, matching the current `AppContainerScriptRunner` behavior
 - The exit code is retrieved via `WslcProcessGetExitCode()` after the process exit event signals
 - The `timeout` config field is enforced via `WslcSessionSettingsSetTimeout()` at the session level, plus a Rust-side watchdog that calls `WslcContainerStop(WSLC_SIGNAL_SIGKILL)` if needed
 
@@ -313,7 +315,7 @@ Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
 **Why it matters:** The `SandboxPolicy` type already describes what to restrict (filesystem paths, network access) without saying how. Today it's translated to NTFS ACLs + Windows Firewall. For Linux containers, the same policy needs to become WSLC volume mounts and networking mode settings. This is what makes the "one policy, any platform" vision work.
 
 **What changes:**
-This logic lives in `wxc_common/src/policy_mapping.rs` and is called by `LinuxContainerRunner` during container settings configuration.
+This logic lives in `wxc_common/src/policy_mapping.rs` and is called by `WSLContainerRunner` during container settings configuration.
 
 Filesystem mapping:
 | SandboxPolicy field | WSLC SDK equivalent |
@@ -360,7 +362,7 @@ Setup script (`scripts/setup-wslc.ps1`):
 - If missing components, calls `wxc-exec.exe --install-wslc` which invokes `WslcInstallWithDependencies()` (SDK handles WSL2, VM platform, and WSL package installation)
 - Pulls default Linux image via `wxc-exec.exe --pull-image alpine:latest` (wraps `WslcSessionImagePull()`)
 - Verify setup by running a smoke test: `wxc-exec.exe --container "echo hello"`
-- **Note:** `--check-platform`, `--install-wslc`, and `--pull-image` are **admin utility subcommands** for setup and maintenance only. They are not part of the execution code path — `LinuxContainerRunner` never calls them. The runner only checks if an image exists and fails fast if it's missing.
+- **Note:** `--check-platform`, `--install-wslc`, and `--pull-image` are **admin utility subcommands** for setup and maintenance only. They are not part of the execution code path — `WSLContainerRunner` never calls them. The runner only checks if an image exists and fails fast if it's missing.
 
 SDK health check (`sdk/src/platform.ts`):
 - `getPlatformSupport()` spawns `wxc-exec.exe --check-platform` and parses JSON output (wraps `WslcCanRun()`)
@@ -388,28 +390,29 @@ These need team decisions before implementation:
 4. **Elevated privileges** — The WSLC SDK may require specific Windows capabilities (VM Platform, WSL optional component). `WslcCanRun()` reports missing components and `WslcInstallWithDependencies()` handles installation. Do we invoke the install
    API automatically, or require users to run setup manually?
 
-5. ~~**ScriptRunner refactor strategy**~~ — **Resolved.** The existing `SandboxScriptRunner` already overrides `run()` entirely, proving the pattern. `LinuxContainerRunner` does the same. No refactoring of the base trait needed.
+5. ~~**ScriptRunner refactor strategy**~~ — **Resolved.** The existing `SandboxScriptRunner` already overrides `run()` entirely, proving the pattern. `WSLContainerRunner` does the same. No refactoring of the base trait needed.
 
 6. **GPU passthrough** — The WSLC SDK supports `WSLC_CONTAINER_FLAG_ENABLE_GPU` and `WSLC_SESSION_FLAG_ENABLE_GPU`. Should we expose this in the MXC config schema (e.g., `"gpu": true`), or defer GPU support?
 
-7. **Session reuse** — Each `LinuxContainerRunner.run()` currently creates and destroys a full WSL2 session (micro-VM). For rapid successive invocations, should we pool/reuse sessions to reduce startup overhead?
+7. **Session reuse** — Each `WSLContainerRunner.run()` currently creates and destroys a full WSL2 session (micro-VM). For rapid successive invocations, should we pool/reuse sessions to reduce startup overhead?
 
 ## Prerequisites for End Users
 
 - Windows 11 or Windows Server 2022/2025
 - WSL2 enabled (VM Platform optional component)
 - WSL Container SDK runtime installed (`WslcInstallWithDependencies()` handles this)
+- WSLC SDK NuGet package referenced in the project (provides `WslcSDK.lib` and `WslcSDK.h` at build time)
 - `WslcCanRun()` returns `canRun = true` (setup script verifies this)
 
 ## Risks
 
 | Risk | Mitigation |
 |---|---|
-| `ScriptRunner::run()` hardcodes BFS/firewall (Windows-specific) | `LinuxContainerRunner` overrides `run()` entirely — same pattern used by `SandboxScriptRunner` |
+| `ScriptRunner::run()` hardcodes BFS/firewall (Windows-specific) | `WSLContainerRunner` overrides `run()` entirely — same pattern used by `SandboxScriptRunner` |
 | WSLC SDK is in public preview — API may change | Pin to a specific SDK version; isolate all WSLC calls behind `wslc_bindings.rs` so API changes are contained to one file |
 | Rust FFI to C API requires careful memory management | Follow WSLC SDK ownership rules: caller frees `CoTaskMemAlloc`'d strings; use Rust RAII wrappers for WSLC handles (Session, Container, Process) |
 | WSL2/WSLC setup complexity for users | `WslcCanRun()` diagnoses missing components; `WslcInstallWithDependencies()` automates installation; setup script wraps both |
-| New dependency on WslcSDK.lib increases coupling | Feature-gate behind `wslc` Cargo feature so AppContainer-only builds don't require the SDK |
+| New dependency on WslcSDK.lib increases coupling | Feature-gate behind `wslc` Cargo feature so AppContainer-only builds don't require the SDK. Dependency is managed via NuGet, providing controlled versioning and a standard acquisition path |
 | Windows→Linux path translation edge cases | WSLC SDK's `WslcContainerVolume` handles path bridging natively via `windowsPath`/`containerPath` fields |
 | Orphaned containers on crash | `ctrlc` handler + RAII drop impl that calls `WslcContainerStop()` → `WslcContainerDelete()` → `WslcSessionTerminate()` |
 | Session startup overhead (micro-VM per invocation) | Document as known cost; explore session pooling in future iteration (Open Question #7) |
@@ -466,3 +469,32 @@ Config file (`app-policy.json`):
 
 This mounts `C:\Projects\my-app` as `/mnt/c/Projects/my-app` (read-write) inside the Linux container, gives it network access (except to `internal.corp.net`), runs `app.py` with Python 3.12, and kills the container after 60 seconds
 if it hasn't exited.
+
+## Supported Workloads
+
+MXC's Linux container support is **language-agnostic and image-agnostic**. The container image defines the capabilities — not MXC. Any workload that meets the following criteria is supported:
+
+> **Runs on Linux, exits on its own, and produces output via stdout/stderr.**
+
+### Supported
+
+| Category | Example images | Use cases |
+|---|---|---|
+| Script execution | `python:3.12`, `node:20`, `ruby:3.3` | Run scripts in any interpreted language |
+| Compiled binaries | `golang:1.22`, `rust:latest`, `gcc:latest` | Build and/or run Linux ELF binaries |
+| Shell automation | `alpine`, `ubuntu:22.04` | Bash scripts, file processing, CLI pipelines |
+| Data processing | `python:3.12` with NumPy/Pandas | CSV transforms, ML inference, analytics |
+| DevOps tooling | `hashicorp/terraform`, `alpine/k8s` | IaC plan output, kubectl queries |
+| .NET on Linux | `mcr.microsoft.com/dotnet/sdk:8.0` | Cross-platform .NET workloads |
+| Custom toolchains | Any private registry image | Team-specific or proprietary tools |
+
+### Not Supported
+
+| Workload type | Why |
+|---|---|
+| Interactive processes (REPLs, shells) | MXC does not pass stdin — execution is fire-and-forget |
+| GUI applications (X11, Wayland) | No display server — MXC captures stdout/stderr only |
+| Long-running daemons (web servers, databases) | MXC expects the process to exit within the configured timeout |
+| Hardware access (USB, serial, Bluetooth) | The micro-VM does not expose host hardware beyond filesystem and network |
+
+**Note:** GPU compute (CUDA, ML training/inference) is an open design question (#6). The WSLC SDK supports `WSLC_CONTAINER_FLAG_ENABLE_GPU` but MXC has not committed to enabling it yet.
