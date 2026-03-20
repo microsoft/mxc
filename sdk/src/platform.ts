@@ -40,6 +40,7 @@ function queryWindowsRegistry(key: string, valueName: string): string | null {
  * Requirements:
  * - CurrentBuild (major version) must be >= 26100
  * - UBR (minor version) must be >= 7965 (Windows Insider 3A or later)
+ * - UBR should not be checked for build versions >= 26300 as they may have different versioning
  * 
  * @returns true if Windows build meets requirements, false otherwise
  */
@@ -63,7 +64,11 @@ function checkWindowsBuildVersion(): boolean {
 
   // UBR is stored as REG_DWORD (hex format), use Number() to parse
   const minorVersion = Number(ubrValue);
-  if (isNaN(minorVersion) || minorVersion < 7965) {
+  if (isNaN(minorVersion)) {
+    return false;
+  }
+
+  if (majorVersion >= 26100 && majorVersion <= 26500 && minorVersion < 7965) {
     return false;
   }
 
