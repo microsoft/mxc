@@ -234,7 +234,7 @@ fn poll_for_ready_file(
 /// `winhttp-proxy-shim` process launched via UAC, which binds the script's
 /// AppContainer SID to the proxy's address and port.
 pub struct NetworkProxyManager {
-    proxy_port: u16,
+    proxy_address: Option<crate::models::ProxyAddress>,
     shim_process_handle: Option<OwnedHandle>,
     cleanup_event_handle: Option<OwnedHandle>,
     ready_file_path: Option<PathBuf>,
@@ -244,7 +244,7 @@ pub struct NetworkProxyManager {
 impl NetworkProxyManager {
     pub fn new() -> Self {
         Self {
-            proxy_port: 0,
+            proxy_address: None,
             shim_process_handle: None,
             cleanup_event_handle: None,
             ready_file_path: None,
@@ -254,12 +254,12 @@ impl NetworkProxyManager {
 
     /// `true` if the proxy is active.
     pub fn is_active(&self) -> bool {
-        self.proxy_port > 0
+        self.proxy_address.is_some()
     }
 
-    /// Returns the proxy port (0 if not active).
-    pub fn proxy_port(&self) -> u16 {
-        self.proxy_port
+    /// Returns the proxy address (if active).
+    pub fn address(&self) -> Option<&crate::models::ProxyAddress> {
+        self.proxy_address.as_ref()
     }
 
     /// Set the WinHTTP proxy policy for the AppContainer and configure
@@ -278,11 +278,13 @@ impl NetworkProxyManager {
         }
 
         let proxy_config = &policy.network_proxy;
-        if !proxy_config.is_enabled() {
+        let address = if let Some(ref addr) = proxy_config.address {
+            addr.clone()
+        } else {
             return Ok(());
-        }
+        };
 
-        self.proxy_port = proxy_config.localhost;
+        self.proxy_address = Some(address.clone());
 
         if let Err(err) = enable_loopback(script_sid) {
             self.cleanup_on_failure(logger);
@@ -296,8 +298,9 @@ impl NetworkProxyManager {
         }
 
         logger.log_line(&format!(
-            "Proxy policy active for SID {} -> 127.0.0.1:{}",
-            principal_id, self.proxy_port,
+            "Proxy policy active for SID {} -> {}",
+            principal_id,
+            self.proxy_address.as_ref().unwrap().to_url(),
         ));
 
         Ok(())
@@ -321,19 +324,22 @@ impl NetworkProxyManager {
         self.ready_file_path = Some(ready_file_path.clone());
 
         let shim_path = find_sibling_exe("winhttp-proxy-shim.exe")?;
+        let addr = self.proxy_address.as_ref().unwrap();
         let shim_args = format!(
-            "--sid {} --proxy-address 127.0.0.1 --proxy-port {} \
+            "--sid {} --proxy-address {} --proxy-port {} \
              --ready-file \"{}\" --cleanup-event \"{}\" --parent-pid {}",
             principal_id,
-            self.proxy_port,
+            addr.host(),
+            addr.port(),
             ready_file_path.display(),
             event_name,
             std::process::id(),
         );
 
         logger.log_line(&format!(
-            "Launching winhttp-proxy-shim elevated: SID {} -> 127.0.0.1:{}",
-            principal_id, self.proxy_port
+            "Launching winhttp-proxy-shim elevated: SID {} -> {}",
+            principal_id,
+            addr.to_url()
         ));
 
         let shim_handle = launch_elevated(&shim_path, &shim_args, logger)?;
@@ -389,7 +395,7 @@ impl NetworkProxyManager {
     fn release_resources(&mut self) {
         self.cleanup_event_handle = None;
         self.shim_process_handle = None;
-        self.proxy_port = 0;
+        self.proxy_address = None;
 
         if let Some(path) = self.ready_file_path.take() {
             let _ = std::fs::remove_file(&path);

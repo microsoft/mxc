@@ -10,7 +10,7 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     CodexRequest, ContainerPolicy, ContainmentBackend, NetworkEnforcementMode, NetworkPolicy,
-    ProxyConfig, SandboxConfig,
+    ProxyAddress, ProxyConfig, SandboxConfig,
 };
 use crate::string_util::base64_decode;
 
@@ -93,7 +93,8 @@ fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError
         .and_then(|val| val.as_u64())
         .ok_or_else(|| {
             WxcError::ConfigParse(
-                "network.proxy requires a 'localhost' field with a port number".to_string(),
+                "network.proxy requires a 'localhost' port (only localhost is currently supported)"
+                    .to_string(),
             )
         })?;
 
@@ -104,7 +105,7 @@ fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError
     }
 
     Ok(ProxyConfig {
-        localhost: port_value as u16,
+        address: Some(ProxyAddress::Localhost(port_value as u16)),
     })
 }
 
@@ -815,7 +816,10 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
-        assert_eq!(req.policy.network_proxy.localhost, 8080);
+        assert_eq!(
+            req.policy.network_proxy.address.as_ref().unwrap().port(),
+            8080
+        );
     }
 
     #[test]
@@ -832,7 +836,10 @@ mod tests {
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.network_proxy.localhost, 9090);
+        assert_eq!(
+            req.policy.network_proxy.address.as_ref().unwrap().port(),
+            9090
+        );
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
     }
 

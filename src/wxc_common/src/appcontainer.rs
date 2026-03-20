@@ -53,8 +53,8 @@ const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL
 /// Copies the current process environment, strips any existing proxy vars
 /// (case-insensitive), injects HTTP_PROXY/HTTPS_PROXY pointing to the
 /// localhost proxy, and returns a double-null-terminated UTF-16 block.
-fn build_proxy_env_block(proxy_port: u16) -> Vec<u16> {
-    let proxy_url = format!("http://127.0.0.1:{}", proxy_port);
+fn build_proxy_env_block(address: &crate::models::ProxyAddress) -> Vec<u16> {
+    let proxy_url = address.to_url();
     let mut entries: Vec<(String, String)> = Vec::new();
 
     for (key, value) in std::env::vars_os() {
@@ -132,7 +132,7 @@ struct SecurityCapabilities {
 pub struct AppContainerScriptRunner {
     app_container_name: String,
     app_container_sid: PSID,
-    proxy_port: u16,
+    proxy_address: Option<crate::models::ProxyAddress>,
 }
 
 impl AppContainerScriptRunner {
@@ -140,7 +140,7 @@ impl AppContainerScriptRunner {
         Self {
             app_container_name: String::new(),
             app_container_sid: PSID(ptr::null_mut()),
-            proxy_port: 0,
+            proxy_address: None,
         }
     }
 
@@ -392,11 +392,7 @@ impl AppContainerScriptRunner {
 
         // Build an explicit environment block when proxy is active.
         // This avoids mutating process-global env vars (which isn't thread-safe).
-        let env_block: Option<Vec<u16>> = if self.proxy_port > 0 {
-            Some(build_proxy_env_block(self.proxy_port))
-        } else {
-            None
-        };
+        let env_block: Option<Vec<u16>> = self.proxy_address.as_ref().map(build_proxy_env_block);
 
         let env_ptr = env_block
             .as_ref()
@@ -590,7 +586,7 @@ impl ScriptRunner for AppContainerScriptRunner {
                 logger,
             ) {
                 Ok(()) => {
-                    self.proxy_port = network_proxy_manager.proxy_port();
+                    self.proxy_address = network_proxy_manager.address().cloned();
                 }
                 Err(err) => {
                     return ScriptResponse::error(&err.to_string());
