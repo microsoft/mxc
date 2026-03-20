@@ -383,16 +383,18 @@ These need team decisions before implementation:
    APIs called outside of MXC). If an image is not found, `wxc-exec.exe` fails fast with a clear error message. This keeps MXC focused on its core job: sandboxed execution. Container management and execution are separate concerns.
 
 2. **Custom images** — ~~Do we validate/restrict images?~~
-   **Decision: Allow any image.** Whatever the WSLC SDK can pull or has locally can be used. No validation or allow-listing for now — iterate later if needed.
+   **Decision: Allow any image.** Whatever the WSLC SDK can pull or has locally can be used. No validation or allow-listing at the MXC layer for now. In the future, image governance (e.g., SBOM tracking, vulnerability scanning, registry allow-listing) will be handled at the policy enforcement layers above MXC — not inside the execution engine itself. MXC executes whatever image the caller specifies; it is the caller's responsibility to ensure the image is approved.
 
-3. **Windows containers via containerd** — The architecture supports routing Windows containers through containerd too (using `runhcs.v1` + `nanoserver`). Is this in scope, or do we only target Linux containers for now?
+3. **Windows containers via containerd** — The architecture supports routing Windows containers through containerd too (using `runhcs.v1` + `nanoserver`). Is this in scope?
+   **Decision: Linux containers first.** This design targets Linux containers only. Windows Server containers (e.g., `nanoserver`, `servercore`) are a different workload category — they use a different runtime (`runhcs.v1`), different isolation model, and serve different use cases (typically long-running services rather than script execution). We will prioritize Windows Server container support when there is a clear need for it. The `ContainmentBackend` enum and routing architecture can accommodate a future Windows container variant without redesign.
 
-4. **Elevated privileges** — The WSLC SDK may require specific Windows capabilities (VM Platform, WSL optional component). `WslcCanRun()` reports missing components and `WslcInstallWithDependencies()` handles installation. Do we invoke the install
-   API automatically, or require users to run setup manually?
+4. **Elevated privileges** — ~~The WSLC SDK may require specific Windows capabilities (VM Platform, WSL optional component). Do we invoke the install API automatically, or require users to run setup manually?~~
+   **Decision: SDK install is out of band.** MXC does not install the WSLC SDK or its dependencies at runtime. Installation of the WSLC SDK NuGet package (build time) and runtime components — VM Platform, WSL optional component, WSL package — is handled separately, outside of MXC's execution path (e.g., by IT admin tooling, a setup script, or the caller's deployment process). At runtime, `WslcCanRun()` checks if everything is in place and fails fast with a clear error if not.
 
 5. ~~**ScriptRunner refactor strategy**~~ — **Resolved.** The existing `SandboxScriptRunner` already overrides `run()` entirely, proving the pattern. `WSLContainerRunner` does the same. No refactoring of the base trait needed.
 
-6. **GPU passthrough** — The WSLC SDK supports `WSLC_CONTAINER_FLAG_ENABLE_GPU` and `WSLC_SESSION_FLAG_ENABLE_GPU`. Should we expose this in the MXC config schema (e.g., `"gpu": true`), or defer GPU support?
+6. ~~**GPU passthrough**~~ — ~~Should we expose GPU support in the MXC config schema?~~
+   **Decision: Yes.** Expose `"gpu": true` in the `container` config section. When enabled, `WSLContainerRunner` sets both `WSLC_SESSION_FLAG_ENABLE_GPU` on the session and `WSLC_CONTAINER_FLAG_ENABLE_GPU` on the container. Defaults to `false`. This enables CUDA and GPU compute workloads (ML inference, training) inside Linux containers.
 
 7. **Session reuse** — Each `WSLContainerRunner.run()` currently creates and destroys a full WSL2 session (micro-VM). For rapid successive invocations, should we pool/reuse sessions to reduce startup overhead?
 
@@ -497,4 +499,4 @@ MXC's Linux container support is **language-agnostic and image-agnostic**. The c
 | Long-running daemons (web servers, databases) | MXC expects the process to exit within the configured timeout |
 | Hardware access (USB, serial, Bluetooth) | The micro-VM does not expose host hardware beyond filesystem and network |
 
-**Note:** GPU compute (CUDA, ML training/inference) is an open design question (#6). The WSLC SDK supports `WSLC_CONTAINER_FLAG_ENABLE_GPU` but MXC has not committed to enabling it yet.
+**Note:** GPU compute (CUDA, ML training/inference) is supported when `"gpu": true` is set in the container config. The WSLC SDK passes through the host GPU via `WSLC_CONTAINER_FLAG_ENABLE_GPU`. Requires a GPU-capable host machine with appropriate drivers.
