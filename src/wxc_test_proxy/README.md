@@ -2,7 +2,7 @@
 
 **⚠️ Testing-only. NOT a production proxy.**
 
-Minimal HTTP CONNECT proxy for `mxc` integration testing. Tunnels HTTPS via `CONNECT` — no caching, filtering, or auth.
+Minimal HTTP CONNECT proxy for `wxc` integration testing. Tunnels HTTPS via `CONNECT` — no caching, filtering, or auth.
 
 ## Usage
 
