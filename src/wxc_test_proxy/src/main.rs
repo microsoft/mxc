@@ -17,7 +17,7 @@ mod proxy;
 #[derive(Parser)]
 #[command(
     name = "wxc-test-proxy",
-    about = "Builtin test proxy for mxc integration testing (NOT for production use)"
+    about = "Builtin test proxy for wxc integration testing (NOT for production use)"
 )]
 struct Cli {
     /// Path where the proxy writes its port number once ready.
