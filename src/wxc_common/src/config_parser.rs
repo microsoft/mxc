@@ -9,8 +9,8 @@ use serde::Deserialize;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, ContainerPolicy, ContainmentBackend, NetworkEnforcementMode, NetworkPolicy,
-    ProxyAddress, ProxyConfig, SandboxConfig,
+    CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, NetworkEnforcementMode,
+    NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SandboxConfig,
 };
 use crate::string_util::base64_decode;
 
@@ -67,6 +67,33 @@ struct RawSandbox {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawPortMapping {
+    #[serde(rename = "windowsPort")]
+    windows_port: Option<u16>,
+    #[serde(rename = "containerPort")]
+    container_port: Option<u16>,
+    protocol: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawContainerConfig {
+    #[serde(rename = "targetOs")]
+    target_os: Option<String>,
+    image: Option<String>,
+    #[serde(rename = "cpuCount")]
+    cpu_count: Option<u32>,
+    #[serde(rename = "memoryMb")]
+    memory_mb: Option<u64>,
+    gpu: Option<bool>,
+    #[serde(rename = "storagePath")]
+    storage_path: Option<String>,
+    #[serde(rename = "portMappings")]
+    port_mappings: Option<Vec<RawPortMapping>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawConfig {
     script: Option<String>,
     containment: Option<String>,
@@ -76,6 +103,7 @@ struct RawConfig {
     #[serde(rename = "appContainer")]
     app_container: Option<RawAppContainer>,
     sandbox: Option<RawSandbox>,
+    container: Option<RawContainerConfig>,
     filesystem: Option<RawFilesystem>,
     network: Option<RawNetwork>,
 }
@@ -177,9 +205,10 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     let containment = match raw.containment.as_deref() {
         None | Some("appcontainer") => ContainmentBackend::AppContainer,
         Some("sandbox") => ContainmentBackend::Sandbox,
+        Some("wslc") => ContainmentBackend::Wslc,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer' or 'sandbox')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', or 'wslc')",
                 other
             );
             logger.log_line(&msg);
@@ -314,6 +343,33 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     }
 
+    // Container configuration (WSLC SDK)
+    let mut container_config = ContainerConfig::default();
+    if let Some(cc) = raw.container {
+        if let Some(os) = cc.target_os {
+            container_config.target_os = os;
+        }
+        if let Some(img) = cc.image {
+            container_config.image = img;
+        }
+        container_config.cpu_count = cc.cpu_count;
+        container_config.memory_mb = cc.memory_mb;
+        if let Some(gpu) = cc.gpu {
+            container_config.gpu = gpu;
+        }
+        container_config.storage_path = cc.storage_path;
+        if let Some(mappings) = cc.port_mappings {
+            container_config.port_mappings = mappings
+                .into_iter()
+                .map(|m| PortMapping {
+                    windows_port: m.windows_port.unwrap_or(0),
+                    container_port: m.container_port.unwrap_or(0),
+                    protocol: m.protocol.unwrap_or_else(|| "tcp".to_string()),
+                })
+                .collect();
+        }
+    }
+
     Ok(CodexRequest {
         script_code,
         working_directory,
@@ -321,6 +377,7 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         containment,
         policy,
         sandbox_config,
+        container_config,
     })
 }
 

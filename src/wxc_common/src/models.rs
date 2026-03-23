@@ -12,6 +12,8 @@ pub enum ContainmentBackend {
     AppContainer,
     /// Windows Sandbox — full VM isolation via a long-lived sandbox daemon.
     Sandbox,
+    /// Linux container via WSL Container SDK (WSLC SDK).
+    Wslc,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
@@ -130,6 +132,52 @@ impl Default for ContainerPolicy {
     }
 }
 
+/// Port mapping for host↔container port forwarding.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct PortMapping {
+    /// Port on the Windows host.
+    pub windows_port: u16,
+    /// Port inside the Linux container.
+    pub container_port: u16,
+    /// Protocol: "tcp" or "udp". Default: "tcp".
+    pub protocol: String,
+}
+
+/// Configuration for the WSL Container (WSLC SDK) backend.
+/// Used when containment == Wslc.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContainerConfig {
+    /// Target OS for the container. Currently only "linux" is supported.
+    pub target_os: String,
+    /// Container image name (e.g., "alpine:latest", "python:3.12").
+    pub image: String,
+    /// Number of CPUs allocated to the session. None = host-determined.
+    pub cpu_count: Option<u32>,
+    /// Memory in MB allocated to the session. None = host-determined.
+    pub memory_mb: Option<u64>,
+    /// Enable GPU passthrough via WSLC_CONTAINER_FLAG_ENABLE_GPU.
+    pub gpu: bool,
+    /// Storage path for WSLC session image store. None = SDK default.
+    pub storage_path: Option<String>,
+    /// Host↔container port mappings.
+    pub port_mappings: Vec<PortMapping>,
+}
+
+impl Default for ContainerConfig {
+    fn default() -> Self {
+        Self {
+            target_os: "linux".to_string(),
+            image: "alpine:latest".to_string(),
+            cpu_count: None,
+            memory_mb: None,
+            gpu: false,
+            storage_path: None,
+            port_mappings: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodexRequest {
@@ -142,6 +190,8 @@ pub struct CodexRequest {
     pub policy: ContainerPolicy,
     /// Sandbox-specific configuration (used when containment == Sandbox).
     pub sandbox_config: SandboxConfig,
+    /// Container configuration (used when containment == Wslc).
+    pub container_config: ContainerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
