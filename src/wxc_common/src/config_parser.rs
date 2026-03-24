@@ -924,7 +924,7 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert!(req.policy.network_proxy.builtin_test_server);
-        assert!(req.policy.network_proxy.address.is_none());
+        assert!(req.policy.network_proxy.address.is_some());
     }
 
     #[test]
