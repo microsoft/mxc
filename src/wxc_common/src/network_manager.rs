@@ -214,19 +214,14 @@ impl NetworkManager {
             )?;
         }
 
-        match self.apply_firewall_rules(principal_id, policy, logger) {
-            Ok(true) => Ok(()),
-            other => {
+        if let Err(err) = self.apply_firewall_rules(principal_id, policy, logger) {
+            if self.proxy_coordinator.is_active() {
                 self.proxy_coordinator.stop(logger);
-                match other {
-                    Ok(false) => Err(WxcError::Firewall(
-                        "Failed to apply network firewall rules.".into(),
-                    )),
-                    Err(err) => Err(err),
-                    _ => unreachable!(),
-                }
             }
+            return Err(err);
         }
+
+        Ok(())
     }
 
     /// Stop all network resources: firewall rules, proxy policy, test proxy.

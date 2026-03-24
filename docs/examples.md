@@ -46,7 +46,7 @@ For a more comprehensive list of examples, look in the examples\ directory.
 ### Network Proxy
 
 Route AppContainer traffic through a localhost proxy. Supported with the
-`appcontainer` containment backend only. Two modes are available:
+`appcontainer` containment backend only. Two mutually exclusive modes are available:
 
 **External proxy** — connect to an already-running localhost proxy:
 

@@ -36,7 +36,7 @@ struct Cli {
 #[tokio::main]
 async fn main() {
     eprintln!(
-        "[wxc-test-proxy] WARNING: This is a testing-only proxy. \
+        "[wxc-test-proxy] *** SECURITY WARNING ***: This is a testing-only proxy. \
          Do NOT use in production."
     );
 
@@ -82,12 +82,22 @@ fn wait_for_shutdown(event_name: &str, parent_pid: u32) {
     let parent_handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, parent_pid) };
 
     let mut handles: Vec<HANDLE> = Vec::new();
+    let mut cleanup_event_index: Option<usize> = None;
+    let mut parent_process_index: Option<usize> = None;
+
     match event_handle {
-        Ok(handle) => handles.push(handle),
+        Ok(handle) => {
+            cleanup_event_index = Some(handles.len());
+            handles.push(handle);
+        }
         Err(err) => eprintln!("[wxc-test-proxy] Could not open cleanup event: {}", err),
     }
+
     match parent_handle {
-        Ok(handle) => handles.push(handle),
+        Ok(handle) => {
+            parent_process_index = Some(handles.len());
+            handles.push(handle);
+        }
         Err(err) => eprintln!("[wxc-test-proxy] Could not open parent process: {}", err),
     }
 
@@ -99,11 +109,17 @@ fn wait_for_shutdown(event_name: &str, parent_pid: u32) {
     }
 
     let result = unsafe { WaitForMultipleObjects(&handles, false, u32::MAX) };
+    let signaled_index = result.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
 
-    if result == WAIT_OBJECT_0 {
+    if cleanup_event_index == Some(signaled_index) {
         eprintln!("[wxc-test-proxy] Cleanup event signaled.");
-    } else {
+    } else if parent_process_index == Some(signaled_index) {
         eprintln!("[wxc-test-proxy] Parent process exited.");
+    } else {
+        eprintln!(
+            "[wxc-test-proxy] WaitForMultipleObjects returned unexpected value: {}",
+            result.0
+        );
     }
 
     for handle in handles {

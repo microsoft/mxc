@@ -92,6 +92,8 @@ fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError
         .as_object()
         .ok_or_else(|| WxcError::ConfigParse("network.proxy must be an object".to_string()))?;
 
+    let mut proxy_addr = ProxyAddress::new("127.0.0.1".to_string(), 0, true);
+
     if let Some(builtin_value) = obj.get("builtinTestServer") {
         if builtin_value.as_bool() != Some(true) {
             return Err(WxcError::ConfigParse(
@@ -103,32 +105,34 @@ fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError
                 "When builtinTestServer is true, no other proxy options may be set".to_string(),
             ));
         }
+
         return Ok(ProxyConfig {
-            address: None,
+            address: Some(proxy_addr),
             builtin_test_server: true,
         });
     }
 
-    let port_value = obj
-        .get("localhost")
-        .and_then(|val| val.as_u64())
-        .ok_or_else(|| {
-            WxcError::ConfigParse(
-                "network.proxy requires either 'localhost' port or 'builtinTestServer: true'"
-                    .to_string(),
-            )
-        })?;
+    if let Some(localhost) = obj.get("localhost") {
+        let port_opt = localhost.as_u64();
+        let port_val = port_opt.expect("network.proxy.localhost must be a number");
 
-    if port_value == 0 || port_value > 65535 {
-        return Err(WxcError::ConfigParse(
-            "network.proxy.localhost must be a port between 1 and 65535".to_string(),
-        ));
+        if port_val == 0 || port_val > 65535 {
+            return Err(WxcError::ConfigParse(
+                "network.proxy.localhost must be a port between 1 and 65535".to_string(),
+            ));
+        }
+
+        // Non builtin proxy with localhost and port specified
+        proxy_addr.port = port_val as u16;
+        return Ok(ProxyConfig {
+            address: Some(proxy_addr),
+            builtin_test_server: false,
+        });
     }
 
-    Ok(ProxyConfig {
-        address: Some(ProxyAddress::new(port_value as u16)),
-        builtin_test_server: false,
-    })
+    Err(WxcError::ConfigParse(
+        "network.proxy must specify either builtinTestServer or localhost".to_string(),
+    ))
 }
 
 /// Loads and parses a JSON-based code execution request.

@@ -15,7 +15,7 @@ use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLE
 
 use crate::error::WxcError;
 use crate::logger::Logger;
-use crate::models::ProxyConfig;
+use crate::models::{ProxyAddress, ProxyConfig};
 use crate::process_util::OwnedHandle;
 use crate::string_util;
 
@@ -327,7 +327,7 @@ impl ProxyCoordinator {
 
         let address = if proxy_config.builtin_test_server {
             let port = self.launch_test_proxy(logger)?;
-            crate::models::ProxyAddress::new(port)
+            ProxyAddress::new("127.0.0.1".to_string(), port, true)
         } else if let Some(ref addr) = proxy_config.address {
             addr.clone()
         } else {

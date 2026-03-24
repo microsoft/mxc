@@ -53,7 +53,7 @@ pub async fn start() -> u16 {
 async fn handle_request(req: Request<Incoming>) -> Result<ProxyResponse, BoxError> {
     if req.method() != Method::CONNECT {
         eprintln!(
-            "[test-proxy] rejected non-CONNECT: {} {}",
+            "[wxc-test-proxy] rejected non-CONNECT: {} {}",
             req.method(),
             req.uri()
         );
@@ -66,10 +66,10 @@ async fn handle_request(req: Request<Incoming>) -> Result<ProxyResponse, BoxErro
         .ok_or("CONNECT missing authority")?
         .to_string();
 
-    eprintln!("[test-proxy] CONNECT {}", authority);
+    eprintln!("[wxc-test-proxy] CONNECT {}", authority);
 
     let server = TcpStream::connect(&authority).await.map_err(|err| {
-        eprintln!("[test-proxy] connect error for {}: {}", authority, err);
+        eprintln!("[wxc-test-proxy] connect error for {}: {}", authority, err);
         err
     })?;
 
@@ -78,7 +78,7 @@ async fn handle_request(req: Request<Incoming>) -> Result<ProxyResponse, BoxErro
         let upgraded = match hyper::upgrade::on(req).await {
             Ok(upgraded) => upgraded,
             Err(err) => {
-                eprintln!("[test-proxy] upgrade failed for {}: {}", target, err);
+                eprintln!("[wxc-test-proxy] upgrade failed for {}: {}", target, err);
                 return;
             }
         };
@@ -89,7 +89,7 @@ async fn handle_request(req: Request<Incoming>) -> Result<ProxyResponse, BoxErro
             tokio::io::copy_bidirectional(&mut client, &mut server).await
         {
             eprintln!(
-                "[test-proxy] tunnel closed {} (client: {} bytes, server: {} bytes)",
+                "[wxc-test-proxy] tunnel closed {} (client: {} bytes, server: {} bytes)",
                 target, from_client, from_server
             );
         }

@@ -51,19 +51,24 @@ pub enum NetworkEnforcementMode {
     Both,
 }
 
-/// Localhost proxy address (host is always 127.0.0.1).
 #[derive(Debug, Clone)]
 pub struct ProxyAddress {
-    port: u16,
+    pub address: String,
+    pub port: u16,
+    pub is_localhost: bool,
 }
 
 impl ProxyAddress {
-    pub fn new(port: u16) -> Self {
-        Self { port }
+    pub fn new(address: String, port: u16, is_localhost: bool) -> Self {
+        Self {
+            address,
+            port,
+            is_localhost,
+        }
     }
 
     pub fn host(&self) -> &str {
-        "127.0.0.1"
+        &self.address
     }
 
     pub fn port(&self) -> u16 {
@@ -71,17 +76,20 @@ impl ProxyAddress {
     }
 
     pub fn to_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        if self.is_localhost {
+            format!("http://127.0.0.1:{}", self.port)
+        } else {
+            // For non-localhost proxies, return in "host:port" format since
+            // the scheme is not implied.
+            format!("{}:{}", self.address, self.port)
+        }
     }
 }
 
 /// Proxy configuration parsed from the `network.proxy` JSON field.
 #[derive(Debug, Default, Clone)]
 pub struct ProxyConfig {
-    /// Localhost port for an external proxy (`"localhost": <port>`).
     pub address: Option<ProxyAddress>,
-    /// When true, wxc launches its own test proxy on an OS-assigned port
-    /// (`"builtinTestServer": true`). Mutually exclusive with `address`.
     pub builtin_test_server: bool,
 }
 
