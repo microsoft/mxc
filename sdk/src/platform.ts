@@ -85,23 +85,30 @@ export function getPlatformSupport(): PlatformSupport {
 
   // Non-Windows platforms
   if (platform === 'darwin') {
-    support.reason = 'WXC is not supported on macOS';
+    support.reason = 'MXC is not supported on macOS';
     return support;
   }
 
   if (platform === 'linux') {
-    support.reason = 'WXC is not supported on Linux';
+    // Check if LXC is available
+    if (isLxcAvailable()) {
+      support.isSupported = true;
+      support.availableMethods = ['lxc'];
+      return support;
+    }
+    support.reason = 'LXC is not installed or not available on this system';
     return support;
   }
 
   if (platform !== 'win32') {
-        support.reason = 'WXC is not supported on this platform';
+        support.reason = 'MXC is not supported on this platform';
     return support;
   }
 
   const buildSupported = checkWindowsBuildVersion();
   if (buildSupported) {
     support.isSupported = true;
+    support.availableMethods = ['appcontainer'];
     return support;
   }
 
@@ -110,17 +117,42 @@ export function getPlatformSupport(): PlatformSupport {
 }
 
 /**
+ * Check if LXC is available on the system
+ */
+function isLxcAvailable(): boolean {
+  try {
+    execSync('lxc-ls --version', { encoding: 'utf-8', stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Get the Rust target triple for the current machine architecture.
  * @returns The Rust target triple string
  */
 function getRustTargetTriple(): string {
   const arch = os.arch();
+  const platform = os.platform();
+  if (platform === 'linux') {
+    return arch === 'arm64' ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu';
+  }
+  // Windows
+  return arch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
+}
+
+/**
+ * Get the Rust target triple for the current Linux machine architecture.
+ */
+function getLinuxRustTargetTriple(): string {
+  const arch = os.arch();
   switch (arch) {
     case 'arm64':
-      return 'aarch64-pc-windows-msvc';
+      return 'aarch64-unknown-linux-gnu';
     case 'x64':
     default:
-      return 'x86_64-pc-windows-msvc';
+      return 'x86_64-unknown-linux-gnu';
   }
 }
 
@@ -157,14 +189,54 @@ export function findWxcExecutable(): string | null {
 }
 
 /**
+ * Verify that an executable exists at the given path
+ * @param execPath - Path to verify
+ * @returns true if the executable exists and is a file, false otherwise
+ */
+function verifyExecutable(execPath: string): boolean {
+  try {
+    return fs.existsSync(execPath) && fs.statSync(execPath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Verify that a wxc-exec executable exists at the given path
  * @param wxcPath - Path to verify
  * @returns true if the executable exists and is a file, false otherwise
  */
 function verifyWxcExecutable(wxcPath: string): boolean {
-  try {
-    return fs.existsSync(wxcPath) && fs.statSync(wxcPath).isFile();
-  } catch {
-    return false;
+  return verifyExecutable(wxcPath);
+}
+
+/**
+ * Find the lxc-exec executable on Linux
+ * Searches in common locations relative to the SDK package.
+ * @returns Path to lxc-exec if found, null otherwise
+ */
+export function findLxcExecutable(): string | null {
+  const targetTriple = getLinuxRustTargetTriple();
+  const targetDir = path.join(__dirname, '..', '..', 'src', 'target');
+
+  const possiblePaths = [
+    // Bundled in the SDK package
+    path.join(__dirname, '..', 'bin', targetTriple, 'lxc-exec'),
+    // Architecture-specific release build
+    path.join(targetDir, targetTriple, 'release', 'lxc-exec'),
+    // Architecture-specific debug build
+    path.join(targetDir, targetTriple, 'debug', 'lxc-exec'),
+    // Default Cargo release build
+    path.join(targetDir, 'release', 'lxc-exec'),
+    // Default Cargo debug build
+    path.join(targetDir, 'debug', 'lxc-exec'),
+  ];
+
+  for (const lxcPath of possiblePaths) {
+    if (verifyExecutable(lxcPath)) {
+      return lxcPath;
+    }
   }
+
+  return null;
 }

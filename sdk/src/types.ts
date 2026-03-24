@@ -62,8 +62,12 @@ export interface WxcConfiguration {
   workingDirectory?: string;
   /** Script execution timeout in milliseconds (default: 0 = no timeout) */
   timeout?: number;
+  /** Containment backend: "appcontainer" (Windows), "sandbox" (Windows), or "lxc" (Linux) */
+  containment?: 'appcontainer' | 'sandbox' | 'lxc';
   /** AppContainer configuration */
   appContainer?: WxcAppContainerConfig;
+  /** LXC container configuration (Linux only) */
+  lxc?: WxcLxcConfig;
   /** Filesystem access configuration */
   filesystem?: WxcFilesystemConfig;
   /** Network access configuration */
@@ -96,9 +100,23 @@ export type SandboxPolicy = {
 }
 
 /**
+ * LXC container configuration for Linux sandbox
+ */
+export interface WxcLxcConfig {
+  /** Container name (default: auto-generated) */
+  containerName?: string;
+  /** Linux distribution for container rootfs (default: "alpine") */
+  distribution?: string;
+  /** Distribution release version (default: "3.19") */
+  release?: string;
+  /** Whether to destroy the container after execution (default: true) */
+  destroyOnExit?: boolean;
+}
+
+/**
  * Sandboxing methods available on the platform
  */
-export type SandboxingMethod = 'appcontainer';
+export type SandboxingMethod = 'appcontainer' | 'lxc';
 
 /**
  * Platform support information

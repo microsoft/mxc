@@ -152,6 +152,45 @@ xperf -stop
 xperf -merge user.etl kernel.etl merged.etl
 ```
 
+## Linux Support (LXC)
+
+MXC also supports Linux via [LXC (Linux Containers)](https://linuxcontainers.org/lxc/). On Linux, the `lxc-exec` binary provides container-based isolation using Linux namespaces, bind mounts for filesystem policy, and iptables/nftables for network policy.
+
+For full details on the LXC backend, see [docs/lxc-backend.md](docs/lxc-backend.md).
+
+### Building on Linux
+
+Use `build.sh` from the repo root:
+
+```bash
+./build.sh              # Release build
+./build.sh --debug      # Debug build
+./build.sh --rust-only  # Only build Rust binaries, skip SDK/CLI
+./build.sh --help       # Show all options
+```
+
+This will:
+1. Build the Rust `lxc-exec` binary
+2. Copy the binary into `sdk/bin/<target-triple>/` so it is bundled with the SDK package
+3. Build the TypeScript SDK and CLI
+
+### LXC Example Configurations
+
+See `examples/11_lxc_hello_world.json`, `examples/12_lxc_filesystem_access.json`, and `examples/13_lxc_network_restricted.json` for LXC-specific examples.
+
+### Running on Linux
+
+```bash
+# Run with config file
+./lxc-exec config.json
+
+# Run with base64-encoded config
+./lxc-exec --config-base64 <base64-string>
+
+# Run with debug output
+./lxc-exec --debug config.json
+```
+
 ## License
 
 See LICENSE file for details.

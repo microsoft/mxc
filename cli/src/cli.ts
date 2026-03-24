@@ -119,8 +119,9 @@ program
   .action(async (configPath: string, options: { debug?: boolean; wxcPath?: string }) => {
     try {
       // Check platform support
-      if (!getPlatformSupport().isSupported) {
-        console.error('Error: WXC is only supported on Windows');
+      const platformInfo = getPlatformSupport();
+      if (!platformInfo.isSupported) {
+        console.error(`Error: MXC is not supported on this platform: ${platformInfo.reason}`);
         process.exit(1);
       }
 
@@ -167,11 +168,22 @@ program
 
       console.log('Spawning sandboxed process using SDK...');
 
+       // Determine container name based on containment configuration.
+       // TODO: Rationalize these together in the schema.
+       let containerName: string | undefined;
+       if ((config as any).containment === 'lxc') {
+         // For LXC configurations, prefer the LXC-specific container name.
+         containerName = (config as any).lxc?.containerName;
+       } else {
+         // For other configurations (e.g., AppContainer), use the app container name.
+         containerName = (config as any).appContainer?.name;
+       }
+
       // Spawn the process
       // NOTE: For now, we will force winpty.
       const pty = spawnSandbox(config.script, policy, {
         debug: options.debug ?? false
-      }, config.workingDirectory, config.appContainer?.name);
+      }, config.workingDirectory, containerName);
 
       // Handle output
       pty.onData((data: string) => {
@@ -196,7 +208,7 @@ program
     try {
       const support = getPlatformSupport();
 
-      console.log('WXC Platform Support Information');
+      console.log('MXC Platform Support Information');
       console.log('='.repeat(50));
       console.log(`Supported: ${support.isSupported ? 'Yes' : 'No'}`);
 
