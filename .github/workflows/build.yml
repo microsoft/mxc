@@ -76,6 +76,7 @@ jobs:
           path: |
             src/target/${{ matrix.target }}/release/wxc-exec.exe
             src/target/${{ matrix.target }}/release/winhttp-proxy-shim.exe
+            src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
 
 
   # Build and package the TypeScript SDK with bundled wxc-exec binaries

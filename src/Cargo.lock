@@ -1117,12 +1117,19 @@ name = "wxc_test_driver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "wxc_test_proxy"
+version = "0.1.0"
+dependencies = [
  "bytes",
+ "clap",
  "http-body-util",
  "hyper",
  "hyper-util",
- "serde_json",
  "tokio",
+ "windows",
 ]
 
 [[package]]

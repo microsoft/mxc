@@ -37,9 +37,7 @@ WXC uses a JSON configuration file with the following structure:
       ],
       "blockedHosts": [],                  // Blocked hostnames
       "removeRulesOnExit": true,           // Remove firewall rules after execution
-      "proxy": {
-        "localhost": 8080                  // Port of already-running localhost proxy
-      }
+      "proxy": { "localhost": 8080 }       // Port of a localhost proxy
     }
 }
 ```

@@ -27,7 +27,7 @@ if ($Release) {
 }
 
 $ProxyConfigs = @(
-    "proxy_localhost_test.json"
+    "proxy_builtin_test.json"
 )
 
 foreach ($configFile in $ProxyConfigs) {

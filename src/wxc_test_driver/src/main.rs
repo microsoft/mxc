@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-mod test_proxy;
-
 use std::env;
 use std::fs;
 use std::process::Command;
@@ -11,33 +9,19 @@ const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
 const RESET: &str = "\x1b[0m";
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: wxc-test-driver <config_path|config_dir> [--debug] [--proxy]");
+        eprintln!("Usage: wxc-test-driver <config_path|config_dir> [--debug]");
         std::process::exit(1);
     }
     let config_path = std::path::Path::new(&args[1]);
     let debug = args.iter().any(|arg| arg == "--debug");
-    let use_proxy = args.iter().any(|arg| arg == "--proxy");
 
-    let proxy_port = if use_proxy {
-        let port = test_proxy::start().await;
-        println!("Test proxy started on 127.0.0.1:{}", port);
-        Some(port)
-    } else {
-        None
-    };
-
-    run_configs(config_path, debug, proxy_port)
+    run_configs(config_path, debug)
 }
 
-fn run_configs(
-    config_path: &std::path::Path,
-    debug: bool,
-    proxy_port: Option<u16>,
-) -> anyhow::Result<()> {
+fn run_configs(config_path: &std::path::Path, debug: bool) -> anyhow::Result<()> {
     let exe_dir = env::current_exe()?
         .parent()
         .expect("Failed to get executable directory")
@@ -61,21 +45,9 @@ fn run_configs(
         entries
     };
 
-    for (index, path) in configs.iter().enumerate() {
-        // When --proxy is used, patch the config's proxy.localhost with the actual port.
-        let config_arg = if let Some(port) = proxy_port {
-            let content = fs::read_to_string(path)?;
-            let patched = patch_proxy_port(&content, port);
-            let temp =
-                env::temp_dir().join(format!("wxc-test-{}-{}.json", std::process::id(), index));
-            fs::write(&temp, &patched)?;
-            temp
-        } else {
-            path.clone()
-        };
-
+    for path in &configs {
         let mut cmd = Command::new(&wxc_path);
-        cmd.arg(&config_arg);
+        cmd.arg(path);
         if debug {
             cmd.arg("--debug");
         }
@@ -102,30 +74,7 @@ fn run_configs(
         if !output.stderr.is_empty() {
             println!("STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
         }
-
-        // Clean up patched temp config.
-        if proxy_port.is_some() {
-            let _ = fs::remove_file(&config_arg);
-        }
     }
 
     Ok(())
-}
-
-/// Patch a JSON config string to set network.proxy.localhost to the given port.
-fn patch_proxy_port(json_str: &str, port: u16) -> String {
-    let mut value = match serde_json::from_str::<serde_json::Value>(json_str) {
-        Ok(val) => val,
-        Err(_) => return json_str.to_string(),
-    };
-
-    let proxy = serde_json::json!({ "localhost": port });
-
-    if let Some(network) = value.get_mut("network").and_then(|val| val.as_object_mut()) {
-        network.insert("proxy".to_string(), proxy);
-    } else if let Some(root) = value.as_object_mut() {
-        root.insert("network".to_string(), serde_json::json!({ "proxy": proxy }));
-    }
-
-    serde_json::to_string_pretty(&value).unwrap_or_else(|_| json_str.to_string())
 }

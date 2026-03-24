@@ -16,11 +16,11 @@ pub mod appcontainer;
 #[cfg(target_os = "windows")]
 pub mod filesystem_bfs;
 #[cfg(target_os = "windows")]
-pub mod network_firewall;
-#[cfg(target_os = "windows")]
-pub mod network_proxy;
+pub mod network_manager;
 #[cfg(target_os = "windows")]
 pub mod process_util;
+#[cfg(target_os = "windows")]
+pub mod proxy_coordinator;
 #[cfg(target_os = "windows")]
 pub mod sandbox_protocol;
 #[cfg(target_os = "windows")]
