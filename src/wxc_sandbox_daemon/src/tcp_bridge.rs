@@ -91,7 +91,7 @@ async fn wait_for_ready(control: &mut TcpStream, timeout: std::time::Duration) -
 
 /// Send an EXEC request to the guest and relay stdin/stdout/stderr.
 ///
-/// Returns the exit code from the guest agent's Exit notification.
+/// Returns `(exit_code, error_message, stdout_bytes, stderr_bytes)`.
 pub async fn execute_on_guest(
     conn: &mut GuestConnection,
     exec_id: &str,
@@ -99,7 +99,7 @@ pub async fn execute_on_guest(
     working_directory: &str,
     timeout_ms: u32,
     host_stdin: &[u8],
-) -> Result<(i32, String)> {
+) -> Result<(i32, String, Vec<u8>, Vec<u8>)> {
     // Send EXEC command.
     let exec_msg = ControlMessage::Exec(ExecRequest {
         exec_id: exec_id.to_string(),
@@ -174,9 +174,9 @@ pub async fn execute_on_guest(
     let (stdout_result, stderr_result, exit_result) =
         tokio::join!(stdout_task, stderr_task, exit_task);
 
-    let _stdout = stdout_result.unwrap_or_default();
-    let _stderr = stderr_result.unwrap_or_default();
+    let stdout = stdout_result.unwrap_or_default();
+    let stderr = stderr_result.unwrap_or_default();
     let (exit_code, error_message) = exit_result?;
 
-    Ok((exit_code, error_message))
+    Ok((exit_code, error_message, stdout, stderr))
 }

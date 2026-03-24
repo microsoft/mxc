@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::tcp_bridge;
 use crate::{rendezvous, sandbox_vm, DaemonState};
+use wxc_common::string_util::base64_encode;
 
 /// Run the named-pipe server loop.
 ///
@@ -44,7 +45,7 @@ pub async fn run(pipe_name: &str, state: Arc<Mutex<DaemonState>>) -> Result<()> 
 ///
 /// Protocol (line-based, simple):
 ///   Client → Daemon: `EXEC <json-request>\n`
-///   Daemon → Client: `RESULT <exit-code> <error-message>\n`
+///   Daemon → Client: `RESULT <exit-code> <stdout-base64> <stderr-base64> <error-message>\n`
 async fn handle_client(
     stream: tokio::net::TcpStream,
     state: Arc<Mutex<DaemonState>>,
@@ -69,8 +70,32 @@ async fn handle_client(
     let req: ClientExecRequest =
         serde_json::from_str(json_payload).context("parse client exec request")?;
 
+    match execute_request(&req, &state).await {
+        Ok(response) => {
+            writer.write_all(response.as_bytes()).await.ok();
+        }
+        Err(e) => {
+            let error_response = format!("ERROR {:#}\n", e);
+            writer.write_all(error_response.as_bytes()).await.ok();
+        }
+    }
+
+    // Update activity timestamp.
+    {
+        let mut s = state.lock().await;
+        s.last_activity = std::time::Instant::now();
+    }
+
+    Ok(())
+}
+
+/// Execute the client request and return the formatted response line.
+async fn execute_request(
+    req: &ClientExecRequest,
+    state: &Arc<Mutex<DaemonState>>,
+) -> Result<String> {
     // Ensure sandbox is running and we have a guest connection.
-    ensure_sandbox_ready(&state).await?;
+    ensure_sandbox_ready(state).await?;
 
     // Update activity timestamp.
     {
@@ -79,7 +104,7 @@ async fn handle_client(
     }
 
     // Execute on the guest.
-    let (exit_code, error_message) = {
+    let (exit_code, error_message, stdout_bytes, stderr_bytes) = {
         let mut s = state.lock().await;
         let conn = s.guest_connection.as_mut().context("no guest connection")?;
 
@@ -95,17 +120,13 @@ async fn handle_client(
         .await?
     };
 
-    // Send result back to wxc-exec client.
-    let response = format!("RESULT {} {}\n", exit_code, error_message);
-    writer.write_all(response.as_bytes()).await.ok();
-
-    // Update activity timestamp.
-    {
-        let mut s = state.lock().await;
-        s.last_activity = std::time::Instant::now();
-    }
-
-    Ok(())
+    // Format: RESULT <exit-code> <stdout-base64> <stderr-base64> <error-message>\n
+    let stdout_b64 = base64_encode(&stdout_bytes);
+    let stderr_b64 = base64_encode(&stderr_bytes);
+    Ok(format!(
+        "RESULT {} {} {} {}\n",
+        exit_code, stdout_b64, stderr_b64, error_message
+    ))
 }
 
 /// Ensure the sandbox VM is running and we have a guest connection.

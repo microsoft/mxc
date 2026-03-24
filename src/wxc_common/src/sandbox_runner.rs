@@ -12,6 +12,7 @@ use std::time::Duration;
 use crate::logger::Logger;
 use crate::models::{CodexRequest, SandboxConfig, ScriptResponse};
 use crate::script_runner::ScriptRunner;
+use crate::string_util::base64_decode;
 
 /// Script runner that delegates execution to the Windows Sandbox daemon.
 pub struct SandboxScriptRunner {
@@ -132,25 +133,50 @@ impl SandboxScriptRunner {
 
         let response_line = response_line.trim();
         if let Some(rest) = response_line.strip_prefix("RESULT ") {
-            // First token is exit code, rest is error message.
-            let (code_str, error_msg) = match rest.find(' ') {
-                Some(pos) => (&rest[..pos], rest[pos + 1..].to_string()),
-                None => (rest, String::new()),
-            };
-            let exit_code = code_str.parse::<i32>().unwrap_or(-1);
+            // Extended format: RESULT <exit-code> <stdout-base64> <stderr-base64> <error-message>
+            let parts: Vec<&str> = rest.splitn(4, ' ').collect();
+            if parts.len() >= 3 {
+                let exit_code = parts[0].parse::<i32>().unwrap_or(-1);
+                let stdout_text = base64_decode(parts[1])
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .unwrap_or_default();
+                let stderr_text = base64_decode(parts[2])
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .unwrap_or_default();
+                let error_msg = if parts.len() == 4 {
+                    parts[3].to_string()
+                } else {
+                    String::new()
+                };
 
-            if error_msg.is_empty() {
                 ScriptResponse {
                     exit_code,
-                    standard_out: String::new(),
-                    standard_err: String::new(),
-                    error_message: String::new(),
+                    standard_out: stdout_text,
+                    standard_err: stderr_text.clone(),
+                    error_message: if error_msg.is_empty() {
+                        stderr_text
+                    } else {
+                        error_msg
+                    },
                 }
             } else {
+                // Fallback: legacy format "RESULT <exit-code> <error-message>"
+                let (code_str, error_msg) = match rest.find(' ') {
+                    Some(pos) => (&rest[..pos], rest[pos + 1..].to_string()),
+                    None => (rest, String::new()),
+                };
+                let exit_code = code_str.parse::<i32>().unwrap_or(-1);
+
                 ScriptResponse {
                     exit_code,
                     standard_out: String::new(),
-                    standard_err: error_msg.clone(),
+                    standard_err: if error_msg.is_empty() {
+                        String::new()
+                    } else {
+                        error_msg.clone()
+                    },
                     error_message: error_msg,
                 }
             }
