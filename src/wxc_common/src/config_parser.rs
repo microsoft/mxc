@@ -113,8 +113,13 @@ fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError
     }
 
     if let Some(localhost) = obj.get("localhost") {
-        let port_opt = localhost.as_u64();
-        let port_val = port_opt.expect("network.proxy.localhost must be a number");
+        let port_val = if let Some(port) = localhost.as_u64() {
+            port
+        } else {
+            return Err(WxcError::ConfigParse(
+                "network.proxy.localhost must be a number".to_string(),
+            ));
+        };
 
         if port_val == 0 || port_val > 65535 {
             return Err(WxcError::ConfigParse(
