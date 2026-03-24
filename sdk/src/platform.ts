@@ -38,40 +38,37 @@ function queryWindowsRegistry(key: string, valueName: string): string | null {
  * Check Windows build version requirements for WXC
  * 
  * Requirements:
- * - Registry key HKLM\Software\Microsoft\Windows NT\CurrentVersion\BuildLab must exist
- * - BuildLab format: buildNumber.branch.buildDate
- * - Branch must be "ge_current_directwinai*"
- * - Build number must be >= 26559
+ * - CurrentBuild (major version) must be >= 26100
+ * - UBR (minor version) must be >= 7965 (Windows Insider 3A or later)
+ * - UBR should not be checked for build versions >= 26500 as they may have different versioning
  * 
  * @returns true if Windows build meets requirements, false otherwise
  */
 function checkWindowsBuildVersion(): boolean {
-  // Query Windows Registry for BuildLab
-  const buildLab = queryWindowsRegistry(
-    'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion',
-    'BuildLab'
-  );
+  const registryPath = 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion';
 
-  if (!buildLab) {
+  const currentBuild = queryWindowsRegistry(registryPath, 'CurrentBuild');
+  if (!currentBuild) {
     return false;
   }
 
-  // Split BuildLab into parts: buildNumber.branch.buildDate
-  const parts = buildLab.split('.');
-  if (parts.length < 3) {
+  const majorVersion = parseInt(currentBuild, 10);
+  if (isNaN(majorVersion) || majorVersion < 26100) {
     return false;
   }
 
-  const buildNumber = parseInt(parts[0], 10);
-  const branch = parts[1];
-
-  // Check branch
-  if (!branch.startsWith('ge_current_directwinai')) {
+  const ubrValue = queryWindowsRegistry(registryPath, 'UBR');
+  if (!ubrValue) {
     return false;
   }
 
-  // Check build number
-  if (isNaN(buildNumber) || buildNumber < 26559) {
+  // UBR is stored as REG_DWORD (hex format), use Number() to parse
+  const minorVersion = Number(ubrValue);
+  if (isNaN(minorVersion)) {
+    return false;
+  }
+
+  if (majorVersion >= 26100 && majorVersion <= 26500 && minorVersion < 7965) {
     return false;
   }
 
@@ -88,7 +85,7 @@ export function getPlatformSupport(): PlatformSupport {
 
   // Non-Windows platforms
   if (platform === 'darwin') {
-    support.reason = 'WXC is not supported on macOS';
+    support.reason = 'MXC is not supported on macOS';
     return support;
   }
 
@@ -104,7 +101,7 @@ export function getPlatformSupport(): PlatformSupport {
   }
 
   if (platform !== 'win32') {
-        support.reason = 'WXC is not supported on this platform';
+        support.reason = 'MXC is not supported on this platform';
     return support;
   }
 

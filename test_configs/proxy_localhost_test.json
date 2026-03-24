@@ -1,0 +1,12 @@
+{
+  "script": "python -c \"import urllib.request\n\nprint('Test 1: Requesting api.github.com...')\ntry:\n    response = urllib.request.urlopen('https://api.github.com', timeout=10)\n    print(f'  Status: {response.status}')\nexcept Exception as err:\n    print(f'  Error: {err}')\n\nprint()\nprint('Done.')\"",
+  "timeout": 30000,
+  "appContainer": {
+    "name": "CLI-Proxy-Default-Test",
+    "capabilities": ["internetClient"],
+    "learningMode": true
+  },
+  "network": {
+    "proxy": { "localhost": 8080 }
+  }
+}

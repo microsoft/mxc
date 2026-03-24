@@ -78,6 +78,46 @@ pub enum NetworkEnforcementMode {
     Both,
 }
 
+/// Proxy address — currently only localhost is supported.
+#[derive(Debug, Clone)]
+pub enum ProxyAddress {
+    Localhost(u16),
+    // Custom(String, u16) — future: user-specified host:port
+}
+
+impl ProxyAddress {
+    pub fn host(&self) -> &str {
+        match self {
+            ProxyAddress::Localhost(_) => "127.0.0.1",
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        match self {
+            ProxyAddress::Localhost(port) => *port,
+        }
+    }
+
+    pub fn to_url(&self) -> String {
+        format!("http://{}:{}", self.host(), self.port())
+    }
+}
+
+/// Proxy configuration for the network section.
+///
+/// When enabled, wxc routes AppContainer traffic through an already-running
+/// proxy. The proxy is responsible for any application-layer filtering.
+#[derive(Debug, Default, Clone)]
+pub struct ProxyConfig {
+    pub address: Option<ProxyAddress>,
+}
+
+impl ProxyConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.address.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContainerPolicy {
@@ -93,6 +133,8 @@ pub struct ContainerPolicy {
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
     pub remove_firewall_rules_on_exit: bool,
+    #[serde(skip)]
+    pub network_proxy: ProxyConfig,
 }
 
 impl Default for ContainerPolicy {
@@ -110,6 +152,7 @@ impl Default for ContainerPolicy {
             allowed_hosts: Vec::new(),
             blocked_hosts: Vec::new(),
             remove_firewall_rules_on_exit: true,
+            network_proxy: ProxyConfig::default(),
         }
     }
 }

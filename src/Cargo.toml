@@ -1,6 +1,9 @@
 [workspace]
-members = ["wxc", "wxc_common", "wxc_test_driver", "wxc_sandbox_agent", "wxc_sandbox_daemon", "lxc", "lxc_common"]
+members = ["wxc", "wxc_common", "wxc_test_driver", "wxc_sandbox_agent", "wxc_sandbox_daemon", "wxc_winhttp_proxy_shim", "lxc", "lxc_common"]
 resolver = "3"
+
+[workspace.package]
+edition = "2021"
 
 [workspace.dependencies]
 windows = { version = "0.62", features = [
@@ -21,6 +24,9 @@ windows = { version = "0.62", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_Security_Isolation",
     "Win32_System_Variant",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_System_Registry",
 ] }
 windows-core = "0.62"
 serde = { version = "1", features = ["derive"] }

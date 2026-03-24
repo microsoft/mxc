@@ -10,8 +10,8 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, ContainerPolicy, ContainmentBackend, LxcConfig, NetworkEnforcementMode,
-    NetworkPolicy, SandboxConfig,
+    CodexRequest, ContainerPolicy, ContainmentBackend, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
+    ProxyAddress, ProxyConfig, SandboxConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -53,6 +53,7 @@ struct RawNetwork {
     blocked_hosts: Option<Vec<String>>,
     #[serde(rename = "removeRulesOnExit")]
     remove_rules_on_exit: Option<bool>,
+    proxy: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -92,6 +93,33 @@ struct RawConfig {
 }
 
 // ---------- Public API ----------
+
+/// Parse the `proxy` field: `{ "localhost": <port> }`.
+fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| WxcError::ConfigParse("network.proxy must be an object".to_string()))?;
+
+    let port_value = obj
+        .get("localhost")
+        .and_then(|val| val.as_u64())
+        .ok_or_else(|| {
+            WxcError::ConfigParse(
+                "network.proxy requires a 'localhost' port (only localhost is currently supported)"
+                    .to_string(),
+            )
+        })?;
+
+    if port_value == 0 || port_value > 65535 {
+        return Err(WxcError::ConfigParse(
+            "network.proxy.localhost must be a port between 1 and 65535".to_string(),
+        ));
+    }
+
+    Ok(ProxyConfig {
+        address: Some(ProxyAddress::Localhost(port_value as u16)),
+    })
+}
 
 /// Loads and parses a JSON-based code execution request.
 ///
@@ -257,6 +285,17 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
 
     // Network section
     if let Some(net) = raw.network {
+        if let Some(proxy_value) = net.proxy {
+            let proxy_config = parse_proxy_config(&proxy_value)?;
+            if proxy_config.is_enabled() && containment != ContainmentBackend::AppContainer {
+                let msg =
+                    "Network proxy is only supported with the 'appcontainer' containment backend";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+            policy.network_proxy = proxy_config;
+        }
+
         if let Some(p) = net.default_policy {
             policy.default_network_policy = match p.as_str() {
                 "allow" => NetworkPolicy::Allow,
@@ -775,5 +814,98 @@ mod tests {
         assert_eq!(req.containment, ContainmentBackend::Sandbox);
         assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
         assert_eq!(req.sandbox_config.daemon_pipe_name, "my-custom-pipe");
+    }
+
+    // ====== Network proxy configuration tests ======
+
+    #[test]
+    fn no_proxy_leaves_default() {
+        let json = r#"{"script": "echo test", "network": {"defaultPolicy": "block"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.network_proxy.is_enabled());
+    }
+
+    #[test]
+    fn proxy_localhost_port() {
+        let json = r#"{
+            "script": "echo test",
+            "network": {
+                "proxy": { "localhost": 8080 }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert_eq!(
+            req.policy.network_proxy.address.as_ref().unwrap().port(),
+            8080
+        );
+    }
+
+    #[test]
+    fn proxy_with_firewall_fields() {
+        let json = r#"{
+            "script": "echo test",
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["api.github.com"],
+                "proxy": { "localhost": 9090 }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(
+            req.policy.network_proxy.address.as_ref().unwrap().port(),
+            9090
+        );
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+    }
+
+    #[test]
+    fn proxy_rejected_with_sandbox() {
+        let json =
+            r#"{"script":"x","containment":"sandbox","network":{"proxy":{"localhost":8080}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_rejects_port_zero() {
+        let json = r#"{"script":"x","network":{"proxy":{"localhost":0}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_rejects_missing_localhost() {
+        let json = r#"{"script":"x","network":{"proxy":{}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_rejects_non_object() {
+        let json = r#"{"script":"x","network":{"proxy":true}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
     }
 }

@@ -37,12 +37,54 @@ const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
 const PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY: usize = 0x0002_000F;
 const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
 const EXTENDED_STARTUPINFO_PRESENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0008_0000);
+const CREATE_UNICODE_ENVIRONMENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0000_0400);
 
 /// SE_GROUP_ENABLED attribute value for SID_AND_ATTRIBUTES.
 const SE_GROUP_ENABLED: u32 = 0x0000_0004;
 
 /// HRESULT value for ERROR_ALREADY_EXISTS (183 / 0xB7).
 const HRESULT_ERROR_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32;
+
+/// Proxy-related env var names to strip/override when building the child env block.
+const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
+
+/// Build a Unicode environment block for CreateProcessW with proxy env vars injected.
+///
+/// Copies the current process environment, strips any existing proxy vars
+/// (case-insensitive), injects HTTP_PROXY/HTTPS_PROXY pointing to the
+/// localhost proxy, and returns a double-null-terminated UTF-16 block.
+fn build_proxy_env_block(address: &crate::models::ProxyAddress) -> Vec<u16> {
+    let proxy_url = address.to_url();
+    let mut entries: Vec<(String, String)> = Vec::new();
+
+    for (key, value) in std::env::vars_os() {
+        let key_str = key.to_string_lossy();
+        let is_proxy_var = PROXY_VAR_NAMES
+            .iter()
+            .any(|name| key_str.eq_ignore_ascii_case(name));
+        if !is_proxy_var {
+            entries.push((key_str.into_owned(), value.to_string_lossy().into_owned()));
+        }
+    }
+
+    entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
+    entries.push(("HTTPS_PROXY".to_string(), proxy_url));
+
+    // Sort case-insensitively by key (required by CreateProcessW).
+    entries.sort_by(|(key_a, _), (key_b, _)| {
+        key_a.to_ascii_uppercase().cmp(&key_b.to_ascii_uppercase())
+    });
+
+    let mut block = Vec::new();
+    for (key, value) in &entries {
+        for ch in format!("{}={}", key, value).encode_utf16() {
+            block.push(ch);
+        }
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
 
 /// A `SID_AND_ATTRIBUTES`-compatible struct used to build the capabilities array.
 /// Using a manual struct avoids issues with conditional availability of
@@ -90,6 +132,7 @@ struct SecurityCapabilities {
 pub struct AppContainerScriptRunner {
     app_container_name: String,
     app_container_sid: PSID,
+    proxy_address: Option<crate::models::ProxyAddress>,
 }
 
 impl AppContainerScriptRunner {
@@ -97,6 +140,7 @@ impl AppContainerScriptRunner {
         Self {
             app_container_name: String::new(),
             app_container_sid: PSID(ptr::null_mut()),
+            proxy_address: None,
         }
     }
 
@@ -346,6 +390,20 @@ impl AppContainerScriptRunner {
             PCWSTR(working_dir_wide.as_ptr())
         };
 
+        // Build an explicit environment block when proxy is active.
+        // This avoids mutating process-global env vars (which isn't thread-safe).
+        let env_block: Option<Vec<u16>> = self.proxy_address.as_ref().map(build_proxy_env_block);
+
+        let env_ptr = env_block
+            .as_ref()
+            .map(|block| block.as_ptr() as *const core::ffi::c_void);
+
+        let creation_flags = if env_block.is_some() {
+            PROCESS_CREATION_FLAGS(EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_UNICODE_ENVIRONMENT.0)
+        } else {
+            EXTENDED_STARTUPINFO_PRESENT
+        };
+
         // --- Create process ---
         let mut pi = PROCESS_INFORMATION::default();
 
@@ -356,14 +414,14 @@ impl AppContainerScriptRunner {
                 None,
                 None,
                 true,
-                EXTENDED_STARTUPINFO_PRESENT,
-                None,
+                creation_flags,
+                env_ptr,
                 working_dir_pcwstr,
                 &si_ex.StartupInfo as *const STARTUPINFOW,
                 &mut pi,
             )
-            .map_err(|e| WxcError::Process(format!("CreateProcessW failed: {}", e)))?;
         }
+        .map_err(|err| WxcError::Process(format!("CreateProcessW failed: {}", err)))?;
 
         logger.log_line(&format!(
             "Process created successfully (PID: {})",
@@ -499,10 +557,10 @@ impl Default for AppContainerScriptRunner {
 }
 
 impl ScriptRunner for AppContainerScriptRunner {
-    /// Template method: validate → initialize → configure FS → configure network → run → cleanup.
     fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         use crate::filesystem_bfs::FileSystemBfsManager;
         use crate::network_firewall::NetworkFirewallManager;
+        use crate::network_proxy::NetworkProxyManager;
         use crate::validator::validate_request;
 
         if let Err(e) = validate_request(request) {
@@ -519,13 +577,32 @@ impl ScriptRunner for AppContainerScriptRunner {
             return ScriptResponse::error(&e.to_string());
         }
 
+        let mut network_proxy_manager = NetworkProxyManager::new();
+        if request.policy.network_proxy.is_enabled() {
+            match network_proxy_manager.start(
+                &request.policy,
+                &principal_id,
+                self.app_container_sid,
+                logger,
+            ) {
+                Ok(()) => {
+                    self.proxy_address = network_proxy_manager.address().cloned();
+                }
+                Err(err) => {
+                    return ScriptResponse::error(&err.to_string());
+                }
+            }
+        }
+
         let mut fw_manager = NetworkFirewallManager::new();
         match fw_manager.apply_firewall_rules(&principal_id, &request.policy, logger) {
             Ok(true) => {}
             Ok(false) => {
+                network_proxy_manager.stop(logger);
                 return ScriptResponse::error("Failed to apply network firewall rules.");
             }
             Err(e) => {
+                network_proxy_manager.stop(logger);
                 return ScriptResponse::error(&e.to_string());
             }
         }
@@ -539,6 +616,9 @@ impl ScriptRunner for AppContainerScriptRunner {
 
         if fw_manager.rules_applied() && request.policy.remove_firewall_rules_on_exit {
             let _ = fw_manager.remove_firewall_rules(logger);
+        }
+        if network_proxy_manager.is_active() {
+            network_proxy_manager.stop(logger);
         }
         if bfs_manager.configured() && request.policy.clear_policy_on_exit {
             bfs_manager.remove_configuration(logger);

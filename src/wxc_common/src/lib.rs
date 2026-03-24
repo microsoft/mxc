@@ -18,6 +18,8 @@ pub mod filesystem_bfs;
 #[cfg(target_os = "windows")]
 pub mod network_firewall;
 #[cfg(target_os = "windows")]
+pub mod network_proxy;
+#[cfg(target_os = "windows")]
 pub mod process_util;
 #[cfg(target_os = "windows")]
 pub mod sandbox_protocol;
