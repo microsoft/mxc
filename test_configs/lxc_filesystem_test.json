@@ -1,0 +1,12 @@
+{
+    "script": "cat /mnt/readonly/test.txt && echo 'write test' > /mnt/readwrite/output.txt",
+    "containment": "lxc",
+    "lxc": {
+        "distribution": "alpine",
+        "release": "3.19"
+    },
+    "filesystem": {
+        "readonlyPaths": ["/mnt/readonly"],
+        "readwritePaths": ["/mnt/readwrite"]
+    }
+}

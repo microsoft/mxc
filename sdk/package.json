@@ -1,7 +1,7 @@
 {
   "name": "@microsoft/mxc-sdk",
   "version": "0.1.5",
-  "description": "TypeScript SDK for MXC (Micfosoft eXecution Containers)",
+  "description": "TypeScript SDK for MXC (Microsoft eXecution Containers)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [ "bin/", "dist/" ],
@@ -27,12 +27,12 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "node-pty": "^1.0.0"
+    "node-pty": "^1.2.0-beta.12"
   },
   "engines": {
     "node": ">=16.0.0"
   },
-  "os": ["win32"],
+  "os": ["win32", "linux"],
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
   }

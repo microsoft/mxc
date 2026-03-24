@@ -1,0 +1,9 @@
+{
+    "script": "echo 'Hello from LXC' && uname -a",
+    "containment": "lxc",
+    "lxc": {
+        "distribution": "alpine",
+        "release": "3.19",
+        "destroyOnExit": true
+    }
+}

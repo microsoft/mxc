@@ -1,0 +1,14 @@
+{
+    "script": "ls -la /mnt/shared && echo 'test' > /mnt/output/result.txt && cat /mnt/output/result.txt",
+    "containment": "lxc",
+    "lxc": {
+        "distribution": "alpine",
+        "release": "3.19",
+        "destroyOnExit": true
+    },
+    "filesystem": {
+        "readonlyPaths": ["/mnt/shared"],
+        "readwritePaths": ["/mnt/output"],
+        "deniedPaths": ["/etc/shadow"]
+    }
+}

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The MXC CLI is a TypeScript-based Node.js wrapper for the Microsoft eXecution Containers (MXC) restricted container environment. It provides both a command-line interface and a programmatic API for invoking MXC with type-safe configuration.
+The MXC CLI is a TypeScript-based Node.js wrapper for the Microsoft eXecution Containers (MXC) restricted container environment. It provides both a command-line interface and a programmatic API for invoking MXC with type-safe configuration. The CLI supports cross-platform operation on Windows (via AppContainer/Windows Sandbox) and Linux (via LXC containers).
 
 ## Project Structure
 
@@ -81,16 +81,20 @@ CLI Command
     │
     ├─> Parse arguments (Commander.js)
     │
+    ├─> Detect platform (Windows or Linux)
+    │   • Windows → uses wxc-exec.exe (AppContainer or Sandbox backend)
+    │   • Linux → uses lxc-exec (LXC container backend)
+    │
     └─> WxcExecutor.run()
             │
-            ├─> Validate WXC executable exists
+            ├─> Validate platform-appropriate executable exists
             │
             ├─> Build command-line arguments
             │   • config path or base64 string
             │   • --config-base64 flag (if needed)
             │   • --debug flag (if requested)
             │
-            ├─> spawn() WXC process
+            ├─> spawn() sandboxed process
             │
             ├─> Capture stdout/stderr streams
             │
@@ -98,6 +102,9 @@ CLI Command
                     │
                     └─> Display results to user
 ```
+
+> **Note:** The SDK's `spawnSandbox()` function automatically selects the correct binary
+> (`wxc-exec.exe` on Windows, `lxc-exec` on Linux) based on the detected platform.
 
 ## Configuration Flow
 

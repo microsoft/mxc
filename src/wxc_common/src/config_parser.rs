@@ -6,13 +6,13 @@ use std::fs;
 
 use serde::Deserialize;
 
+use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, ContainerPolicy, ContainmentBackend, NetworkEnforcementMode, NetworkPolicy,
-    ProxyAddress, ProxyConfig, SandboxConfig,
+    CodexRequest, ContainerPolicy, ContainmentBackend, LxcConfig, NetworkEnforcementMode,
+    NetworkPolicy, ProxyAddress, ProxyConfig, SandboxConfig,
 };
-use crate::string_util::base64_decode;
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
 
@@ -67,6 +67,17 @@ struct RawSandbox {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawLxc {
+    #[serde(rename = "containerName")]
+    container_name: Option<String>,
+    distribution: Option<String>,
+    release: Option<String>,
+    #[serde(rename = "destroyOnExit")]
+    destroy_on_exit: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawConfig {
     script: Option<String>,
     containment: Option<String>,
@@ -76,6 +87,7 @@ struct RawConfig {
     #[serde(rename = "appContainer")]
     app_container: Option<RawAppContainer>,
     sandbox: Option<RawSandbox>,
+    lxc: Option<RawLxc>,
     filesystem: Option<RawFilesystem>,
     network: Option<RawNetwork>,
 }
@@ -208,9 +220,10 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     let containment = match raw.containment.as_deref() {
         None | Some("appcontainer") => ContainmentBackend::AppContainer,
         Some("sandbox") => ContainmentBackend::Sandbox,
+        Some("lxc") => ContainmentBackend::Lxc,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer' or 'sandbox')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', or 'lxc')",
                 other
             );
             logger.log_line(&msg);
@@ -228,6 +241,17 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             sandbox_config.daemon_pipe_name = name;
         }
     }
+
+    // LXC configuration
+    let lxc_config = {
+        let raw_lxc = raw.lxc.unwrap_or_default();
+        LxcConfig {
+            container_name: raw_lxc.container_name.unwrap_or_default(),
+            distribution: raw_lxc.distribution.unwrap_or_else(|| "alpine".to_string()),
+            release: raw_lxc.release.unwrap_or_else(|| "3.19".to_string()),
+            destroy_on_exit: raw_lxc.destroy_on_exit.unwrap_or(true),
+        }
+    };
 
     let mut policy = ContainerPolicy::default();
 
@@ -352,14 +376,15 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         containment,
         policy,
         sandbox_config,
+        lxc_config,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::base64_encode;
     use crate::logger::Mode;
-    use crate::string_util::base64_encode;
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)

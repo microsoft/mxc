@@ -1,0 +1,12 @@
+[package]
+name = "lxc_common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wxc_common = { workspace = true }
+libc = { workspace = true }
+nix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

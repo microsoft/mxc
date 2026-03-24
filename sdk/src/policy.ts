@@ -7,6 +7,7 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { randomBytes } from 'crypto';
@@ -51,9 +52,10 @@ interface KnownEnvVar {
     extractPaths: PathExtractor;
 }
 
-/** Split a semicolon-delimited path list (PATH, PYTHONPATH, …). */
+/** Split a path list using the platform-appropriate separator. */
 function splitPathList(value: string): string[] {
-    return value.split(';').filter(p => p.length > 0);
+    const separator = os.platform() === 'win32' ? ';' : ':';
+    return value.split(separator).filter(p => p.length > 0);
 }
 
 /** Treat the entire value as a single directory path. */
@@ -102,6 +104,11 @@ const KNOWN_ENV_VARS: KnownEnvVar[] = [
 
     // Conda / Anaconda
     { name: 'CONDA_PREFIX', extractPaths: singlePath },
+
+    // Linux-specific
+    { name: 'LD_LIBRARY_PATH', extractPaths: splitPathList },
+    { name: 'VIRTUAL_ENV', extractPaths: singlePath },
+    { name: 'PYENV_ROOT', extractPaths: singlePath },
 ];
 
 // ---------------------------------------------------------------------------
@@ -113,21 +120,30 @@ function getWindowsDirectory(): string {
 }
 
 /**
- * Returns `true` if the path resides under the Windows directory
- * (e.g. C:\Windows, C:\Windows\System32) or other system-critical locations.
+ * Returns `true` if the path resides under system-critical locations.
+ * On Windows: under %WINDIR%. On Linux: /bin, /sbin, /boot, /proc, /sys, /dev, etc.
  */
 function isSystemCriticalPath(dirPath: string): boolean {
-    const winDir = getWindowsDirectory().toLowerCase();
-    const normalized = path.resolve(dirPath).toLowerCase();
-
-    return normalized === winDir || normalized.startsWith(winDir + '\\');
+    if (os.platform() === 'win32') {
+        const winDir = getWindowsDirectory().toLowerCase();
+        const normalized = path.resolve(dirPath).toLowerCase();
+        return normalized === winDir || normalized.startsWith(winDir + '\\');
+    }
+    // Linux: protect critical system paths
+    const normalized = path.resolve(dirPath);
+    const criticalPaths = ['/bin', '/sbin', '/usr/bin', '/usr/sbin', '/boot', '/proc', '/sys', '/dev'];
+    return criticalPaths.some(cp => normalized === cp || normalized.startsWith(cp + '/'));
 }
 
 /**
  * Checks whether the directory ACL already grants access to the
  * ALL_APPLICATION_PACKAGES well-known SID (S-1-15-2-1).
+ * Only applicable on Windows.
  */
 function hasAllApplicationPackagesAccess(dirPath: string): boolean {
+    if (os.platform() !== 'win32') {
+        return false; // Only applicable on Windows
+    }
     try {
         const output = execSync(`icacls "${dirPath}"`, {
             encoding: 'utf-8',
@@ -151,15 +167,16 @@ function directoryExists(dirPath: string): boolean {
 }
 
 /**
- * Deduplicates an array of paths using case-insensitive comparison
- * (Windows filesystem semantics). Paths are resolved to absolute form.
+ * Deduplicates an array of paths. Uses case-insensitive comparison on Windows,
+ * case-sensitive on other platforms. Paths are resolved to absolute form.
  */
 function deduplicatePaths(paths: string[]): string[] {
+    const isWindows = os.platform() === 'win32';
     const seen = new Set<string>();
     const result: string[] = [];
     for (const p of paths) {
         const resolved = path.resolve(p);
-        const key = resolved.toLowerCase();
+        const key = isWindows ? resolved.toLowerCase() : resolved;
         if (!seen.has(key)) {
             seen.add(key);
             result.push(resolved);
@@ -242,27 +259,42 @@ export function getAvailableToolsPolicy(
 export function getUserProfilePolicy(): FilesystemPolicyResult {
     const readonlyPaths: string[] = [];
 
-    /*  TODO: Need to think through the implications of granting access
-        to folders within APPDATA versus LOCALAPPDATA.
-    const appData = process.env['APPDATA'];
-    if (appData && directoryExists(appData)) {
-        readonlyPaths.push(path.resolve(appData));
-    }*/
+    if (os.platform() === 'win32') {
+        /*  TODO: Need to think through the implications of granting access
+            to folders within APPDATA versus LOCALAPPDATA.
+        const appData = process.env['APPDATA'];
+        if (appData && directoryExists(appData)) {
+            readonlyPaths.push(path.resolve(appData));
+        }*/
 
-    const localAppData = process.env['LOCALAPPDATA'];
-    if (localAppData && directoryExists(localAppData)) {
-        // Enumerate per-user program installations
-        const programsDir = path.join(localAppData, 'Programs');
-        if (directoryExists(programsDir)) {
-            try {
-                const entries = fs.readdirSync(programsDir, { withFileTypes: true });
-                for (const entry of entries) {
-                    if (entry.isDirectory()) {
-                        readonlyPaths.push(path.join(programsDir, entry.name));
+        const localAppData = process.env['LOCALAPPDATA'];
+        if (localAppData && directoryExists(localAppData)) {
+            // Enumerate per-user program installations
+            const programsDir = path.join(localAppData, 'Programs');
+            if (directoryExists(programsDir)) {
+                try {
+                    const entries = fs.readdirSync(programsDir, { withFileTypes: true });
+                    for (const entry of entries) {
+                        if (entry.isDirectory()) {
+                            readonlyPaths.push(path.join(programsDir, entry.name));
+                        }
                     }
+                } catch {
+                    // Ignore enumeration errors (e.g. permission denied)
                 }
-            } catch {
-                // Ignore enumeration errors (e.g. permission denied)
+            }
+        }
+    } else {
+        // Linux: enumerate ~/.local/bin and ~/.local/lib
+        const home = process.env['HOME'];
+        if (home) {
+            const localBin = path.join(home, '.local', 'bin');
+            if (directoryExists(localBin)) {
+                readonlyPaths.push(localBin);
+            }
+            const localLib = path.join(home, '.local', 'lib');
+            if (directoryExists(localLib)) {
+                readonlyPaths.push(localLib);
             }
         }
     }
@@ -291,7 +323,11 @@ export function getTemporaryFilesPolicy(
     env?: { [key: string]: string | undefined },
 ): FilesystemPolicyResult {
     const environment = env ?? process.env;
-    const tempRoot = environment['TEMP'] || environment['TMP'];
+
+    // On Linux, prefer TMPDIR; on Windows, prefer TEMP/TMP
+    const tempRoot = os.platform() === 'win32'
+        ? (environment['TEMP'] || environment['TMP'])
+        : (environment['TMPDIR'] || '/tmp');
 
     if (!tempRoot || !directoryExists(tempRoot)) {
         return {

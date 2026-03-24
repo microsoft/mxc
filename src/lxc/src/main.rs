@@ -5,17 +5,15 @@ use std::fmt::Write;
 use std::process;
 
 use clap::Parser;
-use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
-use wxc_common::appcontainer::AppContainerScriptRunner;
 use wxc_common::config_parser::load_request;
-use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
-use wxc_common::sandbox_runner::SandboxScriptRunner;
 use wxc_common::script_runner::ScriptRunner;
 
+use lxc_common::lxc_runner::LxcScriptRunner;
+
 #[derive(Parser)]
-#[command(name = "wxc-exec", about = "Windows Container Executor")]
+#[command(name = "lxc-exec", about = "Linux Container Executor")]
 struct Cli {
     /// Path to config JSON file (positional)
     #[arg(value_name = "CONFIG_PATH")]
@@ -33,7 +31,7 @@ struct Cli {
     #[arg(long)]
     debug: bool,
 
-    /// Delete container profile mode
+    /// Delete container mode
     #[arg(long)]
     delete: bool,
 
@@ -49,7 +47,7 @@ fn log_request(request: &CodexRequest, logger: &mut Logger) {
     let _ = writeln!(
         logger,
         "Container name: {}",
-        request.policy.app_container_name
+        request.lxc_config.container_name
     );
 }
 
@@ -60,24 +58,23 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
     }
 }
 
-fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
-    // Clear BFS policy first
-    let mut bfs = FileSystemBfsManager::new(name.to_string());
-    bfs.remove_configuration(logger);
+fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
+    use lxc_common::lxc_bindings::LxcContainer;
 
-    // Delete the AppContainer profile
-    let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let hstring = windows::core::HSTRING::from_wide(&wide_name[..wide_name.len() - 1]);
-    match unsafe { DeleteAppContainerProfile(&hstring) } {
+    let container = LxcContainer::new(name, None);
+
+    if !container.is_defined() {
+        logger.log_line(&format!("Container '{}' does not exist.", name));
+        return false;
+    }
+
+    match container.destroy() {
         Ok(()) => {
-            logger.log_line(&format!("Deleted AppContainer profile: {}", name));
+            logger.log_line(&format!("Deleted LXC container: {}", name));
             true
         }
         Err(e) => {
-            logger.log_line(&format!(
-                "Failed to delete AppContainer profile '{}': {}",
-                name, e
-            ));
+            logger.log_line(&format!("Failed to delete LXC container '{}': {}", name, e));
             false
         }
     }
@@ -86,7 +83,7 @@ fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
 fn main() {
     let cli = Cli::parse();
 
-    // Determine config input and whether it's base64
+    // Determine config input
     let (config_data, is_base64) = if let Some(ref b64) = cli.config_base64 {
         (b64.clone(), true)
     } else if let Some(ref path) = cli.config {
@@ -115,7 +112,7 @@ fn main() {
                 process::exit(1);
             }
         };
-        let success = delete_app_container_profile(name, &mut logger);
+        let success = delete_lxc_container(name, &mut logger);
         print!("{}", logger.get_buffer());
         process::exit(if success { 0 } else { 1 });
     }
@@ -131,22 +128,18 @@ fn main() {
 
     log_request(&request, &mut logger);
 
-    // Run script in selected containment backend
-    let mut runner: Box<dyn ScriptRunner> = match request.containment {
-        ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
-        ContainmentBackend::Sandbox => Box::new(SandboxScriptRunner::new(&request.sandbox_config)),
-        _ => todo!("Return an error here"),
-    };
+    // Verify containment backend is LXC
+    if request.containment != ContainmentBackend::Lxc {
+        // Default to LXC on Linux regardless of what was specified
+        logger.log_line("Note: Overriding containment backend to LXC on Linux.");
+    }
+
+    // Run script in LXC container
+    let mut runner = LxcScriptRunner::new(&request.lxc_config);
     let response = runner.run(&request, &mut logger);
     display_script_results(&response, &mut logger);
 
-    // Output was already relayed to the console by pipe threads.
-    // Only print captured output if present (e.g. from error paths).
-    if !response.standard_out.is_empty() {
-        print!("{}", response.standard_out);
-    }
-    if !response.standard_err.is_empty() {
-        eprint!("{}", response.standard_err);
-    }
+    print!("{}", response.standard_out);
+    eprint!("{}", response.standard_err);
     process::exit(response.exit_code);
 }
