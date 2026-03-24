@@ -168,11 +168,22 @@ program
 
       console.log('Spawning sandboxed process using SDK...');
 
+       // Determine container name based on containment configuration.
+       // TODO: Rationalize these together in the schema.
+       let containerName: string | undefined;
+       if ((config as any).containment === 'lxc') {
+         // For LXC configurations, prefer the LXC-specific container name.
+         containerName = (config as any).lxc?.containerName;
+       } else {
+         // For other configurations (e.g., AppContainer), use the app container name.
+         containerName = (config as any).appContainer?.name;
+       }
+
       // Spawn the process
       // NOTE: For now, we will force winpty.
       const pty = spawnSandbox(config.script, policy, {
         debug: options.debug ?? false
-      }, config.workingDirectory, config.appContainer?.name);
+      }, config.workingDirectory, containerName);
 
       // Handle output
       pty.onData((data: string) => {

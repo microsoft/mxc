@@ -49,6 +49,7 @@ impl LxcScriptRunner {
 
         // Create container handle
         let container = LxcContainer::new(&container_name, None);
+        let mut container_created = false;
 
         // Create the container if it doesn't exist
         if !container.is_defined() {
@@ -57,6 +58,7 @@ impl LxcScriptRunner {
                 return ScriptResponse::error(&format!("Failed to create container: {}", e));
             }
             let _ = writeln!(logger, "Container created successfully.");
+            container_created = true;
         } else {
             let _ = writeln!(logger, "Container already exists, reusing.");
         }
@@ -65,8 +67,22 @@ impl LxcScriptRunner {
         if let Err(e) =
             filesystem_mounts::configure_filesystem_mounts(&container, &request.policy, logger)
         {
-            let _ = container.destroy();
+            if self.config.destroy_on_exit || container_created {
+                let _ = container.destroy();
+            }
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
+        }
+
+        // Ensure the container is running so that the veth interface exists
+        if !container.is_running() {
+            let _ = writeln!(logger, "Starting LXC container...");
+            if let Err(e) = container.start() {
+                let _ = container.destroy();
+                return ScriptResponse::error(&format!("Failed to start container: {}", e));
+            }
+            let _ = writeln!(logger, "Container started successfully.");
+        } else {
+            let _ = writeln!(logger, "Container already running.");
         }
 
         // Configure network rules
@@ -81,11 +97,15 @@ impl LxcScriptRunner {
         match fw_manager.apply_firewall_rules(&request.policy, logger) {
             Ok(true) => {}
             Ok(false) => {
-                let _ = container.destroy();
+                if self.config.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
                 return ScriptResponse::error("Failed to apply network firewall rules.");
             }
             Err(e) => {
-                let _ = container.destroy();
+                if self.config.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
                 return ScriptResponse::error(&format!("Network policy error: {}", e));
             }
         }

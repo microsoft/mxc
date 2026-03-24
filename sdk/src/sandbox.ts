@@ -51,6 +51,7 @@ export function buildSandboxPayload(
         if (policy.network) {
             config.network = {
                 defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
+                enforcementMode: 'firewall',
             };
         }
 

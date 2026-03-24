@@ -127,6 +127,8 @@ impl LxcContainer {
         _working_directory: &str,
         _timeout_ms: u32,
     ) -> Result<(i32, String, String), String> {
+        // TODO: Implement timeout and working directory support.
+
         let mut cmd = std::process::Command::new("lxc-execute");
         cmd.arg("-n").arg(&self.name);
 

@@ -62,12 +62,13 @@ impl NetworkIptablesManager {
         // Parse the output for the host-side veth name
         // LXC names host-side veth interfaces as "veth<XXXX>"
         let _stdout = String::from_utf8_lossy(&output.stdout);
-        // Try to find the veth from /sys/class/net/
+        // Try to find the veth from /sys/class/net/, but only accept interfaces
+        // that are explicitly referenced in the `lxc-info` output for this container.
         if let Ok(entries) = std::fs::read_dir("/sys/class/net/") {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("veth") {
-                    // Check if this veth belongs to our container by reading the iflink
+                if name.starts_with("veth") && _stdout.contains(&name) {
+                    // Check if this veth has a valid iflink entry
                     let link_path = format!("/sys/class/net/{}/iflink", name);
                     if std::fs::read_to_string(&link_path).is_ok() {
                         return Some(name);
@@ -107,8 +108,9 @@ impl NetworkIptablesManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            logger.log_line(&format!("iptables {} failed: {}", args.join(" "), stderr));
-            return Ok(false);
+            let msg = format!("iptables {} failed: {}", args.join(" "), stderr);
+            logger.log_line(&msg);
+            return Err(msg);
         }
 
         Ok(true)

@@ -15,17 +15,24 @@ use wxc_common::models::ContainerPolicy;
 use crate::lxc_bindings::LxcContainer;
 
 /// Validate that a path does not contain characters that could inject
-/// additional LXC configuration directives (newlines, carriage returns).
+/// additional LXC configuration directives (whitespace, newlines, carriage returns).
 fn validate_path(path: &str) -> Result<(), String> {
+     if path.is_empty() {
+         return Err("Empty path is not allowed".to_string());
+     }
+     if path.chars().any(|c| c.is_whitespace()) {
+        return Err(format!(
+            "Path contains whitespace characters which could inject or break LXC config parsing: {:?}",
+            path
+        ));
+    }
     if path.contains('\n') || path.contains('\r') {
         return Err(format!(
             "Path contains newline characters which could inject LXC config: {:?}",
             path
         ));
     }
-    if path.is_empty() {
-        return Err("Empty path is not allowed".to_string());
-    }
+
     Ok(())
 }
 
@@ -115,8 +122,12 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_path_rejects_whitespace_in_path() {
+        assert!(validate_path("/home/user/data with spaces").is_err());
+    }
+
+    #[test]
     fn test_validate_path_accepts_normal() {
         assert!(validate_path("/mnt/shared").is_ok());
-        assert!(validate_path("/home/user/data with spaces").is_ok());
     }
 }
