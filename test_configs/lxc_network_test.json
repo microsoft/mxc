@@ -1,0 +1,14 @@
+{
+    "script": "wget -qO- https://api.github.com/zen",
+    "containment": "lxc",
+    "lxc": {
+        "distribution": "alpine",
+        "release": "3.19"
+    },
+    "network": {
+        "defaultPolicy": "block",
+        "enforcementMode": "firewall",
+        "allowedHosts": ["api.github.com"],
+        "blockedHosts": ["evil.example.com"]
+    }
+}

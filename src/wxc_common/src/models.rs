@@ -14,6 +14,8 @@ pub enum ContainmentBackend {
     Sandbox,
     /// Linux container via WSL Container SDK (WSLC SDK).
     Wslc,
+    /// LXC — Linux container isolation.
+    Lxc,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
@@ -32,6 +34,31 @@ impl Default for SandboxConfig {
         Self {
             idle_timeout_ms: 300_000,
             daemon_pipe_name: "wxc-sandbox".to_string(),
+        }
+    }
+}
+
+/// Configuration specific to the LXC container backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LxcConfig {
+    /// Container name. Default: auto-generated.
+    pub container_name: String,
+    /// Linux distribution for the container rootfs (e.g., "alpine", "ubuntu").
+    pub distribution: String,
+    /// Distribution release version (e.g., "3.19", "24.04").
+    pub release: String,
+    /// Whether to destroy the container after execution. Default: true.
+    pub destroy_on_exit: bool,
+}
+
+impl Default for LxcConfig {
+    fn default() -> Self {
+        Self {
+            container_name: String::new(),
+            distribution: "alpine".to_string(),
+            release: "3.19".to_string(),
+            destroy_on_exit: true,
         }
     }
 }
@@ -192,6 +219,8 @@ pub struct CodexRequest {
     pub sandbox_config: SandboxConfig,
     /// Container configuration (used when containment == Wslc).
     pub container_config: ContainerConfig,
+    /// LXC-specific configuration (used when containment == Lxc).
+    pub lxc_config: LxcConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
