@@ -10,8 +10,8 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, ContainerPolicy, ContainmentBackend, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
-    ProxyAddress, ProxyConfig, SandboxConfig,
+    CodexRequest, ContainerPolicy, ContainmentBackend, LxcConfig, NetworkEnforcementMode,
+    NetworkPolicy, ProxyAddress, ProxyConfig, SandboxConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------

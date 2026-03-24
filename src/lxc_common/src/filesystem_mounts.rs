@@ -17,10 +17,10 @@ use crate::lxc_bindings::LxcContainer;
 /// Validate that a path does not contain characters that could inject
 /// additional LXC configuration directives (whitespace, newlines, carriage returns).
 fn validate_path(path: &str) -> Result<(), String> {
-     if path.is_empty() {
-         return Err("Empty path is not allowed".to_string());
-     }
-     if path.chars().any(|c| c.is_whitespace()) {
+    if path.is_empty() {
+        return Err("Empty path is not allowed".to_string());
+    }
+    if path.chars().any(|c| c.is_whitespace()) {
         return Err(format!(
             "Path contains whitespace characters which could inject or break LXC config parsing: {:?}",
             path
