@@ -90,6 +90,10 @@ struct RawContainerConfig {
     storage_path: Option<String>,
     #[serde(rename = "portMappings")]
     port_mappings: Option<Vec<RawPortMapping>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawLxc {
     #[serde(rename = "containerName")]
     container_name: Option<String>,
@@ -214,13 +218,10 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         None | Some("appcontainer") => ContainmentBackend::AppContainer,
         Some("sandbox") => ContainmentBackend::Sandbox,
         Some("wslc") => ContainmentBackend::Wslc,
-        Some(other) => {
-            let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', or 'wslc')",
         Some("lxc") => ContainmentBackend::Lxc,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', or 'lxc')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', 'wslc', or 'lxc')",
                 other
             );
             logger.log_line(&msg);
