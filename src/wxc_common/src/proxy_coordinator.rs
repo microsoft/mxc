@@ -257,16 +257,11 @@ fn signal_process_cleanup(
     label: &str,
     logger: &mut Logger,
 ) {
-    let event_handle = match event {
-        Some(ref handle) => handle,
-        None => return,
-    };
-
-    logger.log_line(&format!("Signaling {} to clean up...", label));
-    let set_result = unsafe { SetEvent(event_handle.get()) };
-    if let Err(err) = set_result {
-        logger.log_line(&format!("Warning: failed to signal {}: {}", label, err));
-        return;
+    if let Some(ref event_handle) = event {
+        logger.log_line(&format!("Signaling {} to clean up...", label));
+        if let Err(err) = unsafe { SetEvent(event_handle.get()) } {
+            logger.log_line(&format!("Warning: failed to signal {}: {}", label, err));
+        }
     }
 
     if let Some(ref proc_handle) = process {
@@ -385,14 +380,12 @@ impl ProxyCoordinator {
         let proxy_exe = find_sibling_exe("wxc-test-proxy.exe")?;
 
         let mut child = std::process::Command::new(&proxy_exe)
-            .args([
-                "--ready-file",
-                &ready_file_path.to_string_lossy(),
-                "--cleanup-event",
-                &event_name,
-                "--parent-pid",
-                &std::process::id().to_string(),
-            ])
+            .arg("--ready-file")
+            .arg(&ready_file_path)
+            .arg("--cleanup-event")
+            .arg(&event_name)
+            .arg("--parent-pid")
+            .arg(std::process::id().to_string())
             .stderr(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::null())
             .stdin(std::process::Stdio::null())
@@ -433,10 +426,6 @@ impl ProxyCoordinator {
                 err
             ))
         })?;
-
-        // All fallible steps succeeded — take ownership of the child process
-        // via the raw handle and cleanup event so Child::drop won't kill it.
-        std::mem::forget(child);
 
         Ok(port)
     }
