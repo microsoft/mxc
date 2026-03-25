@@ -218,7 +218,7 @@ impl Default for ContainerConfig {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodexRequest {
     /// Schema version for the config format.
@@ -242,6 +242,25 @@ pub struct CodexRequest {
     pub container_config: ContainerConfig,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
+}
+
+impl Default for CodexRequest {
+    fn default() -> Self {
+        Self {
+            schema_version: String::new(),
+            container_id: String::new(),
+            platform: "windows".to_string(),
+            env: Vec::new(),
+            script_code: String::new(),
+            working_directory: String::new(),
+            script_timeout: 0,
+            containment: ContainmentBackend::default(),
+            policy: ContainerPolicy::default(),
+            sandbox_config: SandboxConfig::default(),
+            container_config: ContainerConfig::default(),
+            lxc_config: LxcConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

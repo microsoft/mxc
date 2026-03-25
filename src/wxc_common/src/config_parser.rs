@@ -1088,8 +1088,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ====== PR 1: New top-level fields + process section + containment expansion ======
-
     #[test]
     fn new_toplevel_fields_parsed() {
         let json = r#"{"version": "1.0", "containerId": "abc-123", "platform": "linux", "script": "echo hi"}"#;
