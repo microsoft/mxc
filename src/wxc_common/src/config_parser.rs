@@ -246,6 +246,19 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     let container_id = raw.container_id.unwrap_or_default();
     let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
 
+    // Validate platform
+    match platform.as_str() {
+        "linux" | "windows" => {}
+        other => {
+            let msg = format!(
+                "Invalid platform value '{}' (must be 'linux' or 'windows')",
+                other
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+    }
+
     // Process section with dual-read fallback (new location wins, old is fallback)
     let (process_script, process_cwd, process_timeout, env) = if let Some(ref p) = raw.process {
         (
@@ -1098,6 +1111,16 @@ mod tests {
         assert_eq!(req.schema_version, "1.0");
         assert_eq!(req.container_id, "abc-123");
         assert_eq!(req.platform, "linux");
+    }
+
+    #[test]
+    fn invalid_platform_rejected() {
+        let json = r#"{"script": "echo hi", "platform": "Windwos"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
     }
 
     #[test]
