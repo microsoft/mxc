@@ -41,5 +41,12 @@ async fn main() -> Result<()> {
     eprintln!("[agent] firewall locked down");
 
     // Step 5: enter command loop.
-    executor::run_command_loop(control, stdin_stream, stdout_stream, stderr_stream).await
+    executor::run_command_loop(
+        control,
+        stdin_stream,
+        stdout_stream,
+        stderr_stream,
+        &tcp_listener,
+    )
+    .await
 }

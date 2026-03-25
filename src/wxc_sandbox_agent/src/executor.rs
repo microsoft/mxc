@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 
 use wxc_common::sandbox_protocol::{
@@ -13,12 +13,14 @@ use wxc_common::sandbox_protocol::{
 };
 
 /// Main command loop.  Reads control messages from the host and executes
-/// scripts until the control connection is closed.
+/// scripts until the control connection is closed.  After each execution,
+/// re-accepts fresh data connections so the next EXEC has usable streams.
 pub async fn run_command_loop(
     mut control: TcpStream,
     stdin_stream: TcpStream,
     stdout_stream: TcpStream,
     stderr_stream: TcpStream,
+    listener: &TcpListener,
 ) -> Result<()> {
     // Signal readiness to the host.
     let ready_frame = encode_message(&ControlMessage::Ready).context("encode Ready")?;
@@ -27,22 +29,21 @@ pub async fn run_command_loop(
         .await
         .context("send Ready")?;
 
-    // Wrap stdio streams in Option so we can take ownership per execution.
-    let mut stdin_stream = Some(stdin_stream);
-    let mut stdout_stream = Some(stdout_stream);
-    let mut stderr_stream = Some(stderr_stream);
+    let mut current_stdin = stdin_stream;
+    let mut current_stdout = stdout_stream;
+    let mut current_stderr = stderr_stream;
 
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 4096];
 
     loop {
         // Read from control channel.
-        let n = control.read(&mut tmp).await.context("read control")?;
-        if n == 0 {
+        let bytes_read = control.read(&mut tmp).await.context("read control")?;
+        if bytes_read == 0 {
             eprintln!("[agent] control connection closed");
             return Ok(());
         }
-        buf.extend_from_slice(&tmp[..n]);
+        buf.extend_from_slice(&tmp[..bytes_read]);
 
         // Try to decode a complete message.
         loop {
@@ -58,15 +59,15 @@ pub async fn run_command_loop(
                                 &req.script_code,
                                 &req.working_directory,
                                 req.timeout_ms,
-                                stdin_stream.take(),
-                                stdout_stream.take(),
-                                stderr_stream.take(),
+                                current_stdin,
+                                current_stdout,
+                                current_stderr,
                             )
                             .await;
 
                             let (exit_code, error_message) = match result {
                                 Ok(code) => (code, String::new()),
-                                Err(e) => (-1, format!("{:#}", e)),
+                                Err(err) => (-1, format!("{:#}", err)),
                             };
 
                             let exit_msg = ControlMessage::Exit(ExitNotification {
@@ -81,6 +82,27 @@ pub async fn run_command_loop(
                                 "[agent] exec {} finished with code {}",
                                 req.exec_id, exit_code
                             );
+
+                            // Tell the host we're ready for new data
+                            // connections, then accept them. The listener is
+                            // already bound so the daemon's connects will
+                            // queue in the TCP backlog while we accept.
+                            let ready_frame = encode_message(&ControlMessage::StreamsReady)
+                                .context("encode StreamsReady")?;
+                            control
+                                .write_all(&ready_frame)
+                                .await
+                                .context("send StreamsReady")?;
+                            eprintln!("[agent] StreamsReady sent, accepting new data connections");
+
+                            let (new_stdin, new_stdout, new_stderr) =
+                                crate::listener::accept_data_connections(listener)
+                                    .await
+                                    .context("re-accept data connections")?;
+                            current_stdin = new_stdin;
+                            current_stdout = new_stdout;
+                            current_stderr = new_stderr;
+                            eprintln!("[agent] new data connections accepted, ready for next exec");
                         }
                         ControlMessage::Ping => {
                             let frame =
@@ -102,9 +124,9 @@ async fn execute_script(
     script_code: &str,
     working_directory: &str,
     timeout_ms: u32,
-    stdin_stream: Option<TcpStream>,
-    stdout_stream: Option<TcpStream>,
-    stderr_stream: Option<TcpStream>,
+    stdin_stream: TcpStream,
+    stdout_stream: TcpStream,
+    stderr_stream: TcpStream,
 ) -> Result<i32> {
     // Use raw_arg to pass the script literally to cmd.exe.
     // Rust's standard arg() escaping conflicts with cmd.exe's quoting rules,
@@ -130,21 +152,21 @@ async fn execute_script(
 
     // Bridge stdin: TCP → child
     let stdin_task = tokio::spawn(async move {
-        if let (Some(mut tcp), Some(mut child_in)) = (stdin_stream, child_stdin) {
+        if let (mut tcp, Some(mut child_in)) = (stdin_stream, child_stdin) {
             let _ = tokio::io::copy(&mut tcp, &mut child_in).await;
         }
     });
 
     // Bridge stdout: child → TCP
     let stdout_task = tokio::spawn(async move {
-        if let (Some(mut tcp), Some(mut child_out)) = (stdout_stream, child_stdout) {
+        if let (mut tcp, Some(mut child_out)) = (stdout_stream, child_stdout) {
             let _ = tokio::io::copy(&mut child_out, &mut tcp).await;
         }
     });
 
     // Bridge stderr: child → TCP
     let stderr_task = tokio::spawn(async move {
-        if let (Some(mut tcp), Some(mut child_err)) = (stderr_stream, child_stderr) {
+        if let (mut tcp, Some(mut child_err)) = (stderr_stream, child_stderr) {
             let _ = tokio::io::copy(&mut child_err, &mut tcp).await;
         }
     });
@@ -156,7 +178,7 @@ async fn execute_script(
         let duration = std::time::Duration::from_millis(timeout_ms as u64);
         match tokio::time::timeout(duration, child.wait()).await {
             Ok(Ok(status)) => status,
-            Ok(Err(e)) => anyhow::bail!("wait failed: {}", e),
+            Ok(Err(err)) => anyhow::bail!("wait failed: {}", err),
             Err(_) => {
                 let _ = child.kill().await;
                 anyhow::bail!("process timed out after {}ms", timeout_ms);

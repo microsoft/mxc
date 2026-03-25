@@ -91,7 +91,9 @@ async fn wait_for_ready(control: &mut TcpStream, timeout: std::time::Duration) -
 
 /// Send an EXEC request to the guest and relay stdin/stdout/stderr.
 ///
-/// Returns `(exit_code, error_message, stdout_bytes, stderr_bytes)`.
+/// Returns `(exit_code, error_message, stdout_bytes, stderr_bytes, control_residual)`.
+/// The `control_residual` contains any bytes read from the control channel
+/// beyond the EXIT frame (e.g. a StreamsReady that arrived in the same read).
 pub async fn execute_on_guest(
     conn: &mut GuestConnection,
     exec_id: &str,
@@ -99,7 +101,7 @@ pub async fn execute_on_guest(
     working_directory: &str,
     timeout_ms: u32,
     host_stdin: &[u8],
-) -> Result<(i32, String, Vec<u8>, Vec<u8>)> {
+) -> Result<(i32, String, Vec<u8>, Vec<u8>, Vec<u8>)> {
     // Send EXEC command.
     let exec_msg = ControlMessage::Exec(ExecRequest {
         exec_id: exec_id.to_string(),
@@ -140,21 +142,26 @@ pub async fn execute_on_guest(
     };
 
     // Wait for the EXIT notification on the control channel.
+    // Returns (exit_code, error_message, residual_bytes) where residual
+    // is anything read past the EXIT frame.
     let exit_task = async {
         let mut buf = Vec::with_capacity(256);
         let mut tmp = [0u8; 4096];
         loop {
-            let n = conn.control.read(&mut tmp).await.context("read control")?;
-            if n == 0 {
+            let bytes_read = conn.control.read(&mut tmp).await.context("read control")?;
+            if bytes_read == 0 {
                 anyhow::bail!("control closed before EXIT");
             }
-            buf.extend_from_slice(&tmp[..n]);
+            buf.extend_from_slice(&tmp[..bytes_read]);
 
             match decode_message(&buf).context("decode control")? {
                 DecodeResult::Message {
                     message: ControlMessage::Exit(exit),
-                    ..
-                } => return Ok((exit.exit_code, exit.error_message)),
+                    consumed,
+                } => {
+                    buf.drain(..consumed);
+                    return Ok((exit.exit_code, exit.error_message, buf));
+                }
                 DecodeResult::Message {
                     message: ControlMessage::Pong,
                     consumed,
@@ -176,7 +183,88 @@ pub async fn execute_on_guest(
 
     let stdout = stdout_result.unwrap_or_default();
     let stderr = stderr_result.unwrap_or_default();
-    let (exit_code, error_message) = exit_result?;
+    let (exit_code, error_message, control_residual) = exit_result?;
 
-    Ok((exit_code, error_message, stdout, stderr))
+    Ok((exit_code, error_message, stdout, stderr, control_residual))
+}
+
+/// Wait for `StreamsReady` from the agent, then connect 3 new data streams.
+///
+/// After an EXEC completes the agent re-accepts stdin/stdout/stderr on its
+/// listener and signals `StreamsReady` on the control channel.  This function
+/// waits for that signal and then establishes 3 fresh TCP connections.
+///
+/// `control_residual` is any bytes already read from the control channel
+/// beyond the EXIT frame (they may contain the StreamsReady message).
+pub async fn reconnect_data_streams(
+    conn: &mut GuestConnection,
+    addr: SocketAddr,
+    control_residual: Vec<u8>,
+) -> Result<()> {
+    let mut buf = control_residual;
+    let mut tmp = [0u8; 256];
+    let timeout = std::time::Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        // First try to decode from what we already have.
+        loop {
+            match decode_message(&buf).context("decode StreamsReady")? {
+                DecodeResult::Message {
+                    message: ControlMessage::StreamsReady,
+                    consumed,
+                } => {
+                    buf.drain(..consumed);
+                    eprintln!("[daemon] received StreamsReady, reconnecting data streams");
+
+                    let connect_timeout = std::time::Duration::from_secs(30);
+                    let connect = |label: &'static str| {
+                        let target = addr;
+                        async move {
+                            tokio::time::timeout(connect_timeout, TcpStream::connect(target))
+                                .await
+                                .with_context(|| {
+                                    format!("timeout reconnecting {} to {}", label, target)
+                                })?
+                                .with_context(|| format!("reconnect {} to {}", label, target))
+                        }
+                    };
+
+                    conn.stdin_stream = connect("stdin").await?;
+                    conn.stdout_stream = connect("stdout").await?;
+                    conn.stderr_stream = connect("stderr").await?;
+
+                    eprintln!("[daemon] data streams reconnected to {}", addr);
+                    return Ok(());
+                }
+                DecodeResult::Message {
+                    message: ControlMessage::Pong,
+                    consumed,
+                } => {
+                    buf.drain(..consumed);
+                    continue;
+                }
+                DecodeResult::Message { message, consumed } => {
+                    eprintln!(
+                        "[daemon] skipping unexpected message while waiting for StreamsReady: {:?}",
+                        message
+                    );
+                    buf.drain(..consumed);
+                    continue;
+                }
+                DecodeResult::Incomplete => break,
+            }
+        }
+
+        // Need more data from the control channel.
+        let remaining = deadline - tokio::time::Instant::now();
+        let bytes_read = tokio::time::timeout(remaining, conn.control.read(&mut tmp))
+            .await
+            .context("timeout waiting for StreamsReady")?
+            .context("read control for StreamsReady")?;
+        if bytes_read == 0 {
+            anyhow::bail!("control closed before StreamsReady");
+        }
+        buf.extend_from_slice(&tmp[..bytes_read]);
+    }
 }

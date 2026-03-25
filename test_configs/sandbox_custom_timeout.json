@@ -3,7 +3,7 @@
   "containerId": "CLI-Sandbox-Timeout",
   "containment": "sandbox",
   "process": {
-    "commandLine": "python -c \"import sys; print(f'Hello from sandbox Python {sys.version}'); print('Sandbox test successful')\"",
+    "commandLine": "python -S -B -c \"import sys; print(f'Hello from sandbox Python {sys.version}'); print('Sandbox test successful')\"",
     "timeout": 60000
   },
   "experimental": {

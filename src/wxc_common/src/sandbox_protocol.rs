@@ -23,6 +23,12 @@ pub enum ControlMessage {
     /// Agent → Host: script finished.
     Exit(ExitNotification),
 
+    /// Agent → Host: new data streams are ready to be connected.
+    ///
+    /// Sent after the agent has re-opened its TCP listener for the next
+    /// set of stdin/stdout/stderr connections following an [`Exit`].
+    StreamsReady,
+
     /// Either direction: keepalive probe.
     Ping,
 
@@ -170,6 +176,20 @@ mod tests {
             exit_code: -1,
             error_message: "spawn failed: file not found".to_string(),
         });
+        let frame = encode_message(&msg).unwrap();
+        let result = decode_message(&frame).unwrap();
+        assert_eq!(
+            result,
+            DecodeResult::Message {
+                message: msg,
+                consumed: frame.len(),
+            }
+        );
+    }
+
+    #[test]
+    fn roundtrip_streams_ready() {
+        let msg = ControlMessage::StreamsReady;
         let frame = encode_message(&msg).unwrap();
         let result = decode_message(&frame).unwrap();
         assert_eq!(

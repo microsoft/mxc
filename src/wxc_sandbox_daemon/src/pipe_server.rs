@@ -99,14 +99,17 @@ async fn execute_request(
 
     // Update activity timestamp.
     {
-        let mut s = state.lock().await;
-        s.last_activity = std::time::Instant::now();
+        let mut locked = state.lock().await;
+        locked.last_activity = std::time::Instant::now();
     }
 
     // Execute on the guest.
-    let (exit_code, error_message, stdout_bytes, stderr_bytes) = {
-        let mut s = state.lock().await;
-        let conn = s.guest_connection.as_mut().context("no guest connection")?;
+    let (exit_code, error_message, stdout_bytes, stderr_bytes, control_residual) = {
+        let mut locked = state.lock().await;
+        let conn = locked
+            .guest_connection
+            .as_mut()
+            .context("no guest connection")?;
 
         let exec_id = uuid::Uuid::new_v4().to_string();
         tcp_bridge::execute_on_guest(
@@ -119,6 +122,21 @@ async fn execute_request(
         )
         .await?
     };
+
+    // Reconnect data streams for the next execution. The agent will
+    // re-accept 3 new data connections and signal StreamsReady.
+    {
+        let mut locked = state.lock().await;
+        let addr = locked.guest_addr.context("no guest address")?;
+        if let Some(conn) = locked.guest_connection.as_mut() {
+            if let Err(err) = tcp_bridge::reconnect_data_streams(conn, addr, control_residual).await
+            {
+                eprintln!("[daemon] failed to reconnect data streams: {:#}", err);
+                // Mark the connection as dead so next request re-launches.
+                locked.guest_connection = None;
+            }
+        }
+    }
 
     // Format: RESULT <exit-code> <stdout-base64> <stderr-base64> <error-message>\n
     let stdout_b64 = base64_encode(&stdout_bytes);
@@ -173,9 +191,10 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
 
                 // Reset state so the next attempt does a fresh launch.
                 {
-                    let mut s = state.lock().await;
-                    s.sandbox_running = false;
-                    s.guest_connection = None;
+                    let mut locked = state.lock().await;
+                    locked.sandbox_running = false;
+                    locked.guest_connection = None;
+                    locked.guest_addr = None;
                 }
                 sandbox_vm::teardown().await;
                 rendezvous::cleanup(&rendezvous_dir).await?;
@@ -189,9 +208,10 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
             Err(e) => {
                 // Final attempt failed — reset state and propagate error.
                 {
-                    let mut s = state.lock().await;
-                    s.sandbox_running = false;
-                    s.guest_connection = None;
+                    let mut locked = state.lock().await;
+                    locked.sandbox_running = false;
+                    locked.guest_connection = None;
+                    locked.guest_addr = None;
                 }
                 return Err(e).context(format!("sandbox failed after {} attempts", max_attempts));
             }
@@ -239,8 +259,9 @@ async fn try_launch_and_connect(
         .await
         .context("connect to guest agent")?;
 
-    let mut s = state.lock().await;
-    s.guest_connection = Some(conn);
+    let mut locked = state.lock().await;
+    locked.guest_connection = Some(conn);
+    locked.guest_addr = Some(guest_addr);
 
     Ok(())
 }

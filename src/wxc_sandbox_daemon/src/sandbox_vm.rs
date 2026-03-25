@@ -19,10 +19,11 @@ pub fn find_host_python() -> Result<PathBuf> {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
                 let p = PathBuf::from(line.trim());
-                if p.exists()
-                    && p.file_name().map(|f| f.to_ascii_lowercase()) == Some("python.exe".into())
-                {
-                    if let Some(dir) = p.parent() {
+                if p.file_name().map(|f| f.to_ascii_lowercase()) != Some("python.exe".into()) {
+                    continue;
+                }
+                if let Some(dir) = p.parent() {
+                    if is_real_python(dir) {
                         return Ok(dir.to_path_buf());
                     }
                 }
@@ -40,9 +41,9 @@ pub fn find_host_python() -> Result<PathBuf> {
         r"C:\Program Files\Python310",
     ];
     for dir in &candidates {
-        let p = PathBuf::from(dir);
-        if p.join("python.exe").exists() {
-            return Ok(p);
+        let path = PathBuf::from(dir);
+        if is_real_python(&path) {
+            return Ok(path);
         }
     }
 
@@ -52,9 +53,9 @@ pub fn find_host_python() -> Result<PathBuf> {
             .join("Programs")
             .join("Python");
         if base.exists() {
-            for e in std::fs::read_dir(&base).into_iter().flatten().flatten() {
-                let dir = e.path();
-                if dir.join("python.exe").exists() {
+            for entry in std::fs::read_dir(&base).into_iter().flatten().flatten() {
+                let dir = entry.path();
+                if is_real_python(&dir) {
                     return Ok(dir);
                 }
             }
@@ -64,6 +65,30 @@ pub fn find_host_python() -> Result<PathBuf> {
     anyhow::bail!(
         "Python installation not found on host. Install Python and ensure python.exe is on PATH."
     )
+}
+
+/// Returns true if `dir` contains a real Python installation (not a
+/// Windows Store stub).  The WindowsApps stub passes `exists()` but
+/// fails when invoked, so we run `python --version` to verify.
+fn is_real_python(dir: &Path) -> bool {
+    let python = dir.join("python.exe");
+    if !python.exists() {
+        return false;
+    }
+    // WindowsApps stubs live under Microsoft\WindowsApps — skip them
+    // outright since they always fail when invoked from another context.
+    if dir.to_string_lossy().contains("Microsoft\\WindowsApps") {
+        eprintln!("[daemon] skipping Windows Store stub at {:?}", dir);
+        return false;
+    }
+    // Belt-and-suspenders: verify it actually runs.
+    std::process::Command::new(&python)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// Generate a .wsb configuration file in `output_dir` and a bootstrap script
@@ -91,6 +116,10 @@ echo [bootstrap] Starting at %date% %time% >> "%LOG%" 2>&1
 
 echo [bootstrap] Adding mapped Python to PATH... >> "%LOG%" 2>&1
 set "PATH=C:\sandbox-python;C:\sandbox-python\Scripts;%PATH%"
+
+echo [bootstrap] Disabling Python bytecode cache (read-only mapped dir)... >> "%LOG%" 2>&1
+set "PYTHONDONTWRITEBYTECODE=1"
+set "PYTHONNOUSERSITE=1"
 
 echo [bootstrap] PATH=%PATH% >> "%LOG%" 2>&1
 where python >> "%LOG%" 2>&1
@@ -194,7 +223,9 @@ pub async fn teardown() {
             break;
         }
         if tokio::time::Instant::now() >= deadline {
-            eprintln!("[daemon] warning: sandbox processes still running after 30s, proceeding anyway");
+            eprintln!(
+                "[daemon] warning: sandbox processes still running after 30s, proceeding anyway"
+            );
             break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
