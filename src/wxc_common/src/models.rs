@@ -16,6 +16,11 @@ pub enum ContainmentBackend {
     Wslc,
     /// LXC — Linux container isolation.
     Lxc,
+    /// VM-based isolation.
+    Vm,
+    /// MicroVM-based isolation.
+    #[serde(rename = "microvm")]
+    MicroVm,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
@@ -213,9 +218,17 @@ impl Default for ContainerConfig {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodexRequest {
+    /// Schema version for the config format.
+    pub schema_version: String,
+    /// Externally assigned container identifier.
+    pub container_id: String,
+    /// Target platform: "linux" or "windows". Default: "windows".
+    pub platform: String,
+    /// Environment variables as "KEY=VALUE" strings (from process.env).
+    pub env: Vec<String>,
     pub script_code: String,
     pub working_directory: String,
     pub script_timeout: u32,
@@ -229,6 +242,25 @@ pub struct CodexRequest {
     pub container_config: ContainerConfig,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
+}
+
+impl Default for CodexRequest {
+    fn default() -> Self {
+        Self {
+            schema_version: String::new(),
+            container_id: String::new(),
+            platform: "windows".to_string(),
+            env: Vec::new(),
+            script_code: String::new(),
+            working_directory: String::new(),
+            script_timeout: 0,
+            containment: ContainmentBackend::default(),
+            policy: ContainerPolicy::default(),
+            sandbox_config: SandboxConfig::default(),
+            container_config: ContainerConfig::default(),
+            lxc_config: LxcConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

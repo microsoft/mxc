@@ -43,6 +43,10 @@ struct Cli {
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
+    if !request.container_id.is_empty() {
+        let _ = writeln!(logger, "Container ID: {}", request.container_id);
+    }
+    let _ = writeln!(logger, "Platform: {}", request.platform);
     let _ = writeln!(logger, "Script code length: {}", request.script_code.len());
     let _ = writeln!(logger, "Working directory: {}", request.working_directory);
     let _ = writeln!(logger, "Script timeout: {}", request.script_timeout);
@@ -139,7 +143,18 @@ fn main() {
             eprintln!("Error: WSLC backend not yet implemented (Phase 3)");
             process::exit(1);
         }
-        _ => todo!("Return an error here"),
+        ContainmentBackend::Lxc => {
+            eprintln!("Error: LXC backend not available on Windows");
+            process::exit(1);
+        }
+        ContainmentBackend::Vm => {
+            eprintln!("Error: VM backend not yet implemented");
+            process::exit(1);
+        }
+        ContainmentBackend::MicroVm => {
+            eprintln!("Error: MicroVM backend not yet implemented");
+            process::exit(1);
+        }
     };
     let response = runner.run(&request, &mut logger);
     display_script_results(&response, &mut logger);
