@@ -130,14 +130,17 @@ async fn execute_request(
 }
 
 /// Ensure the sandbox VM is running and we have a guest connection.
+///
+/// Retries once on failure — tears down the sandbox and relaunches.
 async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
-    let mut s = state.lock().await;
-
-    if s.guest_connection.is_some() {
-        return Ok(());
+    {
+        let s = state.lock().await;
+        if s.guest_connection.is_some() {
+            return Ok(());
+        }
     }
 
-    // Determine paths.
+    // Determine paths (only needed once).
     let exe_dir = std::env::current_exe()
         .context("current_exe")?
         .parent()
@@ -148,34 +151,76 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
     let rendezvous_dir = std::env::temp_dir().join("wxc-sandbox-rendezvous");
     std::fs::create_dir_all(&rendezvous_dir).context("create rendezvous dir")?;
 
-    // Clean up stale rendezvous file.
-    rendezvous::cleanup(&rendezvous_dir).await?;
+    let python_dir = sandbox_vm::find_host_python()
+        .context("Python is required on the host for sandbox execution")?;
+    eprintln!("[daemon] host Python found at {:?}", python_dir);
 
-    if !s.sandbox_running {
-        // Tear down any leftover sandbox from a previous daemon run.
-        sandbox_vm::teardown().await;
+    let temp_dir = std::env::temp_dir().join("wxc-sandbox-config");
+    std::fs::create_dir_all(&temp_dir).context("create .wsb config dir")?;
 
-        // Discover the host Python installation.
-        let python_dir = sandbox_vm::find_host_python()
-            .context("Python is required on the host for sandbox execution")?;
-        eprintln!("[daemon] host Python found at {:?}", python_dir);
+    let max_attempts = 2;
+    for attempt in 1..=max_attempts {
+        match try_launch_and_connect(state, &agent_dir, &rendezvous_dir, &python_dir, &temp_dir)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < max_attempts => {
+                eprintln!(
+                    "[daemon] sandbox attempt {} failed: {:#}, retrying...",
+                    attempt, e
+                );
 
-        // Generate .wsb and launch sandbox.
-        let temp_dir = std::env::temp_dir().join("wxc-sandbox-config");
-        std::fs::create_dir_all(&temp_dir).context("create .wsb config dir")?;
-
-        let wsb_path =
-            sandbox_vm::generate_wsb(&agent_dir, &rendezvous_dir, &python_dir, &temp_dir)?;
-        sandbox_vm::launch(&wsb_path).await?;
-        s.sandbox_running = true;
-        eprintln!("[daemon] sandbox VM launched");
+                // Reset state so the next attempt does a fresh launch.
+                {
+                    let mut s = state.lock().await;
+                    s.sandbox_running = false;
+                    s.guest_connection = None;
+                }
+                sandbox_vm::teardown().await;
+                rendezvous::cleanup(&rendezvous_dir).await?;
+            }
+            Err(e) => {
+                // Final attempt failed — reset state and propagate error.
+                {
+                    let mut s = state.lock().await;
+                    s.sandbox_running = false;
+                    s.guest_connection = None;
+                }
+                return Err(e).context(format!("sandbox failed after {} attempts", max_attempts));
+            }
+        }
     }
 
-    // Drop the lock while we poll for rendezvous (can take 15-20s).
-    drop(s);
+    unreachable!()
+}
 
+/// Single attempt to launch the sandbox and connect to the guest agent.
+async fn try_launch_and_connect(
+    state: &Arc<Mutex<DaemonState>>,
+    agent_dir: &std::path::Path,
+    rendezvous_dir: &std::path::Path,
+    python_dir: &std::path::Path,
+    temp_dir: &std::path::Path,
+) -> Result<()> {
+    {
+        let mut s = state.lock().await;
+
+        rendezvous::cleanup(rendezvous_dir).await?;
+
+        if !s.sandbox_running {
+            sandbox_vm::teardown().await;
+
+            let wsb_path =
+                sandbox_vm::generate_wsb(agent_dir, rendezvous_dir, python_dir, temp_dir)?;
+            sandbox_vm::launch(&wsb_path).await?;
+            s.sandbox_running = true;
+            eprintln!("[daemon] sandbox VM launched");
+        }
+    }
+
+    // Poll for rendezvous without holding the lock (can take 15-60s).
     let guest_addr = rendezvous::wait_for_rendezvous(
-        &rendezvous_dir,
+        rendezvous_dir,
         std::time::Duration::from_secs(120),
         std::time::Duration::from_millis(500),
     )

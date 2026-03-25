@@ -164,18 +164,27 @@ pub async fn launch(wsb_path: &Path) -> Result<()> {
 
 /// Tear down any running Windows Sandbox instance.
 ///
-/// Uses `taskkill` to terminate `WindowsSandbox.exe` and the sandbox VM
-/// processes.  Best-effort — errors are logged but not propagated.
+/// Kills `WindowsSandbox.exe` (UI host), `WindowsSandboxServer`, and
+/// `WindowsSandboxRemoteSession` to ensure a complete shutdown.
+/// Best-effort — errors are logged but not propagated.
 pub async fn teardown() {
     eprintln!("[daemon] tearing down sandbox");
 
-    // WindowsSandbox.exe hosts the UI; killing it closes the sandbox.
-    let _ = Command::new("taskkill")
-        .args(["/F", "/IM", "WindowsSandbox.exe"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
+    for process_name in [
+        "WindowsSandbox.exe",
+        "WindowsSandboxServer",
+        "WindowsSandboxRemoteSession",
+    ] {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/IM", process_name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
+
+    // Allow time for sandbox processes to fully terminate.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 }
 
 #[cfg(test)]

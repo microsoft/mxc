@@ -106,11 +106,12 @@ async fn execute_script(
     stdout_stream: Option<TcpStream>,
     stderr_stream: Option<TcpStream>,
 ) -> Result<i32> {
-    // Parse the command line.  We use cmd.exe /C to handle complex commands
-    // the same way the AppContainer backend uses CreateProcessW with a
-    // command-line string.
+    // Use raw_arg to pass the script literally to cmd.exe.
+    // Rust's standard arg() escaping conflicts with cmd.exe's quoting rules,
+    // so we pass /C normally and the script code unescaped.
     let mut cmd = Command::new("cmd.exe");
-    cmd.arg("/C").arg(script_code);
+    cmd.arg("/C");
+    cmd.raw_arg(script_code);
 
     if !working_directory.is_empty() {
         cmd.current_dir(working_directory);
