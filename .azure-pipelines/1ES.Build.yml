@@ -1,0 +1,185 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+trigger: none
+name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+resources:
+  repositories:
+  - repository: 1ESPipelineTemplates
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
+
+parameters:
+  - name: ESRPInfo
+    type: object
+    default:
+      serviceName: ''
+      tenantId: ''
+      azureKeyVaultName: ''
+      authCertName: ''
+      signCertName: ''
+      clientId: ''
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: windows-2022
+      os: windows
+    customBuildTags:
+    - ES365AIMigrationTooling
+    
+    stages:
+    - stage: Build_WXC_Exec
+      displayName: 'Build WXC Executables'
+      jobs:
+        - job: wxc_build
+          displayName: Build WXC using toolchain
+          templateContext:
+            rust:
+              rustToolchain:
+                toolchainFeed: https://pkgs.dev.azure.com/microsoft/_packaging/RustTools/nuget/v3/index.json
+                cratesIoFeed: sparse+https://pkgs.dev.azure.com/shine-oss/mxc/_packaging/MxcDependencies/Cargo/index/
+              workingDirectory: src
+          strategy:
+            matrix:
+              x64_Release:
+                triplet: x86_64-pc-windows-msvc
+              arm64_Release:
+                triplet: aarch64-pc-windows-msvc
+          variables:
+            # This is the temp directory that Cargo will use for compiling Rust crates.
+            # We use c:\t\target to avoid interference from the container host.
+            CARGO_TARGET_DIR: c:\t\target
+            TargetTriple: $(triplet)
+            TargetTripleDir: $(CARGO_TARGET_DIR)\$(TargetTriple)\release
+            outputDirectory: $(Build.SourcesDirectory)\out
+            artifactBaseName: wxc-binaries-$(TargetTriple)
+
+          steps:
+            - checkout: self
+            - task: 1ES.Build.Rust.Setup@1
+            - task: 1ES.Build.Rust.Restore@1
+            - task: 1ES.Build.Rust.Run@1
+              inputs:
+                command: build
+                profile: release
+                target: $(triplet)
+                enableTest: true
+                enableClippy: true
+
+            # Sign binaries in build folder
+            - task: EsrpCodeSigning@5
+              displayName: Code Sign ESRP
+              inputs:
+                ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+                AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+                AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }} 
+                AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+                AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+                AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+                FolderPath: $(TargetTripleDir)
+                Pattern: |
+                  wxc-exec.exe
+                  winhttp-proxy-shim.exe
+                  wxc-sandbox-daemon.exe
+                  wxc-sandbox-agent.exe
+                UseMinimatch: true
+                signConfigType: inlineSignParams
+                inlineOperation: |
+                  [
+                    {
+                      "keyCode": "CP-230012",
+                      "operationCode": "SigntoolSign",
+                      "parameters": {
+                        "OpusName": "Microsoft eXecution Container",
+                        "OpusInfo": "https://github.com/microsoft/mxc",
+                        "FileDigest": "/fd \"SHA256\"",
+                        "PageHash": "/NPH",
+                        "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
+                      },
+                      "toolName": "sign",
+                      "toolVersion": "1.0"
+                    },
+                    {
+                      "keyCode": "CP-230012",
+                      "operationCode": "SigntoolVerify",
+                      "parameters": {},
+                      "toolName": "sign",
+                      "toolVersion": "1.0"
+                    }
+                  ]
+            
+            - task: CopyFiles@2
+              displayName: Copy Release Binaries
+              inputs:
+                sourceFolder: $(TargetTripleDir)
+                contents: |
+                  wxc-exec.exe
+                  winhttp-proxy-shim.exe
+                  wxc-sandbox-daemon.exe
+                  wxc-sandbox-agent.exe
+                targetFolder: $(outputDirectory)/$(TargetTriple)
+
+            - task: 1ES.PublishPipelineArtifact@1
+              displayName: Upload binaries as pipeline artifact
+              inputs:
+                path: '$(outputDirectory)/$(TargetTriple)'
+                artifactName: $(artifactBaseName)
+
+    - stage: Package_MXC_SDK
+      displayName: 'Package MXC SDK'
+      dependsOn: Build_WXC_Exec
+      jobs:    
+        - job: package_mxc_sdk
+          displayName: Package MXC SDK
+          pool:
+            type: windows
+          variables:
+            outputDirectory: $(Build.SourcesDirectory)\out
+            sdkDirectory: $(Build.SourcesDirectory)\sdk
+            artifactBaseName: mxc-sdk-package
+          steps:
+            - task: DownloadPipelineArtifact@2
+              displayName: Download wxc x64 binary
+              inputs:
+                artifact: wxc-binaries-x86_64-pc-windows-msvc
+                path: $(sdkDirectory)/bin/x86_64-pc-windows-msvc
+
+            - task: DownloadPipelineArtifact@2
+              displayName: Download wxc arm64 binary
+              inputs:
+                artifact: wxc-binaries-aarch64-pc-windows-msvc
+                path: $(sdkDirectory)/bin/aarch64-pc-windows-msvc
+                      
+            - task: NpmAuthenticate@0
+              displayName: NPM Authenticate
+              inputs:
+                workingFile: '$(Build.SourcesDirectory)/.npmrc'
+
+            - script: npm clean install
+              workingDirectory: $(sdkDirectory)
+              displayName: npm ci
+            - script: npm build
+              workingDirectory: $(sdkDirectory)
+              displayName: npm run build
+
+            - script:  Pack npm package
+              workingDirectory: $(sdkDirectory)
+              displayName: npm pack
+
+            - task: CopyFiles@2
+              displayName: Copy Release Binaries
+              inputs:
+                sourceFolder: $(sdkDirectory)
+                contents: |
+                  *.tgz
+                targetFolder: '$(outputDirectory)/packages'
+              
+            - task: 1ES.PublishPipelineArtifact@1
+              displayName: Upload SDK as pipeline artifact
+              inputs:
+                path: '$(outputDirectory)/packages'
+                artifactName: $(artifactBaseName)
