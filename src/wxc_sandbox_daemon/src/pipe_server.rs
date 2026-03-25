@@ -158,7 +158,8 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
     let temp_dir = std::env::temp_dir().join("wxc-sandbox-config");
     std::fs::create_dir_all(&temp_dir).context("create .wsb config dir")?;
 
-    let max_attempts = 2;
+    let max_attempts = 3;
+    let backoff_secs = [0, 10, 20]; // backoff between retries
     for attempt in 1..=max_attempts {
         match try_launch_and_connect(state, &agent_dir, &rendezvous_dir, &python_dir, &temp_dir)
             .await
@@ -166,8 +167,8 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
             Ok(()) => return Ok(()),
             Err(e) if attempt < max_attempts => {
                 eprintln!(
-                    "[daemon] sandbox attempt {} failed: {:#}, retrying...",
-                    attempt, e
+                    "[daemon] sandbox attempt {}/{} failed: {:#}, retrying after {}s...",
+                    attempt, max_attempts, e, backoff_secs[attempt as usize]
                 );
 
                 // Reset state so the next attempt does a fresh launch.
@@ -178,6 +179,12 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
                 }
                 sandbox_vm::teardown().await;
                 rendezvous::cleanup(&rendezvous_dir).await?;
+
+                // Backoff before next attempt.
+                let wait = std::time::Duration::from_secs(backoff_secs[attempt as usize]);
+                if !wait.is_zero() {
+                    tokio::time::sleep(wait).await;
+                }
             }
             Err(e) => {
                 // Final attempt failed — reset state and propagate error.

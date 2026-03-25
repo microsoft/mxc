@@ -126,6 +126,7 @@ echo [bootstrap] Agent exited with code %ERRORLEVEL% >> "%LOG%" 2>&1
   <LogonCommand>
     <Command>C:\sandbox-rendezvous\bootstrap.cmd</Command>
   </LogonCommand>
+  <vGPU>Disable</vGPU>
   <Networking>Enable</Networking>
 </Configuration>"#,
         agent = agent_dir.display(),
@@ -164,12 +165,13 @@ pub async fn launch(wsb_path: &Path) -> Result<()> {
 
 /// Tear down any running Windows Sandbox instance.
 ///
-/// Kills `WindowsSandbox.exe` (UI host), `WindowsSandboxServer`, and
-/// `WindowsSandboxRemoteSession` to ensure a complete shutdown.
-/// Best-effort — errors are logged but not propagated.
+/// Kills all sandbox and related Hyper-V processes, then polls until they
+/// are fully gone before returning. Best-effort — errors are logged but
+/// not propagated.
 pub async fn teardown() {
     eprintln!("[daemon] tearing down sandbox");
 
+    // Kill the sandbox UI and session processes.
     for process_name in [
         "WindowsSandbox.exe",
         "WindowsSandboxServer",
@@ -183,8 +185,46 @@ pub async fn teardown() {
             .await;
     }
 
-    // Allow time for sandbox processes to fully terminate.
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    // Poll until sandbox-related processes are fully gone (up to 30s).
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let still_running = is_any_sandbox_process_running().await;
+        if !still_running {
+            eprintln!("[daemon] all sandbox processes terminated");
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            eprintln!("[daemon] warning: sandbox processes still running after 30s, proceeding anyway");
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+
+    // Additional cooldown for Hyper-V backend / VHDX release.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+}
+
+/// Check if any sandbox-related processes are still running.
+async fn is_any_sandbox_process_running() -> bool {
+    // Use PowerShell to check for sandbox and its backing VM processes.
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-Process -Name 'WindowsSandbox*','vmmemWindowsSandbox' -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await;
+
+    match output {
+        Ok(out) => {
+            let count_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            count_str.parse::<u32>().unwrap_or(0) > 0
+        }
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
