@@ -71,25 +71,56 @@ Inside the NanVix VM:
      WFP firewall    Sandbox VM     └── Capture stdout/stderr
 ```
 
-## Stdin Piping Approach
+## Key Design Decisions
 
-### [Draft] Why Stdin (Not -c, Not Base64, Not File Injection)
+1. **Stdin piping for script delivery** — NanVix's cmdline has a 255-byte limit and splits on spaces. Hence we pipe scripts via stdin using `exec(__import__('sys').stdin.read())`. Zero changes to CPython or NanVix.
 
-NanVix has two constraints that prevent passing scripts via command-line arguments:
+2. **Raw Python source in `script` field** — For AppContainer/Sandbox, `script` is a shell command. For NanVix, it's raw Python code. The runner handles interpreter invocation internally. This avoids users needing to understand NanVix's cmdline constraints.
 
-1. **Space-splitting**: The POSIX runtime (`nvx/src/lib.rs:build_string_table()`) replaces every space with a null byte. No quoting support. `print('Hello World')` becomes two argv entries.
+3. **Pre-built artifacts, not built from source** — NanVix binaries (`nanvixd.exe`, `kernel.elf`, `python.elf`, `cpython-ramfs.img`) are downloaded from GitHub pre-releases. MXC does not compile or build NanVix components.
 
-2. **255-byte cmdline limit**: The VMM uses a `u8` length prefix (`guest.rs:write_args()`). Maximum 255 bytes for the entire argument string including program name and environment variables.
+4. **Separate boot and script timeouts** — VM boot (~2-5s) is infrastructure overhead the user shouldn't need to account for. `boot_timeout_ms` is added automatically on top of the user's `timeout` value.
 
-Stdin piping bypasses both constraints with zero code changes to CPython, NanVix, or nanvixd:
+5. **No policy mapping for NanVix** — Unlike WSL containers (which map `filesystem`/`network` policies to volume mounts and networking modes), NanVix ignores these fields entirely. The guest has no network and a read-only filesystem by design.
 
-| Approach | Spaces | Length | CPython Changes | NanVix Changes |
-|----------|--------|--------|-----------------|----------------|
-| **Stdin pipe** ✅ | ✅ None | ✅ None | ✅ None | ✅ None |
-| Base64 env var | ✅ OK | ❌ ~150B usable | ❌ C decoder | None |
-| Quoting in runtime | ✅ OK | ❌ 255B limit | None | ❌ Unsafe Rust |
-| Ramfs file injection | ✅ OK | ✅ None | None | Moderate |
+6. **Host-side I/O risk mitigated by IKC framing** — `nanvixd.exe` parses guest I/O via IKC (Inter-Kernel Communication) messages using fixed-size frames with bounds checking. A crafted guest could attempt malformed messages. Mitigation: formal fuzzing (future work).
 
+7. **Artifact integrity via hash verification** — Guest artifacts (`python.elf`, `kernel.elf`, `cpython-ramfs.img`) are loaded from disk. If an attacker can modify these files, they control the guest. Mitigation: hash verification at install time via setup scripts (future work).
+
+8. **Timeout = boot + script** — Total timeout is `boot_timeout_ms` (default 60000ms, grace for VM boot + Python init) + `script_timeout` (from JSON `timeout` field). A background watchdog thread terminates the process if the total expires, returning partial stdout/stderr.
+
+9. **Cleanup guarantee** — On normal exit, timeout, or crash: reader threads joined (stdout/stderr fully captured), watchdog cancelled and joined, `nanvixd.exe` termination releases the WHP partition. No orphaned VMs.
+
+## Workspace Changes
+
+```
+mxc/src/
+├── Cargo.toml                        # Add NanVix to workspace (no new deps)
+├── wxc/
+│   ├── Cargo.toml                    # UNCHANGED
+│   └── src/main.rs                   # Add NanVix match arm (2 lines)
+├── wxc_common/
+│   ├── Cargo.toml                    # UNCHANGED
+│   └── src/
+│       ├── lib.rs                    # Add: pub mod nanvix_runner (1 line)
+│       ├── models.rs                 # Add: NanVixConfig struct, ContainmentBackend::NanVix
+│       ├── config_parser.rs          # Add: RawNanVix struct, "nanvix" parsing
+│       ├── error.rs                  # Add: WxcError::NanVix variant
+│       ├── nanvix_runner.rs          # NEW — NanVixScriptRunner implementation
+│       ├── appcontainer.rs           # UNCHANGED
+│       ├── sandbox_runner.rs         # UNCHANGED
+│       ├── script_runner.rs          # UNCHANGED
+│       └── ...                       # All other modules UNCHANGED
+├── wxc_test_driver/                  # UNCHANGED
+├── wxc_sandbox_agent/                # UNCHANGED
+└── wxc_sandbox_daemon/               # UNCHANGED
+
+mxc/docs/
+└── nanvix-integration-plan.md        # NEW — this document
+
+mxc/test_configs/
+└── nanvix_hello.json                 # NEW — example NanVix config
+```
 
 ## Error Handling & Output Semantics
 
@@ -149,41 +180,21 @@ All variants are mapped to `ScriptResponse.error_message` for the JSON response.
 
 ### Config Field Mapping
 
-| Field | NanVix Behavior |
-|-------|----------------|
-| `script` | ✅ **Honored** — raw Python source code |
-| `timeout` | ✅ **Honored** — script execution timeout in ms |
-| `containment` | ✅ **Honored** — must be `"nanvix"` |
-| `nanvix.*` | ✅ **Honored** — NanVix-specific configuration |
-| `workingDirectory` | ⚠️ **Ignored** — guest has its own filesystem namespace |
-| `appContainer.*` | ⚠️ **Ignored** — not applicable to NanVix |
-| `filesystem.*` | ⚠️ **Ignored** — guest FS is a read-only ramfs |
-| `network.*` | ⚠️ **Ignored** — no network stack in guest |
-| `sandbox.*` | ⚠️ **Ignored** — NanVix is not Windows Sandbox |
+| JSON Field | Rust Field (`CodexRequest`) | NanVix Behavior |
+|------------|---------------------------|----------------|
+| `script` | `script_code: String` | ✅ **Used** — raw Python source code (not a shell command) |
+| `timeout` | `script_timeout: u32` | ✅ **Used** — script execution timeout in ms |
+| `containment` | `containment: ContainmentBackend` | ✅ **Used** — must be `"nanvix"` |
+| `nanvix.*` | `nanvix_config: NanVixConfig` | ✅ **Used** — NanVix-specific configuration |
+| `workingDirectory` | `working_directory: String` | ⚠️ **Ignored** — guest has its own filesystem namespace |
+| `appContainer.*` | `policy: ContainerPolicy` | ⚠️ **Ignored** — not applicable to NanVix |
+| `filesystem.*` | (part of `policy`) | ⚠️ **Ignored** — guest FS is a read-only ramfs |
+| `network.*` | (part of `policy`) | ⚠️ **Ignored** — no network stack in guest |
+| `sandbox.*` | `sandbox_config: SandboxConfig` | ⚠️ **Ignored** — NanVix is not Windows Sandbox |
 
-**Note on `script` field**: For NanVix, `script` contains **raw Python source code** (e.g., `"print('hello')"`), not a shell command (e.g., `"python -c \"print('hello')\""`). The runner handles interpreter invocation internally.
+## Binary Distribution & Versioning
 
-### [Draft] NanVixConfig Fields
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `nanvixdPath` | String | Auto-discover | Path to `nanvixd.exe` |
-| `binDir` | String | Same dir as nanvixd | Directory with `kernel.elf` |
-| `ramfsPath` | String | Required | Path to FAT32 stdlib image |
-| `pythonBinary` | String | `"python.elf"` | Python binary name (relative to binDir) |
-| `pythonHome` | String | `"/sysroot"` | `PYTHONHOME` inside the guest |
-| `bootTimeout` | u32 | `60000` | Boot grace period in ms |
-
-### Path Resolution
-
-`nanvixd.exe` is discovered in order:
-1. Explicit `nanvixdPath` from config
-2. `binDir/nanvixd.exe`
-3. Next to `wxc-exec.exe`
-
-## [Draft] Binary Distribution & Versioning
-
-NanVix artifacts (~45 MB total) will be bundled in the MXC npm package.
+NanVix artifacts (~63 MB total) are **NOT bundled** in the MXC npm package. They are distributed as **pre-release binaries** from their respective GitHub repositories:
 
 | Artifact | Size | Source |
 |----------|------|--------|
@@ -191,6 +202,8 @@ NanVix artifacts (~45 MB total) will be bundled in the MXC npm package.
 | `kernel.elf` | 10.5 MB | [nanvix/nanvix](https://github.com/nanvix/nanvix) releases |
 | `python.elf` | 9.1 MB | [nanvix/cpython](https://github.com/nanvix/cpython) releases |
 | `cpython-ramfs.img` | 35.6 MB | [nanvix/cpython](https://github.com/nanvix/cpython) releases |
+
+Setup scripts (PowerShell & Bash) will download matching pre-release binaries and verify checksums.
 
 ## Security Model
 
@@ -204,41 +217,137 @@ NanVix artifacts (~45 MB total) will be bundled in the MXC npm package.
 | **Writable storage** | Host FS (restricted) | VM disk | None (read-only) |
 | **Guest OS** | Windows (host) | Windows (guest) | NanVix microkernel |
 
-### [Draft] Host-Side Risk
+## Development Phases
 
-`nanvixd.exe` parses I/O from the guest via IKC (Inter-Kernel Communication) messages. A crafted guest could attempt to send malformed messages. The IKC protocol uses fixed-size frames with bounds checking. Formal fuzzing is will be added.
+### Phase 1 — Backend Implementation
 
-### [Draft] Artifact Integrity
+**Goal:** Add NanVix as a functional containment backend in `wxc-exec.exe`.
 
-Guest artifacts (`python.elf`, `kernel.elf`, `cpython-ramfs.img`) are loaded from disk. If an attacker can modify these files, they control the guest. Mitigation: store artifacts in read-only locations, or add hash verification will be added.
+**What changed:**
+- `models.rs` — Added `NanVix` variant to `ContainmentBackend`, added `NanVixConfig` struct, added `nanvix_config` field to `CodexRequest`
+- `config_parser.rs` — Added `RawNanVix` serde struct, `"nanvix"` containment parsing, NanVix config section parsing
+- `error.rs` — Added `WxcError::NanVix(String)` variant
+- `nanvix_runner.rs` — **NEW** — `NanVixScriptRunner` implementing `ScriptRunner` trait
+- `lib.rs` — Added `pub mod nanvix_runner`
+- `main.rs` — Added `ContainmentBackend::NanVix` dispatch arm
 
-## Timeout, Lifecycle & Resource Limits
+**Verified:** Build succeeds, all existing tests pass, E2E test produces correct output.
 
-### Timeout Semantics
+### Phase 2 — SDK Types & Platform Detection
+
+**Goal:** Make the TypeScript SDK aware of NanVix as a backend option.
+
+**What changes:**
+- `sdk/src/types.ts` — Add `'nanvix'` to `SandboxingMethod` type, add `NanVixConfig` interface
+- `sdk/src/platform.ts` — Detect NanVix availability via `wxc-exec.exe --check-platform`
+- `sdk/src/sandbox.ts` — Accept `containment: 'nanvix'` in `SandboxSpawnOptions`
+- `wxc/src/main.rs` — Add `--check-platform` subcommand returning JSON capabilities
+
+### Phase 3 — CLI Flags & Setup Scripts
+
+**Goal:** Let users invoke NanVix from the CLI and set up the runtime.
+
+**What changes:**
+- `wxc/src/main.rs` — Add `--nanvix` flag (sets `containment: "nanvix"` automatically)
+- `scripts/setup-nanvix.ps1` — PowerShell script to download NanVix pre-release binaries
+- `scripts/setup-nanvix.sh` — Bash equivalent for WSL/Linux/CI
+
+### Phase 4 — Testing & Hardening
+
+**Goal:** Comprehensive test coverage for the NanVix backend.
+
+**What changes:**
+- Integration tests exercising full MXC→nanvixd→Python→output pipeline
+- Negative tests: missing modules, network I/O, file writes, timeout
+- WHP-conditional test execution (skip on runners without WHP)
+- Mock `nanvixd.exe` for fast unit testing of error/timeout paths
+
+## Supported Workloads
+
+### Supported
+
+| Workload | Example | Notes |
+|----------|---------|-------|
+| Pure computation | `sum(range(1000000))` | Full Python numeric stack |
+| String processing | `re.findall(r'\d+', text)` | Regex, string ops, encodings |
+| JSON/data manipulation | `json.loads(data)` | json, csv, collections |
+| Math/statistics | `math.factorial(100)` | math, decimal, fractions |
+| Date/time operations | `datetime.datetime.now()` | datetime, calendar |
+| Hash computation | `hashlib.sha256(b'data')` | hashlib |
+| Data structures | `dict`, `list`, `set`, `heapq` | All built-in data structures |
+| Multi-line scripts | Functions, classes, loops | Full Python syntax |
+
+### Not Supported
+
+| Workload | Why | Error User Sees |
+|----------|-----|----------------|
+| Network I/O (`urllib`, `socket`, `http`) | No network stack in guest | `OSError: Function not implemented` |
+| File writing (`open('f','w')`, `tempfile`) | Read-only FAT32 ramfs | `OSError: Read-only file system` |
+| Subprocess (`subprocess.run`, `os.system`) | `fork()` is stubbed | `OSError: Function not implemented` |
+| SSL/TLS (`import ssl`) | `_ssl` module not built | `ModuleNotFoundError: No module named '_ssl'` |
+| ctypes (`import ctypes`) | `_ctypes` module not built | `ModuleNotFoundError: No module named '_ctypes'` |
+| GUI (`tkinter`, `turtle`) | No display server | Module removed from ramfs |
+| Interactive input (`input()`) | stdin consumed for script delivery | `EOFError: EOF when reading a line` |
+| Large memory (>128MB) | Default VM memory limit | Process killed by kernel OOM |
+
+## End-User Experience
+
+### CLI Usage
+
+```bash
+# Run a Python script in a NanVix VM
+wxc-exec.exe nanvix_config.json
+
+# With debug output
+wxc-exec.exe --debug nanvix_config.json
+```
+
+### Example Config (`nanvix_config.json`)
+
+```json
+{
+  "script": "import sys\nprint(f'Python {sys.version} on {sys.platform}')",
+  "containment": "nanvix",
+  "timeout": 30000,
+  "nanvix": {
+    "binDir": "C:\\nanvix\\bin",
+    "ramfsPath": "C:\\nanvix\\bin\\cpython-ramfs.img"
+  }
+}
+```
+
+### Expected Output
 
 ```
-total_timeout = boot_timeout_ms + script_timeout
-              = 60,000 + 30,000
-              = 90,000 ms (90 seconds)
+$ wxc-exec.exe --debug nanvix_config.json
+Script code length: 58
+Working directory:
+Script timeout: 30000
+Container name: CLI
+NanVix: nanvixd="C:\\nanvix\\bin\\nanvixd.exe"
+NanVix: bin_dir="C:\\nanvix\\bin"
+NanVix: ramfs="C:\\nanvix\\bin\\cpython-ramfs.img"
+NanVix: python="C:\\nanvix\\bin\\python.elf"
+NanVix: process exited with code 0
+Exit code: 0
+Python 3.12.3 (tags/0715636-nanvix-03bba66:0715636) on nanvix
 ```
 
-- `boot_timeout_ms` (default 60s): Grace period for VM boot + Python init
-- `script_timeout` (from JSON `timeout` field): Script execution time
+### SDK Usage (After Phase 2)
 
-### Watchdog
+```typescript
+import { spawnSandboxAsync } from '@microsoft/mxc-sdk';
 
-A background watchdog thread monitors the `nanvixd.exe` process. If the total timeout expires, the watchdog terminates the process and the runner returns an error response with the partial stdout/stderr captured so far.
+const result = await spawnSandboxAsync(
+  "print('Hello from NanVix!')",
+  {},  // no policy needed — NanVix is isolated by design
+  { containment: 'nanvix' }
+);
 
-### Cleanup Guarantee
+console.log(result.stdout);  // "Hello from NanVix!"
+console.log(result.exitCode); // 0
+```
 
-On normal exit, timeout, or crash:
-- Reader threads joined (stdout/stderr fully captured)
-- Watchdog thread cancelled and joined
-- `nanvixd.exe` termination releases the WHP partition
-
-### Concurrency
-
-Multiple NanVix executions can run concurrently. Each `nanvixd.exe` spawns an independent WHP virtual machine partition. There are no port conflicts, file locks, or shared state. Concurrency is limited only by host RAM (~128 MB per VM default).
 
 ## Testing Strategy
 
@@ -270,3 +379,4 @@ Multiple NanVix executions can run concurrently. Each `nanvixd.exe` spawns an in
 | 2 | Should there be a size limit to the VM |  |
 | 3 | Should there be a writable FS area in the guest? | Parked for Phase 2 |
 | 4 | Can we support TypeScript or other payloads? | Architecture supports it — NanVix can run any i686 ELF |
+
