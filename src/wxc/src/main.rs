@@ -135,6 +135,10 @@ fn main() {
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
         ContainmentBackend::Sandbox => Box::new(SandboxScriptRunner::new(&request.sandbox_config)),
+        ContainmentBackend::Wslc => {
+            eprintln!("Error: WSLC backend not yet implemented (Phase 3)");
+            process::exit(1);
+        }
         _ => todo!("Return an error here"),
     };
     let response = runner.run(&request, &mut logger);
