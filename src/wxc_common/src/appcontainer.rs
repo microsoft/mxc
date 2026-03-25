@@ -559,8 +559,7 @@ impl Default for AppContainerScriptRunner {
 impl ScriptRunner for AppContainerScriptRunner {
     fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         use crate::filesystem_bfs::FileSystemBfsManager;
-        use crate::network_firewall::NetworkFirewallManager;
-        use crate::network_proxy::NetworkProxyManager;
+        use crate::network_manager::NetworkManager;
         use crate::validator::validate_request;
 
         if let Err(e) = validate_request(request) {
@@ -577,33 +576,18 @@ impl ScriptRunner for AppContainerScriptRunner {
             return ScriptResponse::error(&e.to_string());
         }
 
-        let mut network_proxy_manager = NetworkProxyManager::new();
-        if request.policy.network_proxy.is_enabled() {
-            match network_proxy_manager.start(
-                &request.policy,
-                &principal_id,
-                self.app_container_sid,
-                logger,
-            ) {
-                Ok(()) => {
-                    self.proxy_address = network_proxy_manager.address().cloned();
-                }
-                Err(err) => {
-                    return ScriptResponse::error(&err.to_string());
-                }
+        let mut network_manager = NetworkManager::new();
+        match network_manager.start(
+            &principal_id,
+            &request.policy,
+            self.app_container_sid,
+            logger,
+        ) {
+            Ok(()) => {
+                self.proxy_address = network_manager.proxy_address().cloned();
             }
-        }
-
-        let mut fw_manager = NetworkFirewallManager::new();
-        match fw_manager.apply_firewall_rules(&principal_id, &request.policy, logger) {
-            Ok(true) => {}
-            Ok(false) => {
-                network_proxy_manager.stop(logger);
-                return ScriptResponse::error("Failed to apply network firewall rules.");
-            }
-            Err(e) => {
-                network_proxy_manager.stop(logger);
-                return ScriptResponse::error(&e.to_string());
+            Err(err) => {
+                return ScriptResponse::error(&err.to_string());
             }
         }
 
@@ -614,12 +598,7 @@ impl ScriptRunner for AppContainerScriptRunner {
             Err(_) => ScriptResponse::error("Unknown error during script execution."),
         };
 
-        if fw_manager.rules_applied() && request.policy.remove_firewall_rules_on_exit {
-            let _ = fw_manager.remove_firewall_rules(logger);
-        }
-        if network_proxy_manager.is_active() {
-            network_proxy_manager.stop(logger);
-        }
+        network_manager.stop_all(&request.policy, logger);
         if bfs_manager.configured() && request.policy.clear_policy_on_exit {
             bfs_manager.remove_configuration(logger);
         }

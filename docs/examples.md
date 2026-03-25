@@ -45,10 +45,10 @@ For a more comprehensive list of examples, look in the examples\ directory.
 
 ### Network Proxy
 
-Route AppContainer traffic through an already-running localhost proxy. The
-proxy is responsible for application-layer filtering such as domain allow/deny
-lists, request inspection, and logging. Supported with the `appcontainer`
-containment backend only.
+Route AppContainer traffic through a localhost proxy. Supported with the
+`appcontainer` containment backend only. Two mutually exclusive modes are available:
+
+**External proxy** — connect to an already-running localhost proxy:
 
 ```json
 {
@@ -63,3 +63,23 @@ containment backend only.
   }
 }
 ```
+
+**Builtin test server** — wxc launches its own minimal HTTP CONNECT proxy on
+an OS-assigned port (for integration testing only, not production):
+
+```json
+{
+  "script": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
+  "timeout": 30000,
+  "appContainer": {
+    "name": "CLI-BuiltinProxy",
+    "capabilities": ["internetClient"]
+  },
+  "network": {
+    "proxy": { "builtinTestServer": true }
+  }
+}
+```
+
+When `builtinTestServer` is `true`, it must be the only key in the `proxy`
+object.

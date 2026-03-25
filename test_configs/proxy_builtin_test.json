@@ -7,6 +7,6 @@
     "learningMode": true
   },
   "network": {
-    "proxy": { "localhost": 8080 }
+    "proxy": { "builtinTestServer": true }
   }
 }

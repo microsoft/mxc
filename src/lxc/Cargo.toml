@@ -1,0 +1,14 @@
+[package]
+name = "lxc"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "lxc-exec"
+path = "src/main.rs"
+
+[dependencies]
+wxc_common = { workspace = true }
+lxc_common = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }

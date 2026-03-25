@@ -6,13 +6,13 @@ use std::fs;
 
 use serde::Deserialize;
 
+use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, ContainerPolicy, ContainmentBackend, NetworkEnforcementMode, NetworkPolicy,
-    ProxyAddress, ProxyConfig, SandboxConfig,
+    CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, LxcConfig,
+    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SandboxConfig,
 };
-use crate::string_util::base64_decode;
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
 
@@ -67,7 +67,60 @@ struct RawSandbox {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawPortMapping {
+    #[serde(rename = "windowsPort")]
+    windows_port: Option<u16>,
+    #[serde(rename = "containerPort")]
+    container_port: Option<u16>,
+    protocol: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawContainerConfig {
+    #[serde(rename = "targetOs")]
+    target_os: Option<String>,
+    image: Option<String>,
+    #[serde(rename = "cpuCount")]
+    cpu_count: Option<u32>,
+    #[serde(rename = "memoryMb")]
+    memory_mb: Option<u64>,
+    gpu: Option<bool>,
+    #[serde(rename = "storagePath")]
+    storage_path: Option<String>,
+    #[serde(rename = "portMappings")]
+    port_mappings: Option<Vec<RawPortMapping>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawLxc {
+    #[serde(rename = "containerName")]
+    container_name: Option<String>,
+    distribution: Option<String>,
+    release: Option<String>,
+    #[serde(rename = "destroyOnExit")]
+    destroy_on_exit: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawProcess {
+    #[serde(rename = "commandLine")]
+    command_line: Option<String>,
+    cwd: Option<String>,
+    env: Option<Vec<String>>,
+    timeout: Option<u32>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawConfig {
+    version: Option<String>,
+    #[serde(rename = "containerId")]
+    container_id: Option<String>,
+    platform: Option<String>,
+    process: Option<RawProcess>,
     script: Option<String>,
     containment: Option<String>,
     #[serde(rename = "workingDirectory")]
@@ -76,37 +129,70 @@ struct RawConfig {
     #[serde(rename = "appContainer")]
     app_container: Option<RawAppContainer>,
     sandbox: Option<RawSandbox>,
+    container: Option<RawContainerConfig>,
+    lxc: Option<RawLxc>,
     filesystem: Option<RawFilesystem>,
     network: Option<RawNetwork>,
 }
 
 // ---------- Public API ----------
 
-/// Parse the `proxy` field: `{ "localhost": <port> }`.
+/// Parse the `proxy` field.
+///
+/// Accepts either `{ "localhost": <port> }` for an external localhost proxy,
+/// or `{ "builtinTestServer": true }` to have wxc launch its own test proxy.
+/// When `builtinTestServer` is set it must be the only key in the object.
 fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError> {
     let obj = value
         .as_object()
         .ok_or_else(|| WxcError::ConfigParse("network.proxy must be an object".to_string()))?;
 
-    let port_value = obj
-        .get("localhost")
-        .and_then(|val| val.as_u64())
-        .ok_or_else(|| {
-            WxcError::ConfigParse(
-                "network.proxy requires a 'localhost' port (only localhost is currently supported)"
-                    .to_string(),
-            )
-        })?;
+    let mut proxy_addr = ProxyAddress::new("127.0.0.1".to_string(), 0, true);
 
-    if port_value == 0 || port_value > 65535 {
-        return Err(WxcError::ConfigParse(
-            "network.proxy.localhost must be a port between 1 and 65535".to_string(),
-        ));
+    if let Some(builtin_value) = obj.get("builtinTestServer") {
+        if builtin_value.as_bool() != Some(true) {
+            return Err(WxcError::ConfigParse(
+                "network.proxy.builtinTestServer must be true when present".to_string(),
+            ));
+        }
+        if obj.len() != 1 {
+            return Err(WxcError::ConfigParse(
+                "When builtinTestServer is true, no other proxy options may be set".to_string(),
+            ));
+        }
+
+        return Ok(ProxyConfig {
+            address: Some(proxy_addr),
+            builtin_test_server: true,
+        });
     }
 
-    Ok(ProxyConfig {
-        address: Some(ProxyAddress::Localhost(port_value as u16)),
-    })
+    if let Some(localhost) = obj.get("localhost") {
+        let port_val = if let Some(port) = localhost.as_u64() {
+            port
+        } else {
+            return Err(WxcError::ConfigParse(
+                "network.proxy.localhost must be a number".to_string(),
+            ));
+        };
+
+        if port_val == 0 || port_val > 65535 {
+            return Err(WxcError::ConfigParse(
+                "network.proxy.localhost must be a port between 1 and 65535".to_string(),
+            ));
+        }
+
+        // Non builtin proxy with localhost and port specified
+        proxy_addr.port = port_val as u16;
+        return Ok(ProxyConfig {
+            address: Some(proxy_addr),
+            builtin_test_server: false,
+        });
+    }
+
+    Err(WxcError::ConfigParse(
+        "network.proxy must specify either builtinTestServer or localhost".to_string(),
+    ))
 }
 
 /// Loads and parses a JSON-based code execution request.
@@ -155,8 +241,43 @@ pub fn load_request(
 // ---------- Conversion from raw JSON to domain model ----------
 
 fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
+    // New top-level fields
+    let schema_version = raw.version.unwrap_or_default();
+    let container_id = raw.container_id.unwrap_or_default();
+    let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
+
+    // Validate platform
+    match platform.as_str() {
+        "linux" | "windows" => {}
+        other => {
+            let msg = format!(
+                "Invalid platform value '{}' (must be 'linux' or 'windows')",
+                other
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+    }
+
+    // Process section with dual-read fallback (new location wins, old is fallback)
+    let (process_script, process_cwd, process_timeout, env) = if let Some(ref p) = raw.process {
+        (
+            p.command_line.clone().or(raw.script.clone()),
+            p.cwd.clone().or(raw.working_directory.clone()),
+            p.timeout.or(raw.timeout),
+            p.env.clone().unwrap_or_default(),
+        )
+    } else {
+        (
+            raw.script.clone(),
+            raw.working_directory.clone(),
+            raw.timeout,
+            vec![],
+        )
+    };
+
     // Script is required and must be non-empty
-    let script_code = match raw.script {
+    let script_code = match process_script {
         Some(s) if !s.is_empty() => s,
         Some(_) => {
             logger.log_line("script cannot be empty");
@@ -170,16 +291,20 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     };
 
-    let working_directory = raw.working_directory.unwrap_or_default();
-    let script_timeout = raw.timeout.unwrap_or(0);
+    let working_directory = process_cwd.unwrap_or_default();
+    let script_timeout = process_timeout.unwrap_or(0);
 
     // Containment backend selection
     let containment = match raw.containment.as_deref() {
         None | Some("appcontainer") => ContainmentBackend::AppContainer,
         Some("sandbox") => ContainmentBackend::Sandbox,
+        Some("wslc") => ContainmentBackend::Wslc,
+        Some("lxc") => ContainmentBackend::Lxc,
+        Some("vm") => ContainmentBackend::Vm,
+        Some("microvm") => ContainmentBackend::MicroVm,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer' or 'sandbox')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', 'wslc', 'lxc', 'vm', or 'microvm')",
                 other
             );
             logger.log_line(&msg);
@@ -197,6 +322,17 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             sandbox_config.daemon_pipe_name = name;
         }
     }
+
+    // LXC configuration
+    let lxc_config = {
+        let raw_lxc = raw.lxc.unwrap_or_default();
+        LxcConfig {
+            container_name: raw_lxc.container_name.unwrap_or_default(),
+            distribution: raw_lxc.distribution.unwrap_or_else(|| "alpine".to_string()),
+            release: raw_lxc.release.unwrap_or_else(|| "3.19".to_string()),
+            destroy_on_exit: raw_lxc.destroy_on_exit.unwrap_or(true),
+        }
+    };
 
     let mut policy = ContainerPolicy::default();
 
@@ -314,21 +450,54 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     }
 
+    // Container configuration (WSLC SDK)
+    let mut container_config = ContainerConfig::default();
+    if let Some(cc) = raw.container {
+        if let Some(os) = cc.target_os {
+            container_config.target_os = os;
+        }
+        if let Some(img) = cc.image {
+            container_config.image = img;
+        }
+        container_config.cpu_count = cc.cpu_count;
+        container_config.memory_mb = cc.memory_mb;
+        if let Some(gpu) = cc.gpu {
+            container_config.gpu = gpu;
+        }
+        container_config.storage_path = cc.storage_path;
+        if let Some(mappings) = cc.port_mappings {
+            container_config.port_mappings = mappings
+                .into_iter()
+                .map(|m| PortMapping {
+                    windows_port: m.windows_port.unwrap_or(0),
+                    container_port: m.container_port.unwrap_or(0),
+                    protocol: m.protocol.unwrap_or_else(|| "tcp".to_string()),
+                })
+                .collect();
+        }
+    }
+
     Ok(CodexRequest {
+        schema_version,
+        container_id,
+        platform,
+        env,
         script_code,
         working_directory,
         script_timeout,
         containment,
         policy,
         sandbox_config,
+        container_config,
+        lxc_config,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::base64_encode;
     use crate::logger::Mode;
-    use crate::string_util::base64_encode;
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
@@ -882,5 +1051,194 @@ mod tests {
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_builtin_test_server() {
+        let json = r#"{
+            "script": "echo test",
+            "network": {
+                "proxy": { "builtinTestServer": true }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(req.policy.network_proxy.builtin_test_server);
+        assert!(req.policy.network_proxy.address.is_some());
+    }
+
+    #[test]
+    fn proxy_builtin_test_server_rejects_extra_keys() {
+        let json =
+            r#"{"script":"x","network":{"proxy":{"builtinTestServer":true,"localhost":8080}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_builtin_test_server_rejects_false() {
+        let json = r#"{"script":"x","network":{"proxy":{"builtinTestServer":false}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_builtin_test_server_rejected_with_sandbox() {
+        let json = r#"{"script":"x","containment":"sandbox","network":{"proxy":{"builtinTestServer":true}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_toplevel_fields_parsed() {
+        let json = r#"{"version": "1.0", "containerId": "abc-123", "platform": "linux", "script": "echo hi"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "1.0");
+        assert_eq!(req.container_id, "abc-123");
+        assert_eq!(req.platform, "linux");
+    }
+
+    #[test]
+    fn invalid_platform_rejected() {
+        let json = r#"{"script": "echo hi", "platform": "Windwos"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_toplevel_fields_default_when_absent() {
+        let json = r#"{"script": "echo hi"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "");
+        assert_eq!(req.container_id, "");
+        assert_eq!(req.platform, "windows");
+    }
+
+    #[test]
+    fn process_section_overrides_toplevel() {
+        let json = r#"{
+            "script": "old command",
+            "process": { "commandLine": "new command" }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.script_code, "new command");
+    }
+
+    #[test]
+    fn process_section_cwd_overrides_working_directory() {
+        let json = r#"{
+            "script": "echo hi",
+            "workingDirectory": "C:\\old",
+            "process": { "cwd": "/new" }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.working_directory, "/new");
+    }
+
+    #[test]
+    fn process_section_timeout_overrides_toplevel() {
+        let json = r#"{
+            "script": "echo hi",
+            "timeout": 5000,
+            "process": { "timeout": 9000 }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.script_timeout, 9000);
+    }
+
+    #[test]
+    fn process_section_env_parsed() {
+        let json = r#"{
+            "process": {
+                "commandLine": "echo hi",
+                "env": ["FOO=bar", "BAZ=qux"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.env, vec!["FOO=bar", "BAZ=qux"]);
+    }
+
+    #[test]
+    fn toplevel_fallback_when_no_process_section() {
+        let json = r#"{
+            "script": "echo hello",
+            "workingDirectory": "C:\\temp",
+            "timeout": 3000
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.script_code, "echo hello");
+        assert_eq!(req.working_directory, "C:\\temp");
+        assert_eq!(req.script_timeout, 3000);
+        assert!(req.env.is_empty());
+    }
+
+    #[test]
+    fn process_section_falls_back_to_toplevel_script() {
+        let json = r#"{
+            "script": "echo fallback",
+            "process": { "cwd": "/workspace" }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.script_code, "echo fallback");
+        assert_eq!(req.working_directory, "/workspace");
+    }
+
+    #[test]
+    fn containment_vm_accepted() {
+        let json = r#"{"script": "echo hi", "containment": "vm"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::Vm);
+    }
+
+    #[test]
+    fn containment_microvm_accepted() {
+        let json = r#"{"script": "echo hi", "containment": "microvm"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::MicroVm);
     }
 }

@@ -6,7 +6,7 @@ MXC (Microsoft eXecution Container) runs untrusted code in sandboxed environment
 
 ## Proposed Solution
 
-Add a **WSL Container backend** directly into the existing `wxc-exec.exe` Rust binary, using the **[WSL Container SDK (WSLC SDK)](https://microsoft-my.sharepoint-df.com/:w:/p/richfr/cQp13XN0n_AURL9yxz2qBILYEgUCvFhTO6rwSfNlSVE6lUjBxQ?CID=4cb4ab01-ef3a-6ce4-1676-4706077e81ca)** as the container runtime interface. When the JSON config specifies `"containment": "containerd"`, the binary routes to a new `WSLContainerRunner` instead of `AppContainerScriptRunner`. The runner calls WSLC SDK C APIs (via Rust FFI bindings) to manage sessions, containers, and process I/O — eliminating the need to build a custom containerd gRPC client or OCI spec builder. This leverages the existing `ScriptRunner` trait and keeps everything in a single binary.
+Add a **WSL Container runner** directly into the existing `wxc-exec.exe` Rust binary, using the **[WSL Container SDK (WSLC SDK)](https://microsoft-my.sharepoint-df.com/:w:/p/richfr/cQp13XN0n_AURL9yxz2qBILYEgUCvFhTO6rwSfNlSVE6lUjBxQ?CID=4cb4ab01-ef3a-6ce4-1676-4706077e81ca)** as the container runtime interface. When the JSON config specifies `"containment": "wslc"`, the binary routes to a new `WSLContainerRunner` instead of `AppContainerScriptRunner`. The runner calls WSLC SDK C APIs (via Rust FFI bindings) to manage sessions, containers, and process I/O — eliminating the need to build a custom containerd gRPC client or OCI spec builder. This leverages the existing `ScriptRunner` trait and keeps everything in a single binary.
 
 ## How It Works
 
@@ -16,14 +16,14 @@ Path A — CLI (direct):
     └── Clap parses args → builds JSON config internally → dispatches to WSLContainerRunner
 
 Path B — SDK (programmatic):
-  App calls: spawnSandbox("python3 my_app.py", policy, { containment: "containerd" })
+  App calls: spawnSandbox("python3 my_app.py", policy, { containment: "wslc" })
     ├── Detects WSLC SDK available via wxc-exec.exe --check-platform
-    ├── Builds JSON config with containment = "containerd"
+    ├── Builds JSON config with containment = "wslc"
     └── Spawns wxc-exec.exe with the config
 
 Both paths converge here:
   wxc-exec.exe (Rust — single binary, three backends)
-    ├── Parses JSON config → sees containment = "containerd"
+    ├── Parses JSON config → sees containment = "wslc"
     ├── Creates WSLContainerRunner (via existing Box<dyn ScriptRunner> dispatch)
     ├── Calls WSLC SDK via Rust FFI bindings:
     │     WslcCanRun()                → preflight check
@@ -59,7 +59,7 @@ The recent SandboxRunner work introduced a `ContainmentBackend` enum and dynamic
                           │
            ┌──────────────┼──────────────┐
            ▼              ▼              ▼
-  AppContainerScript   Sandbox       LinuxContainer
+  AppContainerScript   Sandbox       WSLContainer
   Runner (existing)    ScriptRunner  Runner (new)
            │           (existing)         │
      AppContainer          │         WSLC SDK (C API)
@@ -69,7 +69,7 @@ The recent SandboxRunner work introduced a `ContainmentBackend` enum and dynamic
                                      └── Win32 HANDLE I/O
 ```
 
-All three backends implement the `ScriptRunner` trait. `main.rs` already uses `Box<dyn ScriptRunner>` with a `match` on `request.containment`. Adding the containerd path requires one new match arm:
+All three backends implement the `ScriptRunner` trait. `main.rs` already uses `Box<dyn ScriptRunner>` with a `match` on `request.containment`. Adding the WSLC path requires one new match arm:
 
 ```rust
 // main.rs — current dispatch (from SandboxRunner work)
@@ -77,7 +77,7 @@ let mut runner: Box<dyn ScriptRunner> = match request.containment {
     ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
     ContainmentBackend::Sandbox => Box::new(SandboxScriptRunner::new(&request.sandbox_config)),
     // NEW — add this arm:
-    ContainmentBackend::Containerd => Box::new(WSLContainerRunner::new(&request.container_config)),
+    ContainmentBackend::Wslc => Box::new(WSLContainerRunner::new(&request.container_config)),
 };
 ```
 
@@ -100,9 +100,9 @@ let mut runner: Box<dyn ScriptRunner> = match request.containment {
 
 **Goal:** Make the SDK aware that more than one sandboxing backend can exist, and detect what's available on the current machine.
 
-**Why it matters:** This phase is specifically needed for **programmatic SDK consumers** — apps (e.g., Electron, Node.js services) that call `spawnSandbox()` directly rather than going through the CLI. Today, `spawnSandbox(script, policy)` always spawns `wxc-exec.exe` with an AppContainer config. After this phase, `spawnSandbox(script, policy, { containment: 'containerd' })` generates a containerd config and passes it to the same `wxc-exec.exe` binary, which routes internally.
+**Why it matters:** This phase is specifically needed for **programmatic SDK consumers** — apps (e.g., Electron, Node.js services) that call `spawnSandbox()` directly rather than going through the CLI. Today, `spawnSandbox(script, policy)` always spawns `wxc-exec.exe` with an AppContainer config. After this phase, `spawnSandbox(script, policy, { containment: 'wslc' })` generates a WSLC config and passes it to the same `wxc-exec.exe` binary, which routes internally.
 
-**Note:** If the only entry point is the CLI (`wxc-exec.exe --container`), this phase can be deferred — the CLI can set `containment: "containerd"` in the config directly. Phase 1 becomes necessary when SDK consumers need programmatic access to Linux containers.
+**Note:** If the only entry point is the CLI (`wxc-exec.exe --container`), this phase can be deferred — the CLI can set `containment: "wslc"` in the config directly. Phase 1 becomes necessary when SDK consumers need programmatic access to Linux containers.
 
 **What already exists:**
 - `PlatformSupport` interface (`types.ts:106-113`) already has an `availableMethods: SandboxingMethod[]` field.
@@ -110,16 +110,16 @@ let mut runner: Box<dyn ScriptRunner> = match request.containment {
 - The plumbing is in place — we need to extend the type and populate the array.
 
 **What changes:**
-- `sdk/src/types.ts` — Extend `SandboxingMethod = 'appcontainer' | 'containerd' | 'sandbox'` (line 101) to mirror the Rust `ContainmentBackend` enum variants. Add `TargetOs = 'linux' | 'windows'` type. Add a `ContainerConfig` interface with `targetOs`, `image`, `cpuCount`, `memoryMb`, `gpu`, and `storagePath` fields.
+- `sdk/src/types.ts` — Extend `SandboxingMethod = 'appcontainer' | 'wslc' | 'sandbox'` (line 101) to mirror the Rust `ContainmentBackend` enum variants. Add `TargetOs = 'linux' | 'windows'` type. Add a `ContainerConfig` interface with `targetOs`, `image`, `cpuCount`, `memoryMb`, `gpu`, and `storagePath` fields.
 
 **Naming note:** The TypeScript SDK uses `SandboxingMethod` while the Rust binary uses `ContainmentBackend`. These are the same concept at different layers — the SDK generates JSON with a `containment` field value that maps directly to the Rust enum variant:
 | SDK (`SandboxingMethod`) | JSON `containment` value | Rust (`ContainmentBackend`) |
 |---|---|---|
 | `'appcontainer'` | `"appcontainer"` | `AppContainer` |
 | `'sandbox'` | `"sandbox"` | `Sandbox` |
-| `'containerd'` | `"containerd"` | `Containerd` (new) |
-- `sdk/src/platform.ts` — In `getPlatformSupport()`, after existing Windows checks, probe for WSLC SDK availability by spawning `wxc-exec.exe --check-platform` and parsing its JSON output (which wraps `WslcCanRun()` internally). If the output reports `canRun: true`, push `'containerd'` into the existing `availableMethods[]`. If it reports missing components, populate `availableMethods` conditionally so the caller knows what's missing vs what's present. SDK consumers check `support.availableMethods.includes('containerd')` to know if Linux containers are available.
-- `sdk/src/sandbox.ts` — Accept `containment` in `SandboxSpawnOptions`. When `containment: 'containerd'`, set `containment: "containerd"` in the JSON config passed to `wxc-exec.exe`. The SDK still spawns the same binary — it generates a different config.
+| `'wslc'` | `"wslc"` | `Wslc` (new) |
+- `sdk/src/platform.ts` — In `getPlatformSupport()`, after existing Windows checks, probe for WSLC SDK availability by spawning `wxc-exec.exe --check-platform` and parsing its JSON output (which wraps `WslcCanRun()` internally). If the output reports `canRun: true`, push `'wslc'` into the existing `availableMethods[]`. If it reports missing components, populate `availableMethods` conditionally so the caller knows what's missing vs what's present. SDK consumers check `support.availableMethods.includes('wslc')` to know if Linux containers are available.
+- `sdk/src/sandbox.ts` — Accept `containment` in `SandboxSpawnOptions`. When `containment: 'wslc'`, set `containment: "wslc"` in the JSON config passed to `wxc-exec.exe`. The SDK still spawns the same binary — it generates a different config.
 - `sdk/package.json` — Remove the `"os": ["win32"]` restriction so the package can be installed on any platform (even if execution is gated at runtime).
 
 **WLXC reference:** WLXC's `Backend` enum (`backend.rs:24-28`) and `ContainerType` proto enum (`wlxc.proto:34-37`). We're expressing the same concepts in TypeScript as `SandboxingMethod` and `TargetOs`.
@@ -128,7 +128,7 @@ let mut runner: Box<dyn ScriptRunner> = match request.containment {
 
 ### Phase 2 — Configuration Schema & Backend Routing
 
-**Goal:** Extend the JSON config format so users can request containerd execution, and add the new variant to the existing backend routing.
+**Goal:** Extend the JSON config format so users can request WSLC execution, and add the new variant to the existing backend routing.
 
 **What already exists (the SandboxRunner work):**
 - `ContainmentBackend` enum in `models.rs` with `AppContainer` and `Sandbox` variants
@@ -141,7 +141,7 @@ let mut runner: Box<dyn ScriptRunner> = match request.containment {
 **What changes:**
 
 Models (`wxc_common/src/models.rs`):
-- Add `Containerd` variant to existing `ContainmentBackend` enum.
+- Add `Wslc` variant to existing `ContainmentBackend` enum.
 - Add `ContainerConfig` struct with `target_os`, `image`, `cpu_count`, `memory_mb`, `gpu`, `storage_path`.
 - Add `container_config: ContainerConfig` field to `CodexRequest`.
 
@@ -149,24 +149,24 @@ Config parser (`wxc_common/src/config_parser.rs`):
 - Add `RawContainerConfig` struct with fields: `targetOs` (`"linux"` or `"windows"`), `image` (user-specified, e.g., `"python:3.12"`, `"ubuntu:22.04"`, `"alpine:latest"`), `cpuCount` (optional, defaults to host-determined), `memoryMb` (optional), `gpu` (optional bool), `storagePath` (optional, for WSLC session storage), `portMappings` (optional array of `{ windowsPort, containerPort, protocol }` entries for host↔container port forwarding).
 - Add `container` field to `RawConfig` (optional `RawContainerConfig`).
 - Extend `convert_raw_config()` to populate the new `container_config` field on `CodexRequest`.
-- The existing `containment` field parsing already handles the enum — adding `"containerd"` as a valid value is sufficient (serde does this automatically from the new enum variant).
+- The existing `containment` field parsing already handles the enum — adding `"wslc"` as a valid value is sufficient (serde does this automatically from the new enum variant).
 
 Entry point (`wxc/src/main.rs`):
 - Add one match arm to the existing dispatch (line 135-138):
 
 ```rust
-// main.rs — add the Containerd arm to the existing match
+// main.rs — add the Wslc arm to the existing match
 let mut runner: Box<dyn ScriptRunner> = match request.containment {
     ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
     ContainmentBackend::Sandbox => Box::new(SandboxScriptRunner::new(&request.sandbox_config)),
-    ContainmentBackend::Containerd => Box::new(WSLContainerRunner::new(&request.container_config)),
+    ContainmentBackend::Wslc => Box::new(WSLContainerRunner::new(&request.container_config)),
 };
 ```
 
 **Example config after this phase:**
 ```json
 {
-  "containment": "containerd",
+  "containment": "wslc",
   "container": {
     "targetOs": "linux",
     "image": "python:3.12",
@@ -179,7 +179,7 @@ let mut runner: Box<dyn ScriptRunner> = match request.containment {
 }
 ```
 
-**Note on the `appContainer` section:** Existing configs may include an `appContainer` section (name, capabilities, leastPrivilege). When `containment` is `"containerd"`, this section is ignored — `WSLContainerRunner` reads from the `container` section
+**Note on the `appContainer` section:** Existing configs may include an `appContainer` section (name, capabilities, leastPrivilege). When `containment` is `"wslc"`, this section is ignored — `WSLContainerRunner` reads from the `container` section
 instead. No error is raised if both are present, making configs forward/backward compatible.
 
 **WLXC reference:** WLXC's `Backend` enum (`backend.rs:24-28`) and `ContainerType` proto enum (`wlxc.proto:34-37`). We're expressing the same concepts in TypeScript as `SandboxingMethod` and `TargetOs`. The JSON `container` section maps to WSLC SDK settings calls (session CPU/memory, container image/networking, process executable/args).
@@ -351,7 +351,7 @@ Port mapping (new capability enabled by WSLC SDK):
 **What changes:**
 
 CLI (`wxc/src/main.rs` — Clap definition):
-- Add `--container` flag to the existing `Cli` struct — sets `containment: "containerd"` automatically
+- Add `--container` flag to the existing `Cli` struct — sets `containment: "wslc"` automatically
 - Add `--image` optional flag to override the default container image (requires `--container`)
 - If `--container` is used without `--image`, default to `alpine:latest` (the lightest general-purpose image; users can override for specific runtimes like `python:3.12`)
 - This flag aligns with the Tessera base model (future flags: `--microvm`, `--session`, `--vm`, `--app`)
@@ -372,13 +372,13 @@ SDK health check (`sdk/src/platform.ts`):
 
 ## Important Constraint
 
-WLXC is a **prototype / not production-ready**. We are using it as a **reference for patterns and approach only**. The actual container runtime interface uses the **WSL Container SDK (WSLC SDK)** — a first-party Microsoft C API. All functionality is implemented directly in MXC's existing Rust workspace (`wxc_common` crate) via Rust FFI bindings to the WSLC SDK. The containerd backend shares the same binary (`wxc-exec.exe`) and has no runtime dependency on WLXC.
+WLXC is a **prototype / not production-ready**. We are using it as a **reference for patterns and approach only**. The actual container runtime interface uses the **WSL Container SDK (WSLC SDK)** — a first-party Microsoft C API. All functionality is implemented directly in MXC's existing Rust workspace (`wxc_common` crate) via Rust FFI bindings to the WSLC SDK. The WSLC backend shares the same binary (`wxc-exec.exe`) and has no runtime dependency on WLXC.
 
 ## Open Design Questions
 
 These need team decisions before implementation:
 
-1. **Image management** — ~~Does the containerd backend pull images on demand?~~ 
+1. **Image management** — ~~Does the WSLC backend pull images on demand?~~ 
    **Decision: Pre-pulled images only.** MXC is an execution layer, not a container management layer. Image pulling, caching, and lifecycle are handled externally (e.g., by the setup script, a separate tool, or the WSLC SDK's own image management
    APIs called outside of MXC). If an image is not found, `wxc-exec.exe` fails fast with a clear error message. This keeps MXC focused on its core job: sandboxed execution. Container management and execution are separate concerns.
 
@@ -423,7 +423,7 @@ These need team decisions before implementation:
 ## Testing Strategy
 
 - **Unit tests (Rust):** FFI binding safety, policy-to-WSLC-settings translation, config parsing — no WSLC runtime needed. These live in `wxc_common` alongside the new modules.
-- **Integration tests:** Require WSL2 + WSLC SDK runtime; run `wxc-exec.exe` end-to-end with containerd configs, verify stdout/stderr capture and exit code propagation
+- **Integration tests:** Require WSL2 + WSLC SDK runtime; run `wxc-exec.exe` end-to-end with WSLC configs, verify stdout/stderr capture and exit code propagation
 - **Regression:** Existing AppContainer tests must pass unchanged — the AppContainer code path is not modified
 - **WSLC SDK smoke test:** Ensure `alpine:latest` is pre-pulled → `WslcCanRun()` → create session → run `echo hello` → verify output → cleanup
 
@@ -440,7 +440,7 @@ wxc-exec.exe --container --image python:3.12 "python3 -c \"print('hello')\""
 wxc-exec.exe --config linux-app.json
 
 # Or programmatically via SDK
-spawnSandbox("python3 app.py", policy, { containment: "containerd" })
+spawnSandbox("python3 app.py", policy, { containment: "wslc" })
 
 # Existing Windows AppContainer usage is unchanged
 wxc-exec.exe --config windows-app.json
@@ -451,7 +451,7 @@ wxc-exec.exe --config windows-app.json
 Config file (`app-policy.json`):
 ```json
 {
-  "containment": "containerd",
+  "containment": "wslc",
   "container": {
     "targetOs": "linux",
     "image": "python:3.12"
