@@ -105,7 +105,22 @@ struct RawLxc {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawProcess {
+    #[serde(rename = "commandLine")]
+    command_line: Option<String>,
+    cwd: Option<String>,
+    env: Option<Vec<String>>,
+    timeout: Option<u32>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawConfig {
+    version: Option<String>,
+    #[serde(rename = "containerId")]
+    container_id: Option<String>,
+    platform: Option<String>,
+    process: Option<RawProcess>,
     script: Option<String>,
     containment: Option<String>,
     #[serde(rename = "workingDirectory")]
@@ -226,8 +241,30 @@ pub fn load_request(
 // ---------- Conversion from raw JSON to domain model ----------
 
 fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
+    // New top-level fields
+    let schema_version = raw.version.unwrap_or_default();
+    let container_id = raw.container_id.unwrap_or_default();
+    let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
+
+    // Process section with dual-read fallback (new location wins, old is fallback)
+    let (process_script, process_cwd, process_timeout, env) = if let Some(ref p) = raw.process {
+        (
+            p.command_line.clone().or(raw.script.clone()),
+            p.cwd.clone().or(raw.working_directory.clone()),
+            p.timeout.or(raw.timeout),
+            p.env.clone().unwrap_or_default(),
+        )
+    } else {
+        (
+            raw.script.clone(),
+            raw.working_directory.clone(),
+            raw.timeout,
+            vec![],
+        )
+    };
+
     // Script is required and must be non-empty
-    let script_code = match raw.script {
+    let script_code = match process_script {
         Some(s) if !s.is_empty() => s,
         Some(_) => {
             logger.log_line("script cannot be empty");
@@ -241,8 +278,8 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     };
 
-    let working_directory = raw.working_directory.unwrap_or_default();
-    let script_timeout = raw.timeout.unwrap_or(0);
+    let working_directory = process_cwd.unwrap_or_default();
+    let script_timeout = process_timeout.unwrap_or(0);
 
     // Containment backend selection
     let containment = match raw.containment.as_deref() {
@@ -250,9 +287,11 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         Some("sandbox") => ContainmentBackend::Sandbox,
         Some("wslc") => ContainmentBackend::Wslc,
         Some("lxc") => ContainmentBackend::Lxc,
+        Some("vm") => ContainmentBackend::Vm,
+        Some("microvm") => ContainmentBackend::MicroVm,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', 'wslc', or 'lxc')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', 'wslc', 'lxc', 'vm', or 'microvm')",
                 other
             );
             logger.log_line(&msg);
@@ -426,6 +465,10 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     }
 
     Ok(CodexRequest {
+        schema_version,
+        container_id,
+        platform,
+        env,
         script_code,
         working_directory,
         script_timeout,
@@ -1043,5 +1086,138 @@ mod tests {
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    // ====== PR 1: New top-level fields + process section + containment expansion ======
+
+    #[test]
+    fn new_toplevel_fields_parsed() {
+        let json = r#"{"version": "1.0", "containerId": "abc-123", "platform": "linux", "script": "echo hi"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "1.0");
+        assert_eq!(req.container_id, "abc-123");
+        assert_eq!(req.platform, "linux");
+    }
+
+    #[test]
+    fn new_toplevel_fields_default_when_absent() {
+        let json = r#"{"script": "echo hi"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "");
+        assert_eq!(req.container_id, "");
+        assert_eq!(req.platform, "windows");
+    }
+
+    #[test]
+    fn process_section_overrides_toplevel() {
+        let json = r#"{
+            "script": "old command",
+            "process": { "commandLine": "new command" }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.script_code, "new command");
+    }
+
+    #[test]
+    fn process_section_cwd_overrides_working_directory() {
+        let json = r#"{
+            "script": "echo hi",
+            "workingDirectory": "C:\\old",
+            "process": { "cwd": "/new" }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.working_directory, "/new");
+    }
+
+    #[test]
+    fn process_section_timeout_overrides_toplevel() {
+        let json = r#"{
+            "script": "echo hi",
+            "timeout": 5000,
+            "process": { "timeout": 9000 }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.script_timeout, 9000);
+    }
+
+    #[test]
+    fn process_section_env_parsed() {
+        let json = r#"{
+            "process": {
+                "commandLine": "echo hi",
+                "env": ["FOO=bar", "BAZ=qux"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.env, vec!["FOO=bar", "BAZ=qux"]);
+    }
+
+    #[test]
+    fn toplevel_fallback_when_no_process_section() {
+        let json = r#"{
+            "script": "echo hello",
+            "workingDirectory": "C:\\temp",
+            "timeout": 3000
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.script_code, "echo hello");
+        assert_eq!(req.working_directory, "C:\\temp");
+        assert_eq!(req.script_timeout, 3000);
+        assert!(req.env.is_empty());
+    }
+
+    #[test]
+    fn process_section_falls_back_to_toplevel_script() {
+        let json = r#"{
+            "script": "echo fallback",
+            "process": { "cwd": "/workspace" }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.script_code, "echo fallback");
+        assert_eq!(req.working_directory, "/workspace");
+    }
+
+    #[test]
+    fn containment_vm_accepted() {
+        let json = r#"{"script": "echo hi", "containment": "vm"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::Vm);
+    }
+
+    #[test]
+    fn containment_microvm_accepted() {
+        let json = r#"{"script": "echo hi", "containment": "microvm"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::MicroVm);
     }
 }

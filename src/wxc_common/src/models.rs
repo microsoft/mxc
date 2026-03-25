@@ -16,6 +16,11 @@ pub enum ContainmentBackend {
     Wslc,
     /// LXC — Linux container isolation.
     Lxc,
+    /// VM-based isolation.
+    Vm,
+    /// MicroVM-based isolation.
+    #[serde(rename = "microvm")]
+    MicroVm,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
@@ -216,6 +221,14 @@ impl Default for ContainerConfig {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodexRequest {
+    /// Schema version for the config format.
+    pub schema_version: String,
+    /// Externally assigned container identifier.
+    pub container_id: String,
+    /// Target platform: "linux" or "windows". Default: "windows".
+    pub platform: String,
+    /// Environment variables as "KEY=VALUE" strings (from process.env).
+    pub env: Vec<String>,
     pub script_code: String,
     pub working_directory: String,
     pub script_timeout: u32,
