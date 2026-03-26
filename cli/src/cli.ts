@@ -168,22 +168,31 @@ program
 
       console.log('Spawning sandboxed process using SDK...');
 
-       // Determine container name based on containment configuration.
-       // TODO: Rationalize these together in the schema.
-       let containerName: string | undefined;
-       if ((config as any).containment === 'lxc') {
-         // For LXC configurations, prefer the LXC-specific container name.
-         containerName = (config as any).lxc?.containerName;
-       } else {
-         // For other configurations (e.g., AppContainer), use the app container name.
-         containerName = (config as any).appContainer?.name;
-       }
+      // Resolve command line from new or legacy fields
+      const commandLine = config.process?.commandLine ?? config.script;
+      if (!commandLine) {
+        console.error('Error: No command specified. Use process.commandLine or script.');
+        process.exit(1);
+      }
+
+      const workingDirectory = config.process?.cwd ?? config.workingDirectory;
+
+      // Determine container name based on containment configuration.
+      // TODO: Rationalize these together in the schema.
+      let containerName: string | undefined;
+      if (config.containerId) {
+        containerName = config.containerId;
+      } else if ((config as any).containment === 'lxc') {
+        containerName = (config as any).lxc?.containerName;
+      } else {
+        containerName = (config as any).appContainer?.name;
+      }
 
       // Spawn the process
       // NOTE: For now, we will force winpty.
-      const pty = spawnSandbox(config.script, policy, {
+      const pty = spawnSandbox(commandLine, policy, {
         debug: options.debug ?? false
-      }, config.workingDirectory, containerName);
+      }, workingDirectory, containerName);
 
       // Handle output
       pty.onData((data: string) => {
