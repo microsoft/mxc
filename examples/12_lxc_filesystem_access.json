@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0-alpha",
+  "version": "2",
   "containerId": "CLI-LXC-FilesystemAccess",
   "containment": "lxc",
   "platform": "linux",

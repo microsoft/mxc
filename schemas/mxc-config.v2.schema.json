@@ -10,8 +10,8 @@
   "properties": {
     "version": {
       "type": "string",
-      "description": "MXC config schema version. Current: '0.3.0-alpha.",
-      "examples": ["0.1.0"]
+      "description": "MXC config schema version. Current: '2'.",
+      "examples": ["2"]
     },
     "containerId": {
       "type": "string",
