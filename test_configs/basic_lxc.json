@@ -1,9 +1,14 @@
 {
-    "script": "echo 'Hello from LXC' && uname -a",
-    "containment": "lxc",
-    "lxc": {
-        "distribution": "alpine",
-        "release": "3.19",
-        "destroyOnExit": true
-    }
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-LXC-Hello-World",
+  "containment": "lxc",
+  "platform": "linux",
+  "process": {
+    "commandLine": "echo 'Hello from LXC' && uname -a"
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.19",
+    "destroyOnExit": true
+  }
 }

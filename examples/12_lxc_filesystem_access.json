@@ -1,17 +1,19 @@
 {
-    "process": {
-        "commandLine": "ls -la /mnt/shared && echo 'test' > /mnt/output/result.txt && cat /mnt/output/result.txt"
-    },
-    "containment": "lxc",
-    "platform": "linux",
-    "lxc": {
-        "distribution": "alpine",
-        "release": "3.19",
-        "destroyOnExit": true
-    },
-    "filesystem": {
-        "readonlyPaths": ["/mnt/shared"],
-        "readwritePaths": ["/mnt/output"],
-        "deniedPaths": ["/etc/shadow"]
-    }
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-LXC-FilesystemAccess",
+  "containment": "lxc",
+  "platform": "linux",
+  "process": {
+    "commandLine": "ls -la /mnt/shared && echo 'test' > /mnt/output/result.txt && cat /mnt/output/result.txt"
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.19",
+    "destroyOnExit": true
+  },
+  "filesystem": {
+    "readonlyPaths": ["/mnt/shared"],
+    "readwritePaths": ["/mnt/output"],
+    "deniedPaths": ["/etc/shadow"]
+  }
 }

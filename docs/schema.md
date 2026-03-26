@@ -10,14 +10,14 @@ you add `"$schema": "./schemas/mxc-config.v1.schema.json"` to your config file.
 
 ```json
 {
-    "version": "1",                        // Schema version (current: "1")
+    "version": "0.3.0-alpha",               // Schema version (current: "0.3.0-alpha")
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "appcontainer",         // Backend (see table below)
     "platform": "windows",                 // Host platform where wxc-exec runs
 
     "lifecycle": {
         "destroyOnExit": true,             // Destroy container after execution
-        "preservePolicy": false            // Retain filesystem/network policies after exit
+        "preservePolicy": false            // Retain container policies after exit if applicable
     },
 
     "process": {
@@ -41,9 +41,9 @@ you add `"$schema": "./schemas/mxc-config.v1.schema.json"` to your config file.
         "proxy": { "localhost": 8080 }     // Localhost proxy port (appcontainer only)
     },
 
-    "appContainer": {                      // AppContainer-specific
+    "appContainer": {                      // Process-based container-specific
         "leastPrivilege": false,
-        "learningMode": false,             // Debug only
+        "learningMode": false,             // Supported only in debug mode
         "capabilities": ["internetClient"]
     },
 

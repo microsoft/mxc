@@ -1,8 +1,10 @@
 {
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-HelloWorld",
+  "containment": "appcontainer",
   "process": {
     "commandLine": "python -c \"import sys; print('Hello from WXC!'); print(f'Python version: {sys.version}'); print('Script executed successfully in AppContainer')\""
   },
-  "containerId": "CLI-HelloWorld",
   "appContainer": {
     "learningMode": true
   }

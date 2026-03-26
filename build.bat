@@ -41,11 +41,15 @@ if "%BUILD_ALL%"=="1" (
     echo   Target: x86_64-pc-windows-msvc
     cargo build %CARGO_FLAGS% x86_64-pc-windows-msvc || goto :error
     echo   Target: aarch64-pc-windows-msvc
-    cargo build %CARGO_FLAGS% aarch64-pc-windows-msvc || goto :error
+    cargo build %CARGO_FLAGS% aarch64-pc-windows-msvc || goto :error 
 ) else (
     echo   Target: %BUILD_ARCH%
     cargo build %CARGO_FLAGS% %BUILD_ARCH% || goto :error
 )
+echo   Check formatting
+cargo fmt --all -- --check || goto :error
+echo   Check linting
+cargo clippy --workspace --all-targets -- -D warnings || goto :error  
 popd
 
 :: Copy binaries into SDK package

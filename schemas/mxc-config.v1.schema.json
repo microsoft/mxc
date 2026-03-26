@@ -22,8 +22,8 @@
   "properties": {
     "version": {
       "type": "string",
-      "description": "MXC config schema version. Current: '1'.",
-      "examples": ["1"]
+      "description": "MXC config schema version. Current: '0.3.0-alpha.",
+      "examples": ["0.1.0"]
     },
     "containerId": {
       "type": "string",

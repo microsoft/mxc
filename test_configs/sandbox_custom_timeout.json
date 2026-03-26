@@ -1,7 +1,11 @@
 {
-  "script": "python -c \"import sys; print(f'Hello from sandbox Python {sys.version}'); print('Sandbox test successful')\"",
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-Sandbox-Timeout",
   "containment": "sandbox",
-  "timeout": 60000,
+  "process": {
+    "commandLine": "python -c \"import sys; print(f'Hello from sandbox Python {sys.version}'); print('Sandbox test successful')\"",
+    "timeout": 60000
+  },
   "sandbox": {
     "idleTimeout": 120000
   }

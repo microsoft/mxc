@@ -1,8 +1,15 @@
 {
-  "script": "python -c \"import sys; print(f'Hello from Python {sys.version}'); print('Container test successful')\"",
-  "timeout": 30000,
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-Permissive-Test",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "python -c \"import sys; print(f'Hello from Python {sys.version}'); print('Container test successful')\"",
+    "timeout": 30000
+  },
   "appContainer": {
-    "name": "CLI-Permissive-Test",
     "learningMode": true
+  },
+  "filesystem": {
+    "readwritePaths": [ "C:\\Users\\AdminUser\\AppData\\Local\\Programs" ]
   }
 }
