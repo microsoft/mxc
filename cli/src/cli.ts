@@ -69,13 +69,14 @@ program
       const policy: WxcConfiguration = JSON.parse(content);
 
       // Basic validation
-      if (!policy.script) {
-        console.error('Invalid configuration: missing script.code');
+      const commandLine = policy.process?.commandLine;
+      if (!commandLine) {
+        console.error('Invalid configuration: missing process.commandLine');
         process.exit(1);
       }
 
       console.log('Configuration is valid');
-      console.log('Script code length:', policy.script.length, 'characters');
+      console.log('Command line length:', commandLine.length, 'characters');
 
       if (policy.appContainer) {
         console.log('AppContainer:', policy.appContainer.name || 'WXC');
@@ -179,11 +180,19 @@ program
          containerName = (config as any).appContainer?.name;
        }
 
+      const commandLine = config.process?.commandLine;
+      if (!commandLine) {
+        console.error('Invalid configuration: missing process.commandLine');
+        process.exit(1);
+      }
+
+      const workingDirectory = config.process?.cwd;
+
       // Spawn the process
       // NOTE: For now, we will force winpty.
-      const pty = spawnSandbox(config.script, policy, {
+      const pty = spawnSandbox(commandLine, policy, {
         debug: options.debug ?? false
-      }, config.workingDirectory, containerName);
+      }, workingDirectory, containerName);
 
       // Handle output
       pty.onData((data: string) => {

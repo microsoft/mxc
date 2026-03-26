@@ -5,7 +5,7 @@ import { WxcConfiguration } from '@microsoft/mxc-sdk/dist/types';
  */
 export function createMinimalConfig(code: string): WxcConfiguration {
   return {
-    script: code
+    process: { commandLine: code }
   };
 }
 
@@ -17,7 +17,7 @@ export function createNetworkRestrictedConfig(
   allow: string[]
 ): WxcConfiguration {
   return {
-    script: code,
+    process: { commandLine: code },
     network: {
       defaultPolicy: 'block',
       enforcementMode: 'capabilities'
@@ -35,7 +35,7 @@ export function createFilesystemRestrictedConfig(
   deniedPaths: string[] = []
 ): WxcConfiguration {
   return {
-    script: code,
+    process: { commandLine: code },
     filesystem: {
       readonlyPaths: readonlyPaths,
       readwritePaths: readwritePaths,
