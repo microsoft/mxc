@@ -61,6 +61,8 @@ struct RawNetwork {
 struct RawSandbox {
     #[serde(rename = "idleTimeout")]
     idle_timeout: Option<u32>,
+    #[serde(rename = "idleTimeoutMs")]
+    idle_timeout_ms: Option<u32>,
     #[serde(rename = "daemonPipeName")]
     daemon_pipe_name: Option<String>,
 }
@@ -272,11 +274,26 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
     if version.is_empty() {
         return Ok(());
     }
-    let major: u32 = version
-        .split('.')
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let major_str = version.split('.').next().unwrap_or("");
+    let major: u32 = match major_str.parse() {
+        Ok(0) => {
+            let msg = format!(
+                "Invalid schema version '{}': major version must be >= 1",
+                version
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+        Ok(v) => v,
+        Err(_) => {
+            let msg = format!(
+                "Invalid schema version '{}': must start with a positive integer (e.g., '1' or '1.0')",
+                version
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+    };
     if major > SUPPORTED_MAJOR_VERSION {
         let msg = format!(
             "Config schema version '{}' is newer than supported (max: {}.x). Upgrade wxc-exec.",
@@ -365,7 +382,7 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     // Sandbox configuration
     let mut sandbox_config = SandboxConfig::default();
     if let Some(sb) = raw.sandbox {
-        if let Some(t) = sb.idle_timeout {
+        if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
             sandbox_config.idle_timeout_ms = t;
         }
         if let Some(name) = sb.daemon_pipe_name {
@@ -374,7 +391,7 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     }
 
     // LXC configuration
-    let lxc_config = {
+    let mut lxc_config = {
         let raw_lxc = raw.lxc.unwrap_or_default();
         LxcConfig {
             container_name: raw_lxc.container_name.unwrap_or_default(),
@@ -525,6 +542,12 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
                 })
                 .collect();
         }
+    }
+
+    // containerId takes precedence over backend-specific container names
+    if !container_id.is_empty() {
+        policy.app_container_name = container_id.clone();
+        lxc_config.container_name = container_id.clone();
     }
 
     // Cross-field validation: platform must be compatible with containment backend
@@ -1377,5 +1400,85 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "");
+    }
+
+    #[test]
+    fn schema_version_non_numeric_rejected() {
+        let json = r#"{"script": "echo hi", "version": "x"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_version_zero_rejected() {
+        let json = r#"{"script": "echo hi", "version": "0"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_version_beta_suffix_rejected() {
+        let json = r#"{"script": "echo hi", "version": "2-beta"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sandbox_idle_timeout_ms_accepted() {
+        let json = r#"{"script": "echo hi", "containment": "sandbox", "sandbox": {"idleTimeoutMs": 60000}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
+    }
+
+    #[test]
+    fn sandbox_idle_timeout_ms_overrides_idle_timeout() {
+        let json = r#"{"script": "echo hi", "containment": "sandbox", "sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
+    }
+
+    #[test]
+    fn container_id_overrides_app_container_name() {
+        let json = r#"{"script": "echo hi", "containerId": "my-container", "appContainer": {"name": "old-name"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.app_container_name, "my-container");
+    }
+
+    #[test]
+    fn container_id_overrides_lxc_container_name() {
+        let json = r#"{"script": "echo hi", "containment": "lxc", "platform": "linux", "containerId": "my-lxc", "lxc": {"containerName": "old-name"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.lxc_config.container_name, "my-lxc");
+    }
+
+    #[test]
+    fn container_id_fallback_to_app_container_name() {
+        let json = r#"{"script": "echo hi", "appContainer": {"name": "old-name"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.app_container_name, "old-name");
     }
 }

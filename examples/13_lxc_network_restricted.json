@@ -4,12 +4,10 @@
     },
     "containment": "lxc",
     "platform": "linux",
-    "lifecycle": {
-        "destroyOnExit": true
-    },
     "lxc": {
         "distribution": "alpine",
-        "release": "3.19"
+        "release": "3.19",
+        "destroyOnExit": true
     },
     "network": {
         "defaultPolicy": "block",

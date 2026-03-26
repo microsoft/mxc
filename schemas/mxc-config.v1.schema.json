@@ -39,7 +39,7 @@
       "type": "string",
       "enum": ["linux", "windows"],
       "default": "windows",
-      "description": "Target platform. Must be compatible with the selected containment backend."
+      "description": "Host platform where wxc-exec runs. Must be compatible with the selected containment backend (e.g., AppContainer/Sandbox/WSLC require 'windows', LXC requires 'linux')."
     },
 
     "lifecycle": {

@@ -13,7 +13,7 @@ you add `"$schema": "./schemas/mxc-config.v1.schema.json"` to your config file.
     "version": "1",                        // Schema version (current: "1")
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "appcontainer",         // Backend (see table below)
-    "platform": "windows",                 // "linux" or "windows"
+    "platform": "windows",                 // Host platform where wxc-exec runs
 
     "lifecycle": {
         "destroyOnExit": true,             // Destroy container after execution
