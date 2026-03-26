@@ -2,22 +2,10 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/microsoft/mxc/schemas/mxc-config.v1.schema.json",
   "title": "MXC Configuration",
-  "description": "Configuration schema for MXC container execution engine (v1)",
+  "description": "Configuration schema for MXC container execution engine (v1). Defines the recommended config format. The parser also accepts legacy fields not listed here during the migration period.",
   "type": "object",
 
-  "anyOf": [
-    { "required": ["script"] },
-    {
-      "required": ["process"],
-      "properties": {
-        "process": {
-          "anyOf": [
-            { "required": ["commandLine"] }
-          ]
-        }
-      }
-    }
-  ],
+  "required": ["process"],
 
   "properties": {
     "version": {
@@ -50,13 +38,13 @@
           "default": false,
           "description": "If true, retain filesystem and network policies after execution. If false (default), policies are cleaned up on exit."
         }
-      },
-      "additionalProperties": false
+      }
     },
 
     "process": {
       "type": "object",
       "description": "Process execution settings.",
+      "required": ["commandLine"],
       "properties": {
         "commandLine": {
           "type": "string",
@@ -79,8 +67,7 @@
           "default": 0,
           "description": "Execution timeout in milliseconds. 0 = no timeout (infinite)."
         }
-      },
-      "additionalProperties": false
+      }
     },
 
     "filesystem": {
@@ -105,8 +92,7 @@
           "default": [],
           "description": "Paths the process cannot access at all."
         }
-      },
-      "additionalProperties": false
+      }
     },
 
     "network": {
@@ -154,8 +140,7 @@
             }
           ]
         }
-      },
-      "additionalProperties": false
+      }
     },
 
     "appContainer": {
@@ -173,8 +158,7 @@
           "default": [],
           "description": "AppContainer capabilities (e.g., 'internetClient', 'registryRead')."
         }
-      },
-      "additionalProperties": false
+      }
     },
 
     "lxc": {
@@ -191,10 +175,7 @@
           "default": "3.19",
           "description": "Distribution release version."
         }
-      },
-      "additionalProperties": false
+      }
     }
-  },
-
-  "additionalProperties": false
+  }
 }
