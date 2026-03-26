@@ -10,7 +10,6 @@ use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::PSID;
-use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
@@ -25,14 +24,6 @@ use crate::models::{CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptR
 use crate::process_util::{get_capability_sid_from_name, OwnedHandle};
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::string_util;
-
-/// Emit a debug trace string visible in kernel debugger (WinDbg / DbgView).
-fn debug_trace(msg: &str) {
-    let wide: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
-        OutputDebugStringW(PCWSTR(wide.as_ptr()));
-    }
-}
 
 // Attribute list constants (not always exported by the windows crate)
 const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES: usize = 0x0002_0009;
@@ -256,11 +247,6 @@ impl AppContainerScriptRunner {
             reserved: 0,
         };
 
-        // --- Console inheritance mode ---
-        // No pipes or relay threads. The child inherits wxc-exec's console
-        // (the outer ConPTY from node-pty), so PowerShell sees a real terminal.
-        debug_trace("[WXC-AC] Console inheritance mode — no pipes");
-
         // --- Allocate and initialize attribute list ---
         let attr_count = if request.policy.least_privilege_mode {
             2u32
@@ -322,8 +308,6 @@ impl AppContainerScriptRunner {
             })?;
         }
 
-        debug_trace("[WXC-AC] SECURITY_CAPABILITIES attribute set");
-
         // 2. ALL_APPLICATION_PACKAGES_POLICY (LPAC mode)
         let lpac_value = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
         if request.policy.least_privilege_mode {
@@ -341,7 +325,6 @@ impl AppContainerScriptRunner {
                     WxcError::Process(format!("UpdateProcThreadAttribute(LPAC): {}", e))
                 })?;
             }
-            debug_trace("[WXC-AC] LPAC attribute set");
         }
 
         // --- Setup STARTUPINFOEXW ---
@@ -385,13 +368,41 @@ impl AppContainerScriptRunner {
             EXTENDED_STARTUPINFO_PRESENT
         };
 
-        // --- Create process ---
+        // --- Create process (console inheritance) ---
+        //
+        // Console I/O path — no pipes, no relay threads:
+        //
+        //   stdin:  node-pty → ConPTY → wxc-exec → PowerShell (AppContainer)
+        //   stdout: node-pty ← ConPTY ←─────────── PowerShell (shares parent's console)
+        //                    ↑
+        //                 onData()
+        //
+        // The child attaches to wxc-exec's console (the ConPTY created by node-pty)
+        // so PowerShell sees a real terminal — PSReadLine, ANSI, UTF-8 all work.
+        //
+        // Why this works for AppContainer:
+        //
+        //   1. Kernel (PspSetupUserProcessAddressSpace):
+        //      ObDuplicateObject copies the parent's ConsoleHandle
+        //      (\Device\ConDrv\Reference) into the child using the parent's
+        //      security context — before the AppContainer token takes effect.
+        //
+        //   2. condrv:
+        //      FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL is set, so the I/O
+        //      Manager permits the AppContainer to open \Device\ConDrv\Connect.
+        //
+        //   3. condrv (CdCreateConnection):
+        //      Inheritance path skips CdAccessCheck. Having the Reference
+        //      handle is proof of authorization.
+        //
+        //   4. conhost (ConsoleHandleConnectionRequest):
+        //      No token check — allocates I/O handles unconditionally.
+        //
         // bInheritHandles = false: we have no explicit handles to inherit.
         // Console attachment is a separate mechanism — the child automatically
         // attaches to the parent's console session via \Device\ConDrv during
         // process initialization, regardless of bInheritHandles. Since we don't
         // pass CREATE_NEW_CONSOLE or DETACH_PROCESS, the child shares our console.
-        debug_trace("[WXC-AC] About to call CreateProcessW (console inheritance, no pipes)");
         let mut pi = PROCESS_INFORMATION::default();
 
         unsafe {
@@ -408,15 +419,8 @@ impl AppContainerScriptRunner {
                 &mut pi,
             )
         }
-        .map_err(|err| {
-            debug_trace(&format!("[WXC-AC] CreateProcessW FAILED: {}", err));
-            WxcError::Process(format!("CreateProcessW failed: {}", err))
-        })?;
+        .map_err(|err| WxcError::Process(format!("CreateProcessW failed: {}", err)))?;
 
-        debug_trace(&format!(
-            "[WXC-AC] Process created successfully (PID: {})",
-            pi.dwProcessId
-        ));
         logger.log_line(&format!(
             "Process created successfully (PID: {})",
             pi.dwProcessId
@@ -428,37 +432,23 @@ impl AppContainerScriptRunner {
         // --- Wait for child process to exit ---
         // No relay threads needed — child shares our console directly.
         let timeout_ms = get_timeout_milliseconds(request.script_timeout);
-        debug_trace(&format!(
-            "[WXC-AC] Waiting for child process (timeout={}ms)",
-            timeout_ms
-        ));
 
         let wait_result = unsafe { WaitForSingleObject(process_handle.get(), timeout_ms) };
 
         match wait_result {
-            WAIT_OBJECT_0 => {
-                debug_trace("[WXC-AC] Child process exited normally");
-            }
-            WAIT_TIMEOUT => {
-                debug_trace("[WXC-AC] Timeout — terminating child process");
-                unsafe {
-                    let _ = TerminateProcess(process_handle.get(), u32::MAX);
-                    let _ = WaitForSingleObject(process_handle.get(), u32::MAX);
-                }
-            }
+            WAIT_OBJECT_0 => {}
+            WAIT_TIMEOUT => unsafe {
+                let _ = TerminateProcess(process_handle.get(), u32::MAX);
+                let _ = WaitForSingleObject(process_handle.get(), u32::MAX);
+            },
             WAIT_FAILED => {
                 let err = unsafe { GetLastError() };
-                debug_trace(&format!("[WXC-AC] WaitForSingleObject FAILED: {:?}", err));
                 return Err(WxcError::Process(format!(
                     "WaitForSingleObject failed: {:?}",
                     err
                 )));
             }
             other => {
-                debug_trace(&format!(
-                    "[WXC-AC] WaitForSingleObject unexpected result: {}",
-                    other.0
-                ));
                 return Err(WxcError::Process(format!(
                     "WaitForSingleObject returned unexpected value: {}",
                     other.0
@@ -472,8 +462,6 @@ impl AppContainerScriptRunner {
             GetExitCodeProcess(process_handle.get(), &mut exit_code)
                 .map_err(|_| WxcError::Process("GetExitCodeProcess failed".into()))?;
         }
-
-        debug_trace(&format!("[WXC-AC] Child exited with code {}", exit_code));
 
         Ok(ScriptResponse {
             exit_code: exit_code as i32,
