@@ -5,10 +5,6 @@
   "process": {
     "commandLine": "cmd /c echo Test AppContainer for deletion"
   },
-  "containerId": "TestDeleteContainer",
-  "appContainer": {
-    "learningMode": true
-  },
   "filesystem": {
     "readwritePaths": [
       "C:\\temp\\test"

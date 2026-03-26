@@ -7,7 +7,6 @@
     "timeout": 45000
   },
   "appContainer": {
-    "learningMode": true,
     "capabilities": [ "internetClient" ]
   },
   "filesystem": {

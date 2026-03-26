@@ -2,22 +2,10 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/microsoft/mxc/schemas/mxc-config.v1.schema.json",
   "title": "MXC Configuration",
-  "description": "Configuration schema for MXC container execution engine (v1)",
+  "description": "Configuration schema for MXC container execution engine (v1). Defines the recommended config format. The parser also accepts legacy fields not listed here during the migration period.",
   "type": "object",
 
-  "anyOf": [
-    { "required": ["script"] },
-    {
-      "required": ["process"],
-      "properties": {
-        "process": {
-          "anyOf": [
-            { "required": ["commandLine"] }
-          ]
-        }
-      }
-    }
-  ],
+  "required": ["process"],
 
   "properties": {
     "version": {
@@ -35,12 +23,6 @@
       "default": "appcontainer",
       "description": "Containment backend to use for execution."
     },
-    "platform": {
-      "type": "string",
-      "enum": ["linux", "windows"],
-      "default": "windows",
-      "description": "Host platform where wxc-exec runs. Must be compatible with the selected containment backend (e.g., AppContainer/Sandbox/WSLC require 'windows', LXC requires 'linux')."
-    },
 
     "lifecycle": {
       "type": "object",
@@ -56,13 +38,13 @@
           "default": false,
           "description": "If true, retain filesystem and network policies after execution. If false (default), policies are cleaned up on exit."
         }
-      },
-      "additionalProperties": false
+      }
     },
 
     "process": {
       "type": "object",
       "description": "Process execution settings.",
+      "required": ["commandLine"],
       "properties": {
         "commandLine": {
           "type": "string",
@@ -85,8 +67,7 @@
           "default": 0,
           "description": "Execution timeout in milliseconds. 0 = no timeout (infinite)."
         }
-      },
-      "additionalProperties": false
+      }
     },
 
     "filesystem": {
@@ -111,8 +92,7 @@
           "default": [],
           "description": "Paths the process cannot access at all."
         }
-      },
-      "additionalProperties": false
+      }
     },
 
     "network": {
@@ -124,18 +104,6 @@
           "enum": ["allow", "block"],
           "default": "allow",
           "description": "Default network posture."
-        },
-        "allowedHosts": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": [],
-          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block')."
-        },
-        "blockedHosts": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": [],
-          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow')."
         },
         "enforcementMode": {
           "type": "string",
@@ -153,7 +121,7 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 65535,
-                  "description": "Port of a localhost proxy."
+                  "description": "Port of an external already running proxy on localhost."
                 }
               },
               "required": ["localhost"],
@@ -164,7 +132,7 @@
                 "builtinTestServer": {
                   "type": "boolean",
                   "const": true,
-                  "description": "Use WXC's built-in test proxy server."
+                  "description": "Use WXC's built-in test proxy server. Mutually exclusive with localhost."
                 }
               },
               "required": ["builtinTestServer"],
@@ -172,8 +140,7 @@
             }
           ]
         }
-      },
-      "additionalProperties": false
+      }
     },
 
     "appContainer": {
@@ -185,55 +152,13 @@
           "default": false,
           "description": "Enforce least privilege mode."
         },
-        "learningMode": {
-          "type": "boolean",
-          "default": false,
-          "description": "Debug only: disables restrictions. Stripped in release builds."
-        },
         "capabilities": {
           "type": "array",
           "items": { "type": "string" },
           "default": [],
           "description": "AppContainer capabilities (e.g., 'internetClient', 'registryRead')."
         }
-      },
-      "additionalProperties": false
-    },
-
-    "sandbox": {
-      "type": "object",
-      "description": "Windows Sandbox-specific settings. Used when containment is 'sandbox'.",
-      "properties": {
-        "daemonPipeName": {
-          "type": "string",
-          "default": "wxc-sandbox",
-          "description": "Named pipe name for the sandbox daemon."
-        },
-        "idleTimeoutMs": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 300000,
-          "description": "Idle timeout in milliseconds before the daemon tears down the sandbox. 0 = no timeout."
-        }
-      },
-      "additionalProperties": false
-    },
-
-    "wslc": {
-      "type": "object",
-      "description": "WSLC SDK-specific settings. Used when containment is 'wslc'.",
-      "properties": {
-        "image": {
-          "type": "string",
-          "default": "alpine:latest",
-          "description": "OCI container image name (e.g., 'python:3.12', 'ubuntu:22.04')."
-        },
-        "storagePath": {
-          "type": "string",
-          "description": "Storage path for WSLC session image store. Omit for SDK default."
-        }
-      },
-      "additionalProperties": false
+      }
     },
 
     "lxc": {
@@ -250,10 +175,7 @@
           "default": "3.19",
           "description": "Distribution release version."
         }
-      },
-      "additionalProperties": false
+      }
     }
-  },
-
-  "additionalProperties": false
+  }
 }

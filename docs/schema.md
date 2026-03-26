@@ -13,7 +13,6 @@ you add `"$schema": "./schemas/mxc-config.v1.schema.json"` to your config file.
     "version": "0.3.0-alpha",               // Schema version (current: "0.3.0-alpha")
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "appcontainer",         // Backend (see table below)
-    "platform": "windows",                 // Host platform where wxc-exec runs
 
     "lifecycle": {
         "destroyOnExit": true,             // Destroy container after execution
@@ -36,25 +35,12 @@ you add `"$schema": "./schemas/mxc-config.v1.schema.json"` to your config file.
     "network": {
         "defaultPolicy": "block",          // "allow" or "block"
         "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
-        "allowedHosts": ["api.github.com"],
-        "blockedHosts": [],
         "proxy": { "localhost": 8080 }     // Localhost proxy port (appcontainer only)
     },
 
     "appContainer": {                      // Process-based container-specific
         "leastPrivilege": false,
-        "learningMode": false,             // Supported only in debug mode
         "capabilities": ["internetClient"]
-    },
-
-    "sandbox": {                           // Windows Sandbox-specific
-        "daemonPipeName": "wxc-sandbox",
-        "idleTimeoutMs": 300000
-    },
-
-    "wslc": {                              // WSLC SDK-specific
-        "image": "python:3.12",
-        "storagePath": "D:\\wslc-store"
     },
 
     "lxc": {                               // LXC-specific
@@ -66,29 +52,17 @@ you add `"$schema": "./schemas/mxc-config.v1.schema.json"` to your config file.
 
 ### Containment Backends
 
-| Value | Platform | Description |
-|-------|----------|-------------|
-| `"appcontainer"` | windows | (Default) Windows AppContainer process-level isolation |
-| `"sandbox"` | windows | Windows Sandbox VM isolation via a long-lived daemon |
-| `"wslc"` | windows | Linux containers via the WSL Container SDK |
-| `"lxc"` | linux | Native LXC container isolation |
-| `"vm"` | — | VM-based isolation (not yet implemented) |
-| `"microvm"` | — | MicroVM-based isolation (not yet implemented) |
+| Value | Description |
+|-------|-------------|
+| `"appcontainer"` | (Default) Windows AppContainer process-level isolation |
+| `"sandbox"` | Windows Sandbox VM isolation via a long-lived daemon |
+| `"wslc"` | Linux containers via the WSL Container SDK |
+| `"lxc"` | Native LXC container isolation |
+| `"vm"` | VM-based isolation (not yet implemented) |
+| `"microvm"` | MicroVM-based isolation (not yet implemented) |
 
 Only the backend section matching the selected `containment` value is used;
 other backend sections are ignored.
-
-### Cross-field Validation
-
-The parser validates that `platform` is compatible with the selected `containment`:
-
-| Containment | Required platform |
-|-------------|-------------------|
-| `appcontainer` | `windows` |
-| `sandbox` | `windows` |
-| `wslc` | `windows` |
-| `lxc` | `linux` |
-| `vm`, `microvm` | any |
 
 ### Schema Versioning
 

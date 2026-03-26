@@ -7,7 +7,6 @@
     "timeout": 10000
   },
   "appContainer": {
-    "learningMode": true,
     "capabilities": [ "registryRead" ]
   },
   "fileSystem": {

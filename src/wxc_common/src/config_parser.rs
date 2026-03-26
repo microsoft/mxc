@@ -245,30 +245,6 @@ pub fn load_request(
 /// Maximum supported schema major version.
 const SUPPORTED_MAJOR_VERSION: u32 = 1;
 
-/// Validate that platform and containment backend are compatible.
-fn validate_platform_containment(
-    containment: &ContainmentBackend,
-    platform: &str,
-    logger: &mut Logger,
-) -> Result<(), WxcError> {
-    let err = match (containment, platform) {
-        (ContainmentBackend::AppContainer, "linux") => {
-            Some("AppContainer requires platform 'windows'")
-        }
-        (ContainmentBackend::Sandbox, "linux") => Some("Sandbox requires platform 'windows'"),
-        (ContainmentBackend::Wslc, "linux") => {
-            Some("WSLC runs Linux containers from a Windows host; platform should be 'windows'")
-        }
-        (ContainmentBackend::Lxc, "windows") => Some("LXC requires platform 'linux'"),
-        _ => None,
-    };
-    if let Some(msg) = err {
-        logger.log_line(msg);
-        return Err(WxcError::ConfigParse(msg.to_string()));
-    }
-    Ok(())
-}
-
 /// Validate that the schema version is supported by this binary.
 fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), WxcError> {
     if version.is_empty() {
@@ -313,20 +289,7 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     let container_id = raw.container_id.unwrap_or_default();
     let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
 
-    // Validate platform
-    match platform.as_str() {
-        "linux" | "windows" => {}
-        other => {
-            let msg = format!(
-                "Invalid platform value '{}' (must be 'linux' or 'windows')",
-                other
-            );
-            logger.log_line(&msg);
-            return Err(WxcError::ConfigParse(msg));
-        }
-    }
-
-    // Process section with dual-read fallback (new location wins, old is fallback)
+    // Process section with dual-read fallback(new location wins, old is fallback)
     let (process_script, process_cwd, process_timeout, env) = if let Some(ref p) = raw.process {
         (
             p.command_line.clone().or(raw.script.clone()),
@@ -549,9 +512,6 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         policy.app_container_name = container_id.clone();
         lxc_config.container_name = container_id.clone();
     }
-
-    // Cross-field validation: platform must be compatible with containment backend
-    validate_platform_containment(&containment, &platform, logger)?;
 
     // Schema version check
     validate_schema_version(&schema_version, logger)?;
@@ -1193,16 +1153,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_platform_rejected() {
-        let json = r#"{"script": "echo hi", "platform": "Windwos"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn new_toplevel_fields_default_when_absent() {
         let json = r#"{"script": "echo hi"}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -1319,57 +1269,6 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::MicroVm);
-    }
-
-    #[test]
-    fn appcontainer_rejects_linux_platform() {
-        let json = r#"{"script": "echo hi", "containment": "appcontainer", "platform": "linux"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn sandbox_rejects_linux_platform() {
-        let json = r#"{"script": "echo hi", "containment": "sandbox", "platform": "linux"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn wslc_rejects_linux_platform() {
-        let json = r#"{"script": "echo hi", "containment": "wslc", "platform": "linux"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn lxc_rejects_windows_platform() {
-        let json = r#"{"script": "echo hi", "containment": "lxc", "platform": "windows"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn valid_platform_containment_accepted() {
-        let json = r#"{"script": "echo hi", "containment": "appcontainer", "platform": "windows"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::AppContainer);
-        assert_eq!(req.platform, "windows");
     }
 
     #[test]

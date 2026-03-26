@@ -7,8 +7,7 @@
     "timeout": 30000
   },
   "appContainer": {
-    "capabilities": ["internetClient"],
-    "learningMode": true
+    "capabilities": ["internetClient"]
   },
   "network": {
     "enforcementMode": "firewall",

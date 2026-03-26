@@ -7,8 +7,7 @@
     "timeout": 45000
   },
   "appContainer": {
-    "capabilities": ["internetClient"],
-    "learningMode": true
+    "capabilities": ["internetClient"]
   },
   "network": {
     "proxy": { "builtinTestServer": true }
