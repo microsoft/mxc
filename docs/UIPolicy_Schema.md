@@ -10,7 +10,7 @@
 
 The `"ui"` section of the WXC container configuration controls how a contained process interacts with the Windows GUI subsystem. It maps developer intent to the underlying enforcement mechanisms:
 
-- **Job Object UI Restrictions** (`NtUserSetJobUILimits`)
+- **Job Object UI Restrictions**
 - **Process Mitigation: Win32k System Call Disable** (`PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY`)
 
 Developers declare *what the process is allowed to do* — Tessera translates that into the correct kernel flags and mitigations.
@@ -35,7 +35,7 @@ The `"ui"` section is a sibling of `"appContainer"`, `"filesystem"`, `"network"`
   "containment": "appcontainer",
   "ui": {
     "disable": false,
-    "dataChannels": "none",
+    "clipboard": "none",
     "isolation": "container",
     "desktopSystemControl": false,
     "systemSettings": "none",
@@ -57,7 +57,7 @@ The `"ui"` section is a sibling of `"appContainer"`, `"filesystem"`, `"network"`
 |---|---|
 | **Type** | `boolean` |
 | **Default** | `true` |
-| **Description** | Kill switch. Completely disables access to the GUI subsystem. The process cannot create windows, use GDI, or make any `NtUser*`/`NtGdi*` system calls. Atom table is also isolated. |
+| **Description** | Kill switch. Completely disables access to the GUI subsystem via `DisallowWin32kSystemCalls` — the process cannot create windows, use GDI, or make any `NtUser*`/`NtGdi*` system calls. Atom table is separately isolated via `UILIMIT_GLOBALATOMS` because atom operations (`NtAddAtom`, `NtFindAtom`, `NtDeleteAtom`) are NT executive syscalls — not Win32k syscalls — and remain reachable even with Win32k disabled. |
 | **Enforcement** | Process mitigation: `DisallowWin32kSystemCalls` (`PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY`) + Job UI limit: `JOB_OBJECT_UILIMIT_GLOBALATOMS` (0x0020) |
 
 **When `true`:**
@@ -68,14 +68,14 @@ The `"ui"` section is a sibling of `"appContainer"`, `"filesystem"`, `"network"`
 
 ---
 
-### `dataChannels`
+### `clipboard`
 
 | | |
 |---|---|
 | **Type** | `enum` |
 | **Default** | `"none"` |
 | **Values** | `"read"`, `"write"`, `"all"`, `"none"` |
-| **Description** | Controls access to data exchange channels between the contained process and the rest of the system. |
+| **Description** | Controls clipboard access between the contained process and the rest of the system. |
 | **Enforcement** | `JOB_OBJECT_UILIMIT_READCLIPBOARD` (0x0002), `JOB_OBJECT_UILIMIT_WRITECLIPBOARD` (0x0004) |
 
 | Value | Flags Set | Read (paste in) | Write (copy out) | Use Case |
@@ -94,15 +94,15 @@ The `"ui"` section is a sibling of `"appContainer"`, `"filesystem"`, `"network"`
 | **Type** | `enum` |
 | **Default** | `"container"` |
 | **Values** | `"desktop"`, `"handles"`, `"atoms"`, `"container"` |
-| **Description** | Determines whether the process can see and interact with UI objects (windows, menus, atoms) belonging to other processes. |
+| **Description** | • Handle isolation — restricts the process from seeing or interacting with USER handles (e.g. windows, menus) owned by processes outside the job. <br>• Atom table isolation — gives the job its own private atom table, preventing processes in the job from accessing the global (Window Station-based) atom table. |
 | **Enforcement** | `JOB_OBJECT_UILIMIT_HANDLES` (0x0001), `JOB_OBJECT_UILIMIT_GLOBALATOMS` (0x0020) |
 
 | Value | Flags Set | Handle Access | Atom Table | Use Case |
 |-------|-----------|--------------|-----------|----------|
-| `"desktop"` | *(none)* | All handles on the desktop | Global (session-wide) | Process needs to interact with other windows |
-| `"handles"` | `UILIMIT_HANDLES` | Same-job handles only | Global (session-wide) | Handle isolation without atom isolation |
-| `"atoms"` | `UILIMIT_GLOBALATOMS` | All handles on the desktop | Per-job (isolated) | Atom isolation without handle restriction |
-| `"container"` | `UILIMIT_HANDLES` + `UILIMIT_GLOBALATOMS` | Same-job handles only | Per-job (isolated) | Sandboxed — process only sees its own UI objects |
+| `"desktop"` | *(none)* | All handles on the desktop | Global (Window Station) | Process needs to interact with other windows |
+| `"handles"` | `UILIMIT_HANDLES` | Same-job handles only | Global (Window Station) | Handle isolation without atom isolation |
+| `"atoms"` | `UILIMIT_GLOBALATOMS` | All handles on the desktop | Per-job (private) | Atom isolation without handle restriction |
+| `"container"` | `UILIMIT_HANDLES` + `UILIMIT_GLOBALATOMS` | Same-job handles only | Per-job (private) | Full isolation — process limited to same-job handles and a private atom table |
 
 **When `"handles"` or `"container"`:**
 - `JOB_OBJECT_UILIMIT_HANDLES` — USER handle validation restricts access to same-job only
@@ -121,7 +121,7 @@ The `"ui"` section is a sibling of `"appContainer"`, `"filesystem"`, `"network"`
 |---|---|
 | **Type** | `boolean` |
 | **Default** | `false` |
-| **Description** | Controls whether the process can manipulate the GUI system — creating/switching desktops and initiating shutdown/logoff/restart. |
+| **Description** | Controls whether the process can perform desktop management operations (create/switch desktops) and initiate session shutdown/logoff/restart. |
 | **Enforcement** | `JOB_OBJECT_UILIMIT_DESKTOP` (0x0040), `JOB_OBJECT_UILIMIT_EXITWINDOWS` (0x0080) |
 
 **When `false`:**
@@ -157,7 +157,7 @@ The `"ui"` section is a sibling of `"appContainer"`, `"filesystem"`, `"network"`
 |---|---|
 | **Type** | `boolean` |
 | **Default** | `false` |
-| **Description** | Controls whether the Input Method Editor (IME) is available to the process. Once disabled, cannot be undone. |
+| **Description** | Controls whether IME modules can load into the process. When disabled, prevents potentially untrusted Input Method Editor (IME) modules from being injected. Once disabled, cannot be undone. |
 | **Enforcement** | `JOB_OBJECT_UILIMIT_IME` (0x0100) |
 
 **When `false`:**
@@ -175,11 +175,11 @@ The `"ui"` section is a sibling of `"appContainer"`, `"filesystem"`, `"network"`
 |---|---|
 | **Type** | `boolean` |
 | **Default** | `false` |
-| **Description** | Controls whether the process can inject synthetic input into other processes. |
+| **Description** | Controls whether the process can inject synthetic input (e.g. `SendInput`, `keybd_event`, `mouse_event`) into other processes. |
 | **Enforcement** | `JOB_OBJECT_UILIMIT_INJECTION` (0x0200) |
 
 **When `false`:**
-- `JOB_OBJECT_UILIMIT_INJECTION` — Blocks synthetic input injection
+- `JOB_OBJECT_UILIMIT_INJECTION` — Blocks synthetic input injection via `SendInput` and related APIs
 
 ---
 
@@ -190,7 +190,7 @@ All fields default to the most restrictive value. **`"ui": {}` = total lockdown.
 | Field | Default | Effect |
 |-------|---------|--------|
 | `disable` | `true` | No GUI — Win32k disabled + atom isolation |
-| `dataChannels` | `"none"` | No clipboard access |
+| `clipboard` | `"none"` | No clipboard access |
 | `isolation` | `"container"` | Job-scoped handles and atoms |
 | `desktopSystemControl` | `false` | Cannot create/switch desktops or shutdown |
 | `systemSettings` | `"none"` | Cannot change system parameters or display |
@@ -216,7 +216,7 @@ The process can create and manage its own windows but is fully isolated from oth
 
 Resolved (with defaults):
 - `disable: false` — GUI enabled
-- `dataChannels: "none"` — no clipboard
+- `clipboard: "none"` — no clipboard
 - `isolation: "container"` — job-scoped handles and atoms
 - `desktopSystemControl: false` — no desktop/shutdown
 - `systemSettings: "none"` — no system changes
@@ -251,7 +251,7 @@ Process has full GUI access and can interact with other windows on the desktop. 
 ```json
 "ui": {
   "disable": false,
-  "dataChannels": "all",
+  "clipboard": "all",
   "isolation": "desktop"
 }
 ```
@@ -265,10 +265,10 @@ This section is for Tessera developers. The JSON fields map to kernel enforcemen
 | Field | Value | OS Enforcement |
 |-------|-------|----------------|
 | `disable` | `true` | `PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY.DisallowWin32kSystemCalls` + `JOB_OBJECT_UILIMIT_GLOBALATOMS` |
-| `dataChannels` | `"none"` | `JOB_OBJECT_UILIMIT_READCLIPBOARD` + `JOB_OBJECT_UILIMIT_WRITECLIPBOARD` |
-| `dataChannels` | `"read"` | `JOB_OBJECT_UILIMIT_WRITECLIPBOARD` |
-| `dataChannels` | `"write"` | `JOB_OBJECT_UILIMIT_READCLIPBOARD` |
-| `dataChannels` | `"all"` | *(no flags)* |
+| `clipboard` | `"none"` | `JOB_OBJECT_UILIMIT_READCLIPBOARD` + `JOB_OBJECT_UILIMIT_WRITECLIPBOARD` |
+| `clipboard` | `"read"` | `JOB_OBJECT_UILIMIT_WRITECLIPBOARD` |
+| `clipboard` | `"write"` | `JOB_OBJECT_UILIMIT_READCLIPBOARD` |
+| `clipboard` | `"all"` | *(no flags)* |
 | `isolation` | `"container"` | `JOB_OBJECT_UILIMIT_HANDLES` + `JOB_OBJECT_UILIMIT_GLOBALATOMS` |
 | `isolation` | `"handles"` | `JOB_OBJECT_UILIMIT_HANDLES` |
 | `isolation` | `"atoms"` | `JOB_OBJECT_UILIMIT_GLOBALATOMS` |
@@ -303,8 +303,8 @@ These are not mutually exclusive — declarative config could resolve to runtime
 | Feature | Schema Change |
 |---------|--------------|
 | [Hooks](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexa) | TBD — at minimum, prevent low-level (`WH_KEYBOARD_LL`, `WH_MOUSE_LL`), CBT (`WH_CBT`), and debug (`WH_DEBUG`) hooks that reach outside the job |
-| [Foreground](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow) | New field controlling the process ability to change foreground |
-| [Raw input](https://learn.microsoft.com/en-us/windows/win32/inputdev/raw-input) | New field controlling the process ability to observe and influence raw input |
+| [Foreground](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow) | New field controlling the process's ability to change foreground |
+| [Raw input](https://learn.microsoft.com/en-us/windows/win32/inputdev/raw-input) | New field controlling the process's ability to observe and influence raw input |
 
 ---
 
