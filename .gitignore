@@ -37,3 +37,4 @@ output
 
 # Copilot
 .copilot/
+.fake
