@@ -3,7 +3,7 @@
 
 use std::ptr;
 
-use windows::Win32::Foundation::{LocalFree, HLOCAL, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{GetLastError, LocalFree, HLOCAL, WAIT_OBJECT_0};
 use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
@@ -12,9 +12,8 @@ use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOEXW,
-    STARTUPINFOW,
+    WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+    STARTUPINFOEXW, STARTUPINFOW,
 };
 use windows_core::{PCWSTR, PWSTR};
 
@@ -427,20 +426,44 @@ impl AppContainerScriptRunner {
         // --- Wait for child process to exit ---
         // No relay threads needed — child shares our console directly.
         let timeout_ms = get_timeout_milliseconds(request.script_timeout);
-        debug_trace(&format!("[WXC-AC] Waiting for child process (timeout={}ms)", timeout_ms));
+        debug_trace(&format!(
+            "[WXC-AC] Waiting for child process (timeout={}ms)",
+            timeout_ms
+        ));
 
         let wait_result = unsafe { WaitForSingleObject(process_handle.get(), timeout_ms) };
 
-        if wait_result != WAIT_OBJECT_0 {
-            debug_trace("[WXC-AC] Timeout or error — terminating child process");
-            // Timeout or error: forcibly terminate the child process.
-            unsafe {
-                let _ = TerminateProcess(
-                    process_handle.get(),
-                    u32::MAX, // 0xFFFFFFFF — matches C++ behavior
-                );
-                // Block until the OS confirms the process is gone.
-                let _ = WaitForSingleObject(process_handle.get(), u32::MAX);
+        const WAIT_TIMEOUT_VALUE: u32 = 0x0000_0102;
+        const WAIT_FAILED_VALUE: u32 = 0xFFFF_FFFF;
+
+        match wait_result.0 {
+            _ if wait_result == WAIT_OBJECT_0 => {
+                debug_trace("[WXC-AC] Child process exited normally");
+            }
+            WAIT_TIMEOUT_VALUE => {
+                debug_trace("[WXC-AC] Timeout — terminating child process");
+                unsafe {
+                    let _ = TerminateProcess(process_handle.get(), u32::MAX);
+                    let _ = WaitForSingleObject(process_handle.get(), u32::MAX);
+                }
+            }
+            WAIT_FAILED_VALUE => {
+                let err = unsafe { GetLastError() };
+                debug_trace(&format!("[WXC-AC] WaitForSingleObject FAILED: {:?}", err));
+                return Err(WxcError::Process(format!(
+                    "WaitForSingleObject failed: {:?}",
+                    err
+                )));
+            }
+            other => {
+                debug_trace(&format!(
+                    "[WXC-AC] WaitForSingleObject unexpected result: {}",
+                    other
+                ));
+                return Err(WxcError::Process(format!(
+                    "WaitForSingleObject returned unexpected value: {}",
+                    other
+                )));
             }
         }
 
