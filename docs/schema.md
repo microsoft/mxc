@@ -2,15 +2,15 @@
 ## Configuration Schema
 
 MXC uses a JSON configuration file. The formal schema is at
-[`schemas/mxc-config.v2.schema.json`](../schemas/mxc-config.v2.schema.json) —
+[`schemas/mxc-config.schema.json`](../schemas/mxc-config.schema.json) —
 editors that support JSON Schema will provide autocomplete and validation when
-you add `"$schema": "./schemas/mxc-config.v2.schema.json"` to your config file.
+you add `"$schema": "./schemas/mxc-config.schema.json"` to your config file.
 
 ### Full Schema
 
 ```json
 {
-    "version": "2",                            // Schema version (current: "2")
+    "version": "0.4.0-alpha",              // Schema version (semver, current: "0.4.0-alpha")
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "appcontainer",         // Backend (see table below)
 
@@ -66,50 +66,45 @@ other backend sections are ignored.
 
 ### Schema Versioning
 
-MXC config files include an optional `version` field that declares the schema
-version. The parser uses this to detect incompatible configs and provide clear
-upgrade guidance.
+MXC config files include an optional `version` field using
+[Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH). The parser uses
+this to detect incompatible configs and provide clear upgrade guidance. If
+`version` is absent, the config is assumed compatible with the current version.
 
-The parser declares a `SUPPORTED_MAJOR_VERSION` constant. At parse time:
+The parser compares the config's major.minor against its supported version:
 
 | Config `version` | Parser supports | Result |
 |---|---|---|
-| absent | any | Accepted (assumed compatible) |
-| `"1"` | 2 | Accepted (1 ≤ 2) |
-| `"2"` | 2 | Accepted (2 ≤ 2) |
-| `"3"` | 2 | **Rejected** — "upgrade wxc-exec" |
-| `"0"` or non-numeric | any | **Rejected** — invalid format |
-
-Version must be a positive integer (e.g., `"1"`, `"2"`). Minor versions
-(e.g., `"2.1"`) are parsed by major only — `"2.1"` is treated as major `2`.
+| absent | 0.4.0-alpha | Accepted (assumed compatible) |
+| `"0.3.0-alpha"` | 0.4.0-alpha | Accepted (0.3 ≤ 0.4) |
+| `"0.4.0-alpha"` | 0.4.0-alpha | Accepted (0.4 ≤ 0.4) |
+| `"0.5.0"` | 0.4.0-alpha | **Rejected** — "upgrade wxc-exec" |
+| `"1.0.0"` | 0.4.0-alpha | **Rejected** — "upgrade wxc-exec" |
 
 #### When to bump
 
 | Change type | Version bump | Example |
 |---|---|---|
-| Add new optional field | **None** | Adding `resources` section |
-| Add new enum value | **None** | Adding `"seatbelt"` to containment |
-| Change a default value | **None** | Default timeout change |
-| Remove a field | **Major** | Dropping `script` top-level field |
-| Rename a field without fallback | **Major** | `workingDirectory` → `process.cwd` |
-| Change a field's type | **Major** | `gpu: bool` → `gpu: { type: "..." }` |
-| Make an optional field required | **Major** | `process` becoming required |
+| Add new optional field | **Patch** (0.4.0 → 0.4.1) | Adding `resources` section |
+| Add backward-compatible functionality | **Minor** (0.4.0 → 0.5.0) | New containment backend |
+| Remove a field / breaking change | **Major** (0.x → 1.0.0) | Dropping legacy fields |
 
-**Rule of thumb:** If an existing valid config would stop parsing, bump the
-major version. Otherwise, don't.
+**Rule of thumb:** Follow [semver](https://semver.org/). While in `0.x`,
+minor bumps may include breaking changes. Once `1.0.0` is reached, breaking
+changes require a major bump.
 
 #### Migration process for breaking changes
 
-1. **PR N:** Add new field with dual-read fallback from old field. No version bump.
+1. **PR N:** Add new field with dual-read fallback from old field. Patch bump.
 2. **PR N+1:** Update all configs, examples, SDK types, and docs to new format.
-3. **PR N+2:** Remove fallback code. Bump `SUPPORTED_MAJOR_VERSION`. Old configs
+3. **PR N+2:** Remove fallback code. Minor bump (or major if post-1.0). Old configs
    no longer parse.
 
 #### Version history
 
 | Version | Changes |
 |---|---|
-| 1 | Initial versioned schema. Added `process`, `lifecycle`, `containerId`, `wslc` alias. All additive with dual-read fallbacks. |
-| 2 | Removed legacy fields (`script`, `workingDirectory`, `appContainer.name`, etc.). `process` section now required. |
+| 0.3.0-alpha | Initial versioned schema. Added `process`, `lifecycle`, `containerId`, `wslc` alias. Dual-read fallbacks for legacy fields. |
+| 0.4.0-alpha | Removed legacy fields (`script`, `workingDirectory`, `appContainer.name`, etc.). `process` section now required. |
 
 See the `examples/` directory for complete configuration examples.
