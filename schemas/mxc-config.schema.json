@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/microsoft/mxc/schemas/mxc-config.v1.schema.json",
+  "$id": "https://github.com/microsoft/mxc/schemas/mxc-config.schema.json",
   "title": "MXC Configuration",
-  "description": "Configuration schema for MXC container execution engine (v1). Defines the recommended config format. The parser also accepts legacy fields not listed here during the migration period.",
+  "description": "Configuration schema for MXC container execution engine. Defines the recommended config format. The parser also accepts legacy fields not listed here during the migration period.",
   "type": "object",
 
   "required": ["process"],
@@ -10,8 +10,8 @@
   "properties": {
     "version": {
       "type": "string",
-      "description": "MXC config schema version. Current: '0.3.0-alpha.",
-      "examples": ["0.1.0"]
+      "description": "MXC config schema version (semver). Current: '0.4.0-alpha'.",
+      "examples": ["0.4.0-alpha"]
     },
     "containerId": {
       "type": "string",

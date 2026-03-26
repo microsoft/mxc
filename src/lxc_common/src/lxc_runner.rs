@@ -8,7 +8,7 @@
 use std::fmt::Write;
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, LxcConfig, ScriptResponse};
+use wxc_common::models::{CodexRequest, LifecycleConfig, LxcConfig, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::validate_request;
 
@@ -19,21 +19,27 @@ use crate::network_iptables::NetworkIptablesManager;
 /// Script runner that executes commands inside an LXC container.
 pub struct LxcScriptRunner {
     config: LxcConfig,
+    container_id: String,
+    destroy_on_exit: bool,
+    cleanup_policy: bool,
 }
 
 impl LxcScriptRunner {
-    pub fn new(config: &LxcConfig) -> Self {
+    pub fn new(config: &LxcConfig, container_id: &str, lifecycle: &LifecycleConfig) -> Self {
         Self {
             config: config.clone(),
+            container_id: container_id.to_string(),
+            destroy_on_exit: lifecycle.destroy_on_exit,
+            cleanup_policy: !lifecycle.preserve_policy,
         }
     }
 
     /// Generate a container name if one wasn't provided.
     fn resolve_container_name(&self) -> String {
-        if self.config.container_name.is_empty() {
+        if self.container_id.is_empty() {
             format!("mxc-{}", uuid_simple())
         } else {
-            self.config.container_name.clone()
+            self.container_id.clone()
         }
     }
 
@@ -67,7 +73,7 @@ impl LxcScriptRunner {
         if let Err(e) =
             filesystem_mounts::configure_filesystem_mounts(&container, &request.policy, logger)
         {
-            if self.config.destroy_on_exit || container_created {
+            if self.destroy_on_exit || container_created {
                 let _ = container.destroy();
             }
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
@@ -97,13 +103,13 @@ impl LxcScriptRunner {
         match fw_manager.apply_firewall_rules(&request.policy, logger) {
             Ok(true) => {}
             Ok(false) => {
-                if self.config.destroy_on_exit || container_created {
+                if self.destroy_on_exit || container_created {
                     let _ = container.destroy();
                 }
                 return ScriptResponse::error("Failed to apply network firewall rules.");
             }
             Err(e) => {
-                if self.config.destroy_on_exit || container_created {
+                if self.destroy_on_exit || container_created {
                     let _ = container.destroy();
                 }
                 return ScriptResponse::error(&format!("Network policy error: {}", e));
@@ -129,12 +135,12 @@ impl LxcScriptRunner {
         };
 
         // Cleanup: remove network rules
-        if fw_manager.rules_applied() && request.policy.remove_firewall_rules_on_exit {
+        if fw_manager.rules_applied() && self.cleanup_policy {
             let _ = fw_manager.remove_firewall_rules(logger);
         }
 
         // Cleanup: destroy container if configured
-        if self.config.destroy_on_exit {
+        if self.destroy_on_exit {
             let _ = writeln!(logger, "Destroying container...");
             if let Err(e) = container.destroy() {
                 let _ = writeln!(logger, "Warning: failed to destroy container: {}", e);
@@ -185,18 +191,17 @@ mod tests {
 
     #[test]
     fn resolve_container_name_uses_config() {
-        let config = LxcConfig {
-            container_name: "my-test".to_string(),
-            ..Default::default()
-        };
-        let runner = LxcScriptRunner::new(&config);
+        let config = LxcConfig::default();
+        let lifecycle = LifecycleConfig::default();
+        let runner = LxcScriptRunner::new(&config, "my-test", &lifecycle);
         assert_eq!(runner.resolve_container_name(), "my-test");
     }
 
     #[test]
     fn resolve_container_name_generates_when_empty() {
         let config = LxcConfig::default();
-        let runner = LxcScriptRunner::new(&config);
+        let lifecycle = LifecycleConfig::default();
+        let runner = LxcScriptRunner::new(&config, "", &lifecycle);
         let name = runner.resolve_container_name();
         assert!(name.starts_with("mxc-"));
     }

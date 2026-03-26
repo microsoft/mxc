@@ -2,15 +2,15 @@
 ## Configuration Schema
 
 MXC uses a JSON configuration file. The formal schema is at
-[`schemas/mxc-config.v1.schema.json`](../schemas/mxc-config.v1.schema.json) —
+[`schemas/mxc-config.schema.json`](../schemas/mxc-config.schema.json) —
 editors that support JSON Schema will provide autocomplete and validation when
-you add `"$schema": "./schemas/mxc-config.v1.schema.json"` to your config file.
+you add `"$schema": "./schemas/mxc-config.schema.json"` to your config file.
 
 ### Full Schema
 
 ```json
 {
-    "version": "0.3.0-alpha",               // Schema version (current: "0.3.0-alpha")
+    "version": "0.4.0-alpha",              // Schema version (semver, current: "0.4.0-alpha")
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "appcontainer",         // Backend (see table below)
 
@@ -66,15 +66,45 @@ other backend sections are ignored.
 
 ### Schema Versioning
 
-The `version` field uses major-version compatibility: configs with a version
-higher than the binary supports are rejected with an error suggesting to upgrade
-`wxc-exec`. Missing `version` is accepted (treated as version 1). Additive
-changes (new optional fields) do not require a version bump.
+MXC config files include an optional `version` field using
+[Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH). The parser uses
+this to detect incompatible configs and provide clear upgrade guidance. If
+`version` is absent, the config is assumed compatible with the current version.
 
-### Legacy Fields
+The parser compares the config's major.minor against its supported version:
 
-The parser also accepts legacy top-level fields (`script`, `workingDirectory`,
-`timeout`) as fallbacks for `process.commandLine`, `process.cwd`, and
-`process.timeout` respectively. These will be removed in a future schema version.
+| Config `version` | Parser supports | Result |
+|---|---|---|
+| absent | 0.4.0-alpha | Accepted (assumed compatible) |
+| `"0.3.0-alpha"` | 0.4.0-alpha | Accepted (0.3 ≤ 0.4) |
+| `"0.4.0-alpha"` | 0.4.0-alpha | Accepted (0.4 ≤ 0.4) |
+| `"0.5.0"` | 0.4.0-alpha | **Rejected** — "upgrade wxc-exec" |
+| `"1.0.0"` | 0.4.0-alpha | **Rejected** — "upgrade wxc-exec" |
+
+#### When to bump
+
+| Change type | Version bump | Example |
+|---|---|---|
+| Add new optional field | **Patch** (0.4.0 → 0.4.1) | Adding `resources` section |
+| Add backward-compatible functionality | **Minor** (0.4.0 → 0.5.0) | New containment backend |
+| Remove a field / breaking change | **Major** (0.x → 1.0.0) | Dropping legacy fields |
+
+**Rule of thumb:** Follow [semver](https://semver.org/). While in `0.x`,
+minor bumps may include breaking changes. Once `1.0.0` is reached, breaking
+changes require a major bump.
+
+#### Migration process for breaking changes
+
+1. **PR N:** Add new field with dual-read fallback from old field. Patch bump.
+2. **PR N+1:** Update all configs, examples, SDK types, and docs to new format.
+3. **PR N+2:** Remove fallback code. Minor bump (or major if post-1.0). Old configs
+   no longer parse.
+
+#### Version history
+
+| Version | Changes |
+|---|---|
+| 0.3.0-alpha | Initial versioned schema. Added `process`, `lifecycle`, `containerId`, `wslc` alias. Dual-read fallbacks for legacy fields. |
+| 0.4.0-alpha | Removed legacy fields (`script`, `workingDirectory`, `appContainer.name`, etc.). `process` section now required. |
 
 See the `examples/` directory for complete configuration examples.

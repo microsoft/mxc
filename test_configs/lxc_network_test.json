@@ -1,15 +1,17 @@
 {
-  "version": "0.3.0-alpha",
+  "version": "0.4.0-alpha",
   "containerId": "CLI-LXC-Filesystem-Test",
   "containment": "lxc",
   "platform": "linux",
   "process": {
     "commandLine": "wget -qO- https://api.github.com/zen"
   },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
   "lxc": {
     "distribution": "alpine",
-    "release": "3.19",
-    "destroyOnExit": true
+    "release": "3.19"
   },
   "network": {
     "defaultPolicy": "block",

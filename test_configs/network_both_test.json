@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0-alpha",
+  "version": "0.4.0-alpha",
   "containerId": "CLI-Network-Both-Test",
   "containment": "appcontainer",
   "process": {
@@ -16,7 +16,6 @@
     "defaultPolicy": "block",
     "enforcementMode": "both",
     "allowedHosts": ["api.github.com"],
-    "blockedHosts": [],
-    "removeRulesOnExit": true
+    "blockedHosts": []
   }
 }

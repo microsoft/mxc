@@ -44,11 +44,7 @@ fn log_request(request: &CodexRequest, logger: &mut Logger) {
     let _ = writeln!(logger, "Script code length: {}", request.script_code.len());
     let _ = writeln!(logger, "Working directory: {}", request.working_directory);
     let _ = writeln!(logger, "Script timeout: {}", request.script_timeout);
-    let _ = writeln!(
-        logger,
-        "Container name: {}",
-        request.lxc_config.container_name
-    );
+    let _ = writeln!(logger, "Container name: {}", request.container_id);
 }
 
 fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
@@ -135,7 +131,11 @@ fn main() {
     }
 
     // Run script in LXC container
-    let mut runner = LxcScriptRunner::new(&request.lxc_config);
+    let mut runner = LxcScriptRunner::new(
+        &request.lxc_config,
+        &request.container_id,
+        &request.lifecycle,
+    );
     let response = runner.run(&request, &mut logger);
     display_script_results(&response, &mut logger);
 
