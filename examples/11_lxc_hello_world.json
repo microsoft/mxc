@@ -1,9 +1,14 @@
 {
-    "script": "echo 'Hello from LXC container!'",
+    "process": {
+        "commandLine": "echo 'Hello from LXC container!'"
+    },
     "containment": "lxc",
+    "platform": "linux",
+    "lifecycle": {
+        "destroyOnExit": true
+    },
     "lxc": {
         "distribution": "alpine",
-        "release": "3.19",
-        "destroyOnExit": true
+        "release": "3.19"
     }
 }

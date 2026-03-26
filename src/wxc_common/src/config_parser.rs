@@ -238,6 +238,56 @@ pub fn load_request(
     convert_raw_config(raw, logger)
 }
 
+// ---------- Cross-field validation ----------
+
+/// Maximum supported schema major version.
+const SUPPORTED_MAJOR_VERSION: u32 = 1;
+
+/// Validate that platform and containment backend are compatible.
+fn validate_platform_containment(
+    containment: &ContainmentBackend,
+    platform: &str,
+    logger: &mut Logger,
+) -> Result<(), WxcError> {
+    let err = match (containment, platform) {
+        (ContainmentBackend::AppContainer, "linux") => {
+            Some("AppContainer requires platform 'windows'")
+        }
+        (ContainmentBackend::Sandbox, "linux") => Some("Sandbox requires platform 'windows'"),
+        (ContainmentBackend::Wslc, "linux") => {
+            Some("WSLC runs Linux containers from a Windows host; platform should be 'windows'")
+        }
+        (ContainmentBackend::Lxc, "windows") => Some("LXC requires platform 'linux'"),
+        _ => None,
+    };
+    if let Some(msg) = err {
+        logger.log_line(msg);
+        return Err(WxcError::ConfigParse(msg.to_string()));
+    }
+    Ok(())
+}
+
+/// Validate that the schema version is supported by this binary.
+fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), WxcError> {
+    if version.is_empty() {
+        return Ok(());
+    }
+    let major: u32 = version
+        .split('.')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if major > SUPPORTED_MAJOR_VERSION {
+        let msg = format!(
+            "Config schema version '{}' is newer than supported (max: {}.x). Upgrade wxc-exec.",
+            version, SUPPORTED_MAJOR_VERSION
+        );
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
+    Ok(())
+}
+
 // ---------- Conversion from raw JSON to domain model ----------
 
 fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
@@ -476,6 +526,12 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
                 .collect();
         }
     }
+
+    // Cross-field validation: platform must be compatible with containment backend
+    validate_platform_containment(&containment, &platform, logger)?;
+
+    // Schema version check
+    validate_schema_version(&schema_version, logger)?;
 
     Ok(CodexRequest {
         schema_version,
@@ -1103,12 +1159,12 @@ mod tests {
 
     #[test]
     fn new_toplevel_fields_parsed() {
-        let json = r#"{"version": "1.0", "containerId": "abc-123", "platform": "linux", "script": "echo hi"}"#;
+        let json = r#"{"version": "1", "containerId": "abc-123", "platform": "linux", "containment": "lxc", "script": "echo hi"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "1.0");
+        assert_eq!(req.schema_version, "1");
         assert_eq!(req.container_id, "abc-123");
         assert_eq!(req.platform, "linux");
     }
@@ -1240,5 +1296,86 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::MicroVm);
+    }
+
+    #[test]
+    fn appcontainer_rejects_linux_platform() {
+        let json = r#"{"script": "echo hi", "containment": "appcontainer", "platform": "linux"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sandbox_rejects_linux_platform() {
+        let json = r#"{"script": "echo hi", "containment": "sandbox", "platform": "linux"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn wslc_rejects_linux_platform() {
+        let json = r#"{"script": "echo hi", "containment": "wslc", "platform": "linux"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn lxc_rejects_windows_platform() {
+        let json = r#"{"script": "echo hi", "containment": "lxc", "platform": "windows"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn valid_platform_containment_accepted() {
+        let json = r#"{"script": "echo hi", "containment": "appcontainer", "platform": "windows"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::AppContainer);
+        assert_eq!(req.platform, "windows");
+    }
+
+    #[test]
+    fn schema_version_too_new_rejected() {
+        let json = r#"{"script": "echo hi", "version": "2"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_version_current_accepted() {
+        let json = r#"{"script": "echo hi", "version": "1"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "1");
+    }
+
+    #[test]
+    fn schema_version_absent_accepted() {
+        let json = r#"{"script": "echo hi"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "");
     }
 }

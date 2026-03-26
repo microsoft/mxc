@@ -1,7 +1,9 @@
 {
-  "script": "python -c \"import sys; print('Hello from WXC!'); print(f'Python version: {sys.version}'); print('Script executed successfully in AppContainer')\"",
+  "process": {
+    "commandLine": "python -c \"import sys; print('Hello from WXC!'); print(f'Python version: {sys.version}'); print('Script executed successfully in AppContainer')\""
+  },
+  "containerId": "CLI-HelloWorld",
   "appContainer": {
-    "name": "CLI-HelloWorld",
     "learningMode": true
   }
 }

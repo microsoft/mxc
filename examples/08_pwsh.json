@@ -1,8 +1,8 @@
 {
-  "script": "pwsh.exe -nop -nol -c \"Set-PSReadLineOption -HistorySaveStyle SaveNothing; Set-Location c:\\temp\"; Get-Location",
-  "appContainer": {
-    "name": "CLI-Pwsh"
+  "process": {
+    "commandLine": "pwsh.exe -nop -nol -c \"Set-PSReadLineOption -HistorySaveStyle SaveNothing; Set-Location c:\\temp\"; Get-Location"
   },
+  "containerId": "CLI-Pwsh",
   "filesystem": {
     "readwritePaths": [
       "C:\\Program Files\\PowerShell\\7",

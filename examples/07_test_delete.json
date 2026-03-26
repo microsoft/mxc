@@ -1,7 +1,9 @@
 {
-  "script": "cmd /c echo Test AppContainer for deletion",
+  "process": {
+    "commandLine": "cmd /c echo Test AppContainer for deletion"
+  },
+  "containerId": "TestDeleteContainer",
   "appContainer": {
-    "name": "TestDeleteContainer",
     "learningMode": true
   },
   "filesystem": {
