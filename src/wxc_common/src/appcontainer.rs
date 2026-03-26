@@ -3,7 +3,9 @@
 
 use std::ptr;
 
-use windows::Win32::Foundation::{GetLastError, LocalFree, HLOCAL, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    GetLastError, LocalFree, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
@@ -433,21 +435,18 @@ impl AppContainerScriptRunner {
 
         let wait_result = unsafe { WaitForSingleObject(process_handle.get(), timeout_ms) };
 
-        const WAIT_TIMEOUT_VALUE: u32 = 0x0000_0102;
-        const WAIT_FAILED_VALUE: u32 = 0xFFFF_FFFF;
-
-        match wait_result.0 {
-            _ if wait_result == WAIT_OBJECT_0 => {
+        match wait_result {
+            WAIT_OBJECT_0 => {
                 debug_trace("[WXC-AC] Child process exited normally");
             }
-            WAIT_TIMEOUT_VALUE => {
+            WAIT_TIMEOUT => {
                 debug_trace("[WXC-AC] Timeout — terminating child process");
                 unsafe {
                     let _ = TerminateProcess(process_handle.get(), u32::MAX);
                     let _ = WaitForSingleObject(process_handle.get(), u32::MAX);
                 }
             }
-            WAIT_FAILED_VALUE => {
+            WAIT_FAILED => {
                 let err = unsafe { GetLastError() };
                 debug_trace(&format!("[WXC-AC] WaitForSingleObject FAILED: {:?}", err));
                 return Err(WxcError::Process(format!(
@@ -458,11 +457,11 @@ impl AppContainerScriptRunner {
             other => {
                 debug_trace(&format!(
                     "[WXC-AC] WaitForSingleObject unexpected result: {}",
-                    other
+                    other.0
                 ));
                 return Err(WxcError::Process(format!(
                     "WaitForSingleObject returned unexpected value: {}",
-                    other
+                    other.0
                 )));
             }
         }
