@@ -1,0 +1,77 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+trigger: none
+name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+resources:
+  repositories:
+  - repository: 1ESPipelineTemplates
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
+
+# Parameters for ESRP release info will be passed from the ADO UI.
+parameters:
+  - name: ESRPInfo
+    type: object
+    default:
+      serviceName: ''
+      tenantId: ''
+      azureKeyVaultName: ''
+      signCertName: ''
+      clientId: ''
+      ApproversEmail: ''
+      OwnersEmail: ''
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: windows-2022
+      os: windows
+    customBuildTags:
+    - ES365AIMigrationTooling
+
+    sdl:
+      sourceAnalysisPool:
+        name: Azure-Pipelines-1ESPT-ExDShared
+        image: windows-latest
+        os: windows
+
+    stages:
+    - stage: Publish_to_NPM
+      displayName: 'Publish NPM Package'
+      variables:
+      - name: release_environment
+        value: Production
+      jobs:
+      - job: ReleaseJob
+        templateContext:
+          type: releaseJob
+          isProduction: true
+          inputs:
+          - input: pipelineArtifact
+            targetPath: '$(Pipeline.Workspace)/packages'
+            artifactName: mxc-sdk-package
+
+        displayName: Publish to NPM
+        pool:
+          type: release
+        steps:
+        - task: EsrpRelease@10
+          displayName: 'Publish to NPM'
+          inputs:
+            connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
+            usemanagedidentity: true 
+            keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+            signcertname: ${{ parameters.ESRPInfo.signCertName }}
+            clientid: ${{ parameters.ESRPInfo.clientId }}
+            contenttype: npm
+            folderlocation: '$(Pipeline.Workspace)/packages'
+            owners: ${{ parameters.ESRPInfo.OwnersEmail }}
+            approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
+            mainpublisher: ESRPRELPACMAN
+            domaintenantid: ${{ parameters.ESRPInfo.tenantId }} 
+
+  
