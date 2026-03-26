@@ -5,10 +5,34 @@
 
 
 /**
+ * Process execution settings
+ */
+export interface WxcProcessConfig {
+  /** Complete command line to execute (e.g., "python -c \"print('hello')\"") */
+  commandLine: string;
+  /** Working directory for the process */
+  cwd?: string;
+  /** Environment variables as KEY=VALUE strings */
+  env?: string[];
+  /** Execution timeout in milliseconds (default: 0 = no timeout) */
+  timeout?: number;
+}
+
+/**
+ * Container lifecycle settings shared across all backends
+ */
+export interface WxcLifecycleConfig {
+  /** Destroy the container after execution completes (default: true) */
+  destroyOnExit?: boolean;
+  /** Retain filesystem and network policies after execution (default: false) */
+  preservePolicy?: boolean;
+}
+
+/**
  * AppContainer configuration for Windows sandbox
  */
 export interface WxcAppContainerConfig {
-  /** AppContainer profile name (default: "CLI") */
+  /** AppContainer profile name (default: "CLI"). Deprecated: use containerId instead. */
   name?: string;
   /** Use least privilege mode with PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT (default: false) */
   leastPrivilege?: boolean;
@@ -48,24 +72,44 @@ export interface WxcNetworkConfig {
   allowedHosts?: string[];
   /** Hostnames or IP addresses to block (firewall mode only) */
   blockedHosts?: string[];
-  /** Automatically remove firewall rules after execution (default: true) */
+  /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
+}
+
+/**
+ * WSLC SDK configuration for Linux containers from Windows
+ */
+export interface WxcWslcConfig {
+  /** OCI container image name (default: "alpine:latest") */
+  image?: string;
+  /** Storage path for WSLC session image store */
+  storagePath?: string;
 }
 
 /**
  * Main WXC configuration
  */
 export interface WxcConfiguration {
-  /** Complete command line to execute (e.g., "python -c \"print('hello')\"") */
-  script: string;
-  /** Optional working directory for the script */
+  /** MXC config schema version (current: "1") */
+  version?: string;
+  /** Externally assigned container identifier */
+  containerId?: string;
+  /** Containment backend */
+  containment?: 'appcontainer' | 'sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm';
+  /** Container lifecycle settings */
+  lifecycle?: WxcLifecycleConfig;
+  /** Process execution settings */
+  process?: WxcProcessConfig;
+  /** Complete command line to execute. Deprecated: use process.commandLine instead. */
+  script?: string;
+  /** Working directory. Deprecated: use process.cwd instead. */
   workingDirectory?: string;
-  /** Script execution timeout in milliseconds (default: 0 = no timeout) */
+  /** Timeout in ms. Deprecated: use process.timeout instead. */
   timeout?: number;
-  /** Containment backend: "appcontainer" (Windows), "sandbox" (Windows), or "lxc" (Linux) */
-  containment?: 'appcontainer' | 'sandbox' | 'lxc';
   /** AppContainer configuration */
   appContainer?: WxcAppContainerConfig;
+  /** WSLC SDK configuration */
+  wslc?: WxcWslcConfig;
   /** LXC container configuration (Linux only) */
   lxc?: WxcLxcConfig;
   /** Filesystem access configuration */
@@ -116,7 +160,7 @@ export interface WxcLxcConfig {
 /**
  * Sandboxing methods available on the platform
  */
-export type SandboxingMethod = 'appcontainer' | 'lxc';
+export type SandboxingMethod = 'appcontainer' | 'sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm';
 
 /**
  * Platform support information

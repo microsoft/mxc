@@ -10,7 +10,7 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, LxcConfig,
+    CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, LifecycleConfig, LxcConfig,
     NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SandboxConfig,
 };
 
@@ -117,12 +117,22 @@ struct RawProcess {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawLifecycle {
+    #[serde(rename = "destroyOnExit")]
+    destroy_on_exit: Option<bool>,
+    #[serde(rename = "preservePolicy")]
+    preserve_policy: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawConfig {
     version: Option<String>,
     #[serde(rename = "containerId")]
     container_id: Option<String>,
     platform: Option<String>,
     process: Option<RawProcess>,
+    lifecycle: Option<RawLifecycle>,
     script: Option<String>,
     containment: Option<String>,
     #[serde(rename = "workingDirectory")]
@@ -131,6 +141,7 @@ struct RawConfig {
     #[serde(rename = "appContainer")]
     app_container: Option<RawAppContainer>,
     sandbox: Option<RawSandbox>,
+    wslc: Option<RawContainerConfig>,
     container: Option<RawContainerConfig>,
     lxc: Option<RawLxc>,
     filesystem: Option<RawFilesystem>,
@@ -353,7 +364,8 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     }
 
-    // LXC configuration
+    // LXC configuration — save destroy_on_exit for lifecycle fallback before consuming
+    let lxc_legacy_destroy_on_exit = raw.lxc.as_ref().and_then(|l| l.destroy_on_exit);
     let mut lxc_config = {
         let raw_lxc = raw.lxc.unwrap_or_default();
         LxcConfig {
@@ -480,9 +492,9 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     }
 
-    // Container configuration (WSLC SDK)
+    // Container configuration (WSLC SDK) — "wslc" key takes precedence over "container"
     let mut container_config = ContainerConfig::default();
-    if let Some(cc) = raw.container {
+    if let Some(cc) = raw.wslc.or(raw.container) {
         if let Some(os) = cc.target_os {
             container_config.target_os = os;
         }
@@ -507,6 +519,29 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     }
 
+    // Lifecycle section with dual-read fallback from legacy fields
+    let lifecycle = {
+        let lc = raw.lifecycle.unwrap_or_default();
+        let destroy_on_exit = lc
+            .destroy_on_exit
+            .or(lxc_legacy_destroy_on_exit)
+            .unwrap_or(true);
+        let preserve_policy = lc.preserve_policy.unwrap_or(false);
+
+        // Sync back to legacy fields so existing runners keep working.
+        // Only override legacy values when lifecycle.preservePolicy was explicitly set.
+        if lc.preserve_policy.is_some() {
+            policy.clear_policy_on_exit = !preserve_policy;
+            policy.remove_firewall_rules_on_exit = !preserve_policy;
+        }
+        lxc_config.destroy_on_exit = destroy_on_exit;
+
+        LifecycleConfig {
+            destroy_on_exit,
+            preserve_policy,
+        }
+    };
+
     // containerId takes precedence over backend-specific container names
     if !container_id.is_empty() {
         policy.app_container_name = container_id.clone();
@@ -525,6 +560,7 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         working_directory,
         script_timeout,
         containment,
+        lifecycle,
         policy,
         sandbox_config,
         container_config,
@@ -1379,5 +1415,125 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.app_container_name, "old-name");
+    }
+
+    #[test]
+    fn lifecycle_destroy_on_exit_parsed() {
+        let json = r#"{"script": "echo hi", "lifecycle": {"destroyOnExit": false}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.lifecycle.destroy_on_exit);
+        assert!(!req.lxc_config.destroy_on_exit);
+    }
+
+    #[test]
+    fn lifecycle_preserve_policy_parsed() {
+        let json = r#"{"script": "echo hi", "lifecycle": {"preservePolicy": true}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.lifecycle.preserve_policy);
+        assert!(!req.policy.clear_policy_on_exit);
+        assert!(!req.policy.remove_firewall_rules_on_exit);
+    }
+
+    #[test]
+    fn lifecycle_fallback_from_lxc_destroy_on_exit() {
+        let json =
+            r#"{"script": "echo hi", "containment": "lxc", "lxc": {"destroyOnExit": false}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.lifecycle.destroy_on_exit);
+        assert!(!req.lxc_config.destroy_on_exit);
+    }
+
+    #[test]
+    fn lifecycle_defaults_when_absent() {
+        let json = r#"{"script": "echo hi"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.lifecycle.destroy_on_exit);
+        assert!(!req.lifecycle.preserve_policy);
+    }
+
+    #[test]
+    fn lifecycle_overrides_lxc_destroy_on_exit() {
+        let json = r#"{"script": "echo hi", "lifecycle": {"destroyOnExit": true}, "lxc": {"destroyOnExit": false}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.lifecycle.destroy_on_exit);
+    }
+
+    #[test]
+    fn lifecycle_preserve_policy_overrides_legacy_fields() {
+        let json = r#"{
+            "script": "echo hi",
+            "filesystem": {"clearPolicyOnExit": true},
+            "network": {"removeRulesOnExit": true},
+            "lifecycle": {"preservePolicy": true}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.lifecycle.preserve_policy);
+        assert!(!req.policy.clear_policy_on_exit);
+        assert!(!req.policy.remove_firewall_rules_on_exit);
+    }
+
+    #[test]
+    fn legacy_policy_fields_preserved_when_lifecycle_absent() {
+        let json = r#"{
+            "script": "echo hi",
+            "filesystem": {"clearPolicyOnExit": false},
+            "network": {"removeRulesOnExit": false}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.lifecycle.preserve_policy);
+        assert!(!req.policy.clear_policy_on_exit);
+        assert!(!req.policy.remove_firewall_rules_on_exit);
+    }
+
+    #[test]
+    fn wslc_section_parsed() {
+        let json =
+            r#"{"script": "echo hi", "containment": "wslc", "wslc": {"image": "python:3.12"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.container_config.image, "python:3.12");
+    }
+
+    #[test]
+    fn wslc_falls_back_to_container_section() {
+        let json = r#"{"script": "echo hi", "containment": "wslc", "container": {"image": "ubuntu:22.04"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.container_config.image, "ubuntu:22.04");
+    }
+
+    #[test]
+    fn wslc_section_overrides_container_section() {
+        let json = r#"{"script": "echo hi", "containment": "wslc", "wslc": {"image": "python:3.12"}, "container": {"image": "ubuntu:22.04"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.container_config.image, "python:3.12");
     }
 }
