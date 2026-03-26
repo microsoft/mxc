@@ -10,6 +10,7 @@ resources:
     name: 1ESPipelineTemplates/1ESPipelineTemplates
     ref: refs/tags/release
 
+# Parameters for ESRP signing info will be passed from the ADO UI.
 parameters:
   - name: ESRPInfo
     type: object
@@ -30,13 +31,16 @@ extends:
       os: windows
     customBuildTags:
     - ES365AIMigrationTooling
-    
     stages:
-    - stage: Build_WXC_Exec
-      displayName: 'Build WXC Executables'
+    - stage: Build_Binaries
+      displayName: 'Build Executables'
       jobs:
-        - job: wxc_build
+        - job: build_wxc
           displayName: Build WXC using toolchain
+          pool:
+            name: Azure-Pipelines-1ESPT-ExDShared
+            image: windows-2022
+            os: windows
           templateContext:
             rust:
               rustToolchain:
@@ -45,28 +49,33 @@ extends:
               workingDirectory: src
           strategy:
             matrix:
-              x64_Release:
+              x64_windows:
                 triplet: x86_64-pc-windows-msvc
-              arm64_Release:
+              arm64_windows:
                 triplet: aarch64-pc-windows-msvc
           variables:
             # This is the temp directory that Cargo will use for compiling Rust crates.
             # We use c:\t\target to avoid interference from the container host.
             CARGO_TARGET_DIR: c:\t\target
-            TargetTriple: $(triplet)
-            TargetTripleDir: $(CARGO_TARGET_DIR)\$(TargetTriple)\release
+            targetTriple: $(triplet)
+            targetTripleDir: $(CARGO_TARGET_DIR)\$(targetTriple)\release
             outputDirectory: $(Build.SourcesDirectory)\out
-            artifactBaseName: wxc-binaries-$(TargetTriple)
+            artifactBaseName: wxc-binaries-$(targetTriple)
 
           steps:
             - checkout: self
             - task: 1ES.Build.Rust.Setup@1
             - task: 1ES.Build.Rust.Restore@1
+
+            # Build Windows WXC crates without building LXC
             - task: 1ES.Build.Rust.Run@1
+              displayName: Build Windows crates
+              condition: contains(variables['triplet'], 'windows')
               inputs:
                 command: build
                 profile: release
                 target: $(triplet)
+                buildExtraArgs: '--exclude lxc --exclude lxc_common'
                 enableTest: true
                 enableClippy: true
 
@@ -80,12 +89,13 @@ extends:
                 AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
                 AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
                 AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
-                FolderPath: $(TargetTripleDir)
+                FolderPath: $(targetTripleDir)
                 Pattern: |
                   wxc-exec.exe
                   winhttp-proxy-shim.exe
                   wxc-sandbox-daemon.exe
                   wxc-sandbox-agent.exe
+                  wxc-test-proxy.exe
                 UseMinimatch: true
                 signConfigType: inlineSignParams
                 inlineOperation: |
@@ -115,23 +125,124 @@ extends:
             - task: CopyFiles@2
               displayName: Copy Release Binaries
               inputs:
-                sourceFolder: $(TargetTripleDir)
+                sourceFolder: $(targetTripleDir)
                 contents: |
                   wxc-exec.exe
                   winhttp-proxy-shim.exe
                   wxc-sandbox-daemon.exe
                   wxc-sandbox-agent.exe
-                targetFolder: $(outputDirectory)/$(TargetTriple)
+                  wxc-test-proxy.exe
+                targetFolder: $(outputDirectory)/$(targetTriple)
 
             - task: 1ES.PublishPipelineArtifact@1
               displayName: Upload binaries as pipeline artifact
               inputs:
-                path: '$(outputDirectory)/$(TargetTriple)'
+                path: '$(outputDirectory)/$(targetTriple)'
                 artifactName: $(artifactBaseName)
+
+        - job: build_lxc
+          displayName: Build LXC using toolchain
+          dependsOn: build_wxc
+          pool:
+            name: Azure-Pipelines-1ESPT-ExDShared
+            image: ubuntu-latest
+            os: linux
+          templateContext:
+            rust:
+              rustToolchain:
+                toolchainFeed: https://pkgs.dev.azure.com/microsoft/_packaging/RustTools/nuget/v3/index.json
+                cratesIoFeed: sparse+https://pkgs.dev.azure.com/shine-oss/mxc/_packaging/MxcDependencies/Cargo/index/
+              workingDirectory: src
+          strategy:
+            matrix:
+              x64_linux:
+                triplet: x86_64-unknown-linux-gnu
+                workingDirectory: $(Build.SourcesDirectory)/src/lxc
+              arm64_linux:
+                triplet: aarch64-unknown-linux-gnu
+                workingDirectory: $(Build.SourcesDirectory)/src/lxc
+          variables:
+            # This is the temp directory that Cargo will use for compiling Rust crates.
+            # We use /tmp/target to avoid interference from the container host.
+            CARGO_TARGET_DIR: /tmp/target
+            targetTriple: $(triplet)
+            targetTripleDir: $(CARGO_TARGET_DIR)/$(targetTriple)/release
+            outputDirectory: $(Build.SourcesDirectory)/out
+            artifactBaseName: lxc-binaries-$(targetTriple)
+
+          steps:
+            - checkout: self
+            - task: 1ES.Build.Rust.Setup@1
+            - task: 1ES.Build.Rust.Restore@1
+
+            # Build Linux LXC crates without building WXC
+            - task: 1ES.Build.Rust.Run@1
+              displayName: Build Linux crates
+              condition: contains(variables['triplet'], 'linux')
+              inputs:
+                command: build
+                workingDirectory: $(workingDirectory)
+                profile: release
+                target: $(triplet)
+                enableTest: true
+                enableClippy: true
+
+            # Sign binaries in build folder
+            - task: EsrpCodeSigning@5
+              displayName: Code Sign ESRP
+              inputs:
+                ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+                AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+                AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }} 
+                AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+                AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+                AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+                FolderPath: $(targetTripleDir)
+                Pattern: |
+                  lxc-exec.exe
+                UseMinimatch: true
+                signConfigType: inlineSignParams
+                inlineOperation: |
+                  [
+                    {
+                      "keyCode": "CP-230012",
+                      "operationCode": "SigntoolSign",
+                      "parameters": {
+                        "OpusName": "Microsoft eXecution Container",
+                        "OpusInfo": "https://github.com/microsoft/mxc",
+                        "FileDigest": "/fd \"SHA256\"",
+                        "PageHash": "/NPH",
+                        "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
+                      },
+                      "toolName": "sign",
+                      "toolVersion": "1.0"
+                    },
+                    {
+                      "keyCode": "CP-230012",
+                      "operationCode": "SigntoolVerify",
+                      "parameters": {},
+                      "toolName": "sign",
+                      "toolVersion": "1.0"
+                    }
+                  ]
+            
+            - task: CopyFiles@2
+              displayName: Copy Release Binaries
+              inputs:
+                sourceFolder: $(targetTripleDir)
+                contents: |
+                  lxc-exec.exe
+                targetFolder: $(outputDirectory)/$(targetTriple)
+
+            - task: 1ES.PublishPipelineArtifact@1
+              displayName: Upload binaries as pipeline artifact
+              inputs:
+                path: '$(outputDirectory)/$(targetTriple)'
+                artifactName: $(artifactBaseName)      
 
     - stage: Package_MXC_SDK
       displayName: 'Package MXC SDK'
-      dependsOn: Build_WXC_Exec
+      dependsOn: Build_Binaries
       jobs:    
         - job: package_mxc_sdk
           displayName: Package MXC SDK
@@ -153,6 +264,18 @@ extends:
               inputs:
                 artifact: wxc-binaries-aarch64-pc-windows-msvc
                 path: $(sdkDirectory)/bin/aarch64-pc-windows-msvc
+            
+            - task: DownloadPipelineArtifact@2
+              displayName: Download lxc x64 binary
+              inputs:
+                artifact: lxc-binaries-x86_64-unknown-linux-gnu
+                path: $(sdkDirectory)/bin/x86_64-unknown-linux-gnu
+
+            - task: DownloadPipelineArtifact@2
+              displayName: Download lxc arm64 binary
+              inputs:
+                artifact: lxc-binaries-aarch64-unknown-linux-gnu
+                path: $(sdkDirectory)/bin/aarch64-unknown-linux-gnu
                       
             - task: NpmAuthenticate@0
               displayName: NPM Authenticate

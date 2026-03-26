@@ -10,6 +10,7 @@ resources:
     name: 1ESPipelineTemplates/1ESPipelineTemplates
     ref: refs/tags/release
 
+# Parameters for ESRP release info will be passed from the ADO UI.
 parameters:
   - name: ESRPInfo
     type: object
@@ -61,15 +62,15 @@ extends:
         - task: EsrpRelease@10
           displayName: 'Publish to NPM'
           inputs:
-            connectedservicename: ${{ parameters.ESRPInfo.serviceName }} # name of the ARM service connection 
+            connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
             usemanagedidentity: true 
-            keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }} # Key vault that stores the signing certificate 
-            signcertname: ${{ parameters.ESRPInfo.signCertName }} # Name of the sign certificate in above key vault
-            clientid: ${{ parameters.ESRPInfo.clientId }} # ESPR Client Id. Old App Registration Id which you mapped your Managed Identity Id.
+            keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+            signcertname: ${{ parameters.ESRPInfo.signCertName }}
+            clientid: ${{ parameters.ESRPInfo.clientId }}
             contenttype: npm
             folderlocation: '$(Pipeline.Workspace)/packages'
-            owners: ${{ parameters.ESRPInfo.OwnersEmail }} # comma separated email list of pipeline owners
-            approvers: ${{ parameters.ESRPInfo.ApproversEmail }} # comma separated email list of approvers
+            owners: ${{ parameters.ESRPInfo.OwnersEmail }}
+            approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
             mainpublisher: ESRPRELPACMAN
             domaintenantid: ${{ parameters.ESRPInfo.tenantId }} 
 
