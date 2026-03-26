@@ -218,6 +218,25 @@ impl Default for ContainerConfig {
     }
 }
 
+/// Container lifecycle settings shared across all backends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LifecycleConfig {
+    /// Destroy the container after execution completes. Default: true.
+    pub destroy_on_exit: bool,
+    /// If true, retain filesystem and network policies after execution. Default: false.
+    pub preserve_policy: bool,
+}
+
+impl Default for LifecycleConfig {
+    fn default() -> Self {
+        Self {
+            destroy_on_exit: true,
+            preserve_policy: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodexRequest {
@@ -234,6 +253,8 @@ pub struct CodexRequest {
     pub script_timeout: u32,
     /// Which containment backend to use. Default: AppContainer.
     pub containment: ContainmentBackend,
+    /// Shared lifecycle settings.
+    pub lifecycle: LifecycleConfig,
     /// AppContainer-specific policy (used when containment == AppContainer).
     pub policy: ContainerPolicy,
     /// Sandbox-specific configuration (used when containment == Sandbox).
@@ -255,6 +276,7 @@ impl Default for CodexRequest {
             working_directory: String::new(),
             script_timeout: 0,
             containment: ContainmentBackend::default(),
+            lifecycle: LifecycleConfig::default(),
             policy: ContainerPolicy::default(),
             sandbox_config: SandboxConfig::default(),
             container_config: ContainerConfig::default(),
