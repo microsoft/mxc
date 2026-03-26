@@ -124,13 +124,19 @@ mxc/test_configs/
 
 ## Error Handling & Output Semantics
 
-### Output Separation
+### I/O Model
 
-stdout contains only script output; stderr contains only kernel traces.
+The NanVix runner follows the same pattern as the other backends: **stdin/stdout/stderr are relayed directly** to the parent process, not captured into strings. Output flows through in real-time via pipe relay threads.
+
+```
+wxc-exec stdin  ──▶  nanvixd stdin  ──▶  guest python stdin  (script delivery)
+wxc-exec stdout ◀──  nanvixd stdout ◀──  guest python stdout (script output)
+wxc-exec stderr ◀──  nanvixd stderr ◀──  kernel traces       (debug only)
+```
 
 ### Exit Code Propagation
 
-`sys.exit(42)` inside the guest → `nanvixd.exe` exits with code 42. The runner maps this directly to `ScriptResponse.exit_code`.
+`sys.exit(42)` inside the guest → `nanvixd.exe` exits with code 42. The runner returns this directly as the process exit code.
 
 ### Error Classification
 
@@ -156,7 +162,7 @@ enum NanVixError {
 | `Runtime` | Stdin write or process error | `Failed to write script to nanvixd stdin: Broken pipe` |
 | `Timeout` | Watchdog fires | `NanVix execution timed out after 90000ms` |
 
-All variants are mapped to `ScriptResponse.error_message` for the JSON response.
+All variants are surfaced as the process exit code and stderr output. Preflight and Platform errors prevent the process from spawning at all.
 
 ## Configuration Semantics
 
@@ -186,11 +192,13 @@ All variants are mapped to `ScriptResponse.error_message` for the JSON response.
 | `timeout` | `script_timeout: u32` | ✅ **Used** — script execution timeout in ms |
 | `containment` | `containment: ContainmentBackend` | ✅ **Used** — must be `"nanvix"` |
 | `nanvix.*` | `nanvix_config: NanVixConfig` | ✅ **Used** — NanVix-specific configuration |
-| `workingDirectory` | `working_directory: String` | ⚠️ **Ignored** — guest has its own filesystem namespace |
-| `appContainer.*` | `policy: ContainerPolicy` | ⚠️ **Ignored** — not applicable to NanVix |
-| `filesystem.*` | (part of `policy`) | ⚠️ **Ignored** — guest FS is a read-only ramfs |
-| `network.*` | (part of `policy`) | ⚠️ **Ignored** — no network stack in guest |
-| `sandbox.*` | `sandbox_config: SandboxConfig` | ⚠️ **Ignored** — NanVix is not Windows Sandbox |
+| `workingDirectory` | `working_directory: String` | ❌ **Rejected** — guest has its own filesystem namespace |
+| `appContainer.*` | `policy: ContainerPolicy` | ❌ **Rejected** — not applicable to NanVix |
+| `filesystem.*` | (part of `policy`) | ❌ **Rejected** — guest FS is a read-only ramfs |
+| `network.*` | (part of `policy`) | ❌ **Rejected** — no network stack in guest |
+| `sandbox.*` | `sandbox_config: SandboxConfig` | ❌ **Rejected** — NanVix is not Windows Sandbox |
+
+**Policy validation**: If a config specifies `containment: "nanvix"` alongside `filesystem`, `network`, `appContainer`, or `workingDirectory` fields, the runner returns a error. This prevents users from assuming policies are being enforced when they cannot be. Example: `"network policy is not supported by the NanVix backend — NanVix has no network stack"`.
 
 ## Binary Distribution & Versioning
 
