@@ -10,7 +10,7 @@ you add `"$schema": "./schemas/mxc-config.v1.schema.json"` to your config file.
 
 ```json
 {
-    "version": "0.3.0-alpha",               // Schema version (current: "0.3.0-alpha")
+    "version": "1",               // Schema version (current: "1")
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "appcontainer",         // Backend (see table below)
 

@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0-alpha",
+  "version": "1",
   "containerId": "CLI-CustomPython",
   "containment": "appcontainer",
   "process": {
