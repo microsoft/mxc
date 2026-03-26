@@ -47,23 +47,17 @@ impl Default for SandboxConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LxcConfig {
-    /// Container name. Default: auto-generated.
-    pub container_name: String,
     /// Linux distribution for the container rootfs (e.g., "alpine", "ubuntu").
     pub distribution: String,
     /// Distribution release version (e.g., "3.19", "24.04").
     pub release: String,
-    /// Whether to destroy the container after execution. Default: true.
-    pub destroy_on_exit: bool,
 }
 
 impl Default for LxcConfig {
     fn default() -> Self {
         Self {
-            container_name: String::new(),
             distribution: "alpine".to_string(),
             release: "3.19".to_string(),
-            destroy_on_exit: true,
         }
     }
 }
@@ -133,43 +127,20 @@ impl ProxyConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContainerPolicy {
-    pub app_container_name: String,
     pub least_privilege_mode: bool,
     pub capabilities: Vec<String>,
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
     pub denied_paths: Vec<String>,
-    pub clear_policy_on_exit: bool,
     pub default_network_policy: NetworkPolicy,
     pub network_enforcement_mode: NetworkEnforcementMode,
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
-    pub remove_firewall_rules_on_exit: bool,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
-}
-
-impl Default for ContainerPolicy {
-    fn default() -> Self {
-        Self {
-            app_container_name: "CLI".to_string(),
-            least_privilege_mode: false,
-            capabilities: Vec::new(),
-            readwrite_paths: Vec::new(),
-            readonly_paths: Vec::new(),
-            denied_paths: Vec::new(),
-            clear_policy_on_exit: true,
-            default_network_policy: NetworkPolicy::default(),
-            network_enforcement_mode: NetworkEnforcementMode::default(),
-            allowed_hosts: Vec::new(),
-            blocked_hosts: Vec::new(),
-            remove_firewall_rules_on_exit: true,
-            network_proxy: ProxyConfig::default(),
-        }
-    }
 }
 
 /// Port mapping for host↔container port forwarding.

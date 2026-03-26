@@ -2,9 +2,9 @@
 ## Configuration Schema
 
 MXC uses a JSON configuration file. The formal schema is at
-[`schemas/mxc-config.v1.schema.json`](../schemas/mxc-config.v1.schema.json) —
+[`schemas/mxc-config.v2.schema.json`](../schemas/mxc-config.v2.schema.json) —
 editors that support JSON Schema will provide autocomplete and validation when
-you add `"$schema": "./schemas/mxc-config.v1.schema.json"` to your config file.
+you add `"$schema": "./schemas/mxc-config.v2.schema.json"` to your config file.
 
 ### Full Schema
 
@@ -66,15 +66,50 @@ other backend sections are ignored.
 
 ### Schema Versioning
 
-The `version` field uses major-version compatibility: configs with a version
-higher than the binary supports are rejected with an error suggesting to upgrade
-`wxc-exec`. Missing `version` is accepted (treated as version 1). Additive
-changes (new optional fields) do not require a version bump.
+MXC config files include an optional `version` field that declares the schema
+version. The parser uses this to detect incompatible configs and provide clear
+upgrade guidance.
 
-### Legacy Fields
+The parser declares a `SUPPORTED_MAJOR_VERSION` constant. At parse time:
 
-The parser also accepts legacy top-level fields (`script`, `workingDirectory`,
-`timeout`) as fallbacks for `process.commandLine`, `process.cwd`, and
-`process.timeout` respectively. These will be removed in a future schema version.
+| Config `version` | Parser supports | Result |
+|---|---|---|
+| absent | any | Accepted (assumed compatible) |
+| `"1"` | 2 | Accepted (1 ≤ 2) |
+| `"2"` | 2 | Accepted (2 ≤ 2) |
+| `"3"` | 2 | **Rejected** — "upgrade wxc-exec" |
+| `"0"` or non-numeric | any | **Rejected** — invalid format |
+
+Version must be a positive integer (e.g., `"1"`, `"2"`). Minor versions
+(e.g., `"2.1"`) are parsed by major only — `"2.1"` is treated as major `2`.
+
+#### When to bump
+
+| Change type | Version bump | Example |
+|---|---|---|
+| Add new optional field | **None** | Adding `resources` section |
+| Add new enum value | **None** | Adding `"seatbelt"` to containment |
+| Change a default value | **None** | Default timeout change |
+| Remove a field | **Major** | Dropping `script` top-level field |
+| Rename a field without fallback | **Major** | `workingDirectory` → `process.cwd` |
+| Change a field's type | **Major** | `gpu: bool` → `gpu: { type: "..." }` |
+| Make an optional field required | **Major** | `process` becoming required |
+
+**Rule of thumb:** If an existing valid config would stop parsing, bump the
+major version. Otherwise, don't.
+
+#### Migration process for breaking changes
+
+1. **PR N:** Add new field with dual-read fallback from old field. No version bump.
+2. **PR N+1:** Update all configs, examples, SDK types, and docs to new format.
+3. **PR N+2:** Remove fallback code. Bump `SUPPORTED_MAJOR_VERSION`. Old configs
+   no longer parse.
+
+#### Version history
+
+| Version | Changes |
+|---|---|
+| 1 | Initial versioned schema. Added `process`, `lifecycle`, `containerId`, `wslc` alias. All additive with dual-read fallbacks. |
+| 2 | Removed legacy fields (`script`, `workingDirectory`, `appContainer.name`, etc.). `process` section now required. |
 
 See the `examples/` directory for complete configuration examples.

@@ -16,7 +16,6 @@
     "defaultPolicy": "block",
     "enforcementMode": "firewall",
     "allowedHosts": [ "api.github.com" ],
-    "blockedHosts": [],
-    "removeRulesOnExit": true
+    "blockedHosts": []
   }
 }

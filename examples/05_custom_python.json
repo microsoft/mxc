@@ -10,7 +10,6 @@
     "capabilities": [ "registryRead" ]
   },
   "fileSystem": {
-    "executablePath": "C:\\Users\\AdminUser\\AppData\\Local\\anaconda3\\python.exe",
-    "workingDirectory": "C:\\Users\\AdminUser\\AppData\\Local\\anaconda3"
+    "executablePath": "C:\\Users\\AdminUser\\AppData\\Local\\anaconda3\\python.exe"
   }
 }

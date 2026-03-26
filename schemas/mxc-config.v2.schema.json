@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/microsoft/mxc/schemas/mxc-config.v1.schema.json",
+  "$id": "https://github.com/microsoft/mxc/schemas/mxc-config.v2.schema.json",
   "title": "MXC Configuration",
-  "description": "Configuration schema for MXC container execution engine (v1). Defines the recommended config format. The parser also accepts legacy fields not listed here during the migration period.",
+  "description": "Configuration schema for MXC container execution engine (v2). Defines the canonical config format with no legacy field support.",
   "type": "object",
 
   "required": ["process"],

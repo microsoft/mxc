@@ -16,7 +16,6 @@
     "defaultPolicy": "block",
     "enforcementMode": "capabilities",
     "allowedHosts": ["api.github.com"],
-    "blockedHosts": [],
-    "removeRulesOnExit": true
+    "blockedHosts": []
   }
 }

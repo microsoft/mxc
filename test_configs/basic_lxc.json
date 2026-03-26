@@ -6,9 +6,11 @@
   "process": {
     "commandLine": "echo 'Hello from LXC' && uname -a"
   },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
   "lxc": {
     "distribution": "alpine",
-    "release": "3.19",
-    "destroyOnExit": true
+    "release": "3.19"
   }
 }

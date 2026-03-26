@@ -53,7 +53,11 @@ fn log_request(request: &CodexRequest, logger: &mut Logger) {
     let _ = writeln!(
         logger,
         "Container name: {}",
-        request.policy.app_container_name
+        if request.container_id.is_empty() {
+            "CLI"
+        } else {
+            &request.container_id
+        }
     );
 }
 

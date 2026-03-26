@@ -6,10 +6,12 @@
   "process": {
     "commandLine": "ls -la /mnt/shared && echo 'test' > /mnt/output/result.txt && cat /mnt/output/result.txt"
   },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
   "lxc": {
     "distribution": "alpine",
-    "release": "3.19",
-    "destroyOnExit": true
+    "release": "3.19"
   },
   "filesystem": {
     "readonlyPaths": ["/mnt/shared"],

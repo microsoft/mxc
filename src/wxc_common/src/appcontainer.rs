@@ -527,9 +527,13 @@ impl AppContainerScriptRunner {
 
     /// Create the AppContainer SID for the given request.
     fn initialize(&mut self, request: &CodexRequest) -> Result<(), WxcError> {
-        self.app_container_sid =
-            Self::create_app_container_sid(&request.policy.app_container_name)?;
-        self.app_container_name = request.policy.app_container_name.clone();
+        let container_name = if request.container_id.is_empty() {
+            "CLI".to_string()
+        } else {
+            request.container_id.clone()
+        };
+        self.app_container_sid = Self::create_app_container_sid(&container_name)?;
+        self.app_container_name = container_name;
         Ok(())
     }
 
@@ -571,7 +575,7 @@ impl ScriptRunner for AppContainerScriptRunner {
 
         let principal_id = self.get_principal_id();
 
-        let mut bfs_manager = FileSystemBfsManager::new(request.policy.app_container_name.clone());
+        let mut bfs_manager = FileSystemBfsManager::new(self.app_container_name.clone());
         if let Err(e) = bfs_manager.configure(&request.policy, logger) {
             return ScriptResponse::error(&e.to_string());
         }
@@ -579,6 +583,7 @@ impl ScriptRunner for AppContainerScriptRunner {
         let mut network_manager = NetworkManager::new();
         match network_manager.start(
             &principal_id,
+            &self.app_container_name,
             &request.policy,
             self.app_container_sid,
             logger,
@@ -598,8 +603,8 @@ impl ScriptRunner for AppContainerScriptRunner {
             Err(_) => ScriptResponse::error("Unknown error during script execution."),
         };
 
-        network_manager.stop_all(&request.policy, logger);
-        if bfs_manager.configured() && request.policy.clear_policy_on_exit {
+        network_manager.stop_all(!request.lifecycle.preserve_policy, logger);
+        if bfs_manager.configured() && !request.lifecycle.preserve_policy {
             bfs_manager.remove_configuration(logger);
         }
 

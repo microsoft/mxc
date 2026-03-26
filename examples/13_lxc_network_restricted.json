@@ -6,10 +6,12 @@
   "process": {
     "commandLine": "wget -qO- https://api.github.com/zen || echo 'Network blocked as expected'"
   },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
   "lxc": {
     "distribution": "alpine",
-    "release": "3.19",
-    "destroyOnExit": true
+    "release": "3.19"
   },
   "network": {
     "defaultPolicy": "block",

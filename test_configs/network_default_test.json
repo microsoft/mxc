@@ -15,7 +15,6 @@
   "network": {
     "defaultPolicy": "block",
     "allowedHosts": ["api.github.com"],
-    "blockedHosts": [],
-    "removeRulesOnExit": true
+    "blockedHosts": []
   }
 }

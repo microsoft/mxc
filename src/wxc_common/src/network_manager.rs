@@ -200,6 +200,7 @@ impl NetworkManager {
     pub fn start(
         &mut self,
         principal_id: &str,
+        container_name: &str,
         policy: &ContainerPolicy,
         script_sid: windows::Win32::Security::PSID,
         logger: &mut Logger,
@@ -207,7 +208,7 @@ impl NetworkManager {
         if policy.network_proxy.is_enabled() {
             self.proxy_coordinator.start(
                 &policy.network_proxy,
-                &policy.app_container_name,
+                container_name,
                 principal_id,
                 script_sid,
                 logger,
@@ -225,8 +226,8 @@ impl NetworkManager {
     }
 
     /// Stop all network resources: firewall rules, proxy policy, test proxy.
-    pub fn stop_all(&mut self, policy: &ContainerPolicy, logger: &mut Logger) {
-        if self.rules_applied() && policy.remove_firewall_rules_on_exit {
+    pub fn stop_all(&mut self, cleanup_policy: bool, logger: &mut Logger) {
+        if self.rules_applied() && cleanup_policy {
             let _ = self.remove_firewall_rules(logger);
         }
         if self.proxy_coordinator.is_active() {
