@@ -3,7 +3,6 @@
         "commandLine": "wget -qO- https://api.github.com/zen || echo 'Network blocked as expected'"
     },
     "containment": "lxc",
-    "platform": "linux",
     "lxc": {
         "distribution": "alpine",
         "release": "3.19",

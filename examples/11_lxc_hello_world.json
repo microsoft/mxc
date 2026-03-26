@@ -3,7 +3,6 @@
         "commandLine": "echo 'Hello from LXC container!'"
     },
     "containment": "lxc",
-    "platform": "linux",
     "lxc": {
         "distribution": "alpine",
         "release": "3.19",

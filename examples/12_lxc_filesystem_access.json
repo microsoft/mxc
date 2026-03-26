@@ -3,7 +3,6 @@
         "commandLine": "ls -la /mnt/shared && echo 'test' > /mnt/output/result.txt && cat /mnt/output/result.txt"
     },
     "containment": "lxc",
-    "platform": "linux",
     "lxc": {
         "distribution": "alpine",
         "release": "3.19",
