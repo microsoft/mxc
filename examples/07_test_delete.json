@@ -1,8 +1,9 @@
 {
-  "script": "cmd /c echo Test AppContainer for deletion",
-  "appContainer": {
-    "name": "TestDeleteContainer",
-    "learningMode": true
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-Filesystem-Test",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "cmd /c echo Test AppContainer for deletion"
   },
   "filesystem": {
     "readwritePaths": [

@@ -1,12 +1,18 @@
 {
-    "script": "cat /mnt/readonly/test.txt && echo 'write test' > /mnt/readwrite/output.txt",
-    "containment": "lxc",
-    "lxc": {
-        "distribution": "alpine",
-        "release": "3.19"
-    },
-    "filesystem": {
-        "readonlyPaths": ["/mnt/readonly"],
-        "readwritePaths": ["/mnt/readwrite"]
-    }
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-LXC-Filesystem-Test",
+  "containment": "lxc",
+  "platform": "linux",
+  "process": {
+    "commandLine": "cat /mnt/readonly/test.txt && echo 'write test' > /mnt/readwrite/output.txt"
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.19",
+    "destroyOnExit": true
+  },
+  "filesystem": {
+    "readonlyPaths": ["/mnt/readonly"],
+    "readwritePaths": ["/mnt/readwrite"]
+  }
 }

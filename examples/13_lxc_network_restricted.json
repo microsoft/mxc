@@ -1,14 +1,19 @@
 {
-    "script": "wget -qO- https://api.github.com/zen || echo 'Network blocked as expected'",
-    "containment": "lxc",
-    "lxc": {
-        "distribution": "alpine",
-        "release": "3.19",
-        "destroyOnExit": true
-    },
-    "network": {
-        "defaultPolicy": "block",
-        "enforcementMode": "firewall",
-        "allowedHosts": ["api.github.com"]
-    }
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-LXC-NetworkRestricted",
+  "containment": "lxc",
+  "platform": "linux",
+  "process": {
+    "commandLine": "wget -qO- https://api.github.com/zen || echo 'Network blocked as expected'"
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.19",
+    "destroyOnExit": true
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": ["api.github.com"]
+  }
 }

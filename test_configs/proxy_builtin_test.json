@@ -1,10 +1,16 @@
 {
-  "script": "python -c \"import urllib.request\n\nprint('Test 1: Requesting api.github.com...')\ntry:\n    response = urllib.request.urlopen('https://api.github.com', timeout=10)\n    print(f'  Status: {response.status}')\nexcept Exception as err:\n    print(f'  Error: {err}')\n\nprint()\nprint('Done.')\"",
-  "timeout": 30000,
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-Proxy-Builtin-Test",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "python -c \"import urllib.request\n\nprint('Test 1: Requesting api.github.com...')\ntry:\n    response = urllib.request.urlopen('https://api.github.com', timeout=10)\n    print(f'  Status: {response.status}')\nexcept Exception as err:\n    print(f'  Error: {err}')\n\nprint()\nprint('Done.')\"",
+    "timeout": 15000
+  },
   "appContainer": {
-    "name": "CLI-Proxy-Default-Test",
-    "capabilities": ["internetClient"],
-    "learningMode": true
+    "capabilities": [ "internetClient" ]
+  },
+  "filesystem": {
+    "readwritePaths": [ "C:\\Users\\AdminUser\\AppData\\Local\\Programs" ]
   },
   "network": {
     "proxy": { "builtinTestServer": true }

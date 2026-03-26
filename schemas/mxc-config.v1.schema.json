@@ -1,0 +1,181 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/microsoft/mxc/schemas/mxc-config.v1.schema.json",
+  "title": "MXC Configuration",
+  "description": "Configuration schema for MXC container execution engine (v1). Defines the recommended config format. The parser also accepts legacy fields not listed here during the migration period.",
+  "type": "object",
+
+  "required": ["process"],
+
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "MXC config schema version. Current: '0.3.0-alpha.",
+      "examples": ["0.1.0"]
+    },
+    "containerId": {
+      "type": "string",
+      "description": "Externally assigned container identifier."
+    },
+    "containment": {
+      "type": "string",
+      "enum": ["appcontainer", "sandbox", "vm", "wslc", "lxc", "microvm"],
+      "default": "appcontainer",
+      "description": "Containment backend to use for execution."
+    },
+
+    "lifecycle": {
+      "type": "object",
+      "description": "Container lifecycle settings shared across all backends.",
+      "properties": {
+        "destroyOnExit": {
+          "type": "boolean",
+          "default": true,
+          "description": "Destroy the container after execution completes."
+        },
+        "preservePolicy": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, retain filesystem and network policies after execution. If false (default), policies are cleaned up on exit."
+        }
+      }
+    },
+
+    "process": {
+      "type": "object",
+      "description": "Process execution settings.",
+      "required": ["commandLine"],
+      "properties": {
+        "commandLine": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Complete command line to execute (e.g., \"python3 app.py\")."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for the process."
+        },
+        "env": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Environment variables as KEY=VALUE strings.",
+          "examples": [["MY_VAR=value", "PATH=/usr/bin"]]
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Execution timeout in milliseconds. 0 = no timeout (infinite)."
+        }
+      }
+    },
+
+    "filesystem": {
+      "type": "object",
+      "description": "Filesystem access policy. Shared across all backends.",
+      "properties": {
+        "readwritePaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Paths the process can read and write."
+        },
+        "readonlyPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Paths the process can read but not write."
+        },
+        "deniedPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Paths the process cannot access at all."
+        }
+      }
+    },
+
+    "network": {
+      "type": "object",
+      "description": "Network access policy. Shared across all backends.",
+      "properties": {
+        "defaultPolicy": {
+          "type": "string",
+          "enum": ["allow", "block"],
+          "default": "allow",
+          "description": "Default network posture."
+        },
+        "enforcementMode": {
+          "type": "string",
+          "enum": ["capabilities", "firewall", "both"],
+          "default": "capabilities",
+          "description": "How network policy is enforced."
+        },
+        "proxy": {
+          "type": "object",
+          "description": "Proxy configuration. Only supported with appcontainer backend.",
+          "oneOf": [
+            {
+              "properties": {
+                "localhost": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "description": "Port of an external already running proxy on localhost."
+                }
+              },
+              "required": ["localhost"],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "builtinTestServer": {
+                  "type": "boolean",
+                  "const": true,
+                  "description": "Use WXC's built-in test proxy server. Mutually exclusive with localhost."
+                }
+              },
+              "required": ["builtinTestServer"],
+              "additionalProperties": false
+            }
+          ]
+        }
+      }
+    },
+
+    "appContainer": {
+      "type": "object",
+      "description": "AppContainer-specific settings. Used when containment is 'appcontainer'.",
+      "properties": {
+        "leastPrivilege": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enforce least privilege mode."
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "AppContainer capabilities (e.g., 'internetClient', 'registryRead')."
+        }
+      }
+    },
+
+    "lxc": {
+      "type": "object",
+      "description": "LXC-specific settings. Used when containment is 'lxc'.",
+      "properties": {
+        "distribution": {
+          "type": "string",
+          "default": "alpine",
+          "description": "Linux distribution for the container rootfs."
+        },
+        "release": {
+          "type": "string",
+          "default": "3.19",
+          "description": "Distribution release version."
+        }
+      }
+    }
+  }
+}

@@ -61,6 +61,8 @@ struct RawNetwork {
 struct RawSandbox {
     #[serde(rename = "idleTimeout")]
     idle_timeout: Option<u32>,
+    #[serde(rename = "idleTimeoutMs")]
+    idle_timeout_ms: Option<u32>,
     #[serde(rename = "daemonPipeName")]
     daemon_pipe_name: Option<String>,
 }
@@ -238,6 +240,47 @@ pub fn load_request(
     convert_raw_config(raw, logger)
 }
 
+// ---------- Cross-field validation ----------
+
+/// Maximum supported schema major version.
+const SUPPORTED_MAJOR_VERSION: u32 = 1;
+
+/// Validate that the schema version is supported by this binary.
+fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), WxcError> {
+    if version.is_empty() {
+        return Ok(());
+    }
+    let major_str = version.split('.').next().unwrap_or("");
+    let major: u32 = match major_str.parse() {
+        Ok(0) => {
+            let msg = format!(
+                "Invalid schema version '{}': major version must be >= 1",
+                version
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+        Ok(v) => v,
+        Err(_) => {
+            let msg = format!(
+                "Invalid schema version '{}': must start with a positive integer (e.g., '1' or '1.0')",
+                version
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+    };
+    if major > SUPPORTED_MAJOR_VERSION {
+        let msg = format!(
+            "Config schema version '{}' is newer than supported (max: {}.x). Upgrade wxc-exec.",
+            version, SUPPORTED_MAJOR_VERSION
+        );
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
+    Ok(())
+}
+
 // ---------- Conversion from raw JSON to domain model ----------
 
 fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
@@ -246,20 +289,7 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     let container_id = raw.container_id.unwrap_or_default();
     let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
 
-    // Validate platform
-    match platform.as_str() {
-        "linux" | "windows" => {}
-        other => {
-            let msg = format!(
-                "Invalid platform value '{}' (must be 'linux' or 'windows')",
-                other
-            );
-            logger.log_line(&msg);
-            return Err(WxcError::ConfigParse(msg));
-        }
-    }
-
-    // Process section with dual-read fallback (new location wins, old is fallback)
+    // Process section with dual-read fallback(new location wins, old is fallback)
     let (process_script, process_cwd, process_timeout, env) = if let Some(ref p) = raw.process {
         (
             p.command_line.clone().or(raw.script.clone()),
@@ -315,7 +345,7 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     // Sandbox configuration
     let mut sandbox_config = SandboxConfig::default();
     if let Some(sb) = raw.sandbox {
-        if let Some(t) = sb.idle_timeout {
+        if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
             sandbox_config.idle_timeout_ms = t;
         }
         if let Some(name) = sb.daemon_pipe_name {
@@ -324,7 +354,7 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     }
 
     // LXC configuration
-    let lxc_config = {
+    let mut lxc_config = {
         let raw_lxc = raw.lxc.unwrap_or_default();
         LxcConfig {
             container_name: raw_lxc.container_name.unwrap_or_default(),
@@ -476,6 +506,15 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
                 .collect();
         }
     }
+
+    // containerId takes precedence over backend-specific container names
+    if !container_id.is_empty() {
+        policy.app_container_name = container_id.clone();
+        lxc_config.container_name = container_id.clone();
+    }
+
+    // Schema version check
+    validate_schema_version(&schema_version, logger)?;
 
     Ok(CodexRequest {
         schema_version,
@@ -1103,24 +1142,14 @@ mod tests {
 
     #[test]
     fn new_toplevel_fields_parsed() {
-        let json = r#"{"version": "1.0", "containerId": "abc-123", "platform": "linux", "script": "echo hi"}"#;
+        let json = r#"{"version": "1", "containerId": "abc-123", "platform": "linux", "containment": "lxc", "script": "echo hi"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "1.0");
+        assert_eq!(req.schema_version, "1");
         assert_eq!(req.container_id, "abc-123");
         assert_eq!(req.platform, "linux");
-    }
-
-    #[test]
-    fn invalid_platform_rejected() {
-        let json = r#"{"script": "echo hi", "platform": "Windwos"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
     }
 
     #[test]
@@ -1240,5 +1269,115 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::MicroVm);
+    }
+
+    #[test]
+    fn schema_version_too_new_rejected() {
+        let json = r#"{"script": "echo hi", "version": "2"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_version_current_accepted() {
+        let json = r#"{"script": "echo hi", "version": "1"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "1");
+    }
+
+    #[test]
+    fn schema_version_absent_accepted() {
+        let json = r#"{"script": "echo hi"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "");
+    }
+
+    #[test]
+    fn schema_version_non_numeric_rejected() {
+        let json = r#"{"script": "echo hi", "version": "x"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_version_zero_rejected() {
+        let json = r#"{"script": "echo hi", "version": "0"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_version_beta_suffix_rejected() {
+        let json = r#"{"script": "echo hi", "version": "2-beta"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sandbox_idle_timeout_ms_accepted() {
+        let json = r#"{"script": "echo hi", "containment": "sandbox", "sandbox": {"idleTimeoutMs": 60000}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
+    }
+
+    #[test]
+    fn sandbox_idle_timeout_ms_overrides_idle_timeout() {
+        let json = r#"{"script": "echo hi", "containment": "sandbox", "sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
+    }
+
+    #[test]
+    fn container_id_overrides_app_container_name() {
+        let json = r#"{"script": "echo hi", "containerId": "my-container", "appContainer": {"name": "old-name"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.app_container_name, "my-container");
+    }
+
+    #[test]
+    fn container_id_overrides_lxc_container_name() {
+        let json = r#"{"script": "echo hi", "containment": "lxc", "platform": "linux", "containerId": "my-lxc", "lxc": {"containerName": "old-name"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.lxc_config.container_name, "my-lxc");
+    }
+
+    #[test]
+    fn container_id_fallback_to_app_container_name() {
+        let json = r#"{"script": "echo hi", "appContainer": {"name": "old-name"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.app_container_name, "old-name");
     }
 }

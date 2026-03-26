@@ -1,10 +1,12 @@
 {
-  "script": "python -c \"import sys; import os; print(f'Python version: {sys.version}'); print(f'Current directory: {os.getcwd()}'); print('Script executed successfully')\"",
-  "timeout": 15000,
-  "executionMode": "appContainer",
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-Cap-Test",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "python -c \"import sys; import os; print(f'Python version: {sys.version}'); print(f'Current directory: {os.getcwd()}'); print('Script executed successfully')\"",
+    "timeout": 30000
+  },
   "appContainer": {
-    "name": "CLI-CAP-Test",
-    "learningMode": true,
     "capabilities": [ "registryRead" ]
   }
 }

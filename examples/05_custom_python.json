@@ -1,9 +1,12 @@
 {
-  "script": "python -c \"import sys\nimport os\nimport platform\n\nprint('Python Environment Information')\nprint('=' * 60)\nprint(f'Python Version: {sys.version}')\nprint(f'Python Executable: {sys.executable}')\nprint(f'Platform: {platform.platform()}')\nprint(f'Architecture: {platform.architecture()}')\nprint()\nprint('Working Directory:')\nprint(f'  Current: {os.getcwd()}')\nprint()\nprint('Python Path:')\nfor i, path in enumerate(sys.path, 1):\n    print(f'  {i}. {path}')\nprint()\nprint('Environment Variables (sample):')\nfor key in ['PATH', 'PYTHONPATH', 'USERPROFILE']:\n    value = os.environ.get(key, '(not set)')\n    if len(value) > 100:\n        value = value[:100] + '...'\n    print(f'  {key}: {value}')\nprint('=' * 60)\"",
-  "timeout": 10000,
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-CustomPython",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "python -c \"import sys\nimport os\nimport platform\n\nprint('Python Environment Information')\nprint('=' * 60)\nprint(f'Python Version: {sys.version}')\nprint(f'Python Executable: {sys.executable}')\nprint(f'Platform: {platform.platform()}')\nprint(f'Architecture: {platform.architecture()}')\nprint()\nprint('Working Directory:')\nprint(f'  Current: {os.getcwd()}')\nprint()\nprint('Python Path:')\nfor i, path in enumerate(sys.path, 1):\n    print(f'  {i}. {path}')\nprint()\nprint('Environment Variables (sample):')\nfor key in ['PATH', 'PYTHONPATH', 'USERPROFILE']:\n    value = os.environ.get(key, '(not set)')\n    if len(value) > 100:\n        value = value[:100] + '...'\n    print(f'  {key}: {value}')\nprint('=' * 60)\"",
+    "timeout": 10000
+  },
   "appContainer": {
-    "name": "CLI-CustomPython",
-    "learningMode": true,
     "capabilities": [ "registryRead" ]
   },
   "fileSystem": {

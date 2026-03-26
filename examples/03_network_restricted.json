@@ -1,16 +1,18 @@
 {
-  "script": "python -c \"import urllib.request\nimport socket\n\nprint('Testing network firewall enforcement...')\nprint('NOTE: This example requires administrator privileges')\nprint()\n\n# Test 1: Connect to allowed host\nallowed_host = 'https://api.github.com'\nprint(f'Test 1: Connecting to allowed host ({allowed_host})...')\ntry:\n    response = urllib.request.urlopen(allowed_host, timeout=10)\n    print(f'  SUCCESS: Connected (status: {response.status})')\n    print(f'  Response headers: {response.getheader(\"Server\")}')\nexcept Exception as e:\n    print(f'  ERROR: Failed to connect: {type(e).__name__}: {e}')\n\nprint()\n\n# Test 2: Try to connect to blocked host (default block policy)\nblocked_host = 'https://www.google.com'\nprint(f'Test 2: Connecting to blocked host ({blocked_host})...')\ntry:\n    response = urllib.request.urlopen(blocked_host, timeout=5)\n    print(f'  ERROR: Should not have connected! Status: {response.status}')\nexcept socket.timeout:\n    print('  SUCCESS: Connection blocked (timeout)')\nexcept urllib.error.URLError as e:\n    print(f'  SUCCESS: Connection blocked ({type(e.reason).__name__})')\nexcept Exception as e:\n    print(f'  SUCCESS: Connection blocked with {type(e).__name__}')\n\nprint()\nprint('Network firewall test complete!')\"",
-  "timeout": 30000,
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-Network-Test",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "python -c \"import urllib.request\nimport socket\n\nprint('Testing network firewall enforcement...')\nprint('NOTE: This example requires administrator privileges')\nprint()\n\n# Test 1: Connect to allowed host\nallowed_host = 'https://api.github.com'\nprint(f'Test 1: Connecting to allowed host ({allowed_host})...')\ntry:\n    response = urllib.request.urlopen(allowed_host, timeout=10)\n    print(f'  SUCCESS: Connected (status: {response.status})')\n    print(f'  Response headers: {response.getheader(\"Server\")}')\nexcept Exception as e:\n    print(f'  ERROR: Failed to connect: {type(e).__name__}: {e}')\n\nprint()\n\n# Test 2: Try to connect to blocked host (default block policy)\nblocked_host = 'https://www.google.com'\nprint(f'Test 2: Connecting to blocked host ({blocked_host})...')\ntry:\n    response = urllib.request.urlopen(blocked_host, timeout=5)\n    print(f'  ERROR: Should not have connected! Status: {response.status}')\nexcept socket.timeout:\n    print('  SUCCESS: Connection blocked (timeout)')\nexcept urllib.error.URLError as e:\n    print(f'  SUCCESS: Connection blocked ({type(e.reason).__name__})')\nexcept Exception as e:\n    print(f'  SUCCESS: Connection blocked with {type(e).__name__}')\n\nprint()\nprint('Network firewall test complete!')\"",
+    "timeout": 30000
+  },
   "appContainer": {
-    "name": "CLI-Network-Test",
-    "capabilities": ["internetClient"],
-    "learningMode": true
+    "capabilities": ["internetClient"]
   },
   "network": {
     "enforcementMode": "firewall",
     "defaultPolicy": "block",
     "allowedHosts": ["api.github.com", "140.82.121.0/24"],
-    "blockedHosts": [],
-    "removeRulesOnExit": true
+    "blockedHosts": []
   }
 }

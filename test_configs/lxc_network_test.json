@@ -1,14 +1,20 @@
 {
-    "script": "wget -qO- https://api.github.com/zen",
-    "containment": "lxc",
-    "lxc": {
-        "distribution": "alpine",
-        "release": "3.19"
-    },
-    "network": {
-        "defaultPolicy": "block",
-        "enforcementMode": "firewall",
-        "allowedHosts": ["api.github.com"],
-        "blockedHosts": ["evil.example.com"]
-    }
+  "version": "0.3.0-alpha",
+  "containerId": "CLI-LXC-Filesystem-Test",
+  "containment": "lxc",
+  "platform": "linux",
+  "process": {
+    "commandLine": "wget -qO- https://api.github.com/zen"
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.19",
+    "destroyOnExit": true
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": ["api.github.com"],
+    "blockedHosts": ["evil.example.com"]
+  }
 }
