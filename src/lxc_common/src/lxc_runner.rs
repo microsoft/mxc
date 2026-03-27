@@ -116,12 +116,11 @@ impl LxcScriptRunner {
             }
         }
 
-        // Execute the script
+        // Execute the script using lxc-attach (container is already running)
         let _ = writeln!(logger, "Executing script inside container...");
-        let result = container.exec(
+        let result = container.attach_run(
             &request.script_code,
             &request.working_directory,
-            request.script_timeout,
         );
 
         let response = match result {

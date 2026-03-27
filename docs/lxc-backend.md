@@ -44,7 +44,7 @@ The LXC backend uses the same JSON configuration schema as the Windows backends,
     "lxc": {
         "containerName": "my-sandbox",
         "distribution": "alpine",
-        "release": "3.19",
+        "release": "3.20",
         "destroyOnExit": true
     },
     "filesystem": {
@@ -66,7 +66,7 @@ The LXC backend uses the same JSON configuration schema as the Windows backends,
 |-------|------|---------|-------------|
 | `containerName` | string | auto-generated | Name for the LXC container |
 | `distribution` | string | `"alpine"` | Linux distribution for the container rootfs |
-| `release` | string | `"3.19"` | Distribution release version |
+| `release` | string | `"3.20"` | Distribution release version |
 | `destroyOnExit` | boolean | `true` | Whether to destroy the container after execution |
 
 ### Supported Distributions
@@ -75,7 +75,7 @@ The `distribution` and `release` fields control which LXC template is used to cr
 
 | Distribution | Release | Notes |
 |-------------|---------|-------|
-| `alpine` | `3.19`, `3.20` | Minimal footprint, fast startup |
+| `alpine` | `3.20`, `3.20` | Minimal footprint, fast startup |
 | `ubuntu` | `22.04`, `24.04` | Full-featured, large ecosystem |
 | `debian` | `bookworm`, `trixie` | Stable, well-tested |
 | `fedora` | `39`, `40` | Modern packages |

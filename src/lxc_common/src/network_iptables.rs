@@ -45,13 +45,13 @@ impl NetworkIptablesManager {
     }
 
     /// Discover the veth interface name for a container by reading its network config.
-    /// Returns the interface name if found.
+    /// Returns the host-side veth interface name if found.
     pub fn discover_veth_interface(container_name: &str) -> Option<String> {
-        // Try to get the veth pair name from lxc-info
+        // Use lxc-info without -i to get the full output including the Link: line.
+        // Output format includes: "Link:           vethXXXXXX"
         let output = Command::new("lxc-info")
             .arg("-n")
             .arg(container_name)
-            .arg("-i")
             .output()
             .ok()?;
 
@@ -59,20 +59,15 @@ impl NetworkIptablesManager {
             return None;
         }
 
-        // Parse the output for the host-side veth name
-        // LXC names host-side veth interfaces as "veth<XXXX>"
-        let _stdout = String::from_utf8_lossy(&output.stdout);
-        // Try to find the veth from /sys/class/net/, but only accept interfaces
-        // that are explicitly referenced in the `lxc-info` output for this container.
-        if let Ok(entries) = std::fs::read_dir("/sys/class/net/") {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("veth") && _stdout.contains(&name) {
-                    // Check if this veth has a valid iflink entry
-                    let link_path = format!("/sys/class/net/{}/iflink", name);
-                    if std::fs::read_to_string(&link_path).is_ok() {
-                        return Some(name);
-                    }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Parse the "Link:" line from lxc-info output
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if let Some(link_name) = trimmed.strip_prefix("Link:") {
+                let veth = link_name.trim();
+                if veth.starts_with("veth") {
+                    return Some(veth.to_string());
                 }
             }
         }
