@@ -3,37 +3,30 @@
 
 use std::ptr;
 
-use windows::Win32::Foundation::{LocalFree, HLOCAL, WAIT_EVENT, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    GetLastError, LocalFree, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::PSID;
-use windows::Win32::System::Console::{
-    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-};
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForMultipleObjects, WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-    STARTUPINFOW,
+    WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+    STARTUPINFOEXW, STARTUPINFOW,
 };
-use windows::Win32::System::IO::CancelSynchronousIo;
 use windows_core::{PCWSTR, PWSTR};
 
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
-use crate::process_util::{
-    create_relay_thread, create_std_pipes, get_capability_sid_from_name, OwnedHandle,
-    PipeRelayParams,
-};
+use crate::process_util::{get_capability_sid_from_name, OwnedHandle};
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::string_util;
 
 // Attribute list constants (not always exported by the windows crate)
 const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES: usize = 0x0002_0009;
-const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
 const PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY: usize = 0x0002_000F;
 const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
 const EXTENDED_STARTUPINFO_PRESENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0008_0000);
@@ -254,21 +247,11 @@ impl AppContainerScriptRunner {
             reserved: 0,
         };
 
-        // --- Create pipes ---
-        let (stdin_read, mut stdin_write) =
-            create_std_pipes(false).map_err(|e| WxcError::Process(format!("stdin pipe: {}", e)))?;
-        let (stdout_read, stdout_write) =
-            create_std_pipes(true).map_err(|e| WxcError::Process(format!("stdout pipe: {}", e)))?;
-        let (stderr_read, stderr_write) =
-            create_std_pipes(true).map_err(|e| WxcError::Process(format!("stderr pipe: {}", e)))?;
-
-        let inherit_handles = [stdin_read.get(), stdout_write.get(), stderr_write.get()];
-
         // --- Allocate and initialize attribute list ---
         let attr_count = if request.policy.least_privilege_mode {
-            3u32
-        } else {
             2u32
+        } else {
+            1u32
         };
         let mut attr_list_size: usize = 0;
 
@@ -344,32 +327,13 @@ impl AppContainerScriptRunner {
             }
         }
 
-        // 3. HANDLE_LIST
-        unsafe {
-            UpdateProcThreadAttribute(
-                attr_list,
-                0,
-                PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-                Some(inherit_handles.as_ptr() as *const core::ffi::c_void),
-                std::mem::size_of_val(&inherit_handles),
-                None,
-                None,
-            )
-            .map_err(|e| {
-                WxcError::Process(format!("UpdateProcThreadAttribute(HANDLE_LIST): {}", e))
-            })?;
-        }
-
         // --- Setup STARTUPINFOEXW ---
         let mut desktop_wide = string_util::to_wide("winsta0\\default");
 
+        // No STARTF_USESTDHANDLES — child inherits parent's console.
         let si_ex = STARTUPINFOEXW {
             StartupInfo: STARTUPINFOW {
                 cb: std::mem::size_of::<STARTUPINFOEXW>() as u32,
-                hStdInput: stdin_read.get(),
-                hStdOutput: stdout_write.get(),
-                hStdError: stderr_write.get(),
-                dwFlags: STARTF_USESTDHANDLES,
                 lpDesktop: PWSTR(desktop_wide.as_mut_ptr()),
                 ..Default::default()
             },
@@ -404,7 +368,41 @@ impl AppContainerScriptRunner {
             EXTENDED_STARTUPINFO_PRESENT
         };
 
-        // --- Create process ---
+        // --- Create process (console inheritance) ---
+        //
+        // Console I/O path — no pipes, no relay threads:
+        //
+        //   stdin:  node-pty → ConPTY → wxc-exec → PowerShell (AppContainer)
+        //   stdout: node-pty ← ConPTY ←─────────── PowerShell (shares parent's console)
+        //                    ↑
+        //                 onData()
+        //
+        // The child attaches to wxc-exec's console (the ConPTY created by node-pty)
+        // so PowerShell sees a real terminal — PSReadLine, ANSI, UTF-8 all work.
+        //
+        // Why this works for AppContainer:
+        //
+        //   1. Kernel (PspSetupUserProcessAddressSpace):
+        //      ObDuplicateObject copies the parent's ConsoleHandle
+        //      (\Device\ConDrv\Reference) into the child using the parent's
+        //      security context — before the AppContainer token takes effect.
+        //
+        //   2. condrv:
+        //      FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL is set, so the I/O
+        //      Manager permits the AppContainer to open \Device\ConDrv\Connect.
+        //
+        //   3. condrv (CdCreateConnection):
+        //      Inheritance path skips CdAccessCheck. Having the Reference
+        //      handle is proof of authorization.
+        //
+        //   4. conhost (ConsoleHandleConnectionRequest):
+        //      No token check — allocates I/O handles unconditionally.
+        //
+        // bInheritHandles = false: we have no explicit handles to inherit.
+        // Console attachment is a separate mechanism — the child automatically
+        // attaches to the parent's console session via \Device\ConDrv during
+        // process initialization, regardless of bInheritHandles. Since we don't
+        // pass CREATE_NEW_CONSOLE or DETACH_PROCESS, the child shares our console.
         let mut pi = PROCESS_INFORMATION::default();
 
         unsafe {
@@ -413,7 +411,7 @@ impl AppContainerScriptRunner {
                 Some(PWSTR(cmd_line_wide.as_mut_ptr())),
                 None,
                 None,
-                true,
+                false, // bInheritHandles = false — no explicit handles to inherit
                 creation_flags,
                 env_ptr,
                 working_dir_pcwstr,
@@ -428,86 +426,34 @@ impl AppContainerScriptRunner {
             pi.dwProcessId
         ));
 
-        // --- Close child-side handles in the parent ---
-        drop(stdin_read);
-        drop(stdout_write);
-        drop(stderr_write);
-
         let process_handle = OwnedHandle::new(pi.hProcess);
         let _thread_handle = OwnedHandle::new(pi.hThread);
 
-        // --- Get parent console handles ---
-        let parent_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
-            .map_err(|e| WxcError::Process(format!("GetStdHandle(stdin): {}", e)))?;
-        let parent_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
-            .map_err(|e| WxcError::Process(format!("GetStdHandle(stdout): {}", e)))?;
-        let parent_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
-            .map_err(|e| WxcError::Process(format!("GetStdHandle(stderr): {}", e)))?;
-
-        // --- Create relay threads ---
-        // Thread 1: Parent stdin → Child stdin
-        let mut stdin_params = PipeRelayParams {
-            h_read: parent_stdin,
-            h_write: stdin_write.get(),
-        };
-        // Thread 2: Child stdout → Parent stdout
-        let mut stdout_params = PipeRelayParams {
-            h_read: stdout_read.get(),
-            h_write: parent_stdout,
-        };
-        // Thread 3: Child stderr → Parent stderr
-        let mut stderr_params = PipeRelayParams {
-            h_read: stderr_read.get(),
-            h_write: parent_stderr,
-        };
-
-        let stdin_relay = unsafe { create_relay_thread(&mut stdin_params)? };
-        let stdout_relay = unsafe { create_relay_thread(&mut stdout_params)? };
-        let stderr_relay = unsafe { create_relay_thread(&mut stderr_params)? };
-
-        // --- Wait for process or output relay completion ---
-        // Any of: process exit, stdout relay done, or stderr relay done signals
-        // that the child session is over.
+        // --- Wait for child process to exit ---
+        // No relay threads needed — child shares our console directly.
         let timeout_ms = get_timeout_milliseconds(request.script_timeout);
-        let completion_handles = [process_handle.get(), stdout_relay.get(), stderr_relay.get()];
 
-        let wait_result = unsafe { WaitForMultipleObjects(&completion_handles, false, timeout_ms) };
+        let wait_result = unsafe { WaitForSingleObject(process_handle.get(), timeout_ms) };
 
-        if wait_result != WAIT_OBJECT_0
-            && wait_result != WAIT_EVENT(WAIT_OBJECT_0.0 + 1)
-            && wait_result != WAIT_EVENT(WAIT_OBJECT_0.0 + 2)
-        {
-            // Timeout or error: forcibly terminate the child process.
-            unsafe {
-                let _ = TerminateProcess(
-                    process_handle.get(),
-                    u32::MAX, // 0xFFFFFFFF — matches C++ behavior
-                );
-                // Block until the OS confirms the process is gone.
+        match wait_result {
+            WAIT_OBJECT_0 => {}
+            WAIT_TIMEOUT => unsafe {
+                let _ = TerminateProcess(process_handle.get(), u32::MAX);
                 let _ = WaitForSingleObject(process_handle.get(), u32::MAX);
+            },
+            WAIT_FAILED => {
+                let err = unsafe { GetLastError() };
+                return Err(WxcError::Process(format!(
+                    "WaitForSingleObject failed: {:?}",
+                    err
+                )));
             }
-        }
-
-        // --- Shut down stdin relay thread ---
-        // CancelSynchronousIo interrupts the blocking ReadFile on parent stdin,
-        // causing the relay thread to break out of its loop. Closing the write
-        // handle ensures any in-flight WriteFile also fails.
-        unsafe {
-            let _ = CancelSynchronousIo(stdin_relay.get());
-        }
-        // Closing stdin_write causes the child's stdin pipe to break, which is
-        // fine since the child has already exited (or been terminated).
-        stdin_write.take();
-
-        // --- Wait for all relay threads to finish draining ---
-        // Use INFINITE because all pipe endpoints are closed at this point
-        // (child is dead, stdin_write is closed, CancelSynchronousIo was called),
-        // so the threads will exit promptly. We must wait for them to finish
-        // because PipeRelayParams are stack-allocated and would become dangling
-        // pointers if this function returned early.
-        let all_threads = [stdin_relay.get(), stdout_relay.get(), stderr_relay.get()];
-        unsafe {
-            let _ = WaitForMultipleObjects(&all_threads, true, u32::MAX);
+            other => {
+                return Err(WxcError::Process(format!(
+                    "WaitForSingleObject returned unexpected value: {}",
+                    other.0
+                )));
+            }
         }
 
         // --- Get exit code ---
