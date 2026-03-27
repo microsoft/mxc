@@ -172,7 +172,7 @@
         },
         "release": {
           "type": "string",
-          "default": "3.19",
+          "default": "3.20",
           "description": "Distribution release version."
         }
       }

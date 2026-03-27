@@ -75,7 +75,7 @@ The `distribution` and `release` fields control which LXC template is used to cr
 
 | Distribution | Release | Notes |
 |-------------|---------|-------|
-| `alpine` | `3.20`, `3.20` | Minimal footprint, fast startup |
+| `alpine` | `3.20`, `3.21` | Minimal footprint, fast startup |
 | `ubuntu` | `22.04`, `24.04` | Full-featured, large ecosystem |
 | `debian` | `bookworm`, `trixie` | Stable, well-tested |
 | `fedora` | `39`, `40` | Modern packages |

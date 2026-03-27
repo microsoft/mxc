@@ -44,8 +44,9 @@ impl NetworkIptablesManager {
         self.rules_applied
     }
 
-    /// Discover the veth interface name for a container by reading its network config.
-    /// Returns the host-side veth interface name if found.
+    /// Discover the host-side veth interface name for a running container.
+    /// Parses the `Link:` line from `lxc-info -n <name>` output.
+    /// Returns the veth interface name (e.g., "vethXXXXXX") if found.
     pub fn discover_veth_interface(container_name: &str) -> Option<String> {
         // Use lxc-info without -i to get the full output including the Link: line.
         // Output format includes: "Link:           vethXXXXXX"
