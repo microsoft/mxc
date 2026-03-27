@@ -1,0 +1,5 @@
+{
+  "script": "powershell -NoProfile -Command \"Write-Output 'PowerShell works'; $PSVersionTable.PSVersion.ToString()\"",
+  "containment": "sandbox",
+  "timeout": 60000
+}

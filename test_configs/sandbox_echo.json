@@ -1,0 +1,5 @@
+{
+  "script": "echo Hello from sandbox!",
+  "containment": "sandbox",
+  "timeout": 60000
+}

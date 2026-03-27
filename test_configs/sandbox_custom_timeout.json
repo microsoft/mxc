@@ -5,10 +5,5 @@
   "process": {
     "commandLine": "python -S -B -c \"import sys; print(f'Hello from sandbox Python {sys.version}'); print('Sandbox test successful')\"",
     "timeout": 60000
-  },
-  "experimental": {
-    "sandbox": {
-      "idleTimeoutMs": 120000
-    }
   }
 }

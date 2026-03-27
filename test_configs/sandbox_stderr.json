@@ -1,0 +1,5 @@
+{
+  "script": "echo stdout-message && echo stderr-message 1>&2",
+  "containment": "sandbox",
+  "timeout": 60000
+}

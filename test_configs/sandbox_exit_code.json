@@ -1,0 +1,5 @@
+{
+  "script": "exit /b 42",
+  "containment": "sandbox",
+  "timeout": 60000
+}

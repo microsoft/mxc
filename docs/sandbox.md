@@ -430,3 +430,49 @@ Remove-Item "$env:TEMP\wxc-sandbox-rendezvous\*" -ErrorAction SilentlyContinue
 3. **Windows Insider regression** — Builds 26100+ have confirmed sandbox boot failures (zombie VM processes)
 4. **Cold boot time** — First sandbox boot takes 15-60s; subsequent boots ~15-30s
 5. **No filesystem/network policy forwarding** — The `filesystem` and `network` config sections are ignored for sandbox containment; isolation relies on the VM boundary and agent firewall
+6. **Buffered output** — stdout/stderr are captured, base64-encoded, and returned in the RESULT protocol line rather than streamed live. Output is only visible after the script finishes. This differs from the AppContainer (console inheritance) and NanVix (pipe relay) backends which forward stdio directly.
+
+## E2E Tests
+
+Sandbox E2E tests are **manual-only** — they require Hyper-V, Windows 11 Pro/Enterprise, and the Windows Sandbox feature, none of which are available on GitHub Actions runners. This follows the same pattern as the existing AppContainer test scripts.
+
+### Running the tests
+
+```powershell
+# From repo root:
+cd test_scripts
+.\run_sandbox_tests.ps1 -Release     # release build
+.\run_sandbox_tests.ps1              # debug build
+```
+
+The runner starts the daemon, executes each test config, validates exit codes and expected output, then runs a multi-exec sequence (3 echo commands on the same VM). Reports a pass/fail summary at the end.
+
+### Test configs
+
+| Config | Script | Validates |
+|--------|--------|-----------|
+| `sandbox_echo.json` | `echo Hello from sandbox!` | Boot, stdout relay, basic cmd.exe |
+| `basic_sandbox.json` | `python -S -B -c "..."` | Python discovery, host mapping, site module fix |
+| `sandbox_powershell.json` | `powershell ... "Write-Output 'PowerShell works'"` | PowerShell execution in sandbox |
+| `sandbox_powershell_env.json` | `powershell ... $env:COMPUTERNAME` | Environment access, VM isolation |
+| `sandbox_stderr.json` | `echo stdout && echo stderr 1>&2` | stderr relay |
+| `sandbox_exit_code.json` | `exit /b 42` | Non-zero exit code propagation |
+| `sandbox_timeout.json` | `ping -n 30 127.0.0.1` (5s timeout) | Timeout enforcement, process killing |
+| *(multi-exec)* | `sandbox_echo.json` × 3 | StreamsReady protocol, VM reuse |
+
+### What the tests cover
+
+- ✅ Sandbox boot and agent rendezvous
+- ✅ Python and PowerShell script execution
+- ✅ stdout and stderr relay
+- ✅ Non-zero exit codes
+- ✅ Timeout enforcement
+- ✅ Multi-exec on the same VM (3 consecutive executions)
+
+### What the tests do NOT cover
+
+- ❌ Network isolation / firewall lockdown
+- ❌ Stdin forwarding to scripts
+- ❌ Working directory configuration
+- ❌ Custom idle timeout behavior
+- ❌ Cross-execution state leakage (files/processes persisting between execs)
