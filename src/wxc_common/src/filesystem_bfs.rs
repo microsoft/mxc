@@ -139,12 +139,7 @@ impl FileSystemBfsManager {
     }
 
     fn run_bfscfg(&self, args: &[&str]) -> Result<String, WxcError> {
-        // Build a command line: "bfscfg.exe arg1 arg2 ..."
-        let mut cmd_line = BFSCFG_EXE.to_string();
-        for arg in args {
-            cmd_line.push(' ');
-            cmd_line.push_str(arg);
-        }
+        let cmd_line = build_bfscfg_cmd_line(args);
 
         let output = process_util::run_process_with_captured_output(&cmd_line, BFSCFG_TIMEOUT_MS)?;
 
@@ -172,6 +167,17 @@ fn test_for_root_path(path: &str) -> bool {
     path != "C:\\"
 }
 
+// We control the arguments and ensure they are properly quoted, so this simple implementation
+// is sufficient for our needs. The only time we expect spaces in our arguments is for the user
+// provided path argument and user provided container name, both of which are properly quoted here.
+fn build_bfscfg_cmd_line(args: &[&str]) -> String {
+    let mut cmd_line = BFSCFG_EXE.to_string();
+    for arg in args {
+        cmd_line.push_str(&format!(" \"{arg}\""));
+    }
+    cmd_line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +198,20 @@ mod tests {
     fn test_new_manager() {
         let mgr = FileSystemBfsManager::new("test_container".to_string());
         assert!(!mgr.configured());
+    }
+
+    #[test]
+    fn test_build_cmd_line_quotes_args_with_spaces() {
+        let cmd = build_bfscfg_cmd_line(&[
+            "--addpolicy",
+            "--filename",
+            r"C:\Program Files\PowerShell\7",
+            "--appid",
+            "test_container",
+        ]);
+        assert_eq!(
+            cmd,
+            r#"bfscfg.exe "--addpolicy" "--filename" "C:\Program Files\PowerShell\7" "--appid" "test_container""#
+        );
     }
 }
