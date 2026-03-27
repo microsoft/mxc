@@ -1,0 +1,12 @@
+{
+  "version": "0.4.0-alpha",
+  "containerId": "CLI-BFS-Spaces-Test",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "cmd.exe /c echo SUCCESS > \"C:\\Users\\Public\\wxc bfs test\\test_output.txt\" && type \"C:\\Users\\Public\\wxc bfs test\\test_output.txt\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readwritePaths": [ "C:\\Users\\Public\\wxc bfs test" ]
+  }
+}
