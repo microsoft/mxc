@@ -75,8 +75,27 @@ pub fn configure_filesystem_mounts(
     for host_path in &policy.denied_paths {
         validate_path(host_path)?;
         let container_path = host_path.trim_start_matches('/');
-        let mount_entry = format!("tmpfs {} tmpfs ro,size=0,create=dir 0 0", container_path);
-        logger.log_line(&format!("Masking denied path: /{}", container_path));
+
+        // Determine if the path is a file or directory inside the container rootfs
+        // so we use the correct LXC `create=` type for the mount entry.
+        let rootfs_base = container
+            .config_path()
+            .map(|p| format!("{}/{}/rootfs", p, container.name()))
+            .unwrap_or_else(|| format!("/var/lib/lxc/{}/rootfs", container.name()));
+        let full_path = format!("{}/{}", rootfs_base, container_path);
+
+        // Use /dev/null bind mount for files, tmpfs for directories
+        let is_file = std::path::Path::new(&full_path).is_file();
+        let mount_entry = if is_file {
+            format!("/dev/null {} none bind,ro,create=file 0 0", container_path)
+        } else {
+            format!("tmpfs {} tmpfs ro,size=0,create=dir 0 0", container_path)
+        };
+        let create_type = if is_file { "file" } else { "dir" };
+        logger.log_line(&format!(
+            "Masking denied path: /{} ({})",
+            container_path, create_type
+        ));
         container.set_config_item("lxc.mount.entry", &mount_entry)?;
     }
 
