@@ -1,104 +1,5 @@
 # Windows Sandbox Backend
 
-## Issues Found & Fixes Applied
-
-Four issues were discovered during E2E bring-up of the sandbox backend. A 3-model LLM council (GPT-5.4, Claude Opus 4.6, Gemini 3 Pro) reviewed all fixes and confirmed unanimously that they are genuine defect corrections — none removed intentional security hardening.
-
-### Issue 1: stdout/stderr silently discarded
-
-**Symptom:** Scripts executed successfully (exit code 0) but produced no visible output.
-
-**Root cause:** Output was dropped at three layers:
-- `tcp_bridge.rs` — captured stdout/stderr bytes assigned to `_stdout`/`_stderr` (Rust `_` prefix = intentionally unused, suppresses compiler warning)
-- `pipe_server.rs` — RESULT protocol format had no stdout/stderr fields, only exit code and error message
-- `sandbox_runner.rs` — hardcoded `standard_out = String::new()` in both success and error paths
-
-**Fix:** Extended RESULT protocol to `RESULT <code> <stdout-b64> <stderr-b64> <error>\n`, with base64 encoding to handle binary output. Client-side parser decodes and surfaces the output.
-
-**Security review:** Not an anti-exfiltration measure. The `_` naming existed from the initial commit that built the TCP bridge infrastructure — the commit message explicitly stated "bridges stdin/stdout/stderr over TCP." The caller who submits the script already controls execution and can exfiltrate via other channels (files in the read-write rendezvous directory, exit codes, timing).
-
-### Issue 2: cmd.exe quoting breaks scripts with double quotes
-
-**Symptom:** Scripts containing double quotes (e.g., `python -c "print('hi')"`) failed inside the sandbox with cryptic cmd.exe errors.
-
-**Root cause:** Rust's `Command::arg()` applies backslash-escaping for quotes (`\"`) targeting the MSVC C runtime. But `cmd.exe /C` doesn't use MSVC conventions — it interprets `\"` literally, breaking the command.
-
-**Fix:** Changed `cmd.arg(script_code)` to `cmd.raw_arg(script_code)`, which passes the script text to cmd.exe without Rust-side escaping.
-
-**Security review:** No command injection risk. The script text originates from the caller's JSON config, flows through the length-prefixed control protocol, and is intentionally executed as a shell command. `raw_arg()` restores correct behavior — both `arg()` and `raw_arg()` result in the script running with full shell capabilities.
-
-### Issue 3: Sandbox boot failures (~60% failure rate)
-
-**Symptom:** Most sandbox launch attempts failed with "The remote environment is logging off" or timed out waiting for rendezvous.
-
-**Root causes** (identified via 3-model LLM council analysis):
-1. Zombie Hyper-V processes (`vmwp.exe`, `vmmemWindowsSandbox`) persisted after `taskkill`, blocking new VM launches
-2. 3-second teardown cooldown was grossly insufficient for Hyper-V cleanup
-3. vGPU virtualization failed intermittently under nested Hyper-V
-4. Windows Insider builds 26100+ have a confirmed sandbox regression
-
-**Fix:**
-- Poll up to 30 seconds for sandbox processes (`WindowsSandbox*`, `vmmemWindowsSandbox`) to fully exit
-- 5-second CmService cooldown after process exit
-- Disable vGPU in `.wsb` config (`<vGPU>Disable</vGPU>`)
-- 3 retry attempts with exponential backoff (0s, 10s, 20s)
-- State reset between retries (clear `sandbox_running`, `guest_connection`, rendezvous directory)
-
-### Issue 4: Single execution per sandbox lifetime
-
-**Symptom:** First script execution succeeded, but any subsequent EXEC on the same sandbox had no stdio — output was silently lost and the daemon timed out waiting for StreamsReady.
-
-**Root cause:** The agent wrapped stdin/stdout/stderr TCP streams in `Option` and called `.take()` on first EXEC, moving ownership into the bridge tasks. After completion, all three were `None` — the second EXEC had no streams to bridge.
-
-**Fix:** Added `StreamsReady` protocol message for coordinated reconnection:
-1. After sending `Exit`, agent sends `StreamsReady` on the control channel (signals its listener is ready)
-2. Daemon receives `StreamsReady`, connects 3 new TCP data streams to the agent
-3. Agent accepts the connections, stores them as the current streams for the next EXEC
-4. Residual control buffer passed from `execute_on_guest` to `reconnect_data_streams` to handle cases where `StreamsReady` arrives in the same TCP read as `Exit`
-
-**Critical ordering:** Agent sends `StreamsReady` *before* calling accept. The listener is already bound, so the daemon's connection attempts queue in the TCP backlog. This avoids a deadlock where both sides wait for the other.
-
-**Security review:** Multi-exec does not breach the VM boundary or weaken host isolation. However, VM reuse means execution N+1 runs in the state left by execution N (files, registry, processes). This is acceptable in the single-tenant model (same caller controls all scripts). See [Multi-Exec Security Considerations](#multi-exec-security-considerations) below.
-
-### Issue 4b: Python discovery finds Windows Store stub
-
-**Symptom:** Daemon found Python at `WindowsApps\python.exe` — a Store redirect stub that passes `exists()` but fails when executed. The mapped Python directory in the sandbox contained no real Python.
-
-**Fix:** `find_host_python()` now skips paths containing `Microsoft\WindowsApps` and verifies each candidate by running `python --version`.
-
-### Issue 4c: Python site module crash on read-only mount
-
-**Symptom:** `basic_sandbox.json` returned exit code 1 instead of 0 because Python's `site` module tried to write `.pyc` bytecode cache files to the read-only mapped Python directory.
-
-**Fix:** `bootstrap.cmd` sets `PYTHONDONTWRITEBYTECODE=1` and `PYTHONNOUSERSITE=1`. Test configs also use `-S -B` flags as belt-and-suspenders.
-
-**Security review:** The read-only mount is unchanged. Disabling `site` and bytecache prevents write attempts that would fail — the security control (read-only mount) is preserved. Disabling user site-packages actually *improves* security slightly by preventing package injection.
-
-### Multi-Exec Security Considerations
-
-Multi-exec reuses the same sandbox VM across script executions for performance. This has implications:
-
-**What IS preserved between executions:**
-- VM boundary (separate OS instance) — unchanged
-- Firewall lockdown (host IP only) — applied once at agent startup, persists
-- Read-only mounts (agent binaries, Python) — cannot be modified
-- Fresh `cmd.exe /C` process per execution — env vars don't leak between cmd.exe instances
-
-**What MAY leak between executions:**
-- Filesystem changes (temp files, downloaded files, created directories)
-- Registry modifications
-- Background processes spawned by a previous script
-- Scheduled tasks or services installed by a previous script
-
-**Constraint:** Multi-exec assumes all scripts in a session come from the **same trust domain**. Do NOT reuse a sandbox VM across different callers or trust boundaries.
-
-**Recommended future safeguards:**
-- Kill orphan processes between executions (enumerate and terminate non-system processes)
-- Clean temporary directories between runs
-- Consider an optional `freshVM: true` config flag for callers who need per-execution isolation
-
----
-
 ## Overview
 
 The Windows Sandbox backend provides VM-level isolation for script execution using [Windows Sandbox](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview). Unlike the AppContainer backend (which runs scripts in a sandboxed process on the host), the Sandbox backend boots an ephemeral Windows VM, executes scripts inside it, and tears it down when idle.
@@ -269,7 +170,30 @@ After the first execution completes:
 4. Daemon receives `StreamsReady`, connects 3 new TCP streams (stdin, stdout, stderr) to the agent
 5. Next `EXEC` request reuses the existing sandbox VM with fresh data streams
 
-**Key design detail:** The agent sends `StreamsReady` *before* calling accept on the listener. The listener is already bound, so the daemon's connection attempts queue in the TCP backlog. This avoids a deadlock where both sides wait for the other.
+### Multi-Exec Security Considerations
+
+Multi-exec reuses the same sandbox VM across script executions for performance. This has implications:
+
+**What IS preserved between executions:**
+- VM boundary (separate OS instance) — unchanged
+- Firewall lockdown (host IP only) — applied once at agent startup, persists
+- Read-only mounts (agent binaries, Python) — cannot be modified
+- Fresh `cmd.exe /C` process per execution — env vars don't leak between cmd.exe instances
+
+**What MAY leak between executions:**
+- Filesystem changes (temp files, downloaded files, created directories)
+- Registry modifications
+- Background processes spawned by a previous script
+- Scheduled tasks or services installed by a previous script
+
+**Constraint:** Multi-exec assumes all scripts in a session come from the **same trust domain**. Do NOT reuse a sandbox VM across different callers or trust boundaries.
+
+**Recommended future safeguards:**
+- Kill orphan processes between executions (enumerate and terminate non-system processes)
+- Clean temporary directories between runs
+- Consider an optional `freshVM: true` config flag for callers who need per-execution isolation
+
+---
 
 ## Python in the Sandbox
 
