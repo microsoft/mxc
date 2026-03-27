@@ -71,7 +71,13 @@ MXC config files include an optional `version` field using
 this to detect incompatible configs and provide clear upgrade guidance. If
 `version` is absent, the config is assumed compatible with the current version.
 
-The parser compares the config's major.minor against its supported version:
+Versions with a pre-release suffix (e.g., `-alpha`) indicate the schema is not
+yet stable — breaking changes may occur in any release. Once the schema is
+stable, version `1.0.0` (no suffix) will be released. After `1.0.0`, breaking
+changes require a major version bump per semver.
+
+The parser compares the config's major.minor against its supported version
+(pre-release labels are ignored for comparison):
 
 | Config `version` | Parser supports | Result |
 |---|---|---|
@@ -85,17 +91,18 @@ The parser compares the config's major.minor against its supported version:
 
 | Change type | Version bump | Example |
 |---|---|---|
-| Add new optional field | **Patch** (0.4.0 → 0.4.1) | Adding `resources` section |
-| Add backward-compatible functionality | **Minor** (0.4.0 → 0.5.0) | New containment backend |
+| Backward-compatible bug fix | **Patch** (0.4.0 → 0.4.1) | Fix default value |
+| New optional field or functionality | **Minor** (0.4.0 → 0.5.0) | Adding `resources` section |
 | Remove a field / breaking change | **Major** (0.x → 1.0.0) | Dropping legacy fields |
 
-**Rule of thumb:** Follow [semver](https://semver.org/). While in `0.x`,
-minor bumps may include breaking changes. Once `1.0.0` is reached, breaking
+**Rule of thumb:** Follow [semver](https://semver.org/). While in `0.x` (initial
+development), any release may include breaking changes per
+[semver §4](https://semver.org/#spec-item-4). Once `1.0.0` is reached, breaking
 changes require a major bump.
 
 #### Migration process for breaking changes
 
-1. **PR N:** Add new field with dual-read fallback from old field. Patch bump.
+1. **PR N:** Add new field with dual-read fallback from old field. Minor bump.
 2. **PR N+1:** Update all configs, examples, SDK types, and docs to new format.
 3. **PR N+2:** Remove fallback code. Minor bump (or major if post-1.0). Old configs
    no longer parse.
