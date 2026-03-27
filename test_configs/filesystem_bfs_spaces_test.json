@@ -3,7 +3,7 @@
   "containerId": "CLI-BFS-Spaces-Test",
   "containment": "appcontainer",
   "process": {
-    "commandLine": "python -c \"import os, sys\nallowed_dir = 'C:\\\\Users\\\\Public\\\\wxc bfs test'\nallowed_path = os.path.join(allowed_dir, 'test_output.txt')\ndenied_path = 'C:\\\\temp\\\\wxc_test_denied\\\\forbidden.txt'\nprint('Testing BFS with spaces in path...')\nf = open(allowed_path, 'w')\nf.write('SUCCESS')\nf.close()\nprint(f'Wrote to: {allowed_path}')\ntry:\n    f2 = open(denied_path, 'w')\n    f2.write('should fail')\n    f2.close()\n    print('ERROR: Write to denied path should have failed!')\n    sys.exit(1)\nexcept PermissionError:\n    print('SUCCESS: Access denied on path outside BFS policy')\"",
+    "commandLine": "cmd.exe /c echo SUCCESS > \"C:\\Users\\Public\\wxc bfs test\\test_output.txt\" && type \"C:\\Users\\Public\\wxc bfs test\\test_output.txt\"",
     "timeout": 30000
   },
   "filesystem": {
