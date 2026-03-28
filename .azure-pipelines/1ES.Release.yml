@@ -18,6 +18,7 @@ parameters:
       serviceName: ''
       tenantId: ''
       azureKeyVaultName: ''
+      authCertName: ''
       signCertName: ''
       clientId: ''
       ApproversEmail: ''
@@ -53,7 +54,7 @@ extends:
           inputs:
           - input: pipelineArtifact
             targetPath: '$(Pipeline.Workspace)/packages'
-            artifactName: mxc-sdk-package
+            artifactName: mxc-npm-sdk-package
 
         displayName: Publish to NPM
         pool:
@@ -63,14 +64,19 @@ extends:
           displayName: 'Publish to NPM'
           inputs:
             connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
-            usemanagedidentity: true 
+            usemanagedidentity: true
             keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+            authcertname: ${{ parameters.ESRPInfo.authCertName }}
             signcertname: ${{ parameters.ESRPInfo.signCertName }}
             clientid: ${{ parameters.ESRPInfo.clientId }}
+            intent: 'PackageDistribution'
             contenttype: npm
+            contentsource: 'Folder'
             folderlocation: '$(Pipeline.Workspace)/packages'
             owners: ${{ parameters.ESRPInfo.OwnersEmail }}
             approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
+            waitforreleasecompletion: true
+            serviceendpointurl: 'https://api.esrp.microsoft.com'
             mainpublisher: ESRPRELPACMAN
             domaintenantid: ${{ parameters.ESRPInfo.tenantId }} 
 

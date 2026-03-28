@@ -1,0 +1,167 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+parameters:
+- name: isOfficialBuild
+  type: boolean
+  default: false
+- name: matrix
+  type: object
+  default: {}
+- name: ESRPInfo
+  type: object
+  default: {}
+
+jobs:
+- ${{ each item in parameters.matrix }}:
+  - job: 'build_${{ item.arch }}_${{ item.component }}'
+    displayName: 'Build (${{ item.arch }} ${{ item.component }})'
+
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      ${{ if eq(item.os, 'windows') }}:
+        image: windows-latest #x64 host
+        os: windows
+      ${{ if eq(item.os, 'linux') }}:
+        image: ubuntu-latest #x64 host
+        os: linux
+
+    variables:
+
+      # Triplet
+      ${{ if and(eq(item.os, 'windows'), eq(item.arch, 'x64')) }}:
+        triplet: x86_64-pc-windows-msvc
+      ${{ if and(eq(item.os, 'windows'), eq(item.arch, 'arm64')) }}:
+        triplet: aarch64-pc-windows-msvc
+      ${{ if and(eq(item.os, 'linux'), eq(item.arch, 'x64')) }}:
+        triplet: x86_64-unknown-linux-gnu
+      ${{ if and(eq(item.os, 'linux'), eq(item.arch, 'arm64')) }}:
+        triplet: aarch64-unknown-linux-gnu
+
+      # Windows specific variables
+      ${{ if eq(item.os, 'windows') }}:
+        CARGO_TARGET_DIR: c:/t/target
+        artifactPrefix: wxc-binaries
+        workingDirectory: src
+        buildExtraArgs: '--workspace --exclude lxc --exclude lxc_common'
+        signPattern: |
+            wxc-exec.exe
+            winhttp-proxy-shim.exe
+            wxc-sandbox-daemon.exe
+            wxc-sandbox-agent.exe
+            wxc-test-proxy.exe
+
+      # Linux specific variables
+      ${{ if eq(item.os, 'linux') }}:
+        CARGO_TARGET_DIR: /tmp/target
+        artifactPrefix: lxc-binaries
+        workingDirectory: $(Build.SourcesDirectory)/src/lxc
+        buildExtraArgs: ''
+        signPattern: |
+          lxc-exec
+
+      ${{ if eq(item.arch, 'x64') }}:
+        isX64: true
+        
+      ${{ if eq(item.arch, 'arm64') }}:
+        isX64: false
+      
+      # Paths
+      targetTriple: $(triplet)
+      targetTripleDir: $(CARGO_TARGET_DIR)/$(targetTriple)/release
+      outputDirectory: $(Build.SourcesDirectory)/out
+      artifactBaseName: $(artifactPrefix)-$(targetTriple)
+
+    templateContext:
+      rust:
+        rustToolchain:
+          toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+          version: 'ms-prod-1.93'
+          additionalTargets: $(triplet)
+        workingDirectory: $(workingDirectory)
+
+    steps:
+      - checkout: self
+
+      # Install Linux ARM64 toolchain for arm64 linux builds
+      - script: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+        displayName: Install ARM64 toolchain
+        condition: and(eq('${{ item.os }}','linux'), eq('${{ item.arch }}','arm64'))
+
+      - task: CopyFiles@2
+        displayName: Setup Cargo Config
+        inputs:
+          SourceFolder: '$(Build.SourcesDirectory)/.azure-pipelines/.cargo'
+          Contents: 'config.toml'
+          TargetFolder: '$(Build.SourcesDirectory)/.cargo'
+
+      - task: 1ES.Build.Rust.Setup@1
+      - task: 1ES.Build.Rust.Restore@1
+
+      - task: 1ES.Build.Rust.Run@1
+        displayName: Build
+        inputs:
+          command: build
+          profile: release
+          target: $(triplet)
+          testCondition: "eq(variables['isX64'], 'true')" # 1ES nested template takes this as a string
+          enableTests: $(isX64)
+          publishTestResults: $(isX64)
+          enableClippy: $(isX64)
+          useNextest: $(isX64)
+          testAllTargets: false
+          buildAllTargets: false
+
+      - task: EsrpCodeSigning@5
+        displayName: Code Sign
+        condition: and(eq(${{ parameters.isOfficialBuild }}, true), eq('${{ item.os }}', 'windows'))
+        inputs:
+          ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+          AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+          AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
+          AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+          AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+          AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+          FolderPath: $(targetTripleDir)
+          Pattern: |
+            $(signPattern)
+          UseMinimatch: true
+          inlineOperation: >-
+            [
+              {
+                "KeyCode": "CP-230012",
+                "OperationCode": "SigntoolSign",
+                "ToolName": "sign",
+                "ToolVersion": "1.0",
+                "Parameters": {
+                  "OpusName": "Microsoft",
+                  "OpusInfo": "https://www.microsoft.com",
+                  "FileDigest": "/fd SHA256",
+                  "PageHash": "/NPH",
+                  "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
+                }
+              },
+              {
+                "KeyCode": "CP-230012",
+                "OperationCode": "SigntoolVerify",
+                "ToolName": "sign",
+                "ToolVersion": "1.0",
+                "Parameters": {}
+              }
+            ]
+
+      - task: CopyFiles@2
+        displayName: Copy binaries
+        inputs:
+          sourceFolder: $(targetTripleDir)
+          contents: |
+            $(signPattern)
+          targetFolder: $(outputDirectory)/$(targetTriple)
+
+      - task: 1ES.PublishPipelineArtifact@1
+        displayName: Publish
+        inputs:
+          path: '$(outputDirectory)/$(targetTriple)'
+          artifactName: $(artifactBaseName)

@@ -1,0 +1,72 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+parameters:
+- name: Targets
+  type: object
+  default: []   # list of { artifact, path }
+- name: ESRPInfo
+  type: object
+  default: {}
+
+jobs:
+- job: package_mxc_npm_sdk
+  displayName: Package Mxc Npm Sdk
+  pool:
+    name: Azure-Pipelines-1ESPT-ExDShared
+    image: windows-latest
+    os: windows
+  variables:
+    outputDirectory: $(Build.SourcesDirectory)\out
+    sdkDirectory: $(Build.SourcesDirectory)\sdk
+    artifactBaseName: mxc-npm-sdk-package
+
+  steps:
+    - checkout: self
+
+    # Download all artifacts dynamically
+    - ${{ each target in parameters.targets }}:
+      - task: DownloadPipelineArtifact@2
+        displayName: Download ${{ target.artifact }}
+        inputs:
+          artifact: ${{ target.artifact }}
+          path: $(sdkDirectory)/bin/${{ target.path }}
+
+    # Copy .npmrc to the SDK directory so Azure artifacts feed is used for npm install.
+    - task: CopyFiles@2
+      displayName: Copy .npmrc to SDK
+      inputs:
+        SourceFolder: '$(Build.SourcesDirectory)/.azure-pipelines/.npm'
+        Contents: '.npmrc'
+        TargetFolder: '$(sdkDirectory)'
+
+    - task: NpmAuthenticate@0
+      displayName: NPM Authenticate
+      inputs:
+        workingFile: '$(sdkDirectory)/.npmrc'
+
+    - script: npm ci
+      workingDirectory: $(sdkDirectory)
+      displayName: npm ci
+
+    - script: npm run build
+      workingDirectory: $(sdkDirectory)
+      displayName: npm run build
+
+    - script: npm pack
+      workingDirectory: $(sdkDirectory)
+      displayName: npm pack
+
+    - task: CopyFiles@2
+      displayName: Copy npm package
+      inputs:
+        sourceFolder: $(sdkDirectory)
+        contents: |
+          *.tgz
+        targetFolder: '$(outputDirectory)/packages'
+
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: Upload SDK as pipeline artifact
+      inputs:
+        path: '$(outputDirectory)/packages'
+        artifactName: $(artifactBaseName)
