@@ -44,22 +44,13 @@ impl Default for SandboxConfig {
 }
 
 /// Configuration specific to the LXC container backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LxcConfig {
     /// Linux distribution for the container rootfs (e.g., "alpine", "ubuntu"). Required.
     pub distribution: String,
     /// Distribution release version (e.g., "3.20", "24.04"). Required.
     pub release: String,
-}
-
-impl Default for LxcConfig {
-    fn default() -> Self {
-        Self {
-            distribution: String::new(),
-            release: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
