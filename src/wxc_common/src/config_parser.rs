@@ -358,8 +358,8 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     let lxc_config = {
         let raw_lxc = raw.lxc.unwrap_or_default();
         LxcConfig {
-            distribution: raw_lxc.distribution.unwrap_or_else(|| "alpine".to_string()),
-            release: raw_lxc.release.unwrap_or_else(|| "3.19".to_string()),
+            distribution: raw_lxc.distribution.unwrap_or_default(),
+            release: raw_lxc.release.unwrap_or_default(),
         }
     };
 

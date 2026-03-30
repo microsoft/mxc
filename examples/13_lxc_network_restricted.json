@@ -11,7 +11,7 @@
   },
   "lxc": {
     "distribution": "alpine",
-    "release": "3.19"
+    "release": "3.20"
   },
   "network": {
     "defaultPolicy": "block",
