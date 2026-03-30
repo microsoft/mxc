@@ -2,6 +2,13 @@
 # Run all LXC container tests
 set -uo pipefail
 
+# LXC tests require root for container management, bind mounts, and iptables
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: LXC tests require root privileges."
+    echo "Run with: sudo $0"
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PASSED=0
 FAILED=0
