@@ -35,7 +35,7 @@ sudo pacman -S lxc
 
 ## Configuration
 
-The LXC backend uses the same JSON configuration schema as the Windows backends, with the `containment` field set to `"lxc"` and an optional `lxc` section:
+The LXC backend uses the same JSON configuration schema as the Windows backends, with the `containment` field set to `"lxc"` and a required `lxc` section specifying the distribution and release:
 
 ```json
 {
@@ -62,12 +62,10 @@ The LXC backend uses the same JSON configuration schema as the Windows backends,
 
 ### LXC-Specific Options
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `containerName` | string | auto-generated | Name for the LXC container |
-| `distribution` | string | `"alpine"` | Linux distribution for the container rootfs |
-| `release` | string | `"3.20"` | Distribution release version |
-| `destroyOnExit` | boolean | `true` | Whether to destroy the container after execution |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `distribution` | string | **Yes** | Linux distribution for the container rootfs (e.g., `"alpine"`, `"ubuntu"`) |
+| `release` | string | **Yes** | Distribution release version (e.g., `"3.20"`, `"24.04"`) |
 
 ### Supported Distributions
 

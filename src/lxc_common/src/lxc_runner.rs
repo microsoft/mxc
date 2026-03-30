@@ -45,6 +45,14 @@ impl LxcScriptRunner {
 
     /// Core execution logic.
     fn run_internal(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+        // Validate required LXC fields
+        if self.config.distribution.is_empty() || self.config.release.is_empty() {
+            return ScriptResponse::error(
+                "LXC distribution and release are required \
+                 (e.g., \"distribution\": \"alpine\", \"release\": \"3.20\")",
+            );
+        }
+
         let container_name = self.resolve_container_name();
         let _ = writeln!(logger, "Container name: {}", container_name);
         let _ = writeln!(

@@ -47,17 +47,17 @@ impl Default for SandboxConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LxcConfig {
-    /// Linux distribution for the container rootfs (e.g., "alpine", "ubuntu").
+    /// Linux distribution for the container rootfs (e.g., "alpine", "ubuntu"). Required.
     pub distribution: String,
-    /// Distribution release version (e.g., "3.20", "24.04").
+    /// Distribution release version (e.g., "3.20", "24.04"). Required.
     pub release: String,
 }
 
 impl Default for LxcConfig {
     fn default() -> Self {
         Self {
-            distribution: "alpine".to_string(),
-            release: "3.20".to_string(),
+            distribution: String::new(),
+            release: String::new(),
         }
     }
 }
