@@ -78,10 +78,8 @@ pub fn configure_filesystem_mounts(
 
         // Determine if the path is a file or directory inside the container rootfs
         // so we use the correct LXC `create=` type for the mount entry.
-        let rootfs_base = container
-            .config_path()
-            .map(|p| format!("{}/{}/rootfs", p, container.name()))
-            .unwrap_or_else(|| format!("/var/lib/lxc/{}/rootfs", container.name()));
+        let lxc_base = container.config_path().unwrap_or("/var/lib/lxc");
+        let rootfs_base = format!("{}/{}/rootfs", lxc_base, container.name());
         let full_path = format!("{}/{}", rootfs_base, container_path);
 
         // Use /dev/null bind mount for files, tmpfs for directories
