@@ -1,11 +1,16 @@
-import { WxcConfiguration } from '@microsoft/mxc-sdk/dist/types';
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+import { ContainerConfig } from '@microsoft/mxc-sdk/dist/types';
 
 /**
  * Helper function to create a minimal valid configuration
  */
-export function createMinimalConfig(code: string): WxcConfiguration {
+export function createMinimalConfig(code: string): ContainerConfig {
   return {
-    script: code
+    process: {
+      commandLine: code,
+    },
   };
 }
 
@@ -15,12 +20,14 @@ export function createMinimalConfig(code: string): WxcConfiguration {
 export function createNetworkRestrictedConfig(
   code: string,
   allow: string[]
-): WxcConfiguration {
+): ContainerConfig {
   return {
-    script: code,
+    process: {
+      commandLine: code,
+    },
     network: {
       defaultPolicy: 'block',
-      enforcementMode: 'capabilities'
+      enforcementMode: 'capabilities',
     }
   };
 }
@@ -33,9 +40,11 @@ export function createFilesystemRestrictedConfig(
   readonlyPaths: string[],
   readwritePaths: string[],
   deniedPaths: string[] = []
-): WxcConfiguration {
+): ContainerConfig {
   return {
-    script: code,
+    process: {
+      commandLine: code,
+    },
     filesystem: {
       readonlyPaths: readonlyPaths,
       readwritePaths: readwritePaths,

@@ -1,5 +1,8 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
- * WXC SDK - TypeScript SDK for execution containers
+ * MXC SDK - TypeScript SDK for execution containers
  *
  * This package provides a Node.js interface for spawning sandboxed processes
  * on Windows using the WXC system.
@@ -36,6 +39,7 @@ export {
 // Export platform detection functions
 export {
   getPlatformSupport,
+  findWxcExecutable,
   findLxcExecutable,
 } from './platform';
 
