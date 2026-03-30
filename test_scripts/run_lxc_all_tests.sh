@@ -7,6 +7,17 @@ PASSED=0
 FAILED=0
 FAILURES=""
 
+# Check for Windows line endings in test scripts
+check_line_endings() {
+    if grep -rPl '\r$' "$SCRIPT_DIR"/run_lxc_*.sh >/dev/null 2>&1; then
+        echo "ERROR: Shell scripts have Windows line endings (CRLF)."
+        echo "Fix with: sed -i 's/\r\$//' $SCRIPT_DIR/run_lxc_*.sh"
+        exit 1
+    fi
+}
+
+check_line_endings
+
 run_test() {
     local name="$1"
     local script="$2"
