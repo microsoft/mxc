@@ -9,8 +9,14 @@
 //! ## I/O model
 //!
 //! - **stdin**: runner writes script code, then closes (EOF triggers `exec()`)
-//! - **stdout**: relayed directly to parent process (not captured)
-//! - **stderr**: relayed directly to parent process (kernel traces)
+//! - **stdout**: relayed directly to parent process via `Stdio::inherit()` (not captured)
+//! - **stderr**: relayed directly to parent process via `Stdio::inherit()` (kernel traces)
+//!
+//! **Note for SDK consumers:** Because stdout/stderr are inherited (not captured),
+//! `ScriptResponse.standard_out` and `standard_err` are always empty strings for
+//! the NanVix backend. Output is streamed directly to the parent's console/pipes.
+//! Programmatic consumers that need captured output should redirect wxc-exec's
+//! stdout/stderr at the process level.
 //!
 //! ## Exit codes
 //!
@@ -149,6 +155,8 @@ impl NanVixScriptRunner {
 impl ScriptRunner for NanVixScriptRunner {
     fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         // -- Policy validation ---------------------------------------------------
+        // Reject unsupported policies — NanVix provides its own isolation model.
+        // Fail-closed: any policy setting not meaningful for NanVix is rejected.
         if !request.policy.readwrite_paths.is_empty()
             || !request.policy.readonly_paths.is_empty()
             || !request.policy.denied_paths.is_empty()
@@ -171,12 +179,32 @@ impl ScriptRunner for NanVixScriptRunner {
             )
             .to_response();
         }
+        if request.policy.network_proxy.is_enabled() {
+            return NanVixError::Preflight(
+                "network proxy is not supported by the NanVix backend \
+                 — NanVix has no network stack"
+                    .to_string(),
+            )
+            .to_response();
+        }
         if !request.working_directory.is_empty() {
             return NanVixError::Preflight(
                 "workingDirectory is not supported by the NanVix backend \
                  -- guest has its own filesystem namespace"
                     .to_string(),
             )
+            .to_response();
+        }
+
+        // Validate PYTHON_HOME doesn't contain NanVix delimiters that could
+        // corrupt the guest argument string (';' separates argv from env vars,
+        // spaces separate argv entries).
+        if PYTHON_HOME.contains(';') || PYTHON_HOME.contains(' ') {
+            return NanVixError::Preflight(format!(
+                "PYTHON_HOME '{}' contains invalid characters (';' or space) \
+                 — these are NanVix argument delimiters",
+                PYTHON_HOME
+            ))
             .to_response();
         }
 
@@ -285,17 +313,29 @@ impl ScriptRunner for NanVixScriptRunner {
                 let result = cvar.wait_timeout(cancelled, duration).unwrap();
                 cancelled = result.0;
 
+                // Always close the duplicated handle to avoid leaks.
+                let close_handle = |handle_raw: usize| {
+                    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+                    let handle = HANDLE(handle_raw as *mut std::ffi::c_void);
+                    let _ = unsafe { CloseHandle(handle) };
+                };
+
                 if *cancelled {
+                    // Process already exited — close the handle and return.
+                    if let Some(handle_raw) = process_handle_raw {
+                        close_handle(handle_raw);
+                    }
                     return;
                 }
 
+                // Timeout elapsed and process is still running — kill it.
                 if let Some(handle_raw) = process_handle_raw {
-                    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+                    use windows::Win32::Foundation::HANDLE;
                     use windows::Win32::System::Threading::TerminateProcess;
 
                     let handle = HANDLE(handle_raw as *mut std::ffi::c_void);
                     let kill_result = unsafe { TerminateProcess(handle, 1) };
-                    let _ = unsafe { CloseHandle(handle) };
+                    close_handle(handle_raw);
 
                     if kill_result.is_ok() {
                         timed_out_clone.store(true, Ordering::SeqCst);
@@ -489,5 +529,47 @@ mod tests {
             !resp.error_message.contains("workingDirectory"),
             "default request should not trigger workingDirectory rejection"
         );
+    }
+
+    #[test]
+    fn policy_rejects_network_proxy() {
+        let mut runner = NanVixScriptRunner::new();
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                network_proxy: crate::models::ProxyConfig {
+                    address: Some(crate::models::ProxyAddress::new(
+                        "127.0.0.1".to_string(),
+                        8080,
+                        true,
+                    )),
+                    builtin_test_server: false,
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let resp = runner.run(&request, &mut logger);
+        assert_eq!(resp.exit_code, -1);
+        assert!(resp.error_message.contains("network proxy"));
+    }
+
+    #[test]
+    fn python_home_constant_has_no_delimiters() {
+        // PYTHON_HOME must not contain ';' or spaces — these are NanVix
+        // argument delimiters that would corrupt the guest arg string.
+        assert!(!PYTHON_HOME.contains(';'), "PYTHON_HOME contains ';'");
+        assert!(!PYTHON_HOME.contains(' '), "PYTHON_HOME contains space");
+    }
+
+    #[test]
+    fn guest_args_format_is_correct() {
+        let expected = "-S -B -c exec(__import__('sys').stdin.read());PYTHONHOME=/sysroot";
+        let actual = format!(
+            "-S -B -c exec(__import__('sys').stdin.read());PYTHONHOME={}",
+            PYTHON_HOME
+        );
+        assert_eq!(actual, expected);
+        assert!(!"exec(__import__('sys').stdin.read())".contains(' '));
     }
 }
