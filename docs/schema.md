@@ -35,7 +35,9 @@ you add `"$schema": "./schemas/mxc-config.schema.json"` to your config file.
     "network": {
         "defaultPolicy": "block",          // "allow" or "block"
         "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
-        "proxy": { "localhost": 8080 }     // Localhost proxy port (appcontainer only)
+        "allowedHosts": ["api.github.com"],// LXC only: hostnames/IPs to allow
+        "blockedHosts": [],                // LXC only: hostnames/IPs to block
+        "proxy": { "localhost": 8080 }     // AppContainer only: localhost proxy port
     },
 
     "appContainer": {                      // Process-based container-specific

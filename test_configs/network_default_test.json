@@ -13,8 +13,6 @@
     "readwritePaths": [ "C:\\Users\\AdminUser\\AppData\\Local\\Programs" ]
   },
   "network": {
-    "defaultPolicy": "block",
-    "allowedHosts": ["api.github.com"],
-    "blockedHosts": []
+    "defaultPolicy": "block"
   }
 }

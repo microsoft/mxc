@@ -97,7 +97,7 @@
 
     "network": {
       "type": "object",
-      "description": "Network access policy. Shared across all backends.",
+      "description": "Network access policy.",
       "properties": {
         "defaultPolicy": {
           "type": "string",
@@ -111,9 +111,19 @@
           "default": "capabilities",
           "description": "How network policy is enforced."
         },
+        "allowedHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Only supported with 'lxc' containment backend."
+        },
+        "blockedHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Only supported with 'lxc' containment backend."
+        },
         "proxy": {
           "type": "object",
-          "description": "Proxy configuration. Only supported with appcontainer backend.",
+          "description": "Proxy configuration. Only supported with 'appcontainer' containment backend.",
           "oneOf": [
             {
               "properties": {

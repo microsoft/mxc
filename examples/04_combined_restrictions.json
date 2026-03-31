@@ -21,8 +21,6 @@
   },
   "network": {
     "enforcementMode": "both",
-    "defaultPolicy": "block",
-    "allowedHosts": [ "api.github.com" ],
-    "blockedHosts": []
+    "defaultPolicy": "block"
   }
 }

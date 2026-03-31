@@ -463,9 +463,21 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
 
         if let Some(v) = net.allowed_hosts {
+            if containment != ContainmentBackend::Lxc {
+                let msg =
+                    "network.allowedHosts is only supported with the 'lxc' containment backend";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
             policy.allowed_hosts = v;
         }
         if let Some(v) = net.blocked_hosts {
+            if containment != ContainmentBackend::Lxc {
+                let msg =
+                    "network.blockedHosts is only supported with the 'lxc' containment backend";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
             policy.blocked_hosts = v;
         }
     }
@@ -602,8 +614,7 @@ mod tests {
             "network": {
                 "defaultPolicy": "block",
                 "enforcementMode": "firewall",
-                "allowedHosts": ["example.com"],
-                "blockedHosts": ["evil.com"]
+                "proxy": { "localhost": 8080 }
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());
@@ -627,8 +638,10 @@ mod tests {
             req.policy.network_enforcement_mode,
             NetworkEnforcementMode::Firewall
         );
-        assert_eq!(req.policy.allowed_hosts, vec!["example.com"]);
-        assert_eq!(req.policy.blocked_hosts, vec!["evil.com"]);
+        assert_eq!(
+            req.policy.network_proxy.address.as_ref().unwrap().port(),
+            8080
+        );
     }
 
     #[test]
@@ -820,7 +833,9 @@ mod tests {
     #[test]
     fn network_hosts() {
         let json = r#"{
+            "containment": "lxc",
             "process": {"commandLine": "print('test')"},
+            "lxc": {"distribution": "alpine", "release": "3.20"},
             "network": {
                 "allowedHosts": ["example.com", "api.trusted.com"],
                 "blockedHosts": ["malicious.com", "tracker.net"]
@@ -1011,7 +1026,6 @@ mod tests {
             "process": {"commandLine": "echo test"},
             "network": {
                 "defaultPolicy": "block",
-                "allowedHosts": ["api.github.com"],
                 "proxy": { "localhost": 9090 }
             }
         }"#;
