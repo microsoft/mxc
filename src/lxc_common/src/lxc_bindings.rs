@@ -27,6 +27,11 @@ impl LxcContainer {
         &self.name
     }
 
+    /// Get the config path (LXC storage path), if set.
+    pub fn config_path(&self) -> Option<&str> {
+        self.config_path.as_deref()
+    }
+
     /// Check if the container exists.
     pub fn is_defined(&self) -> bool {
         let output = std::process::Command::new("lxc-info")
