@@ -18,9 +18,9 @@ pub enum ContainmentBackend {
     Lxc,
     /// VM-based isolation.
     Vm,
-    /// MicroVM-based isolation.
-    #[serde(rename = "microvm")]
-    MicroVm,
+    /// NanVix — microkernel VM isolation via WHP.
+    #[serde(rename = "nanvix")]
+    NanVix,
 }
 
 /// Configuration specific to the Windows Sandbox backend.

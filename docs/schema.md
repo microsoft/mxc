@@ -59,7 +59,7 @@ you add `"$schema": "./schemas/dev/mxc-config.schema.json"` to your config file.
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation |
 | `"vm"` | VM-based isolation (not yet implemented) |
-| `"microvm"` | MicroVM-based isolation (not yet implemented) |
+| `"nanvix"` | NanVix microkernel VM isolation via WHP |
 
 Only the backend section matching the selected `containment` value is used;
 other backend sections are ignored.
