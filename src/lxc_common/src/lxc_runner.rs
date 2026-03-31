@@ -45,6 +45,14 @@ impl LxcScriptRunner {
 
     /// Core execution logic.
     fn run_internal(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+        // Validate required LXC fields
+        if self.config.distribution.is_empty() || self.config.release.is_empty() {
+            return ScriptResponse::error(
+                "LXC distribution and release are required \
+                 (e.g., \"distribution\": \"alpine\", \"release\": \"3.20\")",
+            );
+        }
+
         let container_name = self.resolve_container_name();
         let _ = writeln!(logger, "Container name: {}", container_name);
         let _ = writeln!(
@@ -116,13 +124,10 @@ impl LxcScriptRunner {
             }
         }
 
-        // Execute the script
+        // Execute the script using lxc-attach (container is already running)
+        // TODO: Thread request.script_timeout through to attach_run for timeout enforcement.
         let _ = writeln!(logger, "Executing script inside container...");
-        let result = container.exec(
-            &request.script_code,
-            &request.working_directory,
-            request.script_timeout,
-        );
+        let result = container.attach_run(&request.script_code, &request.working_directory);
 
         let response = match result {
             Ok((exit_code, stdout, stderr)) => ScriptResponse {

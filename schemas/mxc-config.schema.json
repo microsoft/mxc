@@ -164,16 +164,15 @@
     "lxc": {
       "type": "object",
       "description": "LXC-specific settings. Used when containment is 'lxc'.",
+      "required": ["distribution", "release"],
       "properties": {
         "distribution": {
           "type": "string",
-          "default": "alpine",
-          "description": "Linux distribution for the container rootfs."
+          "description": "Linux distribution for the container rootfs (e.g., 'alpine', 'ubuntu'). Required."
         },
         "release": {
           "type": "string",
-          "default": "3.19",
-          "description": "Distribution release version."
+          "description": "Distribution release version (e.g., '3.20', '24.04'). Required."
         }
       }
     }
