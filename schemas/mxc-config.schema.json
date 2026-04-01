@@ -111,6 +111,16 @@
           "default": "capabilities",
           "description": "How network policy is enforced."
         },
+        "allowedHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Enforced by 'lxc' and 'appcontainer' containment backends."
+        },
+        "blockedHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc' and 'appcontainer' containment backends."
+        },
         "proxy": {
           "type": "object",
           "description": "Proxy configuration. Only supported with appcontainer backend.",
