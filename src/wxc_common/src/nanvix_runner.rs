@@ -109,6 +109,12 @@ pub struct NanVixScriptRunner {
     _private: (),
 }
 
+impl Default for NanVixScriptRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NanVixScriptRunner {
     pub fn new() -> Self {
         Self { _private: () }
