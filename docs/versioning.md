@@ -4,11 +4,16 @@
 
 ### Policy = Intent
 
-The policy (filesystem, network, lifecycle) expresses **what** the user wants — "block network, allow these paths, destroy on exit." It does not specify how the OS enforces it, nor which container type to use.
+The policy (filesystem, network) expresses **what** the user wants — "block network, allow these paths." It does not specify how the OS enforces it, nor which container type to use.
 
 ### Policy Version = Config Schema Version
 
 We are introducing a `version` field in the SandboxPolicy. This version must match the MXC config JSON version — they are the same version, tied 1:1.
+
+When a consumer specifies a SandboxPolicy version (e.g., `0.4.0`), MXC creates
+the corresponding `WxcConfiguration` using the `0.4.0` schema. If a different
+version is specified (e.g., `0.5.0`), MXC uses the `0.5.0` schema. All schemas
+for a major version are packaged together in the SDK.
 
 ```typescript
 // sdk/src/types.ts
@@ -37,23 +42,15 @@ Per [semver.org](https://semver.org/):
 - **Minor** (x.Y.0) — new features, backward compatible
 - **Major** (X.0.0) — breaking changes
 
-## Two Independent Version Streams
-
-| Stream | Owner | What it versions | Format |
-|---|---|---|---|
-| **MXC Policy/Config** | MXC team | SandboxPolicy + config format | Semver (e.g., 0.4.0-alpha) |
-| **OS Tech Language** | OS team | What the OS can enforce (sandbox spec) | Version info (e.g., 1.4.5, 2.0.0) |
-
-MXC is responsible for mapping policy intent onto the OS tech language version.
-They are **not** lock-stepped.
-
 ## Schema Shipping Model
 
 ```
 mxc/schemas/
-├── schema.0.3.0-alpha.json      (shipped — historical)
-├── schema.0.4.0-alpha.json      (shipped — current stable)
-└── mxc-config.schema.json       (current — includes experimental section)
+├── stable/
+│   ├── schema.0.3.0-alpha.json      (shipped — historical)
+│   └── schema.0.4.0-alpha.json      (shipped — current stable)
+└── dev/
+    └── mxc-config.schema.json       (current — includes experimental section)
 ```
 
 ### Shipped vs Experimental
@@ -80,7 +77,10 @@ The current config schema has two sections:
 **Rules:**
 - **Generic section** (top) — shipped, stable, supported. Always executed.
 - **Experimental section** (bottom) — only executed when the experimental flag
-  is enabled (see below).
+  is enabled (see below). Developers can add any keys or nested keys they want
+  in this section and are responsible for adding the parsing code for their
+  experimental feature. As long as their experimental code doesn't break what
+  is shipped, they are free to iterate as much as they want.
 - **Promotion:** When an experimental feature is ready to ship, move it from
   `experimental` to the generic section and bump the minor version.
 
@@ -90,8 +90,8 @@ The experimental flag must be supported at every layer of the stack:
 
 **1. `wxc-exec.exe` / `lxc-exec` (Rust binaries):**
 ```bash
-wxc-exec.exe --experimental config.json
-lxc-exec --experimental config.json
+wxc-exec.exe config.json --experimental
+lxc-exec config.json --experimental
 ```
 
 When `--experimental` is passed:
@@ -109,11 +109,6 @@ const pty = spawnSandbox("python app.py", policy, {
 ```
 
 The SDK passes `--experimental` to the underlying binary when this option is set.
-
-**3. CLI (`mxc-cli`):**
-```bash
-npm start run config.json --experimental
-```
 
 ### Forking Code for Experimental Features
 
@@ -254,6 +249,11 @@ a production feature.
 all experimental features in the config are active. There is no per-feature
 enable/disable mechanism — simplicity over granularity.
 
+**Isolation:** Experimental features must be fully isolated from stable features.
+They must not modify or override the behavior of stable features. Since the
+experimental flag is a development tool, this isolation keeps the stable code path
+deterministic regardless of what experiments are running.
+
 **Migration after promotion:** When an experimental feature is promoted to the
 stable section, configs that still reference it under `experimental` will receive
 an error: "feature X has moved to the stable section." The parser will not
@@ -261,25 +261,15 @@ silently fall back — explicit migration is required.
 
 ## Open Questions
 
-1. **Experimental + stable interaction:** Can experimental features modify or
-   override the behavior of stable features? Or must they be fully isolated?
-   (e.g., experimental compartments changing how `network.defaultPolicy` is
-   enforced)
-
-2. **Experimental features on the OS side:** Does
+1. **Experimental features on the OS side:** Does
    `EnumerateSandboxSpecVersionInfo` distinguish between stable and experimental
    OS capabilities? If the OS itself has experimental features, how does MXC
    discover and target them?
 
-3. **Security of the experimental flag:** Should `--experimental` require
+2. **Security of the experimental flag:** Should `--experimental` require
    additional privilege or be restricted to debug builds? A malicious caller could
    pass `--experimental` to enable a feature that weakens the sandbox boundary.
 
-4. **Telemetry / diagnostics:** When something fails with `--experimental`
-   enabled, how do we distinguish between experimental feature bugs and stable
-   feature regressions? Should experimental execution be tagged differently in
-   logs?
-
-5. **Conflicting experimental features:** If two experimental features have
+3. **Conflicting experimental features:** If two experimental features have
    conflicting requirements (e.g., one denies a namespace, another relaxes it),
    how are conflicts resolved? First-wins, last-wins, or error?
