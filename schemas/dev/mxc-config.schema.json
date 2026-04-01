@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/microsoft/mxc/schemas/mxc-config.schema.json",
+  "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.json",
   "title": "MXC Configuration",
   "description": "Configuration schema for MXC container execution engine. Defines the recommended config format. The parser also accepts legacy fields not listed here during the migration period.",
   "type": "object",
@@ -19,7 +19,7 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["appcontainer", "sandbox", "vm", "wslc", "lxc", "microvm"],
+      "enum": ["appcontainer", "lxc"],
       "default": "appcontainer",
       "description": "Containment backend to use for execution."
     },
