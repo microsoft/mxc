@@ -266,10 +266,8 @@ impl ScriptRunner for NanVixScriptRunner {
         // With inherited stdout/stderr there is no pipe buffer deadlock risk.
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(e) = stdin.write_all(request.script_code.as_bytes()) {
-                let err = NanVixError::Runtime(format!(
-                    "failed to write script to nanvixd stdin: {}",
-                    e
-                ));
+                let err =
+                    NanVixError::Runtime(format!("failed to write script to nanvixd stdin: {}", e));
                 let _ = writeln!(logger, "{}", err);
                 let _ = child.kill();
                 let _ = child.wait();
@@ -291,7 +289,7 @@ impl ScriptRunner for NanVixScriptRunner {
 
             // Duplicate the process handle at spawn time (safe against PID reuse).
             use std::os::windows::io::AsRawHandle;
-            use windows::Win32::Foundation::{DuplicateHandle, HANDLE, DUPLICATE_SAME_ACCESS};
+            use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
             use windows::Win32::System::Threading::GetCurrentProcess;
 
             let raw = child.as_raw_handle();
