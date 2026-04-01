@@ -4,22 +4,22 @@
 
 ### Policy = Intent
 
-The policy (filesystem, network, lifecycle) expresses **what** the user wants — "block network, allow these paths, destroy on exit." It does not specify how the OS enforces it, nor which container type to use. The container selection is a separate concern handled by MXC based on the `containment` field.
+The policy (filesystem, network, lifecycle) expresses **what** the user wants — "block network, allow these paths, destroy on exit." It does not specify how the OS enforces it, nor which container type to use.
 
 ### Policy Version = Config Schema Version
 
-The SandboxPolicy carries a `version` field that versions **both** the policy format and its semantics together — tied 1:1.
+We are introducing a `version` field in the SandboxPolicy. This version must match the MXC config JSON version — they are the same version, tied 1:1.
 
 ```typescript
 // sdk/src/types.ts
 SandboxPolicy {
-  version: "0.4.0-alpha",       // versions policy format + semantics
+  version: "0.4.0-alpha",       // must match MXC config schema version
   filesystem: { ... },           // policy (intent)
   network: { ... },              // policy (intent)
 }
 ```
 
-The config JSON (`WxcConfiguration`) carries this version through to the binary:
+The config JSON (`WxcConfiguration`) carries this same version:
 
 ```json
 {
