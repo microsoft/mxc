@@ -17,6 +17,7 @@ for a major version are packaged together in the SDK.
 
 ```typescript
 // sdk/src/types.ts
+// NOTE: SandboxPolicy is subject to significant evolution as the schema matures.
 SandboxPolicy {
   version: "0.4.0-alpha",       // must match MXC config schema version
   filesystem: { ... },           // policy (intent)
@@ -50,8 +51,12 @@ mxc/schemas/
 │   ├── schema.0.3.0-alpha.json      (shipped — historical)
 │   └── schema.0.4.0-alpha.json      (shipped — current stable)
 └── dev/
-    └── mxc-config.schema.json       (current — includes experimental section)
+    └── mxc-config.schema.json       (current — includes experimental section definition)
 ```
+
+The dev schema file (`mxc-config.schema.json`) must define the `experimental`
+section structure so that editors can validate experimental configs. Stable
+schemas in `stable/` do not include the experimental section.
 
 ### Shipped vs Experimental
 
@@ -66,19 +71,32 @@ The current config schema has two sections:
   "appContainer": { ... },
   "lxc": { ... },
 
-  "experimental": {
-    "compartments": { ... },
-    "gpuIsolation": { ... },
-    "threadInjectionPrevention": { ... }
-  }
+  "experimental": [
+    {
+      "name": "compartments",
+      "config": { ... }
+    },
+    {
+      "name": "gpu-isolation",
+      "config": { ... }
+    }
+  ]
 }
 ```
 
+Each experimental feature has a `name` (used for identification and future
+per-feature gating — see Open Questions) and a freeform `config` object that
+the feature developer defines. The `name` must be unique across all experimental
+features. Today, the `--experimental` flag is a global toggle that enables all
+experimental features; per-feature gating (e.g., `--experimental compartments`)
+is under consideration.
+
 **Rules:**
 - **Generic section** (top) — shipped, stable, supported. Always executed.
-- **Experimental section** (bottom) — only executed when the experimental flag
-  is enabled (see below). Developers can add any keys or nested keys they want
-  in this section and are responsible for adding the parsing code for their
+- **Experimental section** (bottom) — an array of named features, only executed
+  when the experimental flag is enabled (see below). Developers can put any
+  keys or nested keys they want inside a feature's `config` and are responsible
+  for adding the parsing code for their
   experimental feature. As long as their experimental code doesn't break what
   is shipped, they are free to iterate as much as they want.
 - **Promotion:** When an experimental feature is ready to ship, move it from
@@ -92,6 +110,8 @@ The experimental flag must be supported at every layer of the stack:
 ```bash
 wxc-exec.exe config.json --experimental
 lxc-exec config.json --experimental
+# Flag order does not matter — these are equivalent:
+wxc-exec.exe --experimental config.json
 ```
 
 When `--experimental` is passed:
@@ -249,11 +269,6 @@ a production feature.
 all experimental features in the config are active. There is no per-feature
 enable/disable mechanism — simplicity over granularity.
 
-**Isolation:** Experimental features must be fully isolated from stable features.
-They must not modify or override the behavior of stable features. Since the
-experimental flag is a development tool, this isolation keeps the stable code path
-deterministic regardless of what experiments are running.
-
 **Migration after promotion:** When an experimental feature is promoted to the
 stable section, configs that still reference it under `experimental` will receive
 an error: "feature X has moved to the stable section." The parser will not
@@ -273,3 +288,29 @@ silently fall back — explicit migration is required.
 3. **Conflicting experimental features:** If two experimental features have
    conflicting requirements (e.g., one denies a namespace, another relaxes it),
    how are conflicts resolved? First-wins, last-wins, or error?
+
+4. **Per-feature vs global experimental flag:** Should `--experimental` be a
+   global toggle (all experimental features on/off), or per-feature
+   (`--experimental compartments --experimental gpu-isolation`)? Per-feature
+   gives more control but adds complexity to the CLI and SDK interfaces.
+
+5. **Shipping experimental features to customers:** Should experimental features
+   be shippable to specific customers (e.g., Anthropic, Nemoclaw), or strictly
+   internal development only? If shippable, the security and stability
+   requirements for experimental features increase significantly. What is the
+   delivery mechanism — private npm package drop, feature-flagged public release,
+   or a separate experimental binary?
+
+6. **Multiple dev schemas for multiple major versions:** When multiple major
+   versions are alive simultaneously (e.g., v1 shipped on OS 26100, v2 shipped
+   on OS 27000, v3 in development), promoting a feature may require adding it
+   to multiple schemas. For example, if "compartments" is additive, it should
+   be added to both `dev/1.vnext.json` and `dev/2.vnext.json` as a minor bump
+   for each. If it's breaking, it goes only into `dev/3.vnext.json`. The `dev/`
+   folder and promotion process need to support this multi-schema model. Today
+   we are pre-1.0 with only one major version, so a single dev schema suffices.
+
+7. **Experimental features modifying stable behavior:** Experimental features
+   may need to modify stable behavior (e.g., "AppContainer as Medium IL"
+   changes how the stable appcontainer feature works). How do we reason about
+   and test this?
