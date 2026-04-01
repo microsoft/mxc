@@ -157,18 +157,37 @@ Add tests to verify:
 - Missing optional fields use defaults
 - Unknown fields under `experimental` are ignored (forward compatibility)
 
+Also ensure that `convert_raw_config()` populates `CodexRequest.experimental`:
+
+```rust
+Ok(CodexRequest {
+    // ... existing fields ...
+    experimental,   // ← include the parsed experimental config
+})
+```
+
 ## Step 4: Implement the feature in the runner
 
 > The `--experimental` CLI flag and `experimental_enabled` field on
 > `CodexRequest` already exist from when `compartments` was added. No changes
 > needed in `main.rs`.
 
+The full flow is:
+
+```
+main.rs: cli.experimental → request.experimental_enabled = true
+main.rs: runner.run(&request, &mut logger)
+  → runner checks request.experimental_enabled
+    → reads request.experimental.gpu_isolation
+      → applies the feature
+```
+
 In the appropriate runner (`appcontainer.rs`, `lxc_runner.rs`, etc.), guard
 your feature behind `experimental_enabled`:
 
 ```rust
 fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-    // ... normal execution ...
+    // ... normal execution (filesystem, network, etc.) ...
 
     if request.experimental_enabled {
         // existing experimental feature
@@ -182,7 +201,7 @@ fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse
         }
     }
 
-    // ... continue normal execution ...
+    // ... execute the script ...
 }
 ```
 
@@ -220,6 +239,14 @@ wxc-exec.exe test_configs/experimental_gpu_isolation.json --experimental --debug
 # Without flag — experimental section silently ignored, normal execution
 wxc-exec.exe test_configs/experimental_gpu_isolation.json --debug
 ```
+
+Verify three things:
+1. **With `--experimental`:** debug output shows your feature was applied
+   (e.g., "Applying GPU isolation: device 0, 1024MB limit")
+2. **Without `--experimental`:** no trace of your feature in the output,
+   process executes normally
+3. **Stable features unaffected:** filesystem, network, and other policies
+   still work exactly as before in both modes
 
 ## Step 6: Update the SDK (if needed)
 
