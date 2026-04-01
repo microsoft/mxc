@@ -10,7 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, ScriptResponse};
+use wxc_common::models::{
+    CodexRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, ScriptResponse,
+};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::validate_request;
 
