@@ -2,9 +2,9 @@
 ## Configuration Schema
 
 MXC uses a JSON configuration file. The formal schema is at
-[`schemas/mxc-config.schema.json`](../schemas/mxc-config.schema.json) —
+[`schemas/dev/mxc-config.schema.json`](../schemas/dev/mxc-config.schema.json) —
 editors that support JSON Schema will provide autocomplete and validation when
-you add `"$schema": "./schemas/mxc-config.schema.json"` to your config file.
+you add `"$schema": "./schemas/dev/mxc-config.schema.json"` to your config file.
 
 ### Full Schema
 
