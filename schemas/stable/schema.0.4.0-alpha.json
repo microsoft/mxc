@@ -19,7 +19,7 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["appcontainer", "sandbox", "vm", "wslc", "lxc", "microvm"],
+      "enum": ["appcontainer", "lxc"],
       "default": "appcontainer",
       "description": "Containment backend to use for execution."
     },
