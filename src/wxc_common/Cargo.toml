@@ -12,6 +12,7 @@ base64 = { workspace = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
 windows-core = { workspace = true }
+flatbuffers = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

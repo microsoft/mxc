@@ -1,0 +1,41 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+//
+// FlatBuffers schema for the sandbox specification.
+//
+// This defines the binary format of the opaque blob returned by
+// Experimental_CompileSandboxSpecification and consumed by the
+// sandbox engine (ParseSandboxTechSpec).
+//
+
+namespace SandboxTechSpecLayout;
+
+table SandboxSpec {
+    // Schema version — consumers must reject unknown versions.
+    version:string (required);
+
+    // Enable AppContainer isolation for the sandboxed process.
+    app_container:bool = false;
+
+    // Integrity level RID (e.g., SECURITY_MANDATORY_LOW_RID = 0x1000).
+    // 0 means "don't change" (inherit caller's IL).
+    integrity_level:uint32 = 0;
+
+    // JOB_OBJECT_UILIMIT_* bitmask for UI restrictions.
+    // 0 means "no UI restrictions".
+    ui_restrictions:uint32 = 0;
+
+    // Strip privileges from the token (WIN://NOALLAPPPKG).
+    least_privilege:bool = false;
+
+    // Comma-delimited capability names (e.g., "internetClient,registryRead").
+    capabilities:string;
+
+    // Directory paths with read/write access.
+    fs_read_write:[string];
+
+    // Directory paths with read-only access.
+    fs_read_only:[string];
+}
+
+root_type SandboxSpec;
+file_identifier "SBOX";

@@ -14,6 +14,7 @@ use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::nanvix_runner::NanVixScriptRunner;
 use wxc_common::sandbox_runner::SandboxScriptRunner;
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::tessera_runner::TesseraRunner;
 
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
@@ -147,9 +148,19 @@ fn main() {
     log_request(&request, &mut logger);
 
     // Run script in selected containment backend.
-    // Sandbox requires --experimental flag.
+    // Sandbox and Tessera (BaseContainer) require --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
-        ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
+        ContainmentBackend::AppContainer => {
+            if request.experimental_enabled {
+                let _ = writeln!(
+                    logger,
+                    "Using Tessera runner (--experimental)"
+                );
+                Box::new(TesseraRunner::new())
+            } else {
+                Box::new(AppContainerScriptRunner::new())
+            }
+        }
         ContainmentBackend::Wslc => {
             eprintln!("Error: WSLC backend not yet implemented (Phase 3)");
             process::exit(1);
