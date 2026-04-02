@@ -48,7 +48,6 @@ Per [semver.org](https://semver.org/):
 ```
 mxc/schemas/
 ├── stable/
-│   ├── schema.0.3.0-alpha.json      (shipped — historical)
 │   └── mxc-config.schema.0.4.0-alpha.json  (shipped — current stable)
 └── dev/
     └── mxc-config.schema.0.5.0-dev.json   (current — includes experimental section definition)
