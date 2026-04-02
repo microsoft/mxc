@@ -71,36 +71,35 @@ The current config schema has two sections:
   "appContainer": { ... },
   "lxc": { ... },
 
-  "experimental": [
-    {
-      "name": "compartments",
-      "config": { ... }
+  "experimental": {
+    "compartments": {
+      "namespace": "test-ns",
+      "isolationLevel": 2
     },
-    {
-      "name": "gpu-isolation",
-      "config": { ... }
+    "gpuIsolation": {
+      "deviceIndex": 0,
+      "memoryLimitMb": 1024,
+      "allowCuda": true
     }
-  ]
+  }
 }
 ```
 
-Each experimental feature has a `name` (used for identification and future
-per-feature gating — see Open Questions) and a freeform `config` object that
-the feature developer defines. The `name` must be unique across all experimental
-features. Today, the `--experimental` flag is a global toggle that enables all
+Each experimental feature is a typed property under `experimental` — the same
+pattern as stable features (`filesystem`, `network`) under the top-level
+config. This gives editors full autocomplete and validation for experimental
+configs. Today, the `--experimental` flag is a global toggle that enables all
 experimental features; per-feature gating (e.g., `--experimental compartments`)
 is under consideration.
 
 **Rules:**
-- **Generic section** (top) — shipped, stable, supported. Always executed.
-- **Experimental section** (bottom) — an array of named features, only executed
-  when the experimental flag is enabled (see below). Developers can put any
-  keys or nested keys they want inside a feature's `config` and are responsible
-  for adding the parsing code for their
-  experimental feature. As long as their experimental code doesn't break what
-  is shipped, they are free to iterate as much as they want.
+- **Stable section** (top) — shipped, stable, supported. Always executed.
+- **Experimental section** — an object containing experimental features as
+  typed properties, only applied when the experimental flag is enabled (see
+  below). Each feature defines its own schema. As long as experimental code
+  doesn't break what is shipped, developers are free to iterate.
 - **Promotion:** When an experimental feature is ready to ship, move it from
-  `experimental` to the generic section and bump the minor version.
+  `experimental` to the top-level section and bump the minor version.
 
 ### Experimental Flag
 
@@ -132,7 +131,8 @@ The SDK passes `--experimental` to the underlying binary when this option is set
 
 ### Forking Code for Experimental Features
 
-Developers adding experimental features follow this pattern:
+Developers adding experimental features follow this pattern. For a detailed
+step-by-step guide, see [Adding a New Experimental Feature](add-a-new-experimental-feature.md).
 
 **In `config_parser.rs`:**
 ```rust
@@ -143,13 +143,19 @@ struct RawConfig {
 
 struct RawExperimental {
     compartments: Option<RawCompartments>,
+    #[serde(rename = "gpuIsolation")]
     gpu_isolation: Option<RawGpuIsolation>,
-    // ... add new experimental fields here ...
+    // ... add new experimental features here ...
 }
 ```
 
-**In `CodexRequest` (models.rs):**
+**In `models.rs`:**
 ```rust
+pub struct ExperimentalConfig {
+    pub compartments: Option<CompartmentsConfig>,
+    pub gpu_isolation: Option<GpuIsolationConfig>,
+}
+
 pub struct CodexRequest {
     // ... stable fields ...
     pub experimental_enabled: bool,  // set by --experimental flag
@@ -164,20 +170,28 @@ fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse
 
     // Experimental features only applied when flag is set
     if request.experimental_enabled {
-        if let Some(compartments) = &request.experimental.compartments {
+        if let Some(ref compartments) = request.experimental.compartments {
             self.apply_compartments(compartments, logger);
+        }
+        if let Some(ref gpu) = request.experimental.gpu_isolation {
+            self.apply_gpu_isolation(gpu, logger);
         }
     }
 }
 ```
 
 **Promotion process:** When an experimental feature is ready to ship:
-1. Move the field from `RawExperimental` to the stable section of `RawConfig`
-2. Move the field from `ExperimentalConfig` to `CodexRequest`
-3. Remove the `if request.experimental_enabled` guard — the feature now always
-   applies
-4. Update the schema: move from `experimental` section to generic section
+1. Move the property from `experimental` to a top-level property in the schema
+   (e.g., `experimental.gpuIsolation` → `gpuIsolation`)
+2. Move the struct from `ExperimentalConfig` to `CodexRequest`
+3. Move the field from `RawExperimental` to `RawConfig`
+4. Remove the `if request.experimental_enabled` guard
 5. Bump the minor version
+6. Add a parser error for configs still referencing the feature under
+   `experimental`: `"<feature> has moved to the stable section"`.
+   This error should persist for at least one release cycle so users have
+   time to migrate, then it can be relaxed to the standard "unknown field"
+   behavior.
 
 ## Data Flow
 
