@@ -34,24 +34,35 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::logger::Logger;
 use crate::models::{CodexRequest, NetworkPolicy, ScriptResponse};
-use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
+use crate::script_runner::ScriptRunner;
 
+/// CPython guest binary loaded by NanVix.
 const PYTHON_BINARY: &str = "python.elf";
+/// Guest PYTHONHOME value used by CPython inside NanVix.
+/// Must NOT contain ';' or spaces — these are NanVix argument delimiters
+/// that would corrupt the guest cmdline string.
 const PYTHON_HOME: &str = "/sysroot";
+/// NanVix daemon binary launched by the host runner.
+const NANVIXD_BINARY: &str = "nanvixd.exe";
+/// CPython stdlib ramfs image mounted by NanVix.
+const RAMFS_IMAGE: &str = "cpython-ramfs.img";
+/// Boot grace period that is always enforced.
 const BOOT_TIMEOUT_MS: u64 = 60_000;
+/// Generic error exit code returned to host callers.
+const ERROR_EXIT_CODE: i32 = -1;
 
 // -- NanVix error classification ---------------------------------------------
 
 /// Classifies NanVix runner errors for structured error handling.
 #[derive(Debug)]
 enum NanVixError {
-    /// Missing binaries, invalid paths, unsupported policies.
+    /// Pre-spawn validation failures (missing artifacts, invalid config, unsupported policy).
     Preflight(String),
-    /// WHP unavailable, spawn failure.
+    /// OS/platform failures while spawning/managing the NanVix process (WHP/spawn/handles).
     Platform(String),
     /// Stdin broken pipe, VM crash.
     Runtime(String),
@@ -84,7 +95,7 @@ impl std::fmt::Display for NanVixError {
 impl NanVixError {
     fn to_response(&self) -> ScriptResponse {
         ScriptResponse {
-            exit_code: -1,
+            exit_code: ERROR_EXIT_CODE,
             error_message: self.to_string(),
             ..Default::default()
         }
@@ -123,20 +134,23 @@ impl NanVixScriptRunner {
     /// Resolve and validate all required paths next to the running executable.
     fn resolve_paths(&self) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), NanVixError> {
         let dir = exe_dir()?;
+        // NanVix runtime artifacts (nanvixd.exe, kernel.elf, python.elf, cpython-ramfs.img)
+        // are distributed via GitHub releases from nanvix/nanvix and nanvix/cpython.
+        // They are placed next to wxc-exec.exe by setup scripts.
 
-        let nanvixd = dir.join("nanvixd.exe");
+        let nanvixd = dir.join(NANVIXD_BINARY);
         if !nanvixd.exists() {
             return Err(NanVixError::Preflight(format!(
-                "nanvixd.exe not found in {:?}",
-                dir
+                "{} not found in {:?}",
+                NANVIXD_BINARY, dir
             )));
         }
 
-        let ramfs = dir.join("cpython-ramfs.img");
+        let ramfs = dir.join(RAMFS_IMAGE);
         if !ramfs.exists() {
             return Err(NanVixError::Preflight(format!(
-                "cpython-ramfs.img not found in {:?}",
-                dir
+                "{} not found in {:?}",
+                RAMFS_IMAGE, dir
             )));
         }
 
@@ -153,8 +167,92 @@ impl NanVixScriptRunner {
 
     /// Compute total timeout: boot grace + script timeout.
     fn total_timeout_ms(script_timeout: u32) -> u64 {
-        let script_ms = get_timeout_milliseconds(script_timeout) as u64;
-        BOOT_TIMEOUT_MS.saturating_add(script_ms)
+        if script_timeout == 0 {
+            // Infinite script timeout — still enforce boot timeout.
+            u64::MAX
+        } else {
+            BOOT_TIMEOUT_MS.saturating_add(script_timeout as u64)
+        }
+    }
+
+    fn validate_policies(request: &CodexRequest) -> Result<(), NanVixError> {
+        if !request.policy.readwrite_paths.is_empty()
+            || !request.policy.readonly_paths.is_empty()
+            || !request.policy.denied_paths.is_empty()
+        {
+            return Err(NanVixError::Preflight(
+                "filesystem policy is not supported by the NanVix backend \
+                 -- guest has a read-only ramfs"
+                    .to_string(),
+            ));
+        }
+        if !request.policy.allowed_hosts.is_empty()
+            || !request.policy.blocked_hosts.is_empty()
+            || request.policy.default_network_policy != NetworkPolicy::Allow
+        {
+            return Err(NanVixError::Preflight(
+                "network policy is not supported by the NanVix backend \
+                 -- NanVix has no network stack"
+                    .to_string(),
+            ));
+        }
+        if request.policy.network_proxy.is_enabled() {
+            return Err(NanVixError::Preflight(
+                "network proxy is not supported by the NanVix backend \
+                 — NanVix has no network stack"
+                    .to_string(),
+            ));
+        }
+        if !request.working_directory.is_empty() {
+            return Err(NanVixError::Preflight(
+                "workingDirectory is not supported by the NanVix backend \
+                 -- guest has its own filesystem namespace"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn build_guest_args() -> String {
+        format!(
+            "-S -B -c exec(__import__('sys').stdin.read());PYTHONHOME={}",
+            PYTHON_HOME
+        )
+    }
+
+    fn spawn_nanvixd(
+        paths: (&Path, &Path, &Path, &Path),
+        guest_args: &str,
+        script: &str,
+    ) -> Result<std::process::Child, NanVixError> {
+        let (nanvixd_path, bin_dir, ramfs_path, python_path) = paths;
+        let mut child = Command::new(nanvixd_path)
+            .arg("-bin-dir")
+            .arg(bin_dir)
+            .arg("-ramfs")
+            .arg(ramfs_path)
+            .arg("--")
+            .arg(python_path)
+            .arg(guest_args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| NanVixError::Platform(format!("failed to spawn {}: {}", NANVIXD_BINARY, e)))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(script.as_bytes()) {
+                let err =
+                    NanVixError::Runtime(format!("failed to write script to {} stdin: {}", NANVIXD_BINARY, e));
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err);
+            }
+            drop(stdin);
+        }
+
+        Ok(child)
     }
 }
 
@@ -163,55 +261,8 @@ impl ScriptRunner for NanVixScriptRunner {
         // -- Policy validation ---------------------------------------------------
         // Reject unsupported policies — NanVix provides its own isolation model.
         // Fail-closed: any policy setting not meaningful for NanVix is rejected.
-        if !request.policy.readwrite_paths.is_empty()
-            || !request.policy.readonly_paths.is_empty()
-            || !request.policy.denied_paths.is_empty()
-        {
-            return NanVixError::Preflight(
-                "filesystem policy is not supported by the NanVix backend \
-                 -- guest has a read-only ramfs"
-                    .to_string(),
-            )
-            .to_response();
-        }
-        if !request.policy.allowed_hosts.is_empty()
-            || !request.policy.blocked_hosts.is_empty()
-            || request.policy.default_network_policy != NetworkPolicy::Allow
-        {
-            return NanVixError::Preflight(
-                "network policy is not supported by the NanVix backend \
-                 -- NanVix has no network stack"
-                    .to_string(),
-            )
-            .to_response();
-        }
-        if request.policy.network_proxy.is_enabled() {
-            return NanVixError::Preflight(
-                "network proxy is not supported by the NanVix backend \
-                 — NanVix has no network stack"
-                    .to_string(),
-            )
-            .to_response();
-        }
-        if !request.working_directory.is_empty() {
-            return NanVixError::Preflight(
-                "workingDirectory is not supported by the NanVix backend \
-                 -- guest has its own filesystem namespace"
-                    .to_string(),
-            )
-            .to_response();
-        }
-
-        // Validate PYTHON_HOME doesn't contain NanVix delimiters that could
-        // corrupt the guest argument string (';' separates argv from env vars,
-        // spaces separate argv entries).
-        if PYTHON_HOME.contains(';') || PYTHON_HOME.contains(' ') {
-            return NanVixError::Preflight(format!(
-                "PYTHON_HOME '{}' contains invalid characters (';' or space) \
-                 — these are NanVix argument delimiters",
-                PYTHON_HOME
-            ))
-            .to_response();
+        if let Err(e) = Self::validate_policies(request) {
+            return e.to_response();
         }
 
         // -- Path resolution -----------------------------------------------------
@@ -233,48 +284,22 @@ impl ScriptRunner for NanVixScriptRunner {
         // -c exec(...): reads all of stdin and executes it (no interactive >>> prompts)
         // Note: exec(__import__('sys').stdin.read()) has NO spaces, so it survives
         //       NanVix's space-splitting in build_string_table().
-        let guest_args = format!(
-            "-S -B -c exec(__import__('sys').stdin.read());PYTHONHOME={}",
-            PYTHON_HOME
-        );
+        let guest_args = Self::build_guest_args();
 
         // -- Spawn nanvixd -------------------------------------------------------
         // stdout/stderr are inherited (relayed directly to parent process).
         // Only stdin is piped so we can write the script and send EOF.
-        let mut child = match Command::new(&nanvixd_path)
-            .arg("-bin-dir")
-            .arg(&bin_dir)
-            .arg("-ramfs")
-            .arg(&ramfs_path)
-            .arg("--")
-            .arg(&python_path)
-            .arg(&guest_args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-        {
+        let mut child = match Self::spawn_nanvixd(
+            (&nanvixd_path, &bin_dir, &ramfs_path, &python_path),
+            &guest_args,
+            &request.script_code,
+        ) {
             Ok(c) => c,
             Err(e) => {
-                let err = NanVixError::Platform(format!("failed to spawn nanvixd: {}", e));
-                let _ = writeln!(logger, "{}", err);
-                return err.to_response();
+                let _ = writeln!(logger, "{}", e);
+                return e.to_response();
             }
         };
-
-        // Write script to stdin, then close (EOF triggers exec() in guest Python).
-        // With inherited stdout/stderr there is no pipe buffer deadlock risk.
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(e) = stdin.write_all(request.script_code.as_bytes()) {
-                let err =
-                    NanVixError::Runtime(format!("failed to write script to nanvixd stdin: {}", e));
-                let _ = writeln!(logger, "{}", err);
-                let _ = child.kill();
-                let _ = child.wait();
-                return err.to_response();
-            }
-            // stdin dropped here -- sends EOF to nanvixd
-        }
 
         // -- Watchdog ------------------------------------------------------------
         // Condvar-based watchdog with duplicated HANDLE for safe termination.
@@ -282,7 +307,7 @@ impl ScriptRunner for NanVixScriptRunner {
         let timed_out = Arc::new(AtomicBool::new(false));
         let cancel_pair = Arc::new((Mutex::new(false), Condvar::new()));
 
-        let watchdog = if timeout_ms < u32::MAX as u64 {
+        let watchdog = if timeout_ms < u64::MAX {
             let timed_out_clone = Arc::clone(&timed_out);
             let cancel_pair_clone = Arc::clone(&cancel_pair);
             let duration = Duration::from_millis(timeout_ms);
@@ -295,6 +320,9 @@ impl ScriptRunner for NanVixScriptRunner {
             let raw = child.as_raw_handle();
             let mut dup_handle = HANDLE::default();
             let dup_ok = unsafe {
+                // SAFETY: `raw` is the live process HANDLE from `std::process::Child`.
+                // We duplicate it into the current process with same access rights so
+                // the watchdog thread can safely terminate/close it independently.
                 DuplicateHandle(
                     GetCurrentProcess(),
                     HANDLE(raw),
@@ -305,46 +333,66 @@ impl ScriptRunner for NanVixScriptRunner {
                     DUPLICATE_SAME_ACCESS,
                 )
             };
-            let process_handle_raw: Option<usize> = if dup_ok.is_ok() {
-                Some(dup_handle.0 as usize)
-            } else {
-                None
-            };
+            if let Err(e) = dup_ok {
+                let err = NanVixError::Platform(format!(
+                    "failed to duplicate {} process handle: {}",
+                    NANVIXD_BINARY, e
+                ));
+                let _ = writeln!(logger, "{}", err);
+                let _ = child.kill();
+                let _ = child.wait();
+                return err.to_response();
+            }
+            let process_handle_raw = dup_handle.0 as usize;
 
             Some(thread::spawn(move || {
                 let (lock, cvar) = &*cancel_pair_clone;
-                let mut cancelled = lock.lock().unwrap();
-                let result = cvar.wait_timeout(cancelled, duration).unwrap();
-                cancelled = result.0;
+                let mut cancelled = lock.lock().unwrap_or_else(|e| e.into_inner());
+                let start = Instant::now();
+                let mut remaining = duration;
+                loop {
+                    let result = cvar
+                        .wait_timeout(cancelled, remaining)
+                        .unwrap_or_else(|e| e.into_inner());
+                    cancelled = result.0;
+                    if *cancelled || result.1.timed_out() {
+                        break;
+                    }
+                    let elapsed = start.elapsed();
+                    if elapsed >= duration {
+                        break;
+                    }
+                    remaining = duration.saturating_sub(elapsed);
+                }
 
                 // Always close the duplicated handle to avoid leaks.
                 let close_handle = |handle_raw: usize| {
                     use windows::Win32::Foundation::{CloseHandle, HANDLE};
                     let handle = HANDLE(handle_raw as *mut std::ffi::c_void);
+                    // SAFETY: `handle` was returned by `DuplicateHandle` in this
+                    // process and is closed exactly once by this watchdog thread.
                     let _ = unsafe { CloseHandle(handle) };
                 };
 
                 if *cancelled {
                     // Process already exited — close the handle and return.
-                    if let Some(handle_raw) = process_handle_raw {
-                        close_handle(handle_raw);
-                    }
+                    close_handle(process_handle_raw);
                     return;
                 }
 
                 // Timeout elapsed and process is still running — kill it.
-                if let Some(handle_raw) = process_handle_raw {
-                    use windows::Win32::Foundation::HANDLE;
-                    use windows::Win32::System::Threading::TerminateProcess;
+                // Set the timed_out flag BEFORE terminating so the main thread
+                // always sees it as true after child.wait() returns from a kill.
+                timed_out_clone.store(true, Ordering::SeqCst);
 
-                    let handle = HANDLE(handle_raw as *mut std::ffi::c_void);
-                    let kill_result = unsafe { TerminateProcess(handle, 1) };
-                    close_handle(handle_raw);
+                use windows::Win32::Foundation::HANDLE;
+                use windows::Win32::System::Threading::TerminateProcess;
 
-                    if kill_result.is_ok() {
-                        timed_out_clone.store(true, Ordering::SeqCst);
-                    }
-                }
+                let handle = HANDLE(process_handle_raw as *mut std::ffi::c_void);
+                // SAFETY: `handle` is a valid duplicated process handle owned by
+                // this thread, and passing exit code 1 is valid for termination.
+                let _ = unsafe { TerminateProcess(handle, 1) };
+                close_handle(process_handle_raw);
             }))
         } else {
             None
@@ -356,7 +404,7 @@ impl ScriptRunner for NanVixScriptRunner {
         // Signal watchdog to stop
         {
             let (lock, cvar) = &*cancel_pair;
-            let mut cancelled = lock.lock().unwrap();
+            let mut cancelled = lock.lock().unwrap_or_else(|e| e.into_inner());
             *cancelled = true;
             cvar.notify_one();
         }
@@ -377,7 +425,7 @@ impl ScriptRunner for NanVixScriptRunner {
 
         match exit_status {
             Ok(status) => {
-                let exit_code = status.code().unwrap_or(-1);
+                let exit_code = status.code().unwrap_or(ERROR_EXIT_CODE);
                 let _ = writeln!(logger, "NanVix: process exited with code {}", exit_code);
                 ScriptResponse {
                     exit_code,
@@ -385,7 +433,8 @@ impl ScriptRunner for NanVixScriptRunner {
                 }
             }
             Err(e) => {
-                let err = NanVixError::Runtime(format!("failed to wait for nanvixd: {}", e));
+                let err =
+                    NanVixError::Runtime(format!("failed to wait for {}: {}", NANVIXD_BINARY, e));
                 let _ = writeln!(logger, "{}", err);
                 err.to_response()
             }
@@ -401,11 +450,8 @@ mod tests {
 
     #[test]
     fn total_timeout_adds_boot_and_script() {
-        // script_timeout=0 -> u32::MAX (infinite), so total saturates
-        assert_eq!(
-            NanVixScriptRunner::total_timeout_ms(0),
-            u32::MAX as u64 + BOOT_TIMEOUT_MS
-        );
+        // script_timeout=0 => infinite script timeout sentinel.
+        assert_eq!(NanVixScriptRunner::total_timeout_ms(0), u64::MAX);
         // script_timeout=30000 -> 30s + 60s boot = 90s
         assert_eq!(NanVixScriptRunner::total_timeout_ms(30_000), 90_000);
     }
@@ -431,7 +477,7 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, -1);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(resp.error_message.contains("filesystem policy"));
     }
 
@@ -447,7 +493,7 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, -1);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(resp.error_message.contains("filesystem policy"));
     }
 
@@ -463,7 +509,7 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, -1);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(resp.error_message.contains("network policy"));
     }
 
@@ -479,7 +525,7 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, -1);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(resp.error_message.contains("network policy"));
     }
 
@@ -495,7 +541,7 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, -1);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(resp.error_message.contains("network policy"));
     }
 
@@ -508,7 +554,7 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, -1);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(resp.error_message.contains("workingDirectory"));
     }
 
@@ -520,7 +566,7 @@ mod tests {
         let request = CodexRequest::default();
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, -1);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(
             !resp.error_message.contains("filesystem policy"),
             "default request should not trigger filesystem policy rejection"
@@ -554,7 +600,7 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, -1);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(resp.error_message.contains("network proxy"));
     }
 
@@ -569,10 +615,7 @@ mod tests {
     #[test]
     fn guest_args_format_is_correct() {
         let expected = "-S -B -c exec(__import__('sys').stdin.read());PYTHONHOME=/sysroot";
-        let actual = format!(
-            "-S -B -c exec(__import__('sys').stdin.read());PYTHONHOME={}",
-            PYTHON_HOME
-        );
+        let actual = NanVixScriptRunner::build_guest_args();
         assert_eq!(actual, expected);
         assert!(!"exec(__import__('sys').stdin.read())".contains(' '));
     }
