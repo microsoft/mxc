@@ -39,8 +39,6 @@ export {
 // Export platform detection functions
 export {
   getPlatformSupport,
-  findWxcExecutable,
-  findLxcExecutable,
 } from './platform';
 
 // Export sandbox spawning functions
