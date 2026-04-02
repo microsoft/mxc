@@ -51,7 +51,7 @@ impl LxcScriptRunner {
     /// Polls `lxc-info` until the container has an IP address or the timeout is reached.
     fn wait_for_network(container_name: &str, timeout: Duration, logger: &mut Logger) -> bool {
         let start = Instant::now();
-        let poll_interval = Duration::from_millis(250);
+        let poll_interval = Duration::from_millis(500);
 
         let _ = writeln!(logger, "Waiting for container network to initialize...");
 
