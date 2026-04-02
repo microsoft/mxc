@@ -8,6 +8,7 @@ import {
   spawnSandbox,
   getPlatformSupport,
   SandboxPolicy,
+  getAvailableToolsPolicy,
 } from '@microsoft/mxc-sdk';
 
 import * as fs from 'fs';
@@ -86,8 +87,10 @@ program
   // Policy JSON should match the SandboxPolicy type defined in sdk/src/types.ts
   .option('--policy <json>', 'SandboxPolicy as a JSON string')
   .option('--policy-file <path>', 'Path to a SandboxPolicy JSON file')
+  .option('--cwd <path>', 'Working directory for the sandboxed process')
+  .option('--container-name <name>', 'Name for the sandbox container')
   .option('--debug', 'Enable debug output')
-  .action(async (options: { script?: string; scriptFile?: string; policy?: string; policyFile?: string; debug?: boolean }) => {
+  .action(async (options: { script?: string; scriptFile?: string; policy?: string; policyFile?: string; cwd?: string; containerName?: string; debug?: boolean }) => {
     try {
       let scriptCommand: string;
       if (options.script) {
@@ -117,11 +120,32 @@ program
         process.exit(1);
       }
 
+      // Discover tool paths from the current environment and merge them
+      const toolsPolicy = getAvailableToolsPolicy(process.env);
+      if (toolsPolicy.readonlyPaths.length > 0) {
+        if (!policy.filesystem) {
+          policy.filesystem = {};
+        }
+        policy.filesystem.readonlyPaths = [
+          ...(policy.filesystem.readonlyPaths ?? []),
+          ...toolsPolicy.readonlyPaths,
+        ];
+      }
+      if (toolsPolicy.readwritePaths.length > 0) {
+        if (!policy.filesystem) {
+          policy.filesystem = {};
+        }
+        policy.filesystem.readwritePaths = [
+          ...(policy.filesystem.readwritePaths ?? []),
+          ...toolsPolicy.readwritePaths,
+        ];
+      }
+
       console.log('Spawning sandboxed process using SDK...');
 
       const ptyProcess = spawnSandbox(scriptCommand, policy, {
         debug: options.debug ?? false,
-      });
+      }, options.cwd, options.containerName);
 
       ptyProcess.onData((data: string) => {
         process.stdout.write(data);

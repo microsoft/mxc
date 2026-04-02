@@ -49,7 +49,7 @@ describe('SDK end-to-end', () => {
   it('cmd.exe: should execute in appcontainer', () => {
     const dir = createTempDir();
     const policyFile = writeTempPolicy(dir, { version: '0.4.0-alpha' });
-    const output = runCli(`run-sdk --script "cmd.exe /c echo Container test successful" --policy-file "${policyFile}"`);
+    const output = runCli(`run-sdk --script "cmd.exe /c echo Container test successful" --cwd "${dir}" --container-name "test-1" --policy-file "${policyFile}"`);
     assert.ok(output.includes('Container test successful'));
     assert.ok(output.includes('Process exited with code 0'));
   });
@@ -57,7 +57,7 @@ describe('SDK end-to-end', () => {
   it('powershell 5.1: should execute in appcontainer', () => {
     const dir = createTempDir();
     const policyFile = writeTempPolicy(dir, { version: '0.4.0-alpha' });
-    const output = runCli(`run-sdk --script "powershell.exe -NoProfile -Command Write-Output 'PowerShell test successful'" --policy-file "${policyFile}"`);
+    const output = runCli(`run-sdk --script "powershell.exe -NoProfile -Command Write-Output 'PowerShell test successful'" --cwd "${dir}" --container-name "test-2" --policy-file "${policyFile}"`);
     assert.ok(output.includes('PowerShell test successful'));
     assert.ok(output.includes('Process exited with code 0'));
   });
@@ -65,7 +65,7 @@ describe('SDK end-to-end', () => {
   it('python: should execute in appcontainer', () => {
     const dir = createTempDir();
     const policyFile = writeTempPolicy(dir, { version: '0.4.0-alpha' });
-    const output = runCli(`run-sdk --script "python -c \\"print('Python test successful')\\"" --policy-file "${policyFile}"`);
+    const output = runCli(`run-sdk --script "python -c \\"print('Python test successful')\\"" --cwd "${dir}" --container-name "test-3" --policy-file "${policyFile}"`);
     assert.ok(output.includes('Python test successful'));
     assert.ok(output.includes('Process exited with code 0'));
   });
@@ -79,7 +79,7 @@ describe('SDK end-to-end', () => {
       version: '0.4.0-alpha',
       filesystem: { readwritePaths: [dir] },
     });
-    const output = runCli(`run-sdk --script "python ${scriptFile}" --policy-file "${policyFile}"`);
+    const output = runCli(`run-sdk --script "python ${scriptFile}" --cwd "${dir}" --container-name "test-4" --policy-file "${policyFile}"`);
     assert.ok(output.includes('WRITE_OK'));
     assert.ok(output.includes('Process exited with code 0'));
     assert.ok(fs.existsSync(testFile), 'File should have been written to readwrite path');
@@ -93,7 +93,7 @@ describe('SDK end-to-end', () => {
       version: '0.4.0-alpha',
       filesystem: { readonlyPaths: [dir] },
     });
-    const output = runCli(`run-sdk --script "cmd.exe /c type ${inputFile}" --policy-file "${policyFile}"`);
+    const output = runCli(`run-sdk --script "cmd.exe /c type ${inputFile}" --cwd "${dir}" --container-name "test-5" --policy-file "${policyFile}"`);
     assert.ok(output.includes('readonly test data'));
     assert.ok(output.includes('Process exited with code 0'));
   });
