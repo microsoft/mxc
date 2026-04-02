@@ -139,7 +139,6 @@ async fn execute_request(
         }
     }
 
-    // Format: RESULT <exit-code> <stdout-base64> <stderr-base64> <error-message>\n
     let stdout_b64 = base64_encode(&result.stdout);
     let stderr_b64 = base64_encode(&result.stderr);
     Ok(format!(
@@ -178,7 +177,7 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
     std::fs::create_dir_all(&temp_dir).context("create .wsb config dir")?;
 
     let max_attempts = 3;
-    let backoff_secs = [0, 10, 20]; // backoff between retries
+    let backoff_secs = [0, 10, 20]; // TODO: backoff tuned from initial runs; may need adjustment on stable builds
     for attempt in 1..=max_attempts {
         match try_launch_and_connect(state, &agent_dir, &rendezvous_dir, &python_dir, &temp_dir)
             .await
@@ -268,6 +267,9 @@ async fn try_launch_and_connect(
 }
 
 /// Deterministic port derived from the pipe name, in the ephemeral range.
+///
+/// TODO: Change to a more robust approach like bind to port 0 (OS-assigned)
+/// and communicate the actual port via a file or registry key.
 fn pipe_name_to_port(name: &str) -> u16 {
     let hash: u32 = name
         .bytes()

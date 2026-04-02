@@ -14,6 +14,8 @@ use wxc_common::sandbox_protocol::{
 };
 
 /// Four TCP connections to the guest agent.
+///
+/// TODO: These TCP connections are unencrypted. Verify if this is a concern.
 pub struct GuestConnection {
     pub control: TcpStream,
     pub stdin_stream: TcpStream,
