@@ -6,9 +6,13 @@
 //! Implements the `ScriptRunner` trait for LXC-based containment on Linux.
 
 use std::fmt::Write;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, LifecycleConfig, LxcConfig, ScriptResponse};
+use wxc_common::models::{
+    CodexRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, ScriptResponse,
+};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::validate_request;
 
@@ -41,6 +45,46 @@ impl LxcScriptRunner {
         } else {
             self.container_id.clone()
         }
+    }
+
+    /// Wait for the container's network stack to initialize.
+    /// Polls `lxc-info` until the container has an IP address or the timeout is reached.
+    fn wait_for_network(container_name: &str, timeout: Duration, logger: &mut Logger) -> bool {
+        let start = Instant::now();
+        let poll_interval = Duration::from_millis(500);
+
+        let _ = writeln!(logger, "Waiting for container network to initialize...");
+
+        while start.elapsed() < timeout {
+            let output = std::process::Command::new("lxc-info")
+                .arg("-n")
+                .arg(container_name)
+                .arg("-iH")
+                .output();
+
+            if let Ok(out) = output {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let ip = stdout.trim();
+                if !ip.is_empty() {
+                    let _ = writeln!(
+                        logger,
+                        "Container network ready (IP: {}, waited {:.1}s)",
+                        ip,
+                        start.elapsed().as_secs_f64()
+                    );
+                    return true;
+                }
+            }
+
+            thread::sleep(poll_interval);
+        }
+
+        let _ = writeln!(
+            logger,
+            "Warning: container network not ready after {:.1}s",
+            timeout.as_secs_f64()
+        );
+        false
     }
 
     /// Core execution logic.
@@ -97,6 +141,18 @@ impl LxcScriptRunner {
             let _ = writeln!(logger, "Container started successfully.");
         } else {
             let _ = writeln!(logger, "Container already running.");
+        }
+
+        // Wait for network only when the config uses network features (firewall rules
+        // or allowed/blocked hosts).
+        let needs_network = matches!(
+            request.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+        ) || !request.policy.allowed_hosts.is_empty()
+            || !request.policy.blocked_hosts.is_empty();
+
+        if needs_network {
+            Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
         }
 
         // Configure network rules
