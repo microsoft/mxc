@@ -14,11 +14,6 @@ use wxc_common::sandbox_protocol::{
 };
 
 /// Four TCP connections to the guest agent.
-///
-/// TODO: These TCP connections are unencrypted. Traffic traverses the
-/// Hyper-V virtual switch (host-local), but any host process with raw
-/// socket access could snoop script output (which may contain PII or
-/// tokens). Consider adding TLS if this becomes a concern.
 pub struct GuestConnection {
     pub control: TcpStream,
     pub stdin_stream: TcpStream,
