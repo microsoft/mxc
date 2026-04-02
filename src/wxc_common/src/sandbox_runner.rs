@@ -95,8 +95,39 @@ impl SandboxScriptRunner {
         }
     }
 
+    /// Check if Windows Sandbox is available on this system.
+    fn check_sandbox_available() -> Result<(), String> {
+        let output = std::process::Command::new("dism")
+            .args([
+                "/online",
+                "/get-featureinfo",
+                "/featurename:Containers-DisposableClientVM",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map_err(|err| format!("failed to run dism: {}", err))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("State : Enabled") {
+            Ok(())
+        } else {
+            Err(
+                "Windows Sandbox is not enabled. \
+                 Run 'dism /online /enable-feature /featurename:Containers-DisposableClientVM /all' \
+                 and reboot."
+                    .to_string(),
+            )
+        }
+    }
+
     /// Send an execution request to the daemon and read the result.
     fn execute_via_daemon(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+        // Pre-flight: verify Windows Sandbox is available.
+        if let Err(err) = Self::check_sandbox_available() {
+            return ScriptResponse::error(&err);
+        }
+
         // Ensure daemon is up.
         if let Err(e) = self.ensure_daemon_running(logger) {
             return ScriptResponse::error(&e);
@@ -133,52 +164,39 @@ impl SandboxScriptRunner {
 
         let response_line = response_line.trim();
         if let Some(rest) = response_line.strip_prefix("RESULT ") {
-            // Extended format: RESULT <exit-code> <stdout-base64> <stderr-base64> <error-message>
+            // Format: RESULT <exit-code> <stdout-base64> <stderr-base64> <error-message>
             let parts: Vec<&str> = rest.splitn(4, ' ').collect();
-            if parts.len() >= 3 {
-                let exit_code = parts[0].parse::<i32>().unwrap_or(-1);
-                let stdout_text = base64_decode(parts[1])
-                    .ok()
-                    .and_then(|b| String::from_utf8(b).ok())
-                    .unwrap_or_default();
-                let stderr_text = base64_decode(parts[2])
-                    .ok()
-                    .and_then(|b| String::from_utf8(b).ok())
-                    .unwrap_or_default();
-                let error_msg = if parts.len() == 4 {
-                    parts[3].to_string()
-                } else {
-                    String::new()
-                };
+            if parts.len() < 3 {
+                return ScriptResponse::error(&format!(
+                    "malformed RESULT from daemon: expected at least 3 fields, got {}",
+                    parts.len()
+                ));
+            }
 
-                ScriptResponse {
-                    exit_code,
-                    standard_out: stdout_text,
-                    standard_err: stderr_text.clone(),
-                    error_message: if error_msg.is_empty() {
-                        stderr_text
-                    } else {
-                        error_msg
-                    },
-                }
+            let exit_code = parts[0].parse::<i32>().unwrap_or(-1);
+            let stdout_text = base64_decode(parts[1])
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_default();
+            let stderr_text = base64_decode(parts[2])
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_default();
+            let error_msg = if parts.len() == 4 {
+                parts[3].to_string()
             } else {
-                // Fallback: legacy format "RESULT <exit-code> <error-message>"
-                let (code_str, error_msg) = match rest.find(' ') {
-                    Some(pos) => (&rest[..pos], rest[pos + 1..].to_string()),
-                    None => (rest, String::new()),
-                };
-                let exit_code = code_str.parse::<i32>().unwrap_or(-1);
+                String::new()
+            };
 
-                ScriptResponse {
-                    exit_code,
-                    standard_out: String::new(),
-                    standard_err: if error_msg.is_empty() {
-                        String::new()
-                    } else {
-                        error_msg.clone()
-                    },
-                    error_message: error_msg,
-                }
+            ScriptResponse {
+                exit_code,
+                standard_out: stdout_text,
+                standard_err: stderr_text.clone(),
+                error_message: if error_msg.is_empty() {
+                    stderr_text
+                } else {
+                    error_msg
+                },
             }
         } else if let Some(stripped) = response_line.strip_prefix("ERROR ") {
             ScriptResponse::error(stripped)

@@ -104,7 +104,7 @@ async fn execute_request(
     }
 
     // Execute on the guest.
-    let (exit_code, error_message, stdout_bytes, stderr_bytes, control_residual) = {
+    let result = {
         let mut locked = state.lock().await;
         let conn = locked
             .guest_connection
@@ -129,7 +129,8 @@ async fn execute_request(
         let mut locked = state.lock().await;
         let addr = locked.guest_addr.context("no guest address")?;
         if let Some(conn) = locked.guest_connection.as_mut() {
-            if let Err(err) = tcp_bridge::reconnect_data_streams(conn, addr, control_residual).await
+            if let Err(err) =
+                tcp_bridge::reconnect_data_streams(conn, addr, result.control_residual).await
             {
                 eprintln!("[daemon] failed to reconnect data streams: {:#}", err);
                 // Mark the connection as dead so next request re-launches.
@@ -139,11 +140,11 @@ async fn execute_request(
     }
 
     // Format: RESULT <exit-code> <stdout-base64> <stderr-base64> <error-message>\n
-    let stdout_b64 = base64_encode(&stdout_bytes);
-    let stderr_b64 = base64_encode(&stderr_bytes);
+    let stdout_b64 = base64_encode(&result.stdout);
+    let stderr_b64 = base64_encode(&result.stderr);
     Ok(format!(
         "RESULT {} {} {} {}\n",
-        exit_code, stdout_b64, stderr_b64, error_message
+        result.exit_code, stdout_b64, stderr_b64, result.error_message
     ))
 }
 

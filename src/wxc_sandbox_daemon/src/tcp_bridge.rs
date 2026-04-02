@@ -21,6 +21,21 @@ pub struct GuestConnection {
     pub stderr_stream: TcpStream,
 }
 
+/// Result of executing a script on the guest agent.
+pub struct ExecResult {
+    /// Process exit code (negative values indicate error/timeout).
+    pub exit_code: i32,
+    /// Optional error message from the agent.
+    pub error_message: String,
+    /// Captured stdout bytes from the child process.
+    pub stdout: Vec<u8>,
+    /// Captured stderr bytes from the child process.
+    pub stderr: Vec<u8>,
+    /// Any bytes read from the control channel beyond the EXIT frame.
+    /// May contain a StreamsReady message that arrived in the same read.
+    pub control_residual: Vec<u8>,
+}
+
 /// Connect to the guest agent at `addr`, establishing all 4 channels.
 /// Waits for the `Ready` message on the control channel before returning.
 pub async fn connect_to_guest(
@@ -90,10 +105,6 @@ async fn wait_for_ready(control: &mut TcpStream, timeout: std::time::Duration) -
 }
 
 /// Send an EXEC request to the guest and relay stdin/stdout/stderr.
-///
-/// Returns `(exit_code, error_message, stdout_bytes, stderr_bytes, control_residual)`.
-/// The `control_residual` contains any bytes read from the control channel
-/// beyond the EXIT frame (e.g. a StreamsReady that arrived in the same read).
 pub async fn execute_on_guest(
     conn: &mut GuestConnection,
     exec_id: &str,
@@ -101,7 +112,7 @@ pub async fn execute_on_guest(
     working_directory: &str,
     timeout_ms: u32,
     host_stdin: &[u8],
-) -> Result<(i32, String, Vec<u8>, Vec<u8>, Vec<u8>)> {
+) -> Result<ExecResult> {
     // Send EXEC command.
     let exec_msg = ControlMessage::Exec(ExecRequest {
         exec_id: exec_id.to_string(),
@@ -185,7 +196,13 @@ pub async fn execute_on_guest(
     let stderr = stderr_result.unwrap_or_default();
     let (exit_code, error_message, control_residual) = exit_result?;
 
-    Ok((exit_code, error_message, stdout, stderr, control_residual))
+    Ok(ExecResult {
+        exit_code,
+        error_message,
+        stdout,
+        stderr,
+        control_residual,
+    })
 }
 
 /// Wait for `StreamsReady` from the agent, then connect 3 new data streams.
