@@ -199,6 +199,30 @@ impl Default for LifecycleConfig {
     }
 }
 
+/// Placeholder experimental feature for testing the experimental infrastructure.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestFeatureConfig {
+    /// Message to log when the feature is applied.
+    pub message: String,
+}
+
+impl TestFeatureConfig {
+    pub fn from_raw(message: Option<String>) -> Self {
+        Self {
+            message: message.unwrap_or_default(),
+        }
+    }
+}
+
+/// Container for all experimental feature configs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExperimentalConfig {
+    /// Placeholder feature for testing experimental infrastructure.
+    pub test: Option<TestFeatureConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodexRequest {
@@ -225,6 +249,10 @@ pub struct CodexRequest {
     pub container_config: ContainerConfig,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
+    /// Whether the --experimental flag was passed.
+    pub experimental_enabled: bool,
+    /// Experimental feature configs (only applied when experimental_enabled is true).
+    pub experimental: ExperimentalConfig,
 }
 
 impl Default for CodexRequest {
@@ -243,6 +271,8 @@ impl Default for CodexRequest {
             sandbox_config: SandboxConfig::default(),
             container_config: ContainerConfig::default(),
             lxc_config: LxcConfig::default(),
+            experimental_enabled: false,
+            experimental: ExperimentalConfig::default(),
         }
     }
 }

@@ -128,6 +128,11 @@ export interface SandboxSpawnOptions {
   debug?: boolean;
 
   /**
+   * Enable experimental features
+   */
+  experimental?: boolean;
+
+  /**
    * PTY options to pass to node-pty
    */
   ptyOptions?: pty.IPtyForkOptions;
@@ -198,6 +203,10 @@ export function spawnSandbox(
 
   if (options.debug) {
     args.push('--debug');
+  }
+
+  if (options.experimental) {
+    args.push('--experimental');
   }
 
   const ptyOpts: pty.IPtyForkOptions = {

@@ -10,8 +10,9 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, LifecycleConfig, LxcConfig,
-    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SandboxConfig,
+    CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
+    LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress,
+    ProxyConfig, SandboxConfig, TestFeatureConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -117,6 +118,18 @@ struct RawLifecycle {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawTestFeature {
+    message: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawExperimental {
+    test: Option<RawTestFeature>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawConfig {
     version: Option<String>,
     #[serde(rename = "containerId")]
@@ -132,6 +145,7 @@ struct RawConfig {
     lxc: Option<RawLxc>,
     filesystem: Option<RawFilesystem>,
     network: Option<RawNetwork>,
+    experimental: Option<RawExperimental>,
 }
 
 // ---------- Public API ----------
@@ -512,6 +526,14 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     // Schema version check
     validate_schema_version(&schema_version, logger)?;
 
+    // Experimental section (parsed but only applied when --experimental flag is set)
+    let experimental = if let Some(raw_exp) = raw.experimental {
+        let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
+        ExperimentalConfig { test }
+    } else {
+        ExperimentalConfig::default()
+    };
+
     Ok(CodexRequest {
         schema_version,
         container_id,
@@ -526,6 +548,8 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         sandbox_config,
         container_config,
         lxc_config,
+        experimental_enabled: false,
+        experimental,
     })
 }
 
@@ -1344,5 +1368,70 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.container_config.image, "python:3.12");
+    }
+
+    // ---------- Experimental feature tests ----------
+
+    #[test]
+    fn experimental_section_parsed_when_present() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "world"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.test.is_some());
+        assert_eq!(req.experimental.test.unwrap().message, "world");
+    }
+
+    #[test]
+    fn experimental_section_absent_is_ok() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.test.is_none());
+    }
+
+    #[test]
+    fn experimental_enabled_defaults_to_false() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "check"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.experimental_enabled);
+    }
+
+    #[test]
+    fn unknown_experimental_fields_ignored() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"futureFeature": {"x": 1}, "test": {"message": "hi"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.test.is_some());
+    }
+
+    #[test]
+    fn experimental_test_message_parsed() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "greetings"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let test = req.experimental.test.unwrap();
+        assert_eq!(test.message, "greetings");
+    }
+
+    #[test]
+    fn experimental_test_default_message() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let test = req.experimental.test.unwrap();
+        assert!(test.message.is_empty());
     }
 }

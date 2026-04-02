@@ -105,6 +105,17 @@ impl LxcScriptRunner {
             self.config.distribution, self.config.release
         );
 
+        // Apply experimental features when flag is set
+        if request.experimental_enabled {
+            if let Some(ref test) = request.experimental.test {
+                let _ = writeln!(
+                    logger,
+                    "Experimental feature 'test' applied: {}",
+                    test.message
+                );
+            }
+        }
+
         // Create container handle
         let container = LxcContainer::new(&container_name, None);
         let mut container_created = false;

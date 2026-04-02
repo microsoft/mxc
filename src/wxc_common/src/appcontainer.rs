@@ -515,6 +515,17 @@ impl ScriptRunner for AppContainerScriptRunner {
         if let Err(e) = validate_request(request) {
             return ScriptResponse::error(&e.to_string());
         }
+
+        // Apply experimental features when flag is set
+        if request.experimental_enabled {
+            if let Some(ref test) = request.experimental.test {
+                logger.log_line(&format!(
+                    "Experimental feature 'test' applied: {}",
+                    test.message
+                ));
+            }
+        }
+
         if let Err(e) = self.initialize(request) {
             return ScriptResponse::error(&e.to_string());
         }

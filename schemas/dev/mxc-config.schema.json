@@ -185,6 +185,23 @@
           "description": "Distribution release version (e.g., '3.20', '24.04'). Required."
         }
       }
+    },
+
+    "experimental": {
+      "type": "object",
+      "description": "Experimental features. Only active when --experimental is passed.",
+      "properties": {
+        "test": {
+          "type": "object",
+          "description": "Placeholder feature for testing experimental infrastructure.",
+          "properties": {
+            "message": {
+              "type": "string",
+              "description": "Message to log when the feature is applied."
+            }
+          }
+        }
+      }
     }
   }
 }
