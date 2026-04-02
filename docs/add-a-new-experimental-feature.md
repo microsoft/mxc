@@ -72,7 +72,8 @@ feature with its own typed schema:
           "default": false,
           "description": "Allow CUDA runtime access inside the container."
         }
-      }
+      },
+      "required": ["deviceIndex", "memoryLimitMb"]
     }
   }
 }
@@ -130,24 +131,33 @@ struct RawGpuIsolation {
 }
 ```
 
-In `convert_raw_config()`, map it directly — no name matching needed:
+In `convert_raw_config()`, map it directly — no name matching needed. Each
+feature should own its parsing via a constructor:
 
 ```rust
 let mut experimental = ExperimentalConfig::default();
 
 if let Some(raw_exp) = raw.experimental {
     if let Some(c) = raw_exp.compartments {
-        experimental.compartments = Some(CompartmentsConfig {
-            namespace: c.namespace,
-            isolation_level: c.isolation_level,
-        });
+        experimental.compartments = Some(CompartmentsConfig::from_raw(c)?);
     }
     if let Some(g) = raw_exp.gpu_isolation {
-        experimental.gpu_isolation = Some(GpuIsolationConfig {
-            device_index: g.device_index,
-            memory_limit_mb: g.memory_limit_mb,
-            allow_cuda: g.allow_cuda.unwrap_or(false),
-        });
+        experimental.gpu_isolation = Some(GpuIsolationConfig::from_raw(g)?);
+    }
+}
+```
+
+Each feature implements its own `from_raw()` constructor to keep
+`convert_raw_config()` clean:
+
+```rust
+impl GpuIsolationConfig {
+    fn from_raw(raw: RawGpuIsolation) -> Result<Self, String> {
+        Ok(Self {
+            device_index: raw.device_index,
+            memory_limit_mb: raw.memory_limit_mb,
+            allow_cuda: raw.allow_cuda.unwrap_or(false),
+        })
     }
 }
 ```
@@ -251,10 +261,10 @@ Verify three things:
 ## Step 6: Update the SDK (if needed)
 
 If your feature should be accessible from the TypeScript SDK, add
-`experimental` to the `SpawnOptions` interface in `sdk/src/types.ts`:
+`experimental` to the `SandboxSpawnOptions` interface in `sdk/src/sandbox.ts`:
 
 ```typescript
-export interface SpawnOptions {
+export interface SandboxSpawnOptions {
   debug?: boolean;
   experimental?: boolean;
 }
@@ -273,7 +283,10 @@ When your experimental feature is ready to ship:
 4. Remove the `if request.experimental_enabled` guard
 5. Bump the minor version
 6. Add a parser error for configs still referencing the feature under
-   `experimental`: `"gpuIsolation has moved to the stable section"`
+   `experimental`: `"gpuIsolation has moved to the stable section"`.
+   This error should persist for at least one release cycle so users have
+   time to migrate, then it can be relaxed to the standard "unknown field"
+   behavior.
 
 ## Checklist
 

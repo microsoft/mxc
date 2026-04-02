@@ -188,7 +188,10 @@ fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse
 4. Remove the `if request.experimental_enabled` guard
 5. Bump the minor version
 6. Add a parser error for configs still referencing the feature under
-   `experimental`: `"<feature> has moved to the stable section"`
+   `experimental`: `"<feature> has moved to the stable section"`.
+   This error should persist for at least one release cycle so users have
+   time to migrate, then it can be relaxed to the standard "unknown field"
+   behavior.
 
 ## Data Flow
 
