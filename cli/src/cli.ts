@@ -22,52 +22,6 @@ program
   .version('0.1.0');
 
 program
-  .command('run')
-  .description('Run a config for a specific container backend')
-  .argument('<config>', 'Path to ContainerConfig JSON file or base64-encoded config')
-  .option('--config-base64', 'Treat config argument as base64-encoded JSON')
-  .option('--debug', 'Enable debug output')
-  .action(async (config: string, options: { configBase64?: boolean; debug?: boolean }) => {
-    try {
-      const platform = require('os').platform();
-      let execPath: string | null;
-      if (platform === 'linux') {
-        const { findLxcExecutable } = require('@microsoft/mxc-sdk');
-        execPath = findLxcExecutable();
-      } else {
-        const { findWxcExecutable } = require('@microsoft/mxc-sdk');
-        execPath = findWxcExecutable();
-      }
-      if (!execPath) {
-        console.error('Error: Executable not found. Ensure wxc-exec or lxc-exec is built.');
-        process.exit(1);
-      }
-      const executor = new ContainerExecutor(execPath);
-      const result = await executor.run(config, {
-        isBase64: options.configBase64 ?? false,
-        debug: options.debug ?? false
-      });
-
-      if (result.success) {
-        console.log('Execution successful');
-        if (result.stdout) {
-          console.log('Output:', result.stdout);
-        }
-        process.exit(result.exitCode);
-      } else {
-        console.error('Execution failed');
-        if (result.stderr) {
-          console.error('Error:', result.stderr);
-        }
-        process.exit(result.exitCode);
-      }
-    } catch (error) {
-      console.error('Error:', error instanceof Error ? error.message : String(error));
-      process.exit(1);
-    }
-  });
-
-program
   .command('validate')
   .description('Validate a configuration file')
   .argument('<config>', 'Path to JSON configuration file')
