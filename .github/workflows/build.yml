@@ -119,6 +119,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Run tests
+        run: npm test
+
       - name: Pack npm package
         run: npm pack
 

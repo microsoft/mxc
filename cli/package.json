@@ -12,7 +12,7 @@
     "watch": "tsc --watch",
     "start": "node dist/cli.js",
     "dev": "ts-node src/cli.ts",
-    "test": "jest",
+    "test": "node --test dist/cli.test.js",
     "lint": "eslint src --ext .ts",
     "clean": "rimraf dist"
   },

@@ -1,10 +1,14 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import * as pty from 'node-pty';
-import * as fs from 'fs';
-import * as path from 'path';
 import * as os from 'os';
 import { randomBytes } from "crypto";
-import { SandboxPolicy, WxcConfiguration } from './types';
+import { parse as semverParse } from 'semver';
+import { SandboxPolicy, ContainerConfig } from './types';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
+
+const SUPPORTED_VERSION = '0.4.0-alpha';
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -13,8 +17,27 @@ function generateRandomContainerName(): string {
     return randomBytes(4).toString("hex");
 }
 
+function validatePolicyVersion(version: string): void {
+    if (!version) {
+        throw new Error('Policy version is required');
+    }
+
+    const parsed = semverParse(version);
+    if (!parsed) {
+        throw new Error(`Invalid policy version '${version}': must be valid semver (e.g., '0.4.0' or '0.4.0-alpha')`);
+    }
+
+    const supported = semverParse(SUPPORTED_VERSION);
+    if (parsed.major !== supported!.major) {
+        throw new Error(
+            `Policy version '${version}' is incompatible (major version ${parsed.major} != ${supported!.major}). ` +
+            `This SDK supports major version ${supported!.major}.`
+        );
+    }
+}
+
 /**
- * Builds a sandbox payload JSON object from the sandbox configuration.
+ * Builds a sandbox payload JSON object from the sandbox policy.
  * @param script The command line script to execute
  * @param policy The sandbox policy configuration
  * @param workingDirectory Optional working directory path
@@ -26,28 +49,36 @@ export function buildSandboxPayload(
     policy: SandboxPolicy,
     workingDirectory?: string,
     containerName?: string,
-): WxcConfiguration {
+): ContainerConfig {
+    validatePolicyVersion(policy.version);
+
     const platform = os.platform();
+    const name = containerName ?? generateRandomContainerName();
+
+    const config: ContainerConfig = {
+        process: {
+            commandLine: script,
+            cwd: workingDirectory,
+        },
+        containerId: name,
+        filesystem: {
+            readwritePaths: policy.filesystem?.readwritePaths,
+            readonlyPaths: policy.filesystem?.readonlyPaths,
+            deniedPaths: policy.filesystem?.deniedPaths,
+            clearPolicyOnExit: true,
+        },
+    };
 
     if (platform === 'linux') {
-        // Build LXC payload
-        const config: WxcConfiguration = {
-            script,
-            containment: 'lxc',
-            workingDirectory,
-            lxc: {
-                containerName: containerName ?? generateRandomContainerName(),
-                destroyOnExit: true,
-            },
-            filesystem: {
-                readwritePaths: policy.filesystem?.readwritePaths,
-                readonlyPaths: policy.filesystem?.readonlyPaths,
-                deniedPaths: policy.filesystem?.deniedPaths,
-                clearPolicyOnExit: true,
-            },
+        config.containment = 'lxc';
+        config.lxc = {
+            containerName: name,
+            // Default Linux distro since SandboxPolicy doesn't expose this
+            distribution: 'alpine',
+            release: '3.23',
+            destroyOnExit: true,
         };
 
-        // Add network config if specified
         if (policy.network) {
             config.network = {
                 defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
@@ -58,31 +89,19 @@ export function buildSandboxPayload(
         return config;
     }
 
-    // Existing Windows payload
+    // Windows / AppContainer
     const capabilities: string[] = [];
-
     if (policy.network?.allowOutbound) {
         capabilities.push("internetClient");
     }
-
     if (policy.network?.allowLocalNetwork) {
         capabilities.push("privateNetworkClientServer");
     }
 
-    const config: WxcConfiguration = {
-        script,
-        workingDirectory,
-        appContainer: {
-            name: containerName ?? generateRandomContainerName(),
-            leastPrivilege: false,
-            capabilities,
-        },
-        filesystem: {
-            readwritePaths: policy.filesystem?.readwritePaths,
-            readonlyPaths: policy.filesystem?.readonlyPaths,
-            deniedPaths: policy.filesystem?.deniedPaths,
-            clearPolicyOnExit: true,
-        },
+    config.appContainer = {
+        name: name,
+        leastPrivilege: false,
+        capabilities,
     };
 
     return config;
@@ -161,23 +180,10 @@ export function spawnSandbox(
   // Build config
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
 
-  // Prepare arguments
   const args: string[] = [];
-  const useBase64 = options.debug ?? true;
-
-  if (useBase64) {
-    const configJson = JSON.stringify(config);
-    const configBase64 = Buffer.from(configJson, 'utf-8').toString('base64');
-    args.push('--config-base64', configBase64);
-  } else {
-    const tempDir = os.tmpdir();
-    const tempFile = path.join(
-      tempDir,
-      `mxc-config-${Date.now()}-${Math.random().toString(36).substring(7)}.json`
-    );
-    fs.writeFileSync(tempFile, JSON.stringify(config, null, 2), 'utf-8');
-    args.push('--config', tempFile);
-  }
+  const configJson = JSON.stringify(config);
+  const configBase64 = Buffer.from(configJson, 'utf-8').toString('base64');
+  args.push('--config-base64', configBase64);
 
   if (options.debug) {
     args.push('--debug');
