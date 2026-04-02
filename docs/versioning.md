@@ -49,12 +49,12 @@ Per [semver.org](https://semver.org/):
 mxc/schemas/
 ├── stable/
 │   ├── schema.0.3.0-alpha.json      (shipped — historical)
-│   └── schema.0.4.0-alpha.json      (shipped — current stable)
+│   └── mxc-config.schema.0.4.0-alpha.json  (shipped — current stable)
 └── dev/
-    └── mxc-config.schema.json       (current — includes experimental section definition)
+    └── mxc-config.schema.0.5.0-dev.json   (current — includes experimental section definition)
 ```
 
-The dev schema file (`mxc-config.schema.json`) must define the `experimental`
+The dev schema file (`mxc-config.schema.X.Y.Z-dev.json`) must define the `experimental`
 section structure so that editors can validate experimental configs. Stable
 schemas in `stable/` do not include the experimental section.
 
@@ -132,7 +132,7 @@ The SDK passes `--experimental` to the underlying binary when this option is set
 ### Forking Code for Experimental Features
 
 Developers adding experimental features follow this pattern. For a detailed
-step-by-step guide, see [Adding a New Experimental Feature](add-a-new-experimental-feature.md).
+step-by-step guide, see [Authoring a New Feature](authoring-a-new-feature.md).
 
 **In `config_parser.rs`:**
 ```rust

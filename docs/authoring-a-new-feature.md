@@ -21,7 +21,7 @@ Adding an experimental feature touches these files:
 
 | File | What to change |
 |------|----------------|
-| `schemas/dev/mxc-config.schema.json` | Add `gpuIsolation` as a feature under `experimental` |
+| `schemas/dev/mxc-config.schema.0.5.0-dev.json` | Add `gpuIsolation` as a feature under `experimental` |
 | `src/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |
 | `src/wxc_common/src/config_parser.rs` | Add `gpuIsolation` field to `RawExperimental` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
@@ -29,7 +29,7 @@ Adding an experimental feature touches these files:
 
 ## Step 1: Update the schema
 
-In `schemas/dev/mxc-config.schema.json`, the `experimental` section already
+In `schemas/dev/mxc-config.schema.0.5.0-dev.json`, the `experimental` section already
 exists with `compartments` as a feature. Add `gpuIsolation` as a new
 feature with its own typed schema:
 
@@ -219,6 +219,13 @@ fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse
 `experimental_enabled` is false, behavior must be identical to before your
 change.
 
+**Validation:** Schema validation for your feature should happen in the feature
+component (e.g., `apply_gpu_isolation()`), not in `config_parser.rs`. The parser
+only deserializes the JSON into structs — the feature component owns validating
+that the config values are correct, compatible, and make sense for the current
+backend. This keeps `config_parser.rs` lean and lets each feature evolve its
+validation independently.
+
 ## Step 5: Add a test config
 
 Create a test config that exercises your feature:
@@ -290,7 +297,7 @@ When your experimental feature is ready to ship:
 
 ## Checklist
 
-- [ ] Schema updated in `schemas/dev/mxc-config.schema.json`
+- [ ] Schema updated in `schemas/dev/mxc-config.schema.X.Y.Z-dev.json`
 - [ ] Model struct added to `models.rs`
 - [ ] Parsing added to `config_parser.rs` with unit tests
 - [ ] `--experimental` flag wired through (if not already)
