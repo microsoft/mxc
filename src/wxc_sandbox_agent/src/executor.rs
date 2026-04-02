@@ -15,6 +15,11 @@ use wxc_common::sandbox_protocol::{
 /// Main command loop.  Reads control messages from the host and executes
 /// scripts until the control connection is closed.  After each execution,
 /// re-accepts fresh data connections so the next EXEC has usable streams.
+///
+/// TODO: Multi-exec reuses the same VM, so a previous script's side
+/// effects (files, processes, registry, env changes) persist. Consider
+/// killing orphan processes and cleaning temp directories between
+/// executions to limit cross-execution state leakage.
 pub async fn run_command_loop(
     mut control: TcpStream,
     stdin_stream: TcpStream,

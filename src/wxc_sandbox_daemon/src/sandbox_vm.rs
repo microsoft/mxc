@@ -197,6 +197,10 @@ pub async fn launch(wsb_path: &Path) -> Result<()> {
 /// Kills all sandbox and related Hyper-V processes, then polls until they
 /// are fully gone before returning. Best-effort — errors are logged but
 /// not propagated.
+///
+/// TODO: `taskkill /F /IM` kills ALL sandbox instances system-wide, not
+/// just ours. If the user has a manual sandbox open, we'd kill it. Scope
+/// teardown to only our process tree or track the sandbox PID at launch.
 pub async fn teardown() {
     eprintln!("[daemon] tearing down sandbox");
 

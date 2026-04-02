@@ -155,7 +155,6 @@ impl SandboxScriptRunner {
             return ScriptResponse::error(&format!("send to daemon: {}", e));
         }
 
-        // Read the "RESULT <exit-code> <error-message>" response line.
         let mut reader = BufReader::new(&stream);
         let mut response_line = String::new();
         if let Err(e) = reader.read_line(&mut response_line) {
