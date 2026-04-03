@@ -1,75 +1,99 @@
-# WXC SDK
-
-TypeScript SDK for WXC - spawn and manage sandboxed processes.
+# MXC SDK
 
 ## Overview
 
-The WXC SDK provides a Node.js interface for running processes in sandboxed environments. It wraps platform specific, native bootstrap executables and exposes a clean TypeScript API for spawning sandboxed processes with full interactive I/O support via node-pty.
+The MXC SDK provides a Node.js interface for creating and managing policy-based containers. It exposes APIs for:
+
+- Defining container policies (filesystem, network)
+- Discovering host tools and helpers for building the policy
+- Spawning containerized processes with full interactive I/O via node-pty
 
 ## Features
 
-- **Platform Detection**: Check if WXC is supported on the current system
-- **Sandboxing Methods**: Query available sandboxing capabilities
-- **Interactive Process Spawning**: Spawn sandboxed processes with full I/O using node-pty
-- **TypeScript Support**: Full type definitions for all configuration options
-- **Flexible Configuration**: Support for filesystem restrictions, network policies, and namespace capabilities
+- **Platform Detection**: Check if MXC is supported on the current system
+- **Policy-Driven Configuration**: Define what the container can access using a `SandboxPolicy`
+- **Policy Discovery**: Automatically discover host tools, user profile paths, and temp directories to build the policy
+- **Interactive Process Spawning**: Spawn containerized processes with full PTY I/O using node-pty
+- **Cross-Platform**: Process containment for Windows and Linux
+- **TypeScript Support**: Full type definitions for all public APIs
 
 ## Installation
 
-The WXC SDK is currently published to a private registry hosted with NPM.  To use this registry, you must have an access token with permission to read from this scope and will need to explicitly install the SDK into your local node modules.
+### From a tarball
 
 ```bash
-npm install --save @microsoft/mxc-sdk
+npm install @microsoft/mxc-sdk-<version>.tgz
 ```
 
+### From source
+
+```bash
+cd sdk
+npm install
+npm run build
+```
+
+Then reference it from your project (e.g., via `npm link` or a relative path in `package.json`).
+
 **Requirements**:
-- **Windows Build**: Build 26559 or later on branch `ge_current_directwinai` or a derivative
-  - The SDK checks the registry key `HKLM\Software\Microsoft\Windows NT\CurrentVersion\BuildLab`
-  - Format: `buildNumber.branch.buildDate` (e.g., `26559.ge_current_directwinai.260130-1453`)
-  - Minimum build number: 26559
-- **wxc-exec.exe**: Must be built and available (build with `cargo build --release` from the `src` directory)
+- **Windows**: Windows 11 build 26100+ with UBR ≥ 7965 (for builds 26100–26500)
+- **Linux**: LXC must be installed and available
 
 **Platform Support**:
-- ✅ Windows x64 (specific build required - see above)
-- ✅ Windows ARM64 (specific build required - see above)
+- ✅ Windows x64
+- ✅ Windows ARM64
+- ✅ Linux x64
+- ✅ Linux ARM64
 - ❌ macOS (not supported)
-- ❌ Linux (not supported)
-- ❌ Other platforms (not supported)
 
-> **Note**: The SDK automatically detects the platform architecture (x64 or ARM64) and uses the appropriate wxc-exec.exe binary.
+> **Note**: The SDK automatically detects the platform and architecture.
 
-> **Note**: Use `getPlatformSupport()` to check if your system meets all requirements before attempting to spawn sandboxed processes.
+> **Note**: Use `getPlatformSupport()` to check if your system meets all requirements before attempting to create containers.
 
 ## Quick Start
 
 ```typescript
-import { spawnSandbox, SandboxConfig, getPlatformSupport } from '@microsoft/mxc-sdk';
+import {
+  spawnSandbox,
+  SandboxPolicy,
+  getPlatformSupport,
+  getAvailableToolsPolicy,
+  getTemporaryFilesPolicy,
+} from '@microsoft/mxc-sdk';
 
 // Check platform support
-if (!getPlatformSupport().supported) {
-  console.error('WXC currently only supports Windows 11');
+const support = getPlatformSupport();
+if (!support.isSupported) {
+  console.error('MXC is not supported:', support.reason);
   process.exit(1);
 }
 
-// Create a sandbox configuration
-const config: SandboxConfig = {
-  script: 'python -c "print(\'Hello from sandbox!\')"',
-  appContainer: {
-    name: 'MyApp',
-    learningMode: true
-  }
+// Discover host tools and temp directories
+const tools = getAvailableToolsPolicy(process.env);
+const temp = getTemporaryFilesPolicy();
+
+// Define a sandbox policy
+const policy: SandboxPolicy = {
+  version: '0.4.0-alpha',
+  filesystem: {
+    readonlyPaths: tools.readonlyPaths,
+    readwritePaths: temp.readwritePaths,
+  },
+  network: {
+    allowOutbound: true,
+  },
 };
 
-// Spawn the sandboxed process
-const pty = spawnSandbox(config);
+// Spawn a sandboxed payload
+const ptyProcess = spawnSandbox('python -c "print(\'Hello from sandbox!\')"', policy);
 
 // Handle output
-pty.onData((data: string) => {
+ptyProcess.onData((data: string) => {
   process.stdout.write(data);
 });
 
 // Handle exit
-pty.onExit((event: { exitCode: number }) => {
+ptyProcess.onExit((event: { exitCode: number }) => {
   console.log(`Process exited with code ${event.exitCode}`);
 });
 ```
@@ -79,22 +103,29 @@ pty.onExit((event: { exitCode: number }) => {
 ### Platform Detection
 
 #### `getPlatformSupport(): PlatformSupport`
-Returns detailed platform support information including available sandboxing methods and the reason for any unsupported status.
+
+Returns platform support information including whether MXC is supported.
 
 ```typescript
 import { getPlatformSupport } from '@microsoft/mxc-sdk';
 
 const support = getPlatformSupport();
-console.log('Platform:', support.platform);
 console.log('Supported:', support.isSupported);
+console.log('Available methods:', support.availableMethods);
 
 if (support.reason) {
   console.log('Reason:', support.reason);
 }
+```
 
-console.log('Available methods:', support.availableMethods);
-// On supported Windows: ['appcontainer']
-// On unsupported platforms: []
+**Return type**:
+
+```typescript
+interface PlatformSupport {
+  isSupported: boolean;
+  reason?: string;
+  availableMethods: SandboxingMethod[];
+}
 ```
 
 **Example outputs**:
@@ -105,292 +136,314 @@ Supported: true
 Available methods: ['appcontainer']
 ```
 
-Unsupported system (wrong branch):
+Unsupported system:
 ```
 Supported: false
-Reason: Unsupported Windows branch: rs_prerelease (requires ge_current_directwinai)
-Available methods: []
-```
-
-Unsupported system (macOS):
-```
-Supported: false
-Reason: WXC is not supported on macOS
+Reason: MXC is not supported on macOS
 Available methods: []
 ```
 
 ### Sandbox Spawning
 
-#### `spawnSandbox(config: SandboxConfig, options?: SandboxSpawnOptions): IPty`
+#### `spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?): IPty`
 
-Spawns a sandboxed process and returns a node-pty `IPty` object for interactive I/O.
+Spawns a containerized process and returns a node-pty `IPty` object for interactive I/O.
 
 **Parameters**:
-- `config`: Sandbox configuration matching the wxc-exec JSON schema
-- `options`: Optional spawn options
-  - `debug`: Enable debug output (default: false)
+- `script` (`string`): The command line to execute inside the container
+- `policy` (`SandboxPolicy`): The sandbox policy defining container permissions
+- `options` (`SandboxSpawnOptions`, optional): Spawn options
+  - `debug`: Enable debug output (default: `false`)
   - `ptyOptions`: node-pty options (cols, rows, etc.)
+- `workingDirectory` (`string`, optional): Working directory for the process
+- `containerName` (`string`, optional): Container name (auto-generated if omitted)
+- `env` (`object`, optional): Environment variables to pass to the container
 
-**Returns**: `IPty` object for interacting with the sandboxed process
+**Returns**: `IPty` object for interacting with the containerized process
 
-**Throws**: Error if platform is not supported or wxc-exec is not found
+**Throws**: Error if platform is not supported
 
 ```typescript
-import { spawnSandbox, SandboxConfig } from '@microsoft/mxc-sdk';
+import { spawnSandbox, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft/mxc-sdk';
 
-const config: SandboxConfig = {
-  script: 'python -c "print(\'Hello!\')"',
-  timeout: 5000
+const tools = getAvailableToolsPolicy(process.env);
+
+const policy: SandboxPolicy = {
+  version: '0.4.0-alpha',
+  filesystem: { readonlyPaths: tools.readonlyPaths },
+  network: { allowOutbound: true },
 };
 
-const pty = spawnSandbox(config, {
-  debug: true,
-  ptyOptions: {
-    cols: 120,
-    rows: 40
-  }
-});
+const ptyProcess = spawnSandbox(
+  'python -c "print(\'Hello!\')"',
+  policy,
+  { debug: true, ptyOptions: { cols: 120, rows: 40 } },
+);
 
-pty.onData((data) => console.log(data));
-pty.onExit((e) => console.log('Exit code:', e.exitCode));
+ptyProcess.onData((data) => console.log(data));
+ptyProcess.onExit((event) => console.log('Exit code:', event.exitCode));
 ```
 
-#### `spawnSandboxAsync(config: SandboxConfig, options?: SandboxSpawnOptions): Promise<{stdout: string, stderr: string, exitCode: number}>`
+#### `spawnSandboxAsync(script, policy, options?, workingDirectory?, containerName?): Promise<...>`
 
-Spawns a sandboxed process and returns a promise that resolves with the output. This is a convenience wrapper for non-interactive use cases.
+Spawns a containerized process and returns a promise that resolves with the collected output. Convenience wrapper for non-interactive use cases.
+
+**Returns**: `Promise<{ stdout: string; stderr: string; exitCode: number }>`
 
 ```typescript
-import { spawnSandboxAsync, SandboxConfig } from '@microsoft/mxc-sdk';
+import { spawnSandboxAsync, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft/mxc-sdk';
 
-async function runSandboxed() {
-  const config: SandboxConfig = {
-    script: 'python -c "import sys; print(sys.version)"',
-    timeout: 5000
-  };
+const tools = getAvailableToolsPolicy(process.env);
 
-  const result = await spawnSandboxAsync(config);
-  console.log('Output:', result.stdout);
-  console.log('Exit code:', result.exitCode);
+const policy: SandboxPolicy = {
+  version: '0.4.0-alpha',
+  filesystem: { readonlyPaths: tools.readonlyPaths },
+};
+
+const result = await spawnSandboxAsync(
+  'python -c "import sys; print(sys.version)"',
+  policy,
+);
+
+console.log('Output:', result.stdout);
+console.log('Exit code:', result.exitCode);
+```
+
+### Policy Discovery
+
+These functions examine the host environment and return `FilesystemPolicyResult` fragments that can be merged into a `SandboxPolicy`.
+
+```typescript
+interface FilesystemPolicyResult {
+  readonlyPaths: string[];
+  readwritePaths: string[];
 }
 ```
 
-## Configuration
+#### `getAvailableToolsPolicy(env?, options?): FilesystemPolicyResult`
 
-### SandboxConfig Type
+Discovers tool and SDK directories from `PATH` and well-known environment variables (e.g., `PYTHONPATH`, `JAVA_HOME`, `CARGO_HOME`, `GOPATH`, etc.) and returns them as read-only policy paths.
 
-The `SandboxConfig` type matches the wxc-exec JSON schema:
+Filters out non-existent directories and system-critical paths (e.g., under `%WINDIR%`).
 
 ```typescript
-interface SandboxConfig {
-  // Required: Complete command line to execute
-  script: string;
+import { getAvailableToolsPolicy } from '@microsoft/mxc-sdk';
 
-  // Optional: Working directory
-  workingDirectory?: string;
+const toolsPolicy = getAvailableToolsPolicy(process.env);
+console.log('Read-only tool paths:', toolsPolicy.readonlyPaths);
+```
 
-  // Optional: Timeout in milliseconds (default: no timeout)
-  timeout?: number;
+#### `getUserProfilePolicy(): FilesystemPolicyResult`
 
-  // Optional: AppContainer configuration
-  appContainer?: {
-    name?: string;              // Default: "CLI"
-    leastPrivilege?: boolean;   // Default: false
-    learningMode?: boolean;     // Enable container in permissive mode
-    capabilities?: string[]; =
-  };
+Returns read-only policy paths for user profile application data. On Windows, enumerates subdirectories under `%LOCALAPPDATA%\Programs`. On Linux, includes `~/.local/bin` and `~/.local/lib`.
 
-  // Optional: Filesystem restrictions
+```typescript
+import { getUserProfilePolicy } from '@microsoft/mxc-sdk';
+
+const profilePolicy = getUserProfilePolicy();
+console.log('User profile paths:', profilePolicy.readonlyPaths);
+```
+
+#### `getTemporaryFilesPolicy(env?): FilesystemPolicyResult`
+
+Returns a read-write policy path for the system temporary directory (`%TEMP%` on Windows, `$TMPDIR` or `/tmp` on Linux).
+
+```typescript
+import { getTemporaryFilesPolicy } from '@microsoft/mxc-sdk';
+
+const tempPolicy = getTemporaryFilesPolicy();
+console.log('Temp paths:', tempPolicy.readwritePaths);
+```
+
+## Policy
+
+### SandboxPolicy
+
+The `SandboxPolicy` type is the public interface for defining what a sandboxed payload is allowed to do. The SDK translates this into the internal container configuration automatically.
+
+```typescript
+type SandboxPolicy = {
+  version: string;
+
   filesystem?: {
     readwritePaths?: string[];
     readonlyPaths?: string[];
     deniedPaths?: string[];
-    clearPolicyOnExit?: boolean; // Default: true
+    clearPolicyOnExit?: boolean;
   };
 
-  // Optional: Network restrictions
   network?: {
-    enforcementMode?: 'capabilities' | 'firewall' | 'both'; // Default: "both"
-    defaultPolicy?: 'allow' | 'block';                      // Default: "allow"
-    allowedHosts?: string[];    // Hostnames or IP/CIDR blocks
-    blockedHosts?: string[];
-    removeRulesOnExit?: boolean; // Default: true
+    allowOutbound?: boolean;
+    allowLocalNetwork?: boolean;
+    proxy?: { builtinTestServer: true } | { localhost: number };
   };
-}
+};
 ```
 
-### Helper Functions
+> **Note**: Low-level container options are managed internally by the SDK based on the policy and platform. You don't need to configure them directly.
 
-#### `createMinimalConfig(scriptCommand: string): SandboxConfig`
-Creates a minimal valid configuration with just a script command.
+### Merging Policy Fragments
 
-```typescript
-import { createMinimalConfig, spawnSandbox } from '@microsoft/mxc-sdk';
-
-const config = createMinimalConfig('python -c "print(\'Hello\')"');
-const pty = spawnSandbox(config);
-```
-
-#### `createNetworkRestrictedConfig(scriptCommand: string, allowedHosts: string[]): SandboxConfig`
-Creates a configuration with network restrictions (blocks all except allowed hosts).
+Combine the policy discovery functions to build a complete policy:
 
 ```typescript
-import { createNetworkRestrictedConfig, spawnSandbox } from '@microsoft/mxc-sdk';
+import {
+  SandboxPolicy,
+  getAvailableToolsPolicy,
+  getUserProfilePolicy,
+  getTemporaryFilesPolicy,
+  spawnSandbox,
+} from '@microsoft/mxc-sdk';
 
-const config = createNetworkRestrictedConfig(
-  'python -c "import requests; print(requests.get(\'https://api.github.com\').status_code)"',
-  ['api.github.com', 'github.com']
-);
+const tools = getAvailableToolsPolicy(process.env);
+const profile = getUserProfilePolicy();
+const temp = getTemporaryFilesPolicy();
 
-const pty = spawnSandbox(config);
-```
+const policy: SandboxPolicy = {
+  version: '0.4.0-alpha',
+  filesystem: {
+    readonlyPaths: [...tools.readonlyPaths, ...profile.readonlyPaths],
+    readwritePaths: [...temp.readwritePaths, 'C:\\workspace\\output'],
+    deniedPaths: ['C:\\secrets'],
+  },
+  network: {
+    allowOutbound: true,
+  },
+};
 
-#### `createFilesystemRestrictedConfig(scriptCommand: string, readwritePaths: string[], deniedPaths?: string[]): SandboxConfig`
-Creates a configuration with filesystem restrictions.
-
-```typescript
-import { createFilesystemRestrictedConfig, spawnSandbox } from '@microsoft/mxc-sdk';
-
-const config = createFilesystemRestrictedConfig(
-  'python script.py',
-  ['C:\\workspace\\data'],          // Read/write paths
-  ['C:\\Windows\\System32']         // Denied paths
-);
-
-const pty = spawnSandbox(config);
+const ptyProcess = spawnSandbox('python script.py', policy, {}, 'C:\\workspace');
 ```
 
 ## Examples
 
-### Minimal Configuration
+### Minimal — Run a Command
 
 ```typescript
-import { createMinimalConfig, spawnSandbox } from '@microsoft/mxc-sdk';
+import { spawnSandbox, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft/mxc-sdk';
 
-const config = createMinimalConfig('python -c "print(\'Hello World\')"');
-const pty = spawnSandbox(config);
+const tools = getAvailableToolsPolicy(process.env);
 
-pty.onData((data) => process.stdout.write(data));
-pty.onExit((e) => console.log('Done!'));
-```
-
-### Network Restrictions
-
-```typescript
-import { SandboxConfig, spawnSandboxAsync } from '@microsoft/mxc-sdk';
-
-const config: SandboxConfig = {
-  script: 'python -c "import urllib.request; print(urllib.request.urlopen(\'https://api.github.com\').read())"',
-  network: {
-    enforcementMode: 'capabilities', // No admin required
-    defaultPolicy: 'allow'
-  }
+const policy: SandboxPolicy = {
+  version: '0.4.0-alpha',
+  filesystem: { readonlyPaths: tools.readonlyPaths },
 };
 
-const result = await spawnSandboxAsync(config);
+const ptyProcess = spawnSandbox('python -c "print(\'Hello World\')"', policy);
+
+ptyProcess.onData((data) => process.stdout.write(data));
+ptyProcess.onExit(() => console.log('Done!'));
+```
+
+### Network — Allow Outbound Access
+
+```typescript
+import { spawnSandboxAsync, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft/mxc-sdk';
+
+const tools = getAvailableToolsPolicy(process.env);
+
+const policy: SandboxPolicy = {
+  version: '0.4.0-alpha',
+  filesystem: { readonlyPaths: tools.readonlyPaths },
+  network: { allowOutbound: true },
+};
+
+const result = await spawnSandboxAsync(
+  'python -c "import urllib.request; print(urllib.request.urlopen(\'https://api.github.com\').read())"',
+  policy,
+);
 console.log(result.stdout);
 ```
 
-### Filesystem Restrictions
+### Filesystem — Restrict Access
 
 ```typescript
-import { SandboxConfig, spawnSandbox } from '@microsoft/mxc-sdk';
+import { spawnSandbox, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft/mxc-sdk';
 
-const config: SandboxConfig = {
-  script: 'python script.py',
-  workingDirectory: 'C:\\projects\\myapp',
+const tools = getAvailableToolsPolicy(process.env);
+
+const policy: SandboxPolicy = {
+  version: '0.4.0-alpha',
   filesystem: {
+    readonlyPaths: [...tools.readonlyPaths, 'C:\\projects\\myapp\\config'],
     readwritePaths: ['C:\\projects\\myapp\\data'],
-    readonlyPaths: ['C:\\projects\\myapp\\config'],
-    deniedPaths: ['C:\\Windows\\System32']
-  }
-};
-
-const pty = spawnSandbox(config);
-```
-
-### Advanced Configuration
-
-```typescript
-import { SandboxConfig, spawnSandbox } from '@microsoft/mxc-sdk';
-
-const config: SandboxConfig = {
-  script: 'node app.js',
-  workingDirectory: 'C:\\projects\\myapp',
-  timeout: 30000, // 30 seconds
-
-  appContainer: {
-    name: 'MyNodeApp',
-    learningMode: false,
-    capabilities: ['internetClient', 'registryRead']
-  },
-
-  filesystem: {
-    readwritePaths: ['C:\\projects\\myapp\\data'],
-    readonlyPaths: ['C:\\projects\\myapp\\config'],
     deniedPaths: ['C:\\Windows\\System32'],
-    clearPolicyOnExit: true
   },
-
-  network: {
-    enforcementMode: 'capabilities', // No admin required
-    defaultPolicy: 'allow'
-  }
 };
 
-const pty = spawnSandbox(config, {
-  debug: true,
-  ptyOptions: {
-    cols: 120,
-    rows: 40
-  }
-});
-
-pty.onData((data) => process.stdout.write(data));
-pty.onExit((e) => console.log(`Exit code: ${e.exitCode}`));
+const ptyProcess = spawnSandbox('python script.py', policy, {}, 'C:\\projects\\myapp');
 ```
 
-## Network Enforcement Modes
-
-WXC supports three network enforcement modes:
-
-1. **`capabilities` (recommended)**: Uses AppContainer capabilities only
-   - No administrator privileges required
-   - Simple allow/block for all network access
-   - Best for most use cases
-
-2. **`firewall`**: Uses Windows Firewall rules
-   - Requires administrator privileges
-   - Granular control over specific hosts
-   - Supports IP ranges (CIDR notation)
-
-3. **`both`**: Uses both capabilities and firewall
-   - Requires administrator privileges
-   - Maximum security with defense-in-depth
+### Combined — Fetch from Web and Write to Disk
 
 ```typescript
-const config: SandboxConfig = {
-  script: 'python network_script.py',
-  network: {
-    enforcementMode: 'capabilities', // No admin required
-    defaultPolicy: 'allow'
-  }
+import {
+  SandboxPolicy,
+  getAvailableToolsPolicy,
+  getTemporaryFilesPolicy,
+  spawnSandboxAsync,
+} from '@microsoft/mxc-sdk';
+
+const tools = getAvailableToolsPolicy(process.env);
+const temp = getTemporaryFilesPolicy();
+
+const policy: SandboxPolicy = {
+  version: '0.4.0-alpha',
+  filesystem: {
+    readonlyPaths: tools.readonlyPaths,
+    readwritePaths: [...temp.readwritePaths, 'C:\\workspace\\output'],
+  },
+  network: { allowOutbound: true },
 };
+
+// Python script that fetches JSON from an API and writes it to a local file
+const script = `python -c "
+import urllib.request, json, os
+
+url = 'https://api.github.com/zen'
+response = urllib.request.urlopen(url)
+wisdom = response.read().decode('utf-8')
+
+output_dir = r'C:\\workspace\\output'
+os.makedirs(output_dir, exist_ok=True)
+output_path = os.path.join(output_dir, 'zen.txt')
+
+with open(output_path, 'w') as f:
+    f.write(wisdom)
+
+print(f'Wrote GitHub zen to {output_path}: {wisdom}')
+"`;
+
+const result = await spawnSandboxAsync(script, policy, {}, 'C:\\workspace');
+
+console.log('Output:', result.stdout);
+console.log('Exit code:', result.exitCode);
 ```
 
 ## TypeScript Support
 
-The package includes full TypeScript definitions. All types are exported from the main entry point:
+The package includes full TypeScript definitions. All public types are exported from the main entry point:
 
 ```typescript
 import {
-  SandboxConfig,
-  WxcConfiguration,
-  WxcAppContainerConfig,
-  WxcFilesystemConfig,
-  WxcNetworkConfig,
-  PlatformSupport,
+  // Types
+  SandboxPolicy,
   SandboxingMethod,
-  SandboxSpawnOptions
+  PlatformSupport,
+
+  // Platform detection
+  getPlatformSupport,
+
+  // Sandbox spawning
+  spawnSandbox,
+  spawnSandboxAsync,
+  SandboxSpawnOptions,
+
+  // Policy discovery
+  getAvailableToolsPolicy,
+  getUserProfilePolicy,
+  getTemporaryFilesPolicy,
+  FilesystemPolicyResult,
+  ToolsPolicyOptions,
 } from '@microsoft/mxc-sdk';
 ```
 
@@ -403,6 +456,9 @@ npm install
 # Build
 npm run build
 
+# Run tests
+npm test
+
 # Watch mode
 npm run watch
 
@@ -412,8 +468,8 @@ npm run clean
 
 ## License
 
-TODO:
+See the [LICENSE](../LICENSE.md) file for details.
 
 ## Contributing
 
-Contributions are welcome! Please see the main WXC project repository for contribution guidelines.
+Contributions are welcome! Please see the main MXC project repository for contribution guidelines.
