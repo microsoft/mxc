@@ -19,7 +19,7 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["appcontainer", "lxc", "nanvix"],
+      "enum": ["appcontainer", "sandbox", "lxc", "nanvix"],
       "default": "appcontainer",
       "description": "Containment backend to use for execution."
     },
@@ -198,6 +198,23 @@
             "message": {
               "type": "string",
               "description": "Message to log when the feature is applied."
+            }
+          }
+        },
+        "sandbox": {
+          "type": "object",
+          "description": "Windows Sandbox backend (experimental). Full VM isolation via a long-lived sandbox daemon.",
+          "properties": {
+            "idleTimeoutMs": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 300000,
+              "description": "Idle timeout in milliseconds before the daemon tears down the sandbox VM. 0 = no timeout."
+            },
+            "daemonPipeName": {
+              "type": "string",
+              "default": "wxc-sandbox",
+              "description": "Named pipe name the daemon listens on (without \\\\.\\pipe\\ prefix)."
             }
           }
         }

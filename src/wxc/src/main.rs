@@ -146,10 +146,23 @@ fn main() {
 
     log_request(&request, &mut logger);
 
-    // Run script in selected containment backend
+    // Run script in selected containment backend.
+    // Sandbox requires --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
-        ContainmentBackend::Sandbox => Box::new(SandboxScriptRunner::new(&request.sandbox_config)),
+        ContainmentBackend::Sandbox => {
+            if !request.experimental_enabled {
+                eprintln!("Error: Sandbox is an experimental feature. Use --experimental flag.");
+                process::exit(1);
+            }
+            let sandbox_config = request
+                .experimental
+                .sandbox
+                .as_ref()
+                .cloned()
+                .unwrap_or_default();
+            Box::new(SandboxScriptRunner::new(&sandbox_config))
+        }
         ContainmentBackend::Wslc => {
             eprintln!("Error: WSLC backend not yet implemented (Phase 3)");
             process::exit(1);
