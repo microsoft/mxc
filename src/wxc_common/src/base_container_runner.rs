@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `TesseraRunner` — executes scripts via Tessera's CreateProcessInSandbox API.
+//! `BaseContainerRunner` — executes scripts via `Experimental_CreateProcessInSandbox` API.
 //!
 //! When `wxc-exec` receives a config with `schema_version` >= 0.5, this runner:
 //! 1. Builds a FlatBuffer `SandboxSpec` from the container policy
@@ -13,7 +13,7 @@ use std::ffi::c_void;
 use std::fmt::Write;
 use std::ptr;
 
-use windows::Win32::Foundation::{CloseHandle, GetLastError, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{CloseHandle, GetLastError, WAIT_FAILED, WAIT_TIMEOUT};
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
@@ -47,19 +47,19 @@ type PfnCreateProcessInSandbox = unsafe extern "system" fn(
     process_information: *mut PROCESS_INFORMATION,
 ) -> i32;
 
-/// Script runner that uses Tessera's `Experimental_CreateProcessInSandbox` API
+/// Script runner that uses `Experimental_CreateProcessInSandbox` API
 /// to launch a sandboxed process.
 #[derive(Default)]
-pub struct TesseraRunner;
+pub struct BaseContainerRunner;
 
-impl TesseraRunner {
+impl BaseContainerRunner {
     pub fn new() -> Self {
         Self
     }
 
     /// Build a FlatBuffer `SandboxSpec` from the container policy in the request.
     ///
-    /// Maps `ContainerPolicy` fields to the Tessera schema:
+    /// Maps `ContainerPolicy` fields to the BaseContainer schema:
     /// - `app_container` is always `true` (AppContainer is the base sandbox primitive)
     /// - `least_privilege` from `policy.least_privilege_mode`
     /// - `capabilities` from `policy.capabilities` (comma-joined)
@@ -161,15 +161,15 @@ impl TesseraRunner {
     }
 }
 
-impl ScriptRunner for TesseraRunner {
+impl ScriptRunner for BaseContainerRunner {
     fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let _ = writeln!(logger, "Tessera: building sandbox specification...");
+        let _ = writeln!(logger, "BaseContainer: building sandbox specification...");
 
         // 1. Build the FlatBuffer sandbox spec from the request policy.
         let spec_bytes = Self::build_sandbox_spec(request);
         let _ = writeln!(
             logger,
-            "Tessera: sandbox spec built ({} bytes)",
+            "BaseContainer: sandbox spec built ({} bytes)",
             spec_bytes.len()
         );
 
@@ -180,7 +180,7 @@ impl ScriptRunner for TesseraRunner {
         };
         let _ = writeln!(
             logger,
-            "Tessera: loaded Experimental_CreateProcessInSandbox from processmodel.dll"
+            "BaseContainer: loaded Experimental_CreateProcessInSandbox from processmodel.dll"
         );
 
         // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
@@ -197,7 +197,7 @@ impl ScriptRunner for TesseraRunner {
 
         // Identity — used by the sandbox engine to name the AppContainer profile.
         let identity = if request.container_id.is_empty() {
-            "MxcTessera".to_string()
+            "MxcBaseContainer".to_string()
         } else {
             request.container_id.clone()
         };
@@ -210,8 +210,8 @@ impl ScriptRunner for TesseraRunner {
         };
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
-        let _ = writeln!(logger, "Tessera: launching: {}", request.script_code);
-        let _ = writeln!(logger, "Tessera: identity: {identity}");
+        let _ = writeln!(logger, "BaseContainer: launching: {}", request.script_code);
+        let _ = writeln!(logger, "BaseContainer: identity: {identity}");
 
         // 4. Call Experimental_CreateProcessInSandbox.
         let success = unsafe {
@@ -239,7 +239,11 @@ impl ScriptRunner for TesseraRunner {
             ));
         }
 
-        let _ = writeln!(logger, "Tessera: process created (PID: {})", pi.dwProcessId);
+        let _ = writeln!(
+            logger,
+            "BaseContainer: process created (PID: {})",
+            pi.dwProcessId
+        );
 
         // 5. Wait for the child process to exit.
         let timeout_ms = get_timeout_milliseconds(request.script_timeout);
@@ -247,8 +251,13 @@ impl ScriptRunner for TesseraRunner {
 
         unsafe {
             let wait_result = WaitForSingleObject(pi.hProcess, timeout_ms);
-            if wait_result == WAIT_TIMEOUT {
-                let _ = writeln!(logger, "Tessera: process timed out, terminating...");
+            if wait_result == WAIT_FAILED {
+                let err = GetLastError();
+                let _ = CloseHandle(pi.hProcess);
+                let _ = CloseHandle(pi.hThread);
+                return ScriptResponse::error(&format!("WaitForSingleObject failed: {err:?}"));
+            } else if wait_result == WAIT_TIMEOUT {
+                let _ = writeln!(logger, "BaseContainer: process timed out, terminating...");
                 let _ = TerminateProcess(pi.hProcess, u32::MAX);
                 let _ = WaitForSingleObject(pi.hProcess, 5000);
             }
@@ -259,7 +268,10 @@ impl ScriptRunner for TesseraRunner {
             let _ = CloseHandle(pi.hThread);
         }
 
-        let _ = writeln!(logger, "Tessera: process exited with code {exit_code}");
+        let _ = writeln!(
+            logger,
+            "BaseContainer: process exited with code {exit_code}"
+        );
 
         ScriptResponse {
             exit_code: exit_code as i32,
@@ -283,7 +295,7 @@ mod tests {
         request.policy.readwrite_paths = vec!["C:\\temp".into()];
         request.policy.readonly_paths = vec!["C:\\Windows".into()];
 
-        let bytes = TesseraRunner::build_sandbox_spec(&request);
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
 
         // Verify the buffer has the SBOX identifier.
         assert!(sandbox_tech_spec_layout::sandbox_spec_buffer_has_identifier(&bytes));
@@ -312,7 +324,7 @@ mod tests {
         // Default network policy is Allow + Capabilities, so internetClient
         // should be auto-added even with an otherwise empty policy.
         let request = CodexRequest::default();
-        let bytes = TesseraRunner::build_sandbox_spec(&request);
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
 
         assert!(sandbox_tech_spec_layout::sandbox_spec_buffer_has_identifier(&bytes));
 
@@ -330,7 +342,7 @@ mod tests {
         let mut request = CodexRequest::default();
         request.policy.default_network_policy = NetworkPolicy::Block;
 
-        let bytes = TesseraRunner::build_sandbox_spec(&request);
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = sandbox_tech_spec_layout::root_as_sandbox_spec(&bytes).unwrap();
         assert!(spec.capabilities().is_none());
     }

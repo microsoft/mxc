@@ -29,9 +29,9 @@ pub mod sandbox_runner;
 #[cfg(target_os = "windows")]
 pub mod string_util;
 
-// Tessera (composable sandbox) support
+// BaseContainer (composable sandbox) support
+#[cfg(target_os = "windows")]
+pub mod base_container_runner;
 #[cfg(target_os = "windows")]
 #[allow(non_snake_case, unused_imports, clippy::all)]
 pub mod sandbox_spec_generated;
-#[cfg(target_os = "windows")]
-pub mod tessera_runner;

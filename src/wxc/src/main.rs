@@ -7,6 +7,7 @@ use std::process;
 use clap::Parser;
 use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
 use wxc_common::appcontainer::AppContainerScriptRunner;
+use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::load_request;
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
@@ -14,7 +15,6 @@ use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::nanvix_runner::NanVixScriptRunner;
 use wxc_common::sandbox_runner::SandboxScriptRunner;
 use wxc_common::script_runner::ScriptRunner;
-use wxc_common::tessera_runner::TesseraRunner;
 
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
@@ -148,15 +148,15 @@ fn main() {
     log_request(&request, &mut logger);
 
     // Run script in selected containment backend.
-    // Sandbox and Tessera (BaseContainer) require --experimental flag.
+    // Sandbox and BaseContainer require --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::AppContainer => {
             if request.experimental_enabled {
                 let _ = writeln!(
                     logger,
-                    "Using Tessera runner (--experimental)"
+                    "Using BaseContainer runner (--experimental)"
                 );
-                Box::new(TesseraRunner::new())
+                Box::new(BaseContainerRunner::new())
             } else {
                 Box::new(AppContainerScriptRunner::new())
             }
