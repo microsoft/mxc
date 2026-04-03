@@ -30,10 +30,11 @@
 use std::fmt::Write;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::logger::Logger;
@@ -54,6 +55,13 @@ const RAMFS_IMAGE: &str = "cpython-ramfs.img";
 const BOOT_TIMEOUT_MS: u64 = 60_000;
 /// Generic error exit code returned to host callers.
 const ERROR_EXIT_CODE: i32 = -1;
+const ERR_FILESYSTEM_POLICY: &str =
+    "filesystem policy is not supported by the NanVix backend -- guest has a read-only ramfs";
+const ERR_NETWORK_POLICY: &str =
+    "network policy is not supported by the NanVix backend -- NanVix has no network stack";
+const ERR_PROXY_POLICY: &str =
+    "network proxy is not supported by the NanVix backend -- NanVix has no network stack";
+const ERR_WORKDIR: &str = "workingDirectory is not supported by the NanVix backend -- guest has its own filesystem namespace";
 
 // -- NanVix error classification ---------------------------------------------
 
@@ -109,6 +117,62 @@ fn exe_dir() -> Result<PathBuf, NanVixError> {
     exe.parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| NanVixError::Preflight("exe has no parent directory".to_string()))
+}
+
+/// Watchdog thread: waits for timeout or cancellation, then terminates the process.
+fn watchdog_thread_fn(
+    process_handle_raw: usize,
+    duration: Duration,
+    cancel_pair: Arc<(Mutex<bool>, Condvar)>,
+    timed_out: Arc<AtomicBool>,
+) {
+    let (lock, cvar) = &*cancel_pair;
+    let mut cancelled = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let start = Instant::now();
+    let mut remaining = duration;
+    loop {
+        let result = cvar
+            .wait_timeout(cancelled, remaining)
+            .unwrap_or_else(|e| e.into_inner());
+        cancelled = result.0;
+        if *cancelled || result.1.timed_out() {
+            break;
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= duration {
+            break;
+        }
+        remaining = duration.saturating_sub(elapsed);
+    }
+
+    // Always close the duplicated handle to avoid leaks.
+    let close_handle = |handle_raw: usize| {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        let handle = HANDLE(handle_raw as *mut std::ffi::c_void);
+        // SAFETY: `handle` was returned by `DuplicateHandle` in this
+        // process and is closed exactly once by this watchdog thread.
+        let _ = unsafe { CloseHandle(handle) };
+    };
+
+    if *cancelled {
+        // Process already exited — close the handle and return.
+        close_handle(process_handle_raw);
+        return;
+    }
+
+    // Timeout elapsed and process is still running — kill it.
+    // Set the timed_out flag BEFORE terminating so the main thread
+    // always sees it as true after child.wait() returns from a kill.
+    timed_out.store(true, Ordering::SeqCst);
+
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Threading::TerminateProcess;
+
+    let handle = HANDLE(process_handle_raw as *mut std::ffi::c_void);
+    // SAFETY: `handle` is a valid duplicated process handle owned by
+    // this thread, and passing exit code 1 is valid for termination.
+    let _ = unsafe { TerminateProcess(handle, 1) };
+    close_handle(process_handle_raw);
 }
 
 // -- NanVixScriptRunner ------------------------------------------------------
@@ -180,41 +244,36 @@ impl NanVixScriptRunner {
             || !request.policy.readonly_paths.is_empty()
             || !request.policy.denied_paths.is_empty()
         {
-            return Err(NanVixError::Preflight(
-                "filesystem policy is not supported by the NanVix backend \
-                 -- guest has a read-only ramfs"
-                    .to_string(),
-            ));
+            return Err(NanVixError::Preflight(ERR_FILESYSTEM_POLICY.to_string()));
         }
         if !request.policy.allowed_hosts.is_empty()
             || !request.policy.blocked_hosts.is_empty()
             || request.policy.default_network_policy != NetworkPolicy::Allow
         {
-            return Err(NanVixError::Preflight(
-                "network policy is not supported by the NanVix backend \
-                 -- NanVix has no network stack"
-                    .to_string(),
-            ));
+            return Err(NanVixError::Preflight(ERR_NETWORK_POLICY.to_string()));
         }
         if request.policy.network_proxy.is_enabled() {
-            return Err(NanVixError::Preflight(
-                "network proxy is not supported by the NanVix backend \
-                 — NanVix has no network stack"
-                    .to_string(),
-            ));
+            return Err(NanVixError::Preflight(ERR_PROXY_POLICY.to_string()));
         }
         if !request.working_directory.is_empty() {
-            return Err(NanVixError::Preflight(
-                "workingDirectory is not supported by the NanVix backend \
-                 -- guest has its own filesystem namespace"
-                    .to_string(),
-            ));
+            return Err(NanVixError::Preflight(ERR_WORKDIR.to_string()));
         }
 
         Ok(())
     }
 
     fn build_guest_args() -> String {
+        // Build the NanVix guest argument string.
+        // Format: "-S -B -c exec(__import__('sys').stdin.read());PYTHONHOME=/sysroot"
+        //
+        // ';' is NanVix's separator between argv and environment variables.
+        // Everything before ';' is split on spaces into argv entries.
+        // Everything after ';' is set as environment variables.
+        //
+        // -S: skip site.py  -B: no .pyc writing
+        // -c exec(...): reads all of stdin and executes it (no interactive >>> prompts)
+        // Note: exec(__import__('sys').stdin.read()) has NO spaces, so it survives
+        //       NanVix's space-splitting in build_string_table().
         format!(
             "-S -B -c exec(__import__('sys').stdin.read());PYTHONHOME={}",
             PYTHON_HOME
@@ -254,169 +313,136 @@ impl NanVixScriptRunner {
 
         Ok(child)
     }
-}
 
-impl ScriptRunner for NanVixScriptRunner {
-    fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        // -- Policy validation ---------------------------------------------------
-        // Reject unsupported policies — NanVix provides its own isolation model.
-        // Fail-closed: any policy setting not meaningful for NanVix is rejected.
-        if let Err(e) = Self::validate_policies(request) {
-            return e.to_response();
+    fn start_watchdog(
+        child: &std::process::Child,
+        timeout_ms: u64,
+        cancel_pair: Arc<(Mutex<bool>, Condvar)>,
+        timed_out: Arc<AtomicBool>,
+    ) -> Option<thread::JoinHandle<()>> {
+        if timeout_ms == u64::MAX {
+            return None;
         }
 
-        // -- Path resolution -----------------------------------------------------
-        let (nanvixd_path, bin_dir, ramfs_path, python_path) = match self.resolve_paths() {
-            Ok(paths) => paths,
-            Err(e) => return e.to_response(),
+        let duration = Duration::from_millis(timeout_ms);
+
+        // Duplicate the process handle at spawn time (safe against PID reuse).
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
+        use windows::Win32::System::Threading::GetCurrentProcess;
+
+        let raw = child.as_raw_handle();
+        let mut dup_handle = HANDLE::default();
+        let dup_ok = unsafe {
+            // SAFETY: `raw` is the live process HANDLE from `std::process::Child`.
+            // We duplicate it into the current process with same access rights so
+            // the watchdog thread can safely terminate/close it independently.
+            DuplicateHandle(
+                GetCurrentProcess(),
+                HANDLE(raw),
+                GetCurrentProcess(),
+                &mut dup_handle,
+                0,
+                false,
+                DUPLICATE_SAME_ACCESS,
+            )
         };
+        if dup_ok.is_err() {
+            return None;
+        }
+        let process_handle_raw = dup_handle.0 as usize;
 
-        let _ = writeln!(logger, "NanVix: nanvixd={:?}", nanvixd_path);
-        let _ = writeln!(logger, "NanVix: bin_dir={:?}", bin_dir);
-        let _ = writeln!(logger, "NanVix: ramfs={:?}", ramfs_path);
-        let _ = writeln!(logger, "NanVix: python={:?}", python_path);
+        Some(thread::spawn(move || {
+            watchdog_thread_fn(process_handle_raw, duration, cancel_pair, timed_out);
+        }))
+    }
 
-        // Build the guest argument string.
-        // The ';' is NanVix's separator between argv and environment variables:
-        //   everything before ';' -> kernel splits on spaces -> argv[]
-        //   everything after ';'  -> kernel sets as env vars
-        // -S: skip site.py, -B: no .pyc writing
-        // -c exec(...): reads all of stdin and executes it (no interactive >>> prompts)
-        // Note: exec(__import__('sys').stdin.read()) has NO spaces, so it survives
-        //       NanVix's space-splitting in build_string_table().
-        let guest_args = Self::build_guest_args();
-
-        // -- Spawn nanvixd -------------------------------------------------------
-        // stdout/stderr are inherited (relayed directly to parent process).
-        // Only stdin is piped so we can write the script and send EOF.
-        let mut child = match Self::spawn_nanvixd(
-            (&nanvixd_path, &bin_dir, &ramfs_path, &python_path),
-            &guest_args,
-            &request.script_code,
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = writeln!(logger, "{}", e);
-                return e.to_response();
-            }
-        };
-
-        // -- Watchdog ------------------------------------------------------------
-        // Condvar-based watchdog with duplicated HANDLE for safe termination.
-        let timeout_ms = Self::total_timeout_ms(request.script_timeout);
+    fn setup_watchdog(
+        child: &mut std::process::Child,
+        timeout_ms: u64,
+        logger: &mut Logger,
+    ) -> Result<
+        (
+            Option<JoinHandle<()>>,
+            Arc<(Mutex<bool>, Condvar)>,
+            Arc<AtomicBool>,
+        ),
+        ScriptResponse,
+    > {
         let timed_out = Arc::new(AtomicBool::new(false));
         let cancel_pair = Arc::new((Mutex::new(false), Condvar::new()));
 
         let watchdog = if timeout_ms < u64::MAX {
-            let timed_out_clone = Arc::clone(&timed_out);
-            let cancel_pair_clone = Arc::clone(&cancel_pair);
-            let duration = Duration::from_millis(timeout_ms);
-
-            // Duplicate the process handle at spawn time (safe against PID reuse).
-            use std::os::windows::io::AsRawHandle;
-            use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
-            use windows::Win32::System::Threading::GetCurrentProcess;
-
-            let raw = child.as_raw_handle();
-            let mut dup_handle = HANDLE::default();
-            let dup_ok = unsafe {
-                // SAFETY: `raw` is the live process HANDLE from `std::process::Child`.
-                // We duplicate it into the current process with same access rights so
-                // the watchdog thread can safely terminate/close it independently.
-                DuplicateHandle(
-                    GetCurrentProcess(),
-                    HANDLE(raw),
-                    GetCurrentProcess(),
-                    &mut dup_handle,
-                    0,
-                    false,
-                    DUPLICATE_SAME_ACCESS,
-                )
-            };
-            if let Err(e) = dup_ok {
-                let err = NanVixError::Platform(format!(
-                    "failed to duplicate {} process handle: {}",
-                    NANVIXD_BINARY, e
-                ));
-                let _ = writeln!(logger, "{}", err);
-                let _ = child.kill();
-                let _ = child.wait();
-                return err.to_response();
+            match Self::start_watchdog(
+                child,
+                timeout_ms,
+                Arc::clone(&cancel_pair),
+                Arc::clone(&timed_out),
+            ) {
+                Some(handle) => Some(handle),
+                None => {
+                    let err = NanVixError::Platform(format!(
+                        "failed to duplicate {} process handle",
+                        NANVIXD_BINARY
+                    ));
+                    let _ = writeln!(logger, "{}", err);
+                    if let Err(e) = child.kill() {
+                        let _ = writeln!(
+                            logger,
+                            "NanVix: failed to kill child after handle dup failure: {}",
+                            e
+                        );
+                    }
+                    if let Err(e) = child.wait() {
+                        let _ = writeln!(
+                            logger,
+                            "NanVix: failed to wait for child after handle dup failure: {}",
+                            e
+                        );
+                    }
+                    return Err(err.to_response());
+                }
             }
-            let process_handle_raw = dup_handle.0 as usize;
-
-            Some(thread::spawn(move || {
-                let (lock, cvar) = &*cancel_pair_clone;
-                let mut cancelled = lock.lock().unwrap_or_else(|e| e.into_inner());
-                let start = Instant::now();
-                let mut remaining = duration;
-                loop {
-                    let result = cvar
-                        .wait_timeout(cancelled, remaining)
-                        .unwrap_or_else(|e| e.into_inner());
-                    cancelled = result.0;
-                    if *cancelled || result.1.timed_out() {
-                        break;
-                    }
-                    let elapsed = start.elapsed();
-                    if elapsed >= duration {
-                        break;
-                    }
-                    remaining = duration.saturating_sub(elapsed);
-                }
-
-                // Always close the duplicated handle to avoid leaks.
-                let close_handle = |handle_raw: usize| {
-                    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-                    let handle = HANDLE(handle_raw as *mut std::ffi::c_void);
-                    // SAFETY: `handle` was returned by `DuplicateHandle` in this
-                    // process and is closed exactly once by this watchdog thread.
-                    let _ = unsafe { CloseHandle(handle) };
-                };
-
-                if *cancelled {
-                    // Process already exited — close the handle and return.
-                    close_handle(process_handle_raw);
-                    return;
-                }
-
-                // Timeout elapsed and process is still running — kill it.
-                // Set the timed_out flag BEFORE terminating so the main thread
-                // always sees it as true after child.wait() returns from a kill.
-                timed_out_clone.store(true, Ordering::SeqCst);
-
-                use windows::Win32::Foundation::HANDLE;
-                use windows::Win32::System::Threading::TerminateProcess;
-
-                let handle = HANDLE(process_handle_raw as *mut std::ffi::c_void);
-                // SAFETY: `handle` is a valid duplicated process handle owned by
-                // this thread, and passing exit code 1 is valid for termination.
-                let _ = unsafe { TerminateProcess(handle, 1) };
-                close_handle(process_handle_raw);
-            }))
         } else {
             None
         };
 
-        // -- Wait + cleanup ------------------------------------------------------
+        Ok((watchdog, cancel_pair, timed_out))
+    }
+
+    fn log_resolved_paths(logger: &mut Logger, nanvixd: &Path, bin_dir: &Path, ramfs: &Path, python: &Path) {
+        let _ = writeln!(logger, "NanVix: nanvixd={:?}", nanvixd);
+        let _ = writeln!(logger, "NanVix: bin_dir={:?}", bin_dir);
+        let _ = writeln!(logger, "NanVix: ramfs={:?}", ramfs);
+        let _ = writeln!(logger, "NanVix: python={:?}", python);
+    }
+
+    fn wait_and_respond(
+        child: &mut Child,
+        watchdog: Option<JoinHandle<()>>,
+        cancel_pair: &Arc<(Mutex<bool>, Condvar)>,
+        timed_out: &AtomicBool,
+        timeout_ms: u64,
+        script_timeout: u32,
+        logger: &mut Logger,
+    ) -> ScriptResponse {
         let exit_status = child.wait();
 
-        // Signal watchdog to stop
         {
-            let (lock, cvar) = &*cancel_pair;
+            let (lock, cvar) = &**cancel_pair;
             let mut cancelled = lock.lock().unwrap_or_else(|e| e.into_inner());
             *cancelled = true;
             cvar.notify_one();
         }
-        if let Some(t) = watchdog {
-            let _ = t.join();
+
+        if let Some(handle) = watchdog {
+            let _ = handle.join();
         }
 
-        let was_timed_out = timed_out.load(Ordering::SeqCst);
-
-        if was_timed_out {
+        if timed_out.load(Ordering::SeqCst) {
+            let _ = child.kill();
             let err = NanVixError::Timeout {
-                script_timeout_ms: request.script_timeout,
+                script_timeout_ms: script_timeout,
                 total_ms: timeout_ms,
             };
             let _ = writeln!(logger, "{}", err);
@@ -439,6 +465,50 @@ impl ScriptRunner for NanVixScriptRunner {
                 err.to_response()
             }
         }
+    }
+}
+
+impl ScriptRunner for NanVixScriptRunner {
+    fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+        if let Err(e) = Self::validate_policies(request) {
+            return e.to_response();
+        }
+
+        let (nanvixd_path, bin_dir, ramfs_path, python_path) = match self.resolve_paths() {
+            Ok(paths) => paths,
+            Err(e) => return e.to_response(),
+        };
+
+        Self::log_resolved_paths(logger, &nanvixd_path, &bin_dir, &ramfs_path, &python_path);
+        let guest_args = Self::build_guest_args();
+
+        let mut child = match Self::spawn_nanvixd(
+            (&nanvixd_path, &bin_dir, &ramfs_path, &python_path),
+            &guest_args,
+            &request.script_code,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = writeln!(logger, "{}", e);
+                return e.to_response();
+            }
+        };
+
+        let timeout_ms = Self::total_timeout_ms(request.script_timeout);
+        let (watchdog, cancel_pair, timed_out) = match Self::setup_watchdog(&mut child, timeout_ms, logger) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+
+        Self::wait_and_respond(
+            &mut child,
+            watchdog,
+            &cancel_pair,
+            timed_out.as_ref(),
+            timeout_ms,
+            request.script_timeout,
+            logger,
+        )
     }
 }
 
@@ -478,7 +548,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains("filesystem policy"));
+        assert!(resp.error_message.contains(ERR_FILESYSTEM_POLICY));
     }
 
     #[test]
@@ -494,7 +564,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains("filesystem policy"));
+        assert!(resp.error_message.contains(ERR_FILESYSTEM_POLICY));
     }
 
     #[test]
@@ -510,7 +580,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains("network policy"));
+        assert!(resp.error_message.contains(ERR_NETWORK_POLICY));
     }
 
     #[test]
@@ -526,7 +596,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains("network policy"));
+        assert!(resp.error_message.contains(ERR_NETWORK_POLICY));
     }
 
     #[test]
@@ -542,7 +612,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains("network policy"));
+        assert!(resp.error_message.contains(ERR_NETWORK_POLICY));
     }
 
     #[test]
@@ -555,7 +625,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains("workingDirectory"));
+        assert!(resp.error_message.contains(ERR_WORKDIR));
     }
 
     #[test]
@@ -568,15 +638,15 @@ mod tests {
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(
-            !resp.error_message.contains("filesystem policy"),
+            !resp.error_message.contains(ERR_FILESYSTEM_POLICY),
             "default request should not trigger filesystem policy rejection"
         );
         assert!(
-            !resp.error_message.contains("network policy"),
+            !resp.error_message.contains(ERR_NETWORK_POLICY),
             "default request should not trigger network policy rejection"
         );
         assert!(
-            !resp.error_message.contains("workingDirectory"),
+            !resp.error_message.contains(ERR_WORKDIR),
             "default request should not trigger workingDirectory rejection"
         );
     }
@@ -601,7 +671,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains("network proxy"));
+        assert!(resp.error_message.contains(ERR_PROXY_POLICY));
     }
 
     #[test]
