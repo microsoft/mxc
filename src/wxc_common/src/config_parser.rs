@@ -946,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_containment_parsed() {
+    fn sandbox_containment() {
         let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "sandbox"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -966,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn experimental_sandbox_config_defaults() {
+    fn sandbox_config_defaults() {
         let json = r#"{"process": {"commandLine": "echo hello"}, "experimental": {"sandbox": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -978,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn experimental_sandbox_config_custom_values() {
+    fn sandbox_config_custom_values() {
         let json = r#"{
             "process": {"commandLine": "echo hello"},
             "experimental": {
@@ -1298,7 +1298,7 @@ mod tests {
     }
 
     #[test]
-    fn experimental_sandbox_idle_timeout_ms_accepted() {
+    fn sandbox_idle_timeout_ms_accepted() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"sandbox": {"idleTimeoutMs": 60000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -1308,7 +1308,7 @@ mod tests {
     }
 
     #[test]
-    fn experimental_sandbox_idle_timeout_ms_overrides_idle_timeout() {
+    fn sandbox_idle_timeout_ms_overrides_idle_timeout() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
