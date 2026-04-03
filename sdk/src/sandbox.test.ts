@@ -102,6 +102,48 @@ describe('buildSandboxPayload', () => {
         restore();
       }
     });
+
+    it('should pass builtinTestServer proxy through to network config', () => {
+      mockWindows();
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.4.0-alpha',
+          network: { allowOutbound: true, proxy: { builtinTestServer: true } },
+        };
+        const payload = buildSandboxPayload('echo hi', policy);
+        assert.deepStrictEqual(payload.network!.proxy, { builtinTestServer: true });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should pass localhost proxy through to network config', () => {
+      mockWindows();
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.4.0-alpha',
+          network: { allowOutbound: true, proxy: { localhost: 8080 } },
+        };
+        const payload = buildSandboxPayload('echo hi', policy);
+        assert.deepStrictEqual(payload.network!.proxy, { localhost: 8080 });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should not set network.proxy when proxy is not specified', () => {
+      mockWindows();
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.4.0-alpha',
+          network: { allowOutbound: true },
+        };
+        const payload = buildSandboxPayload('echo hi', policy);
+        assert.strictEqual(payload.network?.proxy, undefined);
+      } finally {
+        restore();
+      }
+    });
   });
 
   describe('Linux', () => {
@@ -124,6 +166,22 @@ describe('buildSandboxPayload', () => {
         const payload = buildSandboxPayload('echo hi', defaultPolicy);
         assert.strictEqual(payload.containment, 'lxc');
         assert.strictEqual(payload.lxc!.destroyOnExit, true);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject proxy configuration on Linux', () => {
+      mockLinux();
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.4.0-alpha',
+          network: { allowOutbound: true, proxy: { builtinTestServer: true } },
+        };
+        assert.throws(
+          () => buildSandboxPayload('echo hi', policy),
+          { message: /not supported on Linux/ },
+        );
       } finally {
         restore();
       }

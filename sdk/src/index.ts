@@ -2,27 +2,23 @@
 // Licensed under the MIT License.
 
 /**
- * MXC SDK - TypeScript SDK for execution containers
+ * MXC SDK - TypeScript SDK for Microsoft eXecution Containers
  *
- * This package provides a Node.js interface for spawning sandboxed processes
- * on Windows using the WXC system.
+ * This package provides a Node.js interface for spawning sandboxed containers.
  *
  * @example
  * ```typescript
- * import { spawnSandbox, SandboxConfig, getPlatformSupport } from '@microsoft/mxc-sdk';
+ * import { spawnSandbox, SandboxPolicy, getPlatformSupport } from '@microsoft/mxc-sdk';
  *
  * if (getPlatformSupport().isSupported) {
- *   const config: SandboxConfig = {
- *     script: 'python -c "print(\'Hello from sandbox\')"',
- *     appContainer: {
- *       name: 'MyApp',
- *       learningMode: true
- *     }
+ *   const policy: SandboxPolicy = {
+ *     version: '0.4.0-alpha',
+ *     network: { allowOutbound: true },
  *   };
  *
- *   const pty = spawnSandbox(config);
- *   pty.onData((data) => console.log(data));
- *   pty.onExit((e) => console.log('Exit code:', e.exitCode));
+ *   const ptyProcess = spawnSandbox('python -c "print(\'Hello from sandbox\')"', policy);
+ *   ptyProcess.onData((data) => console.log(data));
+ *   ptyProcess.onExit((event) => console.log('Exit code:', event.exitCode));
  * }
  * ```
  *
