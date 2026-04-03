@@ -150,19 +150,6 @@ fn main() {
     // Sandbox requires --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
-        ContainmentBackend::Sandbox => {
-            if !request.experimental_enabled {
-                eprintln!("Error: Sandbox is an experimental feature. Use --experimental flag.");
-                process::exit(1);
-            }
-            let sandbox_config = request
-                .experimental
-                .sandbox
-                .as_ref()
-                .cloned()
-                .unwrap_or_default();
-            Box::new(SandboxScriptRunner::new(&sandbox_config))
-        }
         ContainmentBackend::Wslc => {
             eprintln!("Error: WSLC backend not yet implemented (Phase 3)");
             process::exit(1);
@@ -176,6 +163,23 @@ fn main() {
             process::exit(1);
         }
         ContainmentBackend::NanVix => Box::new(NanVixScriptRunner::new()),
+        ContainmentBackend::MicroVm => {
+            eprintln!("Error: MicroVM backend not yet implemented");
+            process::exit(1);
+        }
+        ContainmentBackend::Sandbox => {
+            if !request.experimental_enabled {
+                eprintln!("Error: Sandbox is an experimental feature. Use --experimental flag.");
+                process::exit(1);
+            }
+            let sandbox_config = request
+                .experimental
+                .sandbox
+                .as_ref()
+                .cloned()
+                .unwrap_or_default();
+            Box::new(SandboxScriptRunner::new(&sandbox_config))
+        }
     };
     let response = runner.run(&request, &mut logger);
     display_script_results(&response, &mut logger);

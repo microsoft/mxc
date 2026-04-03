@@ -10,8 +10,6 @@ pub enum ContainmentBackend {
     #[default]
     /// Windows AppContainer — process-level isolation on the host.
     AppContainer,
-    /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
-    Sandbox,
     /// Linux container via WSL Container SDK (WSLC SDK).
     Wslc,
     /// LXC — Linux container isolation.
@@ -21,6 +19,11 @@ pub enum ContainmentBackend {
     /// NanVix — microkernel VM isolation via WHP.
     #[serde(rename = "nanvix")]
     NanVix,
+    /// MicroVM-based isolation.
+    #[serde(rename = "microvm")]
+    MicroVm,
+    /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
+    Sandbox,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
