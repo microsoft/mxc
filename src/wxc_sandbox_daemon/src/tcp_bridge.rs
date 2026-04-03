@@ -13,6 +13,12 @@ use wxc_common::sandbox_protocol::{
     decode_message, encode_message, ControlMessage, DecodeResult, ExecRequest,
 };
 
+/// Maximum time (seconds) to wait for the guest's StreamsReady message.
+const STREAMS_READY_TIMEOUT_SECS: u64 = 60;
+
+/// Maximum time (seconds) for each data stream reconnection attempt.
+const RECONNECT_TIMEOUT_SECS: u64 = 30;
+
 /// Four TCP connections to the guest agent.
 ///
 /// TODO: These TCP connections are unencrypted. Verify if this is a concern.
@@ -222,7 +228,7 @@ pub async fn reconnect_data_streams(
 ) -> Result<()> {
     let mut buf = control_residual;
     let mut tmp = [0u8; 256];
-    let timeout = std::time::Duration::from_secs(60);
+    let timeout = std::time::Duration::from_secs(STREAMS_READY_TIMEOUT_SECS);
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {
@@ -236,7 +242,7 @@ pub async fn reconnect_data_streams(
                     buf.drain(..consumed);
                     eprintln!("[daemon] received StreamsReady, reconnecting data streams");
 
-                    let connect_timeout = std::time::Duration::from_secs(30);
+                    let connect_timeout = std::time::Duration::from_secs(RECONNECT_TIMEOUT_SECS);
                     let connect = |label: &'static str| {
                         let target = addr;
                         async move {

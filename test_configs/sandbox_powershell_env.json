@@ -1,5 +1,7 @@
 {
-  "script": "powershell -NoProfile -Command \"Write-Output ('ComputerName=' + $env:COMPUTERNAME); Write-Output ('User=' + $env:USERNAME); Write-Output ('ProcessCount=' + (Get-Process | Measure-Object).Count)\"",
   "containment": "sandbox",
-  "timeout": 60000
+  "process": {
+    "commandLine": "powershell -NoProfile -Command \"Write-Output ('ComputerName=' + $env:COMPUTERNAME); Write-Output ('User=' + $env:USERNAME); Write-Output ('ProcessCount=' + (Get-Process | Measure-Object).Count)\"",
+    "timeout": 60000
+  }
 }

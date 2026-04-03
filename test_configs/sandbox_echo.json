@@ -1,5 +1,7 @@
 {
-  "script": "echo Hello from sandbox!",
   "containment": "sandbox",
-  "timeout": 60000
+  "process": {
+    "commandLine": "echo Hello from sandbox!",
+    "timeout": 60000
+  }
 }

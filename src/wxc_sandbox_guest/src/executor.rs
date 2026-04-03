@@ -9,7 +9,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 
 use wxc_common::sandbox_protocol::{
-    decode_message, encode_message, ControlMessage, DecodeResult, ExitNotification,
+    decode_message, encode_message, ControlMessage, DecodeResult, ExecRequest, ExitNotification,
 };
 
 /// Main command loop.  Reads control messages from the host and executes
@@ -45,7 +45,7 @@ pub async fn run_command_loop(
         // Read from control channel.
         let bytes_read = control.read(&mut tmp).await.context("read control")?;
         if bytes_read == 0 {
-            eprintln!("[agent] control connection closed");
+            eprintln!("[guest] control connection closed");
             return Ok(());
         }
         buf.extend_from_slice(&tmp[..bytes_read]);
@@ -58,56 +58,25 @@ pub async fn run_command_loop(
                     buf.drain(..consumed);
                     match message {
                         ControlMessage::Exec(req) => {
-                            eprintln!("[agent] exec {}: {}", req.exec_id, req.script_code);
+                            eprintln!("[guest] exec {}: {}", req.exec_id, req.script_code);
 
-                            let result = execute_script(
-                                &req.script_code,
-                                &req.working_directory,
-                                req.timeout_ms,
+                            handle_exec(
+                                &req,
+                                &mut control,
                                 current_stdin,
                                 current_stdout,
                                 current_stderr,
                             )
-                            .await;
+                            .await?;
 
-                            let (exit_code, error_message) = match result {
-                                Ok(code) => (code, String::new()),
-                                Err(err) => (-1, format!("{:#}", err)),
-                            };
-
-                            let exit_msg = ControlMessage::Exit(ExitNotification {
-                                exec_id: req.exec_id.clone(),
-                                exit_code,
-                                error_message,
-                            });
-                            let frame = encode_message(&exit_msg).context("encode Exit")?;
-                            control.write_all(&frame).await.context("send Exit")?;
-
-                            eprintln!(
-                                "[agent] exec {} finished with code {}",
-                                req.exec_id, exit_code
-                            );
-
-                            // Tell the host we're ready for new data
-                            // connections, then accept them. The listener is
-                            // already bound so the daemon's connects will
-                            // queue in the TCP backlog while we accept.
-                            let ready_frame = encode_message(&ControlMessage::StreamsReady)
-                                .context("encode StreamsReady")?;
-                            control
-                                .write_all(&ready_frame)
-                                .await
-                                .context("send StreamsReady")?;
-                            eprintln!("[agent] StreamsReady sent, accepting new data connections");
-
+                            // Re-accept fresh data connections for the next
+                            // execution. The listener is already bound so the
+                            // daemon's connects queue in the TCP backlog.
                             let (new_stdin, new_stdout, new_stderr) =
-                                crate::listener::accept_data_connections(listener)
-                                    .await
-                                    .context("re-accept data connections")?;
+                                reconnect_streams(&mut control, listener).await?;
                             current_stdin = new_stdin;
                             current_stdout = new_stdout;
                             current_stderr = new_stderr;
-                            eprintln!("[agent] new data connections accepted, ready for next exec");
                         }
                         ControlMessage::Ping => {
                             let frame =
@@ -115,13 +84,71 @@ pub async fn run_command_loop(
                             control.write_all(&frame).await.context("send Pong")?;
                         }
                         other => {
-                            eprintln!("[agent] unexpected message: {:?}", other);
+                            eprintln!("[guest] unexpected message: {:?}", other);
                         }
                     }
                 }
             }
         }
     }
+}
+
+/// Execute a single EXEC request: run the script, send Exit on control.
+async fn handle_exec(
+    req: &ExecRequest,
+    control: &mut TcpStream,
+    stdin_stream: TcpStream,
+    stdout_stream: TcpStream,
+    stderr_stream: TcpStream,
+) -> Result<()> {
+    let result = execute_script(
+        &req.script_code,
+        &req.working_directory,
+        req.timeout_ms,
+        stdin_stream,
+        stdout_stream,
+        stderr_stream,
+    )
+    .await;
+
+    let (exit_code, error_message) = match result {
+        Ok(code) => (code, String::new()),
+        Err(err) => (-1, format!("{:#}", err)),
+    };
+
+    let exit_msg = ControlMessage::Exit(ExitNotification {
+        exec_id: req.exec_id.clone(),
+        exit_code,
+        error_message,
+    });
+    let frame = encode_message(&exit_msg).context("encode Exit")?;
+    control.write_all(&frame).await.context("send Exit")?;
+
+    eprintln!(
+        "[guest] exec {} finished with code {}",
+        req.exec_id, exit_code
+    );
+    Ok(())
+}
+
+/// Signal StreamsReady and accept fresh data connections for the next EXEC.
+async fn reconnect_streams(
+    control: &mut TcpStream,
+    listener: &TcpListener,
+) -> Result<(TcpStream, TcpStream, TcpStream)> {
+    let ready_frame =
+        encode_message(&ControlMessage::StreamsReady).context("encode StreamsReady")?;
+    control
+        .write_all(&ready_frame)
+        .await
+        .context("send StreamsReady")?;
+    eprintln!("[guest] StreamsReady sent, accepting new data connections");
+
+    let streams = crate::listener::accept_data_connections(listener)
+        .await
+        .context("re-accept data connections")?;
+    eprintln!("[guest] new data connections accepted, ready for next exec");
+    Ok(streams)
 }
 
 /// Spawn a child process and bridge its stdio over the TCP streams.
@@ -158,21 +185,27 @@ async fn execute_script(
     // Bridge stdin: TCP → child
     let stdin_task = tokio::spawn(async move {
         if let (mut tcp, Some(mut child_in)) = (stdin_stream, child_stdin) {
-            let _ = tokio::io::copy(&mut tcp, &mut child_in).await;
+            if let Err(err) = tokio::io::copy(&mut tcp, &mut child_in).await {
+                eprintln!("[guest] stdin bridge error: {}", err);
+            }
         }
     });
 
     // Bridge stdout: child → TCP
     let stdout_task = tokio::spawn(async move {
         if let (mut tcp, Some(mut child_out)) = (stdout_stream, child_stdout) {
-            let _ = tokio::io::copy(&mut child_out, &mut tcp).await;
+            if let Err(err) = tokio::io::copy(&mut child_out, &mut tcp).await {
+                eprintln!("[guest] stdout bridge error: {}", err);
+            }
         }
     });
 
     // Bridge stderr: child → TCP
     let stderr_task = tokio::spawn(async move {
         if let (mut tcp, Some(mut child_err)) = (stderr_stream, child_stderr) {
-            let _ = tokio::io::copy(&mut child_err, &mut tcp).await;
+            if let Err(err) = tokio::io::copy(&mut child_err, &mut tcp).await {
+                eprintln!("[guest] stderr bridge error: {}", err);
+            }
         }
     });
 
@@ -185,15 +218,28 @@ async fn execute_script(
             Ok(Ok(status)) => status,
             Ok(Err(err)) => anyhow::bail!("wait failed: {}", err),
             Err(_) => {
-                let _ = child.kill().await;
+                if let Err(err) = child.kill().await {
+                    eprintln!("[guest] failed to kill timed-out process: {}", err);
+                }
                 anyhow::bail!("process timed out after {}ms", timeout_ms);
             }
         }
     };
 
     // Wait for bridge tasks to complete (they'll finish when the child exits
-    // and its stdio handles are closed).
-    let _ = tokio::join!(stdin_task, stdout_task, stderr_task);
+    // and its stdio handles are closed). Task join errors indicate panics
+    // in the bridge tasks, which should not happen but we log them.
+    let (stdin_result, stdout_result, stderr_result) =
+        tokio::join!(stdin_task, stdout_task, stderr_task);
+    if let Err(err) = stdin_result {
+        eprintln!("[guest] stdin bridge task failed: {}", err);
+    }
+    if let Err(err) = stdout_result {
+        eprintln!("[guest] stdout bridge task failed: {}", err);
+    }
+    if let Err(err) = stderr_result {
+        eprintln!("[guest] stderr bridge task failed: {}", err);
+    }
 
     Ok(exit_status.code().unwrap_or(-1))
 }

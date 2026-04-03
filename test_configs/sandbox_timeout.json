@@ -1,5 +1,7 @@
 {
-  "script": "ping -n 30 127.0.0.1",
   "containment": "sandbox",
-  "timeout": 5000
+  "process": {
+    "commandLine": "ping -n 30 127.0.0.1",
+    "timeout": 5000
+  }
 }

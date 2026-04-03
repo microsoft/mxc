@@ -8,6 +8,27 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
+/// Path where the guest binary is mapped inside the sandbox.
+const SANDBOX_GUEST_DIR: &str = r"C:\Sandbox-Guest";
+
+/// Path where the rendezvous directory is mapped inside the sandbox.
+const SANDBOX_RENDEZVOUS_DIR: &str = r"C:\Sandbox-Rendezvous";
+
+/// Path where Python is mapped inside the sandbox.
+const SANDBOX_PYTHON_DIR: &str = r"C:\Sandbox-Python";
+
+/// Name of the guest binary that runs inside the sandbox.
+const GUEST_BINARY: &str = "wxc-sandbox-guest.exe";
+
+/// Maximum time (seconds) to wait for sandbox processes to exit during teardown.
+const TEARDOWN_POLL_TIMEOUT_SECS: u64 = 30;
+
+/// Cooldown (seconds) after sandbox processes exit for Hyper-V backend cleanup.
+const TEARDOWN_COOLDOWN_SECS: u64 = 5;
+
+/// Polling interval (seconds) when checking for sandbox process exit.
+const TEARDOWN_POLL_INTERVAL_SECS: u64 = 2;
+
 /// Discover the host's Python installation directory.
 ///
 /// Checks `python.exe` on PATH, then falls back to common install locations.
@@ -95,27 +116,28 @@ fn is_real_python(dir: &Path) -> bool {
 /// in `rendezvous_dir`.
 ///
 /// The .wsb maps three folders into the sandbox:
-///   - `agent_dir` (read-only)       → `C:\sandbox-agent`
+///   - `guest_dir` (read-only)        → `C:\sandbox-guest`
 ///   - `rendezvous_dir` (read-write) → `C:\sandbox-rendezvous`
 ///   - `python_dir` (read-only)      → `C:\sandbox-python`
 ///
 /// The LogonCommand runs a bootstrap script that adds Python to PATH
 /// then starts the guest agent.
 pub fn generate_wsb(
-    agent_dir: &Path,
+    guest_dir: &Path,
     rendezvous_dir: &Path,
     python_dir: &Path,
     output_dir: &Path,
 ) -> Result<PathBuf> {
     // Write the bootstrap script into the rendezvous dir (read-write inside
     // the sandbox) so it can be executed by the LogonCommand.
-    let bootstrap_content = r#"@echo off
-set "LOG=C:\sandbox-rendezvous\bootstrap.log"
+    let bootstrap_content = format!(
+        r#"@echo off
+set "LOG={rendezvous}\bootstrap.log"
 
 echo [bootstrap] Starting at %date% %time% >> "%LOG%" 2>&1
 
 echo [bootstrap] Adding mapped Python to PATH... >> "%LOG%" 2>&1
-set "PATH=C:\sandbox-python;C:\sandbox-python\Scripts;%PATH%"
+set "PATH={python};{python}\Scripts;%PATH%"
 
 echo [bootstrap] Disabling Python bytecode cache (read-only mapped dir)... >> "%LOG%" 2>&1
 set "PYTHONDONTWRITEBYTECODE=1"
@@ -125,10 +147,15 @@ echo [bootstrap] PATH=%PATH% >> "%LOG%" 2>&1
 where python >> "%LOG%" 2>&1
 python --version >> "%LOG%" 2>&1
 
-echo [bootstrap] Starting sandbox agent... >> "%LOG%" 2>&1
-C:\sandbox-agent\wxc-sandbox-agent.exe >> "%LOG%" 2>&1
-echo [bootstrap] Agent exited with code %ERRORLEVEL% >> "%LOG%" 2>&1
-"#;
+echo [bootstrap] Starting sandbox guest... >> "%LOG%" 2>&1
+{guest}\{binary} >> "%LOG%" 2>&1
+echo [bootstrap] Guest exited with code %ERRORLEVEL% >> "%LOG%" 2>&1
+"#,
+        rendezvous = SANDBOX_RENDEZVOUS_DIR,
+        python = SANDBOX_PYTHON_DIR,
+        guest = SANDBOX_GUEST_DIR,
+        binary = GUEST_BINARY,
+    );
     let bootstrap_path = rendezvous_dir.join("bootstrap.cmd");
     std::fs::write(&bootstrap_path, bootstrap_content)
         .with_context(|| format!("write bootstrap script {:?}", bootstrap_path))?;
@@ -137,30 +164,33 @@ echo [bootstrap] Agent exited with code %ERRORLEVEL% >> "%LOG%" 2>&1
         r#"<Configuration>
   <MappedFolders>
     <MappedFolder>
-      <HostFolder>{agent}</HostFolder>
-      <SandboxFolder>C:\sandbox-agent</SandboxFolder>
+      <HostFolder>{host_guest}</HostFolder>
+      <SandboxFolder>{sandbox_guest}</SandboxFolder>
       <ReadOnly>true</ReadOnly>
     </MappedFolder>
     <MappedFolder>
-      <HostFolder>{rendezvous}</HostFolder>
-      <SandboxFolder>C:\sandbox-rendezvous</SandboxFolder>
+      <HostFolder>{host_rendezvous}</HostFolder>
+      <SandboxFolder>{sandbox_rendezvous}</SandboxFolder>
       <ReadOnly>false</ReadOnly>
     </MappedFolder>
     <MappedFolder>
-      <HostFolder>{python}</HostFolder>
-      <SandboxFolder>C:\sandbox-python</SandboxFolder>
+      <HostFolder>{host_python}</HostFolder>
+      <SandboxFolder>{sandbox_python}</SandboxFolder>
       <ReadOnly>true</ReadOnly>
     </MappedFolder>
   </MappedFolders>
   <LogonCommand>
-    <Command>C:\sandbox-rendezvous\bootstrap.cmd</Command>
+    <Command>{sandbox_rendezvous}\bootstrap.cmd</Command>
   </LogonCommand>
   <vGPU>Disable</vGPU>
   <Networking>Enable</Networking>
 </Configuration>"#,
-        agent = agent_dir.display(),
-        rendezvous = rendezvous_dir.display(),
-        python = python_dir.display(),
+        host_guest = guest_dir.display(),
+        host_rendezvous = rendezvous_dir.display(),
+        host_python = python_dir.display(),
+        sandbox_guest = SANDBOX_GUEST_DIR,
+        sandbox_rendezvous = SANDBOX_RENDEZVOUS_DIR,
+        sandbox_python = SANDBOX_PYTHON_DIR,
     );
 
     let wsb_path = output_dir.join("wxc-sandbox.wsb");
@@ -210,16 +240,30 @@ pub async fn teardown() {
         "WindowsSandboxServer",
         "WindowsSandboxRemoteSession",
     ] {
-        let _ = Command::new("taskkill")
+        match Command::new("taskkill")
             .args(["/F", "/IM", process_name])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .await;
+            .await
+        {
+            Ok(status) if !status.success() => {
+                // Non-zero exit from taskkill is expected when the process
+                // isn't running — not an error worth logging.
+            }
+            Err(err) => {
+                eprintln!(
+                    "[daemon] failed to run taskkill for {}: {}",
+                    process_name, err
+                );
+            }
+            _ => {}
+        }
     }
 
     // Poll until sandbox-related processes are fully gone (up to 30s).
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(TEARDOWN_POLL_TIMEOUT_SECS);
     loop {
         let still_running = is_any_sandbox_process_running().await;
         if !still_running {
@@ -228,15 +272,16 @@ pub async fn teardown() {
         }
         if tokio::time::Instant::now() >= deadline {
             eprintln!(
-                "[daemon] warning: sandbox processes still running after 30s, proceeding anyway"
+                "[daemon] warning: sandbox processes still running after {}s, proceeding anyway",
+                TEARDOWN_POLL_TIMEOUT_SECS
             );
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(TEARDOWN_POLL_INTERVAL_SECS)).await;
     }
 
     // Additional cooldown for Hyper-V backend / VHDX release.
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(TEARDOWN_COOLDOWN_SECS)).await;
 }
 
 /// Check if any sandbox-related processes are still running.
@@ -269,21 +314,21 @@ mod tests {
     #[test]
     fn generate_wsb_creates_file() {
         let dir = tempfile::tempdir().unwrap();
-        let agent_dir = dir.path().join("agent");
+        let guest_dir = dir.path().join("guest");
         let rendezvous_dir = dir.path().join("rendezvous");
         let python_dir = dir.path().join("python");
-        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&guest_dir).unwrap();
         std::fs::create_dir_all(&rendezvous_dir).unwrap();
         std::fs::create_dir_all(&python_dir).unwrap();
 
-        let wsb_path = generate_wsb(&agent_dir, &rendezvous_dir, &python_dir, dir.path()).unwrap();
+        let wsb_path = generate_wsb(&guest_dir, &rendezvous_dir, &python_dir, dir.path()).unwrap();
         assert!(wsb_path.exists());
 
         let content = std::fs::read_to_string(&wsb_path).unwrap();
         assert!(content.contains("<Configuration>"));
         assert!(content.contains("bootstrap.cmd"));
         assert!(content.contains("sandbox-python"));
-        assert!(content.contains(&agent_dir.display().to_string()));
+        assert!(content.contains(&guest_dir.display().to_string()));
         assert!(content.contains(&rendezvous_dir.display().to_string()));
         assert!(content.contains(&python_dir.display().to_string()));
 
@@ -292,7 +337,7 @@ mod tests {
         assert!(bootstrap.exists());
         let bootstrap_content = std::fs::read_to_string(&bootstrap).unwrap();
         assert!(bootstrap_content.contains("sandbox-python"));
-        assert!(bootstrap_content.contains("wxc-sandbox-agent.exe"));
+        assert!(bootstrap_content.contains(GUEST_BINARY));
     }
 
     #[test]

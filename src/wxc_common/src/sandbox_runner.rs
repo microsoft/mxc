@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use crate::logger::Logger;
 use crate::models::{CodexRequest, SandboxConfig, ScriptResponse};
+use crate::sandbox_protocol::DaemonResult;
 use crate::script_runner::ScriptRunner;
-use crate::string_util::base64_decode;
 
 /// Script runner that delegates execution to the Windows Sandbox daemon.
 pub struct SandboxScriptRunner {
@@ -129,14 +129,14 @@ impl SandboxScriptRunner {
         }
 
         // Ensure daemon is up.
-        if let Err(e) = self.ensure_daemon_running(logger) {
-            return ScriptResponse::error(&e);
+        if let Err(err) = self.ensure_daemon_running(logger) {
+            return ScriptResponse::error(&err);
         }
 
         // Connect.
         let mut stream = match self.connect_to_daemon() {
-            Ok(s) => s,
-            Err(e) => return ScriptResponse::error(&e),
+            Ok(stream) => stream,
+            Err(err) => return ScriptResponse::error(&err),
         };
 
         // Send EXEC request as a single line: "EXEC <json>\n"
@@ -146,56 +146,43 @@ impl SandboxScriptRunner {
             timeout_ms: request.script_timeout,
         };
         let json = match serde_json::to_string(&payload) {
-            Ok(j) => j,
-            Err(e) => return ScriptResponse::error(&format!("serialize request: {}", e)),
+            Ok(json) => json,
+            Err(err) => return ScriptResponse::error(&format!("serialize request: {}", err)),
         };
 
         let msg = format!("EXEC {}\n", json);
-        if let Err(e) = stream.write_all(msg.as_bytes()) {
-            return ScriptResponse::error(&format!("send to daemon: {}", e));
+        if let Err(err) = stream.write_all(msg.as_bytes()) {
+            return ScriptResponse::error(&format!("send to daemon: {}", err));
         }
 
         let mut reader = BufReader::new(&stream);
         let mut response_line = String::new();
-        if let Err(e) = reader.read_line(&mut response_line) {
-            return ScriptResponse::error(&format!("read daemon response: {}", e));
+        if let Err(err) = reader.read_line(&mut response_line) {
+            return ScriptResponse::error(&format!("read daemon response: {}", err));
         }
 
-        let response_line = response_line.trim();
-        if let Some(rest) = response_line.strip_prefix("RESULT ") {
-            // Format: RESULT <exit-code> <stdout-base64> <stderr-base64> <error-message>
-            let parts: Vec<&str> = rest.splitn(4, ' ').collect();
-            if parts.len() < 3 {
-                return ScriptResponse::error(&format!(
-                    "malformed RESULT from daemon: expected at least 3 fields, got {}",
-                    parts.len()
-                ));
-            }
+        Self::parse_daemon_response(response_line.trim())
+    }
 
-            let exit_code = parts[0].parse::<i32>().unwrap_or(-1);
-            let stdout_text = base64_decode(parts[1])
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-                .unwrap_or_default();
-            let stderr_text = base64_decode(parts[2])
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-                .unwrap_or_default();
-            let error_msg = if parts.len() == 4 {
-                parts[3].to_string()
-            } else {
-                String::new()
-            };
-
-            ScriptResponse {
-                exit_code,
-                standard_out: stdout_text,
-                standard_err: stderr_text.clone(),
-                error_message: if error_msg.is_empty() {
-                    stderr_text
-                } else {
-                    error_msg
-                },
+    /// Parse the daemon's response line into a `ScriptResponse`.
+    fn parse_daemon_response(response_line: &str) -> ScriptResponse {
+        if response_line.starts_with("RESULT ") {
+            match DaemonResult::parse(response_line) {
+                Ok(result) => {
+                    let stdout_text = String::from_utf8(result.stdout).unwrap_or_default();
+                    let stderr_text = String::from_utf8(result.stderr).unwrap_or_default();
+                    ScriptResponse {
+                        exit_code: result.exit_code,
+                        standard_out: stdout_text,
+                        standard_err: stderr_text.clone(),
+                        error_message: if result.error_message.is_empty() {
+                            stderr_text
+                        } else {
+                            result.error_message
+                        },
+                    }
+                }
+                Err(err) => ScriptResponse::error(&err),
             }
         } else if let Some(stripped) = response_line.strip_prefix("ERROR ") {
             ScriptResponse::error(stripped)

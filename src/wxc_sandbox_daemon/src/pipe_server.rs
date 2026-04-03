@@ -12,7 +12,22 @@ use tokio::sync::Mutex;
 
 use crate::tcp_bridge;
 use crate::{rendezvous, sandbox_vm, DaemonState};
-use wxc_common::string_util::base64_encode;
+use wxc_common::sandbox_protocol::DaemonResult;
+
+/// Maximum number of sandbox launch attempts before giving up.
+const MAX_LAUNCH_ATTEMPTS: u32 = 3;
+
+/// Backoff delay (seconds) between sandbox launch retries.
+const LAUNCH_BACKOFF_SECS: [u64; 3] = [0, 10, 20];
+
+/// Maximum time (seconds) to wait for the guest agent's rendezvous file.
+const RENDEZVOUS_TIMEOUT_SECS: u64 = 120;
+
+/// Polling interval (milliseconds) when checking for the rendezvous file.
+const RENDEZVOUS_POLL_INTERVAL_MS: u64 = 500;
+
+/// Maximum time (seconds) to connect to the guest agent after rendezvous.
+const GUEST_CONNECT_TIMEOUT_SECS: u64 = 30;
 
 /// Run the named-pipe server loop.
 ///
@@ -133,18 +148,22 @@ async fn execute_request(
                 tcp_bridge::reconnect_data_streams(conn, addr, result.control_residual).await
             {
                 eprintln!("[daemon] failed to reconnect data streams: {:#}", err);
-                // Mark the connection as dead so next request re-launches.
+                // Full reset so the next request tears down and relaunches
+                // rather than waiting for a rendezvous that won't appear.
                 locked.guest_connection = None;
+                locked.guest_addr = None;
+                locked.sandbox_running = false;
             }
         }
     }
 
-    let stdout_b64 = base64_encode(&result.stdout);
-    let stderr_b64 = base64_encode(&result.stderr);
-    Ok(format!(
-        "RESULT {} {} {} {}\n",
-        result.exit_code, stdout_b64, stderr_b64, result.error_message
-    ))
+    Ok(DaemonResult {
+        exit_code: result.exit_code,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error_message: result.error_message,
+    }
+    .to_line())
 }
 
 /// Ensure the sandbox VM is running and we have a guest connection.
@@ -165,7 +184,7 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
         .context("exe parent dir")?
         .to_path_buf();
 
-    let agent_dir = exe_dir.clone();
+    let guest_dir = exe_dir.clone();
     let rendezvous_dir = std::env::temp_dir().join("wxc-sandbox-rendezvous");
     std::fs::create_dir_all(&rendezvous_dir).context("create rendezvous dir")?;
 
@@ -176,17 +195,15 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
     let temp_dir = std::env::temp_dir().join("wxc-sandbox-config");
     std::fs::create_dir_all(&temp_dir).context("create .wsb config dir")?;
 
-    let max_attempts = 3;
-    let backoff_secs = [0, 10, 20]; // TODO: backoff tuned from initial runs; may need adjustment on stable builds
-    for attempt in 1..=max_attempts {
-        match try_launch_and_connect(state, &agent_dir, &rendezvous_dir, &python_dir, &temp_dir)
+    for attempt in 1..=MAX_LAUNCH_ATTEMPTS {
+        match try_launch_and_connect(state, &guest_dir, &rendezvous_dir, &python_dir, &temp_dir)
             .await
         {
             Ok(()) => return Ok(()),
-            Err(e) if attempt < max_attempts => {
+            Err(e) if attempt < MAX_LAUNCH_ATTEMPTS => {
                 eprintln!(
                     "[daemon] sandbox attempt {}/{} failed: {:#}, retrying after {}s...",
-                    attempt, max_attempts, e, backoff_secs[attempt as usize]
+                    attempt, MAX_LAUNCH_ATTEMPTS, e, LAUNCH_BACKOFF_SECS[attempt as usize]
                 );
 
                 // Reset state so the next attempt does a fresh launch.
@@ -200,7 +217,7 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
                 rendezvous::cleanup(&rendezvous_dir).await?;
 
                 // Backoff before next attempt.
-                let wait = std::time::Duration::from_secs(backoff_secs[attempt as usize]);
+                let wait = std::time::Duration::from_secs(LAUNCH_BACKOFF_SECS[attempt as usize]);
                 if !wait.is_zero() {
                     tokio::time::sleep(wait).await;
                 }
@@ -213,7 +230,10 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
                     locked.guest_connection = None;
                     locked.guest_addr = None;
                 }
-                return Err(e).context(format!("sandbox failed after {} attempts", max_attempts));
+                return Err(e).context(format!(
+                    "sandbox failed after {} attempts",
+                    MAX_LAUNCH_ATTEMPTS
+                ));
             }
         }
     }
@@ -224,7 +244,7 @@ async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
 /// Single attempt to launch the sandbox and connect to the guest agent.
 async fn try_launch_and_connect(
     state: &Arc<Mutex<DaemonState>>,
-    agent_dir: &std::path::Path,
+    guest_dir: &std::path::Path,
     rendezvous_dir: &std::path::Path,
     python_dir: &std::path::Path,
     temp_dir: &std::path::Path,
@@ -238,7 +258,7 @@ async fn try_launch_and_connect(
             sandbox_vm::teardown().await;
 
             let wsb_path =
-                sandbox_vm::generate_wsb(agent_dir, rendezvous_dir, python_dir, temp_dir)?;
+                sandbox_vm::generate_wsb(guest_dir, rendezvous_dir, python_dir, temp_dir)?;
             sandbox_vm::launch(&wsb_path).await?;
             s.sandbox_running = true;
             eprintln!("[daemon] sandbox VM launched");
@@ -248,16 +268,19 @@ async fn try_launch_and_connect(
     // Poll for rendezvous without holding the lock (can take 15-60s).
     let guest_addr = rendezvous::wait_for_rendezvous(
         rendezvous_dir,
-        std::time::Duration::from_secs(120),
-        std::time::Duration::from_millis(500),
+        std::time::Duration::from_secs(RENDEZVOUS_TIMEOUT_SECS),
+        std::time::Duration::from_millis(RENDEZVOUS_POLL_INTERVAL_MS),
     )
     .await
     .context("rendezvous failed")?;
 
     // Connect to the guest agent.
-    let conn = tcp_bridge::connect_to_guest(guest_addr, std::time::Duration::from_secs(30))
-        .await
-        .context("connect to guest agent")?;
+    let conn = tcp_bridge::connect_to_guest(
+        guest_addr,
+        std::time::Duration::from_secs(GUEST_CONNECT_TIMEOUT_SECS),
+    )
+    .await
+    .context("connect to guest agent")?;
 
     let mut locked = state.lock().await;
     locked.guest_connection = Some(conn);

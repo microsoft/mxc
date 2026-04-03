@@ -1,5 +1,7 @@
 {
-  "script": "exit /b 42",
   "containment": "sandbox",
-  "timeout": 60000
+  "process": {
+    "commandLine": "exit /b 42",
+    "timeout": 60000
+  }
 }

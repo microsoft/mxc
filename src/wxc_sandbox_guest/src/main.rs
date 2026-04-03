@@ -1,4 +1,4 @@
-//! Windows Sandbox Guest Agent
+//! Windows Sandbox Guest Process
 //!
 //! Runs inside Windows Sandbox as the LogonCommand. Startup sequence:
 //!   1. Listen on a TCP port
@@ -18,13 +18,13 @@ const RENDEZVOUS_DIR: &str = r"C:\sandbox-rendezvous";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    eprintln!("[agent] starting");
+    eprintln!("[guest] starting");
 
     // Step 1-2: bind TCP listener, write rendezvous file.
     let (tcp_listener, local_addr) = listener::bind_and_advertise(RENDEZVOUS_DIR)
         .await
         .context("failed to start TCP listener")?;
-    eprintln!("[agent] listening on {}", local_addr);
+    eprintln!("[guest] listening on {}", local_addr);
 
     // Step 3: accept 4 connections from the host daemon.
     let (control, stdin_stream, stdout_stream, stderr_stream) =
@@ -32,13 +32,13 @@ async fn main() -> Result<()> {
             .await
             .context("failed to accept host connections")?;
     let host_ip = control.peer_addr()?.ip();
-    eprintln!("[agent] host connected from {}", host_ip);
+    eprintln!("[guest] host connected from {}", host_ip);
 
     // Step 4: lock down firewall — only allow the host IP.
     firewall::lockdown(host_ip, local_addr.port())
         .await
         .context("firewall lockdown failed")?;
-    eprintln!("[agent] firewall locked down");
+    eprintln!("[guest] firewall locked down");
 
     // Step 5: enter command loop.
     executor::run_command_loop(

@@ -28,7 +28,7 @@ wxc-exec.exe (CLI client)
                 │
                 └── Bridges EXEC requests to the guest
                       │
-                      wxc-sandbox-agent.exe (inside sandbox VM)
+                      wxc-sandbox-guest.exe (inside sandbox VM)
                         │
                         ├── Binds TCP, writes IP:port to rendezvous file
                         ├── Accepts 4 connections (control, stdin, stdout, stderr)
@@ -43,7 +43,7 @@ wxc-exec.exe (CLI client)
 |--------|-------|------------|---------|
 | `wxc-exec.exe` | `wxc` | Host | CLI entry point, dispatches to SandboxScriptRunner |
 | `wxc-sandbox-daemon.exe` | `wxc_sandbox_daemon` | Host | Manages sandbox VM lifecycle, bridges IPC to TCP |
-| `wxc-sandbox-agent.exe` | `wxc_sandbox_agent` | Inside sandbox VM | Accepts commands, runs scripts, bridges stdio |
+| `wxc-sandbox-guest.exe` | `wxc_sandbox_guest` | Inside sandbox VM | Accepts commands, runs scripts, bridges stdio |
 
 ## Execution Flow
 

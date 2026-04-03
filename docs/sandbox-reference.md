@@ -42,7 +42,7 @@ Control channel frame format: `[4 bytes: u32 LE length][JSON payload]`
 
 | Host path | Sandbox path | Access | Contents |
 |-----------|-------------|--------|----------|
-| Daemon's exe directory | `C:\sandbox-agent` | Read-only | `wxc-sandbox-agent.exe` |
+| Daemon's exe directory | `C:\sandbox-guest` | Read-only | `wxc-sandbox-guest.exe` |
 | `%TEMP%\wxc-sandbox-rendezvous` | `C:\sandbox-rendezvous` | Read-write | `rendezvous.txt`, `bootstrap.cmd`, `bootstrap.log` |
 | Host Python directory | `C:\sandbox-python` | Read-only | Host's Python installation |
 
@@ -53,7 +53,7 @@ The `.wsb` LogonCommand runs `C:\sandbox-rendezvous\bootstrap.cmd`:
 1. Adds `C:\sandbox-python` and `C:\sandbox-python\Scripts` to PATH
 2. Sets `PYTHONDONTWRITEBYTECODE=1` and `PYTHONNOUSERSITE=1`
 3. Logs diagnostics to `bootstrap.log`
-4. Launches `wxc-sandbox-agent.exe`
+4. Launches `wxc-sandbox-guest.exe`
 
 ### .wsb Configuration
 
@@ -62,7 +62,7 @@ The `.wsb` LogonCommand runs `C:\sandbox-rendezvous\bootstrap.cmd`:
   <MappedFolders>
     <MappedFolder>
       <HostFolder>{agent_dir}</HostFolder>
-      <SandboxFolder>C:\sandbox-agent</SandboxFolder>
+      <SandboxFolder>C:\sandbox-guest</SandboxFolder>
       <ReadOnly>true</ReadOnly>
     </MappedFolder>
     <MappedFolder>
@@ -181,10 +181,10 @@ Remove-Item "$env:TEMP\wxc-sandbox-rendezvous\*" -ErrorAction SilentlyContinue
 | `src/wxc_sandbox_daemon/src/sandbox_vm.rs` | .wsb generation, Python discovery, VM launch/teardown |
 | `src/wxc_sandbox_daemon/src/rendezvous.rs` | Polls rendezvous.txt |
 | `src/wxc_sandbox_daemon/src/tcp_bridge.rs` | 4-channel TCP bridge, execute_on_guest, reconnect |
-| `src/wxc_sandbox_agent/src/main.rs` | Agent entry point |
-| `src/wxc_sandbox_agent/src/listener.rs` | TCP listener, rendezvous writer |
-| `src/wxc_sandbox_agent/src/executor.rs` | Command loop, stdio bridging |
-| `src/wxc_sandbox_agent/src/firewall.rs` | Guest firewall lockdown |
+| `src/wxc_sandbox_guest/src/main.rs` | Guest entry point |
+| `src/wxc_sandbox_guest/src/listener.rs` | TCP listener, rendezvous writer |
+| `src/wxc_sandbox_guest/src/executor.rs` | Command loop, stdio bridging |
+| `src/wxc_sandbox_guest/src/firewall.rs` | Guest firewall lockdown |
 
 ## E2E Tests
 
