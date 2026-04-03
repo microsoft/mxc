@@ -79,6 +79,10 @@ export function buildSandboxPayload(
             destroyOnExit: true,
         };
 
+        if (policy.network?.proxy) {
+            throw new Error('Proxy configuration is not supported on Linux');
+        }
+
         if (policy.network) {
             config.network = {
                 defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
@@ -103,6 +107,13 @@ export function buildSandboxPayload(
         leastPrivilege: false,
         capabilities,
     };
+
+    if (policy.network?.proxy) {
+        if (!config.network) {
+            config.network = {};
+        }
+        config.network.proxy = policy.network.proxy;
+    }
 
     return config;
 }

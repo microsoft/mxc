@@ -141,6 +141,13 @@ export type SandboxPolicy = {
       allowOutbound?: boolean;
       /** Whether to allow connections to local networks. (default: false) */
       allowLocalNetwork?: boolean;
+      /**
+       * Proxy configuration for the container (temporarily Windows only, temporarily requires elevation).
+       * Only one option may be specified:
+       * - `builtinTestServer`: Use the built-in test proxy server
+       * - `localhost`: Forward traffic through a proxy on the specified localhost port
+       */
+      proxy?: { builtinTestServer: true } | { localhost: number }
   };
 }
 
