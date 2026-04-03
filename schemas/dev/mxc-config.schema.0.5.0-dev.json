@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.json",
+  "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.5.0-dev.json",
   "title": "MXC Configuration",
   "description": "Configuration schema for MXC container execution engine. Defines the recommended config format. The parser also accepts legacy fields not listed here during the migration period.",
   "type": "object",
@@ -10,7 +10,7 @@
   "properties": {
     "version": {
       "type": "string",
-      "description": "MXC config schema version (semver). Current: '0.4.0-alpha'.",
+      "description": "MXC config schema version (semver). Current stable: '0.4.0-alpha'. The dev schema filename (0.5.0-dev) reflects the next version in development — configs should continue using '0.4.0-alpha' until the parser is updated to support 0.5.x.",
       "examples": ["0.4.0-alpha"]
     },
     "containerId": {
@@ -183,6 +183,23 @@
         "release": {
           "type": "string",
           "description": "Distribution release version (e.g., '3.20', '24.04'). Required."
+        }
+      }
+    },
+
+    "experimental": {
+      "type": "object",
+      "description": "Experimental features. Only active when --experimental is passed.",
+      "properties": {
+        "test": {
+          "type": "object",
+          "description": "Placeholder feature for testing experimental infrastructure.",
+          "properties": {
+            "message": {
+              "type": "string",
+              "description": "Message to log when the feature is applied."
+            }
+          }
         }
       }
     }

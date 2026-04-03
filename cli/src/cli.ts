@@ -90,7 +90,8 @@ program
   .option('--cwd <path>', 'Working directory for the sandboxed process')
   .option('--container-name <name>', 'Name for the sandbox container')
   .option('--debug', 'Enable debug output')
-  .action(async (options: { script?: string; scriptFile?: string; policy?: string; policyFile?: string; cwd?: string; containerName?: string; debug?: boolean }) => {
+  .option('--experimental', 'Enable experimental features')
+  .action(async (options: { script?: string; scriptFile?: string; policy?: string; policyFile?: string; cwd?: string; containerName?: string; debug?: boolean; experimental?: boolean }) => {
     try {
       let scriptCommand: string;
       if (options.script) {
@@ -145,6 +146,7 @@ program
 
       const ptyProcess = spawnSandbox(scriptCommand, policy, {
         debug: options.debug ?? false,
+        experimental: options.experimental ?? false,
       }, options.cwd, options.containerName);
 
       ptyProcess.onData((data: string) => {

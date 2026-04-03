@@ -1,10 +1,23 @@
 
 ## Configuration Schema
 
-MXC uses a JSON configuration file. The formal schema is at
-[`schemas/dev/mxc-config.schema.json`](../schemas/dev/mxc-config.schema.json) —
-editors that support JSON Schema will provide autocomplete and validation when
-you add `"$schema": "./schemas/dev/mxc-config.schema.json"` to your config file.
+MXC uses a JSON configuration file. The current stable schema is at
+[`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](../schemas/stable/mxc-config.schema.0.4.0-alpha.json).
+For development, the dev schema at
+[`schemas/dev/mxc-config.schema.0.5.0-dev.json`](../schemas/dev/mxc-config.schema.0.5.0-dev.json)
+includes experimental features and may change without notice.
+
+Editors that support JSON Schema will provide autocomplete and validation when
+you add a `"$schema"` reference to your config file. Use the stable schema for
+production configs and the dev schema when working on experimental features:
+
+```json
+// Production
+"$schema": "./schemas/stable/mxc-config.schema.0.4.0-alpha.json"
+
+// Development (experimental features)
+"$schema": "./schemas/dev/mxc-config.schema.0.5.0-dev.json"
+```
 
 ### Full Schema
 
