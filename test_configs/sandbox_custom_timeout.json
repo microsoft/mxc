@@ -6,7 +6,9 @@
     "commandLine": "python -c \"import sys; print(f'Hello from sandbox Python {sys.version}'); print('Sandbox test successful')\"",
     "timeout": 60000
   },
-  "sandbox": {
-    "idleTimeout": 120000
+  "experimental": {
+    "sandbox": {
+      "idleTimeoutMs": 120000
+    }
   }
 }

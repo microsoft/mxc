@@ -126,6 +126,7 @@ struct RawTestFeature {
 #[serde(default)]
 struct RawExperimental {
     test: Option<RawTestFeature>,
+    sandbox: Option<RawSandbox>,
 }
 
 #[derive(Deserialize, Default)]
@@ -140,7 +141,6 @@ struct RawConfig {
     containment: Option<String>,
     #[serde(rename = "appContainer")]
     app_container: Option<RawAppContainer>,
-    sandbox: Option<RawSandbox>,
     wslc: Option<RawContainerConfig>,
     lxc: Option<RawLxc>,
     filesystem: Option<RawFilesystem>,
@@ -357,17 +357,6 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     };
 
-    // Sandbox configuration
-    let mut sandbox_config = SandboxConfig::default();
-    if let Some(sb) = raw.sandbox {
-        if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
-            sandbox_config.idle_timeout_ms = t;
-        }
-        if let Some(name) = sb.daemon_pipe_name {
-            sandbox_config.daemon_pipe_name = name;
-        }
-    }
-
     // LXC configuration
     let lxc_config = {
         let raw_lxc = raw.lxc.unwrap_or_default();
@@ -529,7 +518,17 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     // Experimental section (parsed but only applied when --experimental flag is set)
     let experimental = if let Some(raw_exp) = raw.experimental {
         let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
-        ExperimentalConfig { test }
+        let sandbox = raw_exp.sandbox.map(|sb| {
+            let mut config = SandboxConfig::default();
+            if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
+                config.idle_timeout_ms = t;
+            }
+            if let Some(name) = sb.daemon_pipe_name {
+                config.daemon_pipe_name = name;
+            }
+            config
+        });
+        ExperimentalConfig { test, sandbox }
     } else {
         ExperimentalConfig::default()
     };
@@ -545,7 +544,6 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         containment,
         lifecycle,
         policy,
-        sandbox_config,
         container_config,
         lxc_config,
         experimental_enabled: false,
@@ -969,32 +967,34 @@ mod tests {
 
     #[test]
     fn sandbox_config_defaults() {
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "sandbox"}"#;
+        let json = r#"{"process": {"commandLine": "echo hello"}, "experimental": {"sandbox": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.sandbox_config.idle_timeout_ms, 300_000);
-        assert_eq!(req.sandbox_config.daemon_pipe_name, "wxc-sandbox");
+        let sandbox = req.experimental.sandbox.unwrap();
+        assert_eq!(sandbox.idle_timeout_ms, 300_000);
+        assert_eq!(sandbox.daemon_pipe_name, "wxc-sandbox");
     }
 
     #[test]
     fn sandbox_config_custom_values() {
         let json = r#"{
             "process": {"commandLine": "echo hello"},
-            "containment": "sandbox",
-            "sandbox": {
-                "idleTimeout": 60000,
-                "daemonPipeName": "my-custom-pipe"
+            "experimental": {
+                "sandbox": {
+                    "idleTimeoutMs": 60000,
+                    "daemonPipeName": "my-custom-pipe"
+                }
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Sandbox);
-        assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
-        assert_eq!(req.sandbox_config.daemon_pipe_name, "my-custom-pipe");
+        let sandbox = req.experimental.sandbox.unwrap();
+        assert_eq!(sandbox.idle_timeout_ms, 60000);
+        assert_eq!(sandbox.daemon_pipe_name, "my-custom-pipe");
     }
 
     // ====== Network proxy configuration tests ======
@@ -1051,8 +1051,8 @@ mod tests {
     }
 
     #[test]
-    fn proxy_rejected_with_sandbox() {
-        let json = r#"{"process":{"commandLine":"x"},"containment":"sandbox","network":{"proxy":{"localhost":8080}}}"#;
+    fn proxy_rejected_with_non_appcontainer() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1129,8 +1129,8 @@ mod tests {
     }
 
     #[test]
-    fn proxy_builtin_test_server_rejected_with_sandbox() {
-        let json = r#"{"process":{"commandLine":"x"},"containment":"sandbox","network":{"proxy":{"builtinTestServer":true}}}"#;
+    fn proxy_builtin_test_server_rejected_with_non_appcontainer() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1299,22 +1299,22 @@ mod tests {
 
     #[test]
     fn sandbox_idle_timeout_ms_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "sandbox", "sandbox": {"idleTimeoutMs": 60000}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"sandbox": {"idleTimeoutMs": 60000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
+        assert_eq!(req.experimental.sandbox.unwrap().idle_timeout_ms, 60000);
     }
 
     #[test]
     fn sandbox_idle_timeout_ms_overrides_idle_timeout() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "sandbox", "sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
+        assert_eq!(req.experimental.sandbox.unwrap().idle_timeout_ms, 60000);
     }
 
     #[test]

@@ -10,8 +10,6 @@ pub enum ContainmentBackend {
     #[default]
     /// Windows AppContainer — process-level isolation on the host.
     AppContainer,
-    /// Windows Sandbox — full VM isolation via a long-lived sandbox daemon.
-    Sandbox,
     /// Linux container via WSL Container SDK (WSLC SDK).
     Wslc,
     /// LXC — Linux container isolation.
@@ -21,6 +19,11 @@ pub enum ContainmentBackend {
     /// NanVix — microkernel VM isolation via WHP.
     #[serde(rename = "nanvix")]
     NanVix,
+    /// MicroVM-based isolation.
+    #[serde(rename = "microvm")]
+    MicroVm,
+    /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
+    Sandbox,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
@@ -221,6 +224,8 @@ impl TestFeatureConfig {
 pub struct ExperimentalConfig {
     /// Placeholder feature for testing experimental infrastructure.
     pub test: Option<TestFeatureConfig>,
+    /// Windows Sandbox backend (experimental).
+    pub sandbox: Option<SandboxConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,8 +248,6 @@ pub struct CodexRequest {
     pub lifecycle: LifecycleConfig,
     /// AppContainer-specific policy (used when containment == AppContainer).
     pub policy: ContainerPolicy,
-    /// Sandbox-specific configuration (used when containment == Sandbox).
-    pub sandbox_config: SandboxConfig,
     /// Container configuration (used when containment == Wslc).
     pub container_config: ContainerConfig,
     /// LXC-specific configuration (used when containment == Lxc).
@@ -268,7 +271,6 @@ impl Default for CodexRequest {
             containment: ContainmentBackend::default(),
             lifecycle: LifecycleConfig::default(),
             policy: ContainerPolicy::default(),
-            sandbox_config: SandboxConfig::default(),
             container_config: ContainerConfig::default(),
             lxc_config: LxcConfig::default(),
             experimental_enabled: false,
