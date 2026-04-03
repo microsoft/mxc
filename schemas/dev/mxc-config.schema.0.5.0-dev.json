@@ -21,7 +21,7 @@
       "type": "string",
       "enum": ["appcontainer", "sandbox", "lxc", "nanvix"],
       "default": "appcontainer",
-      "description": "Containment backend to use for execution."
+      "description": "Containment backend to use for execution. Note: 'sandbox' is experimental and requires the --experimental CLI flag."
     },
 
     "lifecycle": {
