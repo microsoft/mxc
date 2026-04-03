@@ -332,10 +332,10 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         Some("wslc") => ContainmentBackend::Wslc,
         Some("lxc") => ContainmentBackend::Lxc,
         Some("vm") => ContainmentBackend::Vm,
-        Some("microvm") => ContainmentBackend::MicroVm,
+        Some("nanvix") => ContainmentBackend::NanVix,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', 'wslc', 'lxc', 'vm', or 'microvm')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', 'wslc', 'lxc', 'vm', or 'nanvix')",
                 other
             );
             logger.log_line(&msg);
@@ -1194,13 +1194,13 @@ mod tests {
     }
 
     #[test]
-    fn containment_microvm_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "microvm"}"#;
+    fn containment_nanvix_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "nanvix"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::MicroVm);
+        assert_eq!(req.containment, ContainmentBackend::NanVix);
     }
 
     #[test]

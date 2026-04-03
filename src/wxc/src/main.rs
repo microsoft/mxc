@@ -11,6 +11,7 @@ use wxc_common::config_parser::load_request;
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
+use wxc_common::nanvix_runner::NanVixScriptRunner;
 use wxc_common::sandbox_runner::SandboxScriptRunner;
 use wxc_common::script_runner::ScriptRunner;
 
@@ -155,10 +156,7 @@ fn main() {
             eprintln!("Error: VM backend not yet implemented");
             process::exit(1);
         }
-        ContainmentBackend::MicroVm => {
-            eprintln!("Error: MicroVM backend not yet implemented");
-            process::exit(1);
-        }
+        ContainmentBackend::NanVix => Box::new(NanVixScriptRunner::new()),
     };
     let response = runner.run(&request, &mut logger);
     display_script_results(&response, &mut logger);

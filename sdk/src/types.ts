@@ -100,7 +100,7 @@ export interface ContainerConfig {
   /** Externally assigned container identifier */
   containerId?: string;
   /** Containment backend */
-  containment?: 'appcontainer' | 'sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm';
+  containment?: 'appcontainer' | 'sandbox' | 'wslc' | 'lxc' | 'vm' | 'nanvix';
   /** Container lifecycle settings */
   lifecycle?: LifecycleConfig;
   /** Process execution settings (required) */
@@ -168,7 +168,7 @@ export interface LxcConfig {
 /**
  * Sandboxing methods available on the platform
  */
-export type SandboxingMethod = 'appcontainer' | 'sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm';
+export type SandboxingMethod = 'appcontainer' | 'sandbox' | 'wslc' | 'lxc' | 'vm' | 'nanvix';
 
 /**
  * Platform support information
