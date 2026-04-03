@@ -175,6 +175,15 @@ fn watchdog_thread_fn(
     close_handle(process_handle_raw);
 }
 
+/// Components returned by [`NanVixScriptRunner::setup_watchdog`]: the watchdog
+/// thread handle (if a finite timeout was requested), the cancellation pair
+/// used to signal early completion, and the `timed_out` flag.
+type WatchdogState = (
+    Option<JoinHandle<()>>,
+    Arc<(Mutex<bool>, Condvar)>,
+    Arc<AtomicBool>,
+);
+
 // -- NanVixScriptRunner ------------------------------------------------------
 
 /// Script runner that executes Python code inside a NanVix microkernel VM.
@@ -298,12 +307,16 @@ impl NanVixScriptRunner {
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|e| NanVixError::Platform(format!("failed to spawn {}: {}", NANVIXD_BINARY, e)))?;
+            .map_err(|e| {
+                NanVixError::Platform(format!("failed to spawn {}: {}", NANVIXD_BINARY, e))
+            })?;
 
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(e) = stdin.write_all(script.as_bytes()) {
-                let err =
-                    NanVixError::Runtime(format!("failed to write script to {} stdin: {}", NANVIXD_BINARY, e));
+                let err = NanVixError::Runtime(format!(
+                    "failed to write script to {} stdin: {}",
+                    NANVIXD_BINARY, e
+                ));
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(err);
@@ -361,14 +374,7 @@ impl NanVixScriptRunner {
         child: &mut std::process::Child,
         timeout_ms: u64,
         logger: &mut Logger,
-    ) -> Result<
-        (
-            Option<JoinHandle<()>>,
-            Arc<(Mutex<bool>, Condvar)>,
-            Arc<AtomicBool>,
-        ),
-        ScriptResponse,
-    > {
+    ) -> Result<WatchdogState, ScriptResponse> {
         let timed_out = Arc::new(AtomicBool::new(false));
         let cancel_pair = Arc::new((Mutex::new(false), Condvar::new()));
 
@@ -410,7 +416,13 @@ impl NanVixScriptRunner {
         Ok((watchdog, cancel_pair, timed_out))
     }
 
-    fn log_resolved_paths(logger: &mut Logger, nanvixd: &Path, bin_dir: &Path, ramfs: &Path, python: &Path) {
+    fn log_resolved_paths(
+        logger: &mut Logger,
+        nanvixd: &Path,
+        bin_dir: &Path,
+        ramfs: &Path,
+        python: &Path,
+    ) {
         let _ = writeln!(logger, "NanVix: nanvixd={:?}", nanvixd);
         let _ = writeln!(logger, "NanVix: bin_dir={:?}", bin_dir);
         let _ = writeln!(logger, "NanVix: ramfs={:?}", ramfs);
@@ -495,10 +507,11 @@ impl ScriptRunner for NanVixScriptRunner {
         };
 
         let timeout_ms = Self::total_timeout_ms(request.script_timeout);
-        let (watchdog, cancel_pair, timed_out) = match Self::setup_watchdog(&mut child, timeout_ms, logger) {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
+        let (watchdog, cancel_pair, timed_out) =
+            match Self::setup_watchdog(&mut child, timeout_ms, logger) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
 
         Self::wait_and_respond(
             &mut child,
