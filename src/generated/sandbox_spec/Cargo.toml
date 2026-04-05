@@ -1,0 +1,9 @@
+[package]
+name = "sandbox_spec"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Generated FlatBuffers bindings for SandboxSpec"
+
+[dependencies]
+flatbuffers = { workspace = true }

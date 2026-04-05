@@ -32,7 +32,3 @@ pub mod string_util;
 // BaseContainer (composable sandbox) support
 #[cfg(target_os = "windows")]
 pub mod base_container_runner;
-#[cfg(target_os = "windows")]
-#[allow(non_snake_case, unused_imports, clippy::all)]
-#[path = "../../generated/basecontainer_sandboxspec_generated.rs"]
-pub mod sandbox_spec_generated;

@@ -24,7 +24,7 @@ use windows_core::PCWSTR;
 
 use crate::logger::Logger;
 use crate::models::{CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
-use crate::sandbox_spec_generated::sandbox_tech_spec_layout::{
+use sandbox_spec::sandbox_tech_spec_layout::{
     finish_sandbox_spec_buffer, SandboxSpec, SandboxSpecArgs,
 };
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
@@ -285,7 +285,7 @@ impl ScriptRunner for BaseContainerRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox_spec_generated::sandbox_tech_spec_layout;
+    use sandbox_spec::sandbox_tech_spec_layout;
 
     #[test]
     fn build_sandbox_spec_produces_valid_flatbuffer() {
