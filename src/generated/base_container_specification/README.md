@@ -16,7 +16,7 @@ Remove-Item src\generated\base_container_specification\src\lib.rs
 Remove-Item src\generated\base_container_specification\src\ -Recurse
 
 # Run flatc
-& "C:\Users\jwhites\Downloads\Windows.flatc.binary\flatc.exe" `
+& "flatc.exe" `
     --rust --gen-object-api --force-empty --no-prefix --rust-module-root-file --gen-all `
     -o src/generated/base_container_specification `
     external/windows-sdk/BaseContainerSpecification.fbs
