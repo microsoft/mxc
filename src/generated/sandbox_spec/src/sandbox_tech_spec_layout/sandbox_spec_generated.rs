@@ -6,153 +6,216 @@ pub enum SandboxSpecOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
 pub struct SandboxSpec<'a> {
-  pub _tab: ::flatbuffers::Table<'a>,
+    pub _tab: ::flatbuffers::Table<'a>,
 }
 
 impl<'a> ::flatbuffers::Follow<'a> for SandboxSpec<'a> {
-  type Inner = SandboxSpec<'a>;
-  #[inline]
-  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
-  }
+    type Inner = SandboxSpec<'a>;
+    #[inline]
+    unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+        Self {
+            _tab: unsafe { ::flatbuffers::Table::new(buf, loc) },
+        }
+    }
 }
 
 impl<'a> SandboxSpec<'a> {
-  pub const VT_VERSION: ::flatbuffers::VOffsetT = 4;
-  pub const VT_APP_CONTAINER: ::flatbuffers::VOffsetT = 6;
-  pub const VT_INTEGRITY_LEVEL: ::flatbuffers::VOffsetT = 8;
-  pub const VT_UI_RESTRICTIONS: ::flatbuffers::VOffsetT = 10;
-  pub const VT_LEAST_PRIVILEGE: ::flatbuffers::VOffsetT = 12;
-  pub const VT_CAPABILITIES: ::flatbuffers::VOffsetT = 14;
-  pub const VT_FS_READ_WRITE: ::flatbuffers::VOffsetT = 16;
-  pub const VT_FS_READ_ONLY: ::flatbuffers::VOffsetT = 18;
+    pub const VT_VERSION: ::flatbuffers::VOffsetT = 4;
+    pub const VT_APP_CONTAINER: ::flatbuffers::VOffsetT = 6;
+    pub const VT_INTEGRITY_LEVEL: ::flatbuffers::VOffsetT = 8;
+    pub const VT_UI_RESTRICTIONS: ::flatbuffers::VOffsetT = 10;
+    pub const VT_LEAST_PRIVILEGE: ::flatbuffers::VOffsetT = 12;
+    pub const VT_CAPABILITIES: ::flatbuffers::VOffsetT = 14;
+    pub const VT_FS_READ_WRITE: ::flatbuffers::VOffsetT = 16;
+    pub const VT_FS_READ_ONLY: ::flatbuffers::VOffsetT = 18;
 
-  #[inline]
-  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
-    SandboxSpec { _tab: table }
-  }
-  #[allow(unused_mut)]
-  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
-    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args SandboxSpecArgs<'args>
-  ) -> ::flatbuffers::WIPOffset<SandboxSpec<'bldr>> {
-    let mut builder = SandboxSpecBuilder::new(_fbb);
-    if let Some(x) = args.fs_read_only { builder.add_fs_read_only(x); }
-    if let Some(x) = args.fs_read_write { builder.add_fs_read_write(x); }
-    if let Some(x) = args.capabilities { builder.add_capabilities(x); }
-    builder.add_ui_restrictions(args.ui_restrictions);
-    builder.add_integrity_level(args.integrity_level);
-    if let Some(x) = args.version { builder.add_version(x); }
-    builder.add_least_privilege(args.least_privilege);
-    builder.add_app_container(args.app_container);
-    builder.finish()
-  }
-
-  pub fn unpack(&self) -> SandboxSpecT {
-    let version = {
-      let x = self.version();
-      alloc::string::ToString::to_string(x)
-    };
-    let app_container = self.app_container();
-    let integrity_level = self.integrity_level();
-    let ui_restrictions = self.ui_restrictions();
-    let least_privilege = self.least_privilege();
-    let capabilities = self.capabilities().map(|x| {
-      alloc::string::ToString::to_string(x)
-    });
-    let fs_read_write = self.fs_read_write().map(|x| {
-      x.iter().map(|s| alloc::string::ToString::to_string(s)).collect()
-    });
-    let fs_read_only = self.fs_read_only().map(|x| {
-      x.iter().map(|s| alloc::string::ToString::to_string(s)).collect()
-    });
-    SandboxSpecT {
-      version,
-      app_container,
-      integrity_level,
-      ui_restrictions,
-      least_privilege,
-      capabilities,
-      fs_read_write,
-      fs_read_only,
+    #[inline]
+    pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+        SandboxSpec { _tab: table }
     }
-  }
+    #[allow(unused_mut)]
+    pub fn create<
+        'bldr: 'args,
+        'args: 'mut_bldr,
+        'mut_bldr,
+        A: ::flatbuffers::Allocator + 'bldr,
+    >(
+        _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+        args: &'args SandboxSpecArgs<'args>,
+    ) -> ::flatbuffers::WIPOffset<SandboxSpec<'bldr>> {
+        let mut builder = SandboxSpecBuilder::new(_fbb);
+        if let Some(x) = args.fs_read_only {
+            builder.add_fs_read_only(x);
+        }
+        if let Some(x) = args.fs_read_write {
+            builder.add_fs_read_write(x);
+        }
+        if let Some(x) = args.capabilities {
+            builder.add_capabilities(x);
+        }
+        builder.add_ui_restrictions(args.ui_restrictions);
+        builder.add_integrity_level(args.integrity_level);
+        if let Some(x) = args.version {
+            builder.add_version(x);
+        }
+        builder.add_least_privilege(args.least_privilege);
+        builder.add_app_container(args.app_container);
+        builder.finish()
+    }
 
-  #[inline]
-  pub fn version(&self) -> &'a str {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SandboxSpec::VT_VERSION, None).unwrap()}
-  }
-  #[inline]
-  pub fn app_container(&self) -> bool {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<bool>(SandboxSpec::VT_APP_CONTAINER, Some(false)).unwrap()}
-  }
-  #[inline]
-  pub fn integrity_level(&self) -> u32 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u32>(SandboxSpec::VT_INTEGRITY_LEVEL, Some(0)).unwrap()}
-  }
-  #[inline]
-  pub fn ui_restrictions(&self) -> u32 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u32>(SandboxSpec::VT_UI_RESTRICTIONS, Some(0)).unwrap()}
-  }
-  #[inline]
-  pub fn least_privilege(&self) -> bool {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<bool>(SandboxSpec::VT_LEAST_PRIVILEGE, Some(false)).unwrap()}
-  }
-  #[inline]
-  pub fn capabilities(&self) -> Option<&'a str> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(SandboxSpec::VT_CAPABILITIES, None)}
-  }
-  #[inline]
-  pub fn fs_read_write(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>(SandboxSpec::VT_FS_READ_WRITE, None)}
-  }
-  #[inline]
-  pub fn fs_read_only(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>(SandboxSpec::VT_FS_READ_ONLY, None)}
-  }
+    pub fn unpack(&self) -> SandboxSpecT {
+        let version = {
+            let x = self.version();
+            alloc::string::ToString::to_string(x)
+        };
+        let app_container = self.app_container();
+        let integrity_level = self.integrity_level();
+        let ui_restrictions = self.ui_restrictions();
+        let least_privilege = self.least_privilege();
+        let capabilities = self
+            .capabilities()
+            .map(|x| alloc::string::ToString::to_string(x));
+        let fs_read_write = self.fs_read_write().map(|x| {
+            x.iter()
+                .map(|s| alloc::string::ToString::to_string(s))
+                .collect()
+        });
+        let fs_read_only = self.fs_read_only().map(|x| {
+            x.iter()
+                .map(|s| alloc::string::ToString::to_string(s))
+                .collect()
+        });
+        SandboxSpecT {
+            version,
+            app_container,
+            integrity_level,
+            ui_restrictions,
+            least_privilege,
+            capabilities,
+            fs_read_write,
+            fs_read_only,
+        }
+    }
+
+    #[inline]
+    pub fn version(&self) -> &'a str {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<::flatbuffers::ForwardsUOffset<&str>>(SandboxSpec::VT_VERSION, None)
+                .unwrap()
+        }
+    }
+    #[inline]
+    pub fn app_container(&self) -> bool {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<bool>(SandboxSpec::VT_APP_CONTAINER, Some(false))
+                .unwrap()
+        }
+    }
+    #[inline]
+    pub fn integrity_level(&self) -> u32 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u32>(SandboxSpec::VT_INTEGRITY_LEVEL, Some(0))
+                .unwrap()
+        }
+    }
+    #[inline]
+    pub fn ui_restrictions(&self) -> u32 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u32>(SandboxSpec::VT_UI_RESTRICTIONS, Some(0))
+                .unwrap()
+        }
+    }
+    #[inline]
+    pub fn least_privilege(&self) -> bool {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<bool>(SandboxSpec::VT_LEAST_PRIVILEGE, Some(false))
+                .unwrap()
+        }
+    }
+    #[inline]
+    pub fn capabilities(&self) -> Option<&'a str> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<::flatbuffers::ForwardsUOffset<&str>>(SandboxSpec::VT_CAPABILITIES, None)
+        }
+    }
+    #[inline]
+    pub fn fs_read_write(
+        &self,
+    ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab.get::<::flatbuffers::ForwardsUOffset<
+                ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>,
+            >>(SandboxSpec::VT_FS_READ_WRITE, None)
+        }
+    }
+    #[inline]
+    pub fn fs_read_only(
+        &self,
+    ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab.get::<::flatbuffers::ForwardsUOffset<
+                ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>,
+            >>(SandboxSpec::VT_FS_READ_ONLY, None)
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for SandboxSpec<'_> {
-  #[inline]
-  fn run_verifier(
-    v: &mut ::flatbuffers::Verifier, pos: usize
-  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
-    v.visit_table(pos)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("version", Self::VT_VERSION, true)?
-     .visit_field::<bool>("app_container", Self::VT_APP_CONTAINER, false)?
-     .visit_field::<u32>("integrity_level", Self::VT_INTEGRITY_LEVEL, false)?
-     .visit_field::<u32>("ui_restrictions", Self::VT_UI_RESTRICTIONS, false)?
-     .visit_field::<bool>("least_privilege", Self::VT_LEAST_PRIVILEGE, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("capabilities", Self::VT_CAPABILITIES, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>>>("fs_read_write", Self::VT_FS_READ_WRITE, false)?
-     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>>>("fs_read_only", Self::VT_FS_READ_ONLY, false)?
-     .finish();
-    Ok(())
-  }
+    #[inline]
+    fn run_verifier(
+        v: &mut ::flatbuffers::Verifier,
+        pos: usize,
+    ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+        v.visit_table(pos)?
+            .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("version", Self::VT_VERSION, true)?
+            .visit_field::<bool>("app_container", Self::VT_APP_CONTAINER, false)?
+            .visit_field::<u32>("integrity_level", Self::VT_INTEGRITY_LEVEL, false)?
+            .visit_field::<u32>("ui_restrictions", Self::VT_UI_RESTRICTIONS, false)?
+            .visit_field::<bool>("least_privilege", Self::VT_LEAST_PRIVILEGE, false)?
+            .visit_field::<::flatbuffers::ForwardsUOffset<&str>>(
+                "capabilities",
+                Self::VT_CAPABILITIES,
+                false,
+            )?
+            .visit_field::<::flatbuffers::ForwardsUOffset<
+                ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>,
+            >>("fs_read_write", Self::VT_FS_READ_WRITE, false)?
+            .visit_field::<::flatbuffers::ForwardsUOffset<
+                ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>,
+            >>("fs_read_only", Self::VT_FS_READ_ONLY, false)?
+            .finish();
+        Ok(())
+    }
 }
 pub struct SandboxSpecArgs<'a> {
     pub version: Option<::flatbuffers::WIPOffset<&'a str>>,
@@ -161,151 +224,188 @@ pub struct SandboxSpecArgs<'a> {
     pub ui_restrictions: u32,
     pub least_privilege: bool,
     pub capabilities: Option<::flatbuffers::WIPOffset<&'a str>>,
-    pub fs_read_write: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>,
-    pub fs_read_only: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>,
+    pub fs_read_write: Option<
+        ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>,
+        >,
+    >,
+    pub fs_read_only: Option<
+        ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>,
+        >,
+    >,
 }
 impl<'a> Default for SandboxSpecArgs<'a> {
-  #[inline]
-  fn default() -> Self {
-    SandboxSpecArgs {
-      version: None, // required field
-      app_container: false,
-      integrity_level: 0,
-      ui_restrictions: 0,
-      least_privilege: false,
-      capabilities: None,
-      fs_read_write: None,
-      fs_read_only: None,
+    #[inline]
+    fn default() -> Self {
+        SandboxSpecArgs {
+            version: None, // required field
+            app_container: false,
+            integrity_level: 0,
+            ui_restrictions: 0,
+            least_privilege: false,
+            capabilities: None,
+            fs_read_write: None,
+            fs_read_only: None,
+        }
     }
-  }
 }
 
 pub struct SandboxSpecBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
-  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+    fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+    start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
 }
 impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SandboxSpecBuilder<'a, 'b, A> {
-  #[inline]
-  pub fn add_version(&mut self, version: ::flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SandboxSpec::VT_VERSION, version);
-  }
-  #[inline]
-  pub fn add_app_container(&mut self, app_container: bool) {
-    self.fbb_.push_slot::<bool>(SandboxSpec::VT_APP_CONTAINER, app_container, false);
-  }
-  #[inline]
-  pub fn add_integrity_level(&mut self, integrity_level: u32) {
-    self.fbb_.push_slot::<u32>(SandboxSpec::VT_INTEGRITY_LEVEL, integrity_level, 0);
-  }
-  #[inline]
-  pub fn add_ui_restrictions(&mut self, ui_restrictions: u32) {
-    self.fbb_.push_slot::<u32>(SandboxSpec::VT_UI_RESTRICTIONS, ui_restrictions, 0);
-  }
-  #[inline]
-  pub fn add_least_privilege(&mut self, least_privilege: bool) {
-    self.fbb_.push_slot::<bool>(SandboxSpec::VT_LEAST_PRIVILEGE, least_privilege, false);
-  }
-  #[inline]
-  pub fn add_capabilities(&mut self, capabilities: ::flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SandboxSpec::VT_CAPABILITIES, capabilities);
-  }
-  #[inline]
-  pub fn add_fs_read_write(&mut self, fs_read_write: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<&'b  str>>>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SandboxSpec::VT_FS_READ_WRITE, fs_read_write);
-  }
-  #[inline]
-  pub fn add_fs_read_only(&mut self, fs_read_only: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<&'b  str>>>) {
-    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(SandboxSpec::VT_FS_READ_ONLY, fs_read_only);
-  }
-  #[inline]
-  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SandboxSpecBuilder<'a, 'b, A> {
-    let start = _fbb.start_table();
-    SandboxSpecBuilder {
-      fbb_: _fbb,
-      start_: start,
+    #[inline]
+    pub fn add_version(&mut self, version: ::flatbuffers::WIPOffset<&'b str>) {
+        self.fbb_
+            .push_slot_always::<::flatbuffers::WIPOffset<_>>(SandboxSpec::VT_VERSION, version);
     }
-  }
-  #[inline]
-  pub fn finish(self) -> ::flatbuffers::WIPOffset<SandboxSpec<'a>> {
-    let o = self.fbb_.end_table(self.start_);
-    self.fbb_.required(o, SandboxSpec::VT_VERSION,"version");
-    ::flatbuffers::WIPOffset::new(o.value())
-  }
+    #[inline]
+    pub fn add_app_container(&mut self, app_container: bool) {
+        self.fbb_
+            .push_slot::<bool>(SandboxSpec::VT_APP_CONTAINER, app_container, false);
+    }
+    #[inline]
+    pub fn add_integrity_level(&mut self, integrity_level: u32) {
+        self.fbb_
+            .push_slot::<u32>(SandboxSpec::VT_INTEGRITY_LEVEL, integrity_level, 0);
+    }
+    #[inline]
+    pub fn add_ui_restrictions(&mut self, ui_restrictions: u32) {
+        self.fbb_
+            .push_slot::<u32>(SandboxSpec::VT_UI_RESTRICTIONS, ui_restrictions, 0);
+    }
+    #[inline]
+    pub fn add_least_privilege(&mut self, least_privilege: bool) {
+        self.fbb_
+            .push_slot::<bool>(SandboxSpec::VT_LEAST_PRIVILEGE, least_privilege, false);
+    }
+    #[inline]
+    pub fn add_capabilities(&mut self, capabilities: ::flatbuffers::WIPOffset<&'b str>) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            SandboxSpec::VT_CAPABILITIES,
+            capabilities,
+        );
+    }
+    #[inline]
+    pub fn add_fs_read_write(
+        &mut self,
+        fs_read_write: ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<&'b str>>,
+        >,
+    ) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            SandboxSpec::VT_FS_READ_WRITE,
+            fs_read_write,
+        );
+    }
+    #[inline]
+    pub fn add_fs_read_only(
+        &mut self,
+        fs_read_only: ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<&'b str>>,
+        >,
+    ) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            SandboxSpec::VT_FS_READ_ONLY,
+            fs_read_only,
+        );
+    }
+    #[inline]
+    pub fn new(
+        _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+    ) -> SandboxSpecBuilder<'a, 'b, A> {
+        let start = _fbb.start_table();
+        SandboxSpecBuilder {
+            fbb_: _fbb,
+            start_: start,
+        }
+    }
+    #[inline]
+    pub fn finish(self) -> ::flatbuffers::WIPOffset<SandboxSpec<'a>> {
+        let o = self.fbb_.end_table(self.start_);
+        self.fbb_.required(o, SandboxSpec::VT_VERSION, "version");
+        ::flatbuffers::WIPOffset::new(o.value())
+    }
 }
 
 impl ::core::fmt::Debug for SandboxSpec<'_> {
-  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-    let mut ds = f.debug_struct("SandboxSpec");
-      ds.field("version", &self.version());
-      ds.field("app_container", &self.app_container());
-      ds.field("integrity_level", &self.integrity_level());
-      ds.field("ui_restrictions", &self.ui_restrictions());
-      ds.field("least_privilege", &self.least_privilege());
-      ds.field("capabilities", &self.capabilities());
-      ds.field("fs_read_write", &self.fs_read_write());
-      ds.field("fs_read_only", &self.fs_read_only());
-      ds.finish()
-  }
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        let mut ds = f.debug_struct("SandboxSpec");
+        ds.field("version", &self.version());
+        ds.field("app_container", &self.app_container());
+        ds.field("integrity_level", &self.integrity_level());
+        ds.field("ui_restrictions", &self.ui_restrictions());
+        ds.field("least_privilege", &self.least_privilege());
+        ds.field("capabilities", &self.capabilities());
+        ds.field("fs_read_write", &self.fs_read_write());
+        ds.field("fs_read_only", &self.fs_read_only());
+        ds.finish()
+    }
 }
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SandboxSpecT {
-  pub version: alloc::string::String,
-  pub app_container: bool,
-  pub integrity_level: u32,
-  pub ui_restrictions: u32,
-  pub least_privilege: bool,
-  pub capabilities: Option<alloc::string::String>,
-  pub fs_read_write: Option<alloc::vec::Vec<alloc::string::String>>,
-  pub fs_read_only: Option<alloc::vec::Vec<alloc::string::String>>,
+    pub version: alloc::string::String,
+    pub app_container: bool,
+    pub integrity_level: u32,
+    pub ui_restrictions: u32,
+    pub least_privilege: bool,
+    pub capabilities: Option<alloc::string::String>,
+    pub fs_read_write: Option<alloc::vec::Vec<alloc::string::String>>,
+    pub fs_read_only: Option<alloc::vec::Vec<alloc::string::String>>,
 }
 impl Default for SandboxSpecT {
-  fn default() -> Self {
-    Self {
-      version: alloc::string::ToString::to_string(""),
-      app_container: false,
-      integrity_level: 0,
-      ui_restrictions: 0,
-      least_privilege: false,
-      capabilities: None,
-      fs_read_write: None,
-      fs_read_only: None,
+    fn default() -> Self {
+        Self {
+            version: alloc::string::ToString::to_string(""),
+            app_container: false,
+            integrity_level: 0,
+            ui_restrictions: 0,
+            least_privilege: false,
+            capabilities: None,
+            fs_read_write: None,
+            fs_read_only: None,
+        }
     }
-  }
 }
 impl SandboxSpecT {
-  pub fn pack<'b, A: ::flatbuffers::Allocator + 'b>(
-    &self,
-    _fbb: &mut ::flatbuffers::FlatBufferBuilder<'b, A>
-  ) -> ::flatbuffers::WIPOffset<SandboxSpec<'b>> {
-    let version = Some({
-      let x = &self.version;
-      _fbb.create_string(x)
-    });
-    let app_container = self.app_container;
-    let integrity_level = self.integrity_level;
-    let ui_restrictions = self.ui_restrictions;
-    let least_privilege = self.least_privilege;
-    let capabilities = self.capabilities.as_ref().map(|x|{
-      _fbb.create_string(x)
-    });
-    let fs_read_write = self.fs_read_write.as_ref().map(|x|{
-      let w: alloc::vec::Vec<_> = x.iter().map(|s| _fbb.create_string(s)).collect();_fbb.create_vector(&w)
-    });
-    let fs_read_only = self.fs_read_only.as_ref().map(|x|{
-      let w: alloc::vec::Vec<_> = x.iter().map(|s| _fbb.create_string(s)).collect();_fbb.create_vector(&w)
-    });
-    SandboxSpec::create(_fbb, &SandboxSpecArgs{
-      version,
-      app_container,
-      integrity_level,
-      ui_restrictions,
-      least_privilege,
-      capabilities,
-      fs_read_write,
-      fs_read_only,
-    })
-  }
+    pub fn pack<'b, A: ::flatbuffers::Allocator + 'b>(
+        &self,
+        _fbb: &mut ::flatbuffers::FlatBufferBuilder<'b, A>,
+    ) -> ::flatbuffers::WIPOffset<SandboxSpec<'b>> {
+        let version = Some({
+            let x = &self.version;
+            _fbb.create_string(x)
+        });
+        let app_container = self.app_container;
+        let integrity_level = self.integrity_level;
+        let ui_restrictions = self.ui_restrictions;
+        let least_privilege = self.least_privilege;
+        let capabilities = self.capabilities.as_ref().map(|x| _fbb.create_string(x));
+        let fs_read_write = self.fs_read_write.as_ref().map(|x| {
+            let w: alloc::vec::Vec<_> = x.iter().map(|s| _fbb.create_string(s)).collect();
+            _fbb.create_vector(&w)
+        });
+        let fs_read_only = self.fs_read_only.as_ref().map(|x| {
+            let w: alloc::vec::Vec<_> = x.iter().map(|s| _fbb.create_string(s)).collect();
+            _fbb.create_vector(&w)
+        });
+        SandboxSpec::create(
+            _fbb,
+            &SandboxSpecArgs {
+                version,
+                app_container,
+                integrity_level,
+                ui_restrictions,
+                least_privilege,
+                capabilities,
+                fs_read_write,
+                fs_read_only,
+            },
+        )
+    }
 }
 #[inline]
 /// Verifies that a buffer of bytes contains a `SandboxSpec`
@@ -314,8 +414,10 @@ impl SandboxSpecT {
 /// catch every error, or be maximally performant. For the
 /// previous, unchecked, behavior use
 /// `root_as_sandbox_spec_unchecked`.
-pub fn root_as_sandbox_spec(buf: &[u8]) -> Result<SandboxSpec<'_>, ::flatbuffers::InvalidFlatbuffer> {
-  ::flatbuffers::root::<SandboxSpec>(buf)
+pub fn root_as_sandbox_spec(
+    buf: &[u8],
+) -> Result<SandboxSpec<'_>, ::flatbuffers::InvalidFlatbuffer> {
+    ::flatbuffers::root::<SandboxSpec>(buf)
 }
 #[inline]
 /// Verifies that a buffer of bytes contains a size prefixed
@@ -324,8 +426,10 @@ pub fn root_as_sandbox_spec(buf: &[u8]) -> Result<SandboxSpec<'_>, ::flatbuffers
 /// catch every error, or be maximally performant. For the
 /// previous, unchecked, behavior use
 /// `size_prefixed_root_as_sandbox_spec_unchecked`.
-pub fn size_prefixed_root_as_sandbox_spec(buf: &[u8]) -> Result<SandboxSpec<'_>, ::flatbuffers::InvalidFlatbuffer> {
-  ::flatbuffers::size_prefixed_root::<SandboxSpec>(buf)
+pub fn size_prefixed_root_as_sandbox_spec(
+    buf: &[u8],
+) -> Result<SandboxSpec<'_>, ::flatbuffers::InvalidFlatbuffer> {
+    ::flatbuffers::size_prefixed_root::<SandboxSpec>(buf)
 }
 #[inline]
 /// Verifies, with the given options, that a buffer of bytes
@@ -335,10 +439,10 @@ pub fn size_prefixed_root_as_sandbox_spec(buf: &[u8]) -> Result<SandboxSpec<'_>,
 /// previous, unchecked, behavior use
 /// `root_as_sandbox_spec_unchecked`.
 pub fn root_as_sandbox_spec_with_opts<'b, 'o>(
-  opts: &'o ::flatbuffers::VerifierOptions,
-  buf: &'b [u8],
+    opts: &'o ::flatbuffers::VerifierOptions,
+    buf: &'b [u8],
 ) -> Result<SandboxSpec<'b>, ::flatbuffers::InvalidFlatbuffer> {
-  ::flatbuffers::root_with_opts::<SandboxSpec<'b>>(opts, buf)
+    ::flatbuffers::root_with_opts::<SandboxSpec<'b>>(opts, buf)
 }
 #[inline]
 /// Verifies, with the given verifier options, that a buffer of
@@ -348,45 +452,49 @@ pub fn root_as_sandbox_spec_with_opts<'b, 'o>(
 /// previous, unchecked, behavior use
 /// `root_as_sandbox_spec_unchecked`.
 pub fn size_prefixed_root_as_sandbox_spec_with_opts<'b, 'o>(
-  opts: &'o ::flatbuffers::VerifierOptions,
-  buf: &'b [u8],
+    opts: &'o ::flatbuffers::VerifierOptions,
+    buf: &'b [u8],
 ) -> Result<SandboxSpec<'b>, ::flatbuffers::InvalidFlatbuffer> {
-  ::flatbuffers::size_prefixed_root_with_opts::<SandboxSpec<'b>>(opts, buf)
+    ::flatbuffers::size_prefixed_root_with_opts::<SandboxSpec<'b>>(opts, buf)
 }
 #[inline]
 /// Assumes, without verification, that a buffer of bytes contains a SandboxSpec and returns it.
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid `SandboxSpec`.
 pub unsafe fn root_as_sandbox_spec_unchecked(buf: &[u8]) -> SandboxSpec<'_> {
-  unsafe { ::flatbuffers::root_unchecked::<SandboxSpec>(buf) }
+    unsafe { ::flatbuffers::root_unchecked::<SandboxSpec>(buf) }
 }
 #[inline]
 /// Assumes, without verification, that a buffer of bytes contains a size prefixed SandboxSpec and returns it.
 /// # Safety
 /// Callers must trust the given bytes do indeed contain a valid size prefixed `SandboxSpec`.
 pub unsafe fn size_prefixed_root_as_sandbox_spec_unchecked(buf: &[u8]) -> SandboxSpec<'_> {
-  unsafe { ::flatbuffers::size_prefixed_root_unchecked::<SandboxSpec>(buf) }
+    unsafe { ::flatbuffers::size_prefixed_root_unchecked::<SandboxSpec>(buf) }
 }
 pub const SANDBOX_SPEC_IDENTIFIER: &str = "SBOX";
 
 #[inline]
 pub fn sandbox_spec_buffer_has_identifier(buf: &[u8]) -> bool {
-  ::flatbuffers::buffer_has_identifier(buf, SANDBOX_SPEC_IDENTIFIER, false)
+    ::flatbuffers::buffer_has_identifier(buf, SANDBOX_SPEC_IDENTIFIER, false)
 }
 
 #[inline]
 pub fn sandbox_spec_size_prefixed_buffer_has_identifier(buf: &[u8]) -> bool {
-  ::flatbuffers::buffer_has_identifier(buf, SANDBOX_SPEC_IDENTIFIER, true)
+    ::flatbuffers::buffer_has_identifier(buf, SANDBOX_SPEC_IDENTIFIER, true)
 }
 
 #[inline]
 pub fn finish_sandbox_spec_buffer<'a, 'b, A: ::flatbuffers::Allocator + 'a>(
     fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-    root: ::flatbuffers::WIPOffset<SandboxSpec<'a>>) {
-  fbb.finish(root, Some(SANDBOX_SPEC_IDENTIFIER));
+    root: ::flatbuffers::WIPOffset<SandboxSpec<'a>>,
+) {
+    fbb.finish(root, Some(SANDBOX_SPEC_IDENTIFIER));
 }
 
 #[inline]
-pub fn finish_size_prefixed_sandbox_spec_buffer<'a, 'b, A: ::flatbuffers::Allocator + 'a>(fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>, root: ::flatbuffers::WIPOffset<SandboxSpec<'a>>) {
-  fbb.finish_size_prefixed(root, Some(SANDBOX_SPEC_IDENTIFIER));
+pub fn finish_size_prefixed_sandbox_spec_buffer<'a, 'b, A: ::flatbuffers::Allocator + 'a>(
+    fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+    root: ::flatbuffers::WIPOffset<SandboxSpec<'a>>,
+) {
+    fbb.finish_size_prefixed(root, Some(SANDBOX_SPEC_IDENTIFIER));
 }

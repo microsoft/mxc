@@ -2,7 +2,7 @@
 // @generated
 #![allow(unused_imports, non_snake_case, clippy::all)]
 pub mod sandbox_tech_spec_layout {
-  use super::*;
-  mod sandbox_spec_generated;
-  pub use self::sandbox_spec_generated::*;
+    use super::*;
+    mod sandbox_spec_generated;
+    pub use self::sandbox_spec_generated::*;
 } // sandbox_tech_spec_layout
