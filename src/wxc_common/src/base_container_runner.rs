@@ -137,6 +137,13 @@ impl BaseContainerRunner {
     fn load_api() -> Result<PfnCreateProcessInSandbox, String> {
         let dll_name = string_util::to_wide("processmodel.dll");
 
+        // SAFETY: `dll_name` is a valid null-terminated wide string that outlives the
+        // call. `LOAD_LIBRARY_SEARCH_SYSTEM32` restricts the search to System32, avoiding
+        // DLL-planting attacks. The returned `hmodule` is used only with `GetProcAddress`
+        // below and is never freed (the DLL stays loaded for the process lifetime).
+        // `GetProcAddress` returns a valid function pointer for a known export; we
+        // transmute it to `PfnCreateProcessInSandbox` whose signature matches the
+        // C declaration of `Experimental_CreateProcessInSandbox` in processmodel.dll.
         unsafe {
             let hmodule = LoadLibraryExW(
                 PCWSTR(dll_name.as_ptr()),
