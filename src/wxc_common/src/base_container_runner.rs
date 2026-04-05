@@ -26,7 +26,7 @@ use crate::logger::Logger;
 use crate::models::{CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::string_util;
-use sandbox_spec::sandbox_tech_spec_layout::{
+use sandbox_spec::base_container_layout::{
     finish_sandbox_spec_buffer, SandboxSpec, SandboxSpecArgs,
 };
 
@@ -285,7 +285,7 @@ impl ScriptRunner for BaseContainerRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sandbox_spec::sandbox_tech_spec_layout;
+    use sandbox_spec::base_container_layout;
 
     #[test]
     fn build_sandbox_spec_produces_valid_flatbuffer() {
@@ -298,10 +298,10 @@ mod tests {
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
 
         // Verify the buffer has the SBOX identifier.
-        assert!(sandbox_tech_spec_layout::sandbox_spec_buffer_has_identifier(&bytes));
+        assert!(base_container_layout::sandbox_spec_buffer_has_identifier(&bytes));
 
         // Parse and verify field values.
-        let spec = sandbox_tech_spec_layout::root_as_sandbox_spec(&bytes)
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes)
             .expect("should be a valid SandboxSpec");
         assert_eq!(spec.version(), "0.1.0");
         assert!(spec.app_container());
@@ -326,9 +326,9 @@ mod tests {
         let request = CodexRequest::default();
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
 
-        assert!(sandbox_tech_spec_layout::sandbox_spec_buffer_has_identifier(&bytes));
+        assert!(base_container_layout::sandbox_spec_buffer_has_identifier(&bytes));
 
-        let spec = sandbox_tech_spec_layout::root_as_sandbox_spec(&bytes).unwrap();
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
         assert_eq!(spec.version(), "0.1.0");
         assert!(spec.app_container());
         assert!(!spec.least_privilege());
@@ -343,7 +343,7 @@ mod tests {
         request.policy.default_network_policy = NetworkPolicy::Block;
 
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
-        let spec = sandbox_tech_spec_layout::root_as_sandbox_spec(&bytes).unwrap();
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
         assert!(spec.capabilities().is_none());
     }
 }

@@ -21,18 +21,17 @@ Remove-Item src\generated\base_container_specification\src\ -Recurse
     -o src/generated/base_container_specification `
     external/windows-sdk/BaseContainerSpecification.fbs
 
-# Move output into the crate's src/ directory
+# Move output into the crate's src/ directory and rename to match our module names
 mkdir src\generated\base_container_specification\src
 mv src\generated\base_container_specification\mod.rs src\generated\base_container_specification\src\lib.rs
-mv src\generated\base_container_specification\sandbox_tech_spec_layout src\generated\base_container_specification\src\
+mv src\generated\base_container_specification\sandbox_tech_spec_layout src\generated\base_container_specification\src\base_container_layout
+mv src\generated\base_container_specification\src\base_container_layout\sandbox_spec_generated.rs `
+   src\generated\base_container_specification\src\base_container_layout\base_container_specification_generated.rs
 
-# Re-add the allow attribute at the top of lib.rs (flatc overwrites it).
-# Insert `#![allow(unused_imports, non_snake_case, clippy::all)]` after the
-# `// @generated` line, e.g.:
-#
-#   // @generated
-#   #![allow(unused_imports, non_snake_case, clippy::all)]
-#   pub mod sandbox_tech_spec_layout { ...
+# Edit lib.rs to use the renamed module names:
+#   - Change `pub mod sandbox_tech_spec_layout` to `pub mod base_container_layout`
+#   - Change `mod sandbox_spec_generated` to `mod base_container_specification_generated`
+#   - Add `#![allow(unused_imports, non_snake_case, clippy::all)]` after the `// @generated` line
 
 # Format the generated code to pass CI checks
 cd src
