@@ -152,10 +152,7 @@ fn main() {
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::AppContainer => {
             if request.experimental_enabled {
-                let _ = writeln!(
-                    logger,
-                    "Using BaseContainer runner (--experimental)"
-                );
+                let _ = writeln!(logger, "Using BaseContainer runner (--experimental)");
                 Box::new(BaseContainerRunner::new())
             } else {
                 Box::new(AppContainerScriptRunner::new())

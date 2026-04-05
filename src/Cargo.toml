@@ -41,4 +41,4 @@ uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 nix = { version = "0.29", features = ["mount", "sched", "signal", "net", "process", "user"] }
 lxc_common = { path = "lxc_common" }
-flatbuffers = "24"
+flatbuffers = "25"
