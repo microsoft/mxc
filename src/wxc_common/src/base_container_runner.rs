@@ -298,7 +298,9 @@ mod tests {
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
 
         // Verify the buffer has the SBOX identifier.
-        assert!(base_container_layout::sandbox_spec_buffer_has_identifier(&bytes));
+        assert!(base_container_layout::sandbox_spec_buffer_has_identifier(
+            &bytes
+        ));
 
         // Parse and verify field values.
         let spec = base_container_layout::root_as_sandbox_spec(&bytes)
@@ -326,7 +328,9 @@ mod tests {
         let request = CodexRequest::default();
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
 
-        assert!(base_container_layout::sandbox_spec_buffer_has_identifier(&bytes));
+        assert!(base_container_layout::sandbox_spec_buffer_has_identifier(
+            &bytes
+        ));
 
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
         assert_eq!(spec.version(), "0.1.0");
