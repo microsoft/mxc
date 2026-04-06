@@ -4,7 +4,8 @@
 //! Build script that downloads NanVix binaries from GitHub releases.
 //!
 //! Uses system tools (`curl.exe`, `tar.exe`, `certutil`) instead of Rust
-//! crates. Zero build-dependencies.
+//! crates. Zero HTTP/zip/crypto build-dependencies — only `nanvix_common`
+//! for shared constants and serde-based config parsing.
 //!
 //! ## Configuration files
 //!
@@ -30,18 +31,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// -- Config structs (parsed manually — no serde needed) ----------------------
-
-struct ReleaseConfig {
-    nanvix: RepoConfig,
-    cpython: RepoConfig,
-}
-
-struct RepoConfig {
-    tag: String,
-    asset: String,
-    binaries: Vec<String>,
-}
+use nanvix_common::{github_download_url, load_checksums, load_json, ReleaseConfig, RepoConfig};
 
 fn main() {
     // Check the TARGET platform (not host). NanVix binaries are only needed when
@@ -59,8 +49,8 @@ fn main() {
     let bin_dir = out_dir.join("nanvix-binaries");
     fs::create_dir_all(&bin_dir).expect("failed to create nanvix-binaries dir");
 
-    let versions = load_versions("versions.json");
-    let checksums = load_checksums("checksums.json");
+    let versions: ReleaseConfig = load_json("versions.json");
+    let checksums: HashMap<String, String> = load_checksums("checksums.json");
 
     let all_binaries: Vec<&str> = versions
         .nanvix
@@ -104,217 +94,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GH_TOKEN");
 }
 
-// -- Manual JSON parsing (versions.json + checksums.json) --------------------
-// STABILITY: versions.json and checksums.json are deliberately minimal schemas
-// owned by this project. If schema complexity grows, re-evaluate adding serde.
-
-fn load_versions(path: &str) -> ReleaseConfig {
-    let content = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("nanvix_binaries: failed to read {}: {}", path, e));
-    let top = parse_json_object(&content);
-
-    let nanvix_str = top
-        .get("nanvix")
-        .unwrap_or_else(|| panic!("nanvix_binaries: versions.json missing 'nanvix' key"));
-    let cpython_str = top
-        .get("cpython")
-        .unwrap_or_else(|| panic!("nanvix_binaries: versions.json missing 'cpython' key"));
-
-    ReleaseConfig {
-        nanvix: parse_repo_config(nanvix_str),
-        cpython: parse_repo_config(cpython_str),
-    }
-}
-
-fn parse_repo_config(json: &str) -> RepoConfig {
-    let obj = parse_json_object(json);
-    let tag = obj
-        .get("tag")
-        .map(|s| unquote(s))
-        .unwrap_or_else(|| panic!("nanvix_binaries: missing 'tag' in repo config"));
-    let asset = obj
-        .get("asset")
-        .map(|s| unquote(s))
-        .unwrap_or_else(|| panic!("nanvix_binaries: missing 'asset' in repo config"));
-    let binaries_str = obj
-        .get("binaries")
-        .unwrap_or_else(|| panic!("nanvix_binaries: missing 'binaries' in repo config"));
-    let binaries = parse_json_string_array(binaries_str);
-    RepoConfig {
-        tag,
-        asset,
-        binaries,
-    }
-}
-
-fn load_checksums(path: &str) -> HashMap<String, String> {
-    let content = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("nanvix_binaries: failed to read {}: {}", path, e));
-    let obj = parse_json_object(&content);
-    obj.into_iter()
-        .map(|(k, v)| (unquote(&k), unquote(&v)))
-        .collect()
-}
-
-/// Minimal JSON object parser — extracts top-level key-value pairs.
-/// Values are returned as raw JSON strings (may be quoted strings, arrays, or objects).
-fn parse_json_object(json: &str) -> HashMap<String, String> {
-    let trimmed = json.trim();
-    let inner = trimmed
-        .strip_prefix('{')
-        .and_then(|s| s.strip_suffix('}'))
-        .unwrap_or_else(|| {
-            panic!(
-                "nanvix_binaries: expected JSON object, got: {}",
-                &trimmed[..trimmed.len().min(50)]
-            )
-        });
-
-    let mut result = HashMap::new();
-    let mut chars = inner.chars().peekable();
-
-    loop {
-        skip_whitespace(&mut chars);
-        if chars.peek().is_none() {
-            break;
-        }
-
-        // Parse key
-        let key = parse_quoted_string(&mut chars);
-        skip_whitespace(&mut chars);
-        expect_char(&mut chars, ':');
-        skip_whitespace(&mut chars);
-
-        // Parse value (collect until matching delimiter)
-        let value = collect_value(&mut chars);
-        result.insert(key, value);
-
-        skip_whitespace(&mut chars);
-        if chars.peek() == Some(&',') {
-            chars.next();
-        }
-    }
-
-    result
-}
-
-fn parse_json_string_array(json: &str) -> Vec<String> {
-    let trimmed = json.trim();
-    let inner = trimmed
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or_else(|| panic!("nanvix_binaries: expected JSON array"));
-
-    let mut result = Vec::new();
-    let mut chars = inner.chars().peekable();
-
-    loop {
-        skip_whitespace(&mut chars);
-        if chars.peek().is_none() {
-            break;
-        }
-        let s = parse_quoted_string(&mut chars);
-        result.push(s);
-        skip_whitespace(&mut chars);
-        if chars.peek() == Some(&',') {
-            chars.next();
-        }
-    }
-    result
-}
-
-fn parse_quoted_string(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
-    expect_char(chars, '"');
-    let mut s = String::new();
-    loop {
-        match chars.next() {
-            Some('"') => break,
-            Some('\\') => {
-                if let Some(c) = chars.next() {
-                    s.push(c);
-                }
-            }
-            Some(c) => s.push(c),
-            None => panic!("nanvix_binaries: unterminated string in JSON"),
-        }
-    }
-    s
-}
-
-fn collect_value(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
-    let mut val = String::new();
-    let mut depth = 0i32;
-    let mut in_string = false;
-
-    loop {
-        match chars.peek() {
-            None => break,
-            Some(&c) if !in_string && depth == 0 && (c == ',' || c == '}' || c == ']') => break,
-            _ => {}
-        }
-        let c = chars.next().unwrap();
-        val.push(c);
-        if in_string {
-            if c == '\\' {
-                // Escape sequence — push next char verbatim
-                if let Some(&next) = chars.peek() {
-                    val.push(next);
-                    chars.next();
-                }
-            } else if c == '"' {
-                in_string = false;
-            }
-        } else {
-            match c {
-                '"' => in_string = true,
-                '{' | '[' => depth += 1,
-                '}' | ']' => depth -= 1,
-                _ => {}
-            }
-        }
-    }
-    val.trim().to_string()
-}
-
-fn skip_whitespace(chars: &mut std::iter::Peekable<std::str::Chars>) {
-    while let Some(&c) = chars.peek() {
-        if c.is_whitespace() {
-            chars.next();
-        } else {
-            break;
-        }
-    }
-}
-
-fn expect_char(chars: &mut std::iter::Peekable<std::str::Chars>, expected: char) {
-    match chars.next() {
-        Some(c) if c == expected => {}
-        other => panic!(
-            "nanvix_binaries: expected '{}', got {:?} in JSON",
-            expected, other
-        ),
-    }
-}
-
-fn unquote(s: &str) -> String {
-    let trimmed = s.trim();
-    trimmed
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(trimmed)
-        .to_string()
-}
-
-// -- Download via curl.exe ---------------------------------------------------
-
-/// Construct deterministic GitHub release download URL.
-/// Format: https://github.com/{repo}/releases/download/{tag}/{asset}
-fn github_download_url(repo: &str, tag: &str, asset: &str) -> String {
-    format!(
-        "https://github.com/{}/releases/download/{}/{}",
-        repo, tag, asset
-    )
-}
+// -- Download logic ----------------------------------------------------------
 
 fn needs_download(
     config: &RepoConfig,
@@ -337,7 +117,6 @@ fn needs_download(
 fn download_and_extract(config: &RepoConfig, repo: &str, bin_dir: &Path) {
     let url = github_download_url(repo, &config.tag, &config.asset);
 
-    // Download zip to a temp file (tar.exe needs a file, not stdin for zip format)
     let zip_path = bin_dir.join(&config.asset);
     eprintln!("  downloading {}...", config.asset);
     curl_download_to_file(&url, &zip_path);
@@ -345,15 +124,14 @@ fn download_and_extract(config: &RepoConfig, repo: &str, bin_dir: &Path) {
     let size = zip_path.metadata().map(|m| m.len()).unwrap_or(0);
     eprintln!("  downloaded {} bytes, extracting...", size);
 
-    // Extract only the files we need using tar.exe (supports zip since Windows 10 1803)
     let binaries: Vec<&str> = config.binaries.iter().map(|s| s.as_str()).collect();
     tar_extract_from_zip(&zip_path, bin_dir, &binaries);
 
-    // Clean up the zip
     let _ = fs::remove_file(&zip_path);
 }
 
-/// Download a file via curl.exe with retry, writing directly to disk.
+// -- curl.exe ----------------------------------------------------------------
+
 fn curl_download_to_file(url: &str, dest: &Path) {
     let mut cmd = Command::new("curl");
     cmd.args([
@@ -395,7 +173,8 @@ fn curl_download_to_file(url: &str, dest: &Path) {
     }
 }
 
-/// Extract specific files from a zip using tar.exe (ships with Windows 10 1803+).
+// -- tar.exe -----------------------------------------------------------------
+
 fn tar_extract_from_zip(zip_path: &Path, dest_dir: &Path, files: &[&str]) {
     let mut cmd = Command::new("tar");
     cmd.arg("-xf");
@@ -433,13 +212,15 @@ fn tar_extract_from_zip(zip_path: &Path, dest_dir: &Path, files: &[&str]) {
     }
 }
 
+// -- Helpers -----------------------------------------------------------------
+
 fn github_token() -> Option<String> {
     std::env::var("GITHUB_TOKEN")
         .or_else(|_| std::env::var("GH_TOKEN"))
         .ok()
 }
 
-// -- SHA256 via certutil -----------------------------------------------------
+// -- certutil SHA256 ---------------------------------------------------------
 
 fn certutil_sha256(path: &Path) -> String {
     let output = Command::new("certutil")
@@ -466,10 +247,10 @@ fn certutil_sha256(path: &Path) -> String {
     let stdout = String::from_utf8(output.stdout).expect("certutil output not UTF-8");
     stdout
         .lines()
-        .nth(1) // second line is the hash
+        .nth(1)
         .unwrap_or_else(|| panic!("nanvix_binaries: unexpected certutil output: {}", stdout))
         .trim()
-        .replace(' ', "") // certutil may space-separate hex groups
+        .replace(' ', "")
         .to_lowercase()
 }
 

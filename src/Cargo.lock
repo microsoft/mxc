@@ -444,6 +444,17 @@ dependencies = [
 [[package]]
 name = "nanvix_binaries"
 version = "0.1.0"
+dependencies = [
+ "nanvix_common",
+]
+
+[[package]]
+name = "nanvix_common"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "nix"
@@ -1103,6 +1114,7 @@ dependencies = [
  "anyhow",
  "clap",
  "nanvix_binaries",
+ "nanvix_common",
  "windows",
  "wxc_common",
 ]

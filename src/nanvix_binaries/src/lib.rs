@@ -6,10 +6,5 @@
 /// `std::env::current_exe()` — it does NOT use this constant.
 pub const NANVIX_BIN_DIR: &str = env!("NANVIX_BIN_DIR");
 
-/// List of required NanVix binary filenames.
-pub const REQUIRED_BINARIES: &[&str] = &[
-    "nanvixd.exe",
-    "kernel.elf",
-    "python.elf",
-    "cpython-ramfs.img",
-];
+// Re-export shared constants from nanvix_common.
+pub use nanvix_common::REQUIRED_BINARIES;

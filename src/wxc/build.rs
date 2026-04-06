@@ -40,14 +40,8 @@ fn copy_nanvix_binaries() {
     };
 
     let src_dir = Path::new(&nanvix_bin_dir);
-    let binaries = [
-        "nanvixd.exe",
-        "kernel.elf",
-        "python.elf",
-        "cpython-ramfs.img",
-    ];
 
-    for name in &binaries {
+    for name in nanvix_common::REQUIRED_BINARIES {
         let src = src_dir.join(name);
         let dst = target_dir.join(name);
 

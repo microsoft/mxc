@@ -1,0 +1,9 @@
+[package]
+name = "nanvix_common"
+version = "0.1.0"
+edition = "2021"
+description = "Shared constants and configuration types for NanVix micro-VM binaries"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
