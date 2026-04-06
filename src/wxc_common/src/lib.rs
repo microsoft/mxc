@@ -28,3 +28,7 @@ pub mod sandbox_protocol;
 pub mod sandbox_runner;
 #[cfg(target_os = "windows")]
 pub mod string_util;
+
+// BaseContainer (composable sandbox) support
+#[cfg(target_os = "windows")]
+pub mod base_container_runner;

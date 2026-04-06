@@ -7,6 +7,7 @@ use std::process;
 use clap::Parser;
 use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
 use wxc_common::appcontainer::AppContainerScriptRunner;
+use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::load_request;
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
@@ -147,9 +148,16 @@ fn main() {
     log_request(&request, &mut logger);
 
     // Run script in selected containment backend.
-    // Sandbox requires --experimental flag.
+    // Sandbox and BaseContainer require --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
-        ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
+        ContainmentBackend::AppContainer => {
+            if request.experimental_enabled {
+                let _ = writeln!(logger, "Using BaseContainer runner (--experimental)");
+                Box::new(BaseContainerRunner::new())
+            } else {
+                Box::new(AppContainerScriptRunner::new())
+            }
+        }
         ContainmentBackend::Wslc => {
             eprintln!("Error: WSLC backend not yet implemented (Phase 3)");
             process::exit(1);
