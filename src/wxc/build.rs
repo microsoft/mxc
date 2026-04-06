@@ -4,14 +4,14 @@
 //! Build script for wxc — copies NanVix binaries next to the output executable.
 
 fn main() {
-    #[cfg(all(windows, feature = "nanvix"))]
+    #[cfg(all(windows, feature = "microvm"))]
     copy_nanvix_binaries();
 
     // Always emit rerun-if-changed so Cargo doesn't re-run unnecessarily.
     println!("cargo:rerun-if-changed=build.rs");
 }
 
-#[cfg(all(windows, feature = "nanvix"))]
+#[cfg(all(windows, feature = "microvm"))]
 fn copy_nanvix_binaries() {
     use std::fs;
     use std::path::Path;
@@ -58,7 +58,7 @@ fn copy_nanvix_binaries() {
     println!("cargo:rerun-if-env-changed=DEP_NANVIX_BINARIES_BIN_DIR");
 }
 
-#[cfg(all(windows, feature = "nanvix"))]
+#[cfg(all(windows, feature = "microvm"))]
 fn is_newer(src: &std::path::Path, dst: &std::path::Path) -> bool {
     let src_time = src.metadata().and_then(|m| m.modified()).ok();
     let dst_time = dst.metadata().and_then(|m| m.modified()).ok();

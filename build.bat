@@ -34,7 +34,7 @@ if "%BUILD_ALL%"=="0" if "%BUILD_ARCH%"=="" (
 :: Build flags
 set "CARGO_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
-if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features nanvix %CARGO_FLAGS%"
+if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 
 :: Build Rust
 echo.

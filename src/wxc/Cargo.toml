@@ -18,4 +18,4 @@ nanvix_binaries = { path = "../nanvix_binaries", optional = true }
 
 [features]
 default = []
-nanvix = ["nanvix_binaries"]
+microvm = ["nanvix_binaries"]
