@@ -14,7 +14,10 @@
 ## Usage
 
 The `wslc_common` crate links against `wslcsdk.lib` at build time via `build.rs`.
-At runtime, `wslcsdk.dll` must be available (installed via the WSLC SDK MSI).
+At runtime, `wslcsdk.dll` must be available on the system — it is installed by the
+WSLC SDK MSI and is **not** bundled with MXC. The `.dll` files checked into this
+directory are for development convenience only (e.g., local builds without the MSI
+installed) and should not be deployed to production.
 
 ### SDK resolution order
 

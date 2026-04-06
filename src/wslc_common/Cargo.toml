@@ -4,6 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wxc_common = { workspace = true }
 
 [build-dependencies]

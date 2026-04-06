@@ -8,6 +8,11 @@
 //! 2. `external/wslc-sdk/runtimes/win-{arch}/` relative to the repo root
 
 fn main() {
+    // WSLC SDK is Windows-only — skip linking entirely on other platforms.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("x86_64") => "x64",
         Ok("aarch64") => "arm64",

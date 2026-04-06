@@ -15,7 +15,12 @@
 //! - Extern function declarations (29 of 54 total SDK functions)
 //! - RAII guard types that call release functions on Drop
 
-#![allow(non_camel_case_types, non_snake_case, dead_code)]
+#![allow(
+    non_camel_case_types,
+    non_snake_case,
+    dead_code,
+    non_upper_case_globals
+)]
 
 use std::ffi::c_void;
 use std::os::raw::c_char;
@@ -79,27 +84,64 @@ pub enum WslcContainerNetworkingMode {
     Bridged = 1,
 }
 
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WslcSessionFeatureFlags {
-    None = 0x00000000,
-    EnableGpu = 0x00000004,
+// ---------------------------------------------------------------------------
+// Bitflag types (C header uses DEFINE_ENUM_FLAG_OPERATORS for these)
+//
+// Modeled as #[repr(transparent)] newtypes so callers can combine flags
+// with `|`, e.g. `WslcContainerFlags::AutoRemove | WslcContainerFlags::EnableGpu`.
+// ---------------------------------------------------------------------------
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WslcSessionFeatureFlags(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl WslcSessionFeatureFlags {
+    pub const None: Self = Self(0x00000000);
+    pub const EnableGpu: Self = Self(0x00000004);
 }
 
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WslcContainerFlags {
-    None = 0x00000000,
-    AutoRemove = 0x00000001,
-    EnableGpu = 0x00000002,
-    Privileged = 0x00000004,
+impl core::ops::BitOr for WslcSessionFeatureFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
 }
 
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WslcContainerStartFlags {
-    None = 0x00000000,
-    Attach = 0x00000001,
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WslcContainerFlags(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl WslcContainerFlags {
+    pub const None: Self = Self(0x00000000);
+    pub const AutoRemove: Self = Self(0x00000001);
+    pub const EnableGpu: Self = Self(0x00000002);
+    pub const Privileged: Self = Self(0x00000004);
+}
+
+impl core::ops::BitOr for WslcContainerFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WslcContainerStartFlags(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl WslcContainerStartFlags {
+    pub const None: Self = Self(0x00000000);
+    pub const Attach: Self = Self(0x00000001);
+}
+
+impl core::ops::BitOr for WslcContainerStartFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
 }
 
 #[repr(i32)]
@@ -159,6 +201,12 @@ pub struct WslcImageInfo {
 
 // ---------------------------------------------------------------------------
 // Extern function declarations — MVP subset for the runner lifecycle
+//
+// Memory ownership: several functions return heap-allocated strings via
+// `error_message: *mut PWSTR` out-parameters. These are allocated with
+// `CoTaskMemAlloc` by the SDK. The caller owns the returned memory and
+// must free it with `CoTaskMemFree` when no longer needed. A safe wrapper
+// should be provided in the runner layer to avoid leaks.
 // ---------------------------------------------------------------------------
 
 extern "system" {
@@ -404,6 +452,11 @@ impl Drop for WslcProcessGuard {
 
 /// Convert an HRESULT into a `Result`. Returns `Ok(())` for `S_OK`,
 /// or `Err(hr)` for any failure code.
+///
+/// Note: standard COM convention treats any `hr >= 0` as success (including
+/// `S_FALSE`). We intentionally check `== S_OK` here because the WSLC SDK
+/// documents `S_OK` as the only success return — any other value (including
+/// `S_FALSE`) would indicate unexpected behavior worth investigating.
 #[inline]
 pub fn check_hresult(hr: HRESULT) -> Result<(), HRESULT> {
     if hr == S_OK {
@@ -452,12 +505,21 @@ mod tests {
     fn enum_discriminant_values() {
         assert_eq!(WslcContainerNetworkingMode::None as i32, 0);
         assert_eq!(WslcContainerNetworkingMode::Bridged as i32, 1);
-        assert_eq!(WslcSessionFeatureFlags::EnableGpu as u32, 0x4);
+        assert_eq!(WslcSessionFeatureFlags::EnableGpu.0, 0x4);
         assert_eq!(WslcSignal::SigKill as i32, 9);
         assert_eq!(WslcSignal::SigTerm as i32, 15);
-        assert_eq!(WslcContainerFlags::AutoRemove as u32, 1);
-        assert_eq!(WslcContainerFlags::EnableGpu as u32, 2);
-        assert_eq!(WslcContainerFlags::Privileged as u32, 4);
+        assert_eq!(WslcContainerFlags::AutoRemove.0, 1);
+        assert_eq!(WslcContainerFlags::EnableGpu.0, 2);
+        assert_eq!(WslcContainerFlags::Privileged.0, 4);
+    }
+
+    #[test]
+    fn bitflags_can_be_combined() {
+        let flags = WslcContainerFlags::AutoRemove | WslcContainerFlags::EnableGpu;
+        assert_eq!(flags.0, 0x03);
+
+        let session_flags = WslcSessionFeatureFlags::None | WslcSessionFeatureFlags::EnableGpu;
+        assert_eq!(session_flags.0, 0x04);
     }
 
     #[test]
