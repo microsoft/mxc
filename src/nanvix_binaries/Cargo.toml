@@ -1,0 +1,15 @@
+[package]
+name = "nanvix_binaries"
+version = "0.1.0"
+edition = "2021"
+description = "Build-time download of NanVix binaries from GitHub releases"
+links = "nanvix_binaries"
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+# None! All operations use Windows built-in tools:
+# - curl.exe for HTTPS downloads (Windows 10 1803+)
+# - tar.exe for zip extraction (Windows 10 1803+)
+# - certutil for SHA256 verification (all Windows)

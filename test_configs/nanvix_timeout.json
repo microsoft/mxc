@@ -1,0 +1,7 @@
+{
+    "process": {
+        "commandLine": "import time; time.sleep(120); print('should not reach here')",
+        "timeout": 5000
+    },
+    "containment": "nanvix"
+}

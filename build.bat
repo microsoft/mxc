@@ -5,6 +5,7 @@ setlocal enabledelayedexpansion
 set "BUILD_CONFIG=release"
 set "BUILD_ARCH="
 set "BUILD_ALL=0"
+set "WITH_NANVIX=0"
 
 :: Parse arguments
 :parse_args
@@ -14,6 +15,7 @@ if /i "%~1"=="--release" ( set "BUILD_CONFIG=release"  & shift & goto :parse_arg
 if /i "%~1"=="--x64"     ( set "BUILD_ARCH=x86_64-pc-windows-msvc"   & shift & goto :parse_args )
 if /i "%~1"=="--arm64"   ( set "BUILD_ARCH=aarch64-pc-windows-msvc"  & shift & goto :parse_args )
 if /i "%~1"=="--all"     ( set "BUILD_ALL=1"           & shift & goto :parse_args )
+if /i "%~1"=="--with-microvm" ( set "WITH_NANVIX=1"    & shift & goto :parse_args )
 if /i "%~1"=="--help"    ( goto :usage )
 if /i "%~1"=="-h"        ( goto :usage )
 echo Unknown argument: %~1
@@ -32,6 +34,7 @@ if "%BUILD_ALL%"=="0" if "%BUILD_ARCH%"=="" (
 :: Build flags
 set "CARGO_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
+if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features nanvix %CARGO_FLAGS%"
 
 :: Build Rust
 echo.
@@ -77,6 +80,14 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             copy /Y "!BIN_DIR!\wxc-test-proxy.exe" "sdk\bin\%%T\" >nul
             echo   Copied %%T\wxc-test-proxy.exe
         )
+        if "%WITH_NANVIX%"=="1" (
+            for %%B in (nanvixd.exe kernel.elf python.elf cpython-ramfs.img) do (
+                if exist "!BIN_DIR!\%%B" (
+                    copy /Y "!BIN_DIR!\%%B" "sdk\bin\%%T\" >nul
+                    echo   Copied %%T\%%B
+                )
+            )
+        )
     )
 )
 
@@ -106,8 +117,9 @@ echo   --debug     Build debug configuration (default: release)
 echo   --release   Build release configuration
 echo   --x64       Build for x64 only
 echo   --arm64     Build for ARM64 only
-echo   --all       Build for both x64 and ARM64
-echo   -h, --help  Show this help
+echo   --all             Build for both x64 and ARM64
+echo   --with-microvm    Download and include NanVix micro-VM binaries
+echo   -h, --help        Show this help
 echo.
 echo Default: builds release for the current machine architecture.
 exit /b 0
