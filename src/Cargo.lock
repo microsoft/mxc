@@ -1496,6 +1496,7 @@ name = "wslc_common"
 version = "0.1.0"
 dependencies = [
  "zip",
+ "wxc_common",
 ]
 
 [[package]]
