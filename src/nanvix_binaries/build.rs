@@ -70,12 +70,18 @@ fn main() {
     let needs_cpython = needs_download(&versions.cpython, &bin_dir, &checksums);
 
     if needs_nanvix {
-        eprintln!("nanvix_binaries: downloading nanvix/nanvix {}...", versions.nanvix.tag);
+        eprintln!(
+            "nanvix_binaries: downloading nanvix/nanvix {}...",
+            versions.nanvix.tag
+        );
         download_and_extract(&versions.nanvix, "nanvix/nanvix", &bin_dir);
     }
 
     if needs_cpython {
-        eprintln!("nanvix_binaries: downloading nanvix/cpython {}...", versions.cpython.tag);
+        eprintln!(
+            "nanvix_binaries: downloading nanvix/cpython {}...",
+            versions.cpython.tag
+        );
         download_and_extract(&versions.cpython, "nanvix/cpython", &bin_dir);
     }
 
@@ -103,9 +109,11 @@ fn load_versions(path: &str) -> ReleaseConfig {
         .unwrap_or_else(|e| panic!("nanvix_binaries: failed to read {}: {}", path, e));
     let top = parse_json_object(&content);
 
-    let nanvix_str = top.get("nanvix")
+    let nanvix_str = top
+        .get("nanvix")
         .unwrap_or_else(|| panic!("nanvix_binaries: versions.json missing 'nanvix' key"));
-    let cpython_str = top.get("cpython")
+    let cpython_str = top
+        .get("cpython")
         .unwrap_or_else(|| panic!("nanvix_binaries: versions.json missing 'cpython' key"));
 
     ReleaseConfig {
@@ -116,16 +124,23 @@ fn load_versions(path: &str) -> ReleaseConfig {
 
 fn parse_repo_config(json: &str) -> RepoConfig {
     let obj = parse_json_object(json);
-    let tag = obj.get("tag")
+    let tag = obj
+        .get("tag")
         .map(|s| unquote(s))
         .unwrap_or_else(|| panic!("nanvix_binaries: missing 'tag' in repo config"));
-    let asset = obj.get("asset")
+    let asset = obj
+        .get("asset")
         .map(|s| unquote(s))
         .unwrap_or_else(|| panic!("nanvix_binaries: missing 'asset' in repo config"));
-    let binaries_str = obj.get("binaries")
+    let binaries_str = obj
+        .get("binaries")
         .unwrap_or_else(|| panic!("nanvix_binaries: missing 'binaries' in repo config"));
     let binaries = parse_json_string_array(binaries_str);
-    RepoConfig { tag, asset, binaries }
+    RepoConfig {
+        tag,
+        asset,
+        binaries,
+    }
 }
 
 fn load_checksums(path: &str) -> HashMap<String, String> {
@@ -144,7 +159,12 @@ fn parse_json_object(json: &str) -> HashMap<String, String> {
     let inner = trimmed
         .strip_prefix('{')
         .and_then(|s| s.strip_suffix('}'))
-        .unwrap_or_else(|| panic!("nanvix_binaries: expected JSON object, got: {}", &trimmed[..trimmed.len().min(50)]));
+        .unwrap_or_else(|| {
+            panic!(
+                "nanvix_binaries: expected JSON object, got: {}",
+                &trimmed[..trimmed.len().min(50)]
+            )
+        });
 
     let mut result = HashMap::new();
     let mut chars = inner.chars().peekable();
@@ -292,7 +312,11 @@ fn github_download_url(repo: &str, tag: &str, asset: &str) -> String {
     )
 }
 
-fn needs_download(config: &RepoConfig, bin_dir: &Path, checksums: &HashMap<String, String>) -> bool {
+fn needs_download(
+    config: &RepoConfig,
+    bin_dir: &Path,
+    checksums: &HashMap<String, String>,
+) -> bool {
     config.binaries.iter().any(|name| {
         let path = bin_dir.join(name);
         if !path.exists() {
@@ -329,8 +353,14 @@ fn download_and_extract(config: &RepoConfig, repo: &str, bin_dir: &Path) {
 fn curl_download_to_file(url: &str, dest: &Path) {
     let mut cmd = Command::new("curl");
     cmd.args([
-        "--silent", "--show-error", "--fail", "--location",
-        "--retry", "2", "--retry-delay", "2",
+        "--silent",
+        "--show-error",
+        "--fail",
+        "--location",
+        "--retry",
+        "2",
+        "--retry-delay",
+        "2",
         "--output",
     ]);
     cmd.arg(dest);
@@ -394,10 +424,7 @@ fn tar_extract_from_zip(zip_path: &Path, dest_dir: &Path, files: &[&str]) {
             let size = path.metadata().map(|m| m.len()).unwrap_or(0);
             eprintln!("  {} -- extracted ({} bytes)", f, size);
         } else {
-            panic!(
-                "nanvix_binaries: '{}' not found in zip after extraction",
-                f
-            );
+            panic!("nanvix_binaries: '{}' not found in zip after extraction", f);
         }
     }
 }
@@ -432,8 +459,7 @@ fn certutil_sha256(path: &Path) -> String {
     //   SHA256 hash of <file>:
     //   <hex hash>
     //   CertUtil: -hashfile command completed successfully.
-    let stdout = String::from_utf8(output.stdout)
-        .expect("certutil output not UTF-8");
+    let stdout = String::from_utf8(output.stdout).expect("certutil output not UTF-8");
     stdout
         .lines()
         .nth(1) // second line is the hash
@@ -443,11 +469,7 @@ fn certutil_sha256(path: &Path) -> String {
         .to_lowercase()
 }
 
-fn verify_checksums(
-    binaries: &[&str],
-    bin_dir: &Path,
-    checksums: &HashMap<String, String>,
-) {
+fn verify_checksums(binaries: &[&str], bin_dir: &Path, checksums: &HashMap<String, String>) {
     for name in binaries {
         let path = bin_dir.join(name);
         if !path.exists() {
@@ -468,10 +490,7 @@ fn verify_checksums(
             }
             eprintln!("  {} -- checksum OK", name);
         } else {
-            eprintln!(
-                "  {} -- WARNING: no checksum entry in checksums.json",
-                name
-            );
+            eprintln!("  {} -- WARNING: no checksum entry in checksums.json", name);
         }
     }
 }

@@ -40,14 +40,23 @@ fn copy_nanvix_binaries() {
     };
 
     let src_dir = Path::new(&nanvix_bin_dir);
-    let binaries = ["nanvixd.exe", "kernel.elf", "python.elf", "cpython-ramfs.img"];
+    let binaries = [
+        "nanvixd.exe",
+        "kernel.elf",
+        "python.elf",
+        "cpython-ramfs.img",
+    ];
 
     for name in &binaries {
         let src = src_dir.join(name);
         let dst = target_dir.join(name);
 
         if src.exists() && (!dst.exists() || is_newer(&src, &dst)) {
-            eprintln!("wxc build.rs: copying {} -> {}", src.display(), dst.display());
+            eprintln!(
+                "wxc build.rs: copying {} -> {}",
+                src.display(),
+                dst.display()
+            );
             if let Err(e) = fs::copy(&src, &dst) {
                 eprintln!("wxc build.rs: WARNING: failed to copy {}: {}", name, e);
             }
