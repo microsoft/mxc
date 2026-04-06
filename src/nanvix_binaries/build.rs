@@ -17,8 +17,9 @@
 //!
 //! ## Caching
 //!
-//! Binaries are cached in OUT_DIR. Checksums are re-verified on every build
-//! to catch corrupted or truncated files.
+//! Binaries are cached in OUT_DIR. Checksums are verified whenever this
+//! build script runs (triggered by changes to build.rs, versions.json,
+//! or checksums.json) to catch corrupted or truncated files.
 //!
 //! # TODO(security): NanVix binaries are not ESRP-signed. Before shipping in
 //! # official MXC releases, either extend ESRP to cover these binaries or
@@ -43,6 +44,9 @@ struct RepoConfig {
 }
 
 fn main() {
+    // Check the TARGET platform (not host). NanVix binaries are only needed when
+    // the output binary will run on Windows. This build script runs on the host,
+    // but CARGO_CFG_TARGET_OS reflects the cross-compilation target.
     let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target != "windows" {
         let out_dir = std::env::var("OUT_DIR").unwrap();
@@ -490,7 +494,11 @@ fn verify_checksums(binaries: &[&str], bin_dir: &Path, checksums: &HashMap<Strin
             }
             eprintln!("  {} -- checksum OK", name);
         } else {
-            eprintln!("  {} -- WARNING: no checksum entry in checksums.json", name);
+            panic!(
+                "nanvix_binaries: '{}' has no entry in checksums.json — \
+                 every binary must be hash-verified",
+                name
+            );
         }
     }
 }

@@ -7,7 +7,7 @@
 
 .DESCRIPTION
     - Checks if Windows Hypervisor Platform is available
-    - Locates wxc-exec.exe (built with --features nanvix)
+    - Locates wxc-exec.exe (built with --features microvm)
     - Verifies NanVix binaries are present
     - Runs each test config, validates exit codes
     - Reports pass/fail summary
@@ -53,7 +53,7 @@ if (-not (Test-WhpAvailable)) {
 
 if (-not (Test-Path $WxcExePath)) {
     Write-Host "ERROR: wxc-exec.exe not found at: $WxcExePath" -ForegroundColor Red
-    Write-Host "       Build with: cd src && cargo build --features nanvix"
+    Write-Host "       Build with: cd src && cargo build --features microvm"
     exit 1
 }
 
@@ -68,7 +68,7 @@ $missing = $requiredBinaries | Where-Object { -not (Test-Path (Join-Path $binDir
 if ($missing) {
     Write-Host "ERROR: Missing NanVix binaries in ${binDir}:" -ForegroundColor Red
     $missing | ForEach-Object { Write-Host "       - $_" }
-    Write-Host "       Build with: cd src && cargo build --features nanvix"
+    Write-Host "       Build with: cd src && cargo build --features microvm"
     exit 1
 }
 
@@ -125,6 +125,10 @@ foreach ($test in $tests) {
 
 $total = $passed + $failed
 Write-Host "`n=== Results ===" -ForegroundColor Cyan
+if ($total -eq 0) {
+    Write-Host "  ERROR: No tests were executed. Check -ConfigDir path." -ForegroundColor Red
+    exit 1
+}
 Write-Host "  Passed: $passed / $total"
 if ($failed -gt 0) {
     Write-Host "  Failed: $failed / $total" -ForegroundColor Red
