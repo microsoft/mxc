@@ -13,7 +13,7 @@ the WSLC SDK self-host release. Key changes:
 - **WSLC SDK available:** The SDK (v2.8.1) has been released as a self-host
   package with `wslcsdk.h`, `wslcsdk.lib`, and `wslcsdk.dll`. API names use
   verb-first convention (e.g., `WslcInitSessionSettings` not
-  `WslcSessionInitSettings`).
+  `WslcInitSessionSettings`).
 - **Phases 1-2 complete:** Config parsing and backend routing shipped in PR #44.
 - **Sandbox is experimental:** References to `SandboxScriptRunner` and
   `request.sandbox_config` are outdated — sandbox is now behind `--experimental`.
@@ -35,30 +35,29 @@ Path A — CLI (direct):
 
 Path B — SDK (programmatic):
   App calls: spawnSandbox("python3 my_app.py", policy, { experimental: true })
-    ├── Detects WSLC SDK available via getPlatformSupport()
     ├── Builds JSON config with containment = "wslc"
     └── Spawns wxc-exec.exe --experimental with the config
 
 Both paths converge here:
-  wxc-exec.exe (Rust — single binary, three backends)
+  wxc-exec.exe (Rust — single binary, multiple backends)
     ├── Parses JSON config → sees containment = "wslc"
-    ├── Creates WSLContainerRunner (via existing Box<dyn ScriptRunner> dispatch)
+    ├── Checks --experimental flag → creates WSLContainerRunner
     ├── Calls WSLC SDK via Rust FFI bindings:
-    │     WslcCanRun()                → preflight check
-    │     WslcSessionInitSettings()   → init session settings (with storagePath)
-    │     WslcSessionSettingsSetCpuCount() / SetMemory() / SetTimeout() → configure session
-    │     WslcSessionCreate()         → create WSL2 micro-VM session
-    │     WslcSessionImageList()      → verify image exists (fail if not found)
-    │     WslcContainerInitSettings() → init from image name
-    │     WslcContainerSettingsAddVolume()  → mount host paths
-    │     WslcContainerSettingsSetNetworkingMode() → network policy
-    │     WslcProcessInitSettings()   → configure executable, args, env, cwd
-    │     WslcContainerSettingsSetInitProcess() → attach process to container
-    │     WslcContainerCreate(session, settings) → create container in session
-    │     WslcContainerStart()        → start container
-    │     WslcContainerGetInitProcess() → get process handle
-    │     WslcProcessGetIOHandles()   → get stdout/stderr Win32 HANDLEs
-    │     ReadFile(stdout/stderr)     → capture output → ScriptResponse
+    │     WslcCanRun()                         → preflight check
+    │     WslcInitSessionSettings()            → init session settings (with storagePath)
+    │     WslcSetSessionSettingsCpuCount() / Memory() / Timeout() → configure session
+    │     WslcCreateSession()                  → create WSL2 micro-VM session
+    │     WslcListSessionImages()              → verify image exists (fail if not found)
+    │     WslcInitContainerSettings()          → init from image name
+    │     WslcSetContainerSettingsVolumes()    → mount host paths
+    │     WslcSetContainerSettingsNetworkingMode() → network policy
+    │     WslcInitProcessSettings()            → configure executable, args, env, cwd
+    │     WslcSetContainerSettingsInitProcess() → attach process to container
+    │     WslcCreateContainer(session, settings) → create container in session
+    │     WslcStartContainer()                 → start container
+    │     WslcGetContainerInitProcess()        → get process handle
+    │     WslcGetProcessIOHandle()             → get stdout/stderr Win32 HANDLEs
+    │     ReadFile(stdout/stderr)              → capture output → ScriptResponse
     │     WslcContainerStop()         → teardown
     │     WslcContainerDelete()       → cleanup
     │     WslcSessionTerminate()      → release micro-VM
@@ -108,7 +107,7 @@ let mut runner: Box<dyn ScriptRunner> = match request.containment {
 |---|---|
 | Container lifecycle model (`daemon.rs:505-953`) | Adapted into `WSLContainerRunner` — but calling WSLC SDK APIs instead of containerd gRPC |
 | Backend enum + routing (`backend.rs`, `daemon.rs:220-279`) | Already exists: `ContainmentBackend` enum + `match` dispatch in `main.rs` (the SandboxRunner work) |
-| Policy → mount translation (`policy.rs`) | `wxc_common/src/policy_mapping.rs` — maps to `WslcContainerSettingsAddVolume()` calls |
+| Policy → mount translation (`policy.rs`) | `wxc_common/src/policy_mapping.rs` — maps to `WslcSetContainerSettingsVolumes()` calls |
 | `setup-containerd.ps1` setup script | Replaced by WSLC SDK's `WslcInstallWithDependencies()` + lightweight setup script |
 
 **Note:** The WSLC SDK replaces the need for WLXC's containerd gRPC client (`containerd/client.rs`) and OCI spec builder (`daemon.rs:2450-2627`) entirely. The SDK handles containerd communication, image management, OCI spec construction, and namespace setup internally.
@@ -238,7 +237,7 @@ Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
 
 1. `initialize()`:
    - Call `WslcCanRun()` — fail fast if WSLC runtime is not available
-   - Call `WslcSessionInitSettings()` with storage path
+   - Call `WslcInitSessionSettings()` with storage path
    - Configure session: CPU count, memory, timeout from `ContainerConfig`
    - Call `WslcSessionCreate()` to start the WSL2 micro-VM
    - Check if image exists via `WslcSessionImageList()`; if not found, fail fast with a clear error message (MXC does not pull images — container management is handled externally)
@@ -247,7 +246,7 @@ Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
    - Initialize container settings from image name via `WslcContainerInitSettings()`
    - Apply policy: set networking mode, add volume mounts, configure port mappings
    - Configure init process: `WslcProcessInitSettings()` → `WslcProcessSettingsSetExecutable()` → `WslcProcessSettingsSetCmdLineArgs()` → `WslcProcessSettingsSetCurrentDirectory()` → `WslcProcessSettingsSetEnvVariables()`
-   - Attach process to container: `WslcContainerSettingsSetInitProcess(containerSettings, processSettings)`
+   - Attach process to container: `WslcSetContainerSettingsInitProcess(containerSettings, processSettings)`
    - Call `WslcContainerCreate(session, containerSettings)` + `WslcContainerStart()`
    - Retrieve the process handle: `WslcContainerGetInitProcess(container, &process)`
    - Get stdout/stderr HANDLEs via `WslcProcessGetIOHandles(process, ...)`
@@ -266,10 +265,10 @@ Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
 **I/O and process behavior:**
 - `WSLContainerRunner` captures stdout/stderr from native Win32 HANDLEs returned by `WslcProcessGetIOHandles()` and returns them in `ScriptResponse`, matching the current `AppContainerScriptRunner` behavior
 - The exit code is retrieved via `WslcProcessGetExitCode()` after the process exit event signals
-- The `timeout` config field is enforced via `WslcSessionSettingsSetTimeout()` at the session level, plus a Rust-side watchdog that calls `WslcContainerStop(WSLC_SIGNAL_SIGKILL)` if needed
+- The `timeout` config field is enforced via `WslcSetSessionSettingsTimeout()` at the session level, plus a Rust-side watchdog that calls `WslcStopContainer(WSLC_SIGNAL_SIGKILL)` if needed
 
 **Path translation (Windows host → Linux container):**
-- Volume mounts use `WslcContainerSettingsAddVolume()` which accepts `WslcContainerVolume` structs with explicit `windowsPath` (PCWSTR) and `containerPath` (PCSTR) fields
+- Volume mounts use `WslcSetContainerSettingsVolumes()` which accepts `WslcContainerVolume` structs with explicit `windowsPath` (PCWSTR) and `containerPath` (PCSTR) fields
 - The runner translates `readwritePaths`/`readonlyPaths` from the policy into volume entries using the WSL2 convention: `C:\workspace` → `/mnt/c/workspace` (strip drive letter, lowercase, prefix `/mnt/`)
 - The WSLC SDK handles the actual cross-OS path bridging internally via WSL2's 9P/Plan9 filesystem
 
@@ -294,8 +293,8 @@ This logic lives in `wxc_common/src/policy_mapping.rs` and is called by `WSLCont
 Filesystem mapping:
 | SandboxPolicy field | WSLC SDK equivalent |
 |---|---|
-| `readwritePaths: ["C:\\workspace"]` | `WslcContainerSettingsAddVolume()` with `windowsPath: "C:\\workspace"`, `containerPath: "/mnt/c/workspace"`, `readOnly: false` |
-| `readonlyPaths: ["C:\\data"]` | `WslcContainerSettingsAddVolume()` with `windowsPath: "C:\\data"`, `containerPath: "/mnt/c/data"`, `readOnly: true` |
+| `readwritePaths: ["C:\\workspace"]` | `WslcSetContainerSettingsVolumes()` with `windowsPath: "C:\\workspace"`, `containerPath: "/mnt/c/workspace"`, `readOnly: false` |
+| `readonlyPaths: ["C:\\data"]` | `WslcSetContainerSettingsVolumes()` with `windowsPath: "C:\\data"`, `containerPath: "/mnt/c/data"`, `readOnly: true` |
 | `deniedPaths: ["C:\\secrets"]` | Simply not added as a volume — Linux container isolation means it's inaccessible by default |
 
 **Path mapping rule:** Windows paths are converted to Linux mount points using the WSL2 convention: strip the drive letter, lowercase it, and prefix with `/mnt/`. For example, `C:\Projects\my-app` → `/mnt/c/Projects/my-app`, `D:\data` → `/mnt/d/data`. This means scripts running inside the container must use `/mnt/c/...` style paths. A future iteration could support explicit `{ windowsPath, containerPath }` pairs for custom mount points.
@@ -303,44 +302,41 @@ Filesystem mapping:
 Network mapping:
 | SandboxPolicy field | WSLC SDK equivalent |
 |---|---|
-| `defaultPolicy: "block"` | `WslcContainerSettingsSetNetworkingMode(WSLC_CONTAINER_NETWORKING_MODE_NONE)` |
-| `defaultPolicy: "allow"` | `WslcContainerSettingsSetNetworkingMode(WSLC_CONTAINER_NETWORKING_MODE_BRIDGED)` |
+| `defaultPolicy: "block"` | `WslcSetContainerSettingsNetworkingMode(WSLC_CONTAINER_NETWORKING_MODE_NONE)` |
+| `defaultPolicy: "allow"` | `WslcSetContainerSettingsNetworkingMode(WSLC_CONTAINER_NETWORKING_MODE_BRIDGED)` |
 | `allowedHosts / blockedHosts` | Post-start iptables rules via `WslcContainerExec()` (run iptables commands inside container). **Prerequisite:** the container image must include iptables, and the container must run with `WSLC_CONTAINER_FLAG_PRIVILEGED` or `NET_ADMIN` capability to modify network rules. Images without iptables will not support per-host filtering — only the all-or-nothing `defaultPolicy` applies. |
 
 Port mapping (new capability enabled by WSLC SDK):
 | Config field | WSLC SDK equivalent |
 |---|---|
-| `portMappings: [{ windowsPort: 8080, containerPort: 80 }]` | `WslcContainerSettingsSetPortMapping()` with `WslcContainerPortMapping` structs |
+| `portMappings: [{ windowsPort: 8080, containerPort: 80 }]` | `WslcSetContainerSettingsPortMappings()` with `WslcContainerPortMapping` structs (TCP only) |
 
 **WSLC SDK advantage:** The `WslcContainerVolume` struct directly models the Windows↔Linux path mapping with `windowsPath` (PCWSTR) and `containerPath` (PCSTR) fields. The runner applies the deterministic `/mnt/<drive>/...` mapping rule and the SDK's 9P filesystem handles the cross-OS bridging internally.
 
 ---
 
-### Phase 5 — CLI Updates & Setup
+### Phase 5 — CLI Updates & Setup (Future Work)
 
-**Goal:** Give users a simple way to invoke Linux container execution from the command line, and a one-command setup for the WSLC SDK prerequisite.
+**Status:** Not yet implemented. The features below are planned for a future
+iteration after the core WSLC backend (Phase 3) is validated.
 
-**Why it matters:** Without CLI support, users would have to hand-write JSON configs with `containment` and `container` sections. Without a setup script, installing the WSLC runtime + pulling images is a manual multi-step process.
+**Goal:** Give users a simple way to invoke Linux container execution from the
+command line, and a one-command setup for the WSLC SDK prerequisite.
 
-**What changes:**
+**Planned changes:**
 
 CLI (`wxc/src/main.rs` — Clap definition):
-- Add `--container` flag to the existing `Cli` struct — sets `containment: "wslc"` automatically
-- Add `--image` optional flag to override the default container image (requires `--container`)
-- If `--container` is used without `--image`, default to `alpine:latest` (the lightest general-purpose image; users can override for specific runtimes like `python:3.12`)
-- This flag aligns with the Tessera base model (future flags: `--microvm`, `--session`, `--vm`, `--app`)
+- Add `--container` flag — sets `containment: "wslc"` automatically
+- Add `--image` optional flag to override the default container image
 - Update `platform` command to show WSLC SDK status
 
 Setup script (`scripts/setup-wslc.ps1`):
-- Calls `wxc-exec.exe --check-platform` to invoke `WslcCanRun()` and report missing components as JSON
-- If missing components, calls `wxc-exec.exe --install-wslc` which invokes `WslcInstallWithDependencies()` (SDK handles WSL2, VM platform, and WSL package installation)
-- Pulls default Linux image via `wxc-exec.exe --pull-image alpine:latest` (wraps `WslcSessionImagePull()`)
-- Verify setup by running a smoke test: `wxc-exec.exe --container "echo hello"`
-- **Note:** `--check-platform`, `--install-wslc`, and `--pull-image` are **admin utility subcommands** for setup and maintenance only. They are not part of the execution code path — `WSLContainerRunner` never calls them. The runner only checks if an image exists and fails fast if it's missing.
+- Verify WSLC SDK is installed via `WslcCanRun()`
+- Pull default Linux image
+- Run a smoke test
 
-SDK health check (`sdk/src/platform.ts`):
-- `getPlatformSupport()` spawns `wxc-exec.exe --check-platform` and parses JSON output (wraps `WslcCanRun()`)
-- CLI `platform` command surfaces this to the user, including which components are missing
+**Current workaround:** Users write JSON configs with `"containment": "wslc"`
+and run with `wxc-exec.exe --experimental --debug config.json`.
 
 ---
 
