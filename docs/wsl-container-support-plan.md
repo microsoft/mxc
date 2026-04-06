@@ -35,7 +35,6 @@ Path A — CLI (direct):
 
 Path B — SDK (programmatic):
   App calls: spawnSandbox("python3 my_app.py", policy, { experimental: true })
-    ├── Detects WSLC SDK available via getPlatformSupport()
     ├── Builds JSON config with containment = "wslc"
     └── Spawns wxc-exec.exe --experimental with the config
 
