@@ -317,6 +317,15 @@ extern "system" {
     pub fn WslcReleaseContainer(container: WslcContainer) -> HRESULT;
 
     // -- Process management --
+    /// Create a new process in a running container (used for post-start exec,
+    /// e.g., iptables rules before the user script).
+    pub fn WslcCreateContainerProcess(
+        container: WslcContainer,
+        new_process_settings: *mut WslcProcessSettings,
+        new_process: *mut WslcProcess,
+        error_message: *mut PWSTR,
+    ) -> HRESULT;
+
     pub fn WslcInitProcessSettings(process_settings: *mut WslcProcessSettings) -> HRESULT;
 
     pub fn WslcSetProcessSettingsCmdLine(
