@@ -74,13 +74,13 @@ Both paths converge here:
                           │
            ┌──────────────┼──────────────┐
            ▼              ▼              ▼
-  AppContainerScript   LXC Script     WSLContainer
+  AppContainerScript   Sandbox        WSLContainer
   Runner (stable)      Runner         Runner (experimental)
-           │           (stable)            │
+           │           (experimental)      │
      AppContainer          │         WSLC SDK (C API)
-     NTFS ACLs         lxc-create    via Rust FFI
-     WFP firewall      lxc-attach    ├── WSL2 micro-VM
-                       iptables      ├── OCI containers
+     NTFS ACLs         Windows       via Rust FFI
+     WFP firewall      Sandbox VM    ├── WSL2 micro-VM
+                                     ├── OCI containers
                                      └── Win32 HANDLE I/O
 ```
 
