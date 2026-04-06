@@ -327,7 +327,7 @@ mod tests {
         let content = std::fs::read_to_string(&wsb_path).unwrap();
         assert!(content.contains("<Configuration>"));
         assert!(content.contains("bootstrap.cmd"));
-        assert!(content.contains("sandbox-python"));
+        assert!(content.contains(SANDBOX_PYTHON_DIR));
         assert!(content.contains(&guest_dir.display().to_string()));
         assert!(content.contains(&rendezvous_dir.display().to_string()));
         assert!(content.contains(&python_dir.display().to_string()));
@@ -336,7 +336,7 @@ mod tests {
         let bootstrap = rendezvous_dir.join("bootstrap.cmd");
         assert!(bootstrap.exists());
         let bootstrap_content = std::fs::read_to_string(&bootstrap).unwrap();
-        assert!(bootstrap_content.contains("sandbox-python"));
+        assert!(bootstrap_content.contains(SANDBOX_PYTHON_DIR));
         assert!(bootstrap_content.contains(GUEST_BINARY));
     }
 
