@@ -1,0 +1,23 @@
+{
+  "version": "0.4.0-alpha",
+  "containerId": "wslc-filesystem-test",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "ls -la /mnt/c/workspace && cat /mnt/d/data/readme.txt",
+    "cwd": "C:\\workspace"
+  },
+  "filesystem": {
+    "readwritePaths": ["C:\\workspace"],
+    "readonlyPaths": ["D:\\data"]
+  },
+  "network": {
+    "defaultPolicy": "allow"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "alpine:latest",
+      "cpuCount": 2,
+      "memoryMb": 1024
+    }
+  }
+}
