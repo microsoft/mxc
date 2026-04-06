@@ -22,3 +22,7 @@ nanvix_common = { path = "../nanvix_common" }
 [features]
 default = []
 microvm = ["nanvix_binaries"]
+wslc_common = { workspace = true, optional = true }
+
+[features]
+wslc = ["dep:wslc_common"]

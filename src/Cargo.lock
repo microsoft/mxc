@@ -1108,6 +1108,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wslc_common"
+version = "0.1.0"
+dependencies = [
+ "wxc_common",
+]
+
+[[package]]
 name = "wxc"
 version = "0.1.0"
 dependencies = [
@@ -1116,6 +1123,7 @@ dependencies = [
  "nanvix_binaries",
  "nanvix_common",
  "windows",
+ "wslc_common",
  "wxc_common",
 ]
 
