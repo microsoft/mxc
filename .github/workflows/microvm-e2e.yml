@@ -7,6 +7,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   microvm-e2e:
     name: MicroVM E2E
@@ -14,12 +17,17 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Rust toolchain
         run: |
           rustup update stable
           rustup target add x86_64-pc-windows-msvc
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
 
       - name: Build with MicroVM support
         working-directory: src
@@ -47,17 +55,32 @@ jobs:
           }
           Get-ChildItem $binDir -Include $required -Recurse | Format-Table Name, Length
 
+      - name: Diagnose hypervisor environment
+        shell: pwsh
+        run: |
+          Write-Host "=== Hypervisor Diagnostics ==="
+          Write-Host "OS: $([System.Environment]::OSVersion)"
+          $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+          Write-Host "HypervisorPresent: $($cs.HypervisorPresent)"
+          Write-Host "WinHvPlatform.dll exists: $(Test-Path "$env:SystemRoot\System32\WinHvPlatform.dll")"
+          $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction SilentlyContinue
+          Write-Host "HypervisorPlatform feature state: $($feature.State)"
+
       - name: Check Windows Hypervisor Platform
         id: whp-check
         shell: pwsh
         run: |
           $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
           if ($feature.State -ne 'Enabled') {
-            Write-Host "::warning::Windows Hypervisor Platform is not enabled — skipping E2E tests."
-            echo "whp_available=false" >> $env:GITHUB_OUTPUT
-            exit 0
+            Write-Host "::error::Windows Hypervisor Platform is not enabled. E2E tests require WHP on windows-latest."
+            exit 1
           }
-          Write-Host "WHP is enabled."
+          $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+          if (-not $cs.HypervisorPresent) {
+            Write-Host "::error::HypervisorPresent is false — WHP feature is enabled but hypervisor is not running."
+            exit 1
+          }
+          Write-Host "WHP is enabled and hypervisor is present."
           echo "whp_available=true" >> $env:GITHUB_OUTPUT
 
       - name: Run MicroVM E2E Tests
@@ -79,7 +102,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure() || cancelled()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: microvm-e2e-logs-${{ github.event.pull_request.number || github.run_number }}
           retention-days: 7
@@ -104,12 +127,12 @@ jobs:
               Write-Host ("{0,-35} {1,10} {2,8}" -f $r.description, $r.wall_time_ms, $r.status)
             }
           } else {
-            Write-Host "No performance results found."
+            Write-Host "::warning::No performance results found — perf JSON was not generated."
           }
 
       - name: Upload performance results
         if: steps.whp-check.outputs.whp_available == 'true' && !cancelled()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: microvm-perf-results-${{ github.event.pull_request.number || github.run_number }}
           retention-days: 30

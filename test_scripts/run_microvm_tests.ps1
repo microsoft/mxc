@@ -84,12 +84,12 @@ Write-Host "binaries: $binDir"
 # Format: config name, expected exit code
 
 $tests = @(
-    @{ Config = "microvm_hello.json";        ExpectedExit = 0;  Description = "Hello world" },
+    @{ Config = "microvm_hello.json";        ExpectedExit = 0;  Description = "Hello world";                    OutputContains = "sum=100" },
     @{ Config = "microvm_exit_code.json";    ExpectedExit = 42; Description = "Exit code propagation" },
-    @{ Config = "microvm_multiline.json";    ExpectedExit = 0;  Description = "Multi-line script (fibonacci)" },
-    @{ Config = "microvm_stdlib.json";       ExpectedExit = 0;  Description = "Stdlib (json, math, hashlib)" },
-    @{ Config = "microvm_large_output.json"; ExpectedExit = 0;  Description = "Large stdout (1000 lines)" },
-    @{ Config = "microvm_error.json";        ExpectedExit = 1;  Description = "Python exception" },
+    @{ Config = "microvm_multiline.json";    ExpectedExit = 0;  Description = "Multi-line script (fibonacci)";  OutputContains = "fib(" },
+    @{ Config = "microvm_stdlib.json";       ExpectedExit = 0;  Description = "Stdlib (json, math, hashlib)";   OutputContains = "pi" },
+    @{ Config = "microvm_large_output.json"; ExpectedExit = 0;  Description = "Large stdout (1000 lines)";      OutputContains = "line 999" },
+    @{ Config = "microvm_error.json";        ExpectedExit = 1;  Description = "Python exception";               OutputContains = "ValueError" },
     @{ Config = "microvm_timeout.json";      ExpectedExit = -1; Description = "Timeout kills VM" }
 )
 
@@ -109,21 +109,44 @@ foreach ($test in $tests) {
     Write-Host "`n--- $($test.Description) ($($test.Config)) ---" -ForegroundColor White
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $stdoutFile = [System.IO.Path]::GetTempFileName()
+    $stderrFile = [System.IO.Path]::GetTempFileName()
     $process = Start-Process -FilePath $wxcExe `
         -ArgumentList "--debug", "--experimental", $configPath `
-        -NoNewWindow -PassThru -Wait
+        -PassThru -Wait `
+        -RedirectStandardOutput $stdoutFile `
+        -RedirectStandardError $stderrFile
     $sw.Stop()
 
     $actualExit = $process.ExitCode
     $expectedExit = $test.ExpectedExit
     $elapsedMs = $sw.ElapsedMilliseconds
+    $stdout = Get-Content $stdoutFile -Raw -ErrorAction SilentlyContinue
+    $stderr = Get-Content $stderrFile -Raw -ErrorAction SilentlyContinue
+    Remove-Item $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
 
-    if ($actualExit -eq $expectedExit) {
+    $pass = ($actualExit -eq $expectedExit)
+    $reason = ""
+
+    if (-not $pass) {
+        $reason = "expected exit=$expectedExit, got exit=$actualExit"
+    }
+
+    # Check stdout content if OutputContains is specified
+    if ($pass -and $test.OutputContains) {
+        $combined = "$stdout`n$stderr"
+        if ($combined -notmatch [regex]::Escape($test.OutputContains)) {
+            $pass = $false
+            $reason = "output missing '$($test.OutputContains)'"
+        }
+    }
+
+    if ($pass) {
         Write-Host "  PASS (exit=$actualExit, ${elapsedMs}ms)" -ForegroundColor Green
         $passed++
         $results += @{ Test = $test.Config; Status = "PASS"; Exit = $actualExit; WallTimeMs = $elapsedMs; Description = $test.Description }
     } else {
-        Write-Host "  FAIL (expected exit=$expectedExit, got exit=$actualExit, ${elapsedMs}ms)" -ForegroundColor Red
+        Write-Host "  FAIL ($reason, ${elapsedMs}ms)" -ForegroundColor Red
         $failed++
         $results += @{ Test = $test.Config; Status = "FAIL"; Exit = $actualExit; WallTimeMs = $elapsedMs; Description = $test.Description }
     }
