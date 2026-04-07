@@ -1,10 +1,10 @@
 [package]
-name = "wxc_sandbox_agent"
+name = "wxc_sandbox_guest"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "wxc-sandbox-agent"
+name = "wxc-sandbox-guest"
 path = "src/main.rs"
 
 [dependencies]
