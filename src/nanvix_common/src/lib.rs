@@ -3,11 +3,10 @@
 
 //! Shared constants and configuration types for NanVix micro-VM binaries.
 //!
-//! This crate is the single source of truth for binary filenames, release
-//! configuration, and checksum data. It is consumed as a `[build-dependency]`
-//! by `nanvix_binaries` (download) and `wxc` (copy to output dir).
+//! This crate is the single source of truth for binary filenames and release
+//! configuration. It is consumed as a `[build-dependency]` by
+//! `nanvix_binaries` (download) and `wxc` (copy to output dir).
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -38,12 +37,17 @@ pub struct ReleaseConfig {
 /// Configuration for a single upstream GitHub repo release.
 #[derive(Debug, Deserialize)]
 pub struct RepoConfig {
-    /// Git tag of the pinned release (e.g., "v0.12.291").
-    pub tag: String,
-    /// Exact filename of the zip asset in the GitHub release.
-    pub asset: String,
+    /// GitHub org/repo (e.g., "nanvix/nanvix").
+    pub repo: String,
+    /// Prefix to match the Windows zip asset name (e.g., "nanvix-windows-microvm-standalone").
+    pub asset_prefix: String,
     /// List of binary filenames to extract from the zip.
     pub binaries: Vec<String>,
+}
+
+/// GitHub API URL for the latest release of a repo.
+pub fn github_latest_release_url(repo: &str) -> String {
+    format!("https://api.github.com/repos/{}/releases/latest", repo)
 }
 
 /// Load and deserialize a JSON file.
@@ -52,19 +56,4 @@ pub fn load_json<T: serde::de::DeserializeOwned>(path: &str) -> T {
         .unwrap_or_else(|e| panic!("nanvix_common: failed to read {}: {}", path, e));
     serde_json::from_str(&content)
         .unwrap_or_else(|e| panic!("nanvix_common: failed to parse {}: {}", path, e))
-}
-
-/// Load checksums from `checksums.json`.
-pub fn load_checksums(path: &str) -> HashMap<String, String> {
-    load_json(path)
-}
-
-/// Construct a deterministic GitHub release download URL.
-///
-/// Format: `https://github.com/{repo}/releases/download/{tag}/{asset}`
-pub fn github_download_url(repo: &str, tag: &str, asset: &str) -> String {
-    format!(
-        "https://github.com/{}/releases/download/{}/{}",
-        repo, tag, asset
-    )
 }

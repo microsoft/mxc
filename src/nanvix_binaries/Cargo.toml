@@ -13,3 +13,5 @@ nanvix_common = { path = "../nanvix_common" }
 
 [build-dependencies]
 nanvix_common = { path = "../nanvix_common" }
+serde = { workspace = true }
+serde_json = { workspace = true }

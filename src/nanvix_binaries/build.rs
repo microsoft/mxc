@@ -1,16 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script that downloads NanVix binaries from GitHub releases.
+//! Build script that downloads NanVix binaries from the latest GitHub releases.
 //!
-//! Uses system tools (`curl.exe`, `tar.exe`, `certutil`) instead of Rust
-//! crates. Zero HTTP/zip/crypto build-dependencies — only `nanvix_common`
+//! Uses system tools (`curl.exe`, `tar.exe`) instead of Rust
+//! crates. Zero HTTP/zip build-dependencies — only `nanvix_common`
 //! for shared constants and serde-based config parsing.
+//!
+//! ## How it works
+//!
+//! 1. Queries GitHub API (`/releases/latest`) for each upstream repo
+//! 2. Finds the Windows zip asset matching the configured prefix
+//! 3. Downloads and extracts the required binaries
 //!
 //! ## Configuration files
 //!
-//! - `versions.json` — pinned release tags and exact asset names
-//! - `checksums.json` — SHA256 hashes for integrity verification
+//! - `versions.json` — repo names, asset prefixes, and binary lists
 //!
 //! ## Environment variables
 //!
@@ -18,20 +23,32 @@
 //!
 //! ## Caching
 //!
-//! Binaries are cached in OUT_DIR. Checksums are verified whenever this
-//! build script runs (triggered by changes to build.rs, versions.json,
-//! or checksums.json) to catch corrupted or truncated files.
+//! Binaries are cached in OUT_DIR. If all required binaries exist,
+//! downloads are skipped.
 //!
 //! # TODO(security): NanVix binaries are not ESRP-signed. Before shipping in
 //! # official MXC releases, either extend ESRP to cover these binaries or
 //! # establish an internal mirror with supply-chain controls.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nanvix_common::{github_download_url, load_checksums, load_json, ReleaseConfig, RepoConfig};
+use nanvix_common::{github_latest_release_url, load_json, ReleaseConfig, RepoConfig};
+
+/// GitHub API release response — only the fields we need.
+#[derive(serde::Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
+}
 
 fn main() {
     // Check the TARGET platform (not host). NanVix binaries are only needed when
@@ -50,7 +67,6 @@ fn main() {
     fs::create_dir_all(&bin_dir).expect("failed to create nanvix-binaries dir");
 
     let versions: ReleaseConfig = load_json("versions.json");
-    let checksums: HashMap<String, String> = load_checksums("checksums.json");
 
     let all_binaries: Vec<&str> = versions
         .nanvix
@@ -60,76 +76,96 @@ fn main() {
         .map(|s| s.as_str())
         .collect();
 
-    let needs_nanvix = needs_download(&versions.nanvix, &bin_dir, &checksums);
-    let needs_cpython = needs_download(&versions.cpython, &bin_dir, &checksums);
+    let needs_nanvix = needs_download(&versions.nanvix, &bin_dir);
+    let needs_cpython = needs_download(&versions.cpython, &bin_dir);
 
     if needs_nanvix {
-        eprintln!(
-            "nanvix_binaries: downloading nanvix/nanvix {}...",
-            versions.nanvix.tag
-        );
-        download_and_extract(&versions.nanvix, "nanvix/nanvix", &bin_dir);
+        eprintln!("nanvix_binaries: fetching latest nanvix/nanvix release...");
+        download_latest(&versions.nanvix, &bin_dir);
     }
 
     if needs_cpython {
-        eprintln!(
-            "nanvix_binaries: downloading nanvix/cpython {}...",
-            versions.cpython.tag
-        );
-        download_and_extract(&versions.cpython, "nanvix/cpython", &bin_dir);
+        eprintln!("nanvix_binaries: fetching latest nanvix/cpython release...");
+        download_latest(&versions.cpython, &bin_dir);
     }
 
     if !needs_nanvix && !needs_cpython {
-        eprintln!("nanvix_binaries: all binaries cached and verified");
+        eprintln!("nanvix_binaries: all binaries cached");
     }
 
-    verify_checksums(&all_binaries, &bin_dir, &checksums);
+    // Verify presence of all binaries
+    for name in &all_binaries {
+        if !bin_dir.join(name).exists() {
+            panic!("nanvix_binaries: {} not found after download/extract", name);
+        }
+    }
 
     println!("cargo:rustc-env=NANVIX_BIN_DIR={}", bin_dir.display());
     println!("cargo:BIN_DIR={}", bin_dir.display());
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=versions.json");
-    println!("cargo:rerun-if-changed=checksums.json");
     println!("cargo:rerun-if-env-changed=GITHUB_TOKEN");
     println!("cargo:rerun-if-env-changed=GH_TOKEN");
 }
 
 // -- Download logic ----------------------------------------------------------
 
-fn needs_download(
-    config: &RepoConfig,
-    bin_dir: &Path,
-    checksums: &HashMap<String, String>,
-) -> bool {
-    config.binaries.iter().any(|name| {
-        let path = bin_dir.join(name);
-        if !path.exists() {
-            return true;
-        }
-        if let Some(expected) = checksums.get(name.as_str()) {
-            certutil_sha256(&path) != *expected
-        } else {
-            false
-        }
-    })
+fn needs_download(config: &RepoConfig, bin_dir: &Path) -> bool {
+    config
+        .binaries
+        .iter()
+        .any(|name| !bin_dir.join(name).exists())
 }
 
-fn download_and_extract(config: &RepoConfig, repo: &str, bin_dir: &Path) {
-    let url = github_download_url(repo, &config.tag, &config.asset);
-    let zip_path = bin_dir.join(&config.asset);
+fn download_latest(config: &RepoConfig, bin_dir: &Path) {
+    // Step 1: Query GitHub API for latest release
+    let api_url = github_latest_release_url(&config.repo);
+    let release_json = curl_fetch_string(&api_url);
+
+    let release: GitHubRelease = serde_json::from_str(&release_json).unwrap_or_else(|e| {
+        panic!(
+            "nanvix_binaries: failed to parse release JSON from {}: {}",
+            api_url, e
+        );
+    });
+
+    eprintln!(
+        "  latest release: {} ({} assets)",
+        release.tag_name,
+        release.assets.len()
+    );
+
+    // Step 2: Find the largest matching Windows zip asset
+    let zip_asset = release
+        .assets
+        .iter()
+        .filter(|a| a.name.starts_with(&config.asset_prefix) && a.name.ends_with(".zip"))
+        .max_by_key(|a| a.size);
+
+    let zip_asset = zip_asset.unwrap_or_else(|| {
+        panic!(
+            "nanvix_binaries: no zip asset matching '{}*.zip' in {} release {}.\n\
+             Available: {:?}",
+            config.asset_prefix,
+            config.repo,
+            release.tag_name,
+            release.assets.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
+    });
+
+    // Step 3: Download and extract
+    let zip_path = bin_dir.join(&zip_asset.name);
     let binary_paths: Vec<PathBuf> = config.binaries.iter().map(|b| bin_dir.join(b)).collect();
 
-    // Cleanup helper: remove zip + any partially extracted binaries.
-    // Called before panicking so the filesystem isn't left in a dangling state.
-    let cleanup = |bin_dir_paths: &[PathBuf], zip: &Path| {
+    let cleanup = |paths: &[PathBuf], zip: &Path| {
         let _ = fs::remove_file(zip);
-        for p in bin_dir_paths {
+        for p in paths {
             let _ = fs::remove_file(p);
         }
     };
 
-    eprintln!("  downloading {}...", config.asset);
-    if let Err(msg) = try_curl_download(&url, &zip_path) {
+    eprintln!("  downloading {}...", zip_asset.name);
+    if let Err(msg) = try_curl_download(&zip_asset.browser_download_url, &zip_path) {
         cleanup(&binary_paths, &zip_path);
         panic!("nanvix_binaries: {}", msg);
     }
@@ -148,6 +184,54 @@ fn download_and_extract(config: &RepoConfig, repo: &str, bin_dir: &Path) {
 
 // -- curl.exe ----------------------------------------------------------------
 
+/// Fetch a URL as a UTF-8 string via curl.exe (for GitHub API).
+fn curl_fetch_string(url: &str) -> String {
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "--silent",
+        "--show-error",
+        "--fail",
+        "--location",
+        "--retry",
+        "2",
+        "--retry-delay",
+        "2",
+        "--header",
+        "User-Agent: mxc-nanvix-build/0.1",
+        "--header",
+        "Accept: application/vnd.github.v3+json",
+    ]);
+
+    if let Some(token) = github_token() {
+        cmd.arg("--header");
+        cmd.arg(format!("Authorization: Bearer {}", token));
+    }
+
+    cmd.arg(url);
+
+    let output = cmd.output().unwrap_or_else(|e| {
+        panic!(
+            "nanvix_binaries: curl.exe not found: {}\n\
+             curl.exe ships with Windows 10 1803+. Ensure it's in PATH.",
+            e
+        );
+    });
+
+    if !output.status.success() {
+        panic!(
+            "nanvix_binaries: curl failed for {}\n  exit code: {}\n  stderr: {}\n\
+             Hint: set GITHUB_TOKEN env var if you're hitting rate limits",
+            url,
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    String::from_utf8(output.stdout)
+        .unwrap_or_else(|_| panic!("nanvix_binaries: non-UTF8 response from {}", url))
+}
+
+/// Download a file to disk via curl.exe with retry.
 fn try_curl_download(url: &str, dest: &Path) -> Result<(), String> {
     let mut cmd = Command::new("curl");
     cmd.args([
@@ -238,68 +322,4 @@ fn github_token() -> Option<String> {
     std::env::var("GITHUB_TOKEN")
         .or_else(|_| std::env::var("GH_TOKEN"))
         .ok()
-}
-
-// -- certutil SHA256 ---------------------------------------------------------
-
-fn certutil_sha256(path: &Path) -> String {
-    let output = Command::new("certutil")
-        .args(["-hashfile"])
-        .arg(path)
-        .arg("SHA256")
-        .output()
-        .unwrap_or_else(|e| {
-            panic!("nanvix_binaries: failed to run certutil: {}", e);
-        });
-
-    if !output.status.success() {
-        panic!(
-            "nanvix_binaries: certutil -hashfile failed for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    // certutil output format:
-    //   SHA256 hash of <file>:
-    //   <hex hash>
-    //   CertUtil: -hashfile command completed successfully.
-    let stdout = String::from_utf8(output.stdout).expect("certutil output not UTF-8");
-    stdout
-        .lines()
-        .nth(1)
-        .unwrap_or_else(|| panic!("nanvix_binaries: unexpected certutil output: {}", stdout))
-        .trim()
-        .replace(' ', "")
-        .to_lowercase()
-}
-
-fn verify_checksums(binaries: &[&str], bin_dir: &Path, checksums: &HashMap<String, String>) {
-    for name in binaries {
-        let path = bin_dir.join(name);
-        if !path.exists() {
-            panic!("nanvix_binaries: {} not found after download/extract", name);
-        }
-
-        if let Some(expected) = checksums.get(*name) {
-            let actual = certutil_sha256(&path);
-            if actual != *expected {
-                panic!(
-                    "nanvix_binaries: SHA256 mismatch for '{}'!\n\
-                     \x20 expected: {}\n\
-                     \x20 actual:   {}\n\
-                     This may indicate a corrupted download or a NanVix version update.\n\
-                     Update checksums.json with the new hashes.",
-                    name, expected, actual
-                );
-            }
-            eprintln!("  {} -- checksum OK", name);
-        } else {
-            panic!(
-                "nanvix_binaries: '{}' has no entry in checksums.json — \
-                 every binary must be hash-verified",
-                name
-            );
-        }
-    }
 }
