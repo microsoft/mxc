@@ -3,5 +3,5 @@
         "commandLine": "import json, math, hashlib\ndata = {'pi': math.pi, 'e': math.e, 'hash': hashlib.sha256(b'nanvix').hexdigest()[:16]}\nprint(json.dumps(data))",
         "timeout": 30000
     },
-    "containment": "nanvix"
+    "containment": "microvm"
 }
