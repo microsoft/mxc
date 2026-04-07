@@ -104,7 +104,7 @@ foreach ($test in $tests) {
     Write-Host "`n--- $($test.Description) ($($test.Config)) ---" -ForegroundColor White
 
     $process = Start-Process -FilePath $wxcExe `
-        -ArgumentList "--debug", $configPath `
+        -ArgumentList "--debug", "--experimental", $configPath `
         -NoNewWindow -PassThru -Wait
 
     $actualExit = $process.ExitCode
