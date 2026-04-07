@@ -25,7 +25,8 @@
 
 param(
     [string]$WxcExePath = "..\src\target\debug\wxc-exec.exe",
-    [string]$ConfigDir = "..\test_configs"
+    [string]$ConfigDir = "..\test_configs",
+    [string]$CliPath = "..\cli"
 )
 
 $ErrorActionPreference = "Stop"
@@ -77,8 +78,18 @@ if ($missing) {
     exit 1
 }
 
+# -- Verify CLI is built -----------------------------------------------------
+
+$cliEntryPoint = Join-Path (Resolve-Path $CliPath) "dist\cli.js"
+if (-not (Test-Path $cliEntryPoint)) {
+    Write-Host "ERROR: CLI not built. Expected: $cliEntryPoint" -ForegroundColor Red
+    Write-Host "       Build with: cd cli && npm install && npm run build"
+    exit 1
+}
+
 Write-Host "wxc-exec: $wxcExe"
 Write-Host "binaries: $binDir"
+Write-Host "cli:      $cliEntryPoint"
 
 # -- Test definitions ---------------------------------------------------------
 # Format: config name, expected exit code
@@ -108,11 +119,29 @@ foreach ($test in $tests) {
 
     Write-Host "`n--- $($test.Description) ($($test.Config)) ---" -ForegroundColor White
 
+    # Read the script command from the config JSON
+    $configJson = Get-Content $configPath -Raw | ConvertFrom-Json
+    $scriptCode = $configJson.process.commandLine
+    $containment = if ($configJson.containment) { $configJson.containment } else { "nanvix" }
+
+    # Build a minimal SandboxPolicy JSON for the CLI
+    $policyJson = '{"version":"0.4.0-alpha"}'
+
+    $cliArgs = @(
+        "dist/cli.js", "run-sdk",
+        "--script", $scriptCode,
+        "--policy", $policyJson,
+        "--containment", $containment,
+        "--experimental"
+    )
+    if ($true) { $cliArgs += "--debug" }
+
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()
-    $process = Start-Process -FilePath $wxcExe `
-        -ArgumentList "--debug", "--experimental", $configPath `
+    $process = Start-Process -FilePath "node" `
+        -ArgumentList $cliArgs `
+        -WorkingDirectory (Resolve-Path $CliPath) `
         -PassThru -Wait `
         -RedirectStandardOutput $stdoutFile `
         -RedirectStandardError $stderrFile

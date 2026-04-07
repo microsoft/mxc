@@ -8,6 +8,7 @@ import {
   spawnSandbox,
   getPlatformSupport,
   SandboxPolicy,
+  SandboxingMethod,
   getAvailableToolsPolicy,
 } from '@microsoft/mxc-sdk';
 
@@ -89,9 +90,10 @@ program
   .option('--policy-file <path>', 'Path to a SandboxPolicy JSON file')
   .option('--cwd <path>', 'Working directory for the sandboxed process')
   .option('--container-name <name>', 'Name for the sandbox container')
+  .option('--containment <backend>', 'Override containment backend (appcontainer, sandbox, microvm, nanvix, lxc, wslc, vm)')
   .option('--debug', 'Enable debug output')
   .option('--experimental', 'Enable experimental features')
-  .action(async (options: { script?: string; scriptFile?: string; policy?: string; policyFile?: string; cwd?: string; containerName?: string; debug?: boolean; experimental?: boolean }) => {
+  .action(async (options: { script?: string; scriptFile?: string; policy?: string; policyFile?: string; cwd?: string; containerName?: string; containment?: string; debug?: boolean; experimental?: boolean }) => {
     try {
       let scriptCommand: string;
       if (options.script) {
@@ -147,6 +149,7 @@ program
       const ptyProcess = spawnSandbox(scriptCommand, policy, {
         debug: options.debug ?? false,
         experimental: options.experimental ?? false,
+        containment: options.containment as SandboxingMethod | undefined,
       }, options.cwd, options.containerName);
 
       ptyProcess.onData((data: string) => {

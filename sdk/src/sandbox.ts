@@ -5,7 +5,7 @@ import * as pty from 'node-pty';
 import * as os from 'os';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, ContainerConfig } from './types';
+import { SandboxPolicy, SandboxingMethod, ContainerConfig } from './types';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
 
 const SUPPORTED_VERSION = '0.4.0-alpha';
@@ -57,6 +57,7 @@ export function buildSandboxPayload(
     policy: SandboxPolicy,
     workingDirectory?: string,
     containerName?: string,
+    containment?: SandboxingMethod,
 ): ContainerConfig {
     validatePolicyVersion(policy.version);
 
@@ -77,6 +78,12 @@ export function buildSandboxPayload(
             clearPolicyOnExit: true,
         },
     };
+
+    // If an explicit containment backend is requested, use it directly.
+    if (containment) {
+        config.containment = containment;
+        return config;
+    }
 
     if (platform === 'linux') {
         config.containment = 'lxc';
@@ -142,6 +149,12 @@ export interface SandboxSpawnOptions {
   experimental?: boolean;
 
   /**
+   * Override the containment backend (default: auto-detected from platform).
+   * Use 'microvm' for Nanvix micro-VM isolation (experimental, requires --experimental).
+   */
+  containment?: SandboxingMethod;
+
+  /**
    * PTY options to pass to node-pty
    */
   ptyOptions?: pty.IPtyForkOptions;
@@ -203,7 +216,7 @@ export function spawnSandbox(
   }
 
   // Build config
-  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName, options.containment);
 
   const args: string[] = [];
   const configJson = JSON.stringify(config);

@@ -55,6 +55,23 @@ jobs:
           }
           Get-ChildItem $binDir -Include $required -Recurse | Format-Table Name, Length
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build SDK
+        working-directory: sdk
+        run: |
+          npm install --ignore-scripts
+          npx tsc
+
+      - name: Build CLI
+        working-directory: cli
+        run: |
+          npm install
+          npm run build
+
       - name: Diagnose hypervisor environment
         shell: pwsh
         run: |
@@ -90,11 +107,12 @@ jobs:
         run: |
           $wxcExe = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug\wxc-exec.exe"
           $configDir = Join-Path $env:GITHUB_WORKSPACE "test_configs"
+          $cliPath = Join-Path $env:GITHUB_WORKSPACE "cli"
           # Support both old (nanvix) and new (microvm) test script names
           if (Test-Path ".\run_microvm_tests.ps1") {
-            .\run_microvm_tests.ps1 -WxcExePath $wxcExe -ConfigDir $configDir
+            .\run_microvm_tests.ps1 -WxcExePath $wxcExe -ConfigDir $configDir -CliPath $cliPath
           } elseif (Test-Path ".\run_nanvix_tests.ps1") {
-            .\run_nanvix_tests.ps1 -WxcExePath $wxcExe -ConfigDir $configDir
+            .\run_nanvix_tests.ps1 -WxcExePath $wxcExe -ConfigDir $configDir -CliPath $cliPath
           } else {
             Write-Error "No MicroVM/Nanvix test script found in test_scripts/"
             exit 1
