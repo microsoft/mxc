@@ -166,8 +166,14 @@ fn main() {
                     process::exit(1);
                 }
                 let _ = writeln!(logger, "Using WSLContainer runner (--experimental)");
+                let wslc_config = request
+                    .experimental
+                    .wslc
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_default();
                 Box::new(wslc_common::wsl_container_runner::WSLContainerRunner::new(
-                    &request.container_config,
+                    &wslc_config,
                 ))
             }
             #[cfg(not(feature = "wslc"))]
