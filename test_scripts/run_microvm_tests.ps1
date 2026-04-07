@@ -3,12 +3,12 @@
 
 <#
 .SYNOPSIS
-    Runs all MicroVM E2E tests. Requires WHP and NanVix binaries next to wxc-exec.exe.
+    Runs all MicroVM E2E tests. Requires WHP and Nanvix binaries next to wxc-exec.exe.
 
 .DESCRIPTION
     - Checks if Windows Hypervisor Platform is available
     - Locates wxc-exec.exe (built with --features microvm)
-    - Verifies NanVix binaries are present
+    - Verifies Nanvix binaries are present
     - Runs each test config, validates exit codes
     - Reports pass/fail summary
 
@@ -33,9 +33,14 @@ $ErrorActionPreference = "Stop"
 # -- WHP check ---------------------------------------------------------------
 
 function Test-WhpAvailable {
+    # Fast check: verify the WHP API DLL exists and the hypervisor is running.
+    # Avoids Get-WindowsOptionalFeature which requires elevation and can hang.
+    if (-not (Test-Path "$env:SystemRoot\System32\WinHvPlatform.dll")) {
+        return $false
+    }
     try {
-        $feature = Get-WindowsOptionalFeature -Online -FeatureName "HypervisorPlatform" -ErrorAction SilentlyContinue
-        return ($feature -and $feature.State -eq "Enabled")
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+        return ($cs -and $cs.HypervisorPresent)
     } catch {
         return $false
     }
