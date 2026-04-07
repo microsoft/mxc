@@ -1,0 +1,106 @@
+name: Windows Sandbox E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  sandbox-e2e:
+    name: Sandbox E2E
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup update stable
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Build
+        working-directory: src
+        run: cargo build --target x86_64-pc-windows-msvc
+
+      - name: Exclude build output from Windows Defender
+        shell: pwsh
+        run: |
+          $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
+          Add-MpPreference -ExclusionPath $binDir
+          Write-Host "Added Defender exclusion for $binDir"
+
+      - name: Verify Sandbox binaries
+        shell: pwsh
+        run: |
+          $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
+          $required = @("wxc-exec.exe", "wxc-sandbox-daemon.exe", "wxc-sandbox-guest.exe")
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
+          if ($missing) {
+            Write-Host "::error::Missing binaries: $($missing -join ', ')"
+            exit 1
+          }
+          Get-ChildItem $binDir -Include $required -Recurse | Format-Table Name, Length
+
+      - name: Check Windows Sandbox availability
+        id: sandbox-check
+        shell: pwsh
+        run: |
+          $info = dism /online /get-featureinfo /featurename:Containers-DisposableClientVM 2>&1 |
+              Select-String "State"
+          if ($info -notmatch "Enabled") {
+            Write-Host "::warning::Windows Sandbox is not enabled — skipping E2E tests."
+            echo "sandbox_available=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          Write-Host "Windows Sandbox is enabled."
+          echo "sandbox_available=true" >> $env:GITHUB_OUTPUT
+
+      - name: Run Sandbox E2E Tests
+        if: steps.sandbox-check.outputs.sandbox_available == 'true'
+        shell: pwsh
+        working-directory: test_scripts
+        run: |
+          $wxcExe = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug\wxc-exec.exe"
+          $configDir = Join-Path $env:GITHUB_WORKSPACE "test_configs"
+          .\run_sandbox_tests.ps1 -WxcExePath $wxcExe -ConfigDir $configDir
+
+      - name: Upload logs on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-e2e-logs-${{ github.event.pull_request.number || github.run_number }}
+          retention-days: 7
+          path: |
+            logs/
+            **/*.log
+
+      - name: Print performance summary
+        if: steps.sandbox-check.outputs.sandbox_available == 'true' && !cancelled()
+        shell: pwsh
+        run: |
+          $jsonPath = Join-Path $env:GITHUB_WORKSPACE "sandbox-perf-results.json"
+          if (Test-Path $jsonPath) {
+            $data = Get-Content $jsonPath -Raw | ConvertFrom-Json
+            Write-Host "`n=== Sandbox Performance Summary ==="
+            Write-Host "Commit: $($data.commit)"
+            Write-Host "Timestamp: $($data.timestamp)"
+            Write-Host ""
+            Write-Host ("{0,-40} {1,10} {2,8}" -f "Test", "Time (ms)", "Status")
+            Write-Host ("{0,-40} {1,10} {2,8}" -f "----", "---------", "------")
+            foreach ($r in $data.results) {
+              Write-Host ("{0,-40} {1,10} {2,8}" -f $r.description, $r.wall_time_ms, $r.status)
+            }
+          } else {
+            Write-Host "No performance results found."
+          }
+
+      - name: Upload performance results
+        if: steps.sandbox-check.outputs.sandbox_available == 'true' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-perf-results-${{ github.event.pull_request.number || github.run_number }}
+          retention-days: 30
+          path: sandbox-perf-results.json
