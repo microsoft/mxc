@@ -14,7 +14,7 @@ use std::fmt::Write;
 use std::ptr;
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, ContainerConfig, NetworkPolicy, ScriptResponse};
+use wxc_common::models::{CodexRequest, NetworkPolicy, ScriptResponse, WslcConfig};
 use wxc_common::script_runner::ScriptRunner;
 
 use crate::policy_mapping;
@@ -22,11 +22,11 @@ use crate::wslc_bindings::*;
 
 /// WSL Container script runner using the WSLC SDK.
 pub struct WSLContainerRunner {
-    config: ContainerConfig,
+    config: WslcConfig,
 }
 
 impl WSLContainerRunner {
-    pub fn new(config: &ContainerConfig) -> Self {
+    pub fn new(config: &WslcConfig) -> Self {
         Self {
             config: config.clone(),
         }
