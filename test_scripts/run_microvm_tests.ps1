@@ -3,7 +3,7 @@
 
 <#
 .SYNOPSIS
-    Runs all NanVix E2E tests. Requires WHP and NanVix binaries next to wxc-exec.exe.
+    Runs all MicroVM E2E tests. Requires WHP and NanVix binaries next to wxc-exec.exe.
 
 .DESCRIPTION
     - Checks if Windows Hypervisor Platform is available
@@ -19,8 +19,8 @@
     Path to test configs directory. Defaults to ..\test_configs
 
 .EXAMPLE
-    .\run_nanvix_tests.ps1
-    .\run_nanvix_tests.ps1 -WxcExePath C:\build\wxc-exec.exe
+    .\run_microvm_tests.ps1
+    .\run_microvm_tests.ps1 -WxcExePath C:\build\wxc-exec.exe
 #>
 
 param(
@@ -41,7 +41,7 @@ function Test-WhpAvailable {
     }
 }
 
-Write-Host "`n=== NanVix E2E Tests ===" -ForegroundColor Cyan
+Write-Host "`n=== MicroVM E2E Tests ===" -ForegroundColor Cyan
 
 if (-not (Test-WhpAvailable)) {
     Write-Host "SKIP: Windows Hypervisor Platform (WHP) is not enabled." -ForegroundColor Yellow
@@ -59,14 +59,14 @@ if (-not (Test-Path $WxcExePath)) {
 
 $wxcExe = Resolve-Path $WxcExePath
 
-# -- Verify NanVix binaries --------------------------------------------------
+# -- Verify MicroVM binaries --------------------------------------------------
 
 $requiredBinaries = @("nanvixd.exe", "kernel.elf", "python.elf", "cpython-ramfs.img")
 $binDir = Split-Path $wxcExe
 $missing = $requiredBinaries | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
 
 if ($missing) {
-    Write-Host "ERROR: Missing NanVix binaries in ${binDir}:" -ForegroundColor Red
+    Write-Host "ERROR: Missing MicroVM binaries in ${binDir}:" -ForegroundColor Red
     $missing | ForEach-Object { Write-Host "       - $_" }
     Write-Host "       Build with: cd src && cargo build --features microvm"
     exit 1
@@ -79,13 +79,13 @@ Write-Host "binaries: $binDir"
 # Format: config name, expected exit code
 
 $tests = @(
-    @{ Config = "nanvix_hello.json";        ExpectedExit = 0;  Description = "Hello world" },
-    @{ Config = "nanvix_exit_code.json";    ExpectedExit = 42; Description = "Exit code propagation" },
-    @{ Config = "nanvix_multiline.json";    ExpectedExit = 0;  Description = "Multi-line script (fibonacci)" },
-    @{ Config = "nanvix_stdlib.json";       ExpectedExit = 0;  Description = "Stdlib (json, math, hashlib)" },
-    @{ Config = "nanvix_large_output.json"; ExpectedExit = 0;  Description = "Large stdout (1000 lines)" },
-    @{ Config = "nanvix_error.json";        ExpectedExit = 1;  Description = "Python exception" },
-    @{ Config = "nanvix_timeout.json";      ExpectedExit = -1; Description = "Timeout kills VM" }
+    @{ Config = "microvm_hello.json";        ExpectedExit = 0;  Description = "Hello world" },
+    @{ Config = "microvm_exit_code.json";    ExpectedExit = 42; Description = "Exit code propagation" },
+    @{ Config = "microvm_multiline.json";    ExpectedExit = 0;  Description = "Multi-line script (fibonacci)" },
+    @{ Config = "microvm_stdlib.json";       ExpectedExit = 0;  Description = "Stdlib (json, math, hashlib)" },
+    @{ Config = "microvm_large_output.json"; ExpectedExit = 0;  Description = "Large stdout (1000 lines)" },
+    @{ Config = "microvm_error.json";        ExpectedExit = 1;  Description = "Python exception" },
+    @{ Config = "microvm_timeout.json";      ExpectedExit = -1; Description = "Timeout kills VM" }
 )
 
 # -- Run tests ----------------------------------------------------------------
@@ -137,6 +137,6 @@ if ($failed -gt 0) {
     }
     exit 1
 } else {
-    Write-Host "  All NanVix E2E tests passed!" -ForegroundColor Green
+    Write-Host "  All MicroVM E2E tests passed!" -ForegroundColor Green
     exit 0
 }

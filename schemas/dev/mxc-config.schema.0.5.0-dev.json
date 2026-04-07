@@ -19,7 +19,7 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["appcontainer", "sandbox", "lxc", "nanvix"],
+      "enum": ["appcontainer", "sandbox", "lxc", "microvm"],
       "default": "appcontainer",
       "description": "Containment backend to use for execution. Note: 'sandbox' is experimental and requires the --experimental CLI flag."
     },

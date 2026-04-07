@@ -148,7 +148,7 @@ fn main() {
     log_request(&request, &mut logger);
 
     // Run script in selected containment backend.
-    // NanVix and Sandbox require --experimental flag.
+    // Sandbox, BaseContainer and MicroVM require --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::AppContainer => {
             if request.experimental_enabled {
@@ -172,7 +172,7 @@ fn main() {
         }
         ContainmentBackend::MicroVm => {
             if !request.experimental_enabled {
-                eprintln!("Error: MicroVm is an experimental feature. Use --experimental flag.");
+                eprintln!("Error: MicroVM is an experimental feature. Use --experimental flag.");
                 process::exit(1);
             }
             Box::new(NanVixScriptRunner::new())
