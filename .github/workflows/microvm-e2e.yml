@@ -86,3 +86,31 @@ jobs:
           path: |
             logs/
             **/*.log
+
+      - name: Print performance summary
+        if: steps.whp-check.outputs.whp_available == 'true' && !cancelled()
+        shell: pwsh
+        run: |
+          $jsonPath = Join-Path $env:GITHUB_WORKSPACE "microvm-perf-results.json"
+          if (Test-Path $jsonPath) {
+            $data = Get-Content $jsonPath -Raw | ConvertFrom-Json
+            Write-Host "`n=== MicroVM Performance Summary ==="
+            Write-Host "Commit: $($data.commit)"
+            Write-Host "Timestamp: $($data.timestamp)"
+            Write-Host ""
+            Write-Host ("{0,-35} {1,10} {2,8}" -f "Test", "Time (ms)", "Status")
+            Write-Host ("{0,-35} {1,10} {2,8}" -f "----", "---------", "------")
+            foreach ($r in $data.results) {
+              Write-Host ("{0,-35} {1,10} {2,8}" -f $r.description, $r.wall_time_ms, $r.status)
+            }
+          } else {
+            Write-Host "No performance results found."
+          }
+
+      - name: Upload performance results
+        if: steps.whp-check.outputs.whp_available == 'true' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: microvm-perf-results-${{ github.event.pull_request.number || github.run_number }}
+          retention-days: 30
+          path: microvm-perf-results.json

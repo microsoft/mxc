@@ -108,23 +108,54 @@ foreach ($test in $tests) {
 
     Write-Host "`n--- $($test.Description) ($($test.Config)) ---" -ForegroundColor White
 
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $process = Start-Process -FilePath $wxcExe `
         -ArgumentList "--debug", "--experimental", $configPath `
         -NoNewWindow -PassThru -Wait
+    $sw.Stop()
 
     $actualExit = $process.ExitCode
     $expectedExit = $test.ExpectedExit
+    $elapsedMs = $sw.ElapsedMilliseconds
 
     if ($actualExit -eq $expectedExit) {
-        Write-Host "  PASS (exit=$actualExit)" -ForegroundColor Green
+        Write-Host "  PASS (exit=$actualExit, ${elapsedMs}ms)" -ForegroundColor Green
         $passed++
-        $results += @{ Test = $test.Config; Status = "PASS"; Exit = $actualExit }
+        $results += @{ Test = $test.Config; Status = "PASS"; Exit = $actualExit; WallTimeMs = $elapsedMs; Description = $test.Description }
     } else {
-        Write-Host "  FAIL (expected exit=$expectedExit, got exit=$actualExit)" -ForegroundColor Red
+        Write-Host "  FAIL (expected exit=$expectedExit, got exit=$actualExit, ${elapsedMs}ms)" -ForegroundColor Red
         $failed++
-        $results += @{ Test = $test.Config; Status = "FAIL"; Exit = $actualExit }
+        $results += @{ Test = $test.Config; Status = "FAIL"; Exit = $actualExit; WallTimeMs = $elapsedMs; Description = $test.Description }
     }
 }
+
+# -- Performance summary ------------------------------------------------------
+
+Write-Host "`n=== Performance ===" -ForegroundColor Cyan
+Write-Host ("  {0,-35} {1,10} {2,8}" -f "Test", "Time (ms)", "Status")
+Write-Host ("  {0,-35} {1,10} {2,8}" -f "----", "---------", "------")
+foreach ($r in $results) {
+    $color = if ($r.Status -eq "PASS") { "Green" } else { "Red" }
+    Write-Host ("  {0,-35} {1,10} {2,8}" -f $r.Description, $r.WallTimeMs, $r.Status) -ForegroundColor $color
+}
+
+# Write JSON results for CI artifact consumption
+$perfOutput = @{
+    commit    = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { "local" }
+    timestamp = (Get-Date -Format "o")
+    results   = $results | ForEach-Object {
+        @{
+            test         = $_.Test
+            description  = $_.Description
+            wall_time_ms = $_.WallTimeMs
+            exit_code    = $_.Exit
+            status       = $_.Status
+        }
+    }
+}
+$perfJsonPath = Join-Path $ConfigDir "..\microvm-perf-results.json"
+$perfOutput | ConvertTo-Json -Depth 3 | Set-Content $perfJsonPath -Encoding UTF8
+Write-Host "`n  Performance results written to: $perfJsonPath"
 
 # -- Summary ------------------------------------------------------------------
 
