@@ -22,6 +22,8 @@ use tokio::sync::Mutex;
 pub struct DaemonState {
     /// TCP connections to the guest agent, established after rendezvous.
     pub guest_connection: Option<tcp_bridge::GuestConnection>,
+    /// The guest agent's socket address (for reconnecting data streams).
+    pub guest_addr: Option<std::net::SocketAddr>,
     /// Whether the sandbox VM is running.
     pub sandbox_running: bool,
     /// Instant of the last execution request (for idle timeout).
@@ -32,6 +34,7 @@ impl DaemonState {
     fn new() -> Self {
         Self {
             guest_connection: None,
+            guest_addr: None,
             sandbox_running: false,
             last_activity: std::time::Instant::now(),
         }

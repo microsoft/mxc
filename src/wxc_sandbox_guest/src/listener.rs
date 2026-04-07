@@ -36,10 +36,22 @@ pub async fn accept_connections(
     listener: &TcpListener,
 ) -> Result<(TcpStream, TcpStream, TcpStream, TcpStream)> {
     let (control, _) = listener.accept().await.context("accept control")?;
+    let (stdin_stream, stdout_stream, stderr_stream) = accept_data_connections(listener).await?;
+    Ok((control, stdin_stream, stdout_stream, stderr_stream))
+}
+
+/// Accept exactly three data TCP connections from the host in order:
+/// stdin, stdout, stderr.
+///
+/// Used both on initial startup (called by [`accept_connections`]) and
+/// after each execution to re-establish data streams for the next EXEC.
+pub async fn accept_data_connections(
+    listener: &TcpListener,
+) -> Result<(TcpStream, TcpStream, TcpStream)> {
     let (stdin_stream, _) = listener.accept().await.context("accept stdin")?;
     let (stdout_stream, _) = listener.accept().await.context("accept stdout")?;
     let (stderr_stream, _) = listener.accept().await.context("accept stderr")?;
-    Ok((control, stdin_stream, stdout_stream, stderr_stream))
+    Ok((stdin_stream, stdout_stream, stderr_stream))
 }
 
 /// Find the first non-loopback IPv4 address (the Hyper-V Default Switch NIC).

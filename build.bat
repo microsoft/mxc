@@ -64,9 +64,9 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         if not exist "sdk\bin\%%T" mkdir "sdk\bin\%%T"
         copy /Y "!BIN_DIR!\wxc-exec.exe" "sdk\bin\%%T\" >nul
         echo   Copied %%T\wxc-exec.exe
-        if exist "!BIN_DIR!\wxc-sandbox-agent.exe" (
-            copy /Y "!BIN_DIR!\wxc-sandbox-agent.exe" "sdk\bin\%%T\" >nul
-            echo   Copied %%T\wxc-sandbox-agent.exe
+        if exist "!BIN_DIR!\wxc-sandbox-guest.exe" (
+            copy /Y "!BIN_DIR!\wxc-sandbox-guest.exe" "sdk\bin\%%T\" >nul
+            echo   Copied %%T\wxc-sandbox-guest.exe
         )
         if exist "!BIN_DIR!\wxc-sandbox-daemon.exe" (
             copy /Y "!BIN_DIR!\wxc-sandbox-daemon.exe" "sdk\bin\%%T\" >nul

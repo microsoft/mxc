@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crate::logger::Logger;
 use crate::models::{CodexRequest, SandboxConfig, ScriptResponse};
+use crate::sandbox_protocol::DaemonResult;
 use crate::script_runner::ScriptRunner;
 
 /// Script runner that delegates execution to the Windows Sandbox daemon.
@@ -94,17 +95,48 @@ impl SandboxScriptRunner {
         }
     }
 
+    /// Check if Windows Sandbox is available on this system.
+    fn check_sandbox_available() -> Result<(), String> {
+        let output = std::process::Command::new("dism")
+            .args([
+                "/online",
+                "/get-featureinfo",
+                "/featurename:Containers-DisposableClientVM",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map_err(|err| format!("failed to run dism: {}", err))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("State : Enabled") {
+            Ok(())
+        } else {
+            Err(
+                "Windows Sandbox is not enabled. \
+                 Run 'dism /online /enable-feature /featurename:Containers-DisposableClientVM /all' \
+                 and reboot."
+                    .to_string(),
+            )
+        }
+    }
+
     /// Send an execution request to the daemon and read the result.
     fn execute_via_daemon(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+        // Pre-flight: verify Windows Sandbox is available.
+        if let Err(err) = Self::check_sandbox_available() {
+            return ScriptResponse::error(&err);
+        }
+
         // Ensure daemon is up.
-        if let Err(e) = self.ensure_daemon_running(logger) {
-            return ScriptResponse::error(&e);
+        if let Err(err) = self.ensure_daemon_running(logger) {
+            return ScriptResponse::error(&err);
         }
 
         // Connect.
         let mut stream = match self.connect_to_daemon() {
-            Ok(s) => s,
-            Err(e) => return ScriptResponse::error(&e),
+            Ok(stream) => stream,
+            Err(err) => return ScriptResponse::error(&err),
         };
 
         // Send EXEC request as a single line: "EXEC <json>\n"
@@ -114,45 +146,43 @@ impl SandboxScriptRunner {
             timeout_ms: request.script_timeout,
         };
         let json = match serde_json::to_string(&payload) {
-            Ok(j) => j,
-            Err(e) => return ScriptResponse::error(&format!("serialize request: {}", e)),
+            Ok(json) => json,
+            Err(err) => return ScriptResponse::error(&format!("serialize request: {}", err)),
         };
 
         let msg = format!("EXEC {}\n", json);
-        if let Err(e) = stream.write_all(msg.as_bytes()) {
-            return ScriptResponse::error(&format!("send to daemon: {}", e));
+        if let Err(err) = stream.write_all(msg.as_bytes()) {
+            return ScriptResponse::error(&format!("send to daemon: {}", err));
         }
 
-        // Read the "RESULT <exit-code> <error-message>" response line.
         let mut reader = BufReader::new(&stream);
         let mut response_line = String::new();
-        if let Err(e) = reader.read_line(&mut response_line) {
-            return ScriptResponse::error(&format!("read daemon response: {}", e));
+        if let Err(err) = reader.read_line(&mut response_line) {
+            return ScriptResponse::error(&format!("read daemon response: {}", err));
         }
 
-        let response_line = response_line.trim();
-        if let Some(rest) = response_line.strip_prefix("RESULT ") {
-            // First token is exit code, rest is error message.
-            let (code_str, error_msg) = match rest.find(' ') {
-                Some(pos) => (&rest[..pos], rest[pos + 1..].to_string()),
-                None => (rest, String::new()),
-            };
-            let exit_code = code_str.parse::<i32>().unwrap_or(-1);
+        Self::parse_daemon_response(response_line.trim())
+    }
 
-            if error_msg.is_empty() {
-                ScriptResponse {
-                    exit_code,
-                    standard_out: String::new(),
-                    standard_err: String::new(),
-                    error_message: String::new(),
+    /// Parse the daemon's response line into a `ScriptResponse`.
+    fn parse_daemon_response(response_line: &str) -> ScriptResponse {
+        if response_line.starts_with("RESULT ") {
+            match DaemonResult::parse(response_line) {
+                Ok(result) => {
+                    let stdout_text = String::from_utf8(result.stdout).unwrap_or_default();
+                    let stderr_text = String::from_utf8(result.stderr).unwrap_or_default();
+                    ScriptResponse {
+                        exit_code: result.exit_code,
+                        standard_out: stdout_text,
+                        standard_err: stderr_text.clone(),
+                        error_message: if result.error_message.is_empty() {
+                            stderr_text
+                        } else {
+                            result.error_message
+                        },
+                    }
                 }
-            } else {
-                ScriptResponse {
-                    exit_code,
-                    standard_out: String::new(),
-                    standard_err: error_msg.clone(),
-                    error_message: error_msg,
-                }
+                Err(err) => ScriptResponse::error(&err),
             }
         } else if let Some(stripped) = response_line.strip_prefix("ERROR ") {
             ScriptResponse::error(stripped)
