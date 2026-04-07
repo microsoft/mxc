@@ -13,10 +13,6 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
 
-    defaults:
-      run:
-        working-directory: src
-
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +22,7 @@ jobs:
           rustup target add x86_64-pc-windows-msvc
 
       - name: Build with MicroVM support
+        working-directory: src
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
