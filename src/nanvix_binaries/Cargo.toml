@@ -1,0 +1,15 @@
+[package]
+name = "nanvix_binaries"
+version = "0.1.0"
+edition = "2021"
+description = "Build-time download of NanVix binaries from GitHub releases"
+links = "nanvix_binaries"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nanvix_common = { path = "../nanvix_common" }
+
+[build-dependencies]
+nanvix_common = { path = "../nanvix_common" }

@@ -12,3 +12,13 @@ wxc_common.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 windows.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+nanvix_binaries = { path = "../nanvix_binaries", optional = true }
+
+[target.'cfg(windows)'.build-dependencies]
+nanvix_common = { path = "../nanvix_common" }
+
+[features]
+default = []
+microvm = ["nanvix_binaries"]
