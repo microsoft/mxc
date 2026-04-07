@@ -170,7 +170,7 @@ fn main() {
             eprintln!("Error: VM backend not yet implemented");
             process::exit(1);
         }
-        ContainmentBackend::MicroVm => {
+        ContainmentBackend::MicroVm | ContainmentBackend::NanVix => {
             if !request.experimental_enabled {
                 eprintln!("Error: MicroVM is an experimental feature. Use --experimental flag.");
                 process::exit(1);
