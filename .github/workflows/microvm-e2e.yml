@@ -56,20 +56,20 @@ jobs:
           Get-ChildItem $binDir -Include $required -Recurse | Format-Table Name, Length
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
 
       - name: Build SDK
         working-directory: sdk
         run: |
-          npm install --ignore-scripts
+          npm ci --ignore-scripts
           npx tsc
 
       - name: Build CLI
         working-directory: cli
         run: |
-          npm install
+          npm ci
           npm run build
 
       - name: Diagnose hypervisor environment

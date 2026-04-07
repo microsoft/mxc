@@ -31,29 +31,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# -- WHP check ---------------------------------------------------------------
-
-function Test-WhpAvailable {
-    # Fast check: verify the WHP API DLL exists and the hypervisor is running.
-    # Avoids Get-WindowsOptionalFeature which requires elevation and can hang.
-    if (-not (Test-Path "$env:SystemRoot\System32\WinHvPlatform.dll")) {
-        return $false
-    }
-    try {
-        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
-        return ($cs -and $cs.HypervisorPresent)
-    } catch {
-        return $false
-    }
-}
-
 Write-Host "`n=== MicroVM E2E Tests ===" -ForegroundColor Cyan
-
-if (-not (Test-WhpAvailable)) {
-    Write-Host "SKIP: Windows Hypervisor Platform (WHP) is not enabled." -ForegroundColor Yellow
-    Write-Host "      Enable it with: Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform"
-    exit 0
-}
 
 # -- Locate wxc-exec.exe -----------------------------------------------------
 
