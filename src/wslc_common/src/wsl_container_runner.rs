@@ -107,7 +107,9 @@ impl WSLContainerRunner {
     unsafe fn run_internal(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
 
-        // -- Step 0: COM initialization (required by WSLC SDK) --
+        // -- Step 0: COM initialization --
+        // The WSLC SDK uses COM internally (STDAPI = COM calling convention).
+        // Without CoInitializeEx, SDK calls fail with CO_E_NOTINITIALIZED (0x800401F0).
         let com_hr = windows::Win32::System::Com::CoInitializeEx(
             None,
             windows::Win32::System::Com::COINIT_MULTITHREADED,
@@ -134,7 +136,9 @@ impl WSLContainerRunner {
         let _ = writeln!(logger, "[WSLC] Runtime check passed");
 
         // -- Step 2: Session settings --
-        let session_name: Vec<u16> = "mxc-wslc\0".encode_utf16().collect();
+        let session_name: Vec<u16> = format!("{}\0", request.container_id)
+            .encode_utf16()
+            .collect();
         let storage_path_str = self.config.storage_path.clone().unwrap_or_else(|| {
             std::env::temp_dir()
                 .join("mxc-wslc-sessions")
