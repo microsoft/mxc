@@ -124,17 +124,21 @@ foreach ($test in $tests) {
     $scriptCode = $configJson.process.commandLine
     $containment = if ($configJson.containment) { $configJson.containment } else { "nanvix" }
 
+    # Write script to a temp file (avoids multi-line argument mangling)
+    $scriptFile = [System.IO.Path]::GetTempFileName()
+    Set-Content $scriptFile $scriptCode -NoNewline -Encoding UTF8
+
     # Build a minimal SandboxPolicy JSON for the CLI
     $policyJson = '{"version":"0.4.0-alpha"}'
 
     $cliArgs = @(
         "dist/cli.js", "run-sdk",
-        "--script", $scriptCode,
+        "--script-file", $scriptFile,
         "--policy", $policyJson,
         "--containment", $containment,
-        "--experimental"
+        "--experimental",
+        "--debug"
     )
-    if ($true) { $cliArgs += "--debug" }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $stdoutFile = [System.IO.Path]::GetTempFileName()
@@ -152,7 +156,7 @@ foreach ($test in $tests) {
     $elapsedMs = $sw.ElapsedMilliseconds
     $stdout = Get-Content $stdoutFile -Raw -ErrorAction SilentlyContinue
     $stderr = Get-Content $stderrFile -Raw -ErrorAction SilentlyContinue
-    Remove-Item $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
+    Remove-Item $stdoutFile, $stderrFile, $scriptFile -ErrorAction SilentlyContinue
 
     $pass = ($actualExit -eq $expectedExit)
     $reason = ""
@@ -176,6 +180,11 @@ foreach ($test in $tests) {
         $results += @{ Test = $test.Config; Status = "PASS"; Exit = $actualExit; WallTimeMs = $elapsedMs; Description = $test.Description }
     } else {
         Write-Host "  FAIL ($reason, ${elapsedMs}ms)" -ForegroundColor Red
+        if ($stderr) {
+            $stderr -split "`n" | Select-Object -Last 5 | ForEach-Object {
+                Write-Host "    > $($_.TrimEnd())" -ForegroundColor Gray
+            }
+        }
         $failed++
         $results += @{ Test = $test.Config; Status = "FAIL"; Exit = $actualExit; WallTimeMs = $elapsedMs; Description = $test.Description }
     }
