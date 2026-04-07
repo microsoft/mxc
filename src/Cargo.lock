@@ -442,6 +442,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanvix_binaries"
+version = "0.1.0"
+dependencies = [
+ "nanvix_common",
+]
+
+[[package]]
+name = "nanvix_common"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1098,6 +1113,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "nanvix_binaries",
+ "nanvix_common",
  "windows",
  "wxc_common",
 ]
@@ -1118,16 +1135,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wxc_sandbox_agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde_json",
- "tokio",
- "wxc_common",
-]
-
-[[package]]
 name = "wxc_sandbox_daemon"
 version = "0.1.0"
 dependencies = [
@@ -1137,6 +1144,16 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+ "wxc_common",
+]
+
+[[package]]
+name = "wxc_sandbox_guest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tokio",
  "wxc_common",
 ]
 

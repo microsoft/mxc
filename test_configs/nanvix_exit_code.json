@@ -1,0 +1,7 @@
+{
+    "process": {
+        "commandLine": "import sys; sys.exit(42)",
+        "timeout": 30000
+    },
+    "containment": "nanvix"
+}

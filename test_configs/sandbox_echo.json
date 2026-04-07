@@ -1,0 +1,7 @@
+{
+  "containment": "sandbox",
+  "process": {
+    "commandLine": "echo Hello from sandbox!",
+    "timeout": 60000
+  }
+}
