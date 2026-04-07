@@ -116,23 +116,39 @@ fn needs_download(
 
 fn download_and_extract(config: &RepoConfig, repo: &str, bin_dir: &Path) {
     let url = github_download_url(repo, &config.tag, &config.asset);
-
     let zip_path = bin_dir.join(&config.asset);
+    let binary_paths: Vec<PathBuf> = config.binaries.iter().map(|b| bin_dir.join(b)).collect();
+
+    // Cleanup helper: remove zip + any partially extracted binaries.
+    // Called before panicking so the filesystem isn't left in a dangling state.
+    let cleanup = |bin_dir_paths: &[PathBuf], zip: &Path| {
+        let _ = fs::remove_file(zip);
+        for p in bin_dir_paths {
+            let _ = fs::remove_file(p);
+        }
+    };
+
     eprintln!("  downloading {}...", config.asset);
-    curl_download_to_file(&url, &zip_path);
+    if let Err(msg) = try_curl_download(&url, &zip_path) {
+        cleanup(&binary_paths, &zip_path);
+        panic!("nanvix_binaries: {}", msg);
+    }
 
     let size = zip_path.metadata().map(|m| m.len()).unwrap_or(0);
     eprintln!("  downloaded {} bytes, extracting...", size);
 
     let binaries: Vec<&str> = config.binaries.iter().map(|s| s.as_str()).collect();
-    tar_extract_from_zip(&zip_path, bin_dir, &binaries);
+    if let Err(msg) = try_tar_extract(&zip_path, bin_dir, &binaries) {
+        cleanup(&binary_paths, &zip_path);
+        panic!("nanvix_binaries: {}", msg);
+    }
 
     let _ = fs::remove_file(&zip_path);
 }
 
 // -- curl.exe ----------------------------------------------------------------
 
-fn curl_download_to_file(url: &str, dest: &Path) {
+fn try_curl_download(url: &str, dest: &Path) -> Result<(), String> {
     let mut cmd = Command::new("curl");
     cmd.args([
         "--silent",
@@ -155,27 +171,29 @@ fn curl_download_to_file(url: &str, dest: &Path) {
 
     cmd.arg(url);
 
-    let output = cmd.output().unwrap_or_else(|e| {
-        panic!(
-            "nanvix_binaries: curl.exe not found: {}\n\
+    let output = cmd.output().map_err(|e| {
+        format!(
+            "curl.exe not found: {}\n\
              curl.exe ships with Windows 10 1803+. Ensure it's in PATH.",
             e
-        );
-    });
+        )
+    })?;
 
     if !output.status.success() {
-        panic!(
-            "nanvix_binaries: curl failed for {}\n  exit code: {}\n  stderr: {}",
+        return Err(format!(
+            "curl failed for {}\n  exit code: {}\n  stderr: {}",
             url,
             output.status,
             String::from_utf8_lossy(&output.stderr)
-        );
+        ));
     }
+
+    Ok(())
 }
 
 // -- tar.exe -----------------------------------------------------------------
 
-fn tar_extract_from_zip(zip_path: &Path, dest_dir: &Path, files: &[&str]) {
+fn try_tar_extract(zip_path: &Path, dest_dir: &Path, files: &[&str]) -> Result<(), String> {
     let mut cmd = Command::new("tar");
     cmd.arg("-xf");
     cmd.arg(zip_path);
@@ -185,20 +203,20 @@ fn tar_extract_from_zip(zip_path: &Path, dest_dir: &Path, files: &[&str]) {
         cmd.arg(f);
     }
 
-    let output = cmd.output().unwrap_or_else(|e| {
-        panic!(
-            "nanvix_binaries: tar.exe not found: {}\n\
+    let output = cmd.output().map_err(|e| {
+        format!(
+            "tar.exe not found: {}\n\
              tar.exe ships with Windows 10 1803+. Ensure it's in PATH.",
             e
-        );
-    });
+        )
+    })?;
 
     if !output.status.success() {
-        panic!(
-            "nanvix_binaries: tar extraction failed\n  exit code: {}\n  stderr: {}",
+        return Err(format!(
+            "tar extraction failed\n  exit code: {}\n  stderr: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr)
-        );
+        ));
     }
 
     for f in files {
@@ -207,9 +225,11 @@ fn tar_extract_from_zip(zip_path: &Path, dest_dir: &Path, files: &[&str]) {
             let size = path.metadata().map(|m| m.len()).unwrap_or(0);
             eprintln!("  {} -- extracted ({} bytes)", f, size);
         } else {
-            panic!("nanvix_binaries: '{}' not found in zip after extraction", f);
+            return Err(format!("'{}' not found in zip after extraction", f));
         }
     }
+
+    Ok(())
 }
 
 // -- Helpers -----------------------------------------------------------------

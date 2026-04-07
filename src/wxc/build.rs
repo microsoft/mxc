@@ -52,6 +52,8 @@ fn copy_nanvix_binaries() {
                 dst.display()
             );
             if let Err(e) = fs::copy(&src, &dst) {
+                // Remove partial copy to avoid leaving a dangling file
+                let _ = fs::remove_file(&dst);
                 eprintln!("wxc build.rs: WARNING: failed to copy {}: {}", name, e);
             }
         }
