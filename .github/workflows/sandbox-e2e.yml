@@ -51,12 +51,12 @@ jobs:
           $info = dism /online /get-featureinfo /featurename:Containers-DisposableClientVM 2>&1 |
               Select-String "State"
           if ($info -notmatch "Enabled") {
-            Write-Host "::warning::Windows Sandbox is not enabled — skipping E2E tests."
-            echo "sandbox_available=false" >> $env:GITHUB_OUTPUT
+            Write-Host "::warning::Windows Sandbox is not enabled - skipping E2E tests."
+            "sandbox_available=false" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
             exit 0
           }
           Write-Host "Windows Sandbox is enabled."
-          echo "sandbox_available=true" >> $env:GITHUB_OUTPUT
+          "sandbox_available=true" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
 
       - name: Run Sandbox E2E Tests
         if: steps.sandbox-check.outputs.sandbox_available == 'true'
