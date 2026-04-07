@@ -47,7 +47,8 @@ describe('SDK end-to-end', () => {
     }
   });
 
-  it('cmd.exe: should execute in appcontainer', () => {
+  // Skipped: AppContainer can't find executables on GitHub workflow runners, run locally until then
+  it.skip('cmd.exe: should execute in appcontainer', () => {
     const dir = createTempDir();
     const policyFile = writeTempPolicy(dir, { version: '0.4.0-alpha' });
     const output = runCli(`run-sdk --script "cmd.exe /c echo Container test successful" --cwd "${dir}" --container-name "test-1" --policy-file "${policyFile}"`);
@@ -55,7 +56,8 @@ describe('SDK end-to-end', () => {
     assert.ok(output.includes('Process exited with code 0'));
   });
 
-  it('powershell 5.1: should execute in appcontainer', () => {
+  // Skipped: AppContainer can't find executables on GitHub workflow runners, run locally until then
+  it.skip('powershell 5.1: should execute in appcontainer', () => {
     const dir = createTempDir();
     const policyFile = writeTempPolicy(dir, { version: '0.4.0-alpha' });
     const output = runCli(`run-sdk --script "powershell.exe -NoProfile -Command Write-Output 'PowerShell test successful'" --cwd "${dir}" --container-name "test-2" --policy-file "${policyFile}"`);
@@ -63,7 +65,8 @@ describe('SDK end-to-end', () => {
     assert.ok(output.includes('Process exited with code 0'));
   });
 
-  it('python: should execute in appcontainer', () => {
+  // Skipped: bfscfg.exe doesn't exist on workflow machines currently, run locally until then
+  it.skip('python: should execute in appcontainer', () => {
     const dir = createTempDir();
     const policyFile = writeTempPolicy(dir, { version: '0.4.0-alpha' });
     const output = runCli(`run-sdk --script "python -c \\"print('Python test successful')\\"" --cwd "${dir}" --container-name "test-3" --policy-file "${policyFile}"`);
@@ -71,7 +74,8 @@ describe('SDK end-to-end', () => {
     assert.ok(output.includes('Process exited with code 0'));
   });
 
-  it('readwritePaths: should allow writing to brokered path', () => {
+  // Skipped: bfscfg.exe doesn't exist on workflow machines currently, run locally until then
+  it.skip('readwritePaths: should allow writing to brokered path', () => {
     tempDir = createTempDir();
     const testFile = path.join(tempDir, 'output.txt');
     const scriptFile = path.join(tempDir, 'write_test.py');
@@ -86,7 +90,8 @@ describe('SDK end-to-end', () => {
     assert.ok(fs.existsSync(testFile), 'File should have been written to readwrite path');
   });
 
-  it('readonlyPaths: should allow reading from brokered path', () => {
+  // Skipped: bfscfg.exe doesn't exist on workflow machines currently, run locally until then
+  it.skip('readonlyPaths: should allow reading from brokered path', () => {
     tempDir = createTempDir();
     fs.writeFileSync(path.join(tempDir, 'input.txt'), 'readonly test data');
     const inputFile = path.join(tempDir, 'input.txt');
@@ -98,9 +103,37 @@ describe('SDK end-to-end', () => {
     assert.ok(output.includes('readonly test data'));
     assert.ok(output.includes('Process exited with code 0'));
   });
+
+  it('should reject policy with missing version', () => {
+    tempDir = createTempDir();
+    const policyFile = writeTempPolicy(tempDir, {});
+    assert.throws(
+      () => runCli(`run-sdk --script "cmd.exe /c echo hi" --cwd "${tempDir}" --container-name "test-no-ver" --policy-file "${policyFile}"`),
+      { message: /version is required/ },
+    );
+  });
+
+  it('should reject policy with invalid version', () => {
+    tempDir = createTempDir();
+    const policyFile = writeTempPolicy(tempDir, { version: '99.0.0' });
+    assert.throws(
+      () => runCli(`run-sdk --script "cmd.exe /c echo hi" --cwd "${tempDir}" --container-name "test-bad-ver" --policy-file "${policyFile}"`),
+      { message: /incompatible/ },
+    );
+  });
+
+  // Skipped: AppContainer can't find executables on GitHub workflow runners, run locally until then
+  it.skip('should launch basic appcontainer with valid version', () => {
+    tempDir = createTempDir();
+    const policyFile = writeTempPolicy(tempDir, { version: '0.4.0-alpha' });
+    const output = runCli(`run-sdk --script "cmd.exe /c echo version ok" --container-name "test-ver" --policy-file "${policyFile}"`);
+    assert.ok(output.includes('version ok'));
+    assert.ok(output.includes('Process exited with code 0'));
+  });
 });
 
-describe('SDK proxy end-to-end', () => {
+// Skipped: requires admin currently and not runnable in pipelines, run locally until then
+describe.skip('SDK proxy end-to-end', () => {
   let tempDir = '';
   let proxyProcess: ChildProcess | null = null;
 

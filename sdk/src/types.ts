@@ -95,8 +95,8 @@ export interface WslcConfig {
  * Main WXC configuration
  */
 export interface ContainerConfig {
-  /** MXC config schema version (current: "0.4.0-alpha") */
-  version?: string;
+  /** MXC config schema version. Required. */
+  version: string;
   /** Externally assigned container identifier */
   containerId?: string;
   /** Containment backend */

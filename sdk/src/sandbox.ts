@@ -56,6 +56,7 @@ export function buildSandboxPayload(
     const name = containerName ?? generateRandomContainerName();
 
     const config: ContainerConfig = {
+        version: policy.version,
         process: {
             commandLine: script,
             cwd: workingDirectory,
