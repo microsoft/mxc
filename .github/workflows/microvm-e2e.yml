@@ -67,7 +67,15 @@ jobs:
         run: |
           $wxcExe = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug\wxc-exec.exe"
           $configDir = Join-Path $env:GITHUB_WORKSPACE "test_configs"
-          .\run_microvm_tests.ps1 -WxcExePath $wxcExe -ConfigDir $configDir
+          # Support both old (nanvix) and new (microvm) test script names
+          if (Test-Path ".\run_microvm_tests.ps1") {
+            .\run_microvm_tests.ps1 -WxcExePath $wxcExe -ConfigDir $configDir
+          } elseif (Test-Path ".\run_nanvix_tests.ps1") {
+            .\run_nanvix_tests.ps1 -WxcExePath $wxcExe -ConfigDir $configDir
+          } else {
+            Write-Error "No MicroVM/Nanvix test script found in test_scripts/"
+            exit 1
+          }
 
       - name: Upload logs on failure
         if: failure() || cancelled()
