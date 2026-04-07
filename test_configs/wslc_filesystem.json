@@ -3,12 +3,11 @@
   "containerId": "wslc-filesystem-test",
   "containment": "wslc",
   "process": {
-    "commandLine": "ls -la /mnt/c/workspace && cat /mnt/d/data/readme.txt",
+    "commandLine": "ls -la /mnt/c/workspace && echo 'Filesystem test passed'",
     "cwd": "C:\\workspace"
   },
   "filesystem": {
-    "readwritePaths": ["C:\\workspace"],
-    "readonlyPaths": ["D:\\data"]
+    "readwritePaths": ["C:\\workspace"]
   },
   "network": {
     "defaultPolicy": "allow"

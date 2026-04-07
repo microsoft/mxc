@@ -199,6 +199,43 @@ pub struct WslcImageInfo {
     pub created_timestamp: u64,
 }
 
+/// Options for pulling a container image via `WslcPullSessionImage`.
+#[repr(C)]
+pub struct WslcPullImageOptions {
+    pub uri: PCSTR,
+    pub progress_callback: Option<WslcContainerImageProgressCallback>,
+    pub progress_callback_context: *mut c_void,
+    pub auth_info: *const c_void, // WslcRegistryAuthenticationInformation*
+}
+
+pub type WslcContainerImageProgressCallback = unsafe extern "system" fn(
+    progress: *const c_void, // WslcImageProgressMessage*
+    context: *mut c_void,
+) -> HRESULT;
+
+// ---------------------------------------------------------------------------
+// Callback types for process I/O
+// ---------------------------------------------------------------------------
+
+/// Callback invoked when stdout or stderr data is available.
+pub type WslcStdIOCallback = unsafe extern "system" fn(
+    io_handle: WslcProcessIOHandle,
+    data: *const BYTE,
+    data_size: u32,
+    context: *mut c_void,
+);
+
+/// Callback invoked when a process exits and all I/O has been flushed.
+pub type WslcProcessExitCallback = unsafe extern "system" fn(exit_code: i32, context: *mut c_void);
+
+/// Callbacks for process I/O and exit notification.
+#[repr(C)]
+pub struct WslcProcessCallbacks {
+    pub on_stdout: Option<WslcStdIOCallback>,
+    pub on_stderr: Option<WslcStdIOCallback>,
+    pub on_exit: Option<WslcProcessExitCallback>,
+}
+
 // ---------------------------------------------------------------------------
 // Extern function declarations — MVP subset for the runner lifecycle
 //
@@ -249,11 +286,17 @@ extern "system" {
     pub fn WslcTerminateSession(session: WslcSession) -> HRESULT;
     pub fn WslcReleaseSession(session: WslcSession) -> HRESULT;
 
-    // -- Image check --
+    // -- Image management --
     pub fn WslcListSessionImages(
         session: WslcSession,
         images: *mut *mut WslcImageInfo,
         count: *mut u32,
+    ) -> HRESULT;
+
+    pub fn WslcPullSessionImage(
+        session: WslcSession,
+        options: *const WslcPullImageOptions,
+        error_message: *mut PWSTR,
     ) -> HRESULT;
 
     // -- Container management --
@@ -345,10 +388,10 @@ extern "system" {
         current_directory: PCSTR,
     ) -> HRESULT;
 
-    pub fn WslcGetProcessIOHandle(
-        process: WslcProcess,
-        io_handle: WslcProcessIOHandle,
-        handle: *mut HANDLE,
+    pub fn WslcSetProcessSettingsCallbacks(
+        process_settings: *mut WslcProcessSettings,
+        callbacks: *const WslcProcessCallbacks,
+        context: *mut c_void,
     ) -> HRESULT;
 
     pub fn WslcGetProcessExitEvent(process: WslcProcess, exit_event: *mut HANDLE) -> HRESULT;

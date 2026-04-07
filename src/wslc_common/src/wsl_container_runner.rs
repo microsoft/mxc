@@ -12,6 +12,7 @@
 use std::ffi::c_void;
 use std::fmt::Write;
 use std::ptr;
+use std::sync::{Arc, Mutex};
 
 use wxc_common::logger::Logger;
 use wxc_common::models::{CodexRequest, NetworkPolicy, ScriptResponse, WslcConfig};
@@ -19,6 +20,39 @@ use wxc_common::script_runner::ScriptRunner;
 
 use crate::policy_mapping;
 use crate::wslc_bindings::*;
+
+/// Shared buffer for capturing process I/O via callbacks.
+struct IoContext {
+    stdout: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+}
+
+/// Callback invoked by the WSLC SDK for stdout/stderr data.
+unsafe extern "system" fn io_callback(
+    io_handle: WslcProcessIOHandle,
+    data: *const BYTE,
+    data_size: u32,
+    context: *mut c_void,
+) {
+    if context.is_null() || data.is_null() || data_size == 0 {
+        return;
+    }
+    let ctx = &*(context as *const IoContext);
+    let bytes = std::slice::from_raw_parts(data, data_size as usize);
+    match io_handle {
+        WslcProcessIOHandle::Stdout => {
+            if let Ok(mut buf) = ctx.stdout.lock() {
+                buf.extend_from_slice(bytes);
+            }
+        }
+        WslcProcessIOHandle::Stderr => {
+            if let Ok(mut buf) = ctx.stderr.lock() {
+                buf.extend_from_slice(bytes);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// WSL Container script runner using the WSLC SDK.
 pub struct WSLContainerRunner {
@@ -72,6 +106,16 @@ impl ScriptRunner for WSLContainerRunner {
 impl WSLContainerRunner {
     unsafe fn run_internal(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
+
+        // -- Step 0: COM initialization (required by WSLC SDK) --
+        let com_hr = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        );
+        if com_hr.is_err() {
+            return ScriptResponse::error(&format!("COM initialization failed: {:?}", com_hr));
+        }
+        let _ = writeln!(logger, "[WSLC] COM initialized");
 
         // -- Step 1: Prerequisites check --
         let mut can_run: BOOL = 0;
@@ -180,13 +224,36 @@ impl WSLContainerRunner {
         }
 
         if !image_found {
-            return ScriptResponse::error(&format!(
-                "Container image '{}' not found. MXC requires images to be pre-pulled. \
-                 Available images: {} found.",
-                image_name, image_count
-            ));
+            // TODO: Move image pulling to a setup script (scripts/setup-wslc.ps1) as
+            // described in docs/wsl-container-support-plan.md Phase 5. MXC is an execution
+            // layer — image management should be handled externally. For now, auto-pull is
+            // used during development/testing.
+            let _ = writeln!(
+                logger,
+                "[WSLC] Image '{}' not found locally, attempting pull...",
+                image_name
+            );
+            let uri_cstr = format!("{}\0", image_name);
+            let pull_opts = WslcPullImageOptions {
+                uri: uri_cstr.as_bytes().as_ptr() as PCSTR,
+                progress_callback: None,
+                progress_callback_context: ptr::null_mut(),
+                auth_info: ptr::null(),
+            };
+            err_msg = ptr::null_mut();
+            let hr = WslcPullSessionImage(session_guard.as_raw(), &pull_opts, &mut err_msg);
+            if hr != S_OK {
+                let msg = Self::take_error_message(err_msg);
+                return ScriptResponse::error(&Self::format_error(
+                    &format!("Failed to pull image '{}'", image_name),
+                    hr,
+                    &msg,
+                ));
+            }
+            let _ = writeln!(logger, "[WSLC] Image '{}' pulled successfully", image_name);
+        } else {
+            let _ = writeln!(logger, "[WSLC] Image '{}' found", image_name);
         }
-        let _ = writeln!(logger, "[WSLC] Image '{}' found", image_name);
 
         // -- Step 5: Process settings --
         let mut process_settings = std::mem::zeroed::<WslcProcessSettings>();
@@ -198,6 +265,24 @@ impl WSLContainerRunner {
                 "",
             ));
         }
+
+        // Register I/O callbacks to capture stdout/stderr
+        let io_ctx = Box::new(IoContext {
+            stdout: Arc::new(Mutex::new(Vec::new())),
+            stderr: Arc::new(Mutex::new(Vec::new())),
+        });
+        let io_ctx_stdout = Arc::clone(&io_ctx.stdout);
+        let io_ctx_stderr = Arc::clone(&io_ctx.stderr);
+        let callbacks = WslcProcessCallbacks {
+            on_stdout: Some(io_callback),
+            on_stderr: Some(io_callback),
+            on_exit: None,
+        };
+        let _ = WslcSetProcessSettingsCallbacks(
+            &mut process_settings,
+            &callbacks,
+            &*io_ctx as *const IoContext as *mut c_void,
+        );
 
         // Build command line: /bin/sh -c "<script_code>"
         let sh = b"/bin/sh\0";
@@ -227,14 +312,15 @@ impl WSLContainerRunner {
         }
 
         // Set working directory
+        let _cwd_cstr; // kept alive for SDK pointer
         if !request.working_directory.is_empty() {
             if let Some(container_cwd) =
                 policy_mapping::windows_path_to_container_path(&request.working_directory)
             {
-                let cwd_cstr = format!("{}\0", container_cwd);
+                _cwd_cstr = format!("{}\0", container_cwd);
                 let _ = WslcSetProcessSettingsCurrentDirectory(
                     &mut process_settings,
-                    cwd_cstr.as_bytes().as_ptr() as PCSTR,
+                    _cwd_cstr.as_bytes().as_ptr() as PCSTR,
                 );
             }
         }
@@ -351,7 +437,7 @@ impl WSLContainerRunner {
         err_msg = ptr::null_mut();
         let hr = WslcStartContainer(
             container_guard.as_raw(),
-            WslcContainerStartFlags::None,
+            WslcContainerStartFlags::Attach,
             &mut err_msg,
         );
         if hr != S_OK {
@@ -443,25 +529,7 @@ impl WSLContainerRunner {
         }
         let process_guard = WslcProcessGuard::from_raw(process);
 
-        // -- Step 12: Get I/O handles --
-        let mut stdout_handle: HANDLE = ptr::null_mut();
-        let mut stderr_handle: HANDLE = ptr::null_mut();
-        let _ = WslcGetProcessIOHandle(
-            process_guard.as_raw(),
-            WslcProcessIOHandle::Stdout,
-            &mut stdout_handle,
-        );
-        let _ = WslcGetProcessIOHandle(
-            process_guard.as_raw(),
-            WslcProcessIOHandle::Stderr,
-            &mut stderr_handle,
-        );
-
-        // -- Step 13: Read stdout/stderr --
-        let stdout = Self::read_handle(stdout_handle);
-        let stderr = Self::read_handle(stderr_handle);
-
-        // -- Step 14-15: Wait for exit and get exit code --
+        // -- Step 12: Wait for exit (callbacks capture I/O during execution) --
         let mut exit_event: HANDLE = ptr::null_mut();
         let _ = WslcGetProcessExitEvent(process_guard.as_raw(), &mut exit_event);
         if !exit_event.is_null() {
@@ -475,7 +543,22 @@ impl WSLContainerRunner {
         let _ = WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code);
         let _ = writeln!(logger, "[WSLC] Process exited with code {}", exit_code);
 
-        // -- Step 16: Cleanup (stop + delete container before guards drop) --
+        // -- Step 13: Collect captured I/O from callbacks --
+        let stdout =
+            String::from_utf8_lossy(&io_ctx_stdout.lock().unwrap_or_else(|e| e.into_inner()))
+                .to_string();
+        let stderr =
+            String::from_utf8_lossy(&io_ctx_stderr.lock().unwrap_or_else(|e| e.into_inner()))
+                .to_string();
+
+        if !stdout.is_empty() {
+            let _ = writeln!(logger, "[WSLC] Captured {} bytes stdout", stdout.len());
+        }
+        if !stderr.is_empty() {
+            let _ = writeln!(logger, "[WSLC] Captured {} bytes stderr", stderr.len());
+        }
+
+        // -- Step 14: Cleanup (stop + delete container before guards drop) --
         err_msg = ptr::null_mut();
         let _ = WslcStopContainer(
             container_guard.as_raw(),
@@ -504,32 +587,5 @@ impl WSLContainerRunner {
             standard_err: stderr,
             error_message: String::new(),
         }
-    }
-
-    /// Read all bytes from a Win32 HANDLE until EOF.
-    unsafe fn read_handle(handle: HANDLE) -> String {
-        if handle.is_null() {
-            return String::new();
-        }
-
-        let win_handle = windows::Win32::Foundation::HANDLE(handle);
-        let mut output = Vec::new();
-        let mut buf = [0u8; 4096];
-
-        loop {
-            let mut bytes_read: u32 = 0;
-            let ok = windows::Win32::Storage::FileSystem::ReadFile(
-                win_handle,
-                Some(&mut buf),
-                Some(&mut bytes_read),
-                None,
-            );
-            if ok.is_err() || bytes_read == 0 {
-                break;
-            }
-            output.extend_from_slice(&buf[..bytes_read as usize]);
-        }
-
-        String::from_utf8_lossy(&output).to_string()
     }
 }
