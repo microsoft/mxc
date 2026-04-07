@@ -1,0 +1,83 @@
+name: MicroVM E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  microvm-e2e:
+    name: MicroVM E2E
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: src
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup update stable
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Build with MicroVM support
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo build --features microvm --target x86_64-pc-windows-msvc
+
+      - name: Exclude build output from Windows Defender
+        shell: pwsh
+        run: |
+          $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
+          Add-MpPreference -ExclusionPath $binDir
+          Write-Host "Added Defender exclusion for $binDir"
+
+      - name: Verify MicroVM binaries
+        shell: pwsh
+        run: |
+          $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
+          $required = @("wxc-exec.exe", "nanvixd.exe", "kernel.elf", "python.elf", "cpython-ramfs.img")
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
+          if ($missing) {
+            Write-Host "::error::Missing binaries: $($missing -join ', ')"
+            exit 1
+          }
+          Get-ChildItem $binDir -Include $required -Recurse | Format-Table Name, Length
+
+      - name: Check Windows Hypervisor Platform
+        id: whp-check
+        shell: pwsh
+        run: |
+          $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+          if ($feature.State -ne 'Enabled') {
+            Write-Host "::warning::Windows Hypervisor Platform is not enabled — skipping E2E tests."
+            echo "whp_available=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          Write-Host "WHP is enabled."
+          echo "whp_available=true" >> $env:GITHUB_OUTPUT
+
+      - name: Run MicroVM E2E Tests
+        if: steps.whp-check.outputs.whp_available == 'true'
+        shell: pwsh
+        working-directory: test_scripts
+        run: |
+          $wxcExe = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug\wxc-exec.exe"
+          $configDir = Join-Path $env:GITHUB_WORKSPACE "test_configs"
+          .\run_microvm_tests.ps1 -WxcExePath $wxcExe -ConfigDir $configDir
+
+      - name: Upload logs on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: microvm-e2e-logs-${{ github.event.pull_request.number || github.run_number }}
+          retention-days: 7
+          path: |
+            logs/
+            **/*.log
