@@ -119,24 +119,9 @@ foreach ($test in $tests) {
 
     Write-Host "`n--- $($test.Description) ($($test.Config)) ---" -ForegroundColor White
 
-    # Read the script command from the config JSON
-    $configJson = Get-Content $configPath -Raw | ConvertFrom-Json
-    $scriptCode = $configJson.process.commandLine
-    $containment = if ($configJson.containment) { $configJson.containment } else { "nanvix" }
-
-    # Write script to a temp file (avoids multi-line argument mangling)
-    $scriptFile = [System.IO.Path]::GetTempFileName()
-    Set-Content $scriptFile $scriptCode -NoNewline -Encoding UTF8
-
-    # Write a minimal SandboxPolicy JSON to a temp file
-    $policyFile = [System.IO.Path]::GetTempFileName()
-    Set-Content $policyFile '{"version":"0.4.0-alpha"}' -NoNewline -Encoding UTF8
-
     $cliArgs = @(
-        "dist/cli.js", "run-sdk",
-        "--script-file", $scriptFile,
-        "--policy-file", $policyFile,
-        "--containment", $containment,
+        "dist/cli.js", "run",
+        (Resolve-Path $configPath),
         "--experimental",
         "--debug"
     )
@@ -157,7 +142,7 @@ foreach ($test in $tests) {
     $elapsedMs = $sw.ElapsedMilliseconds
     $stdout = Get-Content $stdoutFile -Raw -ErrorAction SilentlyContinue
     $stderr = Get-Content $stderrFile -Raw -ErrorAction SilentlyContinue
-    Remove-Item $stdoutFile, $stderrFile, $scriptFile, $policyFile -ErrorAction SilentlyContinue
+    Remove-Item $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
 
     $pass = ($actualExit -eq $expectedExit)
     $reason = ""

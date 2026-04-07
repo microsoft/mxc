@@ -7,6 +7,7 @@ import * as fs from 'fs';
 export interface ContainerExecutionOptions {
   isBase64?: boolean;
   debug?: boolean;
+  experimental?: boolean;
 }
 
 export interface ContainerExecutionResult {
@@ -38,6 +39,10 @@ export class ContainerExecutor {
 
       if (options.debug) {
         args.push('--debug');
+      }
+
+      if (options.experimental) {
+        args.push('--experimental');
       }
 
       const child = spawn(this.executablePath, args);

@@ -24,6 +24,41 @@ program
   .version('0.1.0');
 
 program
+  .command('run')
+  .description('Run a container config JSON directly via wxc-exec (non-interactive, proper exit codes)')
+  .argument('<config>', 'Path to JSON configuration file')
+  .option('--wxc-path <path>', 'Path to wxc-exec.exe (auto-detected if not specified)')
+  .option('--config-base64', 'Treat <config> as a base64-encoded config string')
+  .option('--debug', 'Enable debug output')
+  .option('--experimental', 'Enable experimental features')
+  .action(async (configArg: string, options: { wxcPath?: string; configBase64?: boolean; debug?: boolean; experimental?: boolean }) => {
+    try {
+      const { findWxcExecutable } = await import('@microsoft/mxc-sdk/dist/platform');
+      const execPath = options.wxcPath ?? findWxcExecutable();
+      if (!execPath) {
+        console.error('Error: wxc-exec.exe not found. Use --wxc-path to specify.');
+        process.exit(1);
+      }
+      const executor = new ContainerExecutor(execPath);
+      const result = await executor.run(configArg, {
+        isBase64: options.configBase64 ?? false,
+        debug: options.debug ?? false,
+        experimental: options.experimental ?? false,
+      });
+      if (!options.debug && result.stdout) {
+        console.log(result.stdout);
+      }
+      if (result.stderr) {
+        console.error(result.stderr);
+      }
+      process.exit(result.exitCode);
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
+program
   .command('validate')
   .description('Validate a configuration file')
   .argument('<config>', 'Path to JSON configuration file')
