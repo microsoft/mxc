@@ -129,8 +129,8 @@ new field set. Run `wxc-exec config.json` directly. Verify
 the OS enforcement works.
 
 2. **SDK-level test:** Set the corresponding SandboxRequest
-policy field and call `spawnSandbox()`. Verify the full
-pipeline: request → Config → FlatBuffer → OS.
+policy or environment field and call `spawnSandbox()`. Verify
+the full pipeline: request → Config → FlatBuffer → OS.
 
 3. **Verify default-deny:** Omit the field from Config.
 Verify the most-restrictive default is applied.
