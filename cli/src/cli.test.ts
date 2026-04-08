@@ -118,7 +118,7 @@ describe('SDK end-to-end', () => {
     const policyFile = writeTempPolicy(tempDir, { version: '99.0.0' });
     assert.throws(
       () => runCli(`run-sdk --script "cmd.exe /c echo hi" --cwd "${tempDir}" --container-name "test-bad-ver" --policy-file "${policyFile}"`),
-      { message: /incompatible/ },
+      { message: /newer than supported/ },
     );
   });
 
