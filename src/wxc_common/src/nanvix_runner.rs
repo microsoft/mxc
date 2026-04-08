@@ -248,16 +248,25 @@ impl NanVixScriptRunner {
             || !request.policy.readonly_paths.is_empty()
             || !request.policy.denied_paths.is_empty()
         {
-            let _ = writeln!(logger, "MicroVM: ignoring filesystem policy — guest has a read-only ramfs");
+            let _ = writeln!(
+                logger,
+                "MicroVM: ignoring filesystem policy — guest has a read-only ramfs"
+            );
         }
         if !request.policy.allowed_hosts.is_empty()
             || !request.policy.blocked_hosts.is_empty()
             || request.policy.default_network_policy != NetworkPolicy::Allow
         {
-            let _ = writeln!(logger, "MicroVM: ignoring network policy — guest has no network stack");
+            let _ = writeln!(
+                logger,
+                "MicroVM: ignoring network policy — guest has no network stack"
+            );
         }
         if request.policy.network_proxy.is_enabled() {
-            let _ = writeln!(logger, "MicroVM: ignoring proxy policy — guest has no network stack");
+            let _ = writeln!(
+                logger,
+                "MicroVM: ignoring proxy policy — guest has no network stack"
+            );
         }
         if !request.working_directory.is_empty() {
             return Err(NanVixError::Preflight(ERR_WORKDIR.to_string()));
