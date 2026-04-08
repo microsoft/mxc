@@ -24,14 +24,22 @@ function validatePolicyVersion(version: string): void {
 
     const parsed = semverParse(version);
     if (!parsed) {
-        throw new Error(`Invalid policy version '${version}': must be valid semver (e.g., '0.4.0' or '0.4.0-alpha')`);
+        throw new Error(
+            `Invalid policy version '${version}': must be valid semver` +
+            ` (e.g., '0.4.0' or '0.4.0-alpha')`
+        );
     }
 
     const supported = semverParse(SUPPORTED_VERSION);
-    if (parsed.major !== supported!.major) {
+    if (
+        parsed.major > supported!.major ||
+        (parsed.major === supported!.major &&
+            parsed.minor > supported!.minor)
+    ) {
         throw new Error(
-            `Policy version '${version}' is incompatible (major version ${parsed.major} != ${supported!.major}). ` +
-            `This SDK supports major version ${supported!.major}.`
+            `Policy version '${version}' is newer than supported` +
+            ` (max: ${supported!.major}.${supported!.minor}.x).` +
+            ` Upgrade the SDK.`
         );
     }
 }
