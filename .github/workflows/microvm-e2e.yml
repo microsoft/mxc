@@ -1,4 +1,4 @@
-name: MicroVM E2E Tests
+name: Integration Tests
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   microvm-e2e:
-    name: MicroVM E2E
+    name: MXC-Exec MicroVM
     runs-on: windows-latest
     timeout-minutes: 30
 
