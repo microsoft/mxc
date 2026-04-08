@@ -64,7 +64,7 @@ jobs:
         working-directory: sdk
         run: |
           npm ci --ignore-scripts
-          npx tsc
+          npm run build
 
       - name: Build CLI
         working-directory: cli
