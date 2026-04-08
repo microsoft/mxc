@@ -11,7 +11,7 @@ This provides stronger isolation than AppContainer — the script runs in a comp
 ```
 wxc-exec.exe (CLI client)
   │
-  └── SandboxScriptRunner (src/wxc_common/src/sandbox_runner.rs)
+  └── WindowsSandboxScriptRunner (src/wxc_common/src/windows_sandbox_runner.rs)
         │
         ├── Pre-flight: checks Windows Sandbox feature is enabled
         ├── Connects to wxc-windows-sandbox-daemon via TCP IPC on localhost
@@ -41,7 +41,7 @@ wxc-exec.exe (CLI client)
 
 | Binary | Crate | Runs where | Purpose |
 |--------|-------|------------|---------|
-| `wxc-exec.exe` | `wxc` | Host | CLI entry point, dispatches to SandboxScriptRunner |
+| `wxc-exec.exe` | `wxc` | Host | CLI entry point, dispatches to WindowsSandboxScriptRunner |
 | `wxc-windows-sandbox-daemon.exe` | `wxc_windows_sandbox_daemon` | Host | Manages sandbox VM lifecycle, bridges IPC to TCP |
 | `wxc-windows-sandbox-guest.exe` | `wxc_windows_sandbox_guest` | Inside sandbox VM | Accepts commands, runs scripts, bridges stdio |
 
@@ -70,22 +70,30 @@ This avoids the 30-60s boot cost for subsequent executions.
 
 ```json
 {
-  "script": "python -S -B -c \"print('hello')\"",
   "containment": "windows_sandbox",
-  "timeout": 60000,
-  "windows_sandbox": {
-    "idleTimeout": 300000,
-    "daemonPipeName": "wxc-sandbox"
+  "process": {
+    "commandLine": "python -S -B -c \"print('hello')\"",
+    "timeout": 60000
+  },
+  "experimental": {
+    "windows_sandbox": {
+      "idleTimeoutMs": 300000,
+      "daemonPipeName": "wxc-sandbox"
+    }
   }
 }
 ```
 
+> **Note:** Windows Sandbox is experimental — requires the `--experimental` CLI flag.
+> The `experimental.windows_sandbox` section is optional; defaults are used if omitted.
+
 | Field | Default | Description |
 |-------|---------|-------------|
 | `containment` | `"appcontainer"` | Must be `"windows_sandbox"` to use this backend |
-| `timeout` | `0` (none) | Script execution timeout in milliseconds |
-| `sandbox.idleTimeout` | `300000` (5 min) | Daemon idle timeout before VM teardown |
-| `sandbox.daemonPipeName` | `"wxc-sandbox"` | IPC identifier (determines TCP port) |
+| `process.commandLine` | *(required)* | Command line to execute inside the sandbox |
+| `process.timeout` | `0` (none) | Script execution timeout in milliseconds |
+| `experimental.windows_sandbox.idleTimeoutMs` | `300000` (5 min) | Daemon idle timeout before VM teardown |
+| `experimental.windows_sandbox.daemonPipeName` | `"wxc-sandbox"` | IPC identifier (determines TCP port) |
 
 When `containment` is `"windows_sandbox"`, the `appContainer`, `filesystem`, and `network` sections are ignored — isolation is managed by the sandbox VM and guest agent firewall.
 

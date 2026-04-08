@@ -174,7 +174,7 @@ Remove-Item "$env:TEMP\wxc-sandbox-rendezvous\*" -ErrorAction SilentlyContinue
 
 | File | Purpose |
 |------|---------|
-| `src/wxc_common/src/sandbox_runner.rs` | Client: connects to daemon, sends EXEC, reads RESULT |
+| `src/wxc_common/src/windows_sandbox_runner.rs` | Client: connects to daemon, sends EXEC, reads RESULT |
 | `src/wxc_common/src/sandbox_protocol.rs` | Shared control protocol |
 | `src/wxc_windows_sandbox_daemon/src/main.rs` | Daemon entry point, idle watchdog |
 | `src/wxc_windows_sandbox_daemon/src/pipe_server.rs` | TCP IPC server, EXEC handling, retry logic |
