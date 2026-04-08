@@ -1,7 +1,0 @@
-{
-    "process": {
-        "commandLine": "x = 42\ny = 58\nprint('Hello from NanVix! sum=%d' % (x + y))",
-        "timeout": 30000
-    },
-    "containment": "nanvix"
-}

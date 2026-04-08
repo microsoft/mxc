@@ -111,7 +111,7 @@ mxc/src/
 │       ├── script_runner.rs          # UNCHANGED
 │       └── ...                       # All other modules UNCHANGED
 ├── wxc_test_driver/                  # UNCHANGED
-├── wxc_sandbox_agent/                # UNCHANGED
+├── wxc_sandbox_guest/                # UNCHANGED
 └── wxc_sandbox_daemon/               # UNCHANGED
 
 mxc/docs/

@@ -1,0 +1,6 @@
+{
+    "nanvixd.exe": "0b46b0b4b181ff593cfc77ecb279a298f2ade7852279c8a9a23f7b9ca62a6bda",
+    "kernel.elf": "7e3e61de8bc622a62d2ec761ef5bd5bea6b6cc16b377792a077b0a30e61d8fb0",
+    "python.elf": "f183de3d80c99d14ce86aa08af53c9dfdb2f1b713c0e92a9960a1b7845cb57b2",
+    "cpython-ramfs.img": "0a433935d661e0c51666631d9ddff069ed789405e6dd8fccb57884396d883089"
+}
