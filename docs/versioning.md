@@ -8,20 +8,22 @@ The policy (filesystem, network) expresses **what** the user wants — "block ne
 
 ### Policy Version = Config Schema Version
 
-We are introducing a `version` field in the SandboxPolicy. This version must match the MXC config JSON version — they are the same version, tied 1:1.
+The `version` field in SandboxRequest must match the MXC config
+JSON version: they are the same version, tied 1:1.
 
-When a consumer specifies a SandboxPolicy version (e.g., `0.4.0`), MXC creates
-the corresponding `WxcConfiguration` using the `0.4.0` schema. If a different
-version is specified (e.g., `0.5.0`), MXC uses the `0.5.0` schema. All schemas
-for a major version are packaged together in the SDK.
+When a consumer specifies a SandboxRequest version (e.g.,
+`0.4.0`), MXC creates the corresponding configuration using the
+`0.4.0` schema.
 
 ```typescript
 // sdk/src/types.ts
-// NOTE: SandboxPolicy is subject to significant evolution as the schema matures.
-SandboxPolicy {
+SandboxRequest {
   version: "0.4.0-alpha",       // must match MXC config schema version
-  filesystem: { ... },           // policy (intent)
-  network: { ... },              // policy (intent)
+  policy: {
+    filesystem: { ... },         // security intent
+    network: { ... },            // security intent
+  },
+  environment: { ... },          // runtime selection
 }
 ```
 
@@ -195,7 +197,7 @@ fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse
 ## Data Flow
 
 ```
-User writes SandboxPolicy (intent, versioned)
+User writes SandboxRequest (policy + environment, versioned)
         │
         ▼
 Config JSON (version: "0.4.0-alpha")
@@ -223,7 +225,7 @@ Process runs in sandbox
 ## Version Negotiation
 
 ```
-1. User sends SandboxPolicy with version "0.4.0-alpha"
+1. User sends SandboxRequest with version "0.4.0-alpha"
 
 2. MXC validates: is "0.4.0-alpha" ≤ SUPPORTED_VERSION?
    Yes → continue
