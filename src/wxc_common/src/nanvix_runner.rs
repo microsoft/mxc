@@ -249,21 +249,8 @@ impl NanVixScriptRunner {
     }
 
     fn validate_policies(request: &CodexRequest) -> Result<(), NanVixError> {
-        if !request.policy.readwrite_paths.is_empty()
-            || !request.policy.readonly_paths.is_empty()
-            || !request.policy.denied_paths.is_empty()
-        {
-            return Err(NanVixError::Preflight(ERR_FILESYSTEM_POLICY.to_string()));
-        }
-        if !request.policy.allowed_hosts.is_empty()
-            || !request.policy.blocked_hosts.is_empty()
-            || request.policy.default_network_policy != NetworkPolicy::Allow
-        {
-            return Err(NanVixError::Preflight(ERR_NETWORK_POLICY.to_string()));
-        }
-        if request.policy.network_proxy.is_enabled() {
-            return Err(NanVixError::Preflight(ERR_PROXY_POLICY.to_string()));
-        }
+        // Filesystem policies are silently ignored — the guest has a read-only ramfs.
+        // Network and proxy policies are also ignored — no network stack in guest.
         if !request.working_directory.is_empty() {
             return Err(NanVixError::Preflight(ERR_WORKDIR.to_string()));
         }
@@ -549,7 +536,7 @@ mod tests {
     // -- Policy validation tests -------------------------------------------------
 
     #[test]
-    fn policy_rejects_filesystem_paths() {
+    fn policy_ignores_filesystem_paths() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
             policy: ContainerPolicy {
@@ -561,11 +548,11 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_FILESYSTEM_POLICY));
+        assert!(!resp.error_message.contains(ERR_FILESYSTEM_POLICY));
     }
 
     #[test]
-    fn policy_rejects_readonly_paths() {
+    fn policy_ignores_readonly_paths() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
             policy: ContainerPolicy {
@@ -577,11 +564,11 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_FILESYSTEM_POLICY));
+        assert!(!resp.error_message.contains(ERR_FILESYSTEM_POLICY));
     }
 
     #[test]
-    fn policy_rejects_network_hosts() {
+    fn policy_ignores_network_hosts() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
             policy: ContainerPolicy {
@@ -593,11 +580,11 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_NETWORK_POLICY));
+        assert!(!resp.error_message.contains(ERR_NETWORK_POLICY));
     }
 
     #[test]
-    fn policy_rejects_blocked_network_hosts() {
+    fn policy_ignores_blocked_network_hosts() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
             policy: ContainerPolicy {
@@ -609,11 +596,11 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_NETWORK_POLICY));
+        assert!(!resp.error_message.contains(ERR_NETWORK_POLICY));
     }
 
     #[test]
-    fn policy_rejects_network_block_policy() {
+    fn policy_ignores_network_block_policy() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
             policy: ContainerPolicy {
@@ -625,7 +612,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_NETWORK_POLICY));
+        assert!(!resp.error_message.contains(ERR_NETWORK_POLICY));
     }
 
     #[test]
@@ -665,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_rejects_network_proxy() {
+    fn policy_ignores_network_proxy() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
             policy: ContainerPolicy {
@@ -684,7 +671,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_PROXY_POLICY));
+        assert!(!resp.error_message.contains(ERR_PROXY_POLICY));
     }
 
     #[test]

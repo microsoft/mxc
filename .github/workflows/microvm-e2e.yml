@@ -1,0 +1,131 @@
+name: MicroVM E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  microvm-e2e:
+    name: MicroVM E2E
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup update stable
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+
+      - name: Build with MicroVM support
+        working-directory: src
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo build --features microvm --target x86_64-pc-windows-msvc
+
+      - name: Exclude build output from Windows Defender
+        shell: pwsh
+        run: |
+          $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
+          Add-MpPreference -ExclusionPath $binDir
+          Write-Host "Added Defender exclusion for $binDir"
+
+      - name: Verify MicroVM binaries
+        shell: pwsh
+        run: |
+          $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
+          $required = @("wxc-exec.exe", "nanvixd.exe", "kernel.elf", "python.elf", "cpython-ramfs.img")
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
+          if ($missing) {
+            Write-Host "::error::Missing binaries: $($missing -join ', ')"
+            exit 1
+          }
+          Get-ChildItem $binDir -Include $required -Recurse | Format-Table Name, Length
+
+      - name: Diagnose hypervisor environment
+        shell: pwsh
+        run: |
+          Write-Host "=== Hypervisor Diagnostics ==="
+          Write-Host "OS: $([System.Environment]::OSVersion)"
+          $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+          Write-Host "HypervisorPresent: $($cs.HypervisorPresent)"
+          Write-Host "WinHvPlatform.dll exists: $(Test-Path "$env:SystemRoot\System32\WinHvPlatform.dll")"
+          $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction SilentlyContinue
+          Write-Host "HypervisorPlatform feature state: $($feature.State)"
+
+      - name: Check Windows Hypervisor Platform
+        id: whp-check
+        shell: pwsh
+        run: |
+          $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+          if ($feature.State -ne 'Enabled') {
+            Write-Host "::error::Windows Hypervisor Platform is not enabled. E2E tests require WHP on windows-latest."
+            exit 1
+          }
+          $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+          if (-not $cs.HypervisorPresent) {
+            Write-Host "::error::HypervisorPresent is false — WHP feature is enabled but hypervisor is not running."
+            exit 1
+          }
+          Write-Host "WHP is enabled and hypervisor is present."
+          echo "whp_available=true" >> $env:GITHUB_OUTPUT
+
+      - name: Run MicroVM E2E Tests
+        if: steps.whp-check.outputs.whp_available == 'true'
+        shell: pwsh
+        working-directory: test_scripts
+        run: |
+          $wxcExe = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug\wxc-exec.exe"
+          $configDir = Join-Path $env:GITHUB_WORKSPACE "test_configs"
+          .\run_microvm_tests.ps1 -WxcExePath $wxcExe -ConfigDir $configDir
+
+      - name: Upload logs on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v6
+        with:
+          name: microvm-e2e-logs-${{ github.event.pull_request.number || github.run_number }}
+          retention-days: 7
+          path: |
+            logs/
+            **/*.log
+
+      - name: Print performance summary
+        if: steps.whp-check.outputs.whp_available == 'true' && !cancelled()
+        shell: pwsh
+        run: |
+          $jsonPath = Join-Path $env:GITHUB_WORKSPACE "microvm-perf-results.json"
+          if (Test-Path $jsonPath) {
+            $data = Get-Content $jsonPath -Raw | ConvertFrom-Json
+            Write-Host "`n=== MicroVM Performance Summary ==="
+            Write-Host "Commit: $($data.commit)"
+            Write-Host "Timestamp: $($data.timestamp)"
+            Write-Host ""
+            Write-Host ("{0,-35} {1,10} {2,8}" -f "Test", "Time (ms)", "Status")
+            Write-Host ("{0,-35} {1,10} {2,8}" -f "----", "---------", "------")
+            foreach ($r in $data.results) {
+              Write-Host ("{0,-35} {1,10} {2,8}" -f $r.description, $r.wall_time_ms, $r.status)
+            }
+          } else {
+            Write-Host "::warning::No performance results found — perf JSON was not generated."
+          }
+
+      - name: Upload performance results
+        if: steps.whp-check.outputs.whp_available == 'true' && !cancelled()
+        uses: actions/upload-artifact@v6
+        with:
+          name: microvm-perf-results-${{ github.event.pull_request.number || github.run_number }}
+          retention-days: 30
+          path: microvm-perf-results.json
