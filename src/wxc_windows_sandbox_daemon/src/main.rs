@@ -45,7 +45,7 @@ impl DaemonState {
 async fn main() -> Result<()> {
     let pipe_name = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "wxc-sandbox".to_string());
+        .unwrap_or_else(|| "wxc-windows-sandbox".to_string());
     let idle_timeout_ms: u64 = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())

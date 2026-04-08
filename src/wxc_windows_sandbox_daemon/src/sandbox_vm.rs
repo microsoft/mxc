@@ -18,7 +18,7 @@ const SANDBOX_RENDEZVOUS_DIR: &str = r"C:\Sandbox-Rendezvous";
 const SANDBOX_PYTHON_DIR: &str = r"C:\Sandbox-Python";
 
 /// Name of the guest binary that runs inside the sandbox.
-const GUEST_BINARY: &str = "wxc-sandbox-guest.exe";
+const GUEST_BINARY: &str = "wxc-windows-sandbox-guest.exe";
 
 /// Maximum time (seconds) to wait for sandbox processes to exit during teardown.
 const TEARDOWN_POLL_TIMEOUT_SECS: u64 = 30;
@@ -193,7 +193,7 @@ echo [bootstrap] Guest exited with code %ERRORLEVEL% >> "%LOG%" 2>&1
         sandbox_python = SANDBOX_PYTHON_DIR,
     );
 
-    let wsb_path = output_dir.join("wxc-sandbox.wsb");
+    let wsb_path = output_dir.join("wxc-windows-sandbox.wsb");
     std::fs::write(&wsb_path, wsb_content)
         .with_context(|| format!("write .wsb file {:?}", wsb_path))?;
 

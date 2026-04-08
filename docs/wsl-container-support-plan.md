@@ -15,7 +15,7 @@ the WSLC SDK self-host release. Key changes:
   verb-first convention (e.g., `WslcInitSessionSettings` not
   `WslcInitSessionSettings`).
 - **Phases 1-2 complete:** Config parsing and backend routing shipped in PR #44.
-- **Sandbox is experimental:** References to `SandboxScriptRunner` and
+- **Sandbox is experimental:** References to `WindowsSandboxScriptRunner` and
   `request.sandbox_config` are outdated — sandbox is now behind `--experimental`.
 
 ## Problem
@@ -178,7 +178,7 @@ mxc/src/
 │       ├── config_parser.rs      # Extended (Phase 2)
 │       ├── models.rs             # Extended (Phase 2)
 │       ├── script_runner.rs      # NO CHANGES NEEDED (see below)
-│       ├── sandbox_runner.rs     # UNCHANGED (The existing Sandbox backend)
+│       ├── windows_sandbox_runner.rs     # UNCHANGED (The existing Sandbox backend)
 │       ├── sandbox_protocol.rs   # UNCHANGED (The existing IPC protocol)
 │       ├── wslc_bindings.rs      # NEW — Rust FFI bindings to WslcSDK.h
 │       ├── wsl_container_runner.rs  # NEW — WSLContainerRunner impl
@@ -187,7 +187,7 @@ mxc/src/
 ```
 
 **ScriptRunner trait — no refactor needed:**
-The existing `SandboxScriptRunner` already overrides `run()` entirely (it bypasses the default BFS/firewall orchestration). This proves the pattern works. `WSLContainerRunner` does the same — override `run()` with its own lifecycle:
+The existing `WindowsSandboxScriptRunner` already overrides `run()` entirely (it bypasses the default BFS/firewall orchestration). This proves the pattern works. `WSLContainerRunner` does the same — override `run()` with its own lifecycle:
 `session → container → process → I/O → cleanup`. No changes to
 `script_runner.rs` or `AppContainerScriptRunner` are required.
 
@@ -361,7 +361,7 @@ These need team decisions before implementation:
 4. **Elevated privileges** — ~~The WSLC SDK may require specific Windows capabilities (VM Platform, WSL optional component). Do we invoke the install API automatically, or require users to run setup manually?~~
    **Decision: SDK install is out of band.** MXC does not install the WSLC SDK or its dependencies at runtime. Installation of the WSLC SDK NuGet package (build time) and runtime components — VM Platform, WSL optional component, WSL package — is handled separately, outside of MXC's execution path (e.g., by IT admin tooling, a setup script, or the caller's deployment process). At runtime, `WslcCanRun()` checks if everything is in place and fails fast with a clear error if not.
 
-5. ~~**ScriptRunner refactor strategy**~~ — **Resolved.** The existing `SandboxScriptRunner` already overrides `run()` entirely, proving the pattern. `WSLContainerRunner` does the same. No refactoring of the base trait needed.
+5. ~~**ScriptRunner refactor strategy**~~ — **Resolved.** The existing `WindowsSandboxScriptRunner` already overrides `run()` entirely, proving the pattern. `WSLContainerRunner` does the same. No refactoring of the base trait needed.
 
 6. ~~**GPU passthrough**~~ — ~~Should we expose GPU support in the MXC config schema?~~
    **Decision: Yes.** Expose `"gpu": true` in the `container` config section. When enabled, `WSLContainerRunner` sets both `WSLC_SESSION_FLAG_ENABLE_GPU` on the session and `WSLC_CONTAINER_FLAG_ENABLE_GPU` on the container. Defaults to `false`. This enables CUDA and GPU compute workloads (ML inference, training) inside Linux containers.
@@ -387,7 +387,7 @@ These need team decisions before implementation:
 
 | Risk | Mitigation |
 |---|---|
-| `ScriptRunner::run()` hardcodes BFS/firewall (Windows-specific) | `WSLContainerRunner` overrides `run()` entirely — same pattern used by `SandboxScriptRunner` |
+| `ScriptRunner::run()` hardcodes BFS/firewall (Windows-specific) | `WSLContainerRunner` overrides `run()` entirely — same pattern used by `WindowsSandboxScriptRunner` |
 | WSLC SDK is in public preview — API may change | Pin to a specific SDK version; isolate all WSLC calls behind `wslc_bindings.rs` so API changes are contained to one file |
 | Rust FFI to C API requires careful memory management | Follow WSLC SDK ownership rules: caller frees `CoTaskMemAlloc`'d strings; use Rust RAII wrappers for WSLC handles (Session, Container, Process) |
 | WSL2/WSLC setup complexity for users | `WslcCanRun()` diagnoses missing components; `WslcInstallWithDependencies()` automates installation; setup script wraps both |

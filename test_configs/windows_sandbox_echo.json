@@ -1,5 +1,5 @@
 {
-  "containment": "sandbox",
+  "containment": "windows_sandbox",
   "process": {
     "commandLine": "echo Hello from sandbox!",
     "timeout": 60000

@@ -1,6 +1,6 @@
-//! `SandboxScriptRunner` — executes scripts via the Windows Sandbox daemon.
+//! `WindowsSandboxScriptRunner` — executes scripts via the Windows Sandbox daemon.
 //!
-//! When `wxc-exec` is configured with `"containment": "sandbox"`, this runner
+//! When `wxc-exec` is configured with `"containment": "windows_sandbox"`, this runner
 //! connects to the sandbox daemon's IPC server, sends an EXEC request, and
 //! returns the exit code.  If the daemon isn't running it is auto-launched.
 
@@ -10,17 +10,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::logger::Logger;
-use crate::models::{CodexRequest, SandboxConfig, ScriptResponse};
+use crate::models::{CodexRequest, ScriptResponse, WindowsSandboxConfig};
 use crate::sandbox_protocol::DaemonResult;
 use crate::script_runner::ScriptRunner;
 
 /// Script runner that delegates execution to the Windows Sandbox daemon.
-pub struct SandboxScriptRunner {
-    config: SandboxConfig,
+pub struct WindowsSandboxScriptRunner {
+    config: WindowsSandboxConfig,
 }
 
-impl SandboxScriptRunner {
-    pub fn new(config: &SandboxConfig) -> Self {
+impl WindowsSandboxScriptRunner {
+    pub fn new(config: &WindowsSandboxConfig) -> Self {
         Self {
             config: config.clone(),
         }
@@ -51,7 +51,7 @@ impl SandboxScriptRunner {
     fn daemon_exe_path() -> Result<PathBuf, String> {
         let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
         let dir = exe.parent().ok_or("exe has no parent dir")?;
-        let daemon = dir.join("wxc-sandbox-daemon.exe");
+        let daemon = dir.join("wxc-windows-sandbox-daemon.exe");
         if daemon.exists() {
             Ok(daemon)
         } else {
@@ -192,7 +192,7 @@ impl SandboxScriptRunner {
     }
 }
 
-impl ScriptRunner for SandboxScriptRunner {
+impl ScriptRunner for WindowsSandboxScriptRunner {
     fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         self.execute_via_daemon(request, logger)
     }
@@ -212,8 +212,8 @@ mod tests {
 
     #[test]
     fn pipe_name_to_port_deterministic() {
-        let p1 = SandboxScriptRunner::pipe_name_to_port("wxc-sandbox");
-        let p2 = SandboxScriptRunner::pipe_name_to_port("wxc-sandbox");
+        let p1 = WindowsSandboxScriptRunner::pipe_name_to_port("wxc-windows-sandbox");
+        let p2 = WindowsSandboxScriptRunner::pipe_name_to_port("wxc-windows-sandbox");
         assert_eq!(p1, p2);
         assert!(p1 >= 49152);
     }
@@ -229,11 +229,11 @@ mod tests {
             (49152 + (hash % range)) as u16
         }
         assert_eq!(
-            SandboxScriptRunner::pipe_name_to_port("wxc-sandbox"),
-            daemon_pipe_name_to_port("wxc-sandbox")
+            WindowsSandboxScriptRunner::pipe_name_to_port("wxc-windows-sandbox"),
+            daemon_pipe_name_to_port("wxc-windows-sandbox")
         );
         assert_eq!(
-            SandboxScriptRunner::pipe_name_to_port("custom-pipe"),
+            WindowsSandboxScriptRunner::pipe_name_to_port("custom-pipe"),
             daemon_pipe_name_to_port("custom-pipe")
         );
     }
