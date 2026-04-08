@@ -188,9 +188,7 @@ program
 
       if (options.pty === false) {
         // Non-PTY mode: reliable exit codes, separate stdout/stderr
-        console.error('[mxc-cli] Using execSandbox (non-PTY mode)');
         const result = await execSandbox(scriptCommand, policy, spawnOptions, options.cwd, options.containerName);
-        console.error(`[mxc-cli] execSandbox completed: exitCode=${result.exitCode}, stdout=${result.stdout.length}b, stderr=${result.stderr.length}b`);
         if (result.stdout) {
           process.stdout.write(result.stdout);
         }

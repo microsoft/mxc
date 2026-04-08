@@ -81,8 +81,16 @@ export function buildSandboxPayload(
     };
 
     // If an explicit containment backend is requested, use it directly.
+    // Don't include filesystem/network sections unless the policy has them —
+    // backends like microvm reject unsupported policy fields.
     if (containment) {
         config.containment = containment;
+        if (!policy.filesystem?.readwritePaths?.length &&
+            !policy.filesystem?.readonlyPaths?.length &&
+            !policy.filesystem?.deniedPaths?.length) {
+            delete config.filesystem;
+        }
+        return config;
         return config;
     }
 
