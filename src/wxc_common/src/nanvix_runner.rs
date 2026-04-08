@@ -55,6 +55,12 @@ const RAMFS_IMAGE: &str = "cpython-ramfs.img";
 const BOOT_TIMEOUT_MS: u64 = 60_000;
 /// Generic error exit code returned to host callers.
 const ERROR_EXIT_CODE: i32 = -1;
+const WARN_FILESYSTEM_POLICY: &str =
+    "MicroVM: ignoring filesystem policy — guest has a read-only ramfs";
+const WARN_NETWORK_POLICY: &str =
+    "MicroVM: ignoring network policy — guest has no network stack";
+const WARN_PROXY_POLICY: &str =
+    "MicroVM: ignoring proxy policy — guest has no network stack";
 const ERR_WORKDIR: &str = "workingDirectory is not supported by the NanVix backend -- guest has its own filesystem namespace";
 
 // -- NanVix error classification ---------------------------------------------
@@ -248,25 +254,16 @@ impl NanVixScriptRunner {
             || !request.policy.readonly_paths.is_empty()
             || !request.policy.denied_paths.is_empty()
         {
-            let _ = writeln!(
-                logger,
-                "MicroVM: ignoring filesystem policy — guest has a read-only ramfs"
-            );
+            let _ = writeln!(logger, "{}", WARN_FILESYSTEM_POLICY);
         }
         if !request.policy.allowed_hosts.is_empty()
             || !request.policy.blocked_hosts.is_empty()
             || request.policy.default_network_policy != NetworkPolicy::Allow
         {
-            let _ = writeln!(
-                logger,
-                "MicroVM: ignoring network policy — guest has no network stack"
-            );
+            let _ = writeln!(logger, "{}", WARN_NETWORK_POLICY);
         }
         if request.policy.network_proxy.is_enabled() {
-            let _ = writeln!(
-                logger,
-                "MicroVM: ignoring proxy policy — guest has no network stack"
-            );
+            let _ = writeln!(logger, "{}", WARN_PROXY_POLICY);
         }
         if !request.working_directory.is_empty() {
             return Err(NanVixError::Preflight(ERR_WORKDIR.to_string()));
@@ -565,7 +562,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(!resp.error_message.contains("filesystem policy"));
+        assert!(!resp.error_message.contains(WARN_FILESYSTEM_POLICY));
     }
 
     #[test]
@@ -581,7 +578,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(!resp.error_message.contains("filesystem policy"));
+        assert!(!resp.error_message.contains(WARN_FILESYSTEM_POLICY));
     }
 
     #[test]
@@ -597,7 +594,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(!resp.error_message.contains("network policy"));
+        assert!(!resp.error_message.contains(WARN_NETWORK_POLICY));
     }
 
     #[test]
@@ -613,7 +610,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(!resp.error_message.contains("network policy"));
+        assert!(!resp.error_message.contains(WARN_NETWORK_POLICY));
     }
 
     #[test]
@@ -629,7 +626,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(!resp.error_message.contains("network policy"));
+        assert!(!resp.error_message.contains(WARN_NETWORK_POLICY));
     }
 
     #[test]
@@ -688,7 +685,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(!resp.error_message.contains("network proxy"));
+        assert!(!resp.error_message.contains(WARN_PROXY_POLICY));
     }
 
     #[test]
