@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::path::PathBuf;
+
 use crate::error::WxcError;
 use crate::string_util;
 
@@ -394,6 +396,35 @@ pub fn get_capability_sid_from_name(name: &str) -> Result<*mut core::ffi::c_void
         let _ = LocalFree(Some(HLOCAL(capability_sids as *mut _)));
 
         Ok(result_sid)
+    }
+}
+
+// ── Sibling binary resolution ─────────────────────────────────────────────
+
+/// Return the directory containing the current executable.
+pub fn exe_dir() -> Result<PathBuf, WxcError> {
+    let exe = std::env::current_exe()
+        .map_err(|e| WxcError::Process(format!("cannot determine exe path: {}", e)))?;
+    exe.parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| WxcError::Process("exe has no parent directory".to_string()))
+}
+
+/// Locate a sibling executable next to the current exe.
+///
+/// Returns the full path if the binary exists, or an error describing
+/// where it was expected.
+pub fn resolve_sibling_binary(name: &str) -> Result<PathBuf, WxcError> {
+    let dir = exe_dir()?;
+    let path = dir.join(name);
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(WxcError::Process(format!(
+            "{} not found at {}",
+            name,
+            path.display()
+        )))
     }
 }
 
