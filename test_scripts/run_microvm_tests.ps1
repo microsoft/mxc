@@ -160,7 +160,14 @@ foreach ($test in $tests) {
         $results += @{ Test = $test.Config; Status = "PASS"; Exit = $actualExit; WallTimeMs = $elapsedMs; Description = $test.Description }
     } else {
         Write-Host "  FAIL ($reason, ${elapsedMs}ms)" -ForegroundColor Red
+        if ($stdout) {
+            Write-Host "    [stdout]:" -ForegroundColor Gray
+            $stdout -split "`n" | Select-Object -Last 5 | ForEach-Object {
+                Write-Host "    > $($_.TrimEnd())" -ForegroundColor Gray
+            }
+        }
         if ($stderr) {
+            Write-Host "    [stderr]:" -ForegroundColor Gray
             $stderr -split "`n" | Select-Object -Last 5 | ForEach-Object {
                 Write-Host "    > $($_.TrimEnd())" -ForegroundColor Gray
             }
