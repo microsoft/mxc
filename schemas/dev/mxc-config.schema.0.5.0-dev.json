@@ -230,7 +230,7 @@
             "image": {
               "type": "string",
               "default": "alpine:latest",
-              "description": "Container image name. Must be pre-pulled (MXC does not pull images).",
+              "description": "Container image name. Images should be pre-pulled externally; the runner will attempt an auto-pull if not found (temporary behavior — to be moved to a setup script).",
               "examples": ["alpine:latest", "python:3.12", "ubuntu:24.04"]
             },
             "cpuCount": {
@@ -250,7 +250,7 @@
             },
             "storagePath": {
               "type": "string",
-              "description": "Storage path for the WSLC session image store. Omit for SDK default."
+              "description": "Storage path for the WSLC session image store. Omit to use a temporary directory."
             }
           }
         }

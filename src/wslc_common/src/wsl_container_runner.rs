@@ -25,6 +25,7 @@ use crate::wslc_bindings::*;
 struct IoContext {
     stdout: Arc<Mutex<Vec<u8>>>,
     stderr: Arc<Mutex<Vec<u8>>>,
+    exited: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 }
 
 /// Callback invoked by the WSLC SDK for stdout/stderr data.
@@ -51,6 +52,20 @@ unsafe extern "system" fn io_callback(
             }
         }
         _ => {}
+    }
+}
+
+/// Callback invoked when the process exits and all I/O has been flushed.
+/// Per SDK docs: "Once this callback is invoked, any registered IO callbacks
+/// will no longer be called." This guarantees buffers are complete.
+unsafe extern "system" fn exit_callback(_exit_code: i32, context: *mut c_void) {
+    if context.is_null() {
+        return;
+    }
+    let ctx = &*(context as *const IoContext);
+    if let Ok(mut exited) = ctx.exited.0.lock() {
+        *exited = true;
+        ctx.exited.1.notify_all();
     }
 }
 
@@ -166,11 +181,20 @@ impl WSLContainerRunner {
             let _ = WslcSetSessionSettingsCpuCount(&mut session_settings, cpu);
         }
         if let Some(mem_mb) = self.config.memory_mb {
-            let _ = WslcSetSessionSettingsMemory(&mut session_settings, mem_mb as u32);
+            let mem_mb = match u32::try_from(mem_mb) {
+                Ok(v) => v,
+                Err(_) => {
+                    return ScriptResponse::error(&format!(
+                        "Invalid config: memory_mb value {} exceeds maximum {} MB",
+                        mem_mb,
+                        u32::MAX
+                    ));
+                }
+            };
+            let _ = WslcSetSessionSettingsMemory(&mut session_settings, mem_mb);
         }
         if request.script_timeout > 0 {
-            let _ =
-                WslcSetSessionSettingsTimeout(&mut session_settings, request.script_timeout * 1000);
+            let _ = WslcSetSessionSettingsTimeout(&mut session_settings, request.script_timeout);
         }
         if self.config.gpu {
             let _ = WslcSetSessionSettingsFeatureFlags(
@@ -274,13 +298,15 @@ impl WSLContainerRunner {
         let io_ctx = Box::new(IoContext {
             stdout: Arc::new(Mutex::new(Vec::new())),
             stderr: Arc::new(Mutex::new(Vec::new())),
+            exited: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
         });
         let io_ctx_stdout = Arc::clone(&io_ctx.stdout);
         let io_ctx_stderr = Arc::clone(&io_ctx.stderr);
+        let io_ctx_exited = Arc::clone(&io_ctx.exited);
         let callbacks = WslcProcessCallbacks {
             on_stdout: Some(io_callback),
             on_stderr: Some(io_callback),
-            on_exit: None,
+            on_exit: Some(exit_callback),
         };
         let _ = WslcSetProcessSettingsCallbacks(
             &mut process_settings,
@@ -345,6 +371,9 @@ impl WSLContainerRunner {
         }
 
         // -- Step 7: Apply policy mapping --
+        // TODO: Port mappings (WslcConfig.port_mappings) are parsed but not yet applied.
+        // Requires adding WslcSetContainerSettingsPortMappings and WslcContainerPortMapping
+        // bindings. See wslcsdk.h lines 120-128, 183-186.
         let (mounts, warnings) = policy_mapping::build_volume_mounts(
             &request.policy.readwrite_paths,
             &request.policy.readonly_paths,
@@ -404,7 +433,10 @@ impl WSLContainerRunner {
         );
 
         // Container flags
-        let mut flags = WslcContainerFlags::AutoRemove;
+        let mut flags = WslcContainerFlags::None;
+        if request.lifecycle.destroy_on_exit {
+            flags = flags | WslcContainerFlags::AutoRemove;
+        }
         if self.config.gpu {
             flags = flags | WslcContainerFlags::EnableGpu;
         }
@@ -543,11 +575,31 @@ impl WSLContainerRunner {
             );
         }
 
+        // Wait for exit callback to fire — this guarantees all I/O is flushed
+        // before we read the buffers (per SDK docs).
+        {
+            let (lock, cvar) = &*io_ctx_exited;
+            let mut exited = lock.lock().unwrap_or_else(|e| e.into_inner());
+            if !*exited {
+                let result = cvar
+                    .wait_timeout(exited, std::time::Duration::from_secs(30))
+                    .unwrap_or_else(|e| e.into_inner());
+                exited = result.0;
+                if !*exited {
+                    let _ = writeln!(
+                        logger,
+                        "[WSLC] Warning: exit callback did not fire within 30s"
+                    );
+                }
+            }
+            drop(exited);
+        }
+
         let mut exit_code: i32 = -1;
         let _ = WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code);
         let _ = writeln!(logger, "[WSLC] Process exited with code {}", exit_code);
 
-        // -- Step 13: Collect captured I/O from callbacks --
+        // -- Step 13: Collect captured I/O from callbacks (guaranteed flushed) --
         let stdout =
             String::from_utf8_lossy(&io_ctx_stdout.lock().unwrap_or_else(|e| e.into_inner()))
                 .to_string();
@@ -562,28 +614,32 @@ impl WSLContainerRunner {
             let _ = writeln!(logger, "[WSLC] Captured {} bytes stderr", stderr.len());
         }
 
-        // -- Step 14: Cleanup (stop + delete container before guards drop) --
-        err_msg = ptr::null_mut();
-        let _ = WslcStopContainer(
-            container_guard.as_raw(),
-            WslcSignal::SigTerm,
-            10,
-            &mut err_msg,
-        );
-        Self::free_error_message(err_msg);
+        // -- Step 14: Cleanup --
+        if request.lifecycle.destroy_on_exit {
+            err_msg = ptr::null_mut();
+            let _ = WslcStopContainer(
+                container_guard.as_raw(),
+                WslcSignal::SigTerm,
+                10,
+                &mut err_msg,
+            );
+            Self::free_error_message(err_msg);
 
-        err_msg = ptr::null_mut();
-        let _ = WslcDeleteContainer(
-            container_guard.as_raw(),
-            WslcDeleteContainerFlags::Force,
-            &mut err_msg,
-        );
-        Self::free_error_message(err_msg);
+            err_msg = ptr::null_mut();
+            let _ = WslcDeleteContainer(
+                container_guard.as_raw(),
+                WslcDeleteContainerFlags::Force,
+                &mut err_msg,
+            );
+            Self::free_error_message(err_msg);
+        }
 
         let _ = WslcTerminateSession(session_guard.as_raw());
         let _ = writeln!(logger, "[WSLC] Cleanup complete");
 
         // RAII guards will call Release on drop.
+        // CoUninitialize is not called explicitly — RAII guards need COM alive
+        // for the Release calls, and the process exits shortly after.
 
         ScriptResponse {
             exit_code,
