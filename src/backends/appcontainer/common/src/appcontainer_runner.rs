@@ -34,7 +34,8 @@ use crate::job_object::UiJobObject;
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::policy_util::resolve_capabilities;
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
     SendOwnedHandle, SidAndAttributes,
@@ -523,19 +524,8 @@ impl AppContainerScriptRunner {
         }
 
         // --- Build capability list ---
-        let mut capabilities_to_add: Vec<String> = request.policy.capabilities.clone();
+        let mut capabilities_to_add = resolve_capabilities(&request.policy);
         capabilities_to_add.push("AgenticAppContainer".to_string());
-
-        let use_capabilities_for_network = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
-        );
-        if use_capabilities_for_network
-            && request.policy.default_network_policy == NetworkPolicy::Allow
-            && !capabilities_to_add.iter().any(|c| c == "internetClient")
-        {
-            capabilities_to_add.push("internetClient".to_string());
-        }
 
         // --- Derive SIDs for each capability ---
         // `owned_capability_sids` owns the derived SIDs (freed on drop); it

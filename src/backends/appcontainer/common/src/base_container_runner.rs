@@ -45,10 +45,8 @@ use wxc_common::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
 use wxc_common::logger::Logger;
-use wxc_common::models::{
-    ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress,
-    ScriptResponse,
-};
+use wxc_common::models::{ExecutionRequest, FailurePhase, ProxyAddress, ScriptResponse};
+use wxc_common::policy_util::resolve_capabilities;
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
     SendOwnedHandle,
@@ -322,20 +320,7 @@ impl BaseContainerRunner {
 
         let version = builder.create_string(SANDBOX_SPEC_VERSION);
 
-        // Match legacy AppContainer behaviour: when network enforcement uses
-        // capabilities and the default policy is Allow, ensure internetClient
-        // is present so the sandboxed process has network access.
-        let mut caps = request.policy.capabilities.clone();
-        let use_caps_for_network = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
-        );
-        if use_caps_for_network
-            && request.policy.default_network_policy == NetworkPolicy::Allow
-            && !caps.iter().any(|c| c == "internetClient")
-        {
-            caps.push("internetClient".to_string());
-        }
+        let caps = resolve_capabilities(&request.policy);
 
         let capabilities = if caps.is_empty() {
             None
@@ -1495,7 +1480,7 @@ mod tests {
     use super::*;
     use crate::job_object::to_job_object_uilimit_mask;
     use sandbox_spec::base_container_layout;
-    use wxc_common::models::{ClipboardPolicy, ProxyConfig, UiPolicy};
+    use wxc_common::models::{ClipboardPolicy, NetworkPolicy, ProxyConfig, UiPolicy};
     use wxc_common::ui_policy::EffectiveUiRestrictions;
 
     fn expected_mask(r: EffectiveUiRestrictions) -> u64 {
