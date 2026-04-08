@@ -1,6 +1,6 @@
 # Windows Sandbox Backend — Reference
 
-Detailed reference for the sandbox backend internals. For the high-level design overview, see [sandbox.md](sandbox.md).
+Detailed reference for the sandbox backend internals. For the high-level design overview, see [windows-sandbox.md](windows-sandbox.md).
 
 ## IPC Protocol
 
@@ -194,7 +194,7 @@ Manual-only — requires Hyper-V + Windows Sandbox feature (cannot run in GitHub
 
 ```powershell
 cd test_scripts
-.\run_sandbox_tests.ps1 -Release
+.\run_windows_sandbox_tests.ps1 -Release
 ```
 
 ### Test Configs

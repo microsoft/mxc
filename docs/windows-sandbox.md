@@ -119,4 +119,4 @@ After enabling Windows Sandbox: **reboot required**.
 
 ## Further Reading
 
-See [sandbox-reference.md](sandbox-reference.md) for detailed protocol specs, VM setup internals, debugging guide, source file reference, and E2E test documentation.
+See [windows-sandbox-reference.md](windows-sandbox-reference.md) for detailed protocol specs, VM setup internals, debugging guide, source file reference, and E2E test documentation.
