@@ -13,7 +13,7 @@ pub mod validator;
 
 // Windows-specific modules
 #[cfg(target_os = "windows")]
-pub mod appcontainer;
+pub mod appcontainer_runner;
 #[cfg(target_os = "windows")]
 pub mod filesystem_bfs;
 #[cfg(target_os = "windows")]
