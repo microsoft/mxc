@@ -39,14 +39,14 @@ flowchart TD
     Q1 -->|YES| Q2{Security intent<br/>or runtime selection?}
     Q1 -->|NO| Q3{Changes Config<br/>schema?}
 
-    Q2 -->|Security intent| POL["SandboxPolicy field<br/>+ Config + SDK + executors<br/>+ OS (if new API needed)"]
-    Q2 -->|Runtime selection| ENV["SandboxEnvironment field<br/>+ Config + SDK + executors<br/>+ OS (if new API needed)"]
+    Q2 -->|Security intent| POL["SandboxPolicy field<br/>+ Config + SDK + executors"]
+    Q2 -->|Runtime selection| ENV["SandboxEnvironment field<br/>+ Config + SDK + executors"]
 
-    Q3 -->|YES| INTERNAL["Config + SDK + executors<br/>+ OS (if needed)"]
+    Q3 -->|YES| INTERNAL["Config + SDK + executors"]
     Q3 -->|NO| Q4{SDK library-only?}
 
     Q4 -->|YES| SDK_ONLY["SDK library only"]
-    Q4 -->|NO| EXEC["wxc-exec / lxc-exec only<br/>+ OS (if needed)"]
+    Q4 -->|NO| EXEC["wxc-exec / lxc-exec only"]
 
     POL --> TEST["Write tests"]
     ENV --> TEST
@@ -57,11 +57,26 @@ flowchart TD
     PR --> DONE([Ship It])
 ```
 
-> **OS changes:** If the feature requires a new OS API or kernel
-> behavior, that ships in Windows first (e.g., PR in `os.2020`).
-> Work bottom-up: OS → executors → SDK. See the implementation
-> checklist in the
-> [SandboxRequest spec](sandbox-policy/v1/policy.md).
+## Does your feature need an OS change?
+
+Some features require new OS APIs or kernel behaviors that
+don't exist yet (e.g., a new Job Object restriction, a new
+process mitigation). When that's the case:
+
+1. **Ship the OS change first.** Create a PR in `os.2020` to
+add or expose the OS primitive. Coordinate the API surface
+with the executor author.
+2. **Then update the executor** (wxc-exec / lxc-exec) to call
+the new OS API.
+3. **Then update the SDK** to map the new policy/environment
+field to Config.
+
+Work bottom-up: OS → executors → SDK. Not every feature needs
+an OS change; many use existing OS APIs.
+
+See the implementation checklist in the
+[SandboxRequest spec](sandbox-policy/v1/policy.md) for a
+concrete example.
 
 ## Step 1: Write a Feature Spec
 
