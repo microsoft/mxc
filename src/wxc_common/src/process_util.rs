@@ -265,10 +265,7 @@ pub fn run_process_with_captured_output(
         ..Default::default()
     };
 
-    let mut cmd_wide: Vec<u16> = command_line
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let mut cmd_wide = string_util::to_wide(command_line);
     let mut pi = PROCESS_INFORMATION::default();
 
     unsafe {
@@ -643,7 +640,7 @@ mod tests {
             ..Default::default()
         };
         let mut pi = PROCESS_INFORMATION::default();
-        let mut cmd_wide: Vec<u16> = cmd.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut cmd_wide = string_util::to_wide(cmd);
 
         unsafe {
             CreateProcessW(

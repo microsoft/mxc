@@ -341,11 +341,7 @@ impl AppContainerScriptRunner {
         };
 
         // --- Build command line ---
-        let mut cmd_line_wide: Vec<u16> = request
-            .script_code
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let mut cmd_line_wide = string_util::to_wide(&request.script_code);
 
         let working_dir_wide = string_util::to_wide(&request.working_directory);
         let working_dir_pcwstr = if request.working_directory.is_empty() {
