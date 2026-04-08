@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 
-import { Command } from 'commander';
+import { Command, InvalidArgumentError } from 'commander';
 import { ContainerExecutor } from './wxc-executor';
 import {
   spawnSandbox,
@@ -90,7 +90,14 @@ program
   .option('--policy-file <path>', 'Path to a SandboxPolicy JSON file')
   .option('--cwd <path>', 'Working directory for the sandboxed process')
   .option('--container-name <name>', 'Name for the sandbox container')
-  .option('--containment <backend>', 'Override containment backend (appcontainer, sandbox, microvm, lxc, wslc, vm)')
+  .option('--containment <backend>', 'Override containment backend',
+    (value: string) => {
+      const valid = ['appcontainer', 'sandbox', 'microvm', 'lxc', 'wslc', 'vm'];
+      if (!valid.includes(value)) {
+        throw new InvalidArgumentError(`Must be one of: ${valid.join(', ')}`);
+      }
+      return value;
+    })
   .option('--no-pty', 'Use child_process.spawn instead of node-pty (reliable exit codes)')
   .option('--debug', 'Enable debug output')
   .option('--experimental', 'Enable experimental features')

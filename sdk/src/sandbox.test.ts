@@ -212,4 +212,47 @@ describe('buildSandboxPayload', () => {
       }
     });
   });
+
+  describe('Containment override', () => {
+    it('should return minimal config for microvm without filesystem', () => {
+      const payload = buildSandboxPayload('print(42)', defaultPolicy, undefined, undefined, 'microvm');
+      assert.strictEqual(payload.containment, 'microvm');
+      assert.strictEqual(payload.filesystem, undefined);
+      assert.strictEqual(payload.appContainer, undefined);
+    });
+
+    it('should include filesystem with clearPolicyOnExit for microvm when policy has paths', () => {
+      const policy: SandboxPolicy = {
+        version: '0.4.0-alpha',
+        filesystem: { readwritePaths: ['/tmp'] },
+      };
+      const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
+      assert.strictEqual(payload.containment, 'microvm');
+      assert.deepStrictEqual(payload.filesystem!.readwritePaths, ['/tmp']);
+      assert.strictEqual(payload.filesystem!.clearPolicyOnExit, true);
+    });
+
+    it('should still build appcontainer config when containment is appcontainer', () => {
+      let originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.4.0-alpha',
+          network: { allowOutbound: true },
+        };
+        const payload = buildSandboxPayload('echo hi', policy, undefined, undefined, 'appcontainer');
+        assert.strictEqual(payload.containment, 'appcontainer');
+        assert.ok(payload.appContainer, 'appContainer section should be present');
+        assert.ok(payload.appContainer!.capabilities!.includes('internetClient'));
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
+    it('should early-return for vm containment', () => {
+      const payload = buildSandboxPayload('echo hi', defaultPolicy, undefined, undefined, 'vm');
+      assert.strictEqual(payload.containment, 'vm');
+      assert.strictEqual(payload.appContainer, undefined);
+    });
+  });
 });

@@ -74,21 +74,25 @@ export function buildSandboxPayload(
         containerId: name,
     };
 
-    // If an explicit containment backend is requested, use it directly.
-    // Only include filesystem if the policy actually has paths.
+    // If an explicit containment backend is requested, set it on the config.
     if (containment) {
         config.containment = containment;
-        if (policy.filesystem?.readwritePaths?.length ||
-            policy.filesystem?.readonlyPaths?.length ||
-            policy.filesystem?.deniedPaths?.length) {
-            config.filesystem = {
-                readwritePaths: policy.filesystem?.readwritePaths,
-                readonlyPaths: policy.filesystem?.readonlyPaths,
-                deniedPaths: policy.filesystem?.deniedPaths,
-                clearPolicyOnExit: true,
-            };
+        // microvm and vm don't need platform-specific setup — early return
+        if (containment === 'microvm' || containment === 'vm') {
+            if (policy.filesystem?.readwritePaths?.length ||
+                policy.filesystem?.readonlyPaths?.length ||
+                policy.filesystem?.deniedPaths?.length) {
+                config.filesystem = {
+                    readwritePaths: policy.filesystem?.readwritePaths,
+                    readonlyPaths: policy.filesystem?.readonlyPaths,
+                    deniedPaths: policy.filesystem?.deniedPaths,
+                    clearPolicyOnExit: true,
+                };
+            }
+            return config;
         }
-        return config;
+        // Other backends (appcontainer, lxc, etc.) fall through to
+        // platform-specific setup below
     }
 
     // Default path: include filesystem with clearPolicyOnExit
@@ -211,8 +215,9 @@ export function spawnSandbox(
     name: "xterm-color",
     cols: 120,
     rows: 80,
-    cwd: workingDirectory || process.cwd(),
-    env: env
+    ...options.ptyOptions,
+    cwd: workingDirectory || options.ptyOptions?.cwd || process.cwd(),
+    env: env ?? options.ptyOptions?.env,
   };
 
   const ptyProcess = pty.spawn(executablePath, args, ptyOpts);
@@ -288,6 +293,19 @@ function prepareSandboxInvocation(
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
+  // Validate containment against available methods (skip experimental backends
+  // like microvm/vm/sandbox which aren't reported by platform detection)
+  if (options.containment) {
+    const experimental = ['microvm', 'vm', 'sandbox'];
+    if (!experimental.includes(options.containment) &&
+        !platformSupport.availableMethods.includes(options.containment)) {
+      throw new Error(
+        `Containment backend '${options.containment}' is not available on this platform. ` +
+        `Available methods: ${platformSupport.availableMethods.join(', ')}`
+      );
+    }
+  }
+
   const platform = os.platform();
   let executablePath: string | null;
 
@@ -354,6 +372,7 @@ export function execSandbox(
   options: SandboxSpawnOptions = {},
   workingDirectory?: string,
   containerName?: string,
+  env?: { [key: string]: string | undefined },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const { executablePath, args } = prepareSandboxInvocation(
     script, policy, options, workingDirectory, containerName
@@ -363,6 +382,7 @@ export function execSandbox(
     const child: ChildProcess = spawn(executablePath, args, {
       cwd: workingDirectory || process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
+      ...(env ? { env: env as NodeJS.ProcessEnv } : {}),
     });
 
     const stdoutChunks: Buffer[] = [];
