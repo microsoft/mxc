@@ -485,9 +485,6 @@ Filesystem mapping is largely pass-through, as it's already cross-platform:
 |---------------|--------|
 | `lifecycle.destroyOnExit` | `lifecycle.destroyOnExit` (pass-through) |
 
-> When `destroyOnExit: false`, the Config also sets `lifecycle.preservePolicy: true`
-> to retain filesystem and network policies across executions.
-
 ### 6.7 Process & Timeout → Config
 
 | `request.policy` | Config |
