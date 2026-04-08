@@ -72,19 +72,6 @@ jobs:
           npm install
           npm run build
 
-      - name: Sync SDK build into CLI
-        shell: pwsh
-        run: |
-          # Ensure CLI uses the freshly-built SDK (npm may have copied a stale version)
-          $sdkDist = Join-Path $env:GITHUB_WORKSPACE "sdk\dist"
-          $cliSdkDist = Join-Path $env:GITHUB_WORKSPACE "cli\node_modules\@microsoft\mxc-sdk\dist"
-          if (Test-Path $cliSdkDist) {
-            Copy-Item "$sdkDist\*" $cliSdkDist -Recurse -Force
-            Write-Host "Synced SDK dist into CLI node_modules"
-          } else {
-            Write-Host "::warning::CLI SDK dist not found at $cliSdkDist"
-          }
-
       - name: Diagnose hypervisor environment
         shell: pwsh
         run: |
