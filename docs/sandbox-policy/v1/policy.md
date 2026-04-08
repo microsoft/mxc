@@ -44,7 +44,7 @@ intent stays in `policy` with a platform note. Runtime
 selection goes in `environment`.
 6. **Additive-only within major versions** (semver 2.0). During
 alpha, expect breaking changes.
-6. Every policy or environment change requires a config change.
+7. Every policy or environment change requires a config change.
 Config can change independently (backend optimizations).
 
 **API:**
@@ -72,7 +72,8 @@ walkthrough.
 8. [Development Guide: Adding a New Feature](#8-development-guide--adding-a-new-feature)
 9. [Worked Example: Adding UI Policy](#9-worked-example--adding-ui-policy)
 10. [Industry Precedent Analysis](#10-industry-precedent-analysis)
-11. [FAQ & Decision Log](#11-faq--decision-log)
+11. [Diagrams](#diagrams)
+12. [FAQ & Decision Log](#12-faq--decision-log)
 
 ---
 
@@ -792,7 +793,7 @@ systems.
 
 ---
 
-## Diagrams
+## 11. Diagrams
 
 ### 11.1 End-to-End Data Flow
 
@@ -843,7 +844,7 @@ flowchart TD
 
 ---
 
-## 11. FAQ & Decision Log
+## 12. FAQ & Decision Log
 
 ### "Should I update policy, environment, or Config?"
 

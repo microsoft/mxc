@@ -112,7 +112,7 @@ version bump, follow the walkthrough below.
 
 ## Walkthrough
 
-Adding an experimental feature touches these files:
+Adding a feature may touch these files:
 
 | File | What to change |
 |------|----------------|

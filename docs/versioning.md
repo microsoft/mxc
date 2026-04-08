@@ -17,13 +17,13 @@ When a consumer specifies a SandboxRequest version (e.g.,
 
 ```typescript
 // sdk/src/types.ts
-SandboxRequest {
-  version: "0.4.0-alpha",       // must match MXC config schema version
+type SandboxRequest = {
+  version: "0.4.0-alpha",
   policy: {
-    filesystem: { ... },         // security intent
-    network: { ... },            // security intent
+    filesystem: { ... },
+    network: { ... },
   },
-  environment: { ... },          // runtime selection
+  environment: { ... },
 }
 ```
 
