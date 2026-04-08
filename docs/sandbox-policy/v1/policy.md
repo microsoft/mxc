@@ -1,11 +1,11 @@
-# SandboxPolicy Spec v1
+# MXC SandboxRequest Spec v1
 
 ---
 
 ## TL;DR
 
 **Problem:** MXC's `SandboxPolicy` has 3 fields (version, filesystem, network). We need UI isolation, isolation level
-selection, resource limits, and a clear development process — without making the API Windows-specific.
+selection, resource limits, and a clear development process: without making the API Windows-specific.
 
 **Solution:** Introduce `SandboxRequest` that separates security intent (`policy`) from runtime selection
 (`environment`). ~15 policy fields organized in 5 sections, following an **"intent, not mechanism"** philosophy
@@ -29,7 +29,10 @@ const request: SandboxRequest = {
 ```
 
 **Key rules:**
-1. **Policy** = security intent (what to allow/deny). Developers express what they want. Config = mechanism (how).
+1. **Policy** = security intent: what the developer wants to
+allow or deny. It is both declarative (expresses intent, not
+mechanism) and security-focused (controls permissions and
+restrictions). Config = mechanism (how the OS enforces it).
    Developers never see OS primitives.
 2. **Environment** = runtime selection (what kind of sandbox). Config = backend materialization. Internal. Derived
    from policy + environment.
@@ -37,17 +40,12 @@ const request: SandboxRequest = {
 4. Every policy field must work on ≥2 platforms. Windows-only intent stays in `policy` with a platform note.
    Runtime selection goes in `environment`.
 5. **Additive-only within major versions** (semver 2.0). During alpha, expect breaking changes.
-6. Every policy or environment change requires a config change. But config can change independently (backend
-   optimizations, bug fixes).
+6. Every policy or environment change requires a config change.
+Config can change independently (backend optimizations).
 
-**Two APIs:**
+**API:**
 ```typescript
-// Simple — one call:
 spawnSandbox(script, request);
-
-// Advanced — inspect/modify config before spawning:
-const config = buildSandboxConfig(request);
-spawnSandboxFromConfig(script, config);
 ```
 
 **For contributors:** See
@@ -67,11 +65,10 @@ walkthrough.
 5. [Proposed SandboxRequest Model](#5-proposed-sandboxrequest-model)
 6. [SandboxRequest → Config Mapping Rules](#6-sandboxrequest--config-mapping-rules)
 7. [Versioning & Compatibility](#7-versioning--compatibility)
-8. [Development Guide — Adding a New Feature](#8-development-guide--adding-a-new-feature)
-9. [Worked Example — Adding UI Policy](#9-worked-example--adding-ui-policy)
+8. [Development Guide: Adding a New Feature](#8-development-guide--adding-a-new-feature)
+9. [Worked Example: Adding UI Policy](#9-worked-example--adding-ui-policy)
 10. [Industry Precedent Analysis](#10-industry-precedent-analysis)
 11. [FAQ & Decision Log](#11-faq--decision-log)
-12. [Post-GA Features](#12-post-ga-features)
 
 ---
 
@@ -84,8 +81,16 @@ interact with MXC through the TypeScript SDK's (`@microsoft/mxc-sdk`)
 ```typescript
 type SandboxPolicy = {
   version: string;
-  filesystem?: { readwritePaths?: string[]; readonlyPaths?: string[]; deniedPaths?: string[]; };
-  network?: { allowOutbound?: boolean; allowLocalNetwork?: boolean; proxy?: ...; };
+  filesystem?: {
+    readwritePaths?: string[];
+    readonlyPaths?: string[];
+    deniedPaths?: string[];
+  };
+  network?: {
+    allowOutbound?: boolean;
+    allowLocalNetwork?: boolean;
+    proxy?: ...;
+  };
 };
 ```
 
@@ -102,30 +107,27 @@ filesystem policies, Windows Firewall rules, LXC bind mounts, iptables chains).
 Linux. Developers cannot request a VM or microVM when stronger isolation is needed.
 
 2. **No UI policy surface.** Contributors adding UI containment (clipboard, window isolation, input injection) don't
-know where their work fits: SandboxPolicy? Config? Both? The UIPolicy_Schema draft is Windows-specific (Job Object UI
+know where their work fits: SandboxRequest? Config? Both? The UIPolicy_Schema draft is Windows-specific (Job Object UI
 limits, atom tables) but there's no cross-platform abstraction above it.
 
-3. **No enterprise integration.** IT administrators cannot
-inject restrictions into sandboxes on managed machines. This is a
-post-GA feature.
-machines. There's no discovery mechanism, no merge strategy, no API.
-
-4. **Unclear boundary between Policy and Config.** Contributors repeatedly ask: "Should I update SandboxPolicy or
+3. **Unclear boundary between Policy and Config.**
+Contributors repeatedly ask: "Should I update SandboxPolicy or
 Config? How do I know?" There's no decision framework.
 
-5. **New backends are coming fast.** Disposable VMs, microVMs (Hyperlight/NanVix), WSLC, and macOS are all planned. Each
-has different access controls. The current "map `allowOutbound` to
-either a backend-specific setting or a firewall rule"
+4. **New backends are coming fast.** Disposable VMs, microVMs
+(Hyperlight/NanVix), WSLC, and macOS are all planned. Each
+has different access controls. The current "map `allowOutbound`
+to either a backend-specific setting or a firewall rule"
 approach doesn't scale to N backends × M policy surfaces.
 
 ### Primary consumers
 
-MXC's first adopters are GitHub Copilot, Claude Code, and OpenAI — AI coding assistants that need an OS-provided way to
+MXC's first adopters are GitHub Copilot, Claude Code, and OpenAI: AI coding assistants that need an OS-provided way to
 sandbox untrusted scripts produced by LLMs. These consumers need a policy surface that is:
 
-- **Simple** — a few lines of code to get a secure sandbox
-- **Cross-platform** — same policy works on Windows and Linux
-- **Extensible** — new features can be added without breaking
+- **Simple**: a few lines of code to get a secure sandbox
+- **Cross-platform**: same policy works on Windows and Linux
+- **Extensible**: new features can be added without breaking
 existing code
 
 ---
@@ -134,7 +136,12 @@ existing code
 
 This spec does **not** cover:
 
-- **Runtime permission brokering.** Flatpak-style portals (user-mediated access dialogs at runtime) are out of scope.
+- **Enterprise policy injection (post-GA).** IT administrators
+injecting restrictions into sandboxes on managed machines
+(Group Policy, MDM, config files). This includes discovery and
+merge strategy.
+- **Runtime permission brokering.** Flatpak-style portals
+(user-mediated access dialogs at runtime) are out of scope.
 MXC policies are declared upfront and immutable for the sandbox's lifetime.
 - **Multi-container orchestration.** Composing multiple sandboxes or sandbox-to-sandbox communication is not addressed
 here.
@@ -151,7 +158,8 @@ These principles are derived from analyzing six established sandbox technologies
 
 ### Principle 1: Intent, Not Mechanism
 
-> **SandboxPolicy describes *what* the developer wants. Config describes *how* the OS enforces it.**
+> **SandboxRequest describes *what* the developer wants.
+> Config describes *how* the OS enforces it.**
 
 A developer says: *"I don't want the sandboxed process to read the clipboard."*  
 They write: `clipboard: "none"`.
@@ -159,40 +167,50 @@ They write: `clipboard: "none"`.
 They never write `JOB_OBJECT_UILIMIT_READCLIPBOARD` or `xdg-portal-disable-clipboard`. Those are mechanisms. Mechanisms
 belong in Config and backend runners.
 
-**Modeled after:** Apple's App Sandbox entitlements, where `com.apple.security.network.client` (intent) maps to sandbox
-profile rules (mechanism).
+**Modeled after:** Apple's App Sandbox, where developers
+declare entitlements (e.g., `com.apple.security.network.client`)
+and the OS handles all enforcement internally. In MXC, the
+SandboxRequest is the entitlement; Config and backend enforcement
+are internal, just as Apple's sandbox profiles are.
 
 ### Principle 2: Default-Deny
 
 > **Omitted fields = most restrictive. Adding a field opts *in* to a permission.**
 
 ```typescript
-// This creates a fully locked-down sandbox:
+// This creates a fully locked-down sandboxed process (the default):
 const request: SandboxRequest = { version: "0.5.0-dev", policy: {} };
 
 // This allows outbound network:
 const request: SandboxRequest = { version: "0.5.0-dev", policy: { network: { policy: "outbound" } } };
 ```
 
-Every new field added to SandboxPolicy in a future version automatically defaults to "denied" for existing requests
+Every new field added to SandboxRequest in a future version automatically defaults to "denied" for existing requests
 that don't set it. This is a security guarantee.
 
-**Modeled after:** Flatpak finish-args and the existing
-UIPolicy_Schema draft.
+**Based on:** The design discussion around the UIPolicy_Schema
+draft, which established default-deny as the standard for new
+policy surfaces in MXC.
 
-### Principle 3: Cross-Platform by Design
+### Principle 3: Cross-Platform Where Possible
 
-> **Every policy field must be meaningful on at least two platforms. Platform-specific behavior lives only in Config.**
+> **Policy fields should be cross-platform where possible.
+> Platform-specific intent is allowed with a platform note.**
 
-If a concept exists only on Windows (e.g., atom table isolation) or only on Linux (e.g., cgroup memory limits), it
-cannot be a policy field. It can be a Config field under a platform-specific section (`appcontainer`, `lxc`).
+Cross-platform fields (e.g., `clipboard`, `filesystem`,
+`network`) belong in policy and work on all platforms. The
+enforcement mechanism differs per OS, but the intent is the same.
 
-If a concept is universal (e.g., clipboard access, filesystem paths, network access), it belongs in policy even if
-the enforcement mechanism differs per platform. Windows-only intent stays in `policy` with a "Windows only" note.
-Runtime selection (isolation level, Linux distribution) goes in `environment`.
+Platform-specific fields (e.g., `ui.ime`, which only applies on
+Windows) can also go in policy if the user needs to opt in. They
+are marked "Windows only" (or "Linux only") in the docs. The SDK
+maps them to Config on the matching platform and silently skips
+them on others. Both the SDK library and Config schema need
+updates when adding these.
 
-**Test:** Before adding a field to policy, answer: "How would this be enforced on Windows? On Linux? On macOS?" If
-you can't answer for at least two, it's a Config field.
+Fields that are purely implementation detail (e.g., AppContainer
+capability lists, LXC mount flags) stay in Config only. The user
+never sees them.
 
 ### Principle 4: Layered Containment
 
@@ -202,127 +220,118 @@ you can't answer for at least two, it's a Config field.
 The `SandboxRequest` separates security intent (`policy`) from runtime selection (`environment`). The
 `environment.isolation` field lets developers declare their desired containment strength: `"process"`, `"container"`,
 `"microvm"`, or `"disposableVm"`. The SDK maps this to the best available backend for the current OS. Today
-`"process"` is fully implemented (BaseProcessContainer on Windows, LXC on Linux). Other levels are in development.
+`"process"` is implemented (BaseProcessContainer on Windows, LXC on Linux). Other levels are in development.
 
 **The developer never names a backend directly.** They express
 intent; the SDK resolves it.
 
 ### Principle 5: Version Is a Contract
 
-> **The SandboxRequest version and Config schema version are locked in step. A version number guarantees behavior.**
+> **See [versioning.md](../../versioning.md) for the full
+> versioning design.**
 
-`version: "0.5.0-dev"` means the exact same set of fields, defaults, and semantics — regardless of which OS or SDK
-build is running. If a field was added in 0.6.0, a 0.5.0 request will never see it.
-
-Consequences:
-- New policy or environment field → minor version bump (both request and Config schema)
-- Removed or changed field → major version bump (both)
-- SDK rejects configs with a version higher than it supports
-- Old requests on new SDKs: unchanged behavior (new fields auto-deny)
-
-### Principle 6: Composable
-
-> **Policy fragments can be built independently and merged.**
-
-The SDK already supports this pattern through `FilesystemPolicyResult`:
-
-```typescript
-const tools = getAvailableToolsPolicy();
-const profile = getUserProfilePolicy();
-const temp = getTemporaryFilesPolicy();
-
-const request: SandboxRequest = {
-  version: "0.5.0-dev",
-  policy: {
-    filesystem: {
-      readonlyPaths: [...tools.readonlyPaths, ...profile.readonlyPaths],
-      readwritePaths: [...temp.readwritePaths, workDir],
-    },
-  },
-};
-```
-
-This pattern extends to all policy sections.
-
-> **Future direction:** Today the SDK provides catch-all discovery helpers (`getAvailableToolsPolicy`,
-`getUserProfilePolicy`, `getTemporaryFilesPolicy`). In future versions, we want targeted fragment APIs that return
-policy for specific tools or contexts — e.g.,
-`getPythonPolicy()`, `getNodePolicy()`, `getGitPolicy()`. This lets
-consumers build precise, minimal policies instead of granting broad read-only access to everything on `PATH`.
-
-### Principle 7: Stability Within Major Versions
-
-> **Within a major version, SandboxRequest is additive-only. Breaking changes require a major version bump per semver
-2.0.**
-
-Within a major version (e.g., all 1.x releases):
-- Fields can be added but never removed, renamed, or have their defaults changed
-- A request written for 1.0 must behave identically on SDK 1.5
-- New fields auto-deny (default-deny) so existing requests are never broken
-
-Across major versions (e.g., 1.x → 2.0):
-- Fields CAN be removed, renamed, or have defaults changed
-- Deprecated fields from the previous major version may be dropped
-- The SDK provides a migration guide for each major bump
-- Old major versions continue to work on the old SDK (users aren't forced to upgrade)
-
-This follows [semver 2.0](https://semver.org/) strictly. During the 0.x alpha period, breaking changes are permitted
-with any minor version bump (per semver 2.0 §4: "Major version zero is for initial development. Anything MAY change at
-any time.").
+The SandboxRequest version and Config schema version are locked
+in step. A version number guarantees behavior.
 
 ---
 
 ## 4. Architecture
 
-MXC is a **policy layer** that sits above diverse container technologies. Process containers (BaseProcessContainer on
-Windows, LXC on Linux), self-contained environments (WSLC, Docker), and VMs (disposable VMs, microVMs) are all backends
-that MXC can invoke. The `SandboxRequest` is the single, unified API through which developers express their intent —
-security policy and runtime environment. The SDK translates that intent into backend-specific configuration.
+MXC has two mechanisms:
+
+1. **SandboxRequest** (policy + environment): the user-facing
+input. Developers express security intent (what to allow/deny)
+and runtime selection (what kind of sandbox). This is the
+TypeScript SDK library API.
+
+2. **Configuration** (Config): the backend-facing JSON schema
+used to create containment backends. The SDK generates Config
+from the SandboxRequest. Config is consumed by `wxc-exec` and
+`lxc-exec` to set up the actual sandbox. Developers do not
+write Config directly.
+
+MXC is a **policy layer** that sits above diverse container
+technologies. Process containers (BaseProcessContainer on
+Windows, LXC on Linux), self-contained environments (WSLC,
+Docker), and VMs (disposable VMs, microVMs) are all backends
+that MXC can invoke.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  LAYER 1: SDK + SandboxRequest (policy + environment)                   │
-│                                                                         │
-│  Consumers: GitHub Copilot, Claude Code, OpenAI, etc.                  │
-│                                                                         │
-│  SandboxRequest (TypeScript) — developer-facing intent                 │
-│    policy:      security intent (filesystem, network, ui, resources)   │
-│    environment: runtime selection (isolation, linux distro)            │
-│  SDK: buildSandboxConfig() — compiles request into Config JSON         │
-│                                                                         │
-│  Cross-platform. No OS-specific fields. Intent only.                   │
-│  SDK detects OS, selects backend, generates Config.                    │
-└────────────────────────────────┬────────────────────────────────────────┘
-                                 │ Config JSON (base64-encoded)
-                                 ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  LAYER 2: Executors (wxc-exec, lxc-exec)                               │
-│                                                                         │
-│  Consumers: The SDK spawns these as child processes                    │
-│                                                                         │
-│  Parse Config JSON → select backend runner → apply config             │
-│  Backends: BaseProcessContainer, LXC, Disposable VM, microVM, WSLC     │
-│                                                                         │
-│  Rust. Schema-validated. Can be OS-specific.                           │
-└────────────────────────────────┬────────────────────────────────────────┘
-                                 │ OS API calls
-                                 ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  LAYER 3: OS Primitives                                                │
-│                                                                         │
-│  Windows: BaseProcessContainer profiles, BFS, Windows Firewall,        │
-│           Job Objects, Win32k system call filtering                     │
-│  Linux: LXC cgroups, bind mounts, iptables, seccomp                    │
-│  macOS: App Sandbox profiles, entitlements (future)                     │
-│                                                                         │
-│  Kernel and system-level enforcement. Never referenced by name         │
-│  in Layer 1.                                                            │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│ LAYER 1: SDK + SandboxRequest (policy + environment)        │
+│                                                             │
+│ Users: GitHub Copilot, Claude Code, OpenAI, etc.            │
+│                                                             │
+│ SandboxRequest (TypeScript): developer-facing intent        │
+│   policy:      security intent (filesystem, network, ui)    │
+│   environment: runtime selection (isolation, linux distro)  │
+│ SDK: buildSandboxConfig(): request → Config JSON            │
+│                                                             │
+│ Cross-platform. Intent only.                                │
+│ SDK detects OS, selects backend, generates Config.          │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ Config JSON (base64-encoded)
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ LAYER 2: Executors (wxc-exec, lxc-exec)                     │
+│                                                             │
+│ Parse Config JSON → select backend runner → apply config    │
+│ Backends: BaseProcessContainer, LXC,                        │
+│           Disposable VM, microVM, WSLC                      │
+│                                                             │
+│ Rust. Schema-validated. Can be OS-specific.                 │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ OS API calls
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ LAYER 3: OS Primitives                                      │
+│                                                             │
+│ Windows: BaseProcessContainer profiles, BFS, Firewall,      │
+│          Job Objects, Win32k system call filtering          │
+│ Linux: LXC cgroups, bind mounts, iptables, seccomp          │
+│                                                             │
+│ Kernel and system-level enforcement.                        │
+│ Never referenced by name in Layer 1.                        │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-A developer should never need to know that BaseProcessContainer exists, that BFS is used for filesystem policies, or
-that `JOB_OBJECT_UILIMIT_GLOBALATOMS` is the mechanism for atom table isolation. If they do, the abstraction has
-failed.
+A developer should never need to know that BaseProcessContainer
+exists, that BFS is used for filesystem policies, or that
+`JOB_OBJECT_UILIMIT_GLOBALATOMS` is the mechanism for atom table
+isolation. If they do, the abstraction has failed.
+
+> **OS contributions:** Some features require new OS APIs or
+> kernel behaviors that don't exist yet. When that's the case,
+> OS changes ship first (e.g., in `os.2020`), then the executor
+> (wxc-exec/lxc-exec) calls the new API, then the SDK maps to
+> it. See the implementation checklist in
+> [Section 9.7](#97-implementation-checklist).
+
+### Config granularity
+
+Config exists to translate policy and environment into something
+the executors (wxc-exec, lxc-exec) can act on. It is not a
+general-purpose deployment manifest or a way to provide granular
+control over every OS knob.
+
+Rules for Config:
+
+- **Every Config field must be reachable** from policy or
+environment, either directly or via SDK defaults. If a field
+has no path from the user-facing input, it should not exist.
+- **Keep Config minimal.** Only add Config fields that the
+executors actually need to set up the sandbox. Do not expose
+OS internals just because they exist.
+- **Config is not user-facing.** Users interact with
+SandboxRequest. Config is the internal contract between the
+SDK library and the executors. If you find yourself wanting
+users to edit Config, that's a signal the field should be in
+policy or environment instead.
+- **SDK defaults fill the gap.** When policy says
+`allowWindows: true`, the SDK sets Config fields like
+`ui.isolation: "container"` and `ui.desktopSystemControl: false`
+without the user knowing. These are safe defaults derived from
+the intent, not arbitrary Config values.
 
 ---
 
@@ -341,9 +350,16 @@ type SandboxRequest = {
 
 type SandboxPolicy = {
   filesystem?: { ... };                   // readwritePaths, readonlyPaths, deniedPaths, tempDir
-  network?: { ... };                      // policy, allowedHosts, blockedHosts, proxy
-  ui?: { ... };                           // allowWindows, clipboard, allowInputInjection
+  network?: { ... };                      // policy, allowedHosts, blockedHosts,
+                                          // proxy, enforcementMode
+  ui?: { ... };                           // allowWindows, clipboard,
+                                          // allowInputInjection,
+                                          // isolation (Win), ime (Win),
+                                          // desktopSystemControl (Win),
+                                          // systemSettings (Win)
   resources?: { ... };                    // maxMemoryMB, maxCpus
+  leastPrivilege?: boolean;               // Least privilege mode (Win)
+  integrityLevel?: "inherit"|"low"|"medium"; // Process IL (Win)
   timeoutMs?: number;                     // Execution timeout (ms)
   lifecycle?: { ... };                    // destroyOnExit
 };
@@ -351,56 +367,47 @@ type SandboxPolicy = {
 type SandboxEnvironment = {
   isolation?: "process" | "container"     // Containment strength
     | "microvm" | "disposableVm";
-  linux?: {                               // Linux-specific runtime options
+  linux?: {                               // Linux-specific runtime
     distribution?: string;                // e.g., "alpine", "ubuntu"
     release?: string;                     // e.g., "3.23", "24.04"
+  };
+  vm?: {                                  // VM-specific runtime
+    idleTimeoutMs?: number;               // Idle timeout (default: 300000)
+    daemonPipeName?: string;              // Pipe name (Win, default: "wxc-sandbox")
   };
 };
 ```
 
 Key design decisions:
-- **Default-deny** — `{ version: "0.5.0-dev", policy: {} }` creates
-  a fully locked-down sandbox
-- **Policy vs Environment** — policy declares what to allow/deny.
+- **Default-deny**: `{ version: "0.5.0-dev", policy: {} }` creates
+  a fully locked-down sandboxed process (the default)
+- **Policy vs Environment**: policy declares what to allow/deny.
   Environment declares what kind of sandbox. Config is internal,
   derived from both.
-- **No extensions** — platform-specific intent stays in `policy`
-  with a "Windows only" or "Linux only" note. Runtime selection
-  (isolation, distro) goes in `environment`. This eliminates the
-  extensions layer entirely.
 
 | Change | Rationale |
 |--------|-----------|
-| Introduced `SandboxRequest` wrapper | Separates security intent (`policy`) from runtime selection (`environment`). Config is internal — derived from both. |
-| Moved `isolation` to `environment` | Isolation level is a runtime concern, not a security permission. |
-| Moved `version` to `SandboxRequest` root | Applies to the entire request, not just the policy section. |
-| Replaced `network.allowOutbound` + `allowLocalNetwork` with `network.policy` enum | Two booleans created 4 ambiguous combinations. A single enum (`"none" \| "local" \| "outbound" \| "full"`) is unambiguous. |
-| Added `ui` section | Three cross-platform fields: "can it draw?", "can it clipboard?", "can it inject input?" |
-| Added `timeoutMs` (top-level in policy) | Execution timeout is a security constraint for untrusted code. `env` and `cwd` remain on `SandboxSpawnOptions`. |
-| Removed `extensions` section | Platform-specific intent stays in `policy` with platform notes. Runtime selection goes in `environment`. No need for a separate extensions namespace. |
-| Added `resources` section | Resource constraints for memory and CPU limits. |
-| Added `lifecycle` section | Developers control whether sandboxes are ephemeral (default) or persistent. Maps to Config `lifecycle.destroyOnExit` and `lifecycle.preservePolicy`. |
-| Added `filesystem.tempDir` | Explicit temp directory isolation prevents accidental sharing between sandbox and host. |
-| Moved `distribution`/`release` to `environment.linux` | Linux distro is a runtime concern — what environment to run in, not what to permit. |
-| Removed `filesystem.clearPolicyOnExit` | Implementation detail. Use `lifecycle.preservePolicy` in Config if needed. |
+| `SandboxRequest` = `policy` + `environment` | Separates security intent from runtime selection. Config is internal. |
+| `isolation` in `environment` | It's "what to run in," not "what to restrict." |
+| `network.policy` enum | Replaces ambiguous boolean pair (`allowOutbound` + `allowLocalNetwork`). |
+| `ui` section | Cross-platform UI intent: `allowWindows`, `clipboard`, `allowInputInjection`. |
+| `lifecycle`, `timeoutMs`, `resources`, `filesystem.tempDir` | Security constraints and resource limits as policy fields. |
 
 ### What was deliberately NOT added
 
 | Omitted | Reason |
 |---------|--------|
-| `appcontainer.capabilities` | Implementation detail. The SDK maps `network.policy` to the correct backend-specific enforcement. Developers never set this. |
-| `ui.isolation` (desktop/handles/atoms) in policy | Windows-specific granularity. Config-only — it's mechanism, not intent. Cross-platform `ui.allowWindows` is sufficient for most consumers. |
-| `ui.ime`, `ui.systemSettings`, `ui.desktopSystemControl` in policy | Windows-specific mechanism. Config-only. |
-| `containment` (backend name) | Developer should not name backends. They declare isolation intent; the SDK picks the backend. |
-| Per-backend Config sections | `appcontainer {}`, `lxc {}`, `wslc {}` — internal Config only. |
-| Audio/video/peripheral access | Future work. Will follow the same pattern: cross-platform policy field + Config for platform-specific mechanism. |
+| `containment` (backend name) | Developers declare isolation level in `environment.isolation`. The SDK picks the backend. |
+| Per-backend Config sections | `appcontainer {}`, `lxc {}`, `wslc {}` are internal Config. Every Config field is derived from policy or environment; there is nothing in Config that a developer sets directly. |
+| Audio/video/peripheral access | Future work. |
 
 ---
 
 ## 6. SandboxRequest → Config Mapping Rules
 
-This section defines how the SDK's `buildSandboxConfig()` function translates each SandboxRequest field into
-backend-specific Config fields.
+This section defines how the SDK's `buildSandboxConfig()` function
+(currently `buildSandboxPayload()` in the codebase) translates
+each SandboxRequest field into backend-specific Config fields.
 
 ### 6.1 Environment → Backend Selection
 
@@ -413,7 +420,7 @@ The SDK maps `request.environment.isolation` to a containment backend per OS:
 | `"microvm"` | Hyperlight/NanVix (future) | microVM (future) |
 | `"disposableVm"` | Disposable VM (future) | (future) |
 
-Today only `"process"` is fully implemented. Other levels return
+Today only `"process"` is implemented. Other levels return
 `BACKEND_UNAVAILABLE` until their backends ship. The SDK never
 silently downgrades.
 
@@ -437,14 +444,14 @@ silently downgrades.
 | `clipboard: "read"` | `ui.clipboard: "read"`. | `xclip` / `wl-copy` read-only access via portal or socket permission. | RDP clipboard: host→guest only. |
 | `clipboard: "readwrite"` | `ui.clipboard: "all"`. | Full clipboard socket access. | RDP clipboard: bidirectional. |
 | `allowInputInjection: true` | `ui.injection: true`. | Allow `/dev/uinput` access. | RDP input passthrough. |
+| `isolation: "atoms"` | `ui.isolation: "atoms"`. | N/A (Windows only). | N/A. |
+| `desktopSystemControl: true` | `ui.desktopSystemControl: true`. | N/A (Windows only). | N/A. |
+| `systemSettings: "parameters"` | `ui.systemSettings: "parameters"`. | N/A (Windows only). | N/A. |
+| `ime: true` | `ui.ime: true`. | N/A (Windows only). | N/A. |
 
-Platform-specific UI Config fields (`isolation`, `desktopSystemControl`, `systemSettings`, `ime`) are Config-only —
-they are mechanism, not intent. The SDK sets safe defaults for these based on the cross-platform `ui` fields.
-
-**Cross-platform handling of unsupported features:**
-When a UI field is set but the backend doesn't support it (e.g., clipboard in a headless LXC container), the SDK logs
-a warning and the field is ignored. It does not error — the developer's intent is recorded, and the backend applies
-what it can.
+When a UI field is set but the backend doesn't support it
+(e.g., Windows-only fields on Linux), the SDK logs a warning
+and the field is ignored.
 
 ### 6.4 Filesystem → Config
 
@@ -553,9 +560,12 @@ number, bumped together.
 - **SDK version is independent.** SDK can be v5.0 while
 policy/schema is v2.1.
 - **SDK supports one major version at a time.** If your request
-version is newer than what the SDK knows, it rejects. Upgrade SDK.
-- **No backward compat across major versions.** Major bump means
-the SDK can drop support for old versions.
+version is newer than what the SDK knows, it rejects. Users
+should upgrade their SDK.
+- **No backward compat across major versions.** A major bump
+means the MXC SDK can drop support for old policy versions.
+This does not affect Windows OS support; it is an MXC SDK
+change only.
 - **During alpha, expect breaking changes** as SandboxRequest
 evolves.
 - **Experimental fields** are gated behind
@@ -570,7 +580,7 @@ version number.
 > [authoring-a-new-feature.md](../../authoring-a-new-feature.md)
 
 That document covers:
-- **Step 0:** Decision tree — where does your feature go?
+- **Step 0:** Decision tree: where does your feature go?
 (policy, environment, Config, or Rust-only)
 - **Steps 1–8:** Feature spec → SandboxRequest → SDK mapping →
 Config schema → Rust parser → backend runner → tests → version
@@ -579,14 +589,14 @@ bump
 
 ---
 
-## 9. Worked Example — Adding UI Policy
+## 9. Worked Example: Adding UI Policy
 
 This section walks through the complete process of adding UI containment support as a concrete example of the
 development workflow.
 
 ### 9.1 Problem
 
-Sandboxed processes on Windows can currently interact freely with the GUI subsystem: creating windows, reading the
+Processes on Windows can currently interact freely with the GUI subsystem: creating windows, reading the
 clipboard, injecting input. This is a security gap for untrusted code execution.
 
 ### 9.2 SandboxRequest Addition (Layer 1)
@@ -603,6 +613,9 @@ const request: SandboxRequest = {
       clipboard: "none",
       allowInputInjection: false,
     },
+  },
+  environment: {
+    isolation: "process",
   },
 };
 ```
@@ -647,7 +660,7 @@ if (platform === 'win32') {
       disable: !(ui.allowWindows ?? false),
       clipboard: mapClipboard(ui.clipboard ?? "none"),
       // Cross-platform ui.allowWindows picks a safe default for isolation.
-      // Config-only fields get safe defaults — they're mechanism, not intent.
+      // Config-only fields get safe defaults: they're mechanism, not intent.
       isolation: "container",
       desktopSystemControl: false,
       systemSettings: "none",
@@ -730,30 +743,49 @@ fn apply_ui_policy(&self, ui: &UiConfig, job_handle: HANDLE) -> Result<(), Strin
 
 ### 9.6 Testing
 
-1. **SDK test (cross-platform):** `buildSandboxConfig` with `policy: { ui: { allowWindows: true, clipboard: "read" } }`
-produces Config with `ui.disable: false`, `ui.clipboard: "read"`, `ui.isolation: "container"`.
-2. **Config test:** `test_configs/ui_lockdown.json` with `ui: {}`
-verifies full lockdown. You can test directly with
+1. **SDK unit test:** `buildSandboxConfig` with
+`policy: { ui: { allowWindows: true, clipboard: "read" } }`
+produces Config with `ui.disable: false`, `ui.clipboard: "read"`,
+`ui.isolation: "container"`.
+2. **Config integration test:** `test_configs/ui_lockdown.json`
+with `ui: {}` verifies full lockdown. You can test directly with
 `wxc-exec config.json` bypassing the SDK entirely.
-3. **Integration test** (`cli/cli.test.ts`): Spawn a sandbox with
-clipboard access, verify clipboard operations work/fail as expected.
+3. **SDK integration test** (`cli/cli.test.ts`): Spawn a sandbox
+with clipboard access, verify clipboard operations work/fail as
+expected.
 
 ### 9.7 Implementation checklist
 
-1. **Config layer:** Build the `ui` section in Config schema + Rust
-implementation (appcontainer.rs). Test directly with
-`wxc-exec config.json` to verify Config fields work.
-2. **SandboxRequest layer:** Add the cross-platform `ui` field to
-`SandboxPolicy`. Add the mapping in `buildSandboxConfig()` that
-translates policy fields into Config.
-3. **Verify mapping:** The Config `ui` section field names/types are
-the contract. The mapping rules (Section 9.4) define how
-`request.policy.ui` produces Config. Ensure all Config fields are
-reachable.
-4. **End-to-end validation:** Test through the SDK by setting
-`request.policy.ui.allowWindows = true` in a SandboxRequest and
-calling `spawnSandbox()`. This exercises the full pipeline:
-request → SDK mapping → Config → Rust parser → backend runner → OS.
+Some features require changes at all three layers. Work
+bottom-up: OS first, then executors, then SDK.
+
+1. **OS layer (if needed):** If the feature requires a new OS API
+or kernel behavior that doesn't exist yet (e.g., a new Job
+Object UI restriction, a new process mitigation), that must
+ship in Windows first. Create a PR in `os.2020` to add or
+expose the OS primitive. The executor (wxc-exec) will call this
+API, so coordinate the API surface with the executor author.
+This step is not always needed; many features use existing OS
+APIs.
+
+2. **Config layer:** Build the `ui` section in Config schema +
+Rust implementation (appcontainer.rs). The executor code calls
+the OS APIs from step 1. Test directly with
+`wxc-exec config.json` to verify Config fields work end-to-end
+against the OS.
+
+3. **SandboxRequest layer:** Add the field to `SandboxPolicy`
+(or `SandboxEnvironment`). Add the mapping in
+`buildSandboxConfig()` that translates the request into Config.
+
+4. **Verify mapping:** The Config field names/types are the
+contract. The mapping rules (Section 6) define how the request
+produces Config. Ensure all Config fields are reachable from
+policy or environment.
+
+5. **End-to-end validation:** Test through the SDK by calling
+`spawnSandbox()` with the new field set. This exercises the
+full pipeline: request → SDK → Config → executor → OS.
 
 ---
 
@@ -764,7 +796,7 @@ request → SDK mapping → Config → Rust parser → backend runner → OS.
 | **Apple App Sandbox** | Entitlements (intent) → sandbox profiles (mechanism). Cross-version stable. | **The two-layer model.** SandboxPolicy = entitlements, Config = profiles. |
 | **Flatpak** | `finish-args` (declarative) → Portals (runtime mediation). | **Declarative permissions.** `--share=network` ≈ `network.policy: "outbound"`. |
 | **Windows Sandbox** | `.wsb` XML with ~10 simple boolean/enum fields. | **Simplicity.** Small policy surface covers 90% of use cases. (Disposable VM model.) |
-| **Docker** | `--cap-add/drop`, seccomp profiles, AppArmor. Mechanism-heavy. | **Anti-pattern.** MXC never exposes OS primitives in SandboxPolicy. |
+| **Docker** | `--cap-add/drop`, seccomp profiles, AppArmor. Mechanism-heavy. | **Anti-pattern.** MXC never exposes OS primitives in SandboxRequest. |
 | **Chromium** | Broker/target model. Internal-only policies. | **Broker pattern** for mediating access between isolated and non-isolated processes. |
 
 **Key takeaway:** MXC's two-layer model is most closely aligned with Apple's entitlements → profiles, extended to be
@@ -779,17 +811,17 @@ systems.
 
 ```mermaid
 flowchart TB
-    subgraph "Layer 1 — SDK + SandboxRequest"
+    subgraph "Layer 1: SDK + SandboxRequest"
         A[SandboxRequest<br/>User: Copilot, Claude Code, OpenAI]
         B[SDK: buildSandboxConfig<br/>Detects OS, selects backend,<br/>generates Config JSON]
     end
 
-    subgraph "Layer 2 — Executors"
+    subgraph "Layer 2: Executors"
         E[wxc-exec / lxc-exec<br/>Parses Config, runs backend]
         G[Backend Runner<br/>BaseProcessContainer / LXC /<br/>Disposable VM / microVM]
     end
 
-    subgraph "Layer 3 — OS"
+    subgraph "Layer 3: OS"
         H[BaseProcessContainer, BFS, Firewall,<br/>Job Objects, LXC, iptables, cgroups]
     end
 
@@ -808,22 +840,18 @@ flowchart TD
     P -->|"process"<br/>default| OS1{OS?}
     OS1 -->|Windows| AC[BaseProcessContainer]
     OS1 -->|Linux| LL[LXC]
-    OS1 -->|macOS| AS["App Sandbox (future)"]
 
     P -->|"container"| OS2{OS?}
     OS2 -->|Windows| WSLC[WSLC]
     OS2 -->|Linux| LXC2["Docker / LXC"]
-    OS2 -->|macOS| ERR1[Error: Not supported]
 
     P -->|"microvm"| OS3{OS?}
     OS3 -->|Windows| NV["Hyperlight/NanVix<br/>(future)"]
-    OS3 -->|Linux| ERR2["microVM (future)"]
-    OS3 -->|macOS| ERR3[Error: Not supported]
+    OS3 -->|Linux| ERR2["(future)"]
 
     P -->|"disposableVm"| OS4{OS?}
     OS4 -->|Windows| SB["Disposable VM<br/>(future)"]
     OS4 -->|Linux| ERR4["(future)"]
-    OS4 -->|macOS| ERR5[Error: Not supported]
 ```
 
 ---
@@ -833,11 +861,17 @@ flowchart TD
 ### "Should I update policy, environment, or Config?"
 
 Use the decision tree in
-[authoring-a-new-feature.md](../../authoring-a-new-feature.md). If
-the user needs to opt in to a security permission → `policy`. If
-it's a runtime selection → `environment`. If not developer-facing
-→ Config schema + SDK mapping (SDK sets it internally). Either
-way, if the Config schema changes, the SDK changes too.
+[authoring-a-new-feature.md](../../authoring-a-new-feature.md).
+
+- **Policy**: does this restrict what the sandboxed code can do?
+(e.g., network access, filesystem, UI, timeouts) → `policy`
+- **Environment**: does this choose what kind of sandbox to run
+in? (e.g., isolation level, Linux distro/release) → `environment`
+- **Config**: the Config is derived from policy + environment.
+Every Config field must be reachable from one of those two,
+either directly (user sets it) or via SDK defaults (SDK sets it
+based on policy/environment values). There should never be a
+Config field that has no path from policy or environment.
 
 ### "What if my feature doesn't make sense on Linux?"
 
@@ -853,52 +887,5 @@ abstraction, it's Config-only.
 Useful for testing Config changes, accessing platform-specific
 features, and internal development. The SDK's
 `buildSandboxConfig()` is the recommended path for production.
-
----
-
-## 12. Post-GA Features
-
-The following features are not in scope for the initial release.
-They will be specified in separate documents.
-
-- **Enterprise Policy Injection** — IT administrators restrict
-sandbox permissions on managed machines (Group Policy, MDM, config
-files). Most-restrictive-wins merge strategy. Includes
-`EffectiveSandboxPolicy` type.
-
----
-
-## Appendix A: Migration Path from Current SandboxPolicy
-
-### Current (v0.4.0-alpha)
-```typescript
-const policy: SandboxPolicy = {
-  version: "0.4.0-alpha",
-  filesystem: { readwritePaths: ["/workspace"], readonlyPaths: ["/tools"] },
-  network: { allowOutbound: true },
-};
-```
-
-### Proposed (v0.5.0-dev)
-```typescript
-const request: SandboxRequest = {
-  version: "0.5.0-dev",
-  policy: {
-    filesystem: { readwritePaths: ["/workspace"], readonlyPaths: ["/tools"] },
-    network: { policy: "outbound" },
-  },
-  environment: {
-    isolation: "process",
-  },
-};
-```
-
-The SDK will accept both old and new network fields during a deprecation window. Old booleans map as follows:
-- `allowOutbound: true` → `policy: "outbound"`
-- `allowLocalNetwork: true` (without outbound) → `policy: "local"`
-- Both true → `policy: "outbound"` (the old booleans never implied inbound listener support, so this does NOT map to
-`"full"`)
-
-Deprecated fields emit a console warning and will be removed in the next major version.
 
 
