@@ -93,7 +93,7 @@ Controls network access from the sandbox.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `policy` | `"none" \| "local" \| "outbound" \| "full"` | `"none"` | Network access posture. `"none"`: no network. `"local"`: localhost + RFC 1918 only. `"outbound"`: outbound internet (no inbound). `"full"`: all traffic. |
+| `policy` | `"none" \| "local" \| "outbound" \| "full"` | `"none"` | Network access posture. `"none"`: no network. `"local"`: localhost + RFC 1918 only (narrowed by `allowedHosts` if set). `"outbound"`: outbound internet, no inbound (`allowedHosts` acts as allowlist if set). `"full"`: all traffic. |
 | `allowedHosts` | `string[]` |: | Host allowlist (hostnames, IPs, CIDR). Only valid with `policy: "outbound"`. If omitted, all outbound traffic is allowed. |
 | `blockedHosts` | `string[]` |: | Hosts to explicitly block. Only valid with `policy: "outbound"`. |
 | `proxy` | `{ builtinTestServer: true } \| { url: string }` | — | Proxy configuration. `builtinTestServer`: MXC's built-in test proxy. `url`: proxy URL including protocol, host, and port (e.g., `"http://localhost:8080"`, `"socks5://proxy.corp.com:1080"`). |
