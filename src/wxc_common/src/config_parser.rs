@@ -979,7 +979,7 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         let sandbox = req.experimental.windows_sandbox.unwrap();
         assert_eq!(sandbox.idle_timeout_ms, 300_000);
-        assert_eq!(sandbox.daemon_pipe_name, "wxc-sandbox");
+        assert_eq!(sandbox.daemon_pipe_name, "wxc-windows-sandbox");
     }
 
     #[test]

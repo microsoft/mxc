@@ -78,7 +78,7 @@ This avoids the 30-60s boot cost for subsequent executions.
   "experimental": {
     "windows_sandbox": {
       "idleTimeoutMs": 300000,
-      "daemonPipeName": "wxc-sandbox"
+      "daemonPipeName": "wxc-windows-sandbox"
     }
   }
 }
@@ -93,7 +93,7 @@ This avoids the 30-60s boot cost for subsequent executions.
 | `process.commandLine` | *(required)* | Command line to execute inside the sandbox |
 | `process.timeout` | `0` (none) | Script execution timeout in milliseconds |
 | `experimental.windows_sandbox.idleTimeoutMs` | `300000` (5 min) | Daemon idle timeout before VM teardown |
-| `experimental.windows_sandbox.daemonPipeName` | `"wxc-sandbox"` | IPC identifier (determines TCP port) |
+| `experimental.windows_sandbox.daemonPipeName` | `"wxc-windows-sandbox"` | IPC identifier (determines TCP port) |
 
 When `containment` is `"windows_sandbox"`, the `appContainer`, `filesystem`, and `network` sections are ignored — isolation is managed by the sandbox VM and guest agent firewall.
 

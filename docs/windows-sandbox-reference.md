@@ -153,13 +153,13 @@ Get-Content "$env:TEMP\wxc-sandbox-rendezvous\rendezvous.txt"
 Get-Content "$env:TEMP\wxc-sandbox-rendezvous\bootstrap.log"
 
 # Check generated .wsb config
-Get-Content "$env:TEMP\wxc-sandbox-config\wxc-sandbox.wsb"
+Get-Content "$env:TEMP\wxc-sandbox-config\wxc-windows-sandbox.wsb"
 
 # Check for zombie VM processes
 Get-Process | Where-Object { $_.ProcessName -match "vmmem|vmwp|sandbox" }
 
 # Run daemon manually (visible logs)
-src\target\release\wxc-windows-sandbox-daemon.exe wxc-sandbox 300000
+src\target\release\wxc-windows-sandbox-daemon.exe wxc-windows-sandbox 300000
 # In another terminal:
 src\target\release\wxc-exec.exe --debug test_configs\basic_windows_sandbox.json
 

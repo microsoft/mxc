@@ -193,7 +193,7 @@ echo [bootstrap] Guest exited with code %ERRORLEVEL% >> "%LOG%" 2>&1
         sandbox_python = SANDBOX_PYTHON_DIR,
     );
 
-    let wsb_path = output_dir.join("wxc-sandbox.wsb");
+    let wsb_path = output_dir.join("wxc-windows-sandbox.wsb");
     std::fs::write(&wsb_path, wsb_content)
         .with_context(|| format!("write .wsb file {:?}", wsb_path))?;
 

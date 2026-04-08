@@ -213,7 +213,7 @@
             },
             "daemonPipeName": {
               "type": "string",
-              "default": "wxc-sandbox",
+              "default": "wxc-windows-sandbox",
               "description": "Named pipe name the daemon listens on (without \\\\.\\pipe\\ prefix)."
             }
           }

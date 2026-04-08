@@ -38,7 +38,7 @@ impl Default for WindowsSandboxConfig {
     fn default() -> Self {
         Self {
             idle_timeout_ms: 300_000,
-            daemon_pipe_name: "wxc-sandbox".to_string(),
+            daemon_pipe_name: "wxc-windows-sandbox".to_string(),
         }
     }
 }

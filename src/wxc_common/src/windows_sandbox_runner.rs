@@ -212,8 +212,8 @@ mod tests {
 
     #[test]
     fn pipe_name_to_port_deterministic() {
-        let p1 = WindowsSandboxScriptRunner::pipe_name_to_port("wxc-sandbox");
-        let p2 = WindowsSandboxScriptRunner::pipe_name_to_port("wxc-sandbox");
+        let p1 = WindowsSandboxScriptRunner::pipe_name_to_port("wxc-windows-sandbox");
+        let p2 = WindowsSandboxScriptRunner::pipe_name_to_port("wxc-windows-sandbox");
         assert_eq!(p1, p2);
         assert!(p1 >= 49152);
     }
@@ -229,8 +229,8 @@ mod tests {
             (49152 + (hash % range)) as u16
         }
         assert_eq!(
-            WindowsSandboxScriptRunner::pipe_name_to_port("wxc-sandbox"),
-            daemon_pipe_name_to_port("wxc-sandbox")
+            WindowsSandboxScriptRunner::pipe_name_to_port("wxc-windows-sandbox"),
+            daemon_pipe_name_to_port("wxc-windows-sandbox")
         );
         assert_eq!(
             WindowsSandboxScriptRunner::pipe_name_to_port("custom-pipe"),

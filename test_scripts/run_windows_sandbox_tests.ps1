@@ -127,7 +127,7 @@ Start-Sleep 5
 
 # Start daemon
 Write-Host "Starting sandbox daemon..." -ForegroundColor Yellow
-$daemonProc = Start-Process -FilePath $Daemon -ArgumentList "wxc-sandbox","300000" `
+$daemonProc = Start-Process -FilePath $Daemon -ArgumentList "wxc-windows-sandbox","300000" `
     -PassThru -NoNewWindow -RedirectStandardError "$env:TEMP\wxc-windows-sandbox-daemon.log"
 Start-Sleep 2
 
