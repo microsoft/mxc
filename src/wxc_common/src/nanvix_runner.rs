@@ -38,7 +38,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::logger::Logger;
-use crate::models::{CodexRequest, ScriptResponse};
+use crate::models::{CodexRequest, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 
 /// CPython guest binary loaded by NanVix.
@@ -242,9 +242,23 @@ impl NanVixScriptRunner {
         }
     }
 
-    fn validate_policies(request: &CodexRequest) -> Result<(), NanVixError> {
-        // Filesystem policies are silently ignored — the guest has a read-only ramfs.
-        // Network and proxy policies are also ignored — no network stack in guest.
+    fn validate_policies(request: &CodexRequest, logger: &mut Logger) -> Result<(), NanVixError> {
+        // Warn about unsupported policies — they are silently ignored at runtime.
+        if !request.policy.readwrite_paths.is_empty()
+            || !request.policy.readonly_paths.is_empty()
+            || !request.policy.denied_paths.is_empty()
+        {
+            let _ = writeln!(logger, "MicroVM: ignoring filesystem policy — guest has a read-only ramfs");
+        }
+        if !request.policy.allowed_hosts.is_empty()
+            || !request.policy.blocked_hosts.is_empty()
+            || request.policy.default_network_policy != NetworkPolicy::Allow
+        {
+            let _ = writeln!(logger, "MicroVM: ignoring network policy — guest has no network stack");
+        }
+        if request.policy.network_proxy.is_enabled() {
+            let _ = writeln!(logger, "MicroVM: ignoring proxy policy — guest has no network stack");
+        }
         if !request.working_directory.is_empty() {
             return Err(NanVixError::Preflight(ERR_WORKDIR.to_string()));
         }
@@ -463,7 +477,7 @@ impl NanVixScriptRunner {
 
 impl ScriptRunner for NanVixScriptRunner {
     fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        if let Err(e) = Self::validate_policies(request) {
+        if let Err(e) = Self::validate_policies(request, logger) {
             return e.to_response();
         }
 

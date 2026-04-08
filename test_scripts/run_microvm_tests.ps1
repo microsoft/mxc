@@ -30,6 +30,30 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# -- WHP check (local runs only) ---------------------------------------------
+# In CI, the workflow checks WHP and fails before reaching this script.
+# For local runs, check here and skip gracefully if WHP is unavailable.
+
+if (-not $env:CI) {
+    function Test-WhpAvailable {
+        if (-not (Test-Path "$env:SystemRoot\System32\WinHvPlatform.dll")) {
+            return $false
+        }
+        try {
+            $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+            return ($cs -and $cs.HypervisorPresent)
+        } catch {
+            return $false
+        }
+    }
+
+    if (-not (Test-WhpAvailable)) {
+        Write-Host "SKIP: Windows Hypervisor Platform (WHP) is not available." -ForegroundColor Yellow
+        Write-Host "      Enable it with: Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform"
+        exit 0
+    }
+}
+
 Write-Host "`n=== MicroVM E2E Tests ===" -ForegroundColor Cyan
 
 # -- Locate wxc-exec.exe -----------------------------------------------------
