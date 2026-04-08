@@ -65,7 +65,7 @@ function Run-SandboxTest {
     # wxc-exec outputs base64-encoded stdout/stderr when not attached to a
     # terminal (e.g. when daemon was started via Start-Process). We capture
     # everything and try to decode any base64 lines we find.
-    $output = & $WxcExec --debug $configPath 2>&1 | Out-String
+    $output = & $WxcExec --debug --experimental $configPath 2>&1 | Out-String
     $exitCode = $LASTEXITCODE
 
     # Build a combined string: raw output + any decoded base64 lines.

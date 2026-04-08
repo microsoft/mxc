@@ -3,5 +3,5 @@
         "commandLine": "for i in range(1000):\n    print(f'line {i}: ' + 'x' * 80)",
         "timeout": 30000
     },
-    "containment": "nanvix"
+    "containment": "microvm"
 }
