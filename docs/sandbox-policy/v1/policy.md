@@ -800,7 +800,7 @@ systems.
 flowchart TB
     subgraph "Layer 1: SDK + SandboxRequest"
         A[SandboxRequest<br/>User: Copilot, Claude Code, OpenAI]
-        B[SDK: buildSandboxConfig<br/>Detects OS, selects backend,<br/>generates Config JSON]
+        B[spawnSandbox<br/>Calls buildSandboxConfig internally,<br/>spawns executor with Config JSON]
     end
 
     subgraph "Layer 2: Executors"
