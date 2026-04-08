@@ -72,27 +72,32 @@ export function buildSandboxPayload(
             cwd: workingDirectory,
         },
         containerId: name,
-        filesystem: {
-            readwritePaths: policy.filesystem?.readwritePaths,
-            readonlyPaths: policy.filesystem?.readonlyPaths,
-            deniedPaths: policy.filesystem?.deniedPaths,
-            clearPolicyOnExit: true,
-        },
     };
 
     // If an explicit containment backend is requested, use it directly.
-    // Don't include filesystem/network sections unless the policy has them —
+    // Only include filesystem if the policy actually has paths —
     // backends like microvm reject unsupported policy fields.
     if (containment) {
         config.containment = containment;
-        if (!policy.filesystem?.readwritePaths?.length &&
-            !policy.filesystem?.readonlyPaths?.length &&
-            !policy.filesystem?.deniedPaths?.length) {
-            delete config.filesystem;
+        if (policy.filesystem?.readwritePaths?.length ||
+            policy.filesystem?.readonlyPaths?.length ||
+            policy.filesystem?.deniedPaths?.length) {
+            config.filesystem = {
+                readwritePaths: policy.filesystem?.readwritePaths,
+                readonlyPaths: policy.filesystem?.readonlyPaths,
+                deniedPaths: policy.filesystem?.deniedPaths,
+            };
         }
         return config;
-        return config;
     }
+
+    // Default path: include filesystem with clearPolicyOnExit
+    config.filesystem = {
+        readwritePaths: policy.filesystem?.readwritePaths,
+        readonlyPaths: policy.filesystem?.readonlyPaths,
+        deniedPaths: policy.filesystem?.deniedPaths,
+        clearPolicyOnExit: true,
+    };
 
     if (platform === 'linux') {
         config.containment = 'lxc';

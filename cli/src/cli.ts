@@ -186,11 +186,6 @@ program
         containment: options.containment as SandboxingMethod | undefined,
       };
 
-      // Diagnostic: verify containment reaches SDK
-      if (spawnOptions.containment) {
-        console.error(`[mxc-cli] containment=${spawnOptions.containment}`);
-      }
-
       if (options.pty === false) {
         // Non-PTY mode: reliable exit codes, separate stdout/stderr
         const result = await execSandbox(scriptCommand, policy, spawnOptions, options.cwd, options.containerName);
