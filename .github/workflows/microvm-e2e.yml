@@ -57,31 +57,12 @@ jobs:
 
       - name: Diagnose hypervisor environment
         shell: pwsh
-        run: |
-          Write-Host "=== Hypervisor Diagnostics ==="
-          Write-Host "OS: $([System.Environment]::OSVersion)"
-          $cs = Get-CimInstance -ClassName Win32_ComputerSystem
-          Write-Host "HypervisorPresent: $($cs.HypervisorPresent)"
-          Write-Host "WinHvPlatform.dll exists: $(Test-Path "$env:SystemRoot\System32\WinHvPlatform.dll")"
-          $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction SilentlyContinue
-          Write-Host "HypervisorPlatform feature state: $($feature.State)"
+        run: ./scripts/ci/diagnose-whp.ps1
 
       - name: Check Windows Hypervisor Platform
         id: whp-check
         shell: pwsh
-        run: |
-          $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
-          if ($feature.State -ne 'Enabled') {
-            Write-Host "::error::Windows Hypervisor Platform is not enabled. E2E tests require WHP on windows-latest."
-            exit 1
-          }
-          $cs = Get-CimInstance -ClassName Win32_ComputerSystem
-          if (-not $cs.HypervisorPresent) {
-            Write-Host "::error::HypervisorPresent is false — WHP feature is enabled but hypervisor is not running."
-            exit 1
-          }
-          Write-Host "WHP is enabled and hypervisor is present."
-          echo "whp_available=true" >> $env:GITHUB_OUTPUT
+        run: ./scripts/ci/check-whp.ps1
 
       - name: Run MicroVM E2E Tests
         if: steps.whp-check.outputs.whp_available == 'true'
@@ -105,22 +86,7 @@ jobs:
       - name: Print performance summary
         if: steps.whp-check.outputs.whp_available == 'true' && !cancelled()
         shell: pwsh
-        run: |
-          $jsonPath = Join-Path $env:GITHUB_WORKSPACE "microvm-perf-results.json"
-          if (Test-Path $jsonPath) {
-            $data = Get-Content $jsonPath -Raw | ConvertFrom-Json
-            Write-Host "`n=== MicroVM Performance Summary ==="
-            Write-Host "Commit: $($data.commit)"
-            Write-Host "Timestamp: $($data.timestamp)"
-            Write-Host ""
-            Write-Host ("{0,-35} {1,10} {2,8}" -f "Test", "Time (ms)", "Status")
-            Write-Host ("{0,-35} {1,10} {2,8}" -f "----", "---------", "------")
-            foreach ($r in $data.results) {
-              Write-Host ("{0,-35} {1,10} {2,8}" -f $r.description, $r.wall_time_ms, $r.status)
-            }
-          } else {
-            Write-Host "::warning::No performance results found — perf JSON was not generated."
-          }
+        run: ./scripts/ci/print-perf-summary.ps1 -JsonPath (Join-Path $env:GITHUB_WORKSPACE "microvm-perf-results.json")
 
       - name: Upload performance results
         if: steps.whp-check.outputs.whp_available == 'true' && !cancelled()
