@@ -862,11 +862,11 @@ Config field that has no path from policy or environment.
 
 ### "What if my feature doesn't make sense on Linux?"
 
-If it's developer-facing intent, put it in `policy` with a
-"Windows only" note. If it's purely internal mechanism, put it in
-Config. The cross-platform test (Principle 3) still applies: if a
-concept only exists on one platform and has no cross-platform
-abstraction, it's Config-only.
+If it's a security restriction, put it in `policy` with a
+"Windows only" note. If it's a runtime selection (what kind of
+sandbox to run in), put it in `environment`. Config is derived
+from these two; every Config field must be reachable from
+policy or environment.
 
 ### "Can a developer bypass SandboxRequest and use Config directly?"
 
