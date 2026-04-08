@@ -77,8 +77,8 @@ export function buildSandboxPayload(
     // If an explicit containment backend is requested, set it on the config.
     if (containment) {
         config.containment = containment;
-        // microvm and vm don't need platform-specific setup — early return
-        if (containment === 'microvm' || containment === 'vm') {
+        // microvm doesn't need platform-specific setup — early return
+        if (containment === 'microvm') {
             if (policy.filesystem?.readwritePaths?.length ||
                 policy.filesystem?.readonlyPaths?.length ||
                 policy.filesystem?.deniedPaths?.length) {
@@ -294,9 +294,9 @@ function prepareSandboxInvocation(
   }
 
   // Validate containment against available methods (skip experimental backends
-  // like microvm/vm/sandbox which aren't reported by platform detection)
+  // like microvm which aren't reported by platform detection)
   if (options.containment) {
-    const experimental = ['microvm', 'vm', 'sandbox', 'wslc'];
+    const experimental = ['microvm'];
     if (!experimental.includes(options.containment) &&
         !platformSupport.availableMethods.includes(options.containment)) {
       throw new Error(

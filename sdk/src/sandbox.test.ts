@@ -249,10 +249,5 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should early-return for vm containment', () => {
-      const payload = buildSandboxPayload('echo hi', defaultPolicy, undefined, undefined, 'vm');
-      assert.strictEqual(payload.containment, 'vm');
-      assert.strictEqual(payload.appContainer, undefined);
-    });
   });
 });

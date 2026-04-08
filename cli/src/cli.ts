@@ -92,7 +92,7 @@ program
   .option('--container-name <name>', 'Name for the sandbox container')
   .option('--containment <backend>', 'Override containment backend',
     (value: string) => {
-      const valid = ['appcontainer', 'sandbox', 'microvm', 'lxc', 'wslc', 'vm'];
+      const valid = ['appcontainer', 'microvm', 'lxc'];
       if (!valid.includes(value)) {
         throw new InvalidArgumentError(`Must be one of: ${valid.join(', ')}`);
       }
