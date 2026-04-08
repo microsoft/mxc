@@ -633,13 +633,14 @@ The Config `ui` section has full Windows-specific granularity (per UIPolicy_Sche
 }
 ```
 
-Note: `isolation`, `desktopSystemControl`, `systemSettings`, and `ime` are **Config-only** fields with no
-cross-platform policy equivalent. They are mechanism, not intent. The SDK sets safe defaults for these based on the
-cross-platform `request.policy.ui` fields.
+Note: `isolation`, `desktopSystemControl`, `systemSettings`, and
+`ime` are Windows-only policy fields. They map directly to Config
+`ui` fields of the same name.
 
 ### 9.4 Mapping (SDK)
 
-In `buildSandboxConfig()`, the SDK maps cross-platform `request.policy.ui` fields to Config:
+In `buildSandboxConfig()`, the SDK maps `request.policy.ui`
+fields to Config:
 
 ```typescript
 if (platform === 'win32') {
@@ -649,16 +650,13 @@ if (platform === 'win32') {
     config.ui = {
       disable: !(ui.allowWindows ?? false),
       clipboard: mapClipboard(ui.clipboard ?? "none"),
-      // Cross-platform ui.allowWindows picks a safe default for isolation.
-      // Config-only fields get safe defaults: they're mechanism, not intent.
-      isolation: "container",
-      desktopSystemControl: false,
-      systemSettings: "none",
-      ime: false,
+      isolation: ui.isolation ?? "container",
+      desktopSystemControl: ui.desktopSystemControl ?? false,
+      systemSettings: ui.systemSettings ?? "none",
+      ime: ui.ime ?? false,
       injection: ui.allowInputInjection ?? false,
     };
   } else {
-    // No ui section = full lockdown
     config.ui = { disable: true };
   }
 }
