@@ -91,7 +91,7 @@ Submit a PR for review.
 > APIs that can't be plumbed end-to-end.
 
 For detailed OS contribution steps (FlatBuffer schema, processmodel,
-BaseContainerRunner), see [os-developer.md](os-developer.md).
+BaseContainerRunner), see [os-developers-guide.md](os-developers-guide.md).
 
 ## Step 3+: Implementation
 
