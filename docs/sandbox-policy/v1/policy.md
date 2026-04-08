@@ -70,7 +70,7 @@ walkthrough.
 6. [SandboxRequest → Config Mapping Rules](#6-sandboxrequest--config-mapping-rules)
 7. [Versioning & Compatibility](#7-versioning--compatibility)
 8. [Development Guide: Adding a New Feature](#8-development-guide--adding-a-new-feature)
-9. [Worked Example: Adding UI Policy](#9-worked-example--adding-ui-policy)
+9. [Worked Example: UI Policy](#9-worked-example-ui-policy)
 10. [Industry Precedent Analysis](#10-industry-precedent-analysis)
 11. [Diagrams](#diagrams)
 12. [FAQ & Decision Log](#12-faq--decision-log)
@@ -580,47 +580,51 @@ bump
 
 ---
 
-## 9. Worked Example: Adding UI Policy
-
-This section walks through the complete process of adding UI containment support as a concrete example of the
-development workflow.
+## 9. Worked Example: UI Policy
 
 ### 9.1 Problem
 
-Processes on Windows can currently interact freely with the GUI subsystem: creating windows, reading the
-clipboard, injecting input. This is a security gap for untrusted code execution.
+Processes on Windows can currently interact freely with the
+GUI subsystem: creating windows, reading the clipboard,
+injecting input. This is a security gap for untrusted code
+execution.
 
-### 9.2 SandboxRequest Addition (Layer 1)
+### 9.2 Using UI policy (SDK user)
 
-The developer-facing intent is simple:
+An SDK user requesting UI restrictions:
 
 ```typescript
-// "I want my sandbox to be able to create windows, but no clipboard and no input injection"
 const request: SandboxRequest = {
   version: "0.5.0-dev",
   policy: {
     ui: {
+      // Cross-platform fields:
       allowWindows: true,
       clipboard: "none",
       allowInputInjection: false,
+      // Windows-only fields (ignored on Linux):
+      isolation: "full",
+      ime: false,
     },
   },
   environment: {
     isolation: "process",
   },
 };
+
+spawnSandbox("myapp.exe", request);
 ```
 
-**Cross-platform test:**
-- Windows: Maps to Job Object UI limits + Win32k filtering ✅
-- Linux (LXC with X11): Maps to X11 socket access + clipboard tool restrictions ✅
-- VM: Maps to RDP session settings ✅
+Cross-platform fields (`allowWindows`, `clipboard`,
+`allowInputInjection`) work on all platforms. Windows-only
+fields (`isolation`, `desktopSystemControl`, `systemSettings`,
+`ime`) are silently ignored on non-Windows platforms.
 
-All three platforms can enforce these three intents. The field passes Principle 3.
+### 9.3 Building UI policy (MXC developer)
 
-### 9.3 Config Schema Addition (Layer 2)
+An MXC developer adding UI policy support would:
 
-The Config `ui` section has full Windows-specific granularity (per UIPolicy_Schema):
+**1. Add Config schema fields** (`schemas/dev/`):
 
 ```json
 "ui": {
@@ -634,14 +638,12 @@ The Config `ui` section has full Windows-specific granularity (per UIPolicy_Sche
 }
 ```
 
-Note: `isolation`, `desktopSystemControl`, `systemSettings`, and
-`ime` are Windows-only policy fields. They map directly to Config
-`ui` fields of the same name.
+The Config `ui` field names match the policy field names.
+The SDK passes them through directly (with `allowWindows`
+inverted to `disable` and `clipboard: "readwrite"` mapped
+to `"all"`).
 
-### 9.4 Mapping (SDK)
-
-In `buildSandboxConfig()`, the SDK maps `request.policy.ui`
-fields to Config:
+**2. Add SDK mapping** (`sdk/src/sandbox.ts`):
 
 ```typescript
 if (platform === 'win32') {
@@ -661,120 +663,58 @@ if (platform === 'win32') {
     config.ui = { disable: true };
   }
 }
-
-function mapClipboard(value: string): string {
-  switch (value) {
-    case "none": return "none";
-    case "read": return "read";
-    case "write": return "write";
-    case "readwrite": return "all";
-    default: return "none";
-  }
-}
 ```
 
-### 9.5 Backend Implementation (Rust)
+**3. Implement in executor** (`base_container_runner.rs`):
 
-In `appcontainer.rs`, parse the `ui` section from `ContainerConfig` and apply:
+Build the `ui_restrictions` bitmask from Config. If there are
+no restrictions for a category, do not set the limit flag.
 
 ```rust
-fn apply_ui_policy(&self, ui: &UiConfig, job_handle: HANDLE) -> Result<(), String> {
-    if ui.disable {
-        // Block Win32k system calls entirely
-        self.set_process_mitigation(DisallowWin32kSystemCalls, true)?;
-    }
+fn build_ui_restrictions(ui: &UiConfig) -> u32 {
+    let mut flags = 0u32;
 
-    let mut ui_restrictions = 0u32;
-
-    // Clipboard
     match ui.clipboard.as_str() {
         "none" => {
-            ui_restrictions |= JOB_OBJECT_UILIMIT_READCLIPBOARD;
-            ui_restrictions |= JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
+            flags |= JOB_OBJECT_UILIMIT_READCLIPBOARD;
+            flags |= JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
         }
         "read" => {
-            ui_restrictions |= JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
+            flags |= JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
         }
         "write" => {
-            ui_restrictions |= JOB_OBJECT_UILIMIT_READCLIPBOARD;
+            flags |= JOB_OBJECT_UILIMIT_READCLIPBOARD;
         }
-        "all" => { /* no restrictions */ }
-        _ => {
-            ui_restrictions |= JOB_OBJECT_UILIMIT_READCLIPBOARD;
-            ui_restrictions |= JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
-        }
+        _ => {} // "all": no restriction
     }
 
-    // Isolation level
     match ui.isolation.as_str() {
-        "container" => {
-            ui_restrictions |= JOB_OBJECT_UILIMIT_HANDLES;
-            ui_restrictions |= JOB_OBJECT_UILIMIT_GLOBALATOMS;
+        "full" => {
+            flags |= JOB_OBJECT_UILIMIT_HANDLES;
+            flags |= JOB_OBJECT_UILIMIT_GLOBALATOMS;
         }
         "handles" => {
-            ui_restrictions |= JOB_OBJECT_UILIMIT_HANDLES;
+            flags |= JOB_OBJECT_UILIMIT_HANDLES;
         }
         "atoms" => {
-            ui_restrictions |= JOB_OBJECT_UILIMIT_GLOBALATOMS;
+            flags |= JOB_OBJECT_UILIMIT_GLOBALATOMS;
         }
-        "desktop" => { /* no handle/atom restrictions */ }
-        _ => {
-            ui_restrictions |= JOB_OBJECT_UILIMIT_HANDLES;
-            ui_restrictions |= JOB_OBJECT_UILIMIT_GLOBALATOMS;
-        }
+        _ => {} // "desktop": no restriction
     }
 
-    // Apply to Job Object
-    self.set_job_ui_restrictions(job_handle, ui_restrictions)?;
-    Ok(())
+    flags
 }
 ```
 
-### 9.6 Testing
+> This is illustrative. The actual implementation uses
+> `BaseContainerRunner` which builds a FlatBuffer `SandboxSpec`
+> with a `ui_restrictions` bitmask. See
+> [os-developers-guide.md](../../os-developers-guide.md).
 
-1. **SDK unit test:** `buildSandboxConfig` with
-`policy: { ui: { allowWindows: true, clipboard: "read" } }`
-produces Config with `ui.disable: false`, `ui.clipboard: "read"`,
-`ui.isolation: "container"`.
-2. **Config integration test:** `test_configs/ui_lockdown.json`
-with `ui: {}` verifies full lockdown. You can test directly with
-`wxc-exec config.json` bypassing the SDK entirely.
-3. **SDK integration test** (`cli/cli.test.ts`): Spawn a sandbox
-with clipboard access, verify clipboard operations work/fail as
-expected.
-
-### 9.7 Implementation checklist
-
-Some features require changes at all three layers. Work
-bottom-up: OS first, then executors, then SDK.
-
-1. **OS layer (if needed):** If the feature requires a new OS API
-or kernel behavior that doesn't exist yet (e.g., a new Job
-Object UI restriction, a new process mitigation), that must
-ship in Windows first. Create a PR in `os.2020` to add or
-expose the OS primitive. The executor (wxc-exec) will call this
-API, so coordinate the API surface with the executor author.
-This step is not always needed; many features use existing OS
-APIs.
-
-2. **Config layer:** Build the `ui` section in Config schema +
-Rust implementation (appcontainer.rs). The executor code calls
-the OS APIs from step 1. Test directly with
-`wxc-exec config.json` to verify Config fields work end-to-end
-against the OS.
-
-3. **SandboxRequest layer:** Add the field to `SandboxPolicy`
-(or `SandboxEnvironment`). Add the mapping in
-`buildSandboxConfig()` that translates the request into Config.
-
-4. **Verify mapping:** The Config field names/types are the
-contract. The mapping rules (Section 6) define how the request
-produces Config. Ensure all Config fields are reachable from
-policy or environment.
-
-5. **End-to-end validation:** Test through the SDK by calling
-`spawnSandbox()` with the new field set. This exercises the
-full pipeline: request → SDK → Config → executor → OS.
+**4. Full guide:**
+[authoring-a-new-feature.md](../../authoring-a-new-feature.md)
+covers the complete workflow including OS changes, testing,
+and version bumps.
 
 ---
 
