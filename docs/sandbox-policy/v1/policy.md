@@ -784,7 +784,6 @@ full pipeline: request → SDK → Config → executor → OS.
 | **Apple App Sandbox** | Entitlements (intent) → sandbox profiles (mechanism). Cross-version stable. | **The two-layer model.** SandboxPolicy = entitlements, Config = profiles. |
 | **Flatpak** | `finish-args` (declarative) → Portals (runtime mediation). | **Declarative permissions.** `--share=network` ≈ `network.policy: "outbound"`. |
 | **Windows Sandbox** | `.wsb` XML with ~10 simple boolean/enum fields. | **Simplicity.** Small policy surface covers 90% of use cases. (Disposable VM model.) |
-| **Docker** | `--cap-add/drop`, seccomp profiles, AppArmor. Mechanism-heavy. | **Anti-pattern.** MXC never exposes OS primitives in SandboxRequest. |
 | **Chromium** | Broker/target model. Internal-only policies. | **Broker pattern** for mediating access between isolated and non-isolated processes. |
 
 **Key takeaway:** MXC's two-layer model is most closely aligned with Apple's entitlements → profiles, extended to be
