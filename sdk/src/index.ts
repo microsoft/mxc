@@ -41,6 +41,7 @@ export {
 export {
   spawnSandbox,
   spawnSandboxAsync,
+  execSandbox,
   SandboxSpawnOptions
 } from './sandbox';
 

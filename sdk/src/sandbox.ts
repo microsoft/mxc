@@ -3,9 +3,10 @@
 
 import * as pty from 'node-pty';
 import * as os from 'os';
+import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, ContainerConfig } from './types';
+import { SandboxPolicy, SandboxingMethod, ContainerConfig } from './types';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
 
 const SUPPORTED_VERSION = '0.4.0-alpha';
@@ -57,6 +58,7 @@ export function buildSandboxPayload(
     policy: SandboxPolicy,
     workingDirectory?: string,
     containerName?: string,
+    containment?: SandboxingMethod,
 ): ContainerConfig {
     validatePolicyVersion(policy.version);
 
@@ -70,12 +72,30 @@ export function buildSandboxPayload(
             cwd: workingDirectory,
         },
         containerId: name,
-        filesystem: {
-            readwritePaths: policy.filesystem?.readwritePaths,
-            readonlyPaths: policy.filesystem?.readonlyPaths,
-            deniedPaths: policy.filesystem?.deniedPaths,
-            clearPolicyOnExit: true,
-        },
+    };
+
+    // If an explicit containment backend is requested, use it directly.
+    // Only include filesystem if the policy actually has paths.
+    if (containment) {
+        config.containment = containment;
+        if (policy.filesystem?.readwritePaths?.length ||
+            policy.filesystem?.readonlyPaths?.length ||
+            policy.filesystem?.deniedPaths?.length) {
+            config.filesystem = {
+                readwritePaths: policy.filesystem?.readwritePaths,
+                readonlyPaths: policy.filesystem?.readonlyPaths,
+                deniedPaths: policy.filesystem?.deniedPaths,
+            };
+        }
+        return config;
+    }
+
+    // Default path: include filesystem with clearPolicyOnExit
+    config.filesystem = {
+        readwritePaths: policy.filesystem?.readwritePaths,
+        readonlyPaths: policy.filesystem?.readonlyPaths,
+        deniedPaths: policy.filesystem?.deniedPaths,
+        clearPolicyOnExit: true,
     };
 
     if (platform === 'linux') {
@@ -142,6 +162,12 @@ export interface SandboxSpawnOptions {
   experimental?: boolean;
 
   /**
+   * Override the containment backend (default: auto-detected from platform).
+   * Use 'microvm' for Nanvix micro-VM isolation (experimental, requires --experimental).
+   */
+  containment?: SandboxingMethod;
+
+  /**
    * PTY options to pass to node-pty
    */
   ptyOptions?: pty.IPtyForkOptions;
@@ -176,47 +202,9 @@ export function spawnSandbox(
   containerName?: string,
   env?: { [key: string]: string | undefined }
 ): pty.IPty {
-  // Check platform support
-  const platformSupport = getPlatformSupport();
-  if (!platformSupport.isSupported) {
-    throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
-  }
-
-  // Determine executable path based on platform
-  const platform = os.platform();
-  let executablePath: string | null;
-
-  if (platform === 'linux') {
-    executablePath = findLxcExecutable();
-    if (!executablePath) {
-      throw new Error(
-        'lxc-exec not found. Ensure it is built and available in a standard location.'
-      );
-    }
-  } else {
-    executablePath = findWxcExecutable();
-    if (!executablePath) {
-      throw new Error(
-        'wxc-exec.exe not found. Please specify the path or ensure it exists in a standard location.'
-      );
-    }
-  }
-
-  // Build config
-  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
-
-  const args: string[] = [];
-  const configJson = JSON.stringify(config);
-  const configBase64 = Buffer.from(configJson, 'utf-8').toString('base64');
-  args.push('--config-base64', configBase64);
-
-  if (options.debug) {
-    args.push('--debug');
-  }
-
-  if (options.experimental) {
-    args.push('--experimental');
-  }
+  const { executablePath, args } = prepareSandboxInvocation(
+    script, policy, options, workingDirectory, containerName
+  );
 
   const ptyOpts: pty.IPtyForkOptions = {
     name: "xterm-color",
@@ -280,5 +268,123 @@ export function spawnSandboxAsync(
     } catch (error) {
       reject(error);
     }
+  });
+}
+
+/**
+ * Resolves the executable path and builds CLI arguments for a sandbox invocation.
+ * Shared setup used by both PTY and non-PTY spawn paths.
+ */
+function prepareSandboxInvocation(
+  script: string,
+  policy: SandboxPolicy,
+  options: SandboxSpawnOptions = {},
+  workingDirectory?: string,
+  containerName?: string,
+): { executablePath: string; args: string[] } {
+  const platformSupport = getPlatformSupport();
+  if (!platformSupport.isSupported) {
+    throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
+  }
+
+  const platform = os.platform();
+  let executablePath: string | null;
+
+  if (platform === 'linux') {
+    executablePath = findLxcExecutable();
+    if (!executablePath) {
+      throw new Error('lxc-exec not found. Ensure it is built and available in a standard location.');
+    }
+  } else {
+    executablePath = findWxcExecutable();
+    if (!executablePath) {
+      throw new Error('wxc-exec.exe not found. Please specify the path or ensure it exists in a standard location.');
+    }
+  }
+
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName, options.containment);
+
+  const args: string[] = [];
+  const configJson = JSON.stringify(config);
+  const configBase64 = Buffer.from(configJson, 'utf-8').toString('base64');
+  args.push('--config-base64', configBase64);
+
+  if (options.debug) {
+    args.push('--debug');
+  }
+
+  if (options.experimental) {
+    args.push('--experimental');
+  }
+
+  return { executablePath, args };
+}
+
+/**
+ * Execute a sandboxed process using child_process.spawn (non-PTY).
+ *
+ * Unlike `spawnSandbox` (which uses node-pty for interactive terminal I/O),
+ * this function uses `child_process.spawn` for reliable exit code propagation
+ * and separate stdout/stderr streams. Use this for programmatic/CI scenarios
+ * where correct exit codes matter more than terminal features.
+ *
+ * @param script The command line script to execute
+ * @param policy The sandbox policy
+ * @param options - Spawn options
+ * @param workingDirectory Optional working directory path
+ * @param containerName Optional container name
+ *
+ * @returns Promise resolving with stdout, stderr, and exit code
+ *
+ * @example
+ * ```typescript
+ * const result = await execSandbox(
+ *   "print('Hello from sandbox!')",
+ *   { version: '0.4.0-alpha' },
+ *   { containment: 'microvm', experimental: true }
+ * );
+ * console.log(result.stdout);    // "Hello from sandbox!"
+ * console.log(result.exitCode);  // 0
+ * ```
+ */
+export function execSandbox(
+  script: string,
+  policy: SandboxPolicy,
+  options: SandboxSpawnOptions = {},
+  workingDirectory?: string,
+  containerName?: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const { executablePath, args } = prepareSandboxInvocation(
+    script, policy, options, workingDirectory, containerName
+  );
+
+  return new Promise((resolve, reject) => {
+    const child: ChildProcess = spawn(executablePath, args, {
+      cwd: workingDirectory || process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+
+    child.stdout?.on('data', (data: Buffer) => {
+      stdoutChunks.push(data);
+    });
+
+    child.stderr?.on('data', (data: Buffer) => {
+      stderrChunks.push(data);
+    });
+
+    child.on('error', (error: Error) => {
+      reject(new Error(`Failed to spawn sandbox process: ${error.message}`));
+    });
+
+    child.on('close', (code: number | null) => {
+      resolve({
+        stdout: Buffer.concat(stdoutChunks).toString(),
+        stderr: Buffer.concat(stderrChunks).toString(),
+        exitCode: code ?? -1,
+      });
+    });
   });
 }
