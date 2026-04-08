@@ -4,11 +4,13 @@ if ($null -eq $feature -or $feature.State -ne "Enabled") {
   exit 1
 }
 
-$cs = Get-CimInstance -ClassName Win32_ComputerSystem
-if (-not $cs.HypervisorPresent) {
+$cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+if ($null -eq $cs -or -not $cs.HypervisorPresent) {
   Write-Host "::error::HypervisorPresent is false — WHP feature is enabled but hypervisor is not running."
   exit 1
 }
 
 Write-Host "WHP is enabled and hypervisor is present."
-Add-Content -Path $env:GITHUB_OUTPUT -Value "whp_available=true"
+if ($env:GITHUB_OUTPUT) {
+  Add-Content -Path $env:GITHUB_OUTPUT -Value "whp_available=true"
+}
