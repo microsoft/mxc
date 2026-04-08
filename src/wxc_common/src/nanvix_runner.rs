@@ -38,7 +38,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::logger::Logger;
-use crate::models::{CodexRequest, NetworkPolicy, ScriptResponse};
+use crate::models::{CodexRequest, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 
 /// CPython guest binary loaded by NanVix.
@@ -55,12 +55,6 @@ const RAMFS_IMAGE: &str = "cpython-ramfs.img";
 const BOOT_TIMEOUT_MS: u64 = 60_000;
 /// Generic error exit code returned to host callers.
 const ERROR_EXIT_CODE: i32 = -1;
-const ERR_FILESYSTEM_POLICY: &str =
-    "filesystem policy is not supported by the NanVix backend -- guest has a read-only ramfs";
-const ERR_NETWORK_POLICY: &str =
-    "network policy is not supported by the NanVix backend -- NanVix has no network stack";
-const ERR_PROXY_POLICY: &str =
-    "network proxy is not supported by the NanVix backend -- NanVix has no network stack";
 const ERR_WORKDIR: &str = "workingDirectory is not supported by the NanVix backend -- guest has its own filesystem namespace";
 
 // -- NanVix error classification ---------------------------------------------
@@ -548,7 +542,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(!resp.error_message.contains(ERR_FILESYSTEM_POLICY));
+        assert!(!resp.error_message.contains("filesystem policy"));
     }
 
     #[test]
@@ -564,7 +558,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(!resp.error_message.contains(ERR_FILESYSTEM_POLICY));
+        assert!(!resp.error_message.contains("filesystem policy"));
     }
 
     #[test]
@@ -580,7 +574,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(!resp.error_message.contains(ERR_NETWORK_POLICY));
+        assert!(!resp.error_message.contains("network policy"));
     }
 
     #[test]
@@ -596,7 +590,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(!resp.error_message.contains(ERR_NETWORK_POLICY));
+        assert!(!resp.error_message.contains("network policy"));
     }
 
     #[test]
@@ -612,7 +606,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(!resp.error_message.contains(ERR_NETWORK_POLICY));
+        assert!(!resp.error_message.contains("network policy"));
     }
 
     #[test]
@@ -638,11 +632,11 @@ mod tests {
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(
-            !resp.error_message.contains(ERR_FILESYSTEM_POLICY),
+            !resp.error_message.contains("filesystem policy"),
             "default request should not trigger filesystem policy rejection"
         );
         assert!(
-            !resp.error_message.contains(ERR_NETWORK_POLICY),
+            !resp.error_message.contains("network policy"),
             "default request should not trigger network policy rejection"
         );
         assert!(
@@ -671,7 +665,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(!resp.error_message.contains(ERR_PROXY_POLICY));
+        assert!(!resp.error_message.contains("network proxy"));
     }
 
     #[test]
