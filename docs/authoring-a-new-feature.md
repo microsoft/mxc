@@ -1,21 +1,143 @@
-# Adding a New Experimental Feature
+# Adding a New Feature
 
-> **Do not modify stable schemas.** Files in `schemas/stable/` are immutable
-> release artifacts. All experimental work happens in `schemas/dev/` only.
-> Stable schemas are updated solely during the promotion process when an
-> experimental feature ships.
-
-This guide walks MXC developers through adding a new experimental feature
-end-to-end. We assume an experimental feature `compartments` already exists in
-the codebase, and we are adding a second experimental feature called
-`gpuIsolation`.
+> **Do not modify stable schemas.** Files in `schemas/stable/` are
+> immutable release artifacts. All experimental work happens in
+> `schemas/dev/` only. Stable schemas are updated solely during the
+> promotion process when an experimental feature ships.
 
 ## Prerequisites
 
-Read the [Versioning Design](versioning.md) doc for context on how experimental
-features fit into the MXC schema and shipping model.
+Read these in order:
 
-## Overview
+1. [SandboxRequest spec](sandbox-policy/v1/policy.md): what
+SandboxRequest is (policy + environment), design principles.
+2. [SandboxRequest reference](sandbox-policy/v1/reference.md):
+every field, type, default, and example.
+3. [Versioning Design](versioning.md): how policy/schema/SDK
+versions relate and when to bump.
+
+## Step 0: Where does my feature go?
+
+**Important:** Any change to the Config schema also requires
+changes to the TypeScript SDK library (`@microsoft/mxc-sdk`),
+because the SDK library generates the Config. There is no
+"Config-only" change that doesn't touch the SDK library.
+
+> **Terminology:** "SDK library" refers to the TypeScript npm
+> package (`@microsoft/mxc-sdk`). wxc-exec and lxc-exec are the
+> Rust executors that ship alongside the SDK library but are
+> separate components.
+
+Use this decision tree to determine what the **user** sees:
+
+```
+Does the user need to OPT IN to this feature?
+  │
+  ├─ YES: "Users must explicitly request this"
+  │   │
+  │   └─ Is it security intent or runtime selection?
+  │       │
+  │       ├─ Security intent → SandboxPolicy field
+  │       │   (e.g., policy.ui.clipboard, policy.network)
+  │       │   + Config schema + SDK library
+  │       │   + wxc-exec / lxc-exec
+  │       │
+  │       └─ Runtime selection → SandboxEnvironment field
+  │           (e.g., environment.isolation,
+  │            environment.linux.distribution)
+  │           + Config schema + SDK library
+  │           + wxc-exec / lxc-exec
+  │
+  └─ NO: "User doesn't control this directly"
+      │
+      ├─ Does it change the Config schema?
+      │   │
+      │   ├─ YES → Config schema + SDK library
+      │   │         + wxc-exec / lxc-exec
+      │   │         (SDK sets internally)
+      │   │
+      │   └─ NO  → Is it an SDK library-only feature?
+      │       │
+      │       ├─ YES → SDK library only
+      │       │         (e.g., new helper function)
+      │       │
+      │       └─ NO  → wxc-exec / lxc-exec only
+```
+
+**Examples:**
+
+| Feature | Opt-in? | Type | Where? |
+|---------|---------|------|--------|
+| Clipboard | Yes | Policy | **policy.ui.clipboard** + Config + SDK + executors |
+| UI IME | Yes | Policy | **policy.ui.ime** (Win only) + Config + SDK + wxc-exec |
+| Linux distro | Yes | Environment | **environment.linux.distribution** + Config + SDK + lxc-exec |
+| Isolation level | Yes | Environment | **environment.isolation** + Config + SDK + executors |
+| Fragment API | No | N/A | **SDK library only** (e.g., `getPythonPolicy()`) |
+
+### Decision Flowchart
+
+```mermaid
+flowchart TD
+    START([New Feature Idea]) --> Q1{User needs<br/>to OPT IN?}
+
+    Q1 -->|YES| Q2{Security intent<br/>or runtime selection?}
+    Q1 -->|NO| Q3{Changes Config<br/>schema?}
+
+    Q2 -->|Security intent| POL["SandboxPolicy field<br/>+ Config + SDK + executors"]
+    Q2 -->|Runtime selection| ENV["SandboxEnvironment field<br/>+ Config + SDK + executors"]
+
+    Q3 -->|YES| INTERNAL["Config + SDK + executors<br/>(SDK sets internally)"]
+    Q3 -->|NO| Q4{SDK library-only?}
+
+    Q4 -->|YES| SDK_ONLY["SDK library only"]
+    Q4 -->|NO| EXEC["wxc-exec / lxc-exec only"]
+
+    POL --> TEST["Write tests"]
+    ENV --> TEST
+    INTERNAL --> TEST
+    SDK_ONLY --> TEST
+    EXEC --> TEST
+    TEST --> PR["Submit PR"]
+    PR --> DONE([Ship It])
+```
+
+## Step 1: Write a Feature Spec
+
+Create a spec document with:
+
+1. **Problem statement**: what user problem does this solve?
+2. **SandboxRequest changes**: proposed additions to
+SandboxPolicy (intent) or SandboxEnvironment (runtime), with
+justification
+3. **Config schema changes**: proposed JSON Schema additions,
+including which backends are affected
+4. **Mapping rules**: how policy/environment fields map to
+Config fields per backend
+5. **Default values**: what happens when the field is omitted
+(must be most-restrictive)
+6. **Backward compatibility**: impact on existing requests
+7. **Test plan**: how to test at both layers
+
+Submit a PR for review.
+
+## Steps 2+: Implementation
+
+If your feature touches SandboxRequest, update
+`sdk/src/types.ts`:
+
+- Field must be optional (default-deny)
+- Default value must be the most restrictive option
+- Include JSDoc with description and default
+
+If your feature touches `buildSandboxConfig`, update
+`sdk/src/sandbox.ts` with the mapping logic.
+
+For Config schema, Rust parser, backend runner, tests, and
+version bump, follow the walkthrough below.
+
+---
+
+## Walkthrough
 
 Adding an experimental feature touches these files:
 
