@@ -28,57 +28,7 @@ because the SDK library generates the Config. There is no
 > Rust executors that ship alongside the SDK library but are
 > separate components.
 
-Use this decision tree to determine what the **user** sees:
-
-```
-Does the user need to OPT IN to this feature?
-  │
-  ├─ YES: "Users must explicitly request this"
-  │   │
-  │   └─ Is it security intent or runtime selection?
-  │       │
-  │       ├─ Security intent → SandboxPolicy field
-  │       │   + Config schema + SDK library
-  │       │   + wxc-exec / lxc-exec
-  │       │   + OS changes (if new OS API needed)
-  │       │
-  │       └─ Runtime selection → SandboxEnvironment field
-  │           + Config schema + SDK library
-  │           + wxc-exec / lxc-exec
-  │           + OS changes (if new OS API needed)
-  │
-  └─ NO: "User doesn't control this directly"
-      │
-      ├─ Does it change the Config schema?
-      │   │
-      │   ├─ YES → Config schema + SDK library
-      │   │         + wxc-exec / lxc-exec
-      │   │         + OS changes (if needed)
-      │   │
-      │   └─ NO  → Is it an SDK library-only feature?
-      │       │
-      │       ├─ YES → SDK library only
-      │       │
-      │       └─ NO  → wxc-exec / lxc-exec only
-      │                 + OS changes (if needed)
-```
-
-> **OS changes:** If the feature requires a new OS API or kernel
-> behavior that doesn't exist yet, that ships in Windows first
-> (e.g., PR in `os.2020`). Work bottom-up: OS → executors → SDK.
-> See the implementation checklist in the
-> [SandboxRequest spec](sandbox-policy/v1/policy.md).
-
-**Examples:**
-
-| Feature | Opt-in? | Type | Where? |
-|---------|---------|------|--------|
-| Clipboard | Yes | Policy | policy + Config + SDK + executors |
-| UI IME | Yes | Policy | policy (Win only) + Config + SDK + wxc-exec |
-| Linux distro | Yes | Env | environment + Config + SDK + lxc-exec |
-| Isolation level | Yes | Env | environment + Config + SDK + executors |
-| New UI restriction | Yes | Policy | policy + Config + SDK + wxc-exec + **OS** |
-| Fragment API | No | N/A | SDK library only |
+Use this flowchart to determine where your feature goes:
 
 ### Decision Flowchart
 
@@ -106,6 +56,12 @@ flowchart TD
     TEST --> PR["Submit PR"]
     PR --> DONE([Ship It])
 ```
+
+> **OS changes:** If the feature requires a new OS API or kernel
+> behavior, that ships in Windows first (e.g., PR in `os.2020`).
+> Work bottom-up: OS → executors → SDK. See the implementation
+> checklist in the
+> [SandboxRequest spec](sandbox-policy/v1/policy.md).
 
 ## Step 1: Write a Feature Spec
 
