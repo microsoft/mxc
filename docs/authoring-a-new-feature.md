@@ -57,28 +57,10 @@ flowchart TD
     PR --> DONE([Ship It])
 ```
 
-## Does your feature need an OS change?
-
-Some features require new OS APIs or kernel behaviors that
-don't exist yet (e.g., a new Job Object restriction, a new
-process mitigation). When that's the case:
-
-1. **Ship the OS change first.** Create a PR in `os.2020` to
-add or expose the OS primitive. Coordinate the API surface
-with the executor author.
-2. **Then update the executor** (wxc-exec / lxc-exec) to call
-the new OS API.
-3. **Then update the SDK** to map the new policy/environment
-field to Config.
-
-Work bottom-up: OS → executors → SDK. Not every feature needs
-an OS change; many use existing OS APIs.
-
-See the implementation checklist in the
-[SandboxRequest spec](sandbox-policy/v1/policy.md) for a
-concrete example.
-
 ## Step 1: Write a Feature Spec
+
+Write the spec before any code, including OS changes. The spec
+is how the team aligns on what to build.
 
 Create a spec document with:
 
@@ -92,12 +74,30 @@ including which backends are affected
 Config fields per backend
 5. **Default values**: what happens when the field is omitted
 (must be most-restrictive)
-6. **Backward compatibility**: impact on existing requests
-7. **Test plan**: how to test at both layers
+6. **OS changes (if applicable)**: high-level design for any
+new OS APIs, kernel behaviors, or system primitives needed.
+Which OS repo? What does the API look like? Coordinate with
+the OS engineer.
+7. **Backward compatibility**: impact on existing requests
+8. **Test plan**: how to test at each layer
 
 Submit a PR for review.
 
-## Steps 2+: Implementation
+## Step 2: OS changes (if applicable)
+
+If your feature spec identifies new OS APIs or kernel behaviors
+needed:
+
+1. **Create a PR in `os.2020`** to add or expose the OS
+primitive. Coordinate the API surface with the executor author.
+2. **Land the OS change first.** The executor (wxc-exec /
+lxc-exec) will call this API, so it must exist before the
+executor code can be written.
+
+Not every feature needs an OS change; many use existing OS APIs.
+If no OS change is needed, skip to Step 3.
+
+## Step 3+: Implementation
 
 If your feature touches SandboxRequest, update
 `sdk/src/types.ts`:
