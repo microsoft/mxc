@@ -42,7 +42,7 @@ Control channel frame format: `[4 bytes: u32 LE length][JSON payload]`
 
 | Host path | Sandbox path | Access | Contents |
 |-----------|-------------|--------|----------|
-| Daemon's exe directory | `C:\sandbox-guest` | Read-only | `wxc-sandbox-guest.exe` |
+| Daemon's exe directory | `C:\sandbox-guest` | Read-only | `wxc-windows-sandbox-guest.exe` |
 | `%TEMP%\wxc-sandbox-rendezvous` | `C:\sandbox-rendezvous` | Read-write | `rendezvous.txt`, `bootstrap.cmd`, `bootstrap.log` |
 | Host Python directory | `C:\sandbox-python` | Read-only | Host's Python installation |
 
@@ -53,7 +53,7 @@ The `.wsb` LogonCommand runs `C:\sandbox-rendezvous\bootstrap.cmd`:
 1. Adds `C:\sandbox-python` and `C:\sandbox-python\Scripts` to PATH
 2. Sets `PYTHONDONTWRITEBYTECODE=1` and `PYTHONNOUSERSITE=1`
 3. Logs diagnostics to `bootstrap.log`
-4. Launches `wxc-sandbox-guest.exe`
+4. Launches `wxc-windows-sandbox-guest.exe`
 
 ### .wsb Configuration
 
@@ -124,7 +124,7 @@ The sandbox runs any command through `cmd.exe /C <script>`:
 ### Startup
 
 ```
-wxc-sandbox-daemon.exe <pipe-name> <idle-timeout-ms>
+wxc-windows-sandbox-daemon.exe <pipe-name> <idle-timeout-ms>
 ```
 
 Auto-launched by `wxc-exec` if not already running.
@@ -159,12 +159,12 @@ Get-Content "$env:TEMP\wxc-sandbox-config\wxc-sandbox.wsb"
 Get-Process | Where-Object { $_.ProcessName -match "vmmem|vmwp|sandbox" }
 
 # Run daemon manually (visible logs)
-src\target\release\wxc-sandbox-daemon.exe wxc-sandbox 300000
+src\target\release\wxc-windows-sandbox-daemon.exe wxc-sandbox 300000
 # In another terminal:
 src\target\release\wxc-exec.exe --debug test_configs\basic_sandbox.json
 
 # Clean slate
-Get-Process -Name "wxc-sandbox-daemon","WindowsSandbox*" -ErrorAction SilentlyContinue |
+Get-Process -Name "wxc-windows-sandbox-daemon","WindowsSandbox*" -ErrorAction SilentlyContinue |
   ForEach-Object { Stop-Process -Id $_.Id -Force }
 Start-Sleep 30
 Remove-Item "$env:TEMP\wxc-sandbox-rendezvous\*" -ErrorAction SilentlyContinue
@@ -176,15 +176,15 @@ Remove-Item "$env:TEMP\wxc-sandbox-rendezvous\*" -ErrorAction SilentlyContinue
 |------|---------|
 | `src/wxc_common/src/sandbox_runner.rs` | Client: connects to daemon, sends EXEC, reads RESULT |
 | `src/wxc_common/src/sandbox_protocol.rs` | Shared control protocol |
-| `src/wxc_sandbox_daemon/src/main.rs` | Daemon entry point, idle watchdog |
-| `src/wxc_sandbox_daemon/src/pipe_server.rs` | TCP IPC server, EXEC handling, retry logic |
-| `src/wxc_sandbox_daemon/src/sandbox_vm.rs` | .wsb generation, Python discovery, VM launch/teardown |
-| `src/wxc_sandbox_daemon/src/rendezvous.rs` | Polls rendezvous.txt |
-| `src/wxc_sandbox_daemon/src/tcp_bridge.rs` | 4-channel TCP bridge, execute_on_guest, reconnect |
-| `src/wxc_sandbox_guest/src/main.rs` | Guest entry point |
-| `src/wxc_sandbox_guest/src/listener.rs` | TCP listener, rendezvous writer |
-| `src/wxc_sandbox_guest/src/executor.rs` | Command loop, stdio bridging |
-| `src/wxc_sandbox_guest/src/firewall.rs` | Guest firewall lockdown |
+| `src/wxc_windows_sandbox_daemon/src/main.rs` | Daemon entry point, idle watchdog |
+| `src/wxc_windows_sandbox_daemon/src/pipe_server.rs` | TCP IPC server, EXEC handling, retry logic |
+| `src/wxc_windows_sandbox_daemon/src/sandbox_vm.rs` | .wsb generation, Python discovery, VM launch/teardown |
+| `src/wxc_windows_sandbox_daemon/src/rendezvous.rs` | Polls rendezvous.txt |
+| `src/wxc_windows_sandbox_daemon/src/tcp_bridge.rs` | 4-channel TCP bridge, execute_on_guest, reconnect |
+| `src/wxc_windows_sandbox_guest/src/main.rs` | Guest entry point |
+| `src/wxc_windows_sandbox_guest/src/listener.rs` | TCP listener, rendezvous writer |
+| `src/wxc_windows_sandbox_guest/src/executor.rs` | Command loop, stdio bridging |
+| `src/wxc_windows_sandbox_guest/src/firewall.rs` | Guest firewall lockdown |
 
 ## E2E Tests
 

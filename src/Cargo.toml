@@ -1,5 +1,5 @@
 [workspace]
-members = ["wxc", "wxc_common", "wxc_test_driver", "wxc_test_proxy", "wxc_sandbox_guest", "wxc_sandbox_daemon", "wxc_winhttp_proxy_shim", "lxc", "lxc_common", "generated/base_container_specification"]
+members = ["wxc", "wxc_common", "wxc_test_driver", "wxc_test_proxy", "wxc_windows_sandbox_guest", "wxc_windows_sandbox_daemon", "wxc_winhttp_proxy_shim", "lxc", "lxc_common", "generated/base_container_specification"]
 resolver = "3"
 
 [workspace.package]

@@ -1,14 +1,19 @@
 [package]
-name = "wxc_sandbox_guest"
+name = "wxc_windows_sandbox_daemon"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "wxc-sandbox-guest"
+name = "wxc-windows-sandbox-daemon"
 path = "src/main.rs"
 
 [dependencies]
 wxc_common = { path = "../wxc_common" }
 tokio.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 anyhow.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

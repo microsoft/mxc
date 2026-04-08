@@ -52,10 +52,10 @@ fn run_configs(config_path: &std::path::Path, debug: bool) -> anyhow::Result<()>
             cmd.arg("--debug");
         }
 
-        // Sandbox is experimental — pass --experimental when the config uses it.
+        // Windows Sandbox is experimental — pass --experimental when the config uses it.
         let content = fs::read_to_string(path).unwrap_or_default();
-        if content.contains("\"containment\": \"sandbox\"")
-            || content.contains("\"containment\":\"sandbox\"")
+        if content.contains("\"containment\": \"windows_sandbox\"")
+            || content.contains("\"containment\":\"windows_sandbox\"")
         {
             cmd.arg("--experimental");
         }

@@ -25,7 +25,7 @@ if ($Release) {
 }
 
 $WxcExec = Join-Path $BinDir "wxc-exec.exe"
-$Daemon = Join-Path $BinDir "wxc-sandbox-daemon.exe"
+$Daemon = Join-Path $BinDir "wxc-windows-sandbox-daemon.exe"
 
 if (-not (Test-Path $WxcExec)) {
     Write-Host "ERROR: wxc-exec.exe not found at $WxcExec" -ForegroundColor Red
@@ -33,7 +33,7 @@ if (-not (Test-Path $WxcExec)) {
     exit 1
 }
 if (-not (Test-Path $Daemon)) {
-    Write-Host "ERROR: wxc-sandbox-daemon.exe not found at $Daemon" -ForegroundColor Red
+    Write-Host "ERROR: wxc-windows-sandbox-daemon.exe not found at $Daemon" -ForegroundColor Red
     exit 1
 }
 
@@ -120,7 +120,7 @@ function Run-SandboxTest {
 Write-Host "`nSandbox E2E Tests" -ForegroundColor Cyan
 Write-Host "=================" -ForegroundColor Cyan
 Write-Host "`nCleaning up stale sandbox processes..." -ForegroundColor Yellow
-Get-Process -Name "wxc-sandbox-daemon","WindowsSandbox*" -ErrorAction SilentlyContinue |
+Get-Process -Name "wxc-windows-sandbox-daemon","WindowsSandbox*" -ErrorAction SilentlyContinue |
     ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 Remove-Item "$env:TEMP\wxc-sandbox-rendezvous\*" -ErrorAction SilentlyContinue
 Start-Sleep 5
@@ -128,11 +128,11 @@ Start-Sleep 5
 # Start daemon
 Write-Host "Starting sandbox daemon..." -ForegroundColor Yellow
 $daemonProc = Start-Process -FilePath $Daemon -ArgumentList "wxc-sandbox","300000" `
-    -PassThru -NoNewWindow -RedirectStandardError "$env:TEMP\wxc-sandbox-daemon.log"
+    -PassThru -NoNewWindow -RedirectStandardError "$env:TEMP\wxc-windows-sandbox-daemon.log"
 Start-Sleep 2
 
 if ($daemonProc.HasExited) {
-    Write-Host "ERROR: Daemon exited immediately. Check $env:TEMP\wxc-sandbox-daemon.log" -ForegroundColor Red
+    Write-Host "ERROR: Daemon exited immediately. Check $env:TEMP\wxc-windows-sandbox-daemon.log" -ForegroundColor Red
     exit 1
 }
 Write-Host "Daemon started (PID $($daemonProc.Id))`n" -ForegroundColor Green
@@ -181,6 +181,6 @@ if (-not $daemonProc.HasExited) {
 Get-Process -Name "WindowsSandbox*" -ErrorAction SilentlyContinue |
     ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 
-Write-Host "Daemon log: $env:TEMP\wxc-sandbox-daemon.log" -ForegroundColor Gray
+Write-Host "Daemon log: $env:TEMP\wxc-windows-sandbox-daemon.log" -ForegroundColor Gray
 
 exit $(if ($failed -gt 0) { 1 } else { 0 })

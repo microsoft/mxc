@@ -20,13 +20,13 @@ pub enum ContainmentBackend {
     #[serde(rename = "microvm")]
     MicroVm,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
-    Sandbox,
+    WindowsSandbox,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SandboxConfig {
+pub struct WindowsSandboxConfig {
     /// Idle timeout in milliseconds before the daemon tears down the sandbox VM.
     /// Default: 300 000 (5 minutes). 0 = no timeout.
     pub idle_timeout_ms: u32,
@@ -34,7 +34,7 @@ pub struct SandboxConfig {
     pub daemon_pipe_name: String,
 }
 
-impl Default for SandboxConfig {
+impl Default for WindowsSandboxConfig {
     fn default() -> Self {
         Self {
             idle_timeout_ms: 300_000,
@@ -222,7 +222,8 @@ pub struct ExperimentalConfig {
     /// Placeholder feature for testing experimental infrastructure.
     pub test: Option<TestFeatureConfig>,
     /// Windows Sandbox backend (experimental).
-    pub sandbox: Option<SandboxConfig>,
+    #[serde(rename = "windows_sandbox")]
+    pub windows_sandbox: Option<WindowsSandboxConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

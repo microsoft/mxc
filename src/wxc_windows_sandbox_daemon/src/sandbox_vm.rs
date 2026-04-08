@@ -18,7 +18,7 @@ const SANDBOX_RENDEZVOUS_DIR: &str = r"C:\Sandbox-Rendezvous";
 const SANDBOX_PYTHON_DIR: &str = r"C:\Sandbox-Python";
 
 /// Name of the guest binary that runs inside the sandbox.
-const GUEST_BINARY: &str = "wxc-sandbox-guest.exe";
+const GUEST_BINARY: &str = "wxc-windows-sandbox-guest.exe";
 
 /// Maximum time (seconds) to wait for sandbox processes to exit during teardown.
 const TEARDOWN_POLL_TIMEOUT_SECS: u64 = 30;

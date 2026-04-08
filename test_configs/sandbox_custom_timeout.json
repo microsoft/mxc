@@ -1,7 +1,7 @@
 {
   "version": "0.4.0-alpha",
   "containerId": "CLI-Sandbox-Timeout",
-  "containment": "sandbox",
+  "containment": "windows_sandbox",
   "process": {
     "commandLine": "python -S -B -c \"import sys; print(f'Hello from sandbox Python {sys.version}'); print('Sandbox test successful')\"",
     "timeout": 60000
