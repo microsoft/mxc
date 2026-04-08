@@ -8,7 +8,7 @@ There is a need for a **micro-VM backend** that can execute various forms of cod
 
 ## Proposed Solution
 
-Add a **NanVix micro-VM backend** directly into the existing `wxc-exec.exe` binary. When the JSON config specifies `"containment": "microvm"`, the binary routes to a new `NanVixScriptRunner`. The runner spawns `nanvixd.exe` (the NanVix daemon), pipes the script via stdin, and relays stdout/stderr directly to the parent process.
+Add a **NanVix micro-VM backend** directly into the existing `wxc-exec.exe` binary. When the JSON config specifies `"containment": "nanvix"`, the binary routes to a new `NanVixScriptRunner`. The runner spawns `nanvixd.exe` (the NanVix daemon), pipes the script via stdin, and relays stdout/stderr directly to the parent process.
 
 **NanVix** is a lightweight microkernel OS that runs inside a WHP (Windows Hypervisor Platform) virtual machine. It provides POSIX-compatible process execution with hardware-enforced isolation. NanVix supports multiple runtimes — the initial integration uses CPython 3.12 with a trimmed FAT32 stdlib filesystem, but the architecture supports JavaScript (QuickJS), C, C++, and Rust binaries as configurable runtimes.
 
@@ -20,13 +20,13 @@ Path A — CLI (direct):
     └── Parses args → loads JSON → dispatches to NanVixScriptRunner
 
 Path B — SDK (programmatic):
-  App calls: spawnSandbox("print('hello')", policy, { containment: "microvm" })
-    ├── Builds JSON config with containment = "microvm"
+  App calls: spawnSandbox("print('hello')", policy, { containment: "nanvix" })
+    ├── Builds JSON config with containment = "nanvix"
     └── Spawns wxc-exec.exe with the config
 
 Both paths converge here:
   wxc-exec.exe
-    ├── Parses JSON config → sees containment = "microvm"
+    ├── Parses JSON config → sees containment = "nanvix"
     ├── Creates NanVixScriptRunner (via existing Box<dyn ScriptRunner> dispatch)
     ├── Validates paths: nanvixd.exe, bin_dir, ramfs, python.elf
     ├── Spawns nanvixd.exe as child process:
@@ -80,7 +80,7 @@ Inside the NanVix VM:
 3. **Pre-built artifacts, not built from source** — NanVix binaries (`nanvixd.exe`, `kernel.elf`, `python.elf`, `cpython-ramfs.img`) are downloaded from GitHub pre-releases. MXC does not compile or build NanVix components.
 
 
-4. **Unsupported policies are rejected** — If a config specifies `filesystem`, `network`, or `appContainer` policies with `containment: "microvm"`, the runner returns a clear error.
+4. **Unsupported policies are rejected** — If a config specifies `filesystem`, `network`, or `appContainer` policies with `containment: "nanvix"`, the runner returns a clear error.
 
 5. **Host-side I/O risk mitigated by IKC framing** — `nanvixd.exe` parses guest I/O via IKC (Inter-Kernel Communication) messages using fixed-size frames with bounds checking. A crafted guest could attempt malformed messages. Mitigation: formal fuzzing (future work).
 
@@ -296,18 +296,18 @@ Setup scripts (PowerShell & Bash) will download matching pre-release binaries an
 
 ```bash
 # Run a Python script in a NanVix VM
-wxc-exec.exe microvm_config.json
+wxc-exec.exe nanvix_config.json
 
 # With debug output
-wxc-exec.exe --debug microvm_config.json
+wxc-exec.exe --debug nanvix_config.json
 ```
 
-### Example Config (`microvm_config.json`)
+### Example Config (`nanvix_config.json`)
 
 ```json
 {
   "script": "import sys\nprint(f'Python {sys.version} on {sys.platform}')",
-  "containment": "microvm",
+  "containment": "nanvix",
   "timeout": 30000
 }
 ```
@@ -354,7 +354,7 @@ console.log(result.exitCode); // 0
 | `default_config_values` | NanVixConfig defaults (python.elf, /sysroot, 60s) |
 | `total_timeout_adds_boot_and_script` | Timeout arithmetic |
 | `resolve_nanvixd_missing_returns_error` | Path resolution error handling |
-| Config parser: `"microvm"` containment | JSON parsing of microvm containment value |
+| Config parser: `"nanvix"` containment | JSON parsing of nanvix section |
 
 ### Integration Tests (requires WHP + NanVix binaries)
 
