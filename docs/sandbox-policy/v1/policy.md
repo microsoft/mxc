@@ -136,7 +136,7 @@ existing code
 
 This spec does **not** cover:
 
-- **Enterprise policy injection (post-GA).** IT administrators
+- **Enterprise policy injection.** IT administrators
 injecting restrictions into sandboxes on managed machines
 (Group Policy, MDM, config files). This includes discovery and
 merge strategy.
