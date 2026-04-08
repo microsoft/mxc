@@ -85,6 +85,7 @@ export function buildSandboxPayload(
                 readwritePaths: policy.filesystem?.readwritePaths,
                 readonlyPaths: policy.filesystem?.readonlyPaths,
                 deniedPaths: policy.filesystem?.deniedPaths,
+                clearPolicyOnExit: true,
             };
         }
         return config;

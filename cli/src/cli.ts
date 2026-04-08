@@ -90,7 +90,7 @@ program
   .option('--policy-file <path>', 'Path to a SandboxPolicy JSON file')
   .option('--cwd <path>', 'Working directory for the sandboxed process')
   .option('--container-name <name>', 'Name for the sandbox container')
-  .option('--containment <backend>', 'Override containment backend (appcontainer, sandbox, microvm, nanvix, lxc, wslc, vm)')
+  .option('--containment <backend>', 'Override containment backend (appcontainer, sandbox, microvm, lxc, wslc, vm)')
   .option('--no-pty', 'Use child_process.spawn instead of node-pty (reliable exit codes)')
   .option('--debug', 'Enable debug output')
   .option('--experimental', 'Enable experimental features')
