@@ -6,7 +6,7 @@ use std::process;
 
 use clap::Parser;
 use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
-use wxc_common::appcontainer::AppContainerScriptRunner;
+use wxc_common::appcontainer_runner::AppContainerScriptRunner;
 use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::load_request;
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
