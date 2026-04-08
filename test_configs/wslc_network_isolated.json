@@ -3,7 +3,7 @@
   "containerId": "wslc-network-isolated",
   "containment": "wslc",
   "process": {
-    "commandLine": "wget -q -O /dev/null http://example.com && echo 'Network accessible' || echo 'Network blocked (expected)'"
+    "commandLine": "command -v wget >/dev/null 2>&1 || { echo 'wget not found in image' >&2; exit 1; }; wget -q -O /dev/null http://example.com && echo 'Network accessible' || echo 'Network blocked (expected)'"
   },
   "network": {
     "defaultPolicy": "block"
