@@ -38,15 +38,14 @@ Does the user need to OPT IN to this feature?
   │   └─ Is it security intent or runtime selection?
   │       │
   │       ├─ Security intent → SandboxPolicy field
-  │       │   (e.g., policy.ui.clipboard, policy.network)
   │       │   + Config schema + SDK library
   │       │   + wxc-exec / lxc-exec
+  │       │   + OS changes (if new OS API needed)
   │       │
   │       └─ Runtime selection → SandboxEnvironment field
-  │           (e.g., environment.isolation,
-  │            environment.linux.distribution)
   │           + Config schema + SDK library
   │           + wxc-exec / lxc-exec
+  │           + OS changes (if new OS API needed)
   │
   └─ NO: "User doesn't control this directly"
       │
@@ -54,25 +53,32 @@ Does the user need to OPT IN to this feature?
       │   │
       │   ├─ YES → Config schema + SDK library
       │   │         + wxc-exec / lxc-exec
-      │   │         (SDK sets internally)
+      │   │         + OS changes (if needed)
       │   │
       │   └─ NO  → Is it an SDK library-only feature?
       │       │
       │       ├─ YES → SDK library only
-      │       │         (e.g., new helper function)
       │       │
       │       └─ NO  → wxc-exec / lxc-exec only
+      │                 + OS changes (if needed)
 ```
+
+> **OS changes:** If the feature requires a new OS API or kernel
+> behavior that doesn't exist yet, that ships in Windows first
+> (e.g., PR in `os.2020`). Work bottom-up: OS → executors → SDK.
+> See the implementation checklist in the
+> [SandboxRequest spec](sandbox-policy/v1/policy.md).
 
 **Examples:**
 
 | Feature | Opt-in? | Type | Where? |
 |---------|---------|------|--------|
-| Clipboard | Yes | Policy | **policy.ui.clipboard** + Config + SDK + executors |
-| UI IME | Yes | Policy | **policy.ui.ime** (Win only) + Config + SDK + wxc-exec |
-| Linux distro | Yes | Environment | **environment.linux.distribution** + Config + SDK + lxc-exec |
-| Isolation level | Yes | Environment | **environment.isolation** + Config + SDK + executors |
-| Fragment API | No | N/A | **SDK library only** (e.g., `getPythonPolicy()`) |
+| Clipboard | Yes | Policy | policy + Config + SDK + executors |
+| UI IME | Yes | Policy | policy (Win only) + Config + SDK + wxc-exec |
+| Linux distro | Yes | Env | environment + Config + SDK + lxc-exec |
+| Isolation level | Yes | Env | environment + Config + SDK + executors |
+| New UI restriction | Yes | Policy | policy + Config + SDK + wxc-exec + **OS** |
+| Fragment API | No | N/A | SDK library only |
 
 ### Decision Flowchart
 
@@ -83,14 +89,14 @@ flowchart TD
     Q1 -->|YES| Q2{Security intent<br/>or runtime selection?}
     Q1 -->|NO| Q3{Changes Config<br/>schema?}
 
-    Q2 -->|Security intent| POL["SandboxPolicy field<br/>+ Config + SDK + executors"]
-    Q2 -->|Runtime selection| ENV["SandboxEnvironment field<br/>+ Config + SDK + executors"]
+    Q2 -->|Security intent| POL["SandboxPolicy field<br/>+ Config + SDK + executors<br/>+ OS (if new API needed)"]
+    Q2 -->|Runtime selection| ENV["SandboxEnvironment field<br/>+ Config + SDK + executors<br/>+ OS (if new API needed)"]
 
-    Q3 -->|YES| INTERNAL["Config + SDK + executors<br/>(SDK sets internally)"]
+    Q3 -->|YES| INTERNAL["Config + SDK + executors<br/>+ OS (if needed)"]
     Q3 -->|NO| Q4{SDK library-only?}
 
     Q4 -->|YES| SDK_ONLY["SDK library only"]
-    Q4 -->|NO| EXEC["wxc-exec / lxc-exec only"]
+    Q4 -->|NO| EXEC["wxc-exec / lxc-exec only<br/>+ OS (if needed)"]
 
     POL --> TEST["Write tests"]
     ENV --> TEST
