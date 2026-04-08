@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 
 [build-dependencies]
+zip = "2"

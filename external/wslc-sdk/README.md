@@ -5,36 +5,35 @@
 
 ## Contents
 
-- `include/wslcsdk.h` — C API header
-- `runtimes/win-x64/wslcsdk.lib` — Static import library (x64)
-- `runtimes/win-x64/wslcsdk.dll` — Runtime DLL (x64)
-- `runtimes/win-arm64/wslcsdk.lib` — Static import library (ARM64)
-- `runtimes/win-arm64/wslcsdk.dll` — Runtime DLL (ARM64)
+- `Microsoft.WSL.Containers.2.8.1.nupkg` — NuGet package containing the SDK
+  header (`wslcsdk.h`), import libraries (`wslcsdk.lib`), and runtime DLLs
+  (`wslcsdk.dll`) for x64 and ARM64.
 
 ## Usage
 
-The `wslc_common` crate links against `wslcsdk.lib` at build time via `build.rs`.
-At runtime, `wslcsdk.dll` must be available on the system — it is installed by the
-WSLC SDK MSI and is **not** bundled with MXC. The `.dll` files checked into this
-directory are for development convenience only (e.g., local builds without the MSI
-installed) and should not be deployed to production.
+The `wslc_common` crate's `build.rs` extracts the `.nupkg` (which is a zip
+file) into the cargo build output directory at compile time, then links
+against `wslcsdk.lib`.
+
+At runtime, `wslcsdk.dll` must be available on the system — it is installed
+by the WSLC SDK MSI and is **not** bundled with MXC.
 
 ### SDK resolution order
 
 `build.rs` resolves the SDK lib path in this order:
 
-1. **`WSLC_SDK_PATH` environment variable** — set this to the NuGet package extract
-   path (e.g., from a CI/CD pipeline or local NuGet cache) to avoid relying on the
-   checked-in copy.
-2. **`external/wslc-sdk/runtimes/win-{arch}/`** — fallback while the NuGet package
-   is not yet available in the build pipeline.
+1. **`WSLC_SDK_PATH` environment variable** — set this to a directory
+   containing `wslcsdk.lib` (e.g., from a CI/CD pipeline or local NuGet
+   cache) to skip nupkg extraction.
+2. **`external/wslc-sdk/*.nupkg`** — extracted to `OUT_DIR/wslc-sdk/` at
+   build time.
 
-Once the `Microsoft.WSL.Containers` NuGet package is integrated into the build
-pipeline, this `external/wslc-sdk/` directory can be removed from the repo.
+Once the `Microsoft.WSL.Containers` NuGet package is available on a public
+feed, `build.rs` can be updated to download it directly, and the checked-in
+`.nupkg` can be removed from the repo.
 
 ## Updating
 
 When a new version is available:
-1. Extract the updated `.nupkg`
-2. Replace files in this directory
-3. Update the version number above
+1. Replace the `.nupkg` file in this directory
+2. Update the version number above
