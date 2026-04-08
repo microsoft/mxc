@@ -85,14 +85,21 @@ Submit a PR for review.
 
 ## Step 2: OS changes (if applicable)
 
+> **Do not start OS work without an approved feature spec.**
+> The spec ensures the OS API can be translated through Config
+> into SandboxRequest. Without the spec, OS work may produce
+> APIs that can't be plumbed end-to-end.
+
 If your feature spec identifies new OS APIs or kernel behaviors
 needed:
 
 1. **Create a PR in `os.2020`** to add or expose the OS
-primitive. Coordinate the API surface with the executor author.
-2. **Land the OS change first.** The executor (wxc-exec /
-lxc-exec) will call this API, so it must exist before the
-executor code can be written.
+primitive. The spec's "OS changes" section should describe
+the API surface.
+2. **Coordinate with the executor author.** The executor
+(wxc-exec / lxc-exec) will call this API.
+3. **Land the OS change first.** The executor code can't be
+written until the OS API exists.
 
 Not every feature needs an OS change; many use existing OS APIs.
 If no OS change is needed, skip to Step 3.
