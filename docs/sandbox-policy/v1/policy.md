@@ -519,20 +519,9 @@ All errors include a human-readable `message` plus structured fields for program
 | `network.policy` | `allowedHosts` behavior |
 |-------------------|------------------------|
 | `"none"` | Ignored. No network access regardless of allowedHosts. |
-| `"local"` | **Invalid.** Local policy uses a fixed host list (localhost + RFC 1918 ranges). Setting `allowedHosts` with `"local"` is a validation error. |
+| `"local"` | **Narrows local range.** Only the specified local hosts are reachable. If omitted, all localhost + RFC 1918 ranges are allowed. |
 | `"outbound"` | **Allowlist mode.** Only hosts in `allowedHosts` are reachable. If `allowedHosts` is omitted, all outbound traffic is allowed. |
 | `"full"` | Ignored. Full network access regardless of allowedHosts. |
-
-This is enforced by validation in `buildSandboxConfig()`:
-```typescript
-if (request.policy.network?.policy === "local" && request.policy.network?.allowedHosts) {
-  throw new SandboxRequestError({
-    code: "INVALID_POLICY",
-    field: "policy.network.allowedHosts",
-    message: "allowedHosts cannot be set when network.policy is 'local'. Local policy uses a fixed host list.",
-  });
-}
-```
 
 ### 6.10 Cross-Field Interactions
 
