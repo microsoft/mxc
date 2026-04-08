@@ -6,6 +6,7 @@ import { Command } from 'commander';
 import { ContainerExecutor } from './wxc-executor';
 import {
   spawnSandbox,
+  execSandbox,
   getPlatformSupport,
   SandboxPolicy,
   SandboxingMethod,
@@ -117,18 +118,18 @@ program
 
 program
   .command('run-sdk')
-  .description('Simulate SDK usage: build a sandbox payload from a SandboxPolicy and spawn it')
+  .description('Run a sandboxed process via the MXC SDK')
   .option('--script <command>', 'Command line to execute')
   .option('--script-file <path>', 'Path to a script file (contents are read and passed as the command)')
-  // Policy JSON should match the SandboxPolicy type defined in sdk/src/types.ts
   .option('--policy <json>', 'SandboxPolicy as a JSON string')
   .option('--policy-file <path>', 'Path to a SandboxPolicy JSON file')
   .option('--cwd <path>', 'Working directory for the sandboxed process')
   .option('--container-name <name>', 'Name for the sandbox container')
   .option('--containment <backend>', 'Override containment backend (appcontainer, sandbox, microvm, nanvix, lxc, wslc, vm)')
+  .option('--no-pty', 'Use child_process.spawn instead of node-pty (reliable exit codes, no terminal features)')
   .option('--debug', 'Enable debug output')
   .option('--experimental', 'Enable experimental features')
-  .action(async (options: { script?: string; scriptFile?: string; policy?: string; policyFile?: string; cwd?: string; containerName?: string; containment?: string; debug?: boolean; experimental?: boolean }) => {
+  .action(async (options: { script?: string; scriptFile?: string; policy?: string; policyFile?: string; cwd?: string; containerName?: string; containment?: string; pty?: boolean; debug?: boolean; experimental?: boolean }) => {
     try {
       let scriptCommand: string;
       if (options.script) {
@@ -179,22 +180,36 @@ program
         ];
       }
 
-      console.log('Spawning sandboxed process using SDK...');
-
-      const ptyProcess = spawnSandbox(scriptCommand, policy, {
+      const spawnOptions = {
         debug: options.debug ?? false,
         experimental: options.experimental ?? false,
         containment: options.containment as SandboxingMethod | undefined,
-      }, options.cwd, options.containerName);
+      };
 
-      ptyProcess.onData((data: string) => {
-        process.stdout.write(data);
-      });
+      if (options.pty === false) {
+        // Non-PTY mode: reliable exit codes, separate stdout/stderr
+        const result = await execSandbox(scriptCommand, policy, spawnOptions, options.cwd, options.containerName);
+        if (result.stdout) {
+          process.stdout.write(result.stdout);
+        }
+        if (result.stderr) {
+          process.stderr.write(result.stderr);
+        }
+        process.exit(result.exitCode);
+      } else {
+        // PTY mode: interactive terminal with colors/input
+        console.log('Spawning sandboxed process using SDK...');
+        const ptyProcess = spawnSandbox(scriptCommand, policy, spawnOptions, options.cwd, options.containerName);
 
-      ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
-        console.log(`\nProcess exited with code ${event.exitCode}`);
-        process.exit(event.exitCode);
-      });
+        ptyProcess.onData((data: string) => {
+          process.stdout.write(data);
+        });
+
+        ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
+          console.log(`\nProcess exited with code ${event.exitCode}`);
+          process.exit(event.exitCode);
+        });
+      }
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : String(error));
       process.exit(1);
