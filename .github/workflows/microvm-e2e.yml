@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   microvm-e2e:
-    name: MXC-Exec MicroVM
+    name: WXC-Exec MicroVM
     runs-on: windows-latest
     timeout-minutes: 30
 
