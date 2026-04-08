@@ -161,7 +161,7 @@ Get-Process | Where-Object { $_.ProcessName -match "vmmem|vmwp|sandbox" }
 # Run daemon manually (visible logs)
 src\target\release\wxc-windows-sandbox-daemon.exe wxc-sandbox 300000
 # In another terminal:
-src\target\release\wxc-exec.exe --debug test_configs\basic_sandbox.json
+src\target\release\wxc-exec.exe --debug test_configs\basic_windows_sandbox.json
 
 # Clean slate
 Get-Process -Name "wxc-windows-sandbox-daemon","WindowsSandbox*" -ErrorAction SilentlyContinue |
@@ -201,11 +201,11 @@ cd test_scripts
 
 | Config | Script | Validates |
 |--------|--------|-----------|
-| `sandbox_echo.json` | `echo Hello from sandbox!` | Boot, stdout relay |
-| `basic_sandbox.json` | `python -S -B -c "..."` | Python mapping |
-| `sandbox_powershell.json` | `powershell ... "PowerShell works"` | PowerShell |
-| `sandbox_powershell_env.json` | `powershell ... $env:COMPUTERNAME` | VM isolation |
-| `sandbox_stderr.json` | `echo stdout && echo stderr 1>&2` | stderr relay |
-| `sandbox_exit_code.json` | `exit /b 42` | Exit codes |
-| `sandbox_timeout.json` | `ping -n 30 127.0.0.1` (5s timeout) | Timeout |
-| *(multi-exec)* | `sandbox_echo.json` × 3 | VM reuse |
+| `windows_sandbox_echo.json` | `echo Hello from sandbox!` | Boot, stdout relay |
+| `basic_windows_sandbox.json` | `python -S -B -c "..."` | Python mapping |
+| `windows_sandbox_powershell.json` | `powershell ... "PowerShell works"` | PowerShell |
+| `windows_sandbox_powershell_env.json` | `powershell ... $env:COMPUTERNAME` | VM isolation |
+| `windows_sandbox_stderr.json` | `echo stdout && echo stderr 1>&2` | stderr relay |
+| `windows_sandbox_exit_code.json` | `exit /b 42` | Exit codes |
+| `windows_sandbox_timeout.json` | `ping -n 30 127.0.0.1` (5s timeout) | Timeout |
+| *(multi-exec)* | `windows_sandbox_echo.json` × 3 | VM reuse |

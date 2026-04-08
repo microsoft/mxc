@@ -141,20 +141,20 @@ Write-Host "Daemon started (PID $($daemonProc.Id))`n" -ForegroundColor Green
 [System.Collections.ArrayList]$results = @()
 
 Write-Host "--- Basic Tests ---" -ForegroundColor Cyan
-$null = $results.Add((Run-SandboxTest "sandbox_echo.json" -OutputContains "Hello from sandbox!"))
-$null = $results.Add((Run-SandboxTest "basic_sandbox.json" -OutputContains "executed successfully"))
-$null = $results.Add((Run-SandboxTest "sandbox_powershell.json" -OutputContains "PowerShell works"))
-$null = $results.Add((Run-SandboxTest "sandbox_powershell_env.json" -OutputContains "ComputerName="))
-$null = $results.Add((Run-SandboxTest "sandbox_stderr.json" -OutputContains "stdout-message"))
-$null = $results.Add((Run-SandboxTest "sandbox_exit_code.json" -ExpectedExit 42))
+$null = $results.Add((Run-SandboxTest "windows_sandbox_echo.json" -OutputContains "Hello from sandbox!"))
+$null = $results.Add((Run-SandboxTest "basic_windows_sandbox.json" -OutputContains "executed successfully"))
+$null = $results.Add((Run-SandboxTest "windows_sandbox_powershell.json" -OutputContains "PowerShell works"))
+$null = $results.Add((Run-SandboxTest "windows_sandbox_powershell_env.json" -OutputContains "ComputerName="))
+$null = $results.Add((Run-SandboxTest "windows_sandbox_stderr.json" -OutputContains "stdout-message"))
+$null = $results.Add((Run-SandboxTest "windows_sandbox_exit_code.json" -ExpectedExit 42))
 
 Write-Host "`n--- Timeout Test ---" -ForegroundColor Cyan
-$null = $results.Add((Run-SandboxTest "sandbox_timeout.json" -ExpectNonZero))
+$null = $results.Add((Run-SandboxTest "windows_sandbox_timeout.json" -ExpectNonZero))
 
 Write-Host "`n--- Multi-Exec Test (3x echo on same VM) ---" -ForegroundColor Cyan
 for ($iter = 1; $iter -le 3; $iter++) {
-    $result = Run-SandboxTest "sandbox_echo.json" -OutputContains "Hello from sandbox!"
-    $result.Name = "multi-exec #$iter (sandbox_echo.json)"
+    $result = Run-SandboxTest "windows_sandbox_echo.json" -OutputContains "Hello from sandbox!"
+    $result.Name = "multi-exec #$iter (windows_sandbox_echo.json)"
     $null = $results.Add($result)
 }
 
