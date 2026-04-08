@@ -296,7 +296,7 @@ function prepareSandboxInvocation(
   // Validate containment against available methods (skip experimental backends
   // like microvm/vm/sandbox which aren't reported by platform detection)
   if (options.containment) {
-    const experimental = ['microvm', 'vm', 'sandbox'];
+    const experimental = ['microvm', 'vm', 'sandbox', 'wslc'];
     if (!experimental.includes(options.containment) &&
         !platformSupport.availableMethods.includes(options.containment)) {
       throw new Error(
