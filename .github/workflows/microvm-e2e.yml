@@ -69,7 +69,7 @@ jobs:
       - name: Build CLI
         working-directory: cli
         run: |
-          npm ci
+          npm install
           npm run build
 
       - name: Diagnose hypervisor environment
