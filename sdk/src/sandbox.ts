@@ -349,18 +349,18 @@ export function execSandbox(
   return new Promise((resolve, reject) => {
     const child: ChildProcess = spawn(executablePath, args, {
       cwd: workingDirectory || process.cwd(),
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    let stdout = '';
-    let stderr = '';
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
 
     child.stdout?.on('data', (data: Buffer) => {
-      stdout += data.toString();
+      stdoutChunks.push(data);
     });
 
     child.stderr?.on('data', (data: Buffer) => {
-      stderr += data.toString();
+      stderrChunks.push(data);
     });
 
     child.on('error', (error: Error) => {
@@ -369,8 +369,8 @@ export function execSandbox(
 
     child.on('close', (code: number | null) => {
       resolve({
-        stdout,
-        stderr,
+        stdout: Buffer.concat(stdoutChunks).toString(),
+        stderr: Buffer.concat(stderrChunks).toString(),
         exitCode: code ?? -1,
       });
     });
