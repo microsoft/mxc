@@ -16,14 +16,8 @@ use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLE
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{ProxyAddress, ProxyConfig};
-use crate::process_util::OwnedHandle;
+use crate::process_util::{OwnedHandle, SidAndAttributes};
 use crate::string_util;
-
-#[repr(C)]
-struct SidAndAttributes {
-    sid: PSID,
-    attributes: u32,
-}
 
 /// Remove an AppContainer from the loopback exemption list.
 fn remove_loopback_exemption(container_name: &str) {
