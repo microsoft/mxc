@@ -399,13 +399,12 @@ impl<B: SandboxBackend> ScriptRunner for Runner<B> {
         match child.wait() {
             Ok(exit_code) => {
                 let mut response = ScriptResponse {
-                    exit_code,
                     failure_phase: if exit_code == 0 {
                         FailurePhase::None
                     } else {
                         FailurePhase::ProcessExited
                     },
-                    ..Default::default()
+                    ..ScriptResponse::from_exit_code(exit_code)
                 };
                 // Let the backend enrich a non-zero exit with an actionable
                 // message (the child streamed live, so the response is otherwise

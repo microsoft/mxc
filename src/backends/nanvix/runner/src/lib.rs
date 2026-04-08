@@ -908,10 +908,7 @@ impl NanVixScriptRunner {
                 if exit_code != 0 && !stderr_output.is_empty() {
                     let _ = writeln!(logger, "NanVix stderr:\n{}", stderr_output);
                 }
-                ScriptResponse {
-                    exit_code,
-                    ..Default::default()
-                }
+                ScriptResponse::from_exit_code(exit_code)
             }
             Err(e) => {
                 if !stderr_output.is_empty() {

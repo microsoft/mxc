@@ -783,6 +783,14 @@ impl ScriptResponse {
             ..Default::default()
         }
     }
+
+    /// Create a response with the given exit code and no captured output.
+    pub fn from_exit_code(exit_code: i32) -> Self {
+        ScriptResponse {
+            exit_code,
+            ..Default::default()
+        }
+    }
 }
 
 #[cfg(test)]
