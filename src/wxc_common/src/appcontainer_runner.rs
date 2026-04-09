@@ -21,7 +21,7 @@ use windows_core::{PCWSTR, PWSTR};
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
-use crate::process_util::{get_capability_sid_from_name, OwnedHandle};
+use crate::process_util::{get_capability_sid_from_name, OwnedHandle, SidAndAttributes};
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::string_util;
 
@@ -77,15 +77,6 @@ fn build_proxy_env_block(address: &crate::models::ProxyAddress) -> Vec<u16> {
     }
     block.push(0);
     block
-}
-
-/// A `SID_AND_ATTRIBUTES`-compatible struct used to build the capabilities array.
-/// Using a manual struct avoids issues with conditional availability of
-/// `windows::Win32::Security::SID_AND_ATTRIBUTES`.
-#[repr(C)]
-struct SidAndAttributes {
-    sid: PSID,
-    attributes: u32,
 }
 
 /// RAII guard that frees capability SID pointers via `LocalFree` on drop.

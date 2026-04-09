@@ -334,6 +334,17 @@ pub fn run_process_with_captured_output(
 
 // ── Capability SID helpers ────────────────────────────────────────────────
 
+/// A `SID_AND_ATTRIBUTES`-compatible struct for building capability arrays
+/// and loopback exemption lists.
+///
+/// Using a manual struct avoids issues with conditional availability of
+/// `windows::Win32::Security::SID_AND_ATTRIBUTES`.
+#[repr(C)]
+pub struct SidAndAttributes {
+    pub sid: PSID,
+    pub attributes: u32,
+}
+
 /// Derive the capability SID for a given capability name.
 /// Returns the raw SID pointer. The caller is responsible for freeing it with `LocalFree`.
 pub fn get_capability_sid_from_name(name: &str) -> Result<*mut core::ffi::c_void, WxcError> {
