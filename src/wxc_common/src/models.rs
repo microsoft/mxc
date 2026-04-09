@@ -16,20 +16,17 @@ pub enum ContainmentBackend {
     Lxc,
     /// VM-based isolation.
     Vm,
-    /// NanVix — microkernel VM isolation via WHP.
-    #[serde(rename = "nanvix")]
-    NanVix,
-    /// MicroVM-based isolation.
+    /// MicroVM isolation via Windows Hypervisor Platform (internally powered by NanVix).
     #[serde(rename = "microvm")]
     MicroVm,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
-    Sandbox,
+    WindowsSandbox,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SandboxConfig {
+pub struct WindowsSandboxConfig {
     /// Idle timeout in milliseconds before the daemon tears down the sandbox VM.
     /// Default: 300 000 (5 minutes). 0 = no timeout.
     pub idle_timeout_ms: u32,
@@ -37,11 +34,11 @@ pub struct SandboxConfig {
     pub daemon_pipe_name: String,
 }
 
-impl Default for SandboxConfig {
+impl Default for WindowsSandboxConfig {
     fn default() -> Self {
         Self {
             idle_timeout_ms: 300_000,
-            daemon_pipe_name: "wxc-sandbox".to_string(),
+            daemon_pipe_name: "wxc-windows-sandbox".to_string(),
         }
     }
 }
@@ -225,7 +222,8 @@ pub struct ExperimentalConfig {
     /// Placeholder feature for testing experimental infrastructure.
     pub test: Option<TestFeatureConfig>,
     /// Windows Sandbox backend (experimental).
-    pub sandbox: Option<SandboxConfig>,
+    #[serde(rename = "windows_sandbox")]
+    pub windows_sandbox: Option<WindowsSandboxConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,9 +1,0 @@
-{
-  "version": "0.4.0-alpha",
-  "containerId": "CLI-Sandbox-Hello-World",
-  "containment": "sandbox",
-  "process": {
-    "commandLine": "python -S -B -c \"import sys; print('Hello from Windows Sandbox!'); print(f'Python version: {sys.version}'); print('Script executed successfully in sandbox isolation')\"",
-    "timeout": 60000
-  }
-}

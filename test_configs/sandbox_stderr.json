@@ -1,7 +1,0 @@
-{
-  "containment": "sandbox",
-  "process": {
-    "commandLine": "echo stdout-message && echo stderr-message 1>&2",
-    "timeout": 60000
-  }
-}

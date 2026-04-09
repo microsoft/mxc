@@ -68,11 +68,11 @@ production configs and the dev schema when working on experimental features:
 | Value | Description |
 |-------|-------------|
 | `"appcontainer"` | (Default) Windows AppContainer process-level isolation |
-| `"sandbox"` | Windows Sandbox VM isolation via a long-lived daemon |
+| `"windows_sandbox"` | Windows Sandbox VM isolation via a long-lived daemon |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation |
 | `"vm"` | VM-based isolation (not yet implemented) |
-| `"nanvix"` | NanVix microkernel VM isolation via WHP |
+| `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
 
 Only the backend section matching the selected `containment` value is used;
 other backend sections are ignored.

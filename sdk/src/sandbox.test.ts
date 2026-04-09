@@ -61,6 +61,16 @@ describe('buildSandboxPayload', () => {
       assert.deepStrictEqual(payload.filesystem!.readonlyPaths, ['C:\\data']);
     });
 
+    it('should set ContainerConfig.version to match SandboxPolicy.version', () => {
+      mockWindows();
+      try {
+        const payload = buildSandboxPayload('echo hi', { version: '0.4.0-alpha' });
+        assert.strictEqual(payload.version, '0.4.0-alpha');
+      } finally {
+        restore();
+      }
+    });
+
     it('should accept a compatible version', () => {
       mockWindows();
       try {
@@ -70,10 +80,13 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should accept a newer minor version within same major', () => {
+    it('should reject a newer minor version within same major', () => {
       mockWindows();
       try {
-        assert.doesNotThrow(() => buildSandboxPayload('echo hi', { version: '0.99.0' }));
+        assert.throws(
+          () => buildSandboxPayload('echo hi', { version: '0.99.0' }),
+          { message: /newer than supported/ },
+        );
       } finally {
         restore();
       }
@@ -84,7 +97,7 @@ describe('buildSandboxPayload', () => {
       try {
         assert.throws(
           () => buildSandboxPayload('echo hi', { version: '1.0.0' }),
-          { message: /incompatible/ },
+          { message: /newer than supported/ },
         );
       } finally {
         restore();
@@ -97,6 +110,18 @@ describe('buildSandboxPayload', () => {
         assert.throws(
           () => buildSandboxPayload('echo hi', { version: 'not-a-version' }),
           { message: /Invalid policy version/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject an empty version string', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => buildSandboxPayload('echo hi', { version: '' }),
+          { message: /version is required/ },
         );
       } finally {
         restore();

@@ -15,6 +15,7 @@ windows.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 nanvix_binaries = { path = "../nanvix_binaries", optional = true }
+wslc_common = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.build-dependencies]
 nanvix_common = { path = "../nanvix_common" }
@@ -22,3 +23,4 @@ nanvix_common = { path = "../nanvix_common" }
 [features]
 default = []
 microvm = ["nanvix_binaries"]
+wslc = ["dep:wslc_common"]

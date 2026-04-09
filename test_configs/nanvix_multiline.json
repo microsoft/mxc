@@ -1,7 +1,0 @@
-{
-    "process": {
-        "commandLine": "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n\nfor i in range(10):\n    print(f'fib({i}) = {fib(i)}')",
-        "timeout": 30000
-    },
-    "containment": "nanvix"
-}
