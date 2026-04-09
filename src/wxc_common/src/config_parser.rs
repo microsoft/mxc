@@ -12,7 +12,7 @@ use crate::logger::Logger;
 use crate::models::{
     CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig, LifecycleConfig,
     LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig,
-    SandboxConfig, TestFeatureConfig, WslcConfig,
+    TestFeatureConfig, WindowsSandboxConfig, WslcConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -126,7 +126,8 @@ struct RawTestFeature {
 #[serde(default)]
 struct RawExperimental {
     test: Option<RawTestFeature>,
-    sandbox: Option<RawSandbox>,
+    #[serde(rename = "windows_sandbox")]
+    windows_sandbox: Option<RawSandbox>,
     wslc: Option<RawContainerConfig>,
 }
 
@@ -491,8 +492,8 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     // Experimental section (parsed but only applied when --experimental flag is set)
     let experimental = if let Some(raw_exp) = raw.experimental {
         let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
-        let sandbox = raw_exp.sandbox.map(|sb| {
-            let mut config = SandboxConfig::default();
+        let windows_sandbox = raw_exp.windows_sandbox.map(|sb| {
+            let mut config = WindowsSandboxConfig::default();
             if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
                 config.idle_timeout_ms = t;
             }
@@ -529,9 +530,8 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         });
         ExperimentalConfig {
             test,
-            sandbox,
+            windows_sandbox,
             wslc,
-        }
         }
     } else {
         ExperimentalConfig::default()

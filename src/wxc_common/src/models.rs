@@ -222,7 +222,8 @@ pub struct ExperimentalConfig {
     /// Placeholder feature for testing experimental infrastructure.
     pub test: Option<TestFeatureConfig>,
     /// Windows Sandbox backend (experimental).
-    pub sandbox: Option<SandboxConfig>,
+    #[serde(rename = "windows_sandbox")]
+    pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// WSL Container (WSLC SDK) backend (experimental).
     pub wslc: Option<WslcConfig>,
 }
