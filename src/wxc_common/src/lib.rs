@@ -7,7 +7,6 @@ pub mod encoding;
 pub mod error;
 pub mod logger;
 pub mod models;
-#[cfg(target_os = "windows")]
 pub mod nanvix_runner;
 pub mod script_runner;
 pub mod validator;
