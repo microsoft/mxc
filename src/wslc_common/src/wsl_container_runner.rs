@@ -416,11 +416,12 @@ impl WSLContainerRunner {
         }
 
         // Network policy
+        let is_default_block = request.policy.default_network_policy == NetworkPolicy::Block;
         let has_host_rules = policy_mapping::needs_host_filtering(
+            is_default_block,
             &request.policy.allowed_hosts,
             &request.policy.blocked_hosts,
         );
-        let is_default_block = request.policy.default_network_policy == NetworkPolicy::Block;
         let net_mode = policy_mapping::map_network_policy(is_default_block, has_host_rules);
         let _ = WslcSetContainerSettingsNetworkingMode(&mut container_settings, net_mode);
         let _ = writeln!(logger, "[WSLC] Networking mode: {:?}", net_mode);

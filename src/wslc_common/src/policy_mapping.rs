@@ -45,6 +45,14 @@ pub fn windows_path_to_container_path(windows_path: &str) -> Option<String> {
         return None;
     }
 
+    // After the colon, must be \, /, or end-of-string (bare "C:")
+    if path.len() > 2 {
+        let after_colon = bytes[2];
+        if after_colon != b'\\' && after_colon != b'/' {
+            return None;
+        }
+    }
+
     let drive_lower = (drive as char).to_ascii_lowercase();
     let rest = &path[2..];
     let rest_forward = rest.replace('\\', "/");
@@ -117,8 +125,20 @@ pub fn map_network_policy(is_block: bool, has_host_rules: bool) -> WslcContainer
 
 /// Returns true if per-host network filtering is needed (requires iptables
 /// exec after container start and `Privileged` flag).
-pub fn needs_host_filtering(allowed_hosts: &[String], blocked_hosts: &[String]) -> bool {
-    !allowed_hosts.is_empty() || !blocked_hosts.is_empty()
+///
+/// Only returns true when the host list can refine the selected default policy:
+/// - `Block` → only `allowed_hosts` matter (allowlist)
+/// - `Allow` → only `blocked_hosts` matter (blocklist)
+pub fn needs_host_filtering(
+    is_default_block: bool,
+    allowed_hosts: &[String],
+    blocked_hosts: &[String],
+) -> bool {
+    if is_default_block {
+        !allowed_hosts.is_empty()
+    } else {
+        !blocked_hosts.is_empty()
+    }
 }
 
 /// Build iptables commands for per-host network filtering.
@@ -304,17 +324,47 @@ mod tests {
 
     #[test]
     fn needs_host_filtering_empty() {
-        assert!(!needs_host_filtering(&[], &[]));
+        assert!(!needs_host_filtering(true, &[], &[]));
+        assert!(!needs_host_filtering(false, &[], &[]));
     }
 
     #[test]
-    fn needs_host_filtering_with_allowed() {
-        assert!(needs_host_filtering(&["1.2.3.4".to_string()], &[]));
+    fn needs_host_filtering_block_with_allowed() {
+        assert!(needs_host_filtering(true, &["1.2.3.4".to_string()], &[]));
     }
 
     #[test]
-    fn needs_host_filtering_with_blocked() {
-        assert!(needs_host_filtering(&[], &["evil.com".to_string()]));
+    fn needs_host_filtering_allow_with_blocked() {
+        assert!(needs_host_filtering(false, &[], &["evil.com".to_string()]));
+    }
+
+    #[test]
+    fn needs_host_filtering_block_with_blocked_only_is_false() {
+        // block + blockedHosts makes no sense — blocking is already the default
+        assert!(!needs_host_filtering(true, &[], &["evil.com".to_string()]));
+    }
+
+    #[test]
+    fn needs_host_filtering_allow_with_allowed_only_is_false() {
+        // allow + allowedHosts makes no sense — everything is already allowed
+        assert!(!needs_host_filtering(false, &["1.2.3.4".to_string()], &[]));
+    }
+
+    // -- Path edge case tests --
+
+    #[test]
+    fn path_drive_relative_returns_none() {
+        // C:folder (no separator after colon) is invalid
+        assert_eq!(windows_path_to_container_path("C:folder"), None);
+    }
+
+    #[test]
+    fn path_bare_drive_returns_some() {
+        // C: (just drive letter + colon) is valid
+        assert_eq!(
+            windows_path_to_container_path("C:"),
+            Some("/mnt/c".to_string())
+        );
     }
 
     #[test]
