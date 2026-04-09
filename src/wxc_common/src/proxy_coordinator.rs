@@ -16,7 +16,7 @@ use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLE
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{ProxyAddress, ProxyConfig};
-use crate::process_util::{OwnedHandle, SidAndAttributes};
+use crate::process_util::{resolve_sibling_binary, OwnedHandle, SidAndAttributes};
 use crate::string_util;
 
 /// Remove an AppContainer from the loopback exemption list.
@@ -116,26 +116,6 @@ fn enable_loopback(container_sid: PSID) -> Result<(), WxcError> {
     }
 
     Ok(())
-}
-
-/// Find a sibling executable next to the current exe.
-fn find_sibling_exe(name: &str) -> Result<PathBuf, WxcError> {
-    let exe_dir = std::env::current_exe()
-        .map_err(|err| WxcError::NetworkProxy(format!("Failed to get current exe path: {}", err)))?
-        .parent()
-        .ok_or_else(|| WxcError::NetworkProxy("Failed to get exe directory".into()))?
-        .to_path_buf();
-
-    let path = exe_dir.join(name);
-    if !path.exists() {
-        return Err(WxcError::NetworkProxy(format!(
-            "{} not found at {}",
-            name,
-            path.display()
-        )));
-    }
-
-    Ok(path)
 }
 
 /// Generate a unique identifier for event and file naming.
@@ -371,7 +351,7 @@ impl ProxyCoordinator {
         self.test_proxy_cleanup_event = Some(OwnedHandle::new(event_handle));
         self.test_proxy_ready_file_path = Some(ready_file_path.clone());
 
-        let proxy_exe = find_sibling_exe("wxc-test-proxy.exe")?;
+        let proxy_exe = resolve_sibling_binary("wxc-test-proxy.exe")?;
 
         let mut child = std::process::Command::new(&proxy_exe)
             .arg("--ready-file")
@@ -441,7 +421,7 @@ impl ProxyCoordinator {
         self.shim_cleanup_event = Some(OwnedHandle::new(event_handle));
         self.shim_ready_file_path = Some(ready_file_path.clone());
 
-        let shim_path = find_sibling_exe("winhttp-proxy-shim.exe")?;
+        let shim_path = resolve_sibling_binary("winhttp-proxy-shim.exe")?;
         let addr = self.proxy_address.as_ref().unwrap();
         let shim_args = format!(
             "--sid {} --proxy-address {} --proxy-port {} \

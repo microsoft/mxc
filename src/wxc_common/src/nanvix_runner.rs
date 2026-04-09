@@ -112,11 +112,7 @@ impl NanVixError {
 
 /// Returns the directory containing the current executable.
 fn exe_dir() -> Result<PathBuf, NanVixError> {
-    let exe = std::env::current_exe()
-        .map_err(|e| NanVixError::Preflight(format!("cannot determine exe path: {}", e)))?;
-    exe.parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| NanVixError::Preflight("exe has no parent directory".to_string()))
+    crate::process_util::exe_dir().map_err(|e| NanVixError::Preflight(e.to_string()))
 }
 
 /// Watchdog thread: waits for timeout or cancellation, then terminates the process.
