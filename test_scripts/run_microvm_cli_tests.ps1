@@ -99,12 +99,9 @@ $tests = @(
         ExpectedExit = 1
         Description  = "Python exception"
         OutputContains = "ValueError"
-    },
-    @{
-        Script       = "import time; time.sleep(120); print('should not reach here')"
-        ExpectedExit = -1
-        Description  = "Timeout kills VM"
     }
+    # Note: timeout test is omitted — SandboxPolicy doesn't expose process.timeout.
+    # Timeout behavior is covered by the wxc-exec direct tests (run_microvm_tests.ps1).
 )
 
 # -- Run tests ----------------------------------------------------------------
