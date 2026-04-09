@@ -6,13 +6,15 @@ use std::process;
 
 use clap::Parser;
 use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
-use wxc_common::appcontainer::AppContainerScriptRunner;
+use wxc_common::appcontainer_runner::AppContainerScriptRunner;
+use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::load_request;
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
-use wxc_common::sandbox_runner::SandboxScriptRunner;
+use wxc_common::nanvix_runner::NanVixScriptRunner;
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
@@ -40,6 +42,10 @@ struct Cli {
     /// Container name (required with --delete)
     #[arg(long = "containername")]
     containername: Option<String>,
+
+    /// Enable experimental features
+    #[arg(long)]
+    experimental: bool,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
@@ -129,7 +135,7 @@ fn main() {
     }
 
     // Load request
-    let request = match load_request(&config_data, &mut logger, is_base64) {
+    let mut request = match load_request(&config_data, &mut logger, is_base64) {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());
@@ -137,12 +143,21 @@ fn main() {
         }
     };
 
+    request.experimental_enabled = cli.experimental;
+
     log_request(&request, &mut logger);
 
-    // Run script in selected containment backend
+    // Run script in selected containment backend.
+    // Sandbox, BaseContainer and MicroVM require --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
-        ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
-        ContainmentBackend::Sandbox => Box::new(SandboxScriptRunner::new(&request.sandbox_config)),
+        ContainmentBackend::AppContainer => {
+            if request.experimental_enabled {
+                let _ = writeln!(logger, "Using BaseContainer runner (--experimental)");
+                Box::new(BaseContainerRunner::new())
+            } else {
+                Box::new(AppContainerScriptRunner::new())
+            }
+        }
         ContainmentBackend::Wslc => {
             eprintln!("Error: WSLC backend not yet implemented (Phase 3)");
             process::exit(1);
@@ -156,8 +171,26 @@ fn main() {
             process::exit(1);
         }
         ContainmentBackend::MicroVm => {
-            eprintln!("Error: MicroVM backend not yet implemented");
-            process::exit(1);
+            if !request.experimental_enabled {
+                eprintln!("Error: MicroVM is an experimental feature. Use --experimental flag.");
+                process::exit(1);
+            }
+            Box::new(NanVixScriptRunner::new())
+        }
+        ContainmentBackend::WindowsSandbox => {
+            if !request.experimental_enabled {
+                eprintln!(
+                    "Error: Windows Sandbox is an experimental feature. Use --experimental flag."
+                );
+                process::exit(1);
+            }
+            let sandbox_config = request
+                .experimental
+                .windows_sandbox
+                .as_ref()
+                .cloned()
+                .unwrap_or_default();
+            Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
         }
     };
     let response = runner.run(&request, &mut logger);

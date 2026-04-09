@@ -39,7 +39,7 @@ This makes version a compatibility contract: a config that says `"version": 1` w
 
 ## Config Structure
 
-The `"ui"` section is a sibling of `"appContainer"`, `"filesystem"`, `"network"`, and `"sandbox"` in the WXC config. All fields shown explicitly for illustration — in practice, omitted fields default to their most restrictive value:
+The `"ui"` section is a sibling of `"appContainer"`, `"filesystem"`, `"network"`, and `"windows_sandbox"` in the WXC config. All fields shown explicitly for illustration — in practice, omitted fields default to their most restrictive value:
 
 ```json
 {
@@ -57,7 +57,7 @@ The `"ui"` section is a sibling of `"appContainer"`, `"filesystem"`, `"network"`
 }
 ```
 
-> **Note:** The `"ui"` section is only meaningful when `"containment"` is `"appcontainer"`. When `"containment"` is `"sandbox"`, the sandbox VM provides its own isolation — the `"ui"` section is ignored and a warning is emitted.
+> **Note:** The `"ui"` section is only meaningful when `"containment"` is `"appcontainer"`. When `"containment"` is `"windows_sandbox"`, the sandbox VM provides its own isolation — the `"ui"` section is ignored and a warning is emitted.
 
 ---
 

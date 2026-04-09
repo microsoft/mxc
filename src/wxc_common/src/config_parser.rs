@@ -10,8 +10,9 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, LifecycleConfig, LxcConfig,
-    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SandboxConfig,
+    CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
+    LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress,
+    ProxyConfig, TestFeatureConfig, WindowsSandboxConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -117,6 +118,20 @@ struct RawLifecycle {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawTestFeature {
+    message: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawExperimental {
+    test: Option<RawTestFeature>,
+    #[serde(rename = "windows_sandbox")]
+    windows_sandbox: Option<RawSandbox>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawConfig {
     version: Option<String>,
     #[serde(rename = "containerId")]
@@ -127,11 +142,11 @@ struct RawConfig {
     containment: Option<String>,
     #[serde(rename = "appContainer")]
     app_container: Option<RawAppContainer>,
-    sandbox: Option<RawSandbox>,
     wslc: Option<RawContainerConfig>,
     lxc: Option<RawLxc>,
     filesystem: Option<RawFilesystem>,
     network: Option<RawNetwork>,
+    experimental: Option<RawExperimental>,
 }
 
 // ---------- Public API ----------
@@ -328,31 +343,20 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     // Containment backend selection
     let containment = match raw.containment.as_deref() {
         None | Some("appcontainer") => ContainmentBackend::AppContainer,
-        Some("sandbox") => ContainmentBackend::Sandbox,
+        Some("windows_sandbox") => ContainmentBackend::WindowsSandbox,
         Some("wslc") => ContainmentBackend::Wslc,
         Some("lxc") => ContainmentBackend::Lxc,
         Some("vm") => ContainmentBackend::Vm,
         Some("microvm") => ContainmentBackend::MicroVm,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', 'wslc', 'lxc', 'vm', or 'microvm')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'wslc', 'lxc', 'vm', or 'microvm')",
                 other
             );
             logger.log_line(&msg);
             return Err(WxcError::ConfigParse(msg));
         }
     };
-
-    // Sandbox configuration
-    let mut sandbox_config = SandboxConfig::default();
-    if let Some(sb) = raw.sandbox {
-        if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
-            sandbox_config.idle_timeout_ms = t;
-        }
-        if let Some(name) = sb.daemon_pipe_name {
-            sandbox_config.daemon_pipe_name = name;
-        }
-    }
 
     // LXC configuration
     let lxc_config = {
@@ -512,6 +516,27 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     // Schema version check
     validate_schema_version(&schema_version, logger)?;
 
+    // Experimental section (parsed but only applied when --experimental flag is set)
+    let experimental = if let Some(raw_exp) = raw.experimental {
+        let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
+        let windows_sandbox = raw_exp.windows_sandbox.map(|sb| {
+            let mut config = WindowsSandboxConfig::default();
+            if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
+                config.idle_timeout_ms = t;
+            }
+            if let Some(name) = sb.daemon_pipe_name {
+                config.daemon_pipe_name = name;
+            }
+            config
+        });
+        ExperimentalConfig {
+            test,
+            windows_sandbox,
+        }
+    } else {
+        ExperimentalConfig::default()
+    };
+
     Ok(CodexRequest {
         schema_version,
         container_id,
@@ -523,9 +548,10 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         containment,
         lifecycle,
         policy,
-        sandbox_config,
         container_config,
         lxc_config,
+        experimental_enabled: false,
+        experimental,
     })
 }
 
@@ -925,12 +951,13 @@ mod tests {
 
     #[test]
     fn sandbox_containment() {
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "sandbox"}"#;
+        let json =
+            r#"{"process": {"commandLine": "echo hello"}, "containment": "windows_sandbox"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Sandbox);
+        assert_eq!(req.containment, ContainmentBackend::WindowsSandbox);
     }
 
     #[test]
@@ -945,32 +972,34 @@ mod tests {
 
     #[test]
     fn sandbox_config_defaults() {
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "sandbox"}"#;
+        let json = r#"{"process": {"commandLine": "echo hello"}, "experimental": {"windows_sandbox": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.sandbox_config.idle_timeout_ms, 300_000);
-        assert_eq!(req.sandbox_config.daemon_pipe_name, "wxc-sandbox");
+        let sandbox = req.experimental.windows_sandbox.unwrap();
+        assert_eq!(sandbox.idle_timeout_ms, 300_000);
+        assert_eq!(sandbox.daemon_pipe_name, "wxc-windows-sandbox");
     }
 
     #[test]
     fn sandbox_config_custom_values() {
         let json = r#"{
             "process": {"commandLine": "echo hello"},
-            "containment": "sandbox",
-            "sandbox": {
-                "idleTimeout": 60000,
-                "daemonPipeName": "my-custom-pipe"
+            "experimental": {
+                "windows_sandbox": {
+                    "idleTimeoutMs": 60000,
+                    "daemonPipeName": "my-custom-pipe"
+                }
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Sandbox);
-        assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
-        assert_eq!(req.sandbox_config.daemon_pipe_name, "my-custom-pipe");
+        let sandbox = req.experimental.windows_sandbox.unwrap();
+        assert_eq!(sandbox.idle_timeout_ms, 60000);
+        assert_eq!(sandbox.daemon_pipe_name, "my-custom-pipe");
     }
 
     // ====== Network proxy configuration tests ======
@@ -1027,8 +1056,8 @@ mod tests {
     }
 
     #[test]
-    fn proxy_rejected_with_sandbox() {
-        let json = r#"{"process":{"commandLine":"x"},"containment":"sandbox","network":{"proxy":{"localhost":8080}}}"#;
+    fn proxy_rejected_with_non_appcontainer() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1105,8 +1134,8 @@ mod tests {
     }
 
     #[test]
-    fn proxy_builtin_test_server_rejected_with_sandbox() {
-        let json = r#"{"process":{"commandLine":"x"},"containment":"sandbox","network":{"proxy":{"builtinTestServer":true}}}"#;
+    fn proxy_builtin_test_server_rejected_with_non_appcontainer() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1275,22 +1304,28 @@ mod tests {
 
     #[test]
     fn sandbox_idle_timeout_ms_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "sandbox", "sandbox": {"idleTimeoutMs": 60000}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"windows_sandbox": {"idleTimeoutMs": 60000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
+        assert_eq!(
+            req.experimental.windows_sandbox.unwrap().idle_timeout_ms,
+            60000
+        );
     }
 
     #[test]
     fn sandbox_idle_timeout_ms_overrides_idle_timeout() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "sandbox", "sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"windows_sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
+        assert_eq!(
+            req.experimental.windows_sandbox.unwrap().idle_timeout_ms,
+            60000
+        );
     }
 
     #[test]
@@ -1344,5 +1379,70 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.container_config.image, "python:3.12");
+    }
+
+    // ---------- Experimental feature tests ----------
+
+    #[test]
+    fn experimental_section_parsed_when_present() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "world"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.test.is_some());
+        assert_eq!(req.experimental.test.unwrap().message, "world");
+    }
+
+    #[test]
+    fn experimental_section_absent_is_ok() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.test.is_none());
+    }
+
+    #[test]
+    fn experimental_enabled_defaults_to_false() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "check"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.experimental_enabled);
+    }
+
+    #[test]
+    fn unknown_experimental_fields_ignored() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"futureFeature": {"x": 1}, "test": {"message": "hi"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.test.is_some());
+    }
+
+    #[test]
+    fn experimental_test_message_parsed() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "greetings"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let test = req.experimental.test.unwrap();
+        assert_eq!(test.message, "greetings");
+    }
+
+    #[test]
+    fn experimental_test_default_message() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let test = req.experimental.test.unwrap();
+        assert!(test.message.is_empty());
     }
 }

@@ -10,23 +10,23 @@ pub enum ContainmentBackend {
     #[default]
     /// Windows AppContainer — process-level isolation on the host.
     AppContainer,
-    /// Windows Sandbox — full VM isolation via a long-lived sandbox daemon.
-    Sandbox,
     /// Linux container via WSL Container SDK (WSLC SDK).
     Wslc,
     /// LXC — Linux container isolation.
     Lxc,
     /// VM-based isolation.
     Vm,
-    /// MicroVM-based isolation.
+    /// MicroVM isolation via Windows Hypervisor Platform (internally powered by NanVix).
     #[serde(rename = "microvm")]
     MicroVm,
+    /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
+    WindowsSandbox,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SandboxConfig {
+pub struct WindowsSandboxConfig {
     /// Idle timeout in milliseconds before the daemon tears down the sandbox VM.
     /// Default: 300 000 (5 minutes). 0 = no timeout.
     pub idle_timeout_ms: u32,
@@ -34,11 +34,11 @@ pub struct SandboxConfig {
     pub daemon_pipe_name: String,
 }
 
-impl Default for SandboxConfig {
+impl Default for WindowsSandboxConfig {
     fn default() -> Self {
         Self {
             idle_timeout_ms: 300_000,
-            daemon_pipe_name: "wxc-sandbox".to_string(),
+            daemon_pipe_name: "wxc-windows-sandbox".to_string(),
         }
     }
 }
@@ -199,6 +199,33 @@ impl Default for LifecycleConfig {
     }
 }
 
+/// Placeholder experimental feature for testing the experimental infrastructure.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestFeatureConfig {
+    /// Message to log when the feature is applied.
+    pub message: String,
+}
+
+impl TestFeatureConfig {
+    pub fn from_raw(message: Option<String>) -> Self {
+        Self {
+            message: message.unwrap_or_default(),
+        }
+    }
+}
+
+/// Container for all experimental feature configs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExperimentalConfig {
+    /// Placeholder feature for testing experimental infrastructure.
+    pub test: Option<TestFeatureConfig>,
+    /// Windows Sandbox backend (experimental).
+    #[serde(rename = "windows_sandbox")]
+    pub windows_sandbox: Option<WindowsSandboxConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodexRequest {
@@ -219,12 +246,14 @@ pub struct CodexRequest {
     pub lifecycle: LifecycleConfig,
     /// AppContainer-specific policy (used when containment == AppContainer).
     pub policy: ContainerPolicy,
-    /// Sandbox-specific configuration (used when containment == Sandbox).
-    pub sandbox_config: SandboxConfig,
     /// Container configuration (used when containment == Wslc).
     pub container_config: ContainerConfig,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
+    /// Whether the --experimental flag was passed.
+    pub experimental_enabled: bool,
+    /// Experimental feature configs (only applied when experimental_enabled is true).
+    pub experimental: ExperimentalConfig,
 }
 
 impl Default for CodexRequest {
@@ -240,9 +269,10 @@ impl Default for CodexRequest {
             containment: ContainmentBackend::default(),
             lifecycle: LifecycleConfig::default(),
             policy: ContainerPolicy::default(),
-            sandbox_config: SandboxConfig::default(),
             container_config: ContainerConfig::default(),
             lxc_config: LxcConfig::default(),
+            experimental_enabled: false,
+            experimental: ExperimentalConfig::default(),
         }
     }
 }

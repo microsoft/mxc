@@ -38,6 +38,10 @@ struct Cli {
     /// Container name (required with --delete)
     #[arg(long = "containername")]
     containername: Option<String>,
+
+    /// Enable experimental features
+    #[arg(long)]
+    experimental: bool,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
@@ -114,13 +118,15 @@ fn main() {
     }
 
     // Load request
-    let request = match load_request(&config_data, &mut logger, is_base64) {
+    let mut request = match load_request(&config_data, &mut logger, is_base64) {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());
             process::exit(1);
         }
     };
+
+    request.experimental_enabled = cli.experimental;
 
     log_request(&request, &mut logger);
 

@@ -107,12 +107,12 @@ mxc/src/
 │       ├── error.rs                  # Add: WxcError::NanVix variant
 │       ├── nanvix_runner.rs          # NEW — NanVixScriptRunner implementation
 │       ├── appcontainer.rs           # UNCHANGED
-│       ├── sandbox_runner.rs         # UNCHANGED
+│       ├── windows_sandbox_runner.rs         # UNCHANGED
 │       ├── script_runner.rs          # UNCHANGED
 │       └── ...                       # All other modules UNCHANGED
 ├── wxc_test_driver/                  # UNCHANGED
-├── wxc_sandbox_agent/                # UNCHANGED
-└── wxc_sandbox_daemon/               # UNCHANGED
+├── wxc_windows_sandbox_guest/        # UNCHANGED
+└── wxc_windows_sandbox_daemon/       # UNCHANGED
 
 mxc/docs/
 └── nanvix-integration-plan.md        # NEW — this document
@@ -188,7 +188,7 @@ All variants are surfaced via stderr output. Preflight and Platform errors preve
 | `appContainer.*` | `policy: ContainerPolicy` | ❌ **Rejected** — not applicable to NanVix |
 | `filesystem.*` | (part of `policy`) | ❌ **Rejected** — guest FS is a read-only ramfs |
 | `network.*` | (part of `policy`) | ❌ **Rejected** — no network stack in guest |
-| `sandbox.*` | `sandbox_config: SandboxConfig` | ❌ **Rejected** — NanVix is not Windows Sandbox |
+| `sandbox.*` | `sandbox_config: WindowsSandboxConfig` | ❌ **Rejected** — NanVix is not Windows Sandbox |
 
 **Policy validation**: If a config specifies `containment: "nanvix"` alongside `filesystem`, `network`, `appContainer`, or `workingDirectory` fields, the runner returns a error.
 

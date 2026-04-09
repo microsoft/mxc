@@ -1,5 +1,5 @@
 [workspace]
-members = ["wxc", "wxc_common", "wxc_test_driver", "wxc_test_proxy", "wxc_sandbox_agent", "wxc_sandbox_daemon", "wxc_winhttp_proxy_shim", "lxc", "lxc_common"]
+members = ["wxc", "wxc_common", "wxc_test_driver", "wxc_test_proxy", "wxc_windows_sandbox_guest", "wxc_windows_sandbox_daemon", "wxc_winhttp_proxy_shim", "lxc", "lxc_common", "generated/base_container_specification"]
 resolver = "3"
 
 [workspace.package]
@@ -41,3 +41,5 @@ uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 nix = { version = "0.29", features = ["mount", "sched", "signal", "net", "process", "user"] }
 lxc_common = { path = "lxc_common" }
+flatbuffers = "25"
+sandbox_spec = { path = "generated/base_container_specification" }

@@ -23,6 +23,12 @@ pub enum ControlMessage {
     /// Agent → Host: script finished.
     Exit(ExitNotification),
 
+    /// Agent → Host: new data streams are ready to be connected.
+    ///
+    /// Sent after the agent has re-opened its TCP listener for the next
+    /// set of stdin/stdout/stderr connections following an [`Exit`].
+    StreamsReady,
+
     /// Either direction: keepalive probe.
     Ping,
 
@@ -105,6 +111,88 @@ pub fn decode_message(buf: &[u8]) -> Result<DecodeResult, serde_json::Error> {
 }
 
 // ---------------------------------------------------------------------------
+// Daemon IPC result (line-based protocol between wxc-exec and daemon)
+// ---------------------------------------------------------------------------
+
+/// Placeholder for empty base64 fields in the RESULT protocol line.
+/// Avoids ambiguous whitespace splitting when stdout or stderr is empty.
+const EMPTY_BASE64_PLACEHOLDER: &str = "-";
+
+/// Result sent from the daemon to wxc-exec over the IPC channel.
+///
+/// Wire format: `RESULT <exit-code> <stdout-b64> <stderr-b64> [error-message]\n`
+/// Empty stdout/stderr fields are represented as `"-"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonResult {
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub error_message: String,
+}
+
+impl DaemonResult {
+    /// Format as a protocol line for sending over IPC.
+    pub fn to_line(&self) -> String {
+        let stdout_b64 = if self.stdout.is_empty() {
+            EMPTY_BASE64_PLACEHOLDER.to_string()
+        } else {
+            crate::string_util::base64_encode(&self.stdout)
+        };
+        let stderr_b64 = if self.stderr.is_empty() {
+            EMPTY_BASE64_PLACEHOLDER.to_string()
+        } else {
+            crate::string_util::base64_encode(&self.stderr)
+        };
+        format!(
+            "RESULT {} {} {} {}\n",
+            self.exit_code, stdout_b64, stderr_b64, self.error_message
+        )
+    }
+
+    /// Parse a protocol line received from the daemon.
+    ///
+    /// Expects format: `RESULT <exit-code> <stdout-b64> <stderr-b64> [error-message]`
+    /// (without the trailing newline — caller should trim first).
+    pub fn parse(line: &str) -> Result<Self, String> {
+        let rest = line
+            .strip_prefix("RESULT ")
+            .ok_or_else(|| format!("expected RESULT prefix, got: {}", line))?;
+
+        let parts: Vec<&str> = rest.splitn(4, ' ').collect();
+        if parts.len() < 3 {
+            return Err(format!(
+                "malformed RESULT: expected at least 3 fields, got {}",
+                parts.len()
+            ));
+        }
+
+        let exit_code = parts[0].parse::<i32>().unwrap_or(-1);
+        let stdout = decode_base64_field(parts[1]);
+        let stderr = decode_base64_field(parts[2]);
+        let error_message = if parts.len() == 4 {
+            parts[3].to_string()
+        } else {
+            String::new()
+        };
+
+        Ok(Self {
+            exit_code,
+            stdout,
+            stderr,
+            error_message,
+        })
+    }
+}
+
+/// Decode a base64 field, returning empty Vec for the placeholder.
+fn decode_base64_field(field: &str) -> Vec<u8> {
+    if field == EMPTY_BASE64_PLACEHOLDER {
+        return Vec::new();
+    }
+    crate::string_util::base64_decode(field).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -170,6 +258,20 @@ mod tests {
             exit_code: -1,
             error_message: "spawn failed: file not found".to_string(),
         });
+        let frame = encode_message(&msg).unwrap();
+        let result = decode_message(&frame).unwrap();
+        assert_eq!(
+            result,
+            DecodeResult::Message {
+                message: msg,
+                consumed: frame.len(),
+            }
+        );
+    }
+
+    #[test]
+    fn roundtrip_streams_ready() {
+        let msg = ControlMessage::StreamsReady;
         let frame = encode_message(&msg).unwrap();
         let result = decode_message(&frame).unwrap();
         assert_eq!(
@@ -264,5 +366,38 @@ mod tests {
         // First 4 bytes = LE u32 length of the JSON payload.
         let declared_len = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
         assert_eq!(declared_len, frame.len() - 4);
+    }
+
+    #[test]
+    fn daemon_result_roundtrip_with_output() {
+        let result = DaemonResult {
+            exit_code: 0,
+            stdout: b"hello world".to_vec(),
+            stderr: b"some warning".to_vec(),
+            error_message: String::new(),
+        };
+        let line = result.to_line();
+        let parsed = DaemonResult::parse(line.trim()).unwrap();
+        assert_eq!(parsed, result);
+    }
+
+    #[test]
+    fn daemon_result_roundtrip_empty_output() {
+        let result = DaemonResult {
+            exit_code: 42,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            error_message: "something failed".to_string(),
+        };
+        let line = result.to_line();
+        let parsed = DaemonResult::parse(line.trim()).unwrap();
+        assert_eq!(parsed, result);
+    }
+
+    #[test]
+    fn daemon_result_parse_rejects_malformed() {
+        assert!(DaemonResult::parse("RESULT 0").is_err());
+        assert!(DaemonResult::parse("ERROR something").is_err());
+        assert!(DaemonResult::parse("garbage").is_err());
     }
 }

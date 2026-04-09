@@ -1,9 +1,0 @@
-{
-  "version": "0.4.0-alpha",
-  "containerId": "CLI-Sandbox-Network-Isolated",
-  "containment": "sandbox",
-  "process": {
-    "commandLine": "python -c \"import urllib.request; urllib.request.urlopen('http://example.com', timeout=5)\"",
-    "timeout": 30000
-  },
-}

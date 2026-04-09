@@ -1,10 +1,23 @@
 
 ## Configuration Schema
 
-MXC uses a JSON configuration file. The formal schema is at
-[`schemas/mxc-config.schema.json`](../schemas/mxc-config.schema.json) —
-editors that support JSON Schema will provide autocomplete and validation when
-you add `"$schema": "./schemas/mxc-config.schema.json"` to your config file.
+MXC uses a JSON configuration file. The current stable schema is at
+[`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](../schemas/stable/mxc-config.schema.0.4.0-alpha.json).
+For development, the dev schema at
+[`schemas/dev/mxc-config.schema.0.5.0-dev.json`](../schemas/dev/mxc-config.schema.0.5.0-dev.json)
+includes experimental features and may change without notice.
+
+Editors that support JSON Schema will provide autocomplete and validation when
+you add a `"$schema"` reference to your config file. Use the stable schema for
+production configs and the dev schema when working on experimental features:
+
+```json
+// Production
+"$schema": "./schemas/stable/mxc-config.schema.0.4.0-alpha.json"
+
+// Development (experimental features)
+"$schema": "./schemas/dev/mxc-config.schema.0.5.0-dev.json"
+```
 
 ### Full Schema
 
@@ -55,11 +68,11 @@ you add `"$schema": "./schemas/mxc-config.schema.json"` to your config file.
 | Value | Description |
 |-------|-------------|
 | `"appcontainer"` | (Default) Windows AppContainer process-level isolation |
-| `"sandbox"` | Windows Sandbox VM isolation via a long-lived daemon |
+| `"windows_sandbox"` | Windows Sandbox VM isolation via a long-lived daemon |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation |
 | `"vm"` | VM-based isolation (not yet implemented) |
-| `"microvm"` | MicroVM-based isolation (not yet implemented) |
+| `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
 
 Only the backend section matching the selected `containment` value is used;
 other backend sections are ignored.
