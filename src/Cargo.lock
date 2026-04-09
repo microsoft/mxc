@@ -1521,29 +1521,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wxc_sandbox_daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "uuid",
- "wxc_common",
-]
-
-[[package]]
-name = "wxc_sandbox_guest"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde_json",
- "tokio",
- "wxc_common",
-]
-
-[[package]]
 name = "wxc_test_driver"
 version = "0.1.0"
 dependencies = [
@@ -1561,6 +1538,29 @@ dependencies = [
  "hyper-util",
  "tokio",
  "windows",
+]
+
+[[package]]
+name = "wxc_windows_sandbox_daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "wxc_common",
+]
+
+[[package]]
+name = "wxc_windows_sandbox_guest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tokio",
+ "wxc_common",
 ]
 
 [[package]]

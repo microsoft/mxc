@@ -64,13 +64,13 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         if not exist "sdk\bin\%%T" mkdir "sdk\bin\%%T"
         copy /Y "!BIN_DIR!\wxc-exec.exe" "sdk\bin\%%T\" >nul
         echo   Copied %%T\wxc-exec.exe
-        if exist "!BIN_DIR!\wxc-sandbox-guest.exe" (
-            copy /Y "!BIN_DIR!\wxc-sandbox-guest.exe" "sdk\bin\%%T\" >nul
-            echo   Copied %%T\wxc-sandbox-guest.exe
+        if exist "!BIN_DIR!\wxc-windows-sandbox-guest.exe" (
+            copy /Y "!BIN_DIR!\wxc-windows-sandbox-guest.exe" "sdk\bin\%%T\" >nul
+            echo   Copied %%T\wxc-windows-sandbox-guest.exe
         )
-        if exist "!BIN_DIR!\wxc-sandbox-daemon.exe" (
-            copy /Y "!BIN_DIR!\wxc-sandbox-daemon.exe" "sdk\bin\%%T\" >nul
-            echo   Copied %%T\wxc-sandbox-daemon.exe
+        if exist "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" (
+            copy /Y "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" "sdk\bin\%%T\" >nul
+            echo   Copied %%T\wxc-windows-sandbox-daemon.exe
         )
         if exist "!BIN_DIR!\winhttp-proxy-shim.exe" (
             copy /Y "!BIN_DIR!\winhttp-proxy-shim.exe" "sdk\bin\%%T\" >nul

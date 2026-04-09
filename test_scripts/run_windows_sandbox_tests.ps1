@@ -25,7 +25,7 @@ if ($Release) {
 }
 
 $WxcExec = Join-Path $BinDir "wxc-exec.exe"
-$Daemon = Join-Path $BinDir "wxc-sandbox-daemon.exe"
+$Daemon = Join-Path $BinDir "wxc-windows-sandbox-daemon.exe"
 
 if (-not (Test-Path $WxcExec)) {
     Write-Host "ERROR: wxc-exec.exe not found at $WxcExec" -ForegroundColor Red
@@ -33,7 +33,7 @@ if (-not (Test-Path $WxcExec)) {
     exit 1
 }
 if (-not (Test-Path $Daemon)) {
-    Write-Host "ERROR: wxc-sandbox-daemon.exe not found at $Daemon" -ForegroundColor Red
+    Write-Host "ERROR: wxc-windows-sandbox-daemon.exe not found at $Daemon" -ForegroundColor Red
     exit 1
 }
 
@@ -120,19 +120,19 @@ function Run-SandboxTest {
 Write-Host "`nSandbox E2E Tests" -ForegroundColor Cyan
 Write-Host "=================" -ForegroundColor Cyan
 Write-Host "`nCleaning up stale sandbox processes..." -ForegroundColor Yellow
-Get-Process -Name "wxc-sandbox-daemon","WindowsSandbox*" -ErrorAction SilentlyContinue |
+Get-Process -Name "wxc-windows-sandbox-daemon","WindowsSandbox*" -ErrorAction SilentlyContinue |
     ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 Remove-Item "$env:TEMP\wxc-sandbox-rendezvous\*" -ErrorAction SilentlyContinue
 Start-Sleep 5
 
 # Start daemon
 Write-Host "Starting sandbox daemon..." -ForegroundColor Yellow
-$daemonProc = Start-Process -FilePath $Daemon -ArgumentList "wxc-sandbox","300000" `
-    -PassThru -NoNewWindow -RedirectStandardError "$env:TEMP\wxc-sandbox-daemon.log"
+$daemonProc = Start-Process -FilePath $Daemon -ArgumentList "wxc-windows-sandbox","300000" `
+    -PassThru -NoNewWindow -RedirectStandardError "$env:TEMP\wxc-windows-sandbox-daemon.log"
 Start-Sleep 2
 
 if ($daemonProc.HasExited) {
-    Write-Host "ERROR: Daemon exited immediately. Check $env:TEMP\wxc-sandbox-daemon.log" -ForegroundColor Red
+    Write-Host "ERROR: Daemon exited immediately. Check $env:TEMP\wxc-windows-sandbox-daemon.log" -ForegroundColor Red
     exit 1
 }
 Write-Host "Daemon started (PID $($daemonProc.Id))`n" -ForegroundColor Green
@@ -141,20 +141,20 @@ Write-Host "Daemon started (PID $($daemonProc.Id))`n" -ForegroundColor Green
 [System.Collections.ArrayList]$results = @()
 
 Write-Host "--- Basic Tests ---" -ForegroundColor Cyan
-$null = $results.Add((Run-SandboxTest "sandbox_echo.json" -OutputContains "Hello from sandbox!"))
-$null = $results.Add((Run-SandboxTest "basic_sandbox.json" -OutputContains "executed successfully"))
-$null = $results.Add((Run-SandboxTest "sandbox_powershell.json" -OutputContains "PowerShell works"))
-$null = $results.Add((Run-SandboxTest "sandbox_powershell_env.json" -OutputContains "ComputerName="))
-$null = $results.Add((Run-SandboxTest "sandbox_stderr.json" -OutputContains "stdout-message"))
-$null = $results.Add((Run-SandboxTest "sandbox_exit_code.json" -ExpectedExit 42))
+$null = $results.Add((Run-SandboxTest "windows_sandbox_echo.json" -OutputContains "Hello from sandbox!"))
+$null = $results.Add((Run-SandboxTest "basic_windows_sandbox.json" -OutputContains "executed successfully"))
+$null = $results.Add((Run-SandboxTest "windows_sandbox_powershell.json" -OutputContains "PowerShell works"))
+$null = $results.Add((Run-SandboxTest "windows_sandbox_powershell_env.json" -OutputContains "ComputerName="))
+$null = $results.Add((Run-SandboxTest "windows_sandbox_stderr.json" -OutputContains "stdout-message"))
+$null = $results.Add((Run-SandboxTest "windows_sandbox_exit_code.json" -ExpectedExit 42))
 
 Write-Host "`n--- Timeout Test ---" -ForegroundColor Cyan
-$null = $results.Add((Run-SandboxTest "sandbox_timeout.json" -ExpectNonZero))
+$null = $results.Add((Run-SandboxTest "windows_sandbox_timeout.json" -ExpectNonZero))
 
 Write-Host "`n--- Multi-Exec Test (3x echo on same VM) ---" -ForegroundColor Cyan
 for ($iter = 1; $iter -le 3; $iter++) {
-    $result = Run-SandboxTest "sandbox_echo.json" -OutputContains "Hello from sandbox!"
-    $result.Name = "multi-exec #$iter (sandbox_echo.json)"
+    $result = Run-SandboxTest "windows_sandbox_echo.json" -OutputContains "Hello from sandbox!"
+    $result.Name = "multi-exec #$iter (windows_sandbox_echo.json)"
     $null = $results.Add($result)
 }
 
@@ -181,6 +181,6 @@ if (-not $daemonProc.HasExited) {
 Get-Process -Name "WindowsSandbox*" -ErrorAction SilentlyContinue |
     ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 
-Write-Host "Daemon log: $env:TEMP\wxc-sandbox-daemon.log" -ForegroundColor Gray
+Write-Host "Daemon log: $env:TEMP\wxc-windows-sandbox-daemon.log" -ForegroundColor Gray
 
 exit $(if ($failed -gt 0) { 1 } else { 0 })

@@ -13,7 +13,7 @@ pub mod validator;
 
 // Windows-specific modules
 #[cfg(target_os = "windows")]
-pub mod appcontainer;
+pub mod appcontainer_runner;
 #[cfg(target_os = "windows")]
 pub mod filesystem_bfs;
 #[cfg(target_os = "windows")]
@@ -25,9 +25,9 @@ pub mod proxy_coordinator;
 #[cfg(target_os = "windows")]
 pub mod sandbox_protocol;
 #[cfg(target_os = "windows")]
-pub mod sandbox_runner;
-#[cfg(target_os = "windows")]
 pub mod string_util;
+#[cfg(target_os = "windows")]
+pub mod windows_sandbox_runner;
 
 // BaseContainer (composable sandbox) support
 #[cfg(target_os = "windows")]

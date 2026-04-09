@@ -6,15 +6,15 @@ use std::process;
 
 use clap::Parser;
 use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
-use wxc_common::appcontainer::AppContainerScriptRunner;
+use wxc_common::appcontainer_runner::AppContainerScriptRunner;
 use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::load_request;
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::nanvix_runner::NanVixScriptRunner;
-use wxc_common::sandbox_runner::SandboxScriptRunner;
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
@@ -177,18 +177,20 @@ fn main() {
             }
             Box::new(NanVixScriptRunner::new())
         }
-        ContainmentBackend::Sandbox => {
+        ContainmentBackend::WindowsSandbox => {
             if !request.experimental_enabled {
-                eprintln!("Error: Sandbox is an experimental feature. Use --experimental flag.");
+                eprintln!(
+                    "Error: Windows Sandbox is an experimental feature. Use --experimental flag."
+                );
                 process::exit(1);
             }
             let sandbox_config = request
                 .experimental
-                .sandbox
+                .windows_sandbox
                 .as_ref()
                 .cloned()
                 .unwrap_or_default();
-            Box::new(SandboxScriptRunner::new(&sandbox_config))
+            Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
         }
     };
     let response = runner.run(&request, &mut logger);

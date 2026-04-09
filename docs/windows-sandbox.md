@@ -11,14 +11,14 @@ This provides stronger isolation than AppContainer — the script runs in a comp
 ```
 wxc-exec.exe (CLI client)
   │
-  └── SandboxScriptRunner (src/wxc_common/src/sandbox_runner.rs)
+  └── WindowsSandboxScriptRunner (src/wxc_common/src/windows_sandbox_runner.rs)
         │
         ├── Pre-flight: checks Windows Sandbox feature is enabled
-        ├── Connects to wxc-sandbox-daemon via TCP IPC on localhost
+        ├── Connects to wxc-windows-sandbox-daemon via TCP IPC on localhost
         │
         └── Sends: "EXEC {json}\n"
               │
-              wxc-sandbox-daemon.exe (host-side, long-lived)
+              wxc-windows-sandbox-daemon.exe (host-side, long-lived)
                 │
                 ├── Discovers Python on the host
                 ├── Generates .wsb config with mapped folders
@@ -28,7 +28,7 @@ wxc-exec.exe (CLI client)
                 │
                 └── Bridges EXEC requests to the guest
                       │
-                      wxc-sandbox-guest.exe (inside sandbox VM)
+                      wxc-windows-sandbox-guest.exe (inside sandbox VM)
                         │
                         ├── Binds TCP, writes IP:port to rendezvous file
                         ├── Accepts 4 connections (control, stdin, stdout, stderr)
@@ -41,9 +41,9 @@ wxc-exec.exe (CLI client)
 
 | Binary | Crate | Runs where | Purpose |
 |--------|-------|------------|---------|
-| `wxc-exec.exe` | `wxc` | Host | CLI entry point, dispatches to SandboxScriptRunner |
-| `wxc-sandbox-daemon.exe` | `wxc_sandbox_daemon` | Host | Manages sandbox VM lifecycle, bridges IPC to TCP |
-| `wxc-sandbox-guest.exe` | `wxc_sandbox_guest` | Inside sandbox VM | Accepts commands, runs scripts, bridges stdio |
+| `wxc-exec.exe` | `wxc` | Host | CLI entry point, dispatches to WindowsSandboxScriptRunner |
+| `wxc-windows-sandbox-daemon.exe` | `wxc_windows_sandbox_daemon` | Host | Manages sandbox VM lifecycle, bridges IPC to TCP |
+| `wxc-windows-sandbox-guest.exe` | `wxc_windows_sandbox_guest` | Inside sandbox VM | Accepts commands, runs scripts, bridges stdio |
 
 ## Execution Flow
 
@@ -70,24 +70,32 @@ This avoids the 30-60s boot cost for subsequent executions.
 
 ```json
 {
-  "script": "python -S -B -c \"print('hello')\"",
-  "containment": "sandbox",
-  "timeout": 60000,
-  "sandbox": {
-    "idleTimeout": 300000,
-    "daemonPipeName": "wxc-sandbox"
+  "containment": "windows_sandbox",
+  "process": {
+    "commandLine": "python -S -B -c \"print('hello')\"",
+    "timeout": 60000
+  },
+  "experimental": {
+    "windows_sandbox": {
+      "idleTimeoutMs": 300000,
+      "daemonPipeName": "wxc-windows-sandbox"
+    }
   }
 }
 ```
 
+> **Note:** Windows Sandbox is experimental — requires the `--experimental` CLI flag.
+> The `experimental.windows_sandbox` section is optional; defaults are used if omitted.
+
 | Field | Default | Description |
 |-------|---------|-------------|
-| `containment` | `"appcontainer"` | Must be `"sandbox"` to use this backend |
-| `timeout` | `0` (none) | Script execution timeout in milliseconds |
-| `sandbox.idleTimeout` | `300000` (5 min) | Daemon idle timeout before VM teardown |
-| `sandbox.daemonPipeName` | `"wxc-sandbox"` | IPC identifier (determines TCP port) |
+| `containment` | `"appcontainer"` | Must be `"windows_sandbox"` to use this backend |
+| `process.commandLine` | *(required)* | Command line to execute inside the sandbox |
+| `process.timeout` | `0` (none) | Script execution timeout in milliseconds |
+| `experimental.windows_sandbox.idleTimeoutMs` | `300000` (5 min) | Daemon idle timeout before VM teardown |
+| `experimental.windows_sandbox.daemonPipeName` | `"wxc-windows-sandbox"` | IPC identifier (determines TCP port) |
 
-When `containment` is `"sandbox"`, the `appContainer`, `filesystem`, and `network` sections are ignored — isolation is managed by the sandbox VM and guest agent firewall.
+When `containment` is `"windows_sandbox"`, the `appContainer`, `filesystem`, and `network` sections are ignored — isolation is managed by the sandbox VM and guest agent firewall.
 
 ## Security Model
 
@@ -119,4 +127,4 @@ After enabling Windows Sandbox: **reboot required**.
 
 ## Further Reading
 
-See [sandbox-reference.md](sandbox-reference.md) for detailed protocol specs, VM setup internals, debugging guide, source file reference, and E2E test documentation.
+See [windows-sandbox-reference.md](windows-sandbox-reference.md) for detailed protocol specs, VM setup internals, debugging guide, source file reference, and E2E test documentation.

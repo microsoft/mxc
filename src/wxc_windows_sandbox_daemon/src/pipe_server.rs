@@ -318,15 +318,15 @@ mod tests {
 
     #[test]
     fn pipe_name_to_port_is_deterministic() {
-        let p1 = pipe_name_to_port("wxc-sandbox");
-        let p2 = pipe_name_to_port("wxc-sandbox");
+        let p1 = pipe_name_to_port("wxc-windows-sandbox");
+        let p2 = pipe_name_to_port("wxc-windows-sandbox");
         assert_eq!(p1, p2);
         assert!(p1 >= 49152);
     }
 
     #[test]
     fn pipe_name_to_port_varies_with_name() {
-        let p1 = pipe_name_to_port("wxc-sandbox");
+        let p1 = pipe_name_to_port("wxc-windows-sandbox");
         let p2 = pipe_name_to_port("other-pipe");
         assert_ne!(p1, p2);
     }
