@@ -30,6 +30,8 @@ type SandboxPolicy = {
   resources?: ResourcesPolicy;
   timeoutMs?: number;
   lifecycle?: LifecyclePolicy;
+  leastPrivilege?: boolean;
+  integrityLevel?: "inherit" | "low" | "medium";
 };
 ```
 
@@ -43,6 +45,10 @@ type SandboxEnvironment = {
   linux?: {
     distribution?: string;
     release?: string;
+  };
+  vm?: {
+    idleTimeoutMs?: number;
+    daemonPipeName?: string;
   };
 };
 ```
@@ -94,8 +100,8 @@ Controls network access from the sandbox.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `policy` | `"none" \| "local" \| "outbound" \| "full"` | `"none"` | Network access posture. `"none"`: no network. `"local"`: localhost + RFC 1918 only (narrowed by `allowedHosts` if set). `"outbound"`: outbound internet, no inbound (`allowedHosts` acts as allowlist if set). `"full"`: all traffic. |
-| `allowedHosts` | `string[]` |: | Host allowlist (hostnames, IPs, CIDR). Only valid with `policy: "outbound"`. If omitted, all outbound traffic is allowed. |
-| `blockedHosts` | `string[]` |: | Hosts to explicitly block. Only valid with `policy: "outbound"`. |
+| `allowedHosts` | `string[]` | — | Host allowlist (hostnames, IPs, CIDR). Valid with `"local"` (narrows the local range) and `"outbound"` (acts as allowlist). |
+| `blockedHosts` | `string[]` | — | Hosts to explicitly block. Valid with `"outbound"`. |
 | `proxy` | `{ builtinTestServer: true } \| { url: string }` | — | Proxy configuration. `builtinTestServer`: MXC's built-in test proxy. `url`: proxy URL including protocol, host, and port (e.g., `"http://localhost:8080"`, `"socks5://proxy.corp.com:1080"`). |
 | `enforcementMode` | `"firewall" \| "both"` | `"firewall"` | How network policy is enforced. `"firewall"`: firewall rules only. `"both"`: firewall + additional backend-specific enforcement. |
 
@@ -238,17 +244,6 @@ VM-specific runtime options. Only used when `isolation` is
 
 ---
 
-### `linux`
-
-Linux-specific runtime options. Silently ignored on non-Linux platforms.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `distribution` | `string` | SDK default | Preferred Linux distribution (e.g., `"alpine"`, `"ubuntu"`). Used with `"container"` isolation (future). |
-| `release` | `string` | SDK default | Distribution release version (e.g., `"3.23"`, `"24.04"`). |
-
----
-
 ## Backend Coverage
 
 The `environment.isolation` enum maps to backends. Only `"process"` is fully implemented today:
@@ -266,12 +261,14 @@ The `environment.isolation` enum maps to backends. Only `"process"` is fully imp
 
 ## Defaults Summary
 
-All fields default to the most restrictive value. **An empty policy = maximum lockdown.**
+Permission fields default to deny/disabled. Resource limits and
+timeout default to unlimited (no cap). **An empty policy =
+maximum lockdown for access, but no automatic timeout or
+resource caps.**
 
 ```typescript
-// This creates a fully locked-down sandboxed process (the default):
+// Deny-by-default access controls, no timeout, no resource caps:
 const request: SandboxRequest = { version: "0.5.0-dev", policy: {} };
-// No filesystem access, no network, no GUI, no timeout, ephemeral.
 ```
 
 | Section | Field | Default | Effect |
