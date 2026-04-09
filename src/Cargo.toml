@@ -43,3 +43,4 @@ nix = { version = "0.29", features = ["mount", "sched", "signal", "net", "proces
 lxc_common = { path = "lxc_common" }
 flatbuffers = "25"
 sandbox_spec = { path = "generated/base_container_specification" }
+widestring = "1"
