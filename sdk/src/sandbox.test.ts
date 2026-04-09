@@ -221,15 +221,14 @@ describe('buildSandboxPayload', () => {
       assert.strictEqual(payload.appContainer, undefined);
     });
 
-    it('should include filesystem with clearPolicyOnExit for microvm when policy has paths', () => {
+    it('should return minimal config for microvm even when policy has filesystem paths', () => {
       const policy: SandboxPolicy = {
         version: '0.4.0-alpha',
         filesystem: { readwritePaths: ['/tmp'] },
       };
       const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
       assert.strictEqual(payload.containment, 'microvm');
-      assert.deepStrictEqual(payload.filesystem!.readwritePaths, ['/tmp']);
-      assert.strictEqual(payload.filesystem!.clearPolicyOnExit, true);
+      assert.strictEqual(payload.filesystem, undefined, 'microvm should not include host filesystem policies');
     });
 
     it('should still build appcontainer config when containment is appcontainer', () => {

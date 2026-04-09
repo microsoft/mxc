@@ -95,3 +95,92 @@ jobs:
           name: microvm-perf-results-${{ github.event.pull_request.number || github.run_number }}
           retention-days: 30
           path: microvm-perf-results.json
+
+  microvm-cli-e2e:
+    name: CLI MicroVM
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup update stable
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+
+      - name: Build with MicroVM support
+        working-directory: src
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo build --features microvm --target x86_64-pc-windows-msvc
+
+      - name: Exclude build output from Windows Defender
+        shell: pwsh
+        run: |
+          $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
+          Add-MpPreference -ExclusionPath $binDir
+          Write-Host "Added Defender exclusion for $binDir"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build SDK
+        working-directory: sdk
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build CLI
+        working-directory: cli
+        run: |
+          npm install
+          npm run build
+
+      - name: Diagnose hypervisor environment
+        shell: pwsh
+        run: ./scripts/ci/diagnose-whp.ps1
+
+      - name: Check Windows Hypervisor Platform
+        id: whp-check
+        shell: pwsh
+        run: ./scripts/ci/check-whp.ps1
+
+      - name: Run MicroVM CLI E2E Tests
+        if: steps.whp-check.outputs.whp_available == 'true'
+        shell: pwsh
+        working-directory: test_scripts
+        run: |
+          $cliJs = Join-Path $env:GITHUB_WORKSPACE "cli\dist\cli.js"
+          .\run_microvm_cli_tests.ps1 -CliPath $cliJs
+
+      - name: Upload logs on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v6
+        with:
+          name: microvm-cli-e2e-logs-${{ github.event.pull_request.number || github.run_number }}
+          retention-days: 7
+          path: |
+            logs/
+            **/*.log
+
+      - name: Print performance summary
+        if: steps.whp-check.outputs.whp_available == 'true' && !cancelled()
+        shell: pwsh
+        run: ./scripts/ci/print-perf-summary.ps1 -JsonPath (Join-Path $env:GITHUB_WORKSPACE "microvm-cli-perf-results.json")
+
+      - name: Upload performance results
+        if: steps.whp-check.outputs.whp_available == 'true' && !cancelled()
+        uses: actions/upload-artifact@v6
+        with:
+          name: microvm-cli-perf-results-${{ github.event.pull_request.number || github.run_number }}
+          retention-days: 30
+          path: microvm-cli-perf-results.json

@@ -77,18 +77,9 @@ export function buildSandboxPayload(
     // If an explicit containment backend is requested, set it on the config.
     if (containment) {
         config.containment = containment;
-        // microvm doesn't need platform-specific setup — early return
+        // microvm doesn't need platform-specific setup — early return.
+        // Microvm uses its own ramfs; host filesystem policies are not supported.
         if (containment === 'microvm') {
-            if (policy.filesystem?.readwritePaths?.length ||
-                policy.filesystem?.readonlyPaths?.length ||
-                policy.filesystem?.deniedPaths?.length) {
-                config.filesystem = {
-                    readwritePaths: policy.filesystem?.readwritePaths,
-                    readonlyPaths: policy.filesystem?.readonlyPaths,
-                    deniedPaths: policy.filesystem?.deniedPaths,
-                    clearPolicyOnExit: true,
-                };
-            }
             return config;
         }
         // Other backends (appcontainer, lxc, etc.) fall through to
