@@ -59,8 +59,9 @@ if (-not (Test-Path $CliPath)) {
 $cliJs = Resolve-Path $CliPath
 Write-Host "CLI: $cliJs"
 
-# -- Minimal SandboxPolicy (JSON) --------------------------------------------
-$policyJson = '{"version":"0.4.0-alpha"}'
+# -- Minimal SandboxPolicy file -----------------------------------------------
+$policyFile = [System.IO.Path]::GetTempFileName()
+@{ version = "0.4.0-alpha" } | ConvertTo-Json | Set-Content $policyFile -Encoding UTF8
 
 # -- Test definitions ---------------------------------------------------------
 $tests = @(
@@ -114,6 +115,10 @@ $results = @()
 foreach ($test in $tests) {
     Write-Host "`n--- $($test.Description) ---" -ForegroundColor White
 
+    # Write script to temp file to avoid Start-Process argument quoting issues
+    $scriptFile = [System.IO.Path]::GetTempFileName()
+    Set-Content $scriptFile -Value $test.Script -Encoding UTF8 -NoNewline
+
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()
@@ -122,8 +127,8 @@ foreach ($test in $tests) {
         -ArgumentList @(
             $cliJs,
             "run-sdk",
-            "--script", $test.Script,
-            "--policy", $policyJson,
+            "--script-file", $scriptFile,
+            "--policy-file", $policyFile,
             "--containment", "microvm",
             "--no-pty",
             "--experimental",
@@ -139,7 +144,7 @@ foreach ($test in $tests) {
     $elapsedMs = $sw.ElapsedMilliseconds
     $stdout = Get-Content $stdoutFile -Raw -ErrorAction SilentlyContinue
     $stderr = Get-Content $stderrFile -Raw -ErrorAction SilentlyContinue
-    Remove-Item $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
+    Remove-Item $stdoutFile, $stderrFile, $scriptFile -ErrorAction SilentlyContinue
 
     $pass = ($actualExit -eq $expectedExit)
     $reason = ""
@@ -202,6 +207,7 @@ Write-Host "`n  Performance results written to: $perfJsonPath"
 # -- Summary ------------------------------------------------------------------
 $total = $passed + $failed
 Write-Host "`n=== Results ===" -ForegroundColor Cyan
+Remove-Item $policyFile -ErrorAction SilentlyContinue
 if ($total -eq 0) {
     Write-Host "  ERROR: No tests were executed." -ForegroundColor Red
     exit 1
