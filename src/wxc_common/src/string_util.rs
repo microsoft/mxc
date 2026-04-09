@@ -2,23 +2,20 @@
 // Licensed under the MIT License.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::ffi::OsString;
-use std::os::windows::ffi::OsStringExt;
+use widestring::{U16CString, U16Str};
 use windows::Win32::Foundation::{LocalFree, HLOCAL};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::PSID;
 
 /// Convert a UTF-8 string to a null-terminated UTF-16 wide string.
 pub fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
+    U16CString::from_str_truncate(s).into_vec_with_nul()
 }
 
 /// Convert a UTF-16 slice to a UTF-8 String, stopping at the first null terminator if present.
 pub fn from_wide(wide: &[u16]) -> String {
     let len = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
-    OsString::from_wide(&wide[..len])
-        .to_string_lossy()
-        .into_owned()
+    U16Str::from_slice(&wide[..len]).to_string_lossy()
 }
 
 /// Convert a SID pointer to its string representation (e.g. "S-1-5-...").

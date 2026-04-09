@@ -901,6 +901,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "windows"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1130,6 +1136,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "widestring",
  "windows",
  "windows-core",
 ]
