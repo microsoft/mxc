@@ -186,12 +186,67 @@ function deduplicatePaths(paths: string[]): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// PowerShell discovery
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether PowerShell (pwsh.exe) is available on the machine by scanning
+ * the supplied PATH directories for a `pwsh.exe` binary.
+ *
+ * When PowerShell is found, return a policy fragment with:
+ * - `C:\` in `readonlyPaths` — pwsh.exe enumerates the drive root on startup.
+ * - The PSReadLine history directory in `readwritePaths` so the PSReadLine
+ *   module can persist command history.
+ *
+ * On non-Windows platforms or when pwsh.exe is not found on PATH, returns an
+ * empty policy.
+ *
+ * @param pathDirs - The list of PATH directories already collected by the caller.
+ * @param env - Environment variable map (used to resolve `%USERPROFILE%`).
+ */
+function getPowerShellPolicy(
+    pathDirs: string[],
+    env: { [key: string]: string | undefined },
+): FilesystemPolicyResult {
+    if (os.platform() !== 'win32') {
+        return { readonlyPaths: [], readwritePaths: [] };
+    }
+
+    const pwshFound = pathDirs.some(dir => {
+        try {
+            return fs.existsSync(path.join(dir, 'pwsh.exe'));
+        } catch {
+            return false;
+        }
+    });
+
+    if (!pwshFound) {
+        return { readonlyPaths: [], readwritePaths: [] };
+    }
+
+    const systemDrive = process.env["SystemDrive"] || 'C:';
+    const systemRoot = systemDrive + "\\";
+    const readonlyPaths: string[] = [systemRoot];
+    const readwritePaths: string[] = [];
+
+    const userProfile = env['USERPROFILE'];
+    if (userProfile) {
+        const psReadLineDir = path.join(
+            userProfile, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'PowerShell', 'PSReadLine',
+        );
+        readwritePaths.push(psReadLineDir);
+    }
+
+    return { readonlyPaths, readwritePaths };
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /**
  * Discover tool and SDK directories from the environment and return them as
- * read-only policy paths.
+ * policy paths.
  *
  * Reads the `PATH` variable and a set of well-known tool / SDK environment
  * variables, enumerates the directories they reference, then applies filters:
@@ -202,9 +257,14 @@ function deduplicatePaths(paths: string[]): string[] {
  *    already grant access to `ALL_APPLICATION_PACKAGES` are removed because
  *    AppContainer processes can see them without explicit brokering.
  *
+ * Additionally, if PowerShell (`pwsh.exe`) is found on PATH, the drive root
+ * (`C:\`) is added to `readonlyPaths` and the PSReadLine history directory
+ * is added to `readwritePaths` so that interactive PowerShell sessions work
+ * correctly inside the container.
+ *
  * @param env - Environment variable map. Defaults to `process.env`.
  * @param options - Filtering options.
- * @returns A policy fragment with discovered paths in `readonlyPaths`.
+ * @returns A policy fragment with discovered paths.
  */
 export function getAvailableToolsPolicy(
     env?: { [key: string]: string | undefined },
@@ -215,7 +275,8 @@ export function getAvailableToolsPolicy(
 
     // PATH directories
     const pathValue = environment['PATH'] || environment['Path'] || '';
-    collected.push(...splitPathList(pathValue));
+    const pathDirs = splitPathList(pathValue);
+    collected.push(...pathDirs);
 
     // Known environment variables
     for (const knownVar of KNOWN_ENV_VARS) {
@@ -242,9 +303,12 @@ export function getAvailableToolsPolicy(
         return true;
     });
 
+    // Merge PowerShell-specific paths when pwsh.exe is available
+    const pwshPolicy = getPowerShellPolicy(pathDirs, environment);
+
     return {
-        readonlyPaths: filtered,
-        readwritePaths: [],
+        readonlyPaths: deduplicatePaths([...filtered, ...pwshPolicy.readonlyPaths]),
+        readwritePaths: deduplicatePaths([...pwshPolicy.readwritePaths]),
     };
 }
 
