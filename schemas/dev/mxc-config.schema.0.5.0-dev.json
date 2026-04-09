@@ -19,7 +19,7 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["appcontainer", "lxc", "nanvix", "windows_sandbox", "wslc"],
+      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc"],
       "default": "appcontainer",
       "description": "Containment backend to use for execution. Note: 'windows_sandbox' and 'wslc' are experimental and require the --experimental CLI flag."
     },
