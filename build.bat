@@ -60,31 +60,32 @@ echo.
 echo Copying binaries into SDK package...
 for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
     set "BIN_DIR=src\target\%%T\%BUILD_CONFIG%"
+    if "%%T"=="x86_64-pc-windows-msvc" (set "SDK_ARCH=x64") else (set "SDK_ARCH=arm64")
     if exist "!BIN_DIR!\wxc-exec.exe" (
-        if not exist "sdk\bin\%%T" mkdir "sdk\bin\%%T"
-        copy /Y "!BIN_DIR!\wxc-exec.exe" "sdk\bin\%%T\" >nul
-        echo   Copied %%T\wxc-exec.exe
+        if not exist "sdk\bin\!SDK_ARCH!" mkdir "sdk\bin\!SDK_ARCH!"
+        copy /Y "!BIN_DIR!\wxc-exec.exe" "sdk\bin\!SDK_ARCH!\" >nul
+        echo   Copied !SDK_ARCH!\wxc-exec.exe
         if exist "!BIN_DIR!\wxc-windows-sandbox-guest.exe" (
-            copy /Y "!BIN_DIR!\wxc-windows-sandbox-guest.exe" "sdk\bin\%%T\" >nul
-            echo   Copied %%T\wxc-windows-sandbox-guest.exe
+            copy /Y "!BIN_DIR!\wxc-windows-sandbox-guest.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            echo   Copied !SDK_ARCH!\wxc-windows-sandbox-guest.exe
         )
         if exist "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" (
-            copy /Y "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" "sdk\bin\%%T\" >nul
-            echo   Copied %%T\wxc-windows-sandbox-daemon.exe
+            copy /Y "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            echo   Copied !SDK_ARCH!\wxc-windows-sandbox-daemon.exe
         )
         if exist "!BIN_DIR!\winhttp-proxy-shim.exe" (
-            copy /Y "!BIN_DIR!\winhttp-proxy-shim.exe" "sdk\bin\%%T\" >nul
-            echo   Copied %%T\winhttp-proxy-shim.exe
+            copy /Y "!BIN_DIR!\winhttp-proxy-shim.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            echo   Copied !SDK_ARCH!\winhttp-proxy-shim.exe
         )
         if exist "!BIN_DIR!\wxc-test-proxy.exe" (
-            copy /Y "!BIN_DIR!\wxc-test-proxy.exe" "sdk\bin\%%T\" >nul
-            echo   Copied %%T\wxc-test-proxy.exe
+            copy /Y "!BIN_DIR!\wxc-test-proxy.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            echo   Copied !SDK_ARCH!\wxc-test-proxy.exe
         )
         if "%WITH_NANVIX%"=="1" (
             for %%B in (nanvixd.exe kernel.elf python.elf cpython-ramfs.img) do (
                 if exist "!BIN_DIR!\%%B" (
-                    copy /Y "!BIN_DIR!\%%B" "sdk\bin\%%T\" >nul
-                    echo   Copied %%T\%%B
+                    copy /Y "!BIN_DIR!\%%B" "sdk\bin\!SDK_ARCH!\" >nul
+                    echo   Copied !SDK_ARCH!\%%B
                 )
             )
         )

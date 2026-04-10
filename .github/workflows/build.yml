@@ -100,13 +100,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wxc-exec-x86_64-pc-windows-msvc
-          path: sdk/bin/x86_64-pc-windows-msvc
+          path: sdk/bin/x64
 
       - name: Download wxc-exec (arm64)
         uses: actions/download-artifact@v4
         with:
           name: wxc-exec-aarch64-pc-windows-msvc
-          path: sdk/bin/aarch64-pc-windows-msvc
+          path: sdk/bin/arm64
 
       - name: Set build version
         run: |
