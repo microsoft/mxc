@@ -1,36 +1,42 @@
-# OS Developer Guide
+# BaseProcessContainer: Adding OS Features
 
-This guide is for developers adding new OS-level features that
-flow through MXC's BaseProcessContainer pipeline. It covers
-the end-to-end process from OS API to MXC executor.
+This guide covers adding new OS-level features that flow
+through MXC's BaseProcessContainer pipeline. It is specific
+to the Windows process container backend.
+
+For other backends (LXC, microVM, etc.), the pattern is
+similar but the OS layer differs.
 
 ## Prerequisites
 
 1. Read the
-[SandboxRequest spec](sandbox-policy/v1/policy.md) to
-understand how policy and environment map to Config.
+[Sandbox Policy spec](../sandbox-policy/v1/policy.md) to
+understand how SandboxPolicy maps to ContainerConfig.
 2. Read
-[authoring-a-new-feature.md](authoring-a-new-feature.md),
+[authoring-a-new-feature.md](../authoring-a-new-feature.md),
 especially Step 1 (feature spec) and Step 2 (OS changes).
-3. **Write and get approval on a feature spec before starting
-OS work.** The spec ensures your OS API can be plumbed
-end-to-end through Config into SandboxRequest.
+3. We recommend submitting a feature spec to the MXC repo so
+the team understands the end-to-end flow.
 
 ## Architecture recap
 
+For the BaseProcessContainer backend, the flow is:
+
 ```
-SandboxRequest (policy + environment)
-  → SDK: buildSandboxConfig() → Config JSON
-    → wxc-exec: parses Config
+SandboxPolicy
+  → SDK: createConfigFromPolicy() → ContainerConfig JSON
+    → wxc-exec: parses ContainerConfig
       → BaseContainerRunner: builds FlatBuffer SandboxSpec
         → Experimental_CreateProcessInSandbox (processmodel.dll)
-          → OS enforces policies from the FlatBuffer
+          → OS applies restrictions (Job Objects, mitigations, etc.)
 ```
 
 Your OS change lives at the bottom of this stack. The
 FlatBuffer `SandboxSpec` is the contract between MXC and the
-OS. If you add a new field to `SandboxSpec`, it must be
-reachable from the top (SandboxRequest).
+OS. If you add a new field to `SandboxSpec`, you must also
+update MXC so the data flows down from the ContainerConfig
+into the FlatBuffer blob passed to
+`Experimental_CreateProcessInSandbox`.
 
 ## Step-by-step
 
@@ -83,7 +89,7 @@ external/windows-sdk/BaseContainerSpecification.fbs
 
 Then regenerate the Rust bindings. See
 [src/generated/base_container_specification/README.md](
-../src/generated/base_container_specification/README.md)
+../../src/generated/base_container_specification/README.md)
 for the exact steps.
 
 If the OS change hasn't shipped yet and the `.fbs` is not in
@@ -116,7 +122,7 @@ fn build_sandbox_spec(request: &CodexRequest) -> Vec<u8> {
 ```
 
 The `request.policy` fields come from the Config JSON, which
-comes from the SDK's `buildSandboxConfig()`. Make sure the
+comes from the SDK's `createConfigFromPolicy()`. Make sure the
 Config schema and SDK mapping are also updated (see Step 3+
 in authoring-a-new-feature.md).
 
@@ -128,9 +134,9 @@ You need a build of Windows with your processmodel changes.
 new field set. Run `wxc-exec config.json` directly. Verify
 the OS enforcement works.
 
-2. **SDK-level test:** Set the corresponding SandboxRequest
-policy or environment field and call `spawnSandbox()`. Verify
-the full pipeline: request → Config → FlatBuffer → OS.
+2. **SDK-level test:** Set the corresponding SandboxPolicy
+policy field and call `spawnSandbox()`. Verify
+the full pipeline: policy → Config → FlatBuffer → OS.
 
 3. **Verify default-deny:** Omit the field from Config.
 Verify the most-restrictive default is applied.

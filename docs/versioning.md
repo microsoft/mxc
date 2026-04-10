@@ -8,26 +8,26 @@ The policy (filesystem, network) expresses **what** the user wants — "block ne
 
 ### Policy Version = Config Schema Version
 
-The `version` field in SandboxRequest must match the MXC config
+The `version` field in SandboxPolicy must match the MXC config
 JSON version: they are the same version, tied 1:1.
 
-When a consumer specifies a SandboxRequest version (e.g.,
+When a consumer specifies a SandboxPolicy version (e.g.,
 `0.4.0`), MXC creates the corresponding configuration using the
 `0.4.0` schema.
 
 ```typescript
 // sdk/src/types.ts
-type SandboxRequest = {
+const policy: SandboxPolicy = {
   version: "0.4.0-alpha",
-  policy: {
-    filesystem: { ... },
-    network: { ... },
-  },
-  environment: { ... },
-}
+  containment: "process",
+  filesystem: { ... },
+  network: { ... },
+  ui: { ... },
+  timeoutMs: 30000,
+};
 ```
 
-The config JSON (`WxcConfiguration`) carries this same version:
+The config JSON carries this same version:
 
 ```json
 {
@@ -197,7 +197,7 @@ fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse
 ## Data Flow
 
 ```
-User writes SandboxRequest (policy + environment, versioned)
+User writes SandboxPolicy (policy + environment, versioned)
         │
         ▼
 Config JSON (version: "0.4.0-alpha")
@@ -225,7 +225,7 @@ Process runs in sandbox
 ## Version Negotiation
 
 ```
-1. User sends SandboxRequest with version "0.4.0-alpha"
+1. User sends SandboxPolicy with version "0.4.0-alpha"
 
 2. MXC validates: is "0.4.0-alpha" ≤ SUPPORTED_VERSION?
    Yes → continue
