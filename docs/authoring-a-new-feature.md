@@ -9,11 +9,9 @@
 
 Read these in order:
 
-1. [SandboxRequest spec](sandbox-policy/v1/policy.md): what
-SandboxRequest is (policy + environment), design principles.
-2. [SandboxRequest reference](sandbox-policy/v1/reference.md):
-every field, type, default, and example.
-3. [Versioning Design](versioning.md): how policy/schema/SDK
+1. [Sandbox Policy spec](sandbox-policy/v1/policy.md): what
+Policy and ContainerConfig are, design principles.
+2. [Versioning Design](versioning.md): how policy/schema/SDK
 versions relate and when to bump.
 
 ## Step 0: Where does my feature go?
@@ -34,27 +32,17 @@ Use this flowchart to determine where your feature goes:
 
 ```mermaid
 flowchart TD
-    START([New Feature Idea]) --> Q1{User needs<br/>to OPT IN?}
+    START([New Feature Idea]) --> Q1{Is it a cross-platform<br/>security restriction?}
 
-    Q1 -->|YES| Q2{Security intent<br/>or runtime selection?}
-    Q1 -->|NO| Q3{Changes Config<br/>schema?}
+    Q1 -->|YES| POL["Add to SandboxPolicy<br/>+ update ContainerConfig schema<br/>+ update SDK + executors"]
+    Q1 -->|NO| Q2{Is it backend-specific<br/>configuration?}
 
-    Q2 -->|Security intent| POL["SandboxPolicy field<br/>+ Config + SDK + executors"]
-    Q2 -->|Runtime selection| ENV["SandboxEnvironment field<br/>+ Config + SDK + executors"]
+    Q2 -->|YES| CFG["Add to ContainerConfig schema<br/>+ add containment value to SandboxPolicy<br/>+ update SDK defaults + executors"]
+    Q2 -->|NO| SDK_ONLY["SDK library or executor only"]
 
-    Q3 -->|YES| INTERNAL["Config + SDK + executors"]
-    Q3 -->|NO| Q4{SDK library-only?}
-
-    Q4 -->|YES| SDK_ONLY["SDK library only"]
-    Q4 -->|NO| EXEC["wxc-exec / lxc-exec only"]
-
-    POL --> TEST["Write tests"]
-    ENV --> TEST
-    INTERNAL --> TEST
+    POL --> TEST["Write tests, submit PR"]
+    CFG --> TEST
     SDK_ONLY --> TEST
-    EXEC --> TEST
-    TEST --> PR["Submit PR"]
-    PR --> DONE([Ship It])
 ```
 
 ## Step 1: Write a Feature Spec
@@ -65,16 +53,15 @@ is how the team aligns on what to build.
 Create a spec document with:
 
 1. **Problem statement**: what user problem does this solve?
-2. **SandboxRequest changes**: proposed additions to
-SandboxPolicy (intent) or SandboxEnvironment (runtime), with
-justification
-3. **Config schema changes**: proposed JSON Schema additions,
-including which backends are affected
-4. **Mapping rules**: how policy/environment fields map to
-Config fields per backend
-5. **Default values**: what happens when the field is omitted
-(must be most-restrictive)
-6. **OS changes (if applicable)**: high-level design for any
+2. **Policy changes**: if cross-platform security restriction,
+propose additions to Policy.
+3. **ContainerConfig changes**: proposed schema additions,
+including which backends are affected and what SDK defaults
+should be.
+4. **Default values**: what happens when the field is omitted
+(must be most-restrictive for policy; secure defaults for
+Config).
+5. **OS changes (if applicable)**: high-level design for any
 new OS APIs, kernel behaviors, or system primitives needed.
 Which OS repo? What does the API look like? Coordinate with
 the OS engineer.
@@ -85,17 +72,18 @@ Submit a PR for review.
 
 ## Step 2: OS changes (if applicable)
 
-> **Do not start OS work without an approved feature spec.**
-> The spec ensures the OS API can be translated through Config
-> into SandboxRequest. Without the spec, OS work may produce
-> APIs that can't be plumbed end-to-end.
+> OS work can happen in parallel with schema and executor
+> changes. The SDK library should be updated last since it is
+> customer-facing. We recommend submitting a feature spec to
+> the MXC repo first so the team can align on how the feature
+> flows through all layers.
 
 For detailed OS contribution steps (FlatBuffer schema, processmodel,
-BaseContainerRunner), see [os-developers-guide.md](os-developers-guide.md).
+BaseContainerRunner), see [base-process-container/guide.md](base-process-container/guide.md).
 
 ## Step 3+: Implementation
 
-If your feature touches SandboxRequest, update
+If your feature touches SandboxPolicy, update
 `sdk/src/types.ts`:
 
 - Field must be optional (default-deny)
