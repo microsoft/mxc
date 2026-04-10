@@ -10,18 +10,23 @@ pub enum ContainmentBackend {
     #[default]
     /// Windows AppContainer — process-level isolation on the host.
     AppContainer,
-    /// Windows Sandbox — full VM isolation via a long-lived sandbox daemon.
-    Sandbox,
     /// Linux container via WSL Container SDK (WSLC SDK).
     Wslc,
     /// LXC — Linux container isolation.
     Lxc,
+    /// VM-based isolation.
+    Vm,
+    /// MicroVM isolation via Windows Hypervisor Platform (internally powered by NanVix).
+    #[serde(rename = "microvm")]
+    MicroVm,
+    /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
+    WindowsSandbox,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SandboxConfig {
+pub struct WindowsSandboxConfig {
     /// Idle timeout in milliseconds before the daemon tears down the sandbox VM.
     /// Default: 300 000 (5 minutes). 0 = no timeout.
     pub idle_timeout_ms: u32,
@@ -29,38 +34,23 @@ pub struct SandboxConfig {
     pub daemon_pipe_name: String,
 }
 
-impl Default for SandboxConfig {
+impl Default for WindowsSandboxConfig {
     fn default() -> Self {
         Self {
             idle_timeout_ms: 300_000,
-            daemon_pipe_name: "wxc-sandbox".to_string(),
+            daemon_pipe_name: "wxc-windows-sandbox".to_string(),
         }
     }
 }
 
 /// Configuration specific to the LXC container backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LxcConfig {
-    /// Container name. Default: auto-generated.
-    pub container_name: String,
-    /// Linux distribution for the container rootfs (e.g., "alpine", "ubuntu").
+    /// Linux distribution for the container rootfs (e.g., "alpine", "ubuntu"). Required.
     pub distribution: String,
-    /// Distribution release version (e.g., "3.19", "24.04").
+    /// Distribution release version (e.g., "3.20", "24.04"). Required.
     pub release: String,
-    /// Whether to destroy the container after execution. Default: true.
-    pub destroy_on_exit: bool,
-}
-
-impl Default for LxcConfig {
-    fn default() -> Self {
-        Self {
-            container_name: String::new(),
-            distribution: "alpine".to_string(),
-            release: "3.19".to_string(),
-            destroy_on_exit: true,
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -128,43 +118,20 @@ impl ProxyConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContainerPolicy {
-    pub app_container_name: String,
     pub least_privilege_mode: bool,
     pub capabilities: Vec<String>,
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
     pub denied_paths: Vec<String>,
-    pub clear_policy_on_exit: bool,
     pub default_network_policy: NetworkPolicy,
     pub network_enforcement_mode: NetworkEnforcementMode,
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
-    pub remove_firewall_rules_on_exit: bool,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
-}
-
-impl Default for ContainerPolicy {
-    fn default() -> Self {
-        Self {
-            app_container_name: "CLI".to_string(),
-            least_privilege_mode: false,
-            capabilities: Vec::new(),
-            readwrite_paths: Vec::new(),
-            readonly_paths: Vec::new(),
-            denied_paths: Vec::new(),
-            clear_policy_on_exit: true,
-            default_network_policy: NetworkPolicy::default(),
-            network_enforcement_mode: NetworkEnforcementMode::default(),
-            allowed_hosts: Vec::new(),
-            blocked_hosts: Vec::new(),
-            remove_firewall_rules_on_exit: true,
-            network_proxy: ProxyConfig::default(),
-        }
-    }
 }
 
 /// Port mapping for host↔container port forwarding.
@@ -213,22 +180,101 @@ impl Default for ContainerConfig {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+/// Container lifecycle settings shared across all backends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LifecycleConfig {
+    /// Destroy the container after execution completes. Default: true.
+    pub destroy_on_exit: bool,
+    /// If true, retain filesystem and network policies after execution. Default: false.
+    pub preserve_policy: bool,
+}
+
+impl Default for LifecycleConfig {
+    fn default() -> Self {
+        Self {
+            destroy_on_exit: true,
+            preserve_policy: false,
+        }
+    }
+}
+
+/// Placeholder experimental feature for testing the experimental infrastructure.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestFeatureConfig {
+    /// Message to log when the feature is applied.
+    pub message: String,
+}
+
+impl TestFeatureConfig {
+    pub fn from_raw(message: Option<String>) -> Self {
+        Self {
+            message: message.unwrap_or_default(),
+        }
+    }
+}
+
+/// Container for all experimental feature configs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExperimentalConfig {
+    /// Placeholder feature for testing experimental infrastructure.
+    pub test: Option<TestFeatureConfig>,
+    /// Windows Sandbox backend (experimental).
+    #[serde(rename = "windows_sandbox")]
+    pub windows_sandbox: Option<WindowsSandboxConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodexRequest {
+    /// Schema version for the config format.
+    pub schema_version: String,
+    /// Externally assigned container identifier.
+    pub container_id: String,
+    /// Target platform: "linux" or "windows". Default: "windows".
+    pub platform: String,
+    /// Environment variables as "KEY=VALUE" strings (from process.env).
+    pub env: Vec<String>,
     pub script_code: String,
     pub working_directory: String,
     pub script_timeout: u32,
     /// Which containment backend to use. Default: AppContainer.
     pub containment: ContainmentBackend,
+    /// Shared lifecycle settings.
+    pub lifecycle: LifecycleConfig,
     /// AppContainer-specific policy (used when containment == AppContainer).
     pub policy: ContainerPolicy,
-    /// Sandbox-specific configuration (used when containment == Sandbox).
-    pub sandbox_config: SandboxConfig,
     /// Container configuration (used when containment == Wslc).
     pub container_config: ContainerConfig,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
+    /// Whether the --experimental flag was passed.
+    pub experimental_enabled: bool,
+    /// Experimental feature configs (only applied when experimental_enabled is true).
+    pub experimental: ExperimentalConfig,
+}
+
+impl Default for CodexRequest {
+    fn default() -> Self {
+        Self {
+            schema_version: String::new(),
+            container_id: String::new(),
+            platform: "windows".to_string(),
+            env: Vec::new(),
+            script_code: String::new(),
+            working_directory: String::new(),
+            script_timeout: 0,
+            containment: ContainmentBackend::default(),
+            lifecycle: LifecycleConfig::default(),
+            policy: ContainerPolicy::default(),
+            container_config: ContainerConfig::default(),
+            lxc_config: LxcConfig::default(),
+            experimental_enabled: false,
+            experimental: ExperimentalConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

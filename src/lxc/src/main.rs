@@ -38,17 +38,17 @@ struct Cli {
     /// Container name (required with --delete)
     #[arg(long = "containername")]
     containername: Option<String>,
+
+    /// Enable experimental features
+    #[arg(long)]
+    experimental: bool,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
     let _ = writeln!(logger, "Script code length: {}", request.script_code.len());
     let _ = writeln!(logger, "Working directory: {}", request.working_directory);
     let _ = writeln!(logger, "Script timeout: {}", request.script_timeout);
-    let _ = writeln!(
-        logger,
-        "Container name: {}",
-        request.lxc_config.container_name
-    );
+    let _ = writeln!(logger, "Container name: {}", request.container_id);
 }
 
 fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
@@ -118,13 +118,15 @@ fn main() {
     }
 
     // Load request
-    let request = match load_request(&config_data, &mut logger, is_base64) {
+    let mut request = match load_request(&config_data, &mut logger, is_base64) {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());
             process::exit(1);
         }
     };
+
+    request.experimental_enabled = cli.experimental;
 
     log_request(&request, &mut logger);
 
@@ -135,7 +137,11 @@ fn main() {
     }
 
     // Run script in LXC container
-    let mut runner = LxcScriptRunner::new(&request.lxc_config);
+    let mut runner = LxcScriptRunner::new(
+        &request.lxc_config,
+        &request.container_id,
+        &request.lifecycle,
+    );
     let response = runner.run(&request, &mut logger);
     display_script_results(&response, &mut logger);
 

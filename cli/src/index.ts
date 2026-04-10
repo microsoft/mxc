@@ -2,8 +2,8 @@
  * WXC CLI - TypeScript wrapper for the Windows eXecution Container
  */
 
-// Legacy WxcExecutor (original implementation)
-export { WxcExecutor, WxcExecutionOptions, WxcExecutionResult } from './wxc-executor';
+// Legacy ContainerExecutor (original implementation)
+export { ContainerExecutor, ContainerExecutionOptions, ContainerExecutionResult } from './wxc-executor';
 
 export {
   createMinimalConfig,

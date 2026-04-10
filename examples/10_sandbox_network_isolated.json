@@ -1,5 +1,0 @@
-{
-  "script": "python -c \"import urllib.request; urllib.request.urlopen('http://example.com', timeout=5)\"",
-  "containment": "sandbox",
-  "timeout": 30000
-}

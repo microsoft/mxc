@@ -1,14 +1,41 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /**
- * WXC SDK Types
+ * MXC SDK Types
  * These types match the wxc-exec JSON configuration schema
  */
 
 
 /**
+ * Process execution settings
+ */
+export interface ProcessConfig {
+  /** Complete command line to execute (e.g., "python -c \"print('hello')\"") */
+  commandLine: string;
+  /** Working directory for the process */
+  cwd?: string;
+  /** Environment variables as KEY=VALUE strings */
+  env?: string[];
+  /** Execution timeout in milliseconds (default: 0 = no timeout) */
+  timeout?: number;
+}
+
+/**
+ * Container lifecycle settings shared across all backends
+ */
+export interface LifecycleConfig {
+  /** Destroy the container after execution completes (default: true) */
+  destroyOnExit?: boolean;
+  /** Retain filesystem and network policies after execution (default: false) */
+  preservePolicy?: boolean;
+}
+
+/**
  * AppContainer configuration for Windows sandbox
  */
-export interface WxcAppContainerConfig {
-  /** AppContainer profile name (default: "CLI") */
+export interface AppContainerConfig {
+  /** AppContainer profile name (default: "CLI"). Deprecated: use containerId instead. */
   name?: string;
   /** Use least privilege mode with PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT (default: false) */
   leastPrivilege?: boolean;
@@ -19,7 +46,7 @@ export interface WxcAppContainerConfig {
 /**
  * Filesystem access configuration
  */
-export interface WxcFilesystemConfig {
+export interface FilesystemConfig {
   /** Paths the script can read and write */
   readwritePaths?: string[];
   /** Paths the script can read but not write */
@@ -33,7 +60,7 @@ export interface WxcFilesystemConfig {
 /**
  * Network access configuration
  */
-export interface WxcNetworkConfig {
+export interface NetworkConfig {
   /**
    * Network enforcement mode:
    * - "capabilities": Use AppContainer capabilities only (no admin required)
@@ -48,30 +75,46 @@ export interface WxcNetworkConfig {
   allowedHosts?: string[];
   /** Hostnames or IP addresses to block (firewall mode only) */
   blockedHosts?: string[];
-  /** Automatically remove firewall rules after execution (default: true) */
+  /** Proxy configuration (currently appcontainer only, requires elevation) */
+  proxy?: { builtinTestServer: true } | { localhost: number };
+  /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
+}
+
+/**
+ * WSLC SDK configuration for Linux containers from Windows
+ */
+export interface WslcConfig {
+  /** OCI container image name (default: "alpine:latest") */
+  image?: string;
+  /** Storage path for WSLC session image store */
+  storagePath?: string;
 }
 
 /**
  * Main WXC configuration
  */
-export interface WxcConfiguration {
-  /** Complete command line to execute (e.g., "python -c \"print('hello')\"") */
-  script: string;
-  /** Optional working directory for the script */
-  workingDirectory?: string;
-  /** Script execution timeout in milliseconds (default: 0 = no timeout) */
-  timeout?: number;
-  /** Containment backend: "appcontainer" (Windows), "sandbox" (Windows), or "lxc" (Linux) */
-  containment?: 'appcontainer' | 'sandbox' | 'lxc';
+export interface ContainerConfig {
+  /** MXC config schema version. Required. */
+  version: string;
+  /** Externally assigned container identifier */
+  containerId?: string;
+  /** Containment backend */
+  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm';
+  /** Container lifecycle settings */
+  lifecycle?: LifecycleConfig;
+  /** Process execution settings (required) */
+  process?: ProcessConfig;
   /** AppContainer configuration */
-  appContainer?: WxcAppContainerConfig;
+  appContainer?: AppContainerConfig;
+  /** WSLC SDK configuration */
+  wslc?: WslcConfig;
   /** LXC container configuration (Linux only) */
-  lxc?: WxcLxcConfig;
+  lxc?: LxcConfig;
   /** Filesystem access configuration */
-  filesystem?: WxcFilesystemConfig;
+  filesystem?: FilesystemConfig;
   /** Network access configuration */
-  network?: WxcNetworkConfig;
+  network?: NetworkConfig;
 }
 
 /**
@@ -79,6 +122,8 @@ export interface WxcConfiguration {
  * to define sandboxed execution environments.
  */
 export type SandboxPolicy = {
+  /** Policy version (semver). */
+  version: string;
   /** Filesystem access restrictions */
   filesystem?: {
       /** Paths that are granted read and write access */
@@ -96,13 +141,20 @@ export type SandboxPolicy = {
       allowOutbound?: boolean;
       /** Whether to allow connections to local networks. (default: false) */
       allowLocalNetwork?: boolean;
+      /**
+       * Proxy configuration for the container (temporarily Windows only, temporarily requires elevation).
+       * Only one option may be specified:
+       * - `builtinTestServer`: Use the built-in test proxy server
+       * - `localhost`: Forward traffic through a proxy on the specified localhost port
+       */
+      proxy?: { builtinTestServer: true } | { localhost: number }
   };
 }
 
 /**
  * LXC container configuration for Linux sandbox
  */
-export interface WxcLxcConfig {
+export interface LxcConfig {
   /** Container name (default: auto-generated) */
   containerName?: string;
   /** Linux distribution for container rootfs (default: "alpine") */
@@ -116,7 +168,7 @@ export interface WxcLxcConfig {
 /**
  * Sandboxing methods available on the platform
  */
-export type SandboxingMethod = 'appcontainer' | 'lxc';
+export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm';
 
 /**
  * Platform support information

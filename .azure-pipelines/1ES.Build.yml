@@ -1,0 +1,95 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+trigger: none
+name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+
+resources:
+  repositories:
+  - repository: 1ESPipelineTemplates
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
+
+# Parameters for ESRP signing info will be passed from the ADO UI.
+parameters:
+  - name: officialBuild
+    displayName: Build Official or Unofficial
+    type: string
+    default: Official
+    values:
+      - Official
+      - Unofficial
+
+  - name: ESRPInfo
+    type: object
+    default:
+      serviceName: ''
+      tenantId: ''
+      azureKeyVaultName: ''
+      authCertName: ''
+      signCertName: ''
+      clientId: ''
+
+variables:
+  # Prevents failure when no Rust tests are found; pipeline runs will still fail if present
+  # tests do not pass.
+  NEXTEST_NO_TESTS: pass
+
+extends:
+  template: v1/1ES.${{parameters.officialBuild}}.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: windows-2022
+      os: windows
+
+    customBuildTags:
+    - ES365AIMigrationTooling
+
+    stages:
+    - stage: Build_Binaries
+      displayName: 'Build Executables'
+      jobs:
+
+        # Build Binaries for all targets in parallel
+        - template: .azure-pipelines/templates/Rust.Build.Job.yml@self
+          parameters:
+            isOfficialBuild: ${{ eq(parameters.officialBuild, 'Official') }}
+            matrix:
+              - name: windows_x64
+                os: windows
+                arch: x64
+                component: WXC
+              - name: windows_arm64
+                os: windows
+                arch: arm64
+                component: WXC
+              - name: linux_x64
+                os: linux
+                arch: x64
+                component: LXC
+              - name: linux_arm64
+                os: linux
+                arch: arm64
+                component: LXC
+
+            ESRPInfo: ${{ parameters.ESRPInfo }}
+
+    - stage: Package_MXC_NPM_SDK
+      displayName: 'Package Npm Sdk'
+      dependsOn: Build_Binaries
+      jobs:
+      - template: .azure-pipelines/templates/Package.NpmSdk.Job.yml@self
+        parameters:
+          targets:
+            - artifact: wxc-binaries-x86_64-pc-windows-msvc
+              path: x86_64-pc-windows-msvc
+            - artifact: wxc-binaries-aarch64-pc-windows-msvc
+              path: aarch64-pc-windows-msvc
+            - artifact: lxc-binaries-x86_64-unknown-linux-gnu
+              path: x86_64-unknown-linux-gnu
+            - artifact: lxc-binaries-aarch64-unknown-linux-gnu
+              path: aarch64-unknown-linux-gnu
+
+          ESRPInfo: ${{ parameters.ESRPInfo }}

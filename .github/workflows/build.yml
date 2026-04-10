@@ -80,8 +80,8 @@ jobs:
 
 
   # Build and package the TypeScript SDK with bundled wxc-exec binaries
-  wxc-typescript-sdk:
-    name: WXC TypeScript SDK
+  mxc-typescript-sdk:
+    name: MXC TypeScript SDK
     needs: wxc-exec-build
     runs-on: windows-latest
 
@@ -119,6 +119,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Run tests
+        run: npm test
+
       - name: Pack npm package
         run: npm pack
 
@@ -128,10 +131,10 @@ jobs:
           path: sdk/*.tgz
 
 
-  # Build and package the TypeScript CLI
-  wxc-typescript-cli:
-    name: WXC TypeScript CLI
-    needs: wxc-typescript-sdk
+  # Build and package the TypeScript Test CLI
+  mxc-typescript-test-cli:
+    name: MXC TypeScript Test CLI
+    needs: mxc-typescript-sdk
     runs-on: windows-latest
 
     defaults:
@@ -159,6 +162,9 @@ jobs:
 
       - name: Build CLI
         run: npm run build
+
+      - name: Run tests
+        run: npm test
 
       - name: Pack npm package
         run: npm pack

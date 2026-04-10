@@ -16,7 +16,6 @@ pub fn validate_request(request: &CodexRequest) -> Result<(), WxcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ContainerPolicy;
 
     #[test]
     fn validate_request_with_valid_script() {
@@ -42,10 +41,7 @@ mod tests {
             script_code: "print('test')".to_string(),
             working_directory: "C:\\temp".to_string(),
             script_timeout: 5000,
-            policy: ContainerPolicy {
-                app_container_name: "Test".to_string(),
-                ..Default::default()
-            },
+            container_id: "Test".to_string(),
             ..Default::default()
         };
         assert!(validate_request(&req).is_ok());

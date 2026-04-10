@@ -10,8 +10,9 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, LxcConfig,
-    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SandboxConfig,
+    CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
+    LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress,
+    ProxyConfig, TestFeatureConfig, WindowsSandboxConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -19,7 +20,6 @@ use crate::models::{
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawAppContainer {
-    name: Option<String>,
     #[serde(rename = "leastPrivilege")]
     least_privilege: Option<bool>,
     #[serde(rename = "learningMode")]
@@ -36,8 +36,6 @@ struct RawFilesystem {
     readonly_paths: Option<Vec<String>>,
     #[serde(rename = "deniedPaths")]
     denied_paths: Option<Vec<String>>,
-    #[serde(rename = "clearPolicyOnExit")]
-    clear_policy_on_exit: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -51,8 +49,6 @@ struct RawNetwork {
     allowed_hosts: Option<Vec<String>>,
     #[serde(rename = "blockedHosts")]
     blocked_hosts: Option<Vec<String>>,
-    #[serde(rename = "removeRulesOnExit")]
-    remove_rules_on_exit: Option<bool>,
     proxy: Option<serde_json::Value>,
 }
 
@@ -61,6 +57,8 @@ struct RawNetwork {
 struct RawSandbox {
     #[serde(rename = "idleTimeout")]
     idle_timeout: Option<u32>,
+    #[serde(rename = "idleTimeoutMs")]
+    idle_timeout_ms: Option<u32>,
     #[serde(rename = "daemonPipeName")]
     daemon_pipe_name: Option<String>,
 }
@@ -95,29 +93,60 @@ struct RawContainerConfig {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawLxc {
-    #[serde(rename = "containerName")]
-    container_name: Option<String>,
     distribution: Option<String>,
     release: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawProcess {
+    #[serde(rename = "commandLine")]
+    command_line: Option<String>,
+    cwd: Option<String>,
+    env: Option<Vec<String>>,
+    timeout: Option<u32>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawLifecycle {
     #[serde(rename = "destroyOnExit")]
     destroy_on_exit: Option<bool>,
+    #[serde(rename = "preservePolicy")]
+    preserve_policy: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawTestFeature {
+    message: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawExperimental {
+    test: Option<RawTestFeature>,
+    #[serde(rename = "windows_sandbox")]
+    windows_sandbox: Option<RawSandbox>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawConfig {
-    script: Option<String>,
+    version: Option<String>,
+    #[serde(rename = "containerId")]
+    container_id: Option<String>,
+    platform: Option<String>,
+    process: Option<RawProcess>,
+    lifecycle: Option<RawLifecycle>,
     containment: Option<String>,
-    #[serde(rename = "workingDirectory")]
-    working_directory: Option<String>,
-    timeout: Option<u32>,
     #[serde(rename = "appContainer")]
     app_container: Option<RawAppContainer>,
-    sandbox: Option<RawSandbox>,
-    container: Option<RawContainerConfig>,
+    wslc: Option<RawContainerConfig>,
     lxc: Option<RawLxc>,
     filesystem: Option<RawFilesystem>,
     network: Option<RawNetwork>,
+    experimental: Option<RawExperimental>,
 }
 
 // ---------- Public API ----------
@@ -223,36 +252,105 @@ pub fn load_request(
     convert_raw_config(raw, logger)
 }
 
+// ---------- Cross-field validation ----------
+
+/// Supported schema version (semver). Configs with a higher major.minor are rejected.
+const SUPPORTED_VERSION: (u32, u32) = (0, 4); // 0.4.x
+
+/// Validate that the schema version (semver) is supported by this binary.
+/// Compares major.minor only — patch and pre-release labels are ignored.
+fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), WxcError> {
+    if version.is_empty() {
+        return Ok(());
+    }
+
+    // Strip pre-release suffix (e.g., "0.4.0-alpha" → "0.4.0")
+    let version_core = version.split('-').next().unwrap_or(version);
+    let parts: Vec<&str> = version_core.split('.').collect();
+
+    if parts.len() < 2 {
+        let msg = format!(
+            "Invalid schema version '{}': must be semver (e.g., '0.4.0' or '0.4.0-alpha')",
+            version
+        );
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
+
+    let major: u32 = parts[0].parse().map_err(|_| {
+        let msg = format!(
+            "Invalid schema version '{}': major version must be a non-negative integer",
+            version
+        );
+        logger.log_line(&msg);
+        WxcError::ConfigParse(msg)
+    })?;
+
+    let minor: u32 = parts[1].parse().map_err(|_| {
+        let msg = format!(
+            "Invalid schema version '{}': minor version must be a non-negative integer",
+            version
+        );
+        logger.log_line(&msg);
+        WxcError::ConfigParse(msg)
+    })?;
+
+    let (sup_major, sup_minor) = SUPPORTED_VERSION;
+    if major > sup_major || (major == sup_major && minor > sup_minor) {
+        let msg = format!(
+            "Config schema version '{}' is newer than supported (max: {}.{}.x). Upgrade wxc-exec.",
+            version, sup_major, sup_minor
+        );
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
+    Ok(())
+}
+
 // ---------- Conversion from raw JSON to domain model ----------
 
 fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
-    // Script is required and must be non-empty
-    let script_code = match raw.script {
+    // New top-level fields
+    let schema_version = raw.version.unwrap_or_default();
+    let container_id = raw.container_id.unwrap_or_default();
+    let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
+
+    // Process section is required
+    let process = raw
+        .process
+        .ok_or_else(|| WxcError::ConfigParse("'process' section is required".into()))?;
+
+    let script_code = match process.command_line {
         Some(s) if !s.is_empty() => s,
         Some(_) => {
-            logger.log_line("script cannot be empty");
-            return Err(WxcError::ConfigParse("script cannot be empty".to_string()));
+            logger.log_line("process.commandLine cannot be empty");
+            return Err(WxcError::ConfigParse(
+                "process.commandLine cannot be empty".to_string(),
+            ));
         }
         None => {
-            logger.log_line("Missing required script execution fields");
+            logger.log_line("Missing required field: process.commandLine");
             return Err(WxcError::ConfigParse(
-                "Missing required script execution fields".to_string(),
+                "Missing required field: process.commandLine".to_string(),
             ));
         }
     };
 
-    let working_directory = raw.working_directory.unwrap_or_default();
-    let script_timeout = raw.timeout.unwrap_or(0);
+    let working_directory = process.cwd.unwrap_or_default();
+    let script_timeout = process.timeout.unwrap_or(0);
+    let env = process.env.unwrap_or_default();
 
     // Containment backend selection
     let containment = match raw.containment.as_deref() {
         None | Some("appcontainer") => ContainmentBackend::AppContainer,
-        Some("sandbox") => ContainmentBackend::Sandbox,
+        Some("windows_sandbox") => ContainmentBackend::WindowsSandbox,
         Some("wslc") => ContainmentBackend::Wslc,
         Some("lxc") => ContainmentBackend::Lxc,
+        Some("vm") => ContainmentBackend::Vm,
+        Some("microvm") => ContainmentBackend::MicroVm,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', 'wslc', or 'lxc')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'wslc', 'lxc', 'vm', or 'microvm')",
                 other
             );
             logger.log_line(&msg);
@@ -260,25 +358,12 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     };
 
-    // Sandbox configuration
-    let mut sandbox_config = SandboxConfig::default();
-    if let Some(sb) = raw.sandbox {
-        if let Some(t) = sb.idle_timeout {
-            sandbox_config.idle_timeout_ms = t;
-        }
-        if let Some(name) = sb.daemon_pipe_name {
-            sandbox_config.daemon_pipe_name = name;
-        }
-    }
-
     // LXC configuration
     let lxc_config = {
         let raw_lxc = raw.lxc.unwrap_or_default();
         LxcConfig {
-            container_name: raw_lxc.container_name.unwrap_or_default(),
-            distribution: raw_lxc.distribution.unwrap_or_else(|| "alpine".to_string()),
-            release: raw_lxc.release.unwrap_or_else(|| "3.19".to_string()),
-            destroy_on_exit: raw_lxc.destroy_on_exit.unwrap_or(true),
+            distribution: raw_lxc.distribution.unwrap_or_default(),
+            release: raw_lxc.release.unwrap_or_default(),
         }
     };
 
@@ -286,9 +371,6 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
 
     // AppContainer section
     if let Some(ac) = raw.app_container {
-        if let Some(name) = ac.name {
-            policy.app_container_name = name;
-        }
         if let Some(lp) = ac.least_privilege {
             policy.least_privilege_mode = lp;
         }
@@ -337,9 +419,6 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
         if let Some(v) = fscfg.readonly_paths {
             policy.readonly_paths = v;
-        }
-        if let Some(b) = fscfg.clear_policy_on_exit {
-            policy.clear_policy_on_exit = b;
         }
     }
 
@@ -393,14 +472,11 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         if let Some(v) = net.blocked_hosts {
             policy.blocked_hosts = v;
         }
-        if let Some(b) = net.remove_rules_on_exit {
-            policy.remove_firewall_rules_on_exit = b;
-        }
     }
 
     // Container configuration (WSLC SDK)
     let mut container_config = ContainerConfig::default();
-    if let Some(cc) = raw.container {
+    if let Some(cc) = raw.wslc {
         if let Some(os) = cc.target_os {
             container_config.target_os = os;
         }
@@ -425,15 +501,57 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     }
 
+    // Lifecycle section
+    let lifecycle = {
+        let lc = raw.lifecycle.unwrap_or_default();
+        let destroy_on_exit = lc.destroy_on_exit.unwrap_or(true);
+        let preserve_policy = lc.preserve_policy.unwrap_or(false);
+
+        LifecycleConfig {
+            destroy_on_exit,
+            preserve_policy,
+        }
+    };
+
+    // Schema version check
+    validate_schema_version(&schema_version, logger)?;
+
+    // Experimental section (parsed but only applied when --experimental flag is set)
+    let experimental = if let Some(raw_exp) = raw.experimental {
+        let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
+        let windows_sandbox = raw_exp.windows_sandbox.map(|sb| {
+            let mut config = WindowsSandboxConfig::default();
+            if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
+                config.idle_timeout_ms = t;
+            }
+            if let Some(name) = sb.daemon_pipe_name {
+                config.daemon_pipe_name = name;
+            }
+            config
+        });
+        ExperimentalConfig {
+            test,
+            windows_sandbox,
+        }
+    } else {
+        ExperimentalConfig::default()
+    };
+
     Ok(CodexRequest {
+        schema_version,
+        container_id,
+        platform,
+        env,
         script_code,
         working_directory,
         script_timeout,
         containment,
+        lifecycle,
         policy,
-        sandbox_config,
         container_config,
         lxc_config,
+        experimental_enabled: false,
+        experimental,
     })
 }
 
@@ -449,7 +567,7 @@ mod tests {
 
     #[test]
     fn minimal_config() {
-        let json = r#"{"script": "echo hello"}"#;
+        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -460,8 +578,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_script_field() {
-        let json = r#"{"timeout": 5000}"#;
+    fn missing_process_section() {
+        let json = r#"{"containment": "appcontainer"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -470,8 +588,18 @@ mod tests {
     }
 
     #[test]
-    fn empty_script_field() {
-        let json = r#"{"script": ""}"#;
+    fn missing_command_line() {
+        let json = r#"{"process": {"cwd": "/tmp"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_command_line() {
+        let json = r#"{"process": {"commandLine": ""}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -482,26 +610,26 @@ mod tests {
     #[test]
     fn full_config() {
         let json = r#"{
-            "script": "dir",
-            "workingDirectory": "C:\\temp",
-            "timeout": 3000,
+            "containerId": "TestProfile",
+            "process": {
+                "commandLine": "dir",
+                "cwd": "C:\\temp",
+                "timeout": 3000
+            },
             "appContainer": {
-                "name": "TestProfile",
                 "leastPrivilege": true,
                 "capabilities": ["internetClient"]
             },
             "filesystem": {
                 "readwritePaths": ["C:\\rw"],
                 "readonlyPaths": ["C:\\ro"],
-                "deniedPaths": ["C:\\denied"],
-                "clearPolicyOnExit": false
+                "deniedPaths": ["C:\\denied"]
             },
             "network": {
                 "defaultPolicy": "block",
                 "enforcementMode": "firewall",
                 "allowedHosts": ["example.com"],
-                "blockedHosts": ["evil.com"],
-                "removeRulesOnExit": false
+                "blockedHosts": ["evil.com"]
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());
@@ -511,7 +639,7 @@ mod tests {
         assert_eq!(req.script_code, "dir");
         assert_eq!(req.working_directory, "C:\\temp");
         assert_eq!(req.script_timeout, 3000);
-        assert_eq!(req.policy.app_container_name, "TestProfile");
+        assert_eq!(req.container_id, "TestProfile");
         assert!(req.policy.least_privilege_mode);
         assert!(req
             .policy
@@ -520,7 +648,6 @@ mod tests {
         assert_eq!(req.policy.readwrite_paths, vec!["C:\\rw"]);
         assert_eq!(req.policy.readonly_paths, vec!["C:\\ro"]);
         assert_eq!(req.policy.denied_paths, vec!["C:\\denied"]);
-        assert!(!req.policy.clear_policy_on_exit);
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
         assert_eq!(
             req.policy.network_enforcement_mode,
@@ -528,12 +655,12 @@ mod tests {
         );
         assert_eq!(req.policy.allowed_hosts, vec!["example.com"]);
         assert_eq!(req.policy.blocked_hosts, vec!["evil.com"]);
-        assert!(!req.policy.remove_firewall_rules_on_exit);
     }
 
     #[test]
     fn invalid_network_policy() {
-        let json = r#"{"script": "echo x", "network": {"defaultPolicy": "invalid"}}"#;
+        let json =
+            r#"{"process": {"commandLine": "echo x"}, "network": {"defaultPolicy": "invalid"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -543,7 +670,8 @@ mod tests {
 
     #[test]
     fn invalid_enforcement_mode() {
-        let json = r#"{"script": "echo x", "network": {"enforcementMode": "invalid"}}"#;
+        let json =
+            r#"{"process": {"commandLine": "echo x"}, "network": {"enforcementMode": "invalid"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -555,7 +683,7 @@ mod tests {
     fn load_from_file() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("config.json");
-        std::fs::write(&file_path, r#"{"script": "whoami"}"#).unwrap();
+        std::fs::write(&file_path, r#"{"process": {"commandLine": "whoami"}}"#).unwrap();
 
         let mut logger = test_logger();
         let req = load_request(file_path.to_str().unwrap(), &mut logger, false).unwrap();
@@ -587,7 +715,8 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn learning_mode_adds_capability_in_debug() {
-        let json = r#"{"script": "echo x", "appContainer": {"learningMode": true}}"#;
+        let json =
+            r#"{"process": {"commandLine": "echo x"}, "appContainer": {"learningMode": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -602,8 +731,7 @@ mod tests {
     #[cfg(not(debug_assertions))]
     #[test]
     fn learning_mode_stripped_in_release() {
-        let json =
-            r#"{"script": "echo x", "appContainer": {"capabilities": ["permissiveLearningMode"]}}"#;
+        let json = r#"{"process": {"commandLine": "echo x"}, "appContainer": {"capabilities": ["permissiveLearningMode"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -619,7 +747,8 @@ mod tests {
 
     #[test]
     fn script_with_timeout() {
-        let json = r#"{"script": "import sys\nprint(sys.version)", "timeout": 60000}"#;
+        let json =
+            r#"{"process": {"commandLine": "import sys\nprint(sys.version)", "timeout": 60000}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -628,19 +757,9 @@ mod tests {
     }
 
     #[test]
-    fn app_container_name_standalone() {
-        let json = r#"{"script": "print('test')", "appContainer": {"name": "CustomAppContainer"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.app_container_name, "CustomAppContainer");
-    }
-
-    #[test]
     fn app_container_capabilities() {
         let json = r#"{
-            "script": "print('test')",
+            "process": {"commandLine": "print('test')"},
             "appContainer": {
                 "capabilities": ["internetClient", "privateNetworkClientServer", "documentsLibrary"]
             }
@@ -657,7 +776,7 @@ mod tests {
 
     #[test]
     fn least_privilege_mode() {
-        let json = r#"{"script": "print('test')", "appContainer": {"leastPrivilege": true}}"#;
+        let json = r#"{"process": {"commandLine": "print('test')"}, "appContainer": {"leastPrivilege": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -667,7 +786,7 @@ mod tests {
 
     #[test]
     fn network_default_policy_allow() {
-        let json = r#"{"script": "print('test')", "network": {"defaultPolicy": "allow"}}"#;
+        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"defaultPolicy": "allow"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -677,7 +796,7 @@ mod tests {
 
     #[test]
     fn network_default_policy_block() {
-        let json = r#"{"script": "print('test')", "network": {"defaultPolicy": "block"}}"#;
+        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"defaultPolicy": "block"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -687,7 +806,7 @@ mod tests {
 
     #[test]
     fn network_enforcement_mode_capabilities() {
-        let json = r#"{"script": "print('test')", "network": {"enforcementMode": "capabilities"}}"#;
+        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "capabilities"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -700,7 +819,7 @@ mod tests {
 
     #[test]
     fn network_enforcement_mode_firewall() {
-        let json = r#"{"script": "print('test')", "network": {"enforcementMode": "firewall"}}"#;
+        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "firewall"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -713,7 +832,7 @@ mod tests {
 
     #[test]
     fn network_enforcement_mode_both() {
-        let json = r#"{"script": "print('test')", "network": {"enforcementMode": "both"}}"#;
+        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "both"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -727,7 +846,7 @@ mod tests {
     #[test]
     fn network_hosts() {
         let json = r#"{
-            "script": "print('test')",
+            "process": {"commandLine": "print('test')"},
             "network": {
                 "allowedHosts": ["example.com", "api.trusted.com"],
                 "blockedHosts": ["malicious.com", "tracker.net"]
@@ -748,7 +867,7 @@ mod tests {
     #[test]
     fn filesystem_paths() {
         let json = r#"{
-            "script": "print('test')",
+            "process": {"commandLine": "print('test')"},
             "filesystem": {
                 "readwritePaths": ["C:\\Users\\Public", "C:\\Temp\\Data"],
                 "deniedPaths": ["C:\\Windows\\System32", "C:\\Program Files"]
@@ -767,25 +886,14 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_clear_policy_on_exit_false() {
-        let json = r#"{
-            "script": "print('test')",
-            "filesystem": {"clearPolicyOnExit": false}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(!req.policy.clear_policy_on_exit);
-    }
-
-    #[test]
     fn base64_complex_config() {
         let json = r#"{
-            "script": "import sys\nprint(sys.version)",
-            "timeout": 10000,
+            "containerId": "TestContainer",
+            "process": {
+                "commandLine": "import sys\nprint(sys.version)",
+                "timeout": 10000
+            },
             "appContainer": {
-                "name": "TestContainer",
                 "capabilities": ["internetClient", "privateNetworkClientServer"]
             }
         }"#;
@@ -795,26 +903,13 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_code, "import sys\nprint(sys.version)");
         assert_eq!(req.script_timeout, 10000);
-        assert_eq!(req.policy.app_container_name, "TestContainer");
+        assert_eq!(req.container_id, "TestContainer");
         assert_eq!(req.policy.capabilities.len(), 2);
     }
 
     #[test]
-    fn network_remove_rules_on_exit() {
-        let json = r#"{
-            "script": "print('test')",
-            "network": {"removeRulesOnExit": true}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.remove_firewall_rules_on_exit);
-    }
-
-    #[test]
     fn invalid_json_syntax() {
-        let json = r#"{"script": "print('test')", INVALID_JSON}"#;
+        let json = r#"{"process": {"commandLine": "print('test')"}, INVALID_JSON}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -824,7 +919,7 @@ mod tests {
 
     #[test]
     fn default_timeout_is_zero() {
-        let json = r#"{"script": "echo hello"}"#;
+        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -836,7 +931,7 @@ mod tests {
 
     #[test]
     fn default_containment_is_appcontainer() {
-        let json = r#"{"script": "echo hello"}"#;
+        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -846,7 +941,7 @@ mod tests {
 
     #[test]
     fn explicit_appcontainer_containment() {
-        let json = r#"{"script": "echo hello", "containment": "appcontainer"}"#;
+        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "appcontainer"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -856,17 +951,18 @@ mod tests {
 
     #[test]
     fn sandbox_containment() {
-        let json = r#"{"script": "echo hello", "containment": "sandbox"}"#;
+        let json =
+            r#"{"process": {"commandLine": "echo hello"}, "containment": "windows_sandbox"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Sandbox);
+        assert_eq!(req.containment, ContainmentBackend::WindowsSandbox);
     }
 
     #[test]
     fn invalid_containment_value() {
-        let json = r#"{"script": "echo hello", "containment": "docker"}"#;
+        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "docker"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -876,39 +972,42 @@ mod tests {
 
     #[test]
     fn sandbox_config_defaults() {
-        let json = r#"{"script": "echo hello", "containment": "sandbox"}"#;
+        let json = r#"{"process": {"commandLine": "echo hello"}, "experimental": {"windows_sandbox": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.sandbox_config.idle_timeout_ms, 300_000);
-        assert_eq!(req.sandbox_config.daemon_pipe_name, "wxc-sandbox");
+        let sandbox = req.experimental.windows_sandbox.unwrap();
+        assert_eq!(sandbox.idle_timeout_ms, 300_000);
+        assert_eq!(sandbox.daemon_pipe_name, "wxc-windows-sandbox");
     }
 
     #[test]
     fn sandbox_config_custom_values() {
         let json = r#"{
-            "script": "echo hello",
-            "containment": "sandbox",
-            "sandbox": {
-                "idleTimeout": 60000,
-                "daemonPipeName": "my-custom-pipe"
+            "process": {"commandLine": "echo hello"},
+            "experimental": {
+                "windows_sandbox": {
+                    "idleTimeoutMs": 60000,
+                    "daemonPipeName": "my-custom-pipe"
+                }
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Sandbox);
-        assert_eq!(req.sandbox_config.idle_timeout_ms, 60000);
-        assert_eq!(req.sandbox_config.daemon_pipe_name, "my-custom-pipe");
+        let sandbox = req.experimental.windows_sandbox.unwrap();
+        assert_eq!(sandbox.idle_timeout_ms, 60000);
+        assert_eq!(sandbox.daemon_pipe_name, "my-custom-pipe");
     }
 
     // ====== Network proxy configuration tests ======
 
     #[test]
     fn no_proxy_leaves_default() {
-        let json = r#"{"script": "echo test", "network": {"defaultPolicy": "block"}}"#;
+        let json =
+            r#"{"process": {"commandLine": "echo test"}, "network": {"defaultPolicy": "block"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -919,7 +1018,7 @@ mod tests {
     #[test]
     fn proxy_localhost_port() {
         let json = r#"{
-            "script": "echo test",
+            "process": {"commandLine": "echo test"},
             "network": {
                 "proxy": { "localhost": 8080 }
             }
@@ -938,7 +1037,7 @@ mod tests {
     #[test]
     fn proxy_with_firewall_fields() {
         let json = r#"{
-            "script": "echo test",
+            "process": {"commandLine": "echo test"},
             "network": {
                 "defaultPolicy": "block",
                 "allowedHosts": ["api.github.com"],
@@ -957,9 +1056,8 @@ mod tests {
     }
 
     #[test]
-    fn proxy_rejected_with_sandbox() {
-        let json =
-            r#"{"script":"x","containment":"sandbox","network":{"proxy":{"localhost":8080}}}"#;
+    fn proxy_rejected_with_non_appcontainer() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -969,7 +1067,7 @@ mod tests {
 
     #[test]
     fn proxy_rejects_port_zero() {
-        let json = r#"{"script":"x","network":{"proxy":{"localhost":0}}}"#;
+        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":{"localhost":0}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -979,7 +1077,7 @@ mod tests {
 
     #[test]
     fn proxy_rejects_missing_localhost() {
-        let json = r#"{"script":"x","network":{"proxy":{}}}"#;
+        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":{}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -989,7 +1087,7 @@ mod tests {
 
     #[test]
     fn proxy_rejects_non_object() {
-        let json = r#"{"script":"x","network":{"proxy":true}}"#;
+        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1000,7 +1098,7 @@ mod tests {
     #[test]
     fn proxy_builtin_test_server() {
         let json = r#"{
-            "script": "echo test",
+            "process": {"commandLine": "echo test"},
             "network": {
                 "proxy": { "builtinTestServer": true }
             }
@@ -1016,8 +1114,7 @@ mod tests {
 
     #[test]
     fn proxy_builtin_test_server_rejects_extra_keys() {
-        let json =
-            r#"{"script":"x","network":{"proxy":{"builtinTestServer":true,"localhost":8080}}}"#;
+        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":{"builtinTestServer":true,"localhost":8080}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1027,7 +1124,8 @@ mod tests {
 
     #[test]
     fn proxy_builtin_test_server_rejects_false() {
-        let json = r#"{"script":"x","network":{"proxy":{"builtinTestServer":false}}}"#;
+        let json =
+            r#"{"process":{"commandLine":"x"},"network":{"proxy":{"builtinTestServer":false}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1036,12 +1134,315 @@ mod tests {
     }
 
     #[test]
-    fn proxy_builtin_test_server_rejected_with_sandbox() {
-        let json = r#"{"script":"x","containment":"sandbox","network":{"proxy":{"builtinTestServer":true}}}"#;
+    fn proxy_builtin_test_server_rejected_with_non_appcontainer() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_toplevel_fields_parsed() {
+        let json = r#"{"version": "0.4.0-alpha", "containerId": "abc-123", "platform": "linux", "containment": "lxc", "process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "0.4.0-alpha");
+        assert_eq!(req.container_id, "abc-123");
+        assert_eq!(req.platform, "linux");
+    }
+
+    #[test]
+    fn new_toplevel_fields_default_when_absent() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "");
+        assert_eq!(req.container_id, "");
+        assert_eq!(req.platform, "windows");
+    }
+
+    #[test]
+    fn process_section_env_parsed() {
+        let json = r#"{
+            "process": {
+                "commandLine": "echo hi",
+                "env": ["FOO=bar", "BAZ=qux"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.env, vec!["FOO=bar", "BAZ=qux"]);
+    }
+
+    #[test]
+    fn process_section_cwd_parsed() {
+        let json = r#"{
+            "process": {
+                "commandLine": "echo hi",
+                "cwd": "/workspace"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.working_directory, "/workspace");
+    }
+
+    #[test]
+    fn process_section_timeout_parsed() {
+        let json = r#"{
+            "process": {
+                "commandLine": "echo hi",
+                "timeout": 9000
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.script_timeout, 9000);
+    }
+
+    #[test]
+    fn containment_vm_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "vm"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::Vm);
+    }
+
+    #[test]
+    fn containment_microvm_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "microvm"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::MicroVm);
+    }
+
+    #[test]
+    fn schema_version_too_new_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.5.0"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_version_current_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.4.0-alpha"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "0.4.0-alpha");
+    }
+
+    #[test]
+    fn schema_version_older_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.3.0-alpha"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "0.3.0-alpha");
+    }
+
+    #[test]
+    fn schema_version_absent_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "");
+    }
+
+    #[test]
+    fn schema_version_non_semver_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "x"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_version_major_only_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "2"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_version_future_major_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "1.0.0"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sandbox_idle_timeout_ms_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"windows_sandbox": {"idleTimeoutMs": 60000}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(
+            req.experimental.windows_sandbox.unwrap().idle_timeout_ms,
+            60000
+        );
+    }
+
+    #[test]
+    fn sandbox_idle_timeout_ms_overrides_idle_timeout() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"windows_sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(
+            req.experimental.windows_sandbox.unwrap().idle_timeout_ms,
+            60000
+        );
+    }
+
+    #[test]
+    fn container_id_parsed() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containerId": "my-container"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.container_id, "my-container");
+    }
+
+    #[test]
+    fn lifecycle_destroy_on_exit_parsed() {
+        let json =
+            r#"{"process": {"commandLine": "echo hi"}, "lifecycle": {"destroyOnExit": false}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.lifecycle.destroy_on_exit);
+    }
+
+    #[test]
+    fn lifecycle_preserve_policy_parsed() {
+        let json =
+            r#"{"process": {"commandLine": "echo hi"}, "lifecycle": {"preservePolicy": true}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.lifecycle.preserve_policy);
+    }
+
+    #[test]
+    fn lifecycle_defaults_when_absent() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.lifecycle.destroy_on_exit);
+        assert!(!req.lifecycle.preserve_policy);
+    }
+
+    #[test]
+    fn wslc_section_parsed() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.container_config.image, "python:3.12");
+    }
+
+    // ---------- Experimental feature tests ----------
+
+    #[test]
+    fn experimental_section_parsed_when_present() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "world"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.test.is_some());
+        assert_eq!(req.experimental.test.unwrap().message, "world");
+    }
+
+    #[test]
+    fn experimental_section_absent_is_ok() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.test.is_none());
+    }
+
+    #[test]
+    fn experimental_enabled_defaults_to_false() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "check"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.experimental_enabled);
+    }
+
+    #[test]
+    fn unknown_experimental_fields_ignored() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"futureFeature": {"x": 1}, "test": {"message": "hi"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.test.is_some());
+    }
+
+    #[test]
+    fn experimental_test_message_parsed() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "greetings"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let test = req.experimental.test.unwrap();
+        assert_eq!(test.message, "greetings");
+    }
+
+    #[test]
+    fn experimental_test_default_message() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let test = req.experimental.test.unwrap();
+        assert!(test.message.is_empty());
     }
 }

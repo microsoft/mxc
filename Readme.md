@@ -132,7 +132,7 @@ Execute your script with AppContainer in permissive learning mode:
 {
   "script": "your_code_here",
   "appContainer": {
-    "learningMode": true
+    "capabilities": ["permissiveLearningMode"]
   }
 }
 ```

@@ -1,9 +1,10 @@
 {
-  "script": "python -c \"import urllib.request\nimport sys\n\nprint('Testing network access using AppContainer capabilities only')\nprint('=' * 60)\nprint('Enforcement mode: capabilities (no firewall rules, no admin required)')\nprint()\n\n# Test 1: Make HTTP request to GitHub API\nprint('Test 1: Connecting to api.github.com...')\ntry:\n    response = urllib.request.urlopen('https://api.github.com', timeout=10)\n    data = response.read()\n    print(f'  SUCCESS: Connected (status: {response.status})')\n    print(f'  Response size: {len(data)} bytes')\n    print(f'  Server: {response.getheader(\"Server\")}')\nexcept Exception as e:\n    print(f'  ERROR: {type(e).__name__}: {e}')\n\nprint()\n\n# Test 2: Make HTTP request to Google\nprint('Test 2: Connecting to www.google.com...')\ntry:\n    response = urllib.request.urlopen('https://www.google.com', timeout=10)\n    print(f'  SUCCESS: Connected (status: {response.status})')\nexcept Exception as e:\n    print(f'  ERROR: {type(e).__name__}: {e}')\n\nprint()\nprint('=' * 60)\nprint('Network access test complete!')\nprint()\nprint('Note: With capabilities-only mode, the internetClient capability')\nprint('      grants access to ALL network hosts. For granular control,')\nprint('      use enforcementMode: \"firewall\" or \"both\".')\"",
-  "timeout": 30000,
-  "appContainer": {
-    "name": "CLI-Network-Capabilities",
-    "learningMode": true
+  "version": "0.4.0-alpha",
+  "containerId": "CLI-Network-Capabilities",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "python -c \"import urllib.request\nimport sys\n\nprint('Testing network access using AppContainer capabilities only')\nprint('=' * 60)\nprint('Enforcement mode: capabilities (no firewall rules, no admin required)')\nprint()\n\n# Test 1: Make HTTP request to GitHub API\nprint('Test 1: Connecting to api.github.com...')\ntry:\n    response = urllib.request.urlopen('https://api.github.com', timeout=10)\n    data = response.read()\n    print(f'  SUCCESS: Connected (status: {response.status})')\n    print(f'  Response size: {len(data)} bytes')\n    print(f'  Server: {response.getheader(\"Server\")}')\nexcept Exception as e:\n    print(f'  ERROR: {type(e).__name__}: {e}')\n\nprint()\n\n# Test 2: Make HTTP request to Google\nprint('Test 2: Connecting to www.google.com...')\ntry:\n    response = urllib.request.urlopen('https://www.google.com', timeout=10)\n    print(f'  SUCCESS: Connected (status: {response.status})')\nexcept Exception as e:\n    print(f'  ERROR: {type(e).__name__}: {e}')\n\nprint()\nprint('=' * 60)\nprint('Network access test complete!')\nprint()\nprint('Note: With capabilities-only mode, the internetClient capability')\nprint('      grants access to ALL network hosts. For granular control,')\nprint('      use enforcementMode: \"firewall\" or \"both\".')\"",
+    "timeout": 30000
   },
   "network": {
     "enforcementMode": "capabilities",

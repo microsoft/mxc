@@ -1,8 +1,0 @@
-{
-  "script": "python -c \"import sys; print(f'Hello from sandbox Python {sys.version}'); print('Sandbox test successful')\"",
-  "containment": "sandbox",
-  "timeout": 60000,
-  "sandbox": {
-    "idleTimeout": 120000
-  }
-}

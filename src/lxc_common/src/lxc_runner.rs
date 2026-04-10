@@ -6,9 +6,13 @@
 //! Implements the `ScriptRunner` trait for LXC-based containment on Linux.
 
 use std::fmt::Write;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, LxcConfig, ScriptResponse};
+use wxc_common::models::{
+    CodexRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, ScriptResponse,
+};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::validate_request;
 
@@ -19,26 +23,80 @@ use crate::network_iptables::NetworkIptablesManager;
 /// Script runner that executes commands inside an LXC container.
 pub struct LxcScriptRunner {
     config: LxcConfig,
+    container_id: String,
+    destroy_on_exit: bool,
+    cleanup_policy: bool,
 }
 
 impl LxcScriptRunner {
-    pub fn new(config: &LxcConfig) -> Self {
+    pub fn new(config: &LxcConfig, container_id: &str, lifecycle: &LifecycleConfig) -> Self {
         Self {
             config: config.clone(),
+            container_id: container_id.to_string(),
+            destroy_on_exit: lifecycle.destroy_on_exit,
+            cleanup_policy: !lifecycle.preserve_policy,
         }
     }
 
     /// Generate a container name if one wasn't provided.
     fn resolve_container_name(&self) -> String {
-        if self.config.container_name.is_empty() {
+        if self.container_id.is_empty() {
             format!("mxc-{}", uuid_simple())
         } else {
-            self.config.container_name.clone()
+            self.container_id.clone()
         }
+    }
+
+    /// Wait for the container's network stack to initialize.
+    /// Polls `lxc-info` until the container has an IP address or the timeout is reached.
+    fn wait_for_network(container_name: &str, timeout: Duration, logger: &mut Logger) -> bool {
+        let start = Instant::now();
+        let poll_interval = Duration::from_millis(500);
+
+        let _ = writeln!(logger, "Waiting for container network to initialize...");
+
+        while start.elapsed() < timeout {
+            let output = std::process::Command::new("lxc-info")
+                .arg("-n")
+                .arg(container_name)
+                .arg("-iH")
+                .output();
+
+            if let Ok(out) = output {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let ip = stdout.trim();
+                if !ip.is_empty() {
+                    let _ = writeln!(
+                        logger,
+                        "Container network ready (IP: {}, waited {:.1}s)",
+                        ip,
+                        start.elapsed().as_secs_f64()
+                    );
+                    return true;
+                }
+            }
+
+            thread::sleep(poll_interval);
+        }
+
+        let _ = writeln!(
+            logger,
+            "Warning: container network not ready after {:.1}s",
+            timeout.as_secs_f64()
+        );
+        false
     }
 
     /// Core execution logic.
     fn run_internal(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+        // Validate required LXC fields
+        if self.config.distribution.is_empty() || self.config.release.is_empty() {
+            return ScriptResponse::error(
+                "LXC distribution and release are required \
+                 (e.g., \"distribution\": \"alpine\", \"release\": \"3.20\")",
+            );
+        }
+
         let container_name = self.resolve_container_name();
         let _ = writeln!(logger, "Container name: {}", container_name);
         let _ = writeln!(
@@ -46,6 +104,17 @@ impl LxcScriptRunner {
             "Distribution: {}:{}",
             self.config.distribution, self.config.release
         );
+
+        // Apply experimental features when flag is set
+        if request.experimental_enabled {
+            if let Some(ref test) = request.experimental.test {
+                let _ = writeln!(
+                    logger,
+                    "Experimental feature 'test' applied: {}",
+                    test.message
+                );
+            }
+        }
 
         // Create container handle
         let container = LxcContainer::new(&container_name, None);
@@ -67,7 +136,7 @@ impl LxcScriptRunner {
         if let Err(e) =
             filesystem_mounts::configure_filesystem_mounts(&container, &request.policy, logger)
         {
-            if self.config.destroy_on_exit || container_created {
+            if self.destroy_on_exit || container_created {
                 let _ = container.destroy();
             }
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
@@ -85,6 +154,18 @@ impl LxcScriptRunner {
             let _ = writeln!(logger, "Container already running.");
         }
 
+        // Wait for network only when the config uses network features (firewall rules
+        // or allowed/blocked hosts).
+        let needs_network = matches!(
+            request.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+        ) || !request.policy.allowed_hosts.is_empty()
+            || !request.policy.blocked_hosts.is_empty();
+
+        if needs_network {
+            Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
+        }
+
         // Configure network rules
         let mut fw_manager = NetworkIptablesManager::new(&container_name);
 
@@ -97,26 +178,23 @@ impl LxcScriptRunner {
         match fw_manager.apply_firewall_rules(&request.policy, logger) {
             Ok(true) => {}
             Ok(false) => {
-                if self.config.destroy_on_exit || container_created {
+                if self.destroy_on_exit || container_created {
                     let _ = container.destroy();
                 }
                 return ScriptResponse::error("Failed to apply network firewall rules.");
             }
             Err(e) => {
-                if self.config.destroy_on_exit || container_created {
+                if self.destroy_on_exit || container_created {
                     let _ = container.destroy();
                 }
                 return ScriptResponse::error(&format!("Network policy error: {}", e));
             }
         }
 
-        // Execute the script
+        // Execute the script using lxc-attach (container is already running)
+        // TODO: Thread request.script_timeout through to attach_run for timeout enforcement.
         let _ = writeln!(logger, "Executing script inside container...");
-        let result = container.exec(
-            &request.script_code,
-            &request.working_directory,
-            request.script_timeout,
-        );
+        let result = container.attach_run(&request.script_code, &request.working_directory);
 
         let response = match result {
             Ok((exit_code, stdout, stderr)) => ScriptResponse {
@@ -129,12 +207,12 @@ impl LxcScriptRunner {
         };
 
         // Cleanup: remove network rules
-        if fw_manager.rules_applied() && request.policy.remove_firewall_rules_on_exit {
+        if fw_manager.rules_applied() && self.cleanup_policy {
             let _ = fw_manager.remove_firewall_rules(logger);
         }
 
         // Cleanup: destroy container if configured
-        if self.config.destroy_on_exit {
+        if self.destroy_on_exit {
             let _ = writeln!(logger, "Destroying container...");
             if let Err(e) = container.destroy() {
                 let _ = writeln!(logger, "Warning: failed to destroy container: {}", e);
@@ -185,18 +263,17 @@ mod tests {
 
     #[test]
     fn resolve_container_name_uses_config() {
-        let config = LxcConfig {
-            container_name: "my-test".to_string(),
-            ..Default::default()
-        };
-        let runner = LxcScriptRunner::new(&config);
+        let config = LxcConfig::default();
+        let lifecycle = LifecycleConfig::default();
+        let runner = LxcScriptRunner::new(&config, "my-test", &lifecycle);
         assert_eq!(runner.resolve_container_name(), "my-test");
     }
 
     #[test]
     fn resolve_container_name_generates_when_empty() {
         let config = LxcConfig::default();
-        let runner = LxcScriptRunner::new(&config);
+        let lifecycle = LifecycleConfig::default();
+        let runner = LxcScriptRunner::new(&config, "", &lifecycle);
         let name = runner.resolve_container_name();
         assert!(name.starts_with("mxc-"));
     }

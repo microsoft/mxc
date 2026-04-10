@@ -1,9 +1,10 @@
 {
-  "script": "python -c \"import os\nallowed_path = 'C:\\\\temp\\\\wxc_test_allowed\\\\test_output.txt'\ndenied_path = 'C:\\\\temp\\\\wxc_test_denied\\\\forbidden.txt'\nprint('Testing filesystem BFS enforcement...')\nf = open(allowed_path, 'w')\nf.write('SUCCESS: Write to allowed path worked!')\nf.close()\nprint(f'Successfully wrote to: {allowed_path}')\nprint('Now attempting to write to denied path...')\ntry:\n    f2 = open(denied_path, 'w')\n    f2.write('This should fail')\n    f2.close()\n    print('ERROR: Should not have been able to write to denied path!')\nexcept PermissionError:\n    print('SUCCESS: Access to denied path was blocked as expected')\"",
-  "timeout": 30000,
-  "executionMode": "appContainer",
-  "appContainer": {
-    "name": "CLI-BFS-Test"
+  "version": "0.4.0-alpha",
+  "containerId": "CLI-BFS-Test",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "python -c \"import os\nallowed_path = 'C:\\\\temp\\\\wxc_test_allowed\\\\test_output.txt'\ndenied_path = 'C:\\\\temp\\\\wxc_test_denied\\\\forbidden.txt'\nprint('Testing filesystem BFS enforcement...')\nf = open(allowed_path, 'w')\nf.write('SUCCESS: Write to allowed path worked!')\nf.close()\nprint(f'Successfully wrote to: {allowed_path}')\nprint('Now attempting to write to denied path...')\ntry:\n    f2 = open(denied_path, 'w')\n    f2.write('This should fail')\n    f2.close()\n    print('ERROR: Should not have been able to write to denied path!')\nexcept PermissionError:\n    print('SUCCESS: Access to denied path was blocked as expected')\"",
+    "timeout": 30000
   },
   "filesystem": {
     "readwritePaths": [ "C:\\temp\\wxc_test_allowed", "C:\\Users\\AdminUser\\AppData\\Local\\Programs" ]
