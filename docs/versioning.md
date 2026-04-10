@@ -19,7 +19,6 @@ When a consumer specifies a SandboxPolicy version (e.g.,
 // sdk/src/types.ts
 const policy: SandboxPolicy = {
   version: "0.4.0-alpha",
-  containment: "process",
   filesystem: { ... },
   network: { ... },
   ui: { ... },
@@ -122,9 +121,17 @@ When `--experimental` is passed:
 
 **2. SDK (`@microsoft/mxc-sdk`):**
 ```typescript
+// With policy:
 const pty = spawnSandbox("python app.py", policy, {
   experimental: true,
   debug: false
+});
+
+// Or with config:
+const config = createConfigFromPolicy(policy, "process");
+const pty = spawnSandbox("python app.py", config, {
+  experimental: true,
+  debug: false,
 });
 ```
 

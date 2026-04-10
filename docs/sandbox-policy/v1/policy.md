@@ -88,7 +88,7 @@ guarantees behavior.
 MXC has two user-facing concepts:
 
 1. **SandboxPolicy** (input): what the caller wants restricted.
-   Cross-platform security intent: containment, filesystem,
+   Cross-platform security intent: filesystem,
    network, UI, timeout. No OS-specific content.
 2. **ContainerConfig** (output): the full configuration for one
    specific backend. Returned by `createConfigFromPolicy()`.
@@ -101,17 +101,17 @@ Windows, LXC on Linux).
 ### Flow
 
 ```
-SandboxPolicy --> createConfigFromPolicy() --> ContainerConfig --> spawnSandbox() --> executor --> OS
+SandboxPolicy --> createConfigFromPolicy(policy, containment) --> ContainerConfig --> spawnSandbox() --> executor --> OS
 ```
 
 ### Two API paths
 
 ```typescript
-// Simple: policy in, sandbox out. SDK creates config internally.
+// Simple: policy in, sandbox out. Always uses process containment.
 spawnSandbox(script, policy);
 
-// Advanced: get config, modify backend-specific fields, then spawn.
-const config = createConfigFromPolicy(policy);
+// Advanced: choose containment, get config, modify, then spawn.
+const config = createConfigFromPolicy(policy, "process");
 config.appcontainer.ui.isolation = "atoms";  // backend-specific tweak
 spawnSandbox(script, config);
 ```
@@ -126,9 +126,9 @@ spawnSandbox(script, config);
 │                                                               │
 │ Users: GitHub CLI, Copilot, third-party agents                │
 │                                                               │
-│ SandboxPolicy: containment, filesystem, network, ui, timeout  │
+│ SandboxPolicy: filesystem, network, ui, timeout               │
 │ Simple:   spawnSandbox(script, policy)                        │
-│ Advanced: createConfigFromPolicy(policy)                      │
+│ Advanced: createConfigFromPolicy(policy, "process")           │
 │             → modify config                                   │
 │             → spawnSandbox(script, config)                    │
 │                                                               │
@@ -165,7 +165,7 @@ general-purpose deployment manifest.
 
 Rules:
 
-- **Every Config field must be reachable** from policy, containment hint, or SDK defaults. If a
+- **Every Config field must be reachable** from policy or SDK defaults. If a
   field has no path from user-facing input, it should not exist.
 - **Keep Config minimal.** Only add fields that executors actually need.
 - **SDK defaults to deny** for unfilled policy fields.
@@ -180,7 +180,6 @@ deny. Cross-platform. No OS-specific content.
 ```typescript
 type SandboxPolicy = {
   version: string;
-  containment?: "process" | "microvm" | "agentSession";
   filesystem?: {
     readwritePaths?: string[];
     readonlyPaths?: string[];
@@ -202,12 +201,6 @@ type SandboxPolicy = {
   timeoutMs?: number;
 };
 ```
-
-### `containment`
-
-Optional hint for the isolation backend. Defaults to
-`"process"`. See
-[Containment Types](#7-containment-types) for the mapping.
 
 ### `filesystem`
 
@@ -272,12 +265,8 @@ Key rules:
 - **User-modifiable.** Advanced users can set any Config field before spawning.
 - **Schema-defined.** Schemas live in `schemas/`. The SDK TypeScript types mirror them.
 
-### Discriminated union
-
-All configs share a common base (filesystem, network, ui,
-process, lifecycle). Each backend extends it with
-backend-specific sections. The `containment` field is the
-discriminant:
+All configs share common sections (filesystem, network, ui).
+Each backend adds its own sections on top:
 
 ```typescript
 type ContainerConfig =
@@ -375,15 +364,22 @@ that uses them.
 
 ## 7. Containment Types
 
-| `containment` value | Windows backend           | Linux backend   | Status   |
-|----------------------|---------------------------|-----------------|----------|
-| `"process"`          | BaseProcessContainer      | LXC             | Implemented |
-| `"microvm"`          | Nanvix                    | microVM         | Future   |
-| `"agentSession"`     | Agent session container   | N/A             | Future   |
+The second parameter to `createConfigFromPolicy()` selects
+the containment backend:
+
+```typescript
+const config = createConfigFromPolicy(policy, "process");
+```
+
+| Value              | Windows backend           | Linux backend   | Status      |
+|--------------------|---------------------------|-----------------|-------------|
+| `"process"`        | BaseProcessContainer      | LXC             | Implemented |
+| `"microvm"`        | Nanvix                    | microVM         | Future      |
+| `"agentSession"`   | Agent session container   | N/A             | Future      |
 
 Only `"process"` is end-to-end implemented today.
 
-If `containment` is omitted, it defaults to `"process"`.
+`spawnSandbox(script, policy)` always defaults to `"process"`.
 
 ---
 
@@ -411,12 +407,11 @@ If `containment` is omitted, it defaults to `"process"`.
 
 ### 10.1 SDK user perspective
 
-**Simple path:** policy only, SDK handles everything:
+**Simple path:** policy only, defaults to process containment:
 
 ```typescript
 const policy: SandboxPolicy = {
   version: "0.5.0-dev",
-  containment: "process",
   filesystem: { readwritePaths: ["C:\\workspace"] },
   network: {},
   ui: {
@@ -427,15 +422,15 @@ const policy: SandboxPolicy = {
   timeoutMs: 60000,
 };
 
-spawnSandbox("myapp.exe", policy);
+spawnSandbox("myapp.exe --flag1 arg", policy);
 ```
 
-**Advanced path:** get config, tweak backend-specific fields:
+**Advanced path:** choose containment, get config, tweak:
 
 ```typescript
-const config = createConfigFromPolicy(policy);
+const config = createConfigFromPolicy(policy, "process");
 config.appcontainer.ui.isolation = "atoms";
-spawnSandbox("myapp.exe", config);
+spawnSandbox("myapp.exe --flag1 arg", config);
 ```
 
 ### 10.2 MXC developer perspective
@@ -446,8 +441,9 @@ An MXC developer adding UI containment support would:
 
 If the feature is cross-platform security intent, add it to
 `SandboxPolicy`. If the feature introduces a new containment
-backend, add a new value to the `containment` enum. UI is not
-a new backend, so we only add policy fields here:
+backend, add a new value to the `createConfigFromPolicy()`
+containment parameter. UI is not a new backend, so we only
+add policy fields here:
 
 ```typescript
 ui?: {
@@ -578,5 +574,6 @@ injection. Default-deny.
 ### "Can I pass ContainerConfig JSON directly to an executor?"
 
 Yes. `wxc-exec config.json` accepts raw ContainerConfig. Useful for testing and internal
-development. `createConfigFromPolicy()` is the recommended path for production.
+development. `createConfigFromPolicy()` is the recommended SDK path for production if needing control over
+the configuration itself.
 
