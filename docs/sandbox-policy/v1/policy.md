@@ -46,7 +46,7 @@
 
 Policy describes *what* the caller wants. ContainerConfig describes *how* the OS enforces it.
 
-A caller writes `network: { outbound: true }`. They never write firewall rules, iptables
+A caller writes `network: { allowOutbound: true }`. They never write firewall rules, iptables
 chains, or capability lists. Mechanisms belong in ContainerConfig and backend executors.
 
 Modeled after Apple's App Sandbox: declare entitlements; the OS handles enforcement.
@@ -62,7 +62,7 @@ spawnSandbox("script.sh", { version: "0.5.0-dev" });
 // Allow outbound network:
 spawnSandbox("script.sh", {
   version: "0.5.0-dev",
-  network: { outbound: true },
+  network: { allowOutbound: true },
 });
 ```
 
@@ -131,8 +131,6 @@ spawnSandbox(script, config);
 │ Advanced: createConfigFromPolicy(policy, "process")           │
 │             → modify config                                   │
 │             → spawnSandbox(script, config)                    │
-│                                                               │
-│ Cross-platform. Intent only.                                  │
 └─────────────────────────────┬─────────────────────────────────┘
                               │ ContainerConfig (JSON)
                               ▼
@@ -187,8 +185,8 @@ type SandboxPolicy = {
     tempDir?: "shared" | "isolated";
   };
   network?: {
-    outbound?: boolean;
-    privateServer?: boolean;
+    allowOutbound?: boolean;
+    allowLocalNetwork?: boolean;
     allowedHosts?: string[];
     blockedHosts?: string[];
     proxy?: { builtinTestServer: true } | { url: string };
@@ -217,13 +215,13 @@ Omitted = no filesystem access beyond the default sandbox root.
 
 All flags default to `false` (no network access).
 
-| Field          | Description |
-|----------------|-------------|
-| `outbound`     | Allow outbound connections (HTTP, DNS, etc.). |
-| `privateServer`  | Allow listening for connections on the private network. |
-| `allowedHosts` | Outbound only. When set, ONLY these outbound hosts are reachable. Error if `outbound` is not set. |
-| `blockedHosts` | Outbound only. Hosts to block even when outbound is allowed. Error if `outbound` is not set. |
-| `proxy`        | `{ builtinTestServer: true }` or `{ url: "..." }`. Routes all traffic through this proxy. Cannot be combined with other network flags. |
+| Field              | Description |
+|--------------------|-------------|
+| `allowOutbound`    | Allow outbound connections to the internet (HTTP, DNS, etc.). |
+| `allowLocalNetwork`| Allow connections to local networks. |
+| `allowedHosts`     | When set, ONLY these outbound hosts are reachable. Error if `allowOutbound` is not set. |
+| `blockedHosts`     | Hosts to block even when outbound is allowed. Error if `allowOutbound` is not set. |
+| `proxy`            | `{ builtinTestServer: true }` or `{ url: "..." }`. Routes all traffic through this proxy. Cannot be combined with other network flags. |
 
 Omitted = no network access.
 
