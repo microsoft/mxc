@@ -8,24 +8,25 @@ The policy (filesystem, network) expresses **what** the user wants — "block ne
 
 ### Policy Version = Config Schema Version
 
-We are introducing a `version` field in the SandboxPolicy. This version must match the MXC config JSON version — they are the same version, tied 1:1.
+The `version` field in SandboxPolicy must match the MXC config
+JSON version: they are the same version, tied 1:1.
 
-When a consumer specifies a SandboxPolicy version (e.g., `0.4.0`), MXC creates
-the corresponding `WxcConfiguration` using the `0.4.0` schema. If a different
-version is specified (e.g., `0.5.0`), MXC uses the `0.5.0` schema. All schemas
-for a major version are packaged together in the SDK.
+When a consumer specifies a SandboxPolicy version (e.g.,
+`0.4.0`), MXC creates the corresponding configuration using the
+`0.4.0` schema.
 
 ```typescript
 // sdk/src/types.ts
-// NOTE: SandboxPolicy is subject to significant evolution as the schema matures.
-SandboxPolicy {
-  version: "0.4.0-alpha",       // must match MXC config schema version
-  filesystem: { ... },           // policy (intent)
-  network: { ... },              // policy (intent)
-}
+const policy: SandboxPolicy = {
+  version: "0.4.0-alpha",
+  filesystem: { ... },
+  network: { ... },
+  ui: { ... },
+  timeoutMs: 30000,
+};
 ```
 
-The config JSON (`WxcConfiguration`) carries this same version:
+The config JSON carries this same version:
 
 ```json
 {
@@ -120,9 +121,17 @@ When `--experimental` is passed:
 
 **2. SDK (`@microsoft/mxc-sdk`):**
 ```typescript
+// With policy:
 const pty = spawnSandbox("python app.py", policy, {
   experimental: true,
   debug: false
+});
+
+// Or with config:
+const config = createConfigFromPolicy(policy, "process");
+const pty = spawnSandbox("python app.py", config, {
+  experimental: true,
+  debug: false,
 });
 ```
 
@@ -195,7 +204,7 @@ fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse
 ## Data Flow
 
 ```
-User writes SandboxPolicy (intent, versioned)
+User writes SandboxPolicy (policy + environment, versioned)
         │
         ▼
 Config JSON (version: "0.4.0-alpha")
