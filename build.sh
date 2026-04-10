@@ -70,18 +70,21 @@ ARCH=$(uname -m)
 case $ARCH in
     x86_64)
         TARGET_TRIPLE="x86_64-unknown-linux-gnu"
+        SDK_ARCH="x64"
         ;;
     aarch64)
         TARGET_TRIPLE="aarch64-unknown-linux-gnu"
+        SDK_ARCH="arm64"
         ;;
     *)
         echo "Warning: Unknown architecture $ARCH, skipping binary copy to SDK"
         TARGET_TRIPLE=""
+        SDK_ARCH=""
         ;;
 esac
 
 if [ -n "$TARGET_TRIPLE" ]; then
-    BIN_DIR="$SDK_DIR/bin/$TARGET_TRIPLE"
+    BIN_DIR="$SDK_DIR/bin/$SDK_ARCH"
     mkdir -p "$BIN_DIR"
 
     if [ "$BUILD_TYPE" = "release" ]; then
