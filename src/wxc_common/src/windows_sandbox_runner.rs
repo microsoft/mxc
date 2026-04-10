@@ -6,11 +6,11 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::logger::Logger;
 use crate::models::{CodexRequest, ScriptResponse, WindowsSandboxConfig};
+use crate::process_util::resolve_sibling_binary;
 use crate::sandbox_protocol::DaemonResult;
 use crate::script_runner::ScriptRunner;
 
@@ -48,15 +48,8 @@ impl WindowsSandboxScriptRunner {
     }
 
     /// Locate the daemon executable next to wxc-exec.
-    fn daemon_exe_path() -> Result<PathBuf, String> {
-        let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
-        let dir = exe.parent().ok_or("exe has no parent dir")?;
-        let daemon = dir.join("wxc-windows-sandbox-daemon.exe");
-        if daemon.exists() {
-            Ok(daemon)
-        } else {
-            Err(format!("daemon binary not found at {:?}", daemon))
-        }
+    fn daemon_exe_path() -> Result<std::path::PathBuf, String> {
+        resolve_sibling_binary("wxc-windows-sandbox-daemon.exe").map_err(|e| e.to_string())
     }
 
     /// Launch the daemon process if it's not already running.
