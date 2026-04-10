@@ -16,7 +16,7 @@ mod tcp_bridge;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 /// Shared state for the daemon.
 pub struct DaemonState {
@@ -57,15 +57,17 @@ async fn main() -> Result<()> {
     );
 
     let state = Arc::new(Mutex::new(DaemonState::new()));
+    let shutdown = Arc::new(Notify::new());
 
     // Spawn the idle-timeout watchdog.
     let watchdog_state = state.clone();
+    let watchdog_shutdown = shutdown.clone();
     let watchdog = tokio::spawn(async move {
-        idle_watchdog(watchdog_state, idle_timeout_ms).await;
+        idle_watchdog(watchdog_state, idle_timeout_ms, watchdog_shutdown).await;
     });
 
     // Run the named-pipe server (blocks until shutdown).
-    pipe_server::run(&pipe_name, state.clone())
+    pipe_server::run(&pipe_name, state.clone(), shutdown)
         .await
         .context("pipe server failed")?;
 
@@ -85,7 +87,7 @@ async fn main() -> Result<()> {
 }
 
 /// Periodically checks whether the daemon has been idle beyond the timeout.
-async fn idle_watchdog(state: Arc<Mutex<DaemonState>>, timeout_ms: u64) {
+async fn idle_watchdog(state: Arc<Mutex<DaemonState>>, timeout_ms: u64, shutdown: Arc<Notify>) {
     if timeout_ms == 0 {
         // No timeout — run forever.
         std::future::pending::<()>().await;
@@ -97,8 +99,8 @@ async fn idle_watchdog(state: Arc<Mutex<DaemonState>>, timeout_ms: u64) {
         let s = state.lock().await;
         if s.last_activity.elapsed() >= timeout {
             eprintln!("[daemon] idle timeout reached, shutting down");
-            // Exit the process — the main function's cleanup will run.
-            std::process::exit(0);
+            shutdown.notify_one();
+            return;
         }
     }
 }

@@ -4,6 +4,7 @@
 //! followed by that many bytes of JSON (serde_json).  This keeps the framing
 //! trivial while still allowing structured payloads.
 
+use serde::ser::Error as _;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -69,6 +70,11 @@ pub struct ExitNotification {
 /// Layout: `[len: u32 LE][json: len bytes]`
 pub fn encode_message(msg: &ControlMessage) -> Result<Vec<u8>, serde_json::Error> {
     let json = serde_json::to_vec(msg)?;
+    if json.len() > u32::MAX as usize {
+        return Err(serde_json::Error::custom(
+            "message too large for protocol framing",
+        ));
+    }
     let len = json.len() as u32;
     let mut frame = Vec::with_capacity(4 + json.len());
     frame.extend_from_slice(&len.to_le_bytes());

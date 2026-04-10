@@ -4,6 +4,7 @@
 //! the bridge for relaying control/stdin/stdout/stderr.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -83,7 +84,9 @@ async fn wait_for_ready(control: &mut TcpStream, timeout: std::time::Duration) -
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {
-        let remaining = deadline - tokio::time::Instant::now();
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or(Duration::ZERO);
         let n = tokio::time::timeout(remaining, control.read(&mut tmp))
             .await
             .context("timeout waiting for Ready")?
