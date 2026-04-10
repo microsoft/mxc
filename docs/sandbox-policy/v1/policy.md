@@ -44,7 +44,7 @@
 
 ### Principle 1: Intent, Not Mechanism
 
-Policy describes *what* the caller wants. ContainerConfig describes *how* the OS enforces it.
+Policy describes *what* the caller wants. ContainerConfig describes *how* the platform enforces it.
 
 A caller writes `network: { allowOutbound: true }`. They never write firewall rules, iptables
 chains, or capability lists. Mechanisms belong in ContainerConfig and backend executors.
@@ -69,8 +69,8 @@ them. This is a security guarantee.
 
 ### Principle 3: Cross-Platform Where Possible
 
-Policy fields work on two or more platforms. The enforcement mechanism differs per OS, but the
-intent is the same. Fields that only apply to one backend live in ContainerConfig, not Policy.
+Policy fields work on two or more platforms. The enforcement mechanism differs per platform, but
+the intent is the same. Fields that only apply to one backend live in ContainerConfig, not Policy.
 
 ### Principle 4: Version Is a Contract
 
