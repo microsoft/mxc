@@ -3,14 +3,14 @@
 
 <#
 .SYNOPSIS
-    Runs all MicroVM E2E tests. Requires WHP and Nanvix binaries next to wxc-exec.exe.
+    Runs MicroVM E2E tests. Requires WHP and Nanvix binaries next to wxc-exec.exe.
 
 .DESCRIPTION
-    - Checks if Windows Hypervisor Platform is available
     - Locates wxc-exec.exe (built with --features microvm)
     - Verifies Nanvix binaries are present
-    - Runs each test config, validates exit codes
-    - Reports pass/fail summary
+    - Runs each test config via wxc-exec, validates exit codes and stdout content
+    - Reports pass/fail summary with per-test performance timing
+    - Writes microvm-perf-results.json for CI artifact consumption
 
 .PARAMETER WxcExePath
     Path to wxc-exec.exe. Defaults to ..\src\target\debug\wxc-exec.exe
@@ -30,29 +30,31 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# -- WHP check ---------------------------------------------------------------
+# -- WHP check (local runs only) ---------------------------------------------
+# In CI, the workflow checks WHP and fails before reaching this script.
+# For local runs, check here and skip gracefully if WHP is unavailable.
 
-function Test-WhpAvailable {
-    # Fast check: verify the WHP API DLL exists and the hypervisor is running.
-    # Avoids Get-WindowsOptionalFeature which requires elevation and can hang.
-    if (-not (Test-Path "$env:SystemRoot\System32\WinHvPlatform.dll")) {
-        return $false
+if (-not $env:CI) {
+    function Test-WhpAvailable {
+        if (-not (Test-Path "$env:SystemRoot\System32\WinHvPlatform.dll")) {
+            return $false
+        }
+        try {
+            $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+            return ($cs -and $cs.HypervisorPresent)
+        } catch {
+            return $false
+        }
     }
-    try {
-        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
-        return ($cs -and $cs.HypervisorPresent)
-    } catch {
-        return $false
+
+    if (-not (Test-WhpAvailable)) {
+        Write-Host "SKIP: Windows Hypervisor Platform (WHP) is not available." -ForegroundColor Yellow
+        Write-Host "      Enable it with: Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform"
+        exit 0
     }
 }
 
 Write-Host "`n=== MicroVM E2E Tests ===" -ForegroundColor Cyan
-
-if (-not (Test-WhpAvailable)) {
-    Write-Host "SKIP: Windows Hypervisor Platform (WHP) is not enabled." -ForegroundColor Yellow
-    Write-Host "      Enable it with: Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform"
-    exit 0
-}
 
 # -- Locate wxc-exec.exe -----------------------------------------------------
 
@@ -81,15 +83,14 @@ Write-Host "wxc-exec: $wxcExe"
 Write-Host "binaries: $binDir"
 
 # -- Test definitions ---------------------------------------------------------
-# Format: config name, expected exit code
 
 $tests = @(
-    @{ Config = "microvm_hello.json";        ExpectedExit = 0;  Description = "Hello world" },
+    @{ Config = "microvm_hello.json";        ExpectedExit = 0;  Description = "Hello world";                    OutputContains = "sum=100" },
     @{ Config = "microvm_exit_code.json";    ExpectedExit = 42; Description = "Exit code propagation" },
-    @{ Config = "microvm_multiline.json";    ExpectedExit = 0;  Description = "Multi-line script (fibonacci)" },
-    @{ Config = "microvm_stdlib.json";       ExpectedExit = 0;  Description = "Stdlib (json, math, hashlib)" },
-    @{ Config = "microvm_large_output.json"; ExpectedExit = 0;  Description = "Large stdout (1000 lines)" },
-    @{ Config = "microvm_error.json";        ExpectedExit = 1;  Description = "Python exception" },
+    @{ Config = "microvm_multiline.json";    ExpectedExit = 0;  Description = "Multi-line script (fibonacci)";  OutputContains = "fib(" },
+    @{ Config = "microvm_stdlib.json";       ExpectedExit = 0;  Description = "Stdlib (json, math, hashlib)";   OutputContains = "pi" },
+    @{ Config = "microvm_large_output.json"; ExpectedExit = 0;  Description = "Large stdout (1000 lines)";      OutputContains = "line 999" },
+    @{ Config = "microvm_error.json";        ExpectedExit = 1;  Description = "Python exception";               OutputContains = "ValueError" },
     @{ Config = "microvm_timeout.json";      ExpectedExit = -1; Description = "Timeout kills VM" }
 )
 
@@ -108,23 +109,81 @@ foreach ($test in $tests) {
 
     Write-Host "`n--- $($test.Description) ($($test.Config)) ---" -ForegroundColor White
 
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $stdoutFile = [System.IO.Path]::GetTempFileName()
+    $stderrFile = [System.IO.Path]::GetTempFileName()
     $process = Start-Process -FilePath $wxcExe `
         -ArgumentList "--debug", "--experimental", $configPath `
-        -NoNewWindow -PassThru -Wait
+        -PassThru -Wait `
+        -RedirectStandardOutput $stdoutFile `
+        -RedirectStandardError $stderrFile
+    $sw.Stop()
 
     $actualExit = $process.ExitCode
     $expectedExit = $test.ExpectedExit
+    $elapsedMs = $sw.ElapsedMilliseconds
+    $stdout = Get-Content $stdoutFile -Raw -ErrorAction SilentlyContinue
+    $stderr = Get-Content $stderrFile -Raw -ErrorAction SilentlyContinue
+    Remove-Item $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
 
-    if ($actualExit -eq $expectedExit) {
-        Write-Host "  PASS (exit=$actualExit)" -ForegroundColor Green
+    $pass = ($actualExit -eq $expectedExit)
+    $reason = ""
+
+    if (-not $pass) {
+        $reason = "expected exit=$expectedExit, got exit=$actualExit"
+    }
+
+    # Check stdout content if OutputContains is specified
+    if ($pass -and $test.OutputContains) {
+        $combined = "$stdout`n$stderr"
+        if ($combined -notmatch [regex]::Escape($test.OutputContains)) {
+            $pass = $false
+            $reason = "output missing '$($test.OutputContains)'"
+        }
+    }
+
+    if ($pass) {
+        Write-Host "  PASS (exit=$actualExit, ${elapsedMs}ms)" -ForegroundColor Green
         $passed++
-        $results += @{ Test = $test.Config; Status = "PASS"; Exit = $actualExit }
+        $results += @{ Test = $test.Config; Status = "PASS"; Exit = $actualExit; WallTimeMs = $elapsedMs; Description = $test.Description }
     } else {
-        Write-Host "  FAIL (expected exit=$expectedExit, got exit=$actualExit)" -ForegroundColor Red
+        Write-Host "  FAIL ($reason, ${elapsedMs}ms)" -ForegroundColor Red
+        $combined = "$stdout`n$stderr"
+        $combined -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 3 | ForEach-Object {
+            Write-Host "    > $($_.TrimEnd())" -ForegroundColor Gray
+        }
         $failed++
-        $results += @{ Test = $test.Config; Status = "FAIL"; Exit = $actualExit }
+        $results += @{ Test = $test.Config; Status = "FAIL"; Exit = $actualExit; WallTimeMs = $elapsedMs; Description = $test.Description }
     }
 }
+
+# -- Performance summary ------------------------------------------------------
+
+Write-Host "`n=== Performance ===" -ForegroundColor Cyan
+Write-Host ("  {0,-35} {1,10} {2,8}" -f "Test", "Time (ms)", "Status")
+Write-Host ("  {0,-35} {1,10} {2,8}" -f "----", "---------", "------")
+foreach ($r in $results) {
+    $color = if ($r.Status -eq "PASS") { "Green" } else { "Red" }
+    Write-Host ("  {0,-35} {1,10} {2,8}" -f $r.Description, $r.WallTimeMs, $r.Status) -ForegroundColor $color
+}
+
+# Write JSON results for CI artifact consumption
+$perfOutput = @{
+    commit    = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { "local" }
+    timestamp = (Get-Date -Format "o")
+    results   = $results | ForEach-Object {
+        @{
+            test         = $_.Test
+            description  = $_.Description
+            wall_time_ms = $_.WallTimeMs
+            exit_code    = $_.Exit
+            status       = $_.Status
+        }
+    }
+}
+$perfJsonPath = Join-Path $ConfigDir "..\microvm-perf-results.json"
+$perfOutput | ConvertTo-Json -Depth 3 | Set-Content $perfJsonPath -Encoding UTF8
+Write-Host "`n  Performance results written to: $perfJsonPath"
 
 # -- Summary ------------------------------------------------------------------
 

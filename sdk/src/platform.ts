@@ -129,6 +129,14 @@ function isLxcAvailable(): boolean {
 }
 
 /**
+ * Get the simplified architecture name used for SDK bin directory layout.
+ * @returns 'arm64' or 'x64'
+ */
+function getSdkArch(): string {
+  return os.arch() === 'arm64' ? 'arm64' : 'x64';
+}
+
+/**
  * Get the Rust target triple for the current machine architecture.
  * @returns The Rust target triple string
  */
@@ -168,7 +176,7 @@ export function findWxcExecutable(): string | null {
 
   const possiblePaths = [
     // Bundled in the SDK package (e.g. when installed via npm)
-    path.join(__dirname, '..', 'bin', targetTriple, 'wxc-exec.exe'),
+    path.join(__dirname, '..', 'bin', getSdkArch(), 'wxc-exec.exe'),
     // Architecture-specific release build output (monorepo dev)
     path.join(targetDir, targetTriple, 'release', 'wxc-exec.exe'),
     // Architecture-specific debug build output (monorepo dev)
@@ -221,7 +229,7 @@ export function findLxcExecutable(): string | null {
 
   const possiblePaths = [
     // Bundled in the SDK package
-    path.join(__dirname, '..', 'bin', targetTriple, 'lxc-exec'),
+    path.join(__dirname, '..', 'bin', getSdkArch(), 'lxc-exec'),
     // Architecture-specific release build
     path.join(targetDir, targetTriple, 'release', 'lxc-exec'),
     // Architecture-specific debug build

@@ -1,7 +1,0 @@
-{
-  "containment": "sandbox",
-  "process": {
-    "commandLine": "exit /b 42",
-    "timeout": 60000
-  }
-}

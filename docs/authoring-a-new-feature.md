@@ -1,23 +1,105 @@
-# Adding a New Experimental Feature
+# Adding a New Feature
 
-> **Do not modify stable schemas.** Files in `schemas/stable/` are immutable
-> release artifacts. All experimental work happens in `schemas/dev/` only.
-> Stable schemas are updated solely during the promotion process when an
-> experimental feature ships.
-
-This guide walks MXC developers through adding a new experimental feature
-end-to-end. We assume an experimental feature `compartments` already exists in
-the codebase, and we are adding a second experimental feature called
-`gpuIsolation`.
+> **Do not modify stable schemas.** Files in `schemas/stable/` are
+> immutable release artifacts. All experimental work happens in
+> `schemas/dev/` only. Stable schemas are updated solely during the
+> promotion process when an experimental feature ships.
 
 ## Prerequisites
 
-Read the [Versioning Design](versioning.md) doc for context on how experimental
-features fit into the MXC schema and shipping model.
+Read these in order:
 
-## Overview
+1. [Sandbox Policy spec](sandbox-policy/v1/policy.md): what
+Policy and ContainerConfig are, design principles.
+2. [Versioning Design](versioning.md): how policy/schema/SDK
+versions relate and when to bump.
 
-Adding an experimental feature touches these files:
+## Step 0: Where does my feature go?
+
+**Important:** Any change to the Config schema also requires
+changes to the TypeScript SDK library (`@microsoft/mxc-sdk`),
+because the SDK library generates the Config. There is no
+"Config-only" change that doesn't touch the SDK library.
+
+> **Terminology:** "SDK library" refers to the TypeScript npm
+> package (`@microsoft/mxc-sdk`). wxc-exec and lxc-exec are the
+> Rust executors that ship alongside the SDK library but are
+> separate components.
+
+Use this flowchart to determine where your feature goes:
+
+### Decision Flowchart
+
+```mermaid
+flowchart TD
+    START([New Feature Idea]) --> Q1{Is it a cross-platform<br/>security restriction?}
+
+    Q1 -->|YES| POL["Add to SandboxPolicy<br/>+ update ContainerConfig schema<br/>+ update SDK + executors"]
+    Q1 -->|NO| Q2{Is it backend-specific<br/>configuration?}
+
+    Q2 -->|YES| CFG["Add to ContainerConfig schema<br/>+ add containment type to createConfigFromPolicy<br/>+ update SDK defaults + executors"]
+    Q2 -->|NO| SDK_ONLY["SDK library or executor only"]
+
+    POL --> TEST["Write tests, submit PR"]
+    CFG --> TEST
+    SDK_ONLY --> TEST
+```
+
+## Step 1: Write a Feature Spec
+
+Write the spec before any code, including OS changes. The spec
+is how the team aligns on what to build.
+
+Create a spec document with:
+
+1. **Problem statement**: what user problem does this solve?
+2. **Policy changes**: if cross-platform security restriction,
+propose additions to Policy.
+3. **ContainerConfig changes**: proposed schema additions,
+including which backends are affected and what SDK defaults
+should be.
+4. **Default values**: what happens when the field is omitted
+(must be most-restrictive for policy; secure defaults for
+Config).
+5. **OS changes (if applicable)**: high-level design for any
+new OS APIs, kernel behaviors, or system primitives needed.
+Which OS repo? What does the API look like? Coordinate with
+the OS engineer.
+6. **Backward compatibility**: impact on existing requests
+7. **Test plan**: how to test at each layer
+8. **Submit a PR** for review.
+
+## Step 2: OS changes (if applicable)
+
+> OS work can happen in parallel with schema and executor
+> changes. The SDK library should be updated last since it is
+> customer-facing. We recommend submitting a feature spec to
+> the MXC repo first so the team can align on how the feature
+> flows through all layers.
+
+For detailed OS contribution steps (FlatBuffer schema, processmodel,
+BaseContainerRunner), see [base-process-container/guide.md](base-process-container/guide.md).
+
+## Step 3+: Implementation
+
+If your feature touches SandboxPolicy, update
+`sdk/src/types.ts`:
+
+- Field must be optional (default-deny)
+- Default value must be the most restrictive option
+- Include JSDoc with description and default
+
+If your feature adds policy or config fields, you will need
+to plumb them through `createConfigFromPolicy()` in
+`sdk/src/sandbox.ts`. See the
+[worked example in the Sandbox Policy spec](sandbox-policy/v1/policy.md#10-worked-example-ui-policy)
+for a walkthrough.
+
+---
+
+## Walkthrough
+
+Adding a feature may touch these files:
 
 | File | What to change |
 |------|----------------|

@@ -12,7 +12,7 @@ use crate::logger::Logger;
 use crate::models::{
     CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
     LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress,
-    ProxyConfig, SandboxConfig, TestFeatureConfig,
+    ProxyConfig, TestFeatureConfig, WindowsSandboxConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -126,7 +126,8 @@ struct RawTestFeature {
 #[serde(default)]
 struct RawExperimental {
     test: Option<RawTestFeature>,
-    sandbox: Option<RawSandbox>,
+    #[serde(rename = "windows_sandbox")]
+    windows_sandbox: Option<RawSandbox>,
 }
 
 #[derive(Deserialize, Default)]
@@ -342,14 +343,14 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     // Containment backend selection
     let containment = match raw.containment.as_deref() {
         None | Some("appcontainer") => ContainmentBackend::AppContainer,
-        Some("sandbox") => ContainmentBackend::Sandbox,
+        Some("windows_sandbox") => ContainmentBackend::WindowsSandbox,
         Some("wslc") => ContainmentBackend::Wslc,
         Some("lxc") => ContainmentBackend::Lxc,
         Some("vm") => ContainmentBackend::Vm,
         Some("microvm") => ContainmentBackend::MicroVm,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'sandbox', 'wslc', 'lxc', 'vm', or 'microvm')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'wslc', 'lxc', 'vm', or 'microvm')",
                 other
             );
             logger.log_line(&msg);
@@ -518,8 +519,8 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     // Experimental section (parsed but only applied when --experimental flag is set)
     let experimental = if let Some(raw_exp) = raw.experimental {
         let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
-        let sandbox = raw_exp.sandbox.map(|sb| {
-            let mut config = SandboxConfig::default();
+        let windows_sandbox = raw_exp.windows_sandbox.map(|sb| {
+            let mut config = WindowsSandboxConfig::default();
             if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
                 config.idle_timeout_ms = t;
             }
@@ -528,7 +529,10 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             }
             config
         });
-        ExperimentalConfig { test, sandbox }
+        ExperimentalConfig {
+            test,
+            windows_sandbox,
+        }
     } else {
         ExperimentalConfig::default()
     };
@@ -947,12 +951,13 @@ mod tests {
 
     #[test]
     fn sandbox_containment() {
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "sandbox"}"#;
+        let json =
+            r#"{"process": {"commandLine": "echo hello"}, "containment": "windows_sandbox"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Sandbox);
+        assert_eq!(req.containment, ContainmentBackend::WindowsSandbox);
     }
 
     #[test]
@@ -967,14 +972,14 @@ mod tests {
 
     #[test]
     fn sandbox_config_defaults() {
-        let json = r#"{"process": {"commandLine": "echo hello"}, "experimental": {"sandbox": {}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hello"}, "experimental": {"windows_sandbox": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let sandbox = req.experimental.sandbox.unwrap();
+        let sandbox = req.experimental.windows_sandbox.unwrap();
         assert_eq!(sandbox.idle_timeout_ms, 300_000);
-        assert_eq!(sandbox.daemon_pipe_name, "wxc-sandbox");
+        assert_eq!(sandbox.daemon_pipe_name, "wxc-windows-sandbox");
     }
 
     #[test]
@@ -982,7 +987,7 @@ mod tests {
         let json = r#"{
             "process": {"commandLine": "echo hello"},
             "experimental": {
-                "sandbox": {
+                "windows_sandbox": {
                     "idleTimeoutMs": 60000,
                     "daemonPipeName": "my-custom-pipe"
                 }
@@ -992,7 +997,7 @@ mod tests {
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let sandbox = req.experimental.sandbox.unwrap();
+        let sandbox = req.experimental.windows_sandbox.unwrap();
         assert_eq!(sandbox.idle_timeout_ms, 60000);
         assert_eq!(sandbox.daemon_pipe_name, "my-custom-pipe");
     }
@@ -1299,22 +1304,28 @@ mod tests {
 
     #[test]
     fn sandbox_idle_timeout_ms_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"sandbox": {"idleTimeoutMs": 60000}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"windows_sandbox": {"idleTimeoutMs": 60000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.experimental.sandbox.unwrap().idle_timeout_ms, 60000);
+        assert_eq!(
+            req.experimental.windows_sandbox.unwrap().idle_timeout_ms,
+            60000
+        );
     }
 
     #[test]
     fn sandbox_idle_timeout_ms_overrides_idle_timeout() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"windows_sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.experimental.sandbox.unwrap().idle_timeout_ms, 60000);
+        assert_eq!(
+            req.experimental.windows_sandbox.unwrap().idle_timeout_ms,
+            60000
+        );
     }
 
     #[test]

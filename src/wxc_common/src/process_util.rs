@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::path::PathBuf;
+
 use crate::error::WxcError;
 use crate::string_util;
 
@@ -268,10 +270,7 @@ pub fn run_process_with_captured_output(
         ..Default::default()
     };
 
-    let mut cmd_wide: Vec<u16> = command_line
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let mut cmd_wide = string_util::to_wide(command_line);
     let mut pi = PROCESS_INFORMATION::default();
 
     unsafe {
@@ -340,6 +339,17 @@ pub fn run_process_with_captured_output(
 
 // ── Capability SID helpers ────────────────────────────────────────────────
 
+/// A `SID_AND_ATTRIBUTES`-compatible struct for building capability arrays
+/// and loopback exemption lists.
+///
+/// Using a manual struct avoids issues with conditional availability of
+/// `windows::Win32::Security::SID_AND_ATTRIBUTES`.
+#[repr(C)]
+pub struct SidAndAttributes {
+    pub sid: PSID,
+    pub attributes: u32,
+}
+
 /// Derive the capability SID for a given capability name.
 /// Returns the raw SID pointer. The caller is responsible for freeing it with `LocalFree`.
 pub fn get_capability_sid_from_name(name: &str) -> Result<*mut core::ffi::c_void, WxcError> {
@@ -389,6 +399,35 @@ pub fn get_capability_sid_from_name(name: &str) -> Result<*mut core::ffi::c_void
         let _ = LocalFree(Some(HLOCAL(capability_sids as *mut _)));
 
         Ok(result_sid)
+    }
+}
+
+// ── Sibling binary resolution ─────────────────────────────────────────────
+
+/// Return the directory containing the current executable.
+pub fn exe_dir() -> Result<PathBuf, WxcError> {
+    let exe = std::env::current_exe()
+        .map_err(|e| WxcError::Process(format!("cannot determine exe path: {}", e)))?;
+    exe.parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| WxcError::Process("exe has no parent directory".to_string()))
+}
+
+/// Locate a sibling executable next to the current exe.
+///
+/// Returns the full path if the binary exists, or an error describing
+/// where it was expected.
+pub fn resolve_sibling_binary(name: &str) -> Result<PathBuf, WxcError> {
+    let dir = exe_dir()?;
+    let path = dir.join(name);
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(WxcError::Process(format!(
+            "{} not found at {}",
+            name,
+            path.display()
+        )))
     }
 }
 
@@ -646,7 +685,7 @@ mod tests {
             ..Default::default()
         };
         let mut pi = PROCESS_INFORMATION::default();
-        let mut cmd_wide: Vec<u16> = cmd.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut cmd_wide = string_util::to_wide(cmd);
 
         unsafe {
             CreateProcessW(
