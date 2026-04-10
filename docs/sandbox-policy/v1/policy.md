@@ -49,8 +49,6 @@ Policy describes *what* the caller wants. ContainerConfig describes *how* the OS
 A caller writes `network: { allowOutbound: true }`. They never write firewall rules, iptables
 chains, or capability lists. Mechanisms belong in ContainerConfig and backend executors.
 
-Modeled after Apple's App Sandbox: declare entitlements; the OS handles enforcement.
-
 ### Principle 2: Default-Deny
 
 Omitted policy fields = most restrictive permissions. Adding a field opts *in* to a capability.
