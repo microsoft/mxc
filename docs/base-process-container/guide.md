@@ -27,7 +27,7 @@ SandboxPolicy
   → SDK: createConfigFromPolicy() → ContainerConfig JSON
     → wxc-exec: parses ContainerConfig
       → BaseContainerRunner: builds FlatBuffer SandboxSpec
-        → Experimental_CreateProcessInSandbox (processmodel.dll)
+        → CreateProcessInSandbox (processmodel.dll)
           → OS applies restrictions (Job Objects, mitigations, etc.)
 ```
 
@@ -36,7 +36,7 @@ FlatBuffer `SandboxSpec` is the contract between MXC and the
 OS. If you add a new field to `SandboxSpec`, you must also
 update MXC so the data flows down from the ContainerConfig
 into the FlatBuffer blob passed to
-`Experimental_CreateProcessInSandbox`.
+`CreateProcessInSandbox`.
 
 ## Step-by-step
 
@@ -69,7 +69,7 @@ schema change:
 ```
 
 This regenerates the internal FlatBuffer bindings and makes
-the new field available to `Experimental_CreateProcessInSandbox`.
+the new field available to `CreateProcessInSandbox`.
 
 ### 3. Implement OS enforcement
 
@@ -123,8 +123,7 @@ fn build_sandbox_spec(request: &CodexRequest) -> Vec<u8> {
 
 The `request.policy` fields come from the Config JSON, which
 comes from the SDK's `createConfigFromPolicy()`. Make sure the
-Config schema and SDK mapping are also updated (see Step 3+
-in authoring-a-new-feature.md).
+Config schema and SDK mapping are also updated (see [authoring-a-new-feature.md](../authoring-a-new-feature.md)).
 
 ### 6. Test end-to-end
 

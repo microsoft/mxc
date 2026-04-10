@@ -37,7 +37,7 @@ flowchart TD
     Q1 -->|YES| POL["Add to SandboxPolicy<br/>+ update ContainerConfig schema<br/>+ update SDK + executors"]
     Q1 -->|NO| Q2{Is it backend-specific<br/>configuration?}
 
-    Q2 -->|YES| CFG["Add to ContainerConfig schema<br/>+ add containment value to SandboxPolicy<br/>+ update SDK defaults + executors"]
+    Q2 -->|YES| CFG["Add to ContainerConfig schema<br/>+ add containment type to createConfigFromPolicy<br/>+ update SDK defaults + executors"]
     Q2 -->|NO| SDK_ONLY["SDK library or executor only"]
 
     POL --> TEST["Write tests, submit PR"]
@@ -65,10 +65,9 @@ Config).
 new OS APIs, kernel behaviors, or system primitives needed.
 Which OS repo? What does the API look like? Coordinate with
 the OS engineer.
-7. **Backward compatibility**: impact on existing requests
-8. **Test plan**: how to test at each layer
-
-Submit a PR for review.
+6. **Backward compatibility**: impact on existing requests
+7. **Test plan**: how to test at each layer
+8. **Submit a PR** for review.
 
 ## Step 2: OS changes (if applicable)
 
@@ -90,11 +89,11 @@ If your feature touches SandboxPolicy, update
 - Default value must be the most restrictive option
 - Include JSDoc with description and default
 
-If your feature touches `buildSandboxConfig`, update
-`sdk/src/sandbox.ts` with the mapping logic.
-
-For Config schema, Rust parser, backend runner, tests, and
-version bump, follow the walkthrough below.
+If your feature adds policy or config fields, you will need
+to plumb them through `createConfigFromPolicy()` in
+`sdk/src/sandbox.ts`. See the
+[worked example in the Sandbox Policy spec](sandbox-policy/v1/policy.md#10-worked-example-ui-policy)
+for a walkthrough.
 
 ---
 
