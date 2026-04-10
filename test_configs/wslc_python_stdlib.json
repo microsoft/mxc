@@ -1,0 +1,16 @@
+{
+  "version": "0.4.0-alpha",
+  "containerId": "wslc-python-stdlib",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "python3 -c \"import json, math, hashlib, platform; data = {'pi': round(math.pi, 6), 'e': round(math.e, 6), 'hash': hashlib.sha256(b'mxc-wslc').hexdigest()[:16], 'platform': platform.system()}; print(json.dumps(data, indent=2))\""
+  },
+  "network": {
+    "defaultPolicy": "block"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "python:3.12-alpine"
+    }
+  }
+}
