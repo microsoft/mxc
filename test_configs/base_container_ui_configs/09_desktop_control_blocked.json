@@ -1,0 +1,11 @@
+{
+  "version": "0.4.0-alpha",
+  "containerId": "UI-Test-09",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "cmd.exe /c \"shutdown /l /t 0 2>nul && echo FAIL: shutdown allowed || echo PASS: shutdown blocked\"",
+    "timeout": 15000
+  },
+  "appContainer": { "capabilities": [], "ui": { "isolation": "desktop", "desktopSystemControl": false, "systemSettings": "none", "ime": false } },
+  "ui": { "disable": false, "clipboard": "none", "injection": false }
+}

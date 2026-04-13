@@ -296,7 +296,7 @@ impl ProxyCoordinator {
 
         let address = if proxy_config.builtin_test_server {
             let port = self.launch_test_proxy(logger)?;
-            ProxyAddress::new("127.0.0.1".to_string(), port, true)
+            ProxyAddress::new("127.0.0.1".to_string(), port)
         } else if let Some(ref addr) = proxy_config.address {
             addr.clone()
         } else {
