@@ -132,8 +132,8 @@ describe('SDK end-to-end', { skip: os.platform() !== 'win32' ? 'AppContainer tes
   });
 });
 
-// Skipped on non-Windows: requires admin currently and not runnable in pipelines, run locally until then
-describe('SDK proxy end-to-end', { skip: os.platform() !== 'win32' ? 'Proxy tests require Windows' : undefined }, () => {
+// Skipped: requires admin and specific binaries not available in CI pipelines, run locally until then
+describe.skip('SDK proxy end-to-end', () => {
   let tempDir = '';
   let proxyProcess: ChildProcess | null = null;
 
