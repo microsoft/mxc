@@ -32,6 +32,46 @@ export interface LifecycleConfig {
 }
 
 /**
+ * Containment type abstraction for createConfigFromPolicy.
+ * Maps to platform-specific backends:
+ * - "process": BaseProcessContainer (Windows) / LXC (Linux)
+ */
+export type ContainmentType = "process";
+
+/**
+ * Clipboard access policy levels
+ */
+export type ClipboardPolicy = "none" | "read" | "write" | "all";
+
+/**
+ * Cross-platform UI configuration in ContainerConfig.
+ * Mapped from SandboxPolicy.ui by createConfigFromPolicy.
+ */
+export interface UiConfig {
+  /** Whether UI is disabled (no visible windows). Maps from !policy.ui.allowWindows. */
+  disable: boolean;
+  /** Clipboard access level */
+  clipboard: ClipboardPolicy;
+  /** Whether input injection is allowed */
+  injection: boolean;
+}
+
+/**
+ * BaseProcess-specific UI configuration (Windows only).
+ * Lives under appContainer.ui in ContainerConfig.
+ */
+export interface BaseProcessUiConfig {
+  /** UI isolation level for the desktop */
+  isolation: "desktop" | "handles" | "atoms" | "container";
+  /** Whether desktop system control is allowed */
+  desktopSystemControl: boolean;
+  /** System settings access level */
+  systemSettings: string;
+  /** Whether IME (Input Method Editor) is allowed */
+  ime: boolean;
+}
+
+/**
  * AppContainer configuration for Windows sandbox
  */
 export interface AppContainerConfig {
@@ -41,6 +81,8 @@ export interface AppContainerConfig {
   leastPrivilege?: boolean;
   /** Additional AppContainer capabilities (e.g., "registryRead", "internetClient") */
   capabilities?: string[];
+  /** BaseProcess-specific UI settings (Windows only) */
+  ui?: BaseProcessUiConfig;
 }
 
 /**
@@ -75,8 +117,8 @@ export interface NetworkConfig {
   allowedHosts?: string[];
   /** Hostnames or IP addresses to block (firewall mode only) */
   blockedHosts?: string[];
-  /** Proxy configuration (currently appcontainer only, requires elevation) */
-  proxy?: { builtinTestServer: true } | { localhost: number };
+  /** Proxy configuration (Windows only) */
+  proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
 }
@@ -115,14 +157,19 @@ export interface ContainerConfig {
   filesystem?: FilesystemConfig;
   /** Network access configuration */
   network?: NetworkConfig;
+  /** Cross-platform UI configuration */
+  ui?: UiConfig;
 }
 
 /**
  * The main sandbox policy configuration interface for external consumers
  * to define sandboxed execution environments.
+ *
+ * Policy describes *what* the caller wants restricted. Cross-platform.
+ * No OS-specific content. Omitted fields = most restrictive (default-deny).
  */
 export type SandboxPolicy = {
-  /** Policy version (semver). */
+  /** Policy version (semver). Must match a supported schema version. */
   version: string;
   /** Filesystem access restrictions */
   filesystem?: {
@@ -132,23 +179,36 @@ export type SandboxPolicy = {
       readonlyPaths?: string[];
       /** Paths that are explicitly denied all access */
       deniedPaths?: string[];
-      /** Whether to clear the filesystem policy when the shell exits. (default: true)*/
+      /** Whether to clear the filesystem policy when the shell exits. (default: true) */
       clearPolicyOnExit?: boolean;
   };
-  /** Network access restrictions */
+  /** Network access restrictions. All flags default to false (no network access). */
   network?: {
       /** Whether to allow outbound connections to the Internet. (default: false) */
       allowOutbound?: boolean;
       /** Whether to allow connections to local networks. (default: false) */
       allowLocalNetwork?: boolean;
+      /** When set, ONLY these outbound hosts are reachable. Requires allowOutbound. */
+      allowedHosts?: string[];
+      /** Hosts to block even when outbound is allowed. Requires allowOutbound. */
+      blockedHosts?: string[];
       /**
-       * Proxy configuration for the container (temporarily Windows only, temporarily requires elevation).
-       * Only one option may be specified:
-       * - `builtinTestServer`: Use the built-in test proxy server
-       * - `localhost`: Forward traffic through a proxy on the specified localhost port
+       * Proxy configuration. Routes all traffic through this proxy.
+       * Cannot be combined with other network flags.
        */
-      proxy?: { builtinTestServer: true } | { localhost: number }
+      proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   };
+  /** UI access restrictions. All flags default to denied. */
+  ui?: {
+      /** Whether the sandbox may create visible windows. (default: false) */
+      allowWindows?: boolean;
+      /** Clipboard access level. (default: "none") */
+      clipboard?: ClipboardPolicy;
+      /** Whether the sandbox may inject keyboard/mouse input. (default: false) */
+      allowInputInjection?: boolean;
+  };
+  /** Execution timeout in milliseconds. Omitted = no timeout. */
+  timeoutMs?: number;
 }
 
 /**

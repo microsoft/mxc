@@ -16,5 +16,8 @@
     "readonlyPaths": [
       "C:\\"
     ]
+  },
+  "ui": {
+    "disable": false
   }
 }

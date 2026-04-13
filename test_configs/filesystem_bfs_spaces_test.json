@@ -7,6 +7,11 @@
     "timeout": 30000
   },
   "filesystem": {
-    "readwritePaths": [ "C:\\Users\\Public\\wxc bfs test" ]
+    "readwritePaths": [
+      "C:\\Users\\Public\\wxc bfs test"
+    ]
+  },
+  "ui": {
+    "disable": false
   }
 }

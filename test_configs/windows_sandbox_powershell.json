@@ -3,5 +3,8 @@
   "process": {
     "commandLine": "powershell -NoProfile -Command \"Write-Output 'PowerShell works'; $PSVersionTable.PSVersion.ToString()\"",
     "timeout": 60000
+  },
+  "ui": {
+    "disable": false
   }
 }

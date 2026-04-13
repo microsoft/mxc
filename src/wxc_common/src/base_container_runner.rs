@@ -25,8 +25,9 @@ use windows_core::PCWSTR;
 use crate::logger::Logger;
 use crate::models::{
     BaseProcessUiConfig, ClipboardPolicy, CodexRequest, NetworkEnforcementMode, NetworkPolicy,
-    ScriptResponse, UiPolicy,
+    ProxyAddress, ScriptResponse, UiPolicy,
 };
+use crate::proxy_coordinator::ProxyCoordinator;
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::string_util;
 use sandbox_spec::base_container_layout::{
@@ -54,11 +55,13 @@ type PfnCreateProcessInSandbox = unsafe extern "system" fn(
 /// Script runner that uses `Experimental_CreateProcessInSandbox` API
 /// to launch a sandboxed process.
 #[derive(Default)]
-pub struct BaseContainerRunner;
+pub struct BaseContainerRunner {
+    proxy_coordinator: ProxyCoordinator,
+}
 
 impl BaseContainerRunner {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 
     /// JOB_OBJECT_UILIMIT_* flag constants (from UIPolicy_Schema.md).
@@ -303,8 +306,34 @@ impl ScriptRunner for BaseContainerRunner {
     fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         let _ = writeln!(logger, "BaseContainer: building sandbox specification...");
 
+        // Launch builtin test proxy if requested (before building spec so we have the port).
+        let mut request = request.clone();
+        if request.policy.network_proxy.builtin_test_server {
+            match self.proxy_coordinator.launch_test_proxy(logger) {
+                Ok(port) => {
+                    let addr = ProxyAddress::new("127.0.0.1".to_string(), port);
+                    request.policy.network_proxy.address = Some(addr);
+                }
+                Err(e) => {
+                    return ScriptResponse::error(&format!(
+                        "Failed to start builtin test proxy: {e}"
+                    ));
+                }
+            }
+        }
+
         // 1. Build the FlatBuffer sandbox spec from the request policy.
-        let spec_bytes = Self::build_sandbox_spec(request);
+        let spec_bytes = Self::build_sandbox_spec(&request);
+
+        // Print proxy URL in debug mode
+        if let Some(ref addr) = request.policy.network_proxy.address {
+            let _ = writeln!(
+                logger,
+                "BaseContainer: proxy URL in spec: {}",
+                addr.to_url()
+            );
+        }
+
         let ui_restrictions =
             Self::ui_restrictions_bitmask(&request.policy.ui, &request.policy.base_process_ui);
         let _ = writeln!(
@@ -446,6 +475,9 @@ impl ScriptRunner for BaseContainerRunner {
             logger,
             "BaseContainer: process exited with code {exit_code}"
         );
+
+        // Stop the builtin test proxy if it was started.
+        self.proxy_coordinator.stop(logger);
 
         ScriptResponse {
             exit_code: exit_code as i32,

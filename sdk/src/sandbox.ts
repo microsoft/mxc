@@ -5,7 +5,7 @@ import * as pty from 'node-pty';
 import * as os from 'os';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, ContainerConfig } from './types';
+import { SandboxPolicy, ContainerConfig, ContainmentType } from './types';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
 
 const SUPPORTED_VERSION = '0.5.0-alpha';
@@ -57,6 +57,149 @@ function validatePolicyVersion(version: string): void {
     }
 }
 
+
+/**
+ * Builds the Linux process container (LXC) portion of a ContainerConfig.
+ */
+function buildLinuxProcessConfig(
+    config: ContainerConfig,
+    containerId: string,
+): ContainerConfig {
+    config.containment = 'lxc';
+    config.lxc = {
+        containerName: containerId,
+        distribution: 'alpine',
+        release: '3.23',
+        destroyOnExit: true,
+    };
+
+    return config;
+}
+
+/**
+ * Builds the Windows process container (BaseProcessContainer) portion of a ContainerConfig.
+ */
+function buildWindowsProcessConfig(
+    config: ContainerConfig,
+    policy: SandboxPolicy,
+    containerId: string,
+): ContainerConfig {
+    const capabilities: string[] = [];
+    if (policy.network?.allowOutbound) {
+        capabilities.push("internetClient");
+    }
+    if (policy.network?.allowLocalNetwork) {
+        capabilities.push("privateNetworkClientServer");
+    }
+
+    config.appContainer = {
+        name: containerId,
+        leastPrivilege: false,
+        capabilities,
+        ui: {
+            isolation: "container",
+            desktopSystemControl: false,
+            systemSettings: "none",
+            ime: false,
+        },
+    };
+
+    // Windows uses both capabilities and firewall for network enforcement
+    if (config.network) {
+        config.network.enforcementMode = 'both';
+    }
+
+    return config;
+}
+
+/**
+ * Creates a ContainerConfig from a SandboxPolicy and optional containment type.
+ *
+ * This is the primary API for translating user-facing security intent (SandboxPolicy)
+ * into a backend-specific configuration (ContainerConfig). The returned config
+ * can be modified before passing to spawnSandboxFromConfig().
+ *
+ * @param policy - The sandbox policy expressing security intent
+ * @param containment - Containment backend type (default: "process")
+ * @param containerName - Optional container name; auto-generated if omitted
+ * @returns A fully populated ContainerConfig ready for modification or spawning
+ *
+ * @example
+ * ```typescript
+ * const policy: SandboxPolicy = {
+ *   version: '0.4.0-alpha',
+ *   network: { allowOutbound: true },
+ *   ui: { allowWindows: true, clipboard: 'read' },
+ * };
+ *
+ * // Simple: use defaults
+ * const config = createConfigFromPolicy(policy);
+ *
+ * // Advanced: tweak backend-specific settings
+ * const config = createConfigFromPolicy(policy, "process");
+ * config.appContainer!.ui!.isolation = "atoms";
+ * ```
+ */
+export function createConfigFromPolicy(
+    policy: SandboxPolicy,
+    containment: ContainmentType = "process",
+    containerName?: string,
+): ContainerConfig {
+    validatePolicyVersion(policy.version);
+
+    const platform = os.platform();
+    const containerId = containerName ?? generateRandomContainerName();
+
+    const config: ContainerConfig = {
+        version: policy.version,
+        containerId,
+        lifecycle: {
+            destroyOnExit: true,
+            preservePolicy: false,
+        },
+        process: {
+            commandLine: '',
+            timeout: policy.timeoutMs ?? 0,
+        },
+        filesystem: {
+            readwritePaths: [...(policy.filesystem?.readwritePaths ?? [])],
+            readonlyPaths: [...(policy.filesystem?.readonlyPaths ?? [])],
+            deniedPaths: [...(policy.filesystem?.deniedPaths ?? [])],
+        },
+    };
+
+    // UI mapping (cross-platform)
+    config.ui = {
+        disable: !(policy.ui?.allowWindows ?? false),
+        clipboard: policy.ui?.clipboard ?? "none",
+        injection: policy.ui?.allowInputInjection ?? false,
+    };
+
+    // Network mapping (cross-platform)
+    if (policy.network) {
+        if (policy.network.proxy && platform === 'linux') {
+            throw new Error('Proxy configuration is not supported on Linux');
+        }
+
+        config.network = {
+            defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
+            allowedHosts: policy.network.allowedHosts,
+            blockedHosts: policy.network.blockedHosts,
+            proxy: policy.network.proxy,
+        };
+    }
+
+    // Backend-specific config based on containment type
+    if (containment === 'process') {
+        if (platform === 'linux') {
+            return buildLinuxProcessConfig(config, containerId);
+        }
+        return buildWindowsProcessConfig(config, policy, containerId);
+    }
+
+    throw new Error(`Containment type '${containment}' is not yet supported.`);
+}
+
 /**
  * Builds a sandbox payload JSON object from the sandbox policy.
  * @param script The command line script to execute
@@ -71,71 +214,10 @@ export function buildSandboxPayload(
     workingDirectory?: string,
     containerName?: string,
 ): ContainerConfig {
-    validatePolicyVersion(policy.version);
+    const config = createConfigFromPolicy(policy, "process", containerName);
 
-    const platform = os.platform();
-    const name = containerName ?? generateRandomContainerName();
-
-    const config: ContainerConfig = {
-        version: policy.version,
-        process: {
-            commandLine: script,
-            cwd: workingDirectory,
-        },
-        containerId: name,
-        filesystem: {
-            readwritePaths: policy.filesystem?.readwritePaths,
-            readonlyPaths: policy.filesystem?.readonlyPaths,
-            deniedPaths: policy.filesystem?.deniedPaths,
-            clearPolicyOnExit: true,
-        },
-    };
-
-    if (platform === 'linux') {
-        config.containment = 'lxc';
-        config.lxc = {
-            containerName: name,
-            // Default Linux distro since SandboxPolicy doesn't expose this
-            distribution: 'alpine',
-            release: '3.23',
-            destroyOnExit: true,
-        };
-
-        if (policy.network?.proxy) {
-            throw new Error('Proxy configuration is not supported on Linux');
-        }
-
-        if (policy.network) {
-            config.network = {
-                defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
-                enforcementMode: 'firewall',
-            };
-        }
-
-        return config;
-    }
-
-    // Windows / AppContainer
-    const capabilities: string[] = [];
-    if (policy.network?.allowOutbound) {
-        capabilities.push("internetClient");
-    }
-    if (policy.network?.allowLocalNetwork) {
-        capabilities.push("privateNetworkClientServer");
-    }
-
-    config.appContainer = {
-        name: name,
-        leastPrivilege: false,
-        capabilities,
-    };
-
-    if (policy.network?.proxy) {
-        if (!config.network) {
-            config.network = {};
-        }
-        config.network.proxy = policy.network.proxy;
-    }
+    config.process!.commandLine = script;
+    config.process!.cwd = workingDirectory;
 
     return config;
 }
@@ -161,41 +243,20 @@ export interface SandboxSpawnOptions {
 }
 
 /**
- * Spawn a sandboxed process using wxc-exec and return a node-pty IPty object
- *
- * @param script The command line script to execute
- * @param policy The sandbox policy
- * @param options - Spawn options
- * @param workingDirectory Optional working directory path
- * @param containerName Optional container name; if not provided, a random name will be generated
- * @returns IPty object for interacting with the sandboxed process
- * @throws Error if platform is not supported or wxc-exec is not found
- *
- * @example
- * ```typescript
- * const script = 'python -c "import sys; print(sys.version)"';
- * const policy: SandboxPolicy = {}
- *
- * const result = await spawnSandbox(script, policy);
- * ptyProcess.onData((data) => console.log(data));
- * ptyProcess.onExit((e) => console.log('Exit code:', e.exitCode));
- * ```
+ * Internal helper: resolves the executor binary path and spawns a PTY process.
  */
-export function spawnSandbox(
+function spawnWithConfig(
   script: string,
-  policy: SandboxPolicy,
-  options: SandboxSpawnOptions = {},
+  config: ContainerConfig,
+  options: SandboxSpawnOptions,
   workingDirectory?: string,
-  containerName?: string,
-  env?: { [key: string]: string | undefined }
+  env?: { [key: string]: string | undefined },
 ): pty.IPty {
-  // Check platform support
   const platformSupport = getPlatformSupport();
   if (!platformSupport.isSupported) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
-  // Determine executable path based on platform
   const platform = os.platform();
   let executablePath: string | null;
 
@@ -214,9 +275,6 @@ export function spawnSandbox(
       );
     }
   }
-
-  // Build config
-  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
 
   const args: string[] = [];
   const configJson = JSON.stringify(config);
@@ -239,13 +297,75 @@ export function spawnSandbox(
     env: env
   };
 
-  const ptyProcess = pty.spawn(executablePath, args, ptyOpts);
-  return ptyProcess;
+  return pty.spawn(executablePath, args, ptyOpts);
 }
 
 /**
- * Spawn a sandboxed process and return a promise that resolves with output
- * This is a convenience wrapper around spawnSandbox for non-interactive use cases
+ * Spawn a sandboxed process from a SandboxPolicy.
+ *
+ * @param script The command line script to execute
+ * @param policy The sandbox policy
+ * @param options - Spawn options
+ * @param workingDirectory Optional working directory path
+ * @param containerName Optional container name; if not provided, a random name will be generated
+ * @returns IPty object for interacting with the sandboxed process
+ *
+ * @example
+ * ```typescript
+ * const policy: SandboxPolicy = {
+ *   version: '0.4.0-alpha',
+ *   network: { allowOutbound: true },
+ * };
+ * const ptyProcess = spawnSandbox('echo hello', policy);
+ * ```
+ */
+export function spawnSandbox(
+  script: string,
+  policy: SandboxPolicy,
+  options: SandboxSpawnOptions = {},
+  workingDirectory?: string,
+  containerName?: string,
+  env?: { [key: string]: string | undefined }
+): pty.IPty {
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
+  return spawnWithConfig(script, config, options, workingDirectory, env);
+}
+
+/**
+ * Spawn a sandboxed process from a pre-built ContainerConfig.
+ *
+ * Use with `createConfigFromPolicy()` when you need to modify
+ * backend-specific settings before spawning. The config must have
+ * `process.commandLine` already set.
+ *
+ * @param config The container configuration (from createConfigFromPolicy)
+ * @param options - Spawn options
+ * @param workingDirectory Optional working directory path
+ * @returns IPty object for interacting with the sandboxed process
+ *
+ * @example
+ * ```typescript
+ * const config = createConfigFromPolicy(policy, "process");
+ * config.process!.commandLine = 'echo hello';
+ * config.appContainer!.ui!.isolation = "atoms";
+ * const ptyProcess = spawnSandboxFromConfig(config);
+ * ```
+ */
+export function spawnSandboxFromConfig(
+  config: ContainerConfig,
+  options: SandboxSpawnOptions = {},
+  workingDirectory?: string,
+  env?: { [key: string]: string | undefined }
+): pty.IPty {
+  if (!config.process?.commandLine) {
+    throw new Error('ContainerConfig.process.commandLine is required');
+  }
+  return spawnWithConfig(config.process.commandLine, config, options, workingDirectory, env);
+}
+
+/**
+ * Spawn a sandboxed process and return a promise that resolves with output.
+ * Convenience wrapper around spawnSandbox for non-interactive use cases.
  *
  * @param script The command line script to execute
  * @param policy The sandbox policy
@@ -257,10 +377,12 @@ export function spawnSandbox(
  *
  * @example
  * ```typescript
- * const script = 'python -c "import sys; print(sys.version)"';
- * const policy: SandboxPolicy = {}
+ * const policy: SandboxPolicy = {
+ *   version: '0.4.0-alpha',
+ *   filesystem: { readwritePaths: ['/workspace'] },
+ * };
  *
- * const result = await spawnSandboxAsync(script, policy);
+ * const result = await spawnSandboxAsync('echo hello', policy);
  * console.log('Output:', result.stdout);
  * console.log('Exit code:', result.exitCode);
  * ```

@@ -7,12 +7,21 @@
     "timeout": 15000
   },
   "appContainer": {
-    "capabilities": [ "internetClient" ]
+    "capabilities": [
+      "internetClient"
+    ]
   },
   "filesystem": {
-    "readwritePaths": [ "C:\\Users\\AdminUser\\AppData\\Local\\Programs" ]
+    "readwritePaths": [
+      "C:\\Users\\AdminUser\\AppData\\Local\\Programs"
+    ]
   },
   "network": {
-    "proxy": { "builtinTestServer": true }
+    "proxy": {
+      "builtinTestServer": true
+    }
+  },
+  "ui": {
+    "disable": false
   }
 }
