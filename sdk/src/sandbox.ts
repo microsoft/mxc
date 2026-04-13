@@ -50,6 +50,8 @@ function validatePolicyVersion(version: string): void {
  * @param policy The sandbox policy configuration
  * @param workingDirectory Optional working directory path
  * @param containerName Optional container name; if not provided, a random name will be generated
+ * @param containment Optional containment backend override. If not provided, defaults to
+ *   'lxc' on Linux and 'appcontainer' on Windows.
  * @returns The sandbox payload object
  */
 export function buildSandboxPayload(
@@ -57,6 +59,7 @@ export function buildSandboxPayload(
     policy: SandboxPolicy,
     workingDirectory?: string,
     containerName?: string,
+    containment?: 'appcontainer' | 'wslc' | 'lxc',
 ): ContainerConfig {
     validatePolicyVersion(policy.version);
 
@@ -78,7 +81,31 @@ export function buildSandboxPayload(
         },
     };
 
-    if (platform === 'linux') {
+    // Determine containment backend
+    const selectedContainment = containment ?? (platform === 'linux' ? 'lxc' : 'appcontainer');
+
+    if (selectedContainment === 'wslc') {
+        config.containment = 'wslc';
+        config.experimental = {
+            wslc: {
+                image: 'alpine:latest',
+            },
+        };
+
+        if (policy.network?.proxy) {
+            throw new Error('Proxy configuration is not supported with WSLC');
+        }
+
+        if (policy.network) {
+            config.network = {
+                defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
+            };
+        }
+
+        return config;
+    }
+
+    if (selectedContainment === 'lxc') {
         config.containment = 'lxc';
         config.lxc = {
             containerName: name,
@@ -142,6 +169,12 @@ export interface SandboxSpawnOptions {
   experimental?: boolean;
 
   /**
+   * Override the containment backend. Defaults to 'lxc' on Linux, 'appcontainer' on Windows.
+   * Use 'wslc' for WSL Container (Linux containers on Windows, experimental).
+   */
+  containment?: 'appcontainer' | 'wslc' | 'lxc';
+
+  /**
    * PTY options to pass to node-pty
    */
   ptyOptions?: pty.IPtyForkOptions;
@@ -203,7 +236,7 @@ export function spawnSandbox(
   }
 
   // Build config
-  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName, options.containment);
 
   const args: string[] = [];
   const configJson = JSON.stringify(config);
@@ -214,7 +247,8 @@ export function spawnSandbox(
     args.push('--debug');
   }
 
-  if (options.experimental) {
+  // WSLC requires --experimental flag
+  if (options.experimental || config.containment === 'wslc') {
     args.push('--experimental');
   }
 

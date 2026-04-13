@@ -212,4 +212,64 @@ describe('buildSandboxPayload', () => {
       }
     });
   });
+
+  describe('WSLC', () => {
+    it('should set containment to wslc when requested', () => {
+      const payload = buildSandboxPayload('echo hello', defaultPolicy, undefined, 'test-wslc', 'wslc');
+      assert.strictEqual(payload.containment, 'wslc');
+    });
+
+    it('should set experimental.wslc.image', () => {
+      const payload = buildSandboxPayload('echo hello', defaultPolicy, undefined, 'test-wslc', 'wslc');
+      assert.ok(payload.experimental?.wslc);
+      assert.strictEqual(payload.experimental!.wslc!.image, 'alpine:latest');
+    });
+
+    it('should map filesystem policy for wslc', () => {
+      const policy: SandboxPolicy = {
+        version: '0.4.0-alpha',
+        filesystem: {
+          readwritePaths: ['C:\\workspace'],
+          readonlyPaths: ['C:\\data'],
+        },
+      };
+      const payload = buildSandboxPayload('echo hi', policy, undefined, 'test-wslc', 'wslc');
+      assert.deepStrictEqual(payload.filesystem!.readwritePaths, ['C:\\workspace']);
+      assert.deepStrictEqual(payload.filesystem!.readonlyPaths, ['C:\\data']);
+    });
+
+    it('should map network allow for wslc', () => {
+      const policy: SandboxPolicy = {
+        version: '0.4.0-alpha',
+        network: { allowOutbound: true },
+      };
+      const payload = buildSandboxPayload('echo hi', policy, undefined, 'test-wslc', 'wslc');
+      assert.strictEqual(payload.network!.defaultPolicy, 'allow');
+    });
+
+    it('should map network block for wslc', () => {
+      const policy: SandboxPolicy = {
+        version: '0.4.0-alpha',
+        network: { allowOutbound: false },
+      };
+      const payload = buildSandboxPayload('echo hi', policy, undefined, 'test-wslc', 'wslc');
+      assert.strictEqual(payload.network!.defaultPolicy, 'block');
+    });
+
+    it('should reject proxy configuration with wslc', () => {
+      const policy: SandboxPolicy = {
+        version: '0.4.0-alpha',
+        network: { allowOutbound: true, proxy: { builtinTestServer: true } },
+      };
+      assert.throws(
+        () => buildSandboxPayload('echo hi', policy, undefined, 'test-wslc', 'wslc'),
+        { message: /not supported with WSLC/ },
+      );
+    });
+
+    it('should not include appContainer config for wslc', () => {
+      const payload = buildSandboxPayload('echo hello', defaultPolicy, undefined, 'test-wslc', 'wslc');
+      assert.strictEqual(payload.appContainer, undefined);
+    });
+  });
 });
