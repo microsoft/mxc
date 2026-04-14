@@ -254,8 +254,8 @@ pub fn load_request(
 
 // ---------- Cross-field validation ----------
 
-/// Supported schema version (semver). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: (u32, u32) = (0, 5); // 0.5.x
+/// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
+const SUPPORTED_VERSION: &str = "<=0.5";
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
@@ -264,42 +264,26 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
         return Ok(());
     }
 
-    // Strip pre-release suffix (e.g., "0.4.0-alpha" → "0.4.0")
-    let version_core = version.split('-').next().unwrap_or(version);
-    let parts: Vec<&str> = version_core.split('.').collect();
-
-    if parts.len() < 2 {
+    // Parse the version, stripping pre-release suffix for comparison
+    // (e.g., "0.4.0-alpha" is treated as "0.4.0")
+    let parsed = semver::Version::parse(version).map_err(|_| {
         let msg = format!(
             "Invalid schema version '{}': must be semver (e.g., 'X.Y.Z' or 'X.Y.Z-alpha')",
             version
         );
         logger.log_line(&msg);
-        return Err(WxcError::ConfigParse(msg));
-    }
-
-    let major: u32 = parts[0].parse().map_err(|_| {
-        let msg = format!(
-            "Invalid schema version '{}': major version must be a non-negative integer",
-            version
-        );
-        logger.log_line(&msg);
         WxcError::ConfigParse(msg)
     })?;
 
-    let minor: u32 = parts[1].parse().map_err(|_| {
-        let msg = format!(
-            "Invalid schema version '{}': minor version must be a non-negative integer",
-            version
-        );
-        logger.log_line(&msg);
-        WxcError::ConfigParse(msg)
-    })?;
+    let req = semver::VersionReq::parse(SUPPORTED_VERSION).unwrap();
 
-    let (sup_major, sup_minor) = SUPPORTED_VERSION;
-    if major > sup_major || (major == sup_major && minor > sup_minor) {
+    // semver crate treats pre-release as lower precedence, so we compare
+    // against a version without the pre-release label for major.minor check.
+    let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
+    if !req.matches(&comparable) {
         let msg = format!(
-            "Config schema version '{}' is newer than supported (max: {}.{}.x). Upgrade wxc-exec.",
-            version, sup_major, sup_minor
+            "Config schema version '{}' is newer than supported (max: {}). Upgrade wxc-exec.",
+            version, SUPPORTED_VERSION
         );
         logger.log_line(&msg);
         return Err(WxcError::ConfigParse(msg));
