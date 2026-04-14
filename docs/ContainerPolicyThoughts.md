@@ -17,9 +17,7 @@ language compiled to FlatBuffers for efficient runtime consumption.
 - [6. macOS Seatbelt Profile Language](#6-macos-seatbelt-profile-language)
 - [7. Proposed Cross-Platform JSON Policy Language](#7-proposed-cross-platform-json-policy-language)
 - [8. FlatBuffer Compiled Format](#8-flatbuffer-compiled-format)
-- [9. Authoring Format: Why JSONC over YAML](#9-authoring-format-why-jsonc-over-yaml)
-- [10. JSONC Parser Landscape](#10-jsonc-parser-landscape)
-- [11. Policy Layers](#11-policy-layers)
+- [9. Policy Layers](#9-policy-layers)
 
 ---
 
@@ -562,7 +560,7 @@ Every sandboxing policy answers the same five questions:
 
 These five questions describe the *shape* of a single policy. But real-world
 sandboxing involves multiple stakeholders, each contributing constraints at
-different layers. See [§11 Policy Layers](#11-policy-layers) for that orthogonal
+different layers. See [§9 Policy Layers](#9-policy-layers) for that orthogonal
 axis.
 
 ---
@@ -737,7 +735,7 @@ sandbox-exec -p '(version 1)(deny default)(allow file-read* (subpath "/tmp"))' /
 
 > **Note on policy layers:** This JSON schema primarily represents a *bound
 > deployment policy* — concrete paths, ports, and hosts are specified. In the
-> layered model described in [§11](#11-policy-layers), this corresponds mostly to
+> layered model described in [§9](#9-policy-layers), this corresponds mostly to
 > **Layer 2 (Instance Binding)**, with the platform overrides section touching on
 > **Layer 7 (Container Enforcement Capabilities)**. Abstract resource-type
 > requirements (Layer 1) and authority-based constraints (Layers 3–5) are upstream
@@ -1314,151 +1312,7 @@ be trusted:
 
 ---
 
-## 9. Authoring Format: Why JSONC over YAML
-
-### Why YAML Is Problematic for Security Policy
-
-**Invisible semantics:** Meaning depends on whitespace you can't see. A single
-space/tab mixup silently changes the data structure.
-
-**The "Norway Problem" — implicit type coercion:**
-
-```yaml
-country: NO          # boolean false (Norway disappears)
-version: 1.10        # float 1.1 (version loses a digit)
-port: 08080          # octal 4160 (surprise!)
-on: true             # you wanted the string "on"
-password: 3e4        # float 30000.0 (not a password)
-```
-
-**Multiple ways to express the same thing:** YAML has 9 ways to write a multi-line
-string and 3 ways to write a list. For a security policy format, ambiguity is the
-enemy.
-
-**Indentation errors are silent data corruption:** For a sandbox policy this is a
-security vulnerability, not a formatting annoyance.
-
-**Spec complexity:** The YAML 1.2 spec is ~80 pages. JSON's is ~5 pages. Parsers
-disagree on edge cases.
-
-### Format Comparison
-
-| Format | Comments | Unambiguous | No Coercion | Visible Structure | Editor Support |
-|---|:---:|:---:|:---:|:---:|:---:|
-| **JSON** | ✗ | ✓ | ✓ | ✓ (braces) | Excellent |
-| **JSONC** | ✓ | ✓ | ✓ | ✓ | Very good |
-| **JSON5** | ✓ | ✓ | ✓ | ✓ | Good |
-| **YAML** | ✓ | ✗ | ✗ | ✗ (invisible) | Good |
-| **TOML** | ✓ | ✓ | ✓ | ✓ | Good |
-
-### Recommendation
-
-**JSONC** (JSON with Comments) as the authoring format:
-
-- **Comments** — critical for explaining *why* a policy rule exists
-- **Explicit delimiters** — braces and brackets make structure visible regardless of
-  indentation
-- **No coercion** — `443` is always a number, `"true"` is always a string
-- **Universal parser availability** — every language has JSON parsing
-- **Trivial round-trip to strict JSON** — strip comments before compiling
-
-The pipeline:
-
-```
-  policy.jsonc          policy.json           policy.sbxp
-  (authored by          (strict, validated,   (deployed,
-   humans, comments,     variables resolved,   zero-copy,
-   in version control)   schema-checked)       signed)
-        │                     │                    │
-        └── strip comments ──►└── compile+sign ───►│
-```
-
----
-
-## 10. JSONC Parser Landscape
-
-### C++
-
-| Library | Comments | How | Notes |
-|---|:---:|---|---|
-| **nlohmann/json** | ✓ | `json::parse(input, nullptr, true, /*ignore_comments=*/true)` | Opt-in per call |
-| **RapidJSON** | ✓ | `kParseCommentsFlag` passed to `Parse()` | Compile-time or runtime flag |
-| **simdjson** | ✗ | — | Strictly RFC 8259. Preprocess if needed |
-| **yyjson** | ✓ | `YYJSON_READ_ALLOW_COMMENTS` flag | Very fast C library with C++ wrappers |
-
-### C
-
-| Library | Comments | How | Notes |
-|---|:---:|---|---|
-| **yyjson** | ✓ | `YYJSON_READ_ALLOW_COMMENTS` | Fastest C JSON parser; cross-platform |
-| **cJSON** | ✗ | — | Lightweight but strict |
-| **parson** | ✓ | Built-in | Small single-file C library |
-
-### Rust
-
-| Library | Comments | How | Notes |
-|---|:---:|---|---|
-| **serde_json** | ✗ | — | Strict standard library |
-| **json_comments** + serde_json | ✓ | `StripComments::new(reader)` wraps reader | Preprocessor approach |
-| **json5** crate | ✓ | Full JSON5 parser | Comments + trailing commas |
-| **serde_jsonc** | ✓ | Drop-in serde_json replacement | Newer crate |
-
-### Go
-
-| Library | Comments | How | Notes |
-|---|:---:|---|---|
-| **encoding/json** (stdlib) | ✗ | — | Strict RFC 8259 |
-| **tidwall/jsonc** | ✓ | `jsonc.ToJSON(input)` strips comments | Lightweight preprocessor |
-| **tailscale/hujson** | ✓ | "Human JSON" — comments + trailing commas | Used by Tailscale; well-maintained |
-
-### C# / .NET
-
-| Library | Comments | How | Notes |
-|---|:---:|---|---|
-| **System.Text.Json** | ✓ | `ReadCommentHandling = JsonCommentHandling.Skip` | Built into .NET |
-| **Newtonsoft.Json** | ✓ | `CommentHandling = CommentHandling.Ignore` | The classic .NET JSON library |
-
-### Python
-
-| Library | Comments | How | Notes |
-|---|:---:|---|---|
-| **json** (stdlib) | ✗ | — | Strict |
-| **commentjson** | ✓ | `commentjson.load(file)` — drop-in replacement | `pip install commentjson` |
-| **pyjson5** | ✓ | Full JSON5 parser | `pip install pyjson5` |
-
-### JavaScript / TypeScript
-
-| Library | Comments | How | Notes |
-|---|:---:|---|---|
-| **JSON.parse()** | ✗ | — | Strict |
-| **jsonc-parser** (Microsoft) | ✓ | `parse(text)` — fault-tolerant | Used by VS Code |
-| **JSON5** | ✓ | `JSON5.parse(text)` | `npm install json5` |
-
-### Java / Kotlin
-
-| Library | Comments | How | Notes |
-|---|:---:|---|---|
-| **Jackson** | ✓ | `JsonParser.Feature.ALLOW_COMMENTS` | Both `//` and `/* */` |
-| **Gson** | ✓ | `setLenient(true)` on JsonReader | Allows comments in lenient mode |
-
-### Recommended Strategy for This Project
-
-Since we compile JSONC → FlatBuffer, **comments are stripped at compile time and the
-runtime never sees JSONC at all**. Pick whichever JSONC parser is most convenient for
-the compiler's implementation language:
-
-| If compiler is written in... | Use |
-|---|---|
-| C++ | nlohmann/json with `ignore_comments=true` or RapidJSON |
-| Rust | `json_comments` + `serde_json` |
-| Go | `tailscale/hujson` or `tidwall/jsonc` |
-| C# | `System.Text.Json` with `ReadCommentHandling.Skip` |
-| Python | `commentjson` |
-| TypeScript | Microsoft `jsonc-parser` |
-
----
-
-## 11. Policy Layers
+## 9. Policy Layers
 
 The preceding sections describe the *shape* of a sandbox policy — what dimensions
 it covers (§5), what the authoring format looks like (§7), and how it compiles to an
