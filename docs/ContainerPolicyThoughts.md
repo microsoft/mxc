@@ -21,6 +21,7 @@ language compiled to FlatBuffers for efficient runtime consumption.
 - [10. Policy Layers](#10-policy-layers)
 - [11. Backend Capability Profiles](#11-backend-capability-profiles)
 - [12. Container Lifecycle and Workload Cycling](#12-container-lifecycle-and-workload-cycling)
+- [13. Intent Manifest](#13-intent-manifest)
 
 ---
 
@@ -950,13 +951,19 @@ sandbox-exec -p '(version 1)(deny default)(allow file-read* (subpath "/tmp"))' /
 4. **Graduated granularity** — simple things should be simple; complex things should
    be possible
 
-> **Note on policy layers:** This JSON schema primarily represents a *bound
-> deployment policy* — concrete paths, ports, and hosts are specified. In the
-> layered model described in [§10](#10-policy-layers), this corresponds mostly to
-> **Layer 2 (Instance Binding)**, with the platform overrides section touching on
-> **Layer 7 (Container Enforcement Capabilities)**. Abstract resource-type
-> requirements (Layer 1) and authority-based constraints (Layers 3–5) are upstream
-> of this format.
+> **Note on policy layers:** This JSON schema represents a *bound deployment
+> policy* — concrete paths, ports, and hosts are already resolved. In the
+> layered model described in [§10](#10-policy-layers), this corresponds to
+> **Layer 2 (Instance Binding)**. The platform overrides section touches on
+> **Layer 7 (Container Enforcement Capabilities)** and should eventually migrate
+> to the backend capability profiles (§11). For the upstream *intent manifest*
+> that code authors write (Layer 1), see
+> [§13 Intent Manifest](#13-intent-manifest). The pipeline is:
+>
+> ```
+> §13 Intent Manifest → bind → §8 Bound Policy → compile → §9 FlatBuffer
+> (Layer 1, portable)          (Layer 2, concrete)         (.sbxp, runtime)
+> ```
 
 ### Example Policy
 
@@ -3053,3 +3060,471 @@ Combining the two lifecycles into a complete state machine:
   │   Stopped    │ ── destroy security boundary, release resources
   └──────────────┘
 ```
+
+---
+
+## 13. Intent Manifest
+
+### The Problem: Intent vs Configuration
+
+The JSON policy language in §8 names **concrete, platform-specific resources** —
+paths like `/usr/lib`, ports like `443`, hosts like `api.example.com`. This makes
+it a *bound deployment policy* (Layer 2 in the §10 model): precise, unambiguous,
+and directly compilable to a FlatBuffer. But it is not what code authors should
+write.
+
+A code author writing a Python web scraper should not need to know that Python
+lives at `/usr/bin/python3` on Linux, `/opt/homebrew/bin/python3` on macOS, and
+`C:\Python312\python.exe` on Windows. They should not need to decide between
+`scope: "subtree"` and `scope: "exact"`. They should express *what they need*,
+not *how to enforce it*.
+
+The intent manifest (Layer 1) is the format code authors write. It expresses
+abstract requirements and behavioral commitments. A **binding step** resolves it
+to a concrete Layer 2 policy on a specific platform.
+
+```
+  §13 Intent Manifest              §8 Bound Policy              §9 FlatBuffer
+  (Layer 1, portable)              (Layer 2, concrete)           (compiled, runtime)
+
+  "I need python,            bind()  "/usr/bin/python3 execute,  compile()  .sbxp
+   workspace rw,            ────────► /home/alice/work rw,      ────────►  (binary,
+   outbound HTTPS"                    TCP *:443 outbound"                  signed)
+
+  Written by:                       Produced by:                 Consumed by:
+  code author                       binder/orchestrator          sandbox runtime
+```
+
+### Design Principles
+
+1. **No platform-specific paths, ports, or mechanism details** — the manifest is
+   portable across Linux, macOS, and Windows
+2. **Logical data domains, not OS layout** — the manifest names `workspace` and
+   `config`, not `/usr/lib` and `/etc`
+3. **Named service references, not hostnames** — the manifest names `llm-api`,
+   not `api.anthropic.com`
+4. **Enforceable constraints separated from self-asserted claims** — what the
+   runtime must enforce vs what the author promises
+5. **Machine-resolvable** — a binder can map every field to a concrete Layer 2
+   value without human judgment
+
+### Schema Overview
+
+The intent manifest has four top-level sections:
+
+| Section | Purpose | Trust Model |
+|---|---|---|
+| `requires` | What the code needs to function | Validated by the binder — unresolvable requirements fail the bind |
+| `constraints` | Hard limits the runtime must enforce | Enforced by the sandbox — violation terminates the workload |
+| `claims` | Behavioral properties the author asserts | Informational — cannot be blindly trusted; may influence policy selection but not enforcement |
+| `metadata` | Identity, versioning, description | Informational |
+
+### Full Schema
+
+```jsonc
+{
+  "manifest_version": "1.0",
+
+  // ─── Metadata ─────────────────────────────────────────────
+  "metadata": {
+    "name": "web-scraper",
+    "version": "1.2.0",
+    "description": "Python web scraper that fetches and parses HTML pages",
+    "author": "alice@example.com"
+  },
+
+  // ─── Requirements ─────────────────────────────────────────
+  // What the code needs to function. The binder resolves each
+  // requirement to concrete resources on the target platform.
+  "requires": {
+
+    // Runtime: what language/interpreter the code needs.
+    // The binder locates the runtime on the target platform
+    // and implicitly grants read+execute access to it and
+    // its standard library.
+    "runtime": {
+      "language": "python",
+      "min_version": "3.10"
+    },
+
+    // Storage: logical data domains the code needs access to.
+    // Each domain maps to a platform-specific path at bind time.
+    "storage": [
+      {
+        "class": "workspace",
+        "access": "read-write",
+        "description": "Working directory for script execution"
+      },
+      {
+        "class": "input_data",
+        "access": "read",
+        "description": "Input files provided by the caller"
+      },
+      {
+        "class": "output_data",
+        "access": "write",
+        "description": "Results produced by the script"
+      },
+      {
+        "class": "temp",
+        "access": "read-write",
+        "persistence": "ephemeral",
+        "description": "Scratch space, discarded after execution"
+      },
+      {
+        "class": "cache",
+        "access": "read-write",
+        "persistence": "discardable",
+        "description": "Reusable across invocations but may be evicted"
+      }
+    ],
+
+    // Network: what services or network capabilities the code needs.
+    // Two modes: named service references (resolved by the binder
+    // through a service catalog) and generic capability classes.
+    "network": [
+      {
+        // Named service: resolved to concrete hosts/ports/auth
+        // by the binder's service catalog.
+        "service": "public-web",
+        "protocol": "https",
+        "description": "Fetch arbitrary web pages over HTTPS"
+      },
+      {
+        // Named service: a specific API the code calls.
+        "service": "search-api",
+        "operations": ["query"],
+        "auth": "injected-token",
+        "description": "Search provider API for web queries"
+      },
+      {
+        // Generic capability: DNS resolution.
+        "capability": "dns"
+      }
+    ],
+
+    // Process: what process-level capabilities the code needs.
+    "process": {
+      "spawn": true,
+      "max_children": 4,
+      "exec": ["python3"],
+      "signals": "self"
+    },
+
+    // IPC: inter-process communication requirements.
+    "ipc": "none",
+
+    // Devices: hardware access requirements.
+    "devices": "none",
+
+    // Identity / auth: what credentials the code needs injected.
+    "credentials": [
+      {
+        "name": "SEARCH_API_KEY",
+        "type": "api-key",
+        "description": "API key for search provider"
+      }
+    ]
+  },
+
+  // ─── Constraints ──────────────────────────────────────────
+  // Hard limits the runtime MUST enforce. These are not requests —
+  // they are ceilings. If the code exceeds them, the workload is
+  // terminated.
+  "constraints": {
+    "max_memory_mb": 512,
+    "max_cpu_cores": 1,
+    "max_wall_time_seconds": 300,
+    "max_processes": 10,
+    "max_open_files": 256,
+    "max_output_bytes": 1048576,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  },
+
+  // ─── Claims ───────────────────────────────────────────────
+  // Author-asserted behavioral properties. These are NOT enforced
+  // by the runtime — they are metadata that MAY influence policy
+  // selection, audit posture, or trust tier assignment. They MUST
+  // NOT be trusted without independent verification.
+  "claims": {
+    "deterministic": false,
+    "idempotent": true,
+    "no_side_effects_beyond_output": true,
+    "no_credential_exfiltration": true
+  }
+}
+```
+
+### Storage Classes
+
+The `storage` section uses **logical data domains** rather than OS filesystem
+paths. The binder maps each class to a concrete path on the target platform.
+
+| Storage Class | Description | Typical Binding |
+|---|---|---|
+| `workspace` | Working directory for the code | Orchestrator-assigned directory; overlay FS for isolation |
+| `input_data` | Files provided as input | Caller-supplied directory, mounted read-only |
+| `output_data` | Files produced as output | Orchestrator-assigned output directory |
+| `temp` | Ephemeral scratch space | `tmpfs` (Linux), ephemeral overlay (Windows); discarded after execution |
+| `cache` | Persistent but evictable storage | Warm container's cache directory; survives workloads, may be evicted |
+| `config` | Application configuration | App-specific config files, mounted read-only |
+| `secrets` | Credentials and keys | `tmpfs`-backed mount (never on disk); injected by orchestrator |
+| `app_code` | The application's own code | Read-only mount of the code bundle/image |
+| `user_selected` | Files chosen by the user at runtime | Brokered via file picker; binding and consent happen together |
+
+**What is NOT in the manifest:** `system_libraries`, `runtime_libraries`, or
+any platform-specific path. The binder derives system library access from the
+`runtime` declaration — if the code needs Python 3.10, the binder grants read
+access to wherever Python and its stdlib live on this platform.
+
+### Network Service References
+
+Network requirements use **named service references** that are resolved through
+a service catalog at bind time.
+
+```jsonc
+// In the intent manifest (Layer 1):
+{ "service": "search-api", "operations": ["query"], "auth": "injected-token" }
+
+// Resolved by the binder to (Layer 2):
+{
+  "direction": "outbound",
+  "action": "connect",
+  "protocol": "tcp",
+  "host": "api.search-provider.com",
+  "port": 443
+}
+```
+
+The service catalog is environment-specific:
+
+```jsonc
+{
+  "services": {
+    "search-api": {
+      "hosts": ["api.search-provider.com"],
+      "port": 443,
+      "protocol": "https",
+      "auth_method": "bearer-token",
+      "credential_ref": "SEARCH_API_KEY"
+    },
+    "public-web": {
+      "hosts": ["*"],
+      "port": 443,
+      "protocol": "https"
+    }
+  }
+}
+```
+
+This separation means:
+- The **manifest** says "I need a search API" (portable, audit-friendly)
+- The **service catalog** says "the search API is at `api.search-provider.com`"
+  (environment-specific, operator-managed)
+- The **bound policy** says "`api.search-provider.com:443` outbound TCP"
+  (concrete, compilable)
+
+### Generic Network Capabilities
+
+For common network needs that don't map to named services, the manifest uses
+capability references:
+
+| Capability | Description | Bound To |
+|---|---|---|
+| `dns` | DNS resolution | UDP port 53 outbound (or system resolver) |
+| `ntp` | Time synchronization | NTP port 123 outbound |
+| `localhost` | Loopback access | `127.0.0.1` / `::1` |
+
+### Constraints vs Claims
+
+The distinction between `constraints` and `claims` is critical:
+
+**Constraints** are enforced by the sandbox runtime. If the code exceeds them,
+the workload is terminated. The runtime is responsible for enforcement.
+
+```jsonc
+"constraints": {
+  "max_memory_mb": 512,             // Enforced via cgroups, Job Objects
+  "max_wall_time_seconds": 300,     // Enforced via timeout
+  "persistent_storage": "forbidden" // Enforced via ephemeral workspace
+}
+```
+
+**Claims** are self-asserted by the code author. They cannot be blindly trusted.
+They may influence:
+- **Trust tier assignment** — a claim of `no_side_effects_beyond_output` might
+  qualify the code for a higher trust tier
+- **Audit posture** — claims are recorded and can be verified post-hoc
+- **Policy selection** — an orchestrator might relax monitoring for code that
+  claims idempotency
+
+```jsonc
+"claims": {
+  "deterministic": false,
+  "idempotent": true,                     // May re-run safely
+  "no_credential_exfiltration": true      // Author says credentials won't leak
+}
+```
+
+A claim of `"no_credential_exfiltration": true` does **not** mean the runtime
+skips credential protection. The runtime always protects credentials regardless
+of claims. Claims are metadata, not policy.
+
+### The Binding Step
+
+Binding resolves an intent manifest to a bound policy (§8) on a specific
+platform. It consumes:
+
+1. **Intent manifest** (Layer 1) — what the code needs
+2. **Platform inventory** — what the target system has (runtime locations, kernel
+   version, available backends)
+3. **Service catalog** — named service → concrete host/port mapping
+4. **User consent** (Layer 3) — what the user approves
+5. **Admin policy** (Layer 4) — what organizational constraints apply
+
+And produces:
+
+6. **Bound policy** (Layer 2, §8) — concrete paths, ports, hosts
+7. **Bind report** — what was resolved, what was denied, what requires consent
+
+```
+resolve(manifest, platform, services, consent, admin_policy) → BoundPolicy:
+
+  // Runtime resolution
+  runtime_path = platform.locate_runtime(manifest.requires.runtime)
+  stdlib_paths = platform.locate_stdlib(manifest.requires.runtime)
+
+  // Storage binding
+  for each storage requirement:
+    path = allocate_path(storage.class, platform)
+    add filesystem rule: { path, scope: subtree, allow: storage.access }
+
+  // Network binding
+  for each network requirement:
+    if requirement.service:
+      hosts, port, protocol = services.resolve(requirement.service)
+      for host in hosts:
+        add network rule: { direction: outbound, host, port, protocol }
+    if requirement.capability == "dns":
+      set allow_dns = true
+
+  // Credential injection
+  for each credential:
+    source = secrets.resolve(credential.name)
+    mount as tmpfs-backed read-only at secrets path
+
+  // Constraint mapping
+  map constraints to resource limits in the bound policy
+
+  // Authority checks
+  for each bound resource:
+    check user consent (Layer 3)
+    check admin policy (Layer 4)
+    check system policy (Layer 5)
+    if denied: add to bind_report.denied
+
+  return BoundPolicy + BindReport
+```
+
+### Bind Failures
+
+When the binder cannot resolve a requirement:
+
+| Situation | Response |
+|---|---|
+| Runtime not found on platform | Bind fails: "Python 3.10+ not found on this system" |
+| Named service not in catalog | Bind fails: "Service 'search-api' not defined in service catalog" |
+| Admin policy forbids a requirement | Bind fails: "Outbound HTTPS denied by admin policy" |
+| User declines consent for a resource | Bind succeeds with resource excluded; code must handle graceful degradation |
+| Constraint exceeds system capacity | Bind fails: "Requested 512MB memory exceeds system limit of 256MB for sandboxed containers" |
+
+### Relationship to Other Sections
+
+| Section | Relationship |
+|---|---|
+| **§8 (Bound Policy)** | The binder's output — §13 is input, §8 is output |
+| **§9 (FlatBuffer)** | The compiler's input is the §8 bound policy, not the §13 manifest |
+| **§10 (Policy Layers)** | §13 is Layer 1 (Code Requirements) and partially Layer 2 (Instance Binding for abstract resources). §8 is Layer 2 (fully bound). Layers 3–5 are consumed during the binding step. |
+| **§11 (Backend Profiles)** | The binder uses backend profiles to validate that the resolved policy can be enforced. If not, the binder can select a different backend or fail. |
+| **§12 (Lifecycle)** | The manifest's `constraints` (wall time, persistence) and `storage.persistence` fields inform the lifecycle model — ephemeral vs warm-cacheable vs persistent. |
+
+### Example: Full Pipeline
+
+**Layer 1 — Author writes intent manifest:**
+
+```jsonc
+{
+  "manifest_version": "1.0",
+  "metadata": { "name": "summarizer", "version": "1.0.0" },
+  "requires": {
+    "runtime": { "language": "python", "min_version": "3.11" },
+    "storage": [
+      { "class": "workspace", "access": "read-write" },
+      { "class": "input_data", "access": "read" }
+    ],
+    "network": [
+      { "service": "llm-api", "operations": ["completions"], "auth": "injected-token" }
+    ],
+    "credentials": [
+      { "name": "LLM_API_KEY", "type": "api-key" }
+    ]
+  },
+  "constraints": {
+    "max_memory_mb": 256,
+    "max_wall_time_seconds": 60,
+    "persistent_storage": "forbidden"
+  }
+}
+```
+
+**Binder resolves on Linux:**
+
+```jsonc
+// Service catalog entry:
+{ "llm-api": { "hosts": ["api.anthropic.com"], "port": 443, "protocol": "https" } }
+
+// Platform inventory:
+{ "python3": "/usr/bin/python3", "python3_stdlib": "/usr/lib/python3.11" }
+```
+
+**Layer 2 — Bound policy (§8 format):**
+
+```jsonc
+{
+  "version": "1.0",
+  "name": "summarizer",
+  "filesystem": {
+    "rules": [
+      { "path": "/usr/bin/python3",    "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/lib/python3.11", "scope": "subtree", "allow": ["read"] },
+      { "path": "/workspace",          "scope": "subtree", "allow": ["read", "write", "create"] },
+      { "path": "/input",              "scope": "subtree", "allow": ["read"] },
+      { "path": "/tmp",                "scope": "subtree", "allow": ["read", "write", "create",
+                                                                      "delete"],
+                                                            "ephemeral": true }
+    ]
+  },
+  "network": {
+    "mode": "rules",
+    "rules": [
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "api.anthropic.com", "port": 443 }
+    ],
+    "allow_dns": true
+  },
+  "resources": {
+    "max_memory_mb": 256,
+    "max_wall_time_seconds": 60
+  },
+  "environment": {
+    "mode": "clean",
+    "set": { "PATH": "/usr/bin", "HOME": "/workspace" }
+  }
+}
+```
+
+**Layer 2 → FlatBuffer (§9):**
+
+Compiled to `.sbxp` binary for zero-copy runtime consumption.
