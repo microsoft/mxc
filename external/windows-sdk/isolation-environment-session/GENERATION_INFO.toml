@@ -1,0 +1,13 @@
+# Provenance information for the generated agent_session_bindings crate.
+# Updated by the generation tool; verified by the bindings crate's build.rs.
+
+[source]
+# OS repo branch and commit that produced the WinMD.
+os_branch = "official/ge_current_directwinai_dev1"
+os_commit = "92c51045953e9"
+winmd_sha256 = "79361220ecaa4080808fc4c1eaf015eda421541a3e1f8cd2199f911dc9596280"
+
+[tool]
+windows_bindgen_version = "0.62.1"
+target_windows_crate = "0.62"
+generated_date = "2026-04-14"
