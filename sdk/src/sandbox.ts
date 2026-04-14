@@ -8,7 +8,7 @@ import { parse as semverParse } from 'semver';
 import { SandboxPolicy, ContainerConfig } from './types';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
 
-const SUPPORTED_VERSION = '0.4.0-alpha';
+const SUPPORTED_VERSION = '0.5.0-alpha';
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -26,7 +26,7 @@ function validatePolicyVersion(version: string): void {
     if (!parsed) {
         throw new Error(
             `Invalid policy version '${version}': must be valid semver` +
-            ` (e.g., '0.4.0' or '0.4.0-alpha')`
+            ` (e.g., '0.5.0' or '0.5.0-alpha')`
         );
     }
 

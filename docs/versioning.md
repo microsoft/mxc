@@ -60,11 +60,12 @@ schemas in `stable/` do not include the experimental section.
 
 ### Shipped vs Experimental
 
-The current config schema has two sections:
+The current config schema has two sections. Configs using experimental
+features should use version `0.5.0-alpha`:
 
 ```json
 {
-  "version": "0.4.0-alpha",
+  "version": "0.5.0-alpha",
   "process": { ... },
   "filesystem": { ... },
   "network": { ... },

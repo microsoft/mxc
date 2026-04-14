@@ -255,7 +255,7 @@ pub fn load_request(
 // ---------- Cross-field validation ----------
 
 /// Supported schema version (semver). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: (u32, u32) = (0, 4); // 0.4.x
+const SUPPORTED_VERSION: (u32, u32) = (0, 5); // 0.5.x
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
@@ -1234,7 +1234,7 @@ mod tests {
 
     #[test]
     fn schema_version_too_new_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.5.0"}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.6.0"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1244,6 +1244,16 @@ mod tests {
 
     #[test]
     fn schema_version_current_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.5.0-alpha"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "0.5.0-alpha");
+    }
+
+    #[test]
+    fn schema_version_older_accepted() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.4.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -1253,13 +1263,33 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_older_accepted() {
+    fn schema_version_oldest_accepted() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.3.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "0.3.0-alpha");
+    }
+
+    #[test]
+    fn full_config_with_0_5_0_alpha_accepted() {
+        let json = r#"{
+            "version": "0.5.0-alpha",
+            "containerId": "test-050",
+            "containment": "appcontainer",
+            "process": { "commandLine": "echo hello", "timeout": 5000 },
+            "filesystem": { "readwritePaths": ["C:\\workspace"] },
+            "network": { "defaultPolicy": "block" }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "0.5.0-alpha");
+        assert_eq!(req.container_id, "test-050");
+        assert_eq!(req.script_timeout, 5000);
+        assert_eq!(req.policy.readwrite_paths, vec!["C:\\workspace"]);
     }
 
     #[test]

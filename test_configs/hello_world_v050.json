@@ -1,0 +1,11 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "CLI-HelloWorld-v050",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "python -c \"import sys; print('Hello from MXC 0.5.0-alpha!'); print(f'Python version: {sys.version}')\""
+  },
+  "appContainer": {
+    "capabilities": ["permissiveLearningMode"]
+  }
+}

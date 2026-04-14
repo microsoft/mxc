@@ -74,6 +74,15 @@ describe('buildSandboxPayload', () => {
     it('should accept a compatible version', () => {
       mockWindows();
       try {
+        assert.doesNotThrow(() => buildSandboxPayload('echo hi', { version: '0.5.0-alpha' }));
+      } finally {
+        restore();
+      }
+    });
+
+    it('should accept older version 0.4.0-alpha', () => {
+      mockWindows();
+      try {
         assert.doesNotThrow(() => buildSandboxPayload('echo hi', { version: '0.4.0-alpha' }));
       } finally {
         restore();
