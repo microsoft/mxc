@@ -10,9 +10,10 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
-    LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress,
-    ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    AgentSessionConfig, ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend,
+    ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
+    PortMapping, ProxyAddress, ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
+    WslcConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -138,11 +139,20 @@ struct RawTestFeature {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawAgentSession {
+    #[serde(rename = "configurationId")]
+    configuration_id: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawExperimental {
     test: Option<RawTestFeature>,
     #[serde(rename = "windows_sandbox")]
     windows_sandbox: Option<RawSandbox>,
     wslc: Option<RawContainerConfig>,
+    #[serde(rename = "agent_session")]
+    agent_session: Option<RawAgentSession>,
 }
 
 #[derive(Deserialize, Default)]
@@ -439,9 +449,10 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         Some("lxc") => ContainmentBackend::Lxc,
         Some("vm") => ContainmentBackend::Vm,
         Some("microvm") => ContainmentBackend::MicroVm,
+        Some("agent_session") => ContainmentBackend::AgentSession,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'wslc', 'lxc', 'vm', or 'microvm')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'agent_session', 'wslc', 'lxc', 'vm', or 'microvm')",
                 other
             );
             logger.log_line(&msg);
@@ -632,10 +643,31 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             }
             config
         });
+        let agent_session = raw_exp.agent_session.map(|as_cfg| {
+            let mut config = AgentSessionConfig::default();
+            if let Some(id) = as_cfg.configuration_id {
+                use crate::models::AgentSessionConfigurationId;
+                config.configuration_id = match id.as_str() {
+                    "small" => AgentSessionConfigurationId::Small,
+                    "medium" => AgentSessionConfigurationId::Medium,
+                    "large" => AgentSessionConfigurationId::Large,
+                    "commandline" => AgentSessionConfigurationId::CommandLine,
+                    _ => {
+                        logger.log_line(&format!(
+                            "Unknown agent_session configurationId '{}', defaulting to 'small'",
+                            id
+                        ));
+                        AgentSessionConfigurationId::Small
+                    }
+                };
+            }
+            config
+        });
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
+            agent_session,
         }
     } else {
         ExperimentalConfig::default()
@@ -1750,5 +1782,112 @@ mod tests {
         assert!(!is_base_container_version("0.4.9"));
         assert!(!is_base_container_version(""));
         assert!(!is_base_container_version("not-a-version"));
+    }
+
+    // ====== Agent Session containment and config tests ======
+
+    #[test]
+    fn containment_agent_session_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "agent_session"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::AgentSession);
+    }
+
+    #[test]
+    fn agent_session_config_defaults() {
+        let json =
+            r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.agent_session.unwrap();
+        assert_eq!(
+            cfg.configuration_id,
+            crate::models::AgentSessionConfigurationId::Small
+        );
+    }
+
+    #[test]
+    fn agent_session_config_small() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"configurationId": "small"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.agent_session.unwrap();
+        assert_eq!(
+            cfg.configuration_id,
+            crate::models::AgentSessionConfigurationId::Small
+        );
+    }
+
+    #[test]
+    fn agent_session_config_medium() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"configurationId": "medium"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.agent_session.unwrap();
+        assert_eq!(
+            cfg.configuration_id,
+            crate::models::AgentSessionConfigurationId::Medium
+        );
+    }
+
+    #[test]
+    fn agent_session_config_large() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"configurationId": "large"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.agent_session.unwrap();
+        assert_eq!(
+            cfg.configuration_id,
+            crate::models::AgentSessionConfigurationId::Large
+        );
+    }
+
+    #[test]
+    fn agent_session_config_commandline() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"configurationId": "commandline"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.agent_session.unwrap();
+        assert_eq!(
+            cfg.configuration_id,
+            crate::models::AgentSessionConfigurationId::CommandLine
+        );
+    }
+
+    #[test]
+    fn agent_session_config_unknown_defaults_to_small() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"configurationId": "xlarge"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.agent_session.unwrap();
+        assert_eq!(
+            cfg.configuration_id,
+            crate::models::AgentSessionConfigurationId::Small
+        );
+    }
+
+    #[test]
+    fn agent_session_absent_from_experimental() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.agent_session.is_none());
     }
 }

@@ -237,6 +237,10 @@ fn main() {
                 .unwrap_or_default();
             Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
         }
+        ContainmentBackend::AgentSession => {
+            eprintln!("Error: Agent Session backend not yet implemented");
+            process::exit(1);
+        }
     };
     let run_start = Instant::now();
     let response = runner.run(&request, &mut logger);

@@ -21,6 +21,9 @@ pub enum ContainmentBackend {
     MicroVm,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
     WindowsSandbox,
+    /// Agent Session — process isolation via IsoEnvBroker Session API (experimental).
+    #[serde(rename = "agent_session")]
+    AgentSession,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
@@ -39,6 +42,35 @@ impl Default for WindowsSandboxConfig {
         Self {
             idle_timeout_ms: 300_000,
             daemon_pipe_name: "wxc-windows-sandbox".to_string(),
+        }
+    }
+}
+
+/// Session configuration size for the Agent Session backend.
+/// Maps to `IsolationConfigurationId` in the IsoEnvBroker Session API.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentSessionConfigurationId {
+    #[default]
+    Small,
+    Medium,
+    Large,
+    CommandLine,
+}
+
+/// Configuration specific to the Agent Session backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentSessionConfig {
+    /// Session size/weight. Default: Small.
+    #[serde(rename = "configurationId")]
+    pub configuration_id: AgentSessionConfigurationId,
+}
+
+impl Default for AgentSessionConfig {
+    fn default() -> Self {
+        Self {
+            configuration_id: AgentSessionConfigurationId::Small,
         }
     }
 }
@@ -306,6 +338,9 @@ pub struct ExperimentalConfig {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// WSL Container (WSLC SDK) backend (experimental).
     pub wslc: Option<WslcConfig>,
+    /// Agent Session backend (experimental).
+    #[serde(rename = "agent_session")]
+    pub agent_session: Option<AgentSessionConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
