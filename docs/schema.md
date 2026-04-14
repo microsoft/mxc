@@ -94,12 +94,12 @@ The parser compares the config's major.minor against its supported version
 
 | Config `version` | Parser supports | Result |
 |---|---|---|
-| absent | 0.5.0-alpha | Accepted (assumed compatible) |
-| `"0.3.0-alpha"` | 0.5.0-alpha | Accepted (0.3 ≤ 0.5) |
-| `"0.4.0-alpha"` | 0.5.0-alpha | Accepted (0.4 ≤ 0.5) |
-| `"0.5.0-alpha"` | 0.5.0-alpha | Accepted (0.5 ≤ 0.5) |
-| `"0.6.0"` | 0.5.0-alpha | **Rejected** — "upgrade wxc-exec" |
-| `"1.0.0"` | 0.5.0-alpha | **Rejected** — "upgrade wxc-exec" |
+| absent | >=0.4, <=0.5 | Accepted (assumed compatible) |
+| `"0.3.0-alpha"` | >=0.4, <=0.5 | **Rejected** — "older than supported" |
+| `"0.4.0-alpha"` | >=0.4, <=0.5 | Accepted (0.4 in range) |
+| `"0.5.0-alpha"` | >=0.4, <=0.5 | Accepted (0.5 in range) |
+| `"0.6.0"` | >=0.4, <=0.5 | **Rejected** — "newer than supported" |
+| `"1.0.0"` | >=0.4, <=0.5 | **Rejected** — "newer than supported" |
 
 #### When to bump
 

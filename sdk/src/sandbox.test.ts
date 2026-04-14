@@ -113,6 +113,18 @@ describe('buildSandboxPayload', () => {
       }
     });
 
+    it('should reject a version older than minimum', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => buildSandboxPayload('echo hi', { version: '0.3.0-alpha' }),
+          { message: /older than supported/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
     it('should reject an invalid semver string', () => {
       mockWindows();
       try {

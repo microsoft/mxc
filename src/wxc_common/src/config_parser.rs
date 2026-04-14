@@ -255,7 +255,7 @@ pub fn load_request(
 // ---------- Cross-field validation ----------
 
 /// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: &str = "<=0.5";
+const SUPPORTED_VERSION: &str = ">=0.4, <=0.5";
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
@@ -281,10 +281,18 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
     // against a version without the pre-release label for major.minor check.
     let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
     if !req.matches(&comparable) {
-        let msg = format!(
-            "Config schema version '{}' is newer than supported (max: {}). Upgrade wxc-exec.",
-            version, SUPPORTED_VERSION
-        );
+        let min = semver::VersionReq::parse(">=0.4").unwrap();
+        let msg = if !min.matches(&comparable) {
+            format!(
+                "Config schema version '{}' is older than supported (supported: {}). Update your config.",
+                version, SUPPORTED_VERSION
+            )
+        } else {
+            format!(
+                "Config schema version '{}' is newer than supported (supported: {}). Upgrade wxc-exec.",
+                version, SUPPORTED_VERSION
+            )
+        };
         logger.log_line(&msg);
         return Err(WxcError::ConfigParse(msg));
     }
@@ -1247,13 +1255,13 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_oldest_accepted() {
+    fn schema_version_too_old_rejected() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.3.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.3.0-alpha");
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
     }
 
     #[test]
