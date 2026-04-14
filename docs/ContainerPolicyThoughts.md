@@ -3551,6 +3551,120 @@ When the binder cannot resolve a requirement:
 | `"max_wall_time_seconds": 60` | `resources.max_wall_time_seconds: 60` — direct passthrough |
 | `credentials[].name: "LLM_API_KEY"` | Filesystem rule for `/run/secrets/LLM_API_KEY` (read-only, ephemeral tmpfs mount) + environment variable `LLM_API_KEY_FILE` pointing to the mount path |
 
+**Binder resolves the same manifest on Windows:**
+
+```jsonc
+// Platform inventory:
+{ "python3": "C:\\Python311\\python.exe", "python3_stdlib": "C:\\Python311\\Lib" }
+```
+
+**Layer 2 — Bound policy (§8 format, Windows):**
+
+```jsonc
+{
+  "version": "1.0",
+  "name": "summarizer",
+  "filesystem": {
+    // On Windows, the Brokered File System (BFS) maps host paths into the
+    // container's view. The container sees these paths; BFS enforces the
+    // access mode. Paths not listed are invisible to the container.
+    "rules": [
+      // Runtime — BFS maps the host Python installation read-only
+      { "path": "C:\\Python311\\python.exe", "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Python311\\Lib",        "scope": "subtree",
+        "allow": ["read"] },
+      { "path": "C:\\Python311\\DLLs",       "scope": "subtree",
+        "allow": ["read", "execute"] },
+
+      // Workspace — BFS maps a host directory as an ephemeral overlay.
+      // Writes go to a scratch layer that is discarded after execution.
+      { "path": "C:\\Sandbox\\Workspace",    "scope": "subtree",
+        "allow": ["read", "write", "create"],
+        "ephemeral": true },
+
+      // Input data — BFS maps the caller-supplied directory read-only
+      { "path": "C:\\Sandbox\\Input",        "scope": "subtree",
+        "allow": ["read"] },
+
+      // Temp — ephemeral scratch space, discarded after execution
+      { "path": "C:\\Sandbox\\Temp",         "scope": "subtree",
+        "allow": ["read", "write", "create", "delete"],
+        "ephemeral": true },
+
+      // Credential — ephemeral file, never written to host disk.
+      // The orchestrator writes the secret value into this path
+      // inside the container at bind time.
+      { "path": "C:\\Sandbox\\Secrets\\LLM_API_KEY",  "scope": "exact",
+        "allow": ["read"],
+        "ephemeral": true }
+    ],
+
+    // Paths to mask — these exist on the host but must be invisible
+    // inside the container, even if BFS would otherwise inherit them.
+    "mask": [
+      "C:\\Users",
+      "%USERPROFILE%\\.ssh",
+      "%USERPROFILE%\\.aws"
+    ]
+  },
+
+  "network": {
+    "mode": "rules",
+    "rules": [
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "api.anthropic.com", "port": 443 }
+    ],
+    "allow_dns": true
+  },
+
+  "resources": {
+    "max_memory_mb": 256,
+    "max_wall_time_seconds": 60
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "C:\\Python311;C:\\Windows\\System32",
+      "TEMP": "C:\\Sandbox\\Temp",
+      "TMP": "C:\\Sandbox\\Temp",
+      "USERPROFILE": "C:\\Sandbox\\Workspace",
+      "LLM_API_KEY_FILE": "C:\\Sandbox\\Secrets\\LLM_API_KEY"
+    }
+  },
+
+  // Windows-specific backend configuration.
+  // On Windows the binder selects the enforcement primitives and
+  // populates platform overrides. This section will eventually
+  // migrate to backend profiles (§11).
+  "platform": {
+    "windows": {
+      "appcontainer": {
+        "capabilities": ["internetClient"]
+      },
+      "bfs": {
+        "enabled": true,
+        "policy_broker": true
+      }
+    }
+  }
+}
+```
+
+Note how the **same intent manifest** produces different bound policies on Linux
+and Windows:
+
+| Intent | Linux Binding | Windows Binding |
+|---|---|---|
+| `runtime: python 3.11` | `/usr/bin/python3`, `/usr/lib/python3.11` | `C:\Python311\python.exe`, `C:\Python311\Lib`, `C:\Python311\DLLs` |
+| `storage: workspace (rw)` | `/workspace` (overlay) | `C:\Sandbox\Workspace` (BFS ephemeral overlay) |
+| `storage: input_data (r)` | `/input` | `C:\Sandbox\Input` (BFS read-only) |
+| `storage: temp` | `/tmp` (tmpfs) | `C:\Sandbox\Temp` (BFS ephemeral) |
+| `credentials: LLM_API_KEY` | `/run/secrets/LLM_API_KEY` (tmpfs) | `C:\Sandbox\Secrets\LLM_API_KEY` (ephemeral) |
+| `network: llm-api` | `api.anthropic.com:443` TCP | `api.anthropic.com:443` TCP + `internetClient` capability |
+| `persistent_storage: forbidden` | All writable paths ephemeral | All writable paths BFS-ephemeral; host paths masked |
+
 **Layer 2 → FlatBuffer (§9):**
 
 Compiled to `.sbxp` binary for zero-copy runtime consumption.
