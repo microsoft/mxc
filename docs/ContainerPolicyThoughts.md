@@ -20,6 +20,7 @@ language compiled to FlatBuffers for efficient runtime consumption.
 - [9. FlatBuffer Compiled Format](#9-flatbuffer-compiled-format)
 - [10. Policy Layers](#10-policy-layers)
 - [11. Backend Capability Profiles](#11-backend-capability-profiles)
+- [12. Container Lifecycle and Workload Cycling](#12-container-lifecycle-and-workload-cycling)
 
 ---
 
@@ -2624,3 +2625,431 @@ auto_select(policy, available_primitives[]) → Composition:
 
 This is a set-cover problem — NP-hard in the general case but tractable in practice
 because the number of available primitives per platform is small (typically 10–15).
+
+---
+
+## 12. Container Lifecycle and Workload Cycling
+
+### The Problem: Setup Cost
+
+The standard container lifecycle assumes containers are cheap to create and
+destroy. For a Linux process in a pre-built namespace, this is roughly true —
+setup is milliseconds. But when the "container" is a Hyper-V micro-VM, a Windows
+Session with desktop initialization, or any environment requiring OS boot and
+runtime library loading, setup can be seconds to tens of seconds.
+
+| Container Type | Approximate Setup Cost | Teardown Cost |
+|---|---|---|
+| Linux process + namespaces | ~10–50 ms | ~1 ms |
+| Linux process + seccomp + Landlock | ~5–20 ms | ~1 ms |
+| Docker container (cached image) | ~200–500 ms | ~100 ms |
+| gVisor / Firecracker micro-VM | ~125–500 ms | ~50 ms |
+| Windows AppContainer process | ~50–200 ms | ~10 ms |
+| Windows Session (new logon session) | ~1–5 s | ~500 ms |
+| Hyper-V micro-VM (Windows) | ~2–10 s | ~1 s |
+| Full VM (boot + OS init) | ~10–60 s | ~5 s |
+
+If an agent invokes a Python sandbox 50 times in a session, paying 5 seconds of
+VM boot per invocation is prohibitive. The solution is to separate the
+**container lifecycle** from the **workload lifecycle**.
+
+### Two Lifecycles
+
+```
+CONTAINER LIFECYCLE (expensive, done once):
+
+  Creating ──► Initializing ──► Ready ─────────────────────► Draining ──► Stopped
+                                  │         ▲                    ▲
+                                  │         │                    │
+                                  ▼         │                    │
+                             ┌────────────────────┐              │
+                             │  WORKLOAD CYCLE    │              │
+                             │  (cheap, repeated) │              │
+                             │                    │              │
+                             │  Bind policy       │              │
+                             │  Mount workspace   │              │
+                             │  Execute           │              │
+                             │  Collect result    │              │
+                             │  Reset state ──────┘              │
+                             │                                   │
+                             │  (no more workloads) ─────────────┘
+                             └────────────────────┘
+```
+
+The container reaches **Ready** once — VM booted, OS initialized, runtime
+libraries loaded, sandbox primitives configured. It then serves multiple
+workloads, each with its own policy binding, workspace, and execution. Between
+workloads, state is reset but the expensive infrastructure stays warm.
+
+### What Happens at Each Phase
+
+#### Container Setup (once, expensive)
+
+| Phase | What Happens | Examples |
+|---|---|---|
+| **Creating** | Allocate resources, pull/verify image, create security boundary | Boot VM, create AppContainer SID, create namespaces |
+| **Initializing** | Load runtime, install immutable security filters, configure invariant policy | Load Python interpreter, install seccomp filter, set up mount tree, apply base Landlock ruleset |
+| **Ready** | Container is warm and waiting for workloads | VM idle, process waiting on IPC channel |
+
+#### Per-Workload Cycle (many times, cheap)
+
+| Phase | What Happens | Examples |
+|---|---|---|
+| **Bind policy** | Apply workload-specific policy that further restricts within the base | Mount workload workspace, set environment variables, add Landlock rules for specific paths |
+| **Mount workspace** | Make workload-specific files available to the container | Bind-mount input directory, overlay FS for writable workspace |
+| **Execute** | Run the workload (script, tool invocation, code execution) | `python3 /workspace/script.py` |
+| **Collect result** | Retrieve output, capture exit code, apply flow labels | Read stdout/files from workspace, label output with integrity tags |
+| **Reset state** | Clean up workload side effects without tearing down the container | Discard overlay upper layer, unmount workspace, terminate workload process, clear environment |
+
+### Base Policy vs Workload Policy
+
+This lifecycle split implies a **two-tier policy model**. The container carries
+a *base policy* that is fixed at creation time (establishing the security
+boundary). Each workload carries a *workload policy* that further restricts
+within that base.
+
+The monotonic invariant holds: the workload policy can only restrict, never
+expand the base policy.
+
+```
+  Base Policy (fixed at container creation)
+  ┌──────────────────────────────────────────────────────┐
+  │                                                      │
+  │  • Syscall filter (immutable once loaded)            │
+  │  • Trust tier ceiling                                │
+  │  • Maximum resource limits                           │
+  │  • Network posture (none / full / rules ceiling)     │
+  │  • Invariant filesystem mounts (read-only system     │
+  │    paths, runtime libraries)                         │
+  │  • Namespace configuration                           │
+  │  • Integrity level / AppContainer SID                │
+  │                                                      │
+  │   ┌────────────────────────────────────────────────┐ │
+  │   │  Workload Policy A  (further restricts base)   │ │
+  │   │                                                │ │
+  │   │  • Specific workspace paths (r/w)              │ │
+  │   │  • Specific network endpoints (if base allows) │ │
+  │   │  • Environment variables                       │ │
+  │   │  • Wall-time limit for this execution          │ │
+  │   │  • Per-workload resource budget                │ │
+  │   └────────────────────────────────────────────────┘ │
+  │                                                      │
+  │   ┌────────────────────────────────────────────────┐ │
+  │   │  Workload Policy B  (different restrictions)   │ │
+  │   │                                                │ │
+  │   │  • Different workspace                         │ │
+  │   │  • Different network endpoints                 │ │
+  │   │  • Different wall-time limit                   │ │
+  │   └────────────────────────────────────────────────┘ │
+  │                                                      │
+  └──────────────────────────────────────────────────────┘
+```
+
+#### Example: Base Policy (JSON)
+
+```jsonc
+{
+  "version": "1.0",
+  "name": "python-sandbox-base",
+  "description": "Base policy for a warm Python execution sandbox",
+
+  "filesystem": {
+    "rules": [
+      // Immutable system paths — available to all workloads
+      { "path": "/usr/lib",        "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/usr/bin/python3","scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/lib/python3","scope": "subtree", "allow": ["read"] },
+      { "path": "/tmp",           "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                       "ephemeral": true }
+    ],
+    "synthetic": { "/dev": "minimal", "/proc": "sandboxed" }
+  },
+
+  "network": { "mode": "none" },
+
+  "process": {
+    "allow_fork": true,
+    "allow_exec": ["/usr/bin/python3"],
+    "visibility": "self",
+    "die_with_parent": true
+  },
+
+  "resources": {
+    "max_memory_mb": 512,
+    "max_cpu_percent": 50,
+    "max_processes": 10,
+    "max_open_files": 256
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "HOME": "/home/sandbox",
+      "LANG": "en_US.UTF-8",
+      "PATH": "/usr/bin:/usr/local/bin"
+    }
+  }
+}
+```
+
+#### Example: Workload Policy (JSON)
+
+```jsonc
+{
+  "version": "1.0",
+  "name": "data-analysis-workload",
+  "description": "Run a specific data analysis script",
+
+  // Only fields that add restrictions or bind concrete resources.
+  // Cannot grant anything the base policy doesn't allow.
+
+  "filesystem": {
+    "rules": [
+      // Workload-specific workspace — mounted fresh, discarded after
+      { "path": "/workspace",     "scope": "subtree",
+        "allow": ["read", "write", "create"] }
+    ]
+  },
+
+  "environment": {
+    "set": {
+      "SCRIPT_INPUT":  "/workspace/input.json",
+      "SCRIPT_OUTPUT": "/workspace/output.json"
+    }
+  },
+
+  "resources": {
+    // Tighter than base — this workload gets 30s, not unlimited
+    "max_wall_time_seconds": 30,
+    // Memory budget for this workload (must be ≤ base)
+    "max_memory_mb": 256
+  }
+}
+```
+
+### State Reset Between Workloads
+
+If a container runs workload A and then workload B, workload A's side effects
+must not leak to workload B. This is both a correctness requirement (workload B
+should see a clean environment) and a security requirement (workload A's data
+must not be accessible to workload B).
+
+| Concern | What Can Leak | Reset Mechanism |
+|---|---|---|
+| **Filesystem** | Written files, modified files | Discard overlay upper layer; or unmount/remount tmpfs |
+| **Environment** | Environment variables set by the workload | Process termination (env dies with process) |
+| **Memory** | Heap data, stack data, mmap'd regions | Process termination (kernel reclaims all) |
+| **Network** | Open TCP connections, DNS cache, socket state | Process termination (kernel closes fds); namespace stays |
+| **IPC** | Shared memory segments, semaphores, message queues | IPC namespace cleanup or explicit `ipcrm` |
+| **Temp files** | `/tmp` contents | Unmount/remount tmpfs; or overlay discard |
+| **Flow labels** | Taint from workload A's data | Reset process secrecy/integrity labels to container baseline |
+| **Kernel state** | Cached file metadata, dentry cache | Generally acceptable (metadata, not content) |
+
+The cleanest model: the container provides the *execution environment* (the VM,
+the namespace set, the security boundary), but each workload runs as a **new
+process** within that environment. Process death gives natural cleanup for
+memory, file descriptors, connections, and environment. Filesystem cleanup via
+overlay discard handles persistent state.
+
+```
+Container (warm, long-lived)
+┌──────────────────────────────────────────────┐
+│  VM / namespace set / security boundary       │
+│  Python runtime loaded, libraries cached      │
+│                                               │
+│  Workload A:                                  │
+│  ┌─────────────────────────────────────────┐  │
+│  │ PID 42: python3 /workspace/script_a.py  │  │
+│  │ overlay: /workspace (upper_a)           │  │
+│  │ env: SCRIPT_INPUT=/workspace/input.json │  │
+│  └──────────────────┬──────────────────────┘  │
+│                     │ exit(0)                  │
+│                     ▼                         │
+│  Reset: discard upper_a, unmount workspace    │
+│                                               │
+│  Workload B:                                  │
+│  ┌─────────────────────────────────────────┐  │
+│  │ PID 43: python3 /workspace/script_b.py  │  │
+│  │ overlay: /workspace (upper_b)           │  │
+│  │ env: SCRIPT_INPUT=/workspace/data.csv   │  │
+│  └─────────────────────────────────────────┘  │
+│                                               │
+└──────────────────────────────────────────────┘
+```
+
+### Implications for Backend Capability Profiles (§11)
+
+The container vs workload lifecycle distinction affects what primitives can do.
+Some primitives are "setup once" (immutable after creation), some can be adjusted
+per-workload:
+
+| Primitive | Setup (once) | Per-Workload Adjustment | Supports Warm Reuse |
+|---|---|---|---|
+| **seccomp-bpf** | Install filter | None (filters are immutable) | ✓ (filter persists) |
+| **linux-mount-namespace** | Create namespace | Add/remove bind mounts, discard overlay | ✓ |
+| **linux-pid-namespace** | Create namespace | New process inherits namespace | ✓ |
+| **linux-net-namespace** | Create namespace | Connections die with process | ✓ |
+| **landlock** | Create base ruleset, restrict_self | Add tighter ruleset per workload (stackable) | ✓ |
+| **cgroups-v2** | Create cgroup, set base limits | Adjust limits per workload (within base) | ✓ |
+| **appcontainer** | Create SID, set capabilities | N/A (SID is per-process) | Partial (new process in same SID) |
+| **job-object** | Create job, set base limits | Adjust limits per workload | ✓ |
+| **integrity-level** | Set on container token | Inherited by child processes | ✓ |
+| **hyper-v-vm** | Boot VM | New process inside VM | ✓ |
+
+This suggests extending primitive profiles with lifecycle metadata:
+
+```jsonc
+{
+  "primitive": "linux-mount-namespace",
+  // ... existing enforcement fields ...
+
+  "lifecycle": {
+    "setup_cost": "medium",
+    "per_workload_cost": "low",
+    "supports_warm_reuse": true,
+    "per_workload_operations": [
+      "add_bind_mount",
+      "remove_bind_mount",
+      "discard_overlay_upper"
+    ],
+    "reset_mechanism": "overlay-discard",
+    "state_isolation_between_workloads": "full"
+  }
+}
+```
+
+```jsonc
+{
+  "primitive": "seccomp-bpf",
+  // ... existing enforcement fields ...
+
+  "lifecycle": {
+    "setup_cost": "low",
+    "per_workload_cost": "none",
+    "supports_warm_reuse": true,
+    "per_workload_operations": [],
+    // Filter is immutable — same filter applies to all workloads.
+    // This is a feature: the security boundary cannot be weakened
+    // between workloads.
+    "reset_mechanism": null,
+    "state_isolation_between_workloads": "inherent"
+  }
+}
+```
+
+```jsonc
+{
+  "primitive": "hyper-v-vm",
+  // ... existing enforcement fields ...
+
+  "lifecycle": {
+    "setup_cost": "high",
+    "per_workload_cost": "low",
+    "supports_warm_reuse": true,
+    "per_workload_operations": [
+      "mount_workspace",
+      "unmount_workspace",
+      "spawn_process",
+      "adjust_resource_limits"
+    ],
+    "reset_mechanism": "process-termination + filesystem-scrub",
+    "state_isolation_between_workloads": "full"
+  }
+}
+```
+
+### Warm Pools
+
+For latency-sensitive workloads (interactive agent tool invocations), even a
+single warm container may not be enough — the agent might want to invoke multiple
+tools concurrently, or the reset cycle between workloads may be too slow.
+
+A **warm pool** maintains multiple pre-initialized containers ready to accept
+workloads immediately:
+
+```
+  Warm Pool: "python-sandbox" (size: 3, max: 5)
+  ┌─────────────────────────────────────────────┐
+  │                                             │
+  │  Container A:  Ready (idle)                 │
+  │  Container B:  Running workload             │
+  │  Container C:  Resetting (overlay discard)  │
+  │                                             │
+  │  Pool policy:                               │
+  │    min_warm: 2     (always keep 2 ready)    │
+  │    max_total: 5    (never exceed 5)         │
+  │    idle_timeout: 300s  (reclaim after 5min) │
+  │    base_policy: "python-sandbox-base"       │
+  │    backend: "docker-default"                │
+  │                                             │
+  └─────────────────────────────────────────────┘
+```
+
+When a workload arrives:
+
+1. Pick an idle container from the pool
+2. Bind the workload policy (mount workspace, set env)
+3. Execute
+4. Collect result
+5. Reset state
+6. Return container to pool
+
+If no idle containers are available and pool size < max, create a new one (paying
+the setup cost). If pool is at max, queue the workload.
+
+### Relationship to Policy Evaluation
+
+The two-tier policy model (base + workload) affects the compiler pipeline from
+§11. Policy evaluation happens at two points:
+
+```
+  Container creation:
+    evaluate(base_policy, composed_backend) → must be fully enforceable
+
+  Workload binding:
+    evaluate(workload_policy, base_policy)  → workload ⊆ base
+    bind(workload_policy, container)        → mount workspace, set env, etc.
+```
+
+The first evaluation uses the full backend capability profile machinery. The
+second evaluation is simpler — it only checks that the workload policy is a
+subset of the base policy. No new primitives are needed; the base already
+established the security boundary.
+
+### Container Lifetime States
+
+Combining the two lifecycles into a complete state machine:
+
+```
+  ┌───────────┐
+  │  Creating  │ ── image pull, resource allocation, security boundary creation
+  └─────┬─────┘
+        ▼
+  ┌──────────────┐
+  │ Initializing │ ── runtime load, immutable filter install, base policy apply
+  └──────┬───────┘
+         ▼
+  ┌──────────────┐    ┌────────────────────────────────────┐
+  │    Ready     │◄───┤  Resetting (between workloads)     │
+  │  (idle,      │    │  overlay discard, env clear,       │
+  │   waiting)   │    │  process termination               │
+  └──────┬───────┘    └────────────────────────────────────┘
+         │                         ▲
+         │ workload arrives        │ workload completes
+         ▼                         │
+  ┌──────────────┐    ┌────────────┴───────────────────────┐
+  │   Binding    │───►│  Executing                         │
+  │  workload    │    │  (process running, workload active) │
+  │  policy      │    └────────────────────────────────────┘
+  └──────────────┘
+         │
+         │ (idle timeout or explicit teardown)
+         ▼
+  ┌──────────────┐
+  │   Draining   │ ── complete in-flight workload, flush results
+  └──────┬───────┘
+         ▼
+  ┌──────────────┐
+  │   Stopped    │ ── destroy security boundary, release resources
+  └──────────────┘
+```
