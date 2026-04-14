@@ -19,6 +19,7 @@ language compiled to FlatBuffers for efficient runtime consumption.
 - [8. Proposed Cross-Platform JSON Policy Language](#8-proposed-cross-platform-json-policy-language)
 - [9. FlatBuffer Compiled Format](#9-flatbuffer-compiled-format)
 - [10. Policy Layers](#10-policy-layers)
+- [11. Backend Capability Profiles](#11-backend-capability-profiles)
 
 ---
 
@@ -1740,7 +1741,9 @@ actually implement?
 No single container technology covers every policy dimension. In practice, backends
 are composed: BubbleWrap + seccomp + cgroups on Linux, AppContainer + Job Objects +
 Restricted Tokens on Windows. Layer 7 determines which composition is needed and
-whether any policy rules cannot be realized at all.
+whether any policy rules cannot be realized at all. See
+[§11 Backend Capability Profiles](#11-backend-capability-profiles) for the formal
+syntax for describing and composing backend capabilities.
 
 ### The Evaluation Pipeline
 
@@ -1824,3 +1827,800 @@ The compiled FlatBuffer (`.sbxp`) represents the **realized policy** — the out
 of evaluating all layers. It is what the sandbox runtime consumes: a fully resolved,
 concrete, enforceable rule set with no remaining variables, authorities, or
 capability questions.
+
+---
+
+## 11. Backend Capability Profiles
+
+Section 10 introduced Layer 7 (Container Enforcement Capabilities) as one of the
+layers in the policy evaluation pipeline. This section defines the formal syntax for
+describing what sandboxing mechanisms can enforce, how they compose, and how the
+compiler evaluates a declared policy against them.
+
+### Design Principles
+
+1. **Primitives are the fundamental unit** — every sandboxing mechanism (mount
+   namespaces, seccomp, AppContainer, Job Objects, etc.) is described by its own
+   primitive profile. The policy system reasons exclusively at this level.
+
+2. **Shorthands are sugar, not abstraction** — named backends like "docker" or
+   "appcontainer+job" expand to a list of primitives early in the compiler pipeline.
+   Nothing downstream sees shorthands; there is no special-casing for named backends.
+
+3. **Profiles are structurally parallel to the policy schema** — for every field in
+   a policy rule, there is a corresponding field in the backend profile that says
+   whether (and which values of) that field are supported. This makes evaluation a
+   mechanical structural walk.
+
+4. **Machine-evaluable** — the compiler can determine whether a backend can enforce
+   a given policy without human judgment. No free-text fields participate in
+   evaluation; they exist only for documentation.
+
+### Isolation Models
+
+Every enforcement capability has an associated *isolation model* that describes the
+strength of the enforcement. Three models emerge from the cross-platform analysis in
+§§1–5:
+
+| Model | Meaning | Examples |
+|---|---|---|
+| `different-universe` | The resource is *invisible* — the process literally cannot see it | Mount namespaces, PID namespaces, network namespaces |
+| `guarded-doors` | The resource is *visible* but access is intercepted and checked | SELinux type enforcement, Seatbelt profiles, Landlock rules |
+| `reduced-credentials` | The process's *identity* is weakened so existing ACLs deny access | AppContainer SIDs, restricted tokens, integrity levels |
+
+These models are ordered by strength:
+
+```
+different-universe > guarded-doors > reduced-credentials
+```
+
+The model does not affect enforceability (all three enforce the rule), but it affects
+the **assurance level** — what security properties hold if the mechanism is correctly
+configured.
+
+Additionally, syscall-level filtering uses a fourth model:
+
+| Model | Meaning | Examples |
+|---|---|---|
+| `kernel-filter` | An in-kernel program inspects each syscall and decides allow/deny | Seccomp-BPF |
+
+### Primitive Profile Schema
+
+A primitive profile describes what a single sandboxing mechanism can enforce. Its
+structure mirrors the policy schema from §8 field-by-field.
+
+```jsonc
+{
+  // ─── Identity ────────────────────────────────────────────────
+  "primitive": "appcontainer",
+  "description": "Windows AppContainer — deny-by-default process isolation via unique SID",
+  "platform": "windows",           // "linux" | "macos" | "windows"
+
+  // ─── Prerequisites ──────────────────────────────────────────
+  // What the host system must provide for this primitive to function.
+  "prerequisites": {
+    "min_os": "10.0.17763",         // Windows-style version
+    "min_kernel": null,             // Linux kernel version (null = N/A)
+    "kernel_config": [],            // Required CONFIG_* options
+    "runtime": null                 // Required userspace runtime
+  },
+
+  // ─── Mutual Exclusions ──────────────────────────────────────
+  // Primitives that cannot be composed with this one.
+  "exclusive_with": [],
+
+  // ─── Enforcement Capabilities ───────────────────────────────
+  // Each key mirrors a section of the policy schema (§8).
+  // Only dimensions this primitive can enforce are listed.
+  // Absent dimensions are implicitly unsupported.
+  "enforcement": {
+
+    "filesystem": {
+      "supported": true,
+      "model": "reduced-credentials",
+
+      // Mirrors PathScope enum in the policy schema
+      "supported_scopes": ["exact", "subtree"],
+
+      // Mirrors FileOps bit-flags in the policy schema
+      "supported_operations": ["read", "write", "execute", "create", "delete"],
+
+      // Mirrors optional fields on FsRule
+      "supports_ephemeral": false,
+      "supports_mask": true,
+      "supported_synthetic_types": []
+    },
+
+    "network": {
+      "supported": true,
+      "model": "reduced-credentials",
+
+      // Mirrors NetworkMode enum
+      "supported_modes": ["none", "full"],
+      // ↑ "rules" NOT listed — cannot do per-rule network filtering
+
+      // Only meaningful when "rules" is in supported_modes.
+      // Mirrors fields on NetRule.
+      "rule_capabilities": {
+        "direction":         true,
+        "per_port":          false,
+        "port_ranges":       false,
+        "per_host":          false,
+        "per_protocol":      [],
+        "localhost_control": true
+      },
+
+      "supports_allow_dns": false
+    },
+
+    // syscalls: not listed → AppContainer cannot filter syscalls
+
+    "process": {
+      "supported": true,
+      "model": "reduced-credentials",
+      // Each field mirrors a field in the Process table
+      "fork_control":          false,
+      "exec_allowlist":        false,
+      "visibility_isolation":  false,
+      "signal_control":        false,
+      "hostname_control":      false,
+      "die_with_parent":       false
+    },
+
+    "ipc": {
+      "supported": true,
+      "model": "reduced-credentials",
+      "full_isolation": true,
+      "service_rules":  true
+    },
+
+    "devices": {
+      "supported": true,
+      "model": "reduced-credentials",
+      "per_device":           false,  // capability-level, not per-device-path
+      "supported_operations": ["read", "write"]
+    },
+
+    // resources: not listed → AppContainer has no resource limiting
+
+    "environment": {
+      "supported": true,
+      "clean_mode":   true,
+      "inherit_mode": true,
+      "set_vars":     true,
+      "pass_through": true
+    }
+  }
+}
+```
+
+### Example Primitive Profiles
+
+#### Linux: Mount Namespace
+
+```jsonc
+{
+  "primitive": "linux-mount-namespace",
+  "description": "Filesystem isolation via mount namespace — process sees a custom filesystem tree",
+  "platform": "linux",
+  "prerequisites": {
+    "min_kernel": "3.8",
+    "kernel_config": ["CONFIG_NAMESPACES", "CONFIG_USER_NS"]
+  },
+  "exclusive_with": [],
+
+  "enforcement": {
+    "filesystem": {
+      "supported": true,
+      "model": "different-universe",
+      "supported_scopes": ["exact", "subtree"],
+      "supported_operations": ["read", "write", "execute", "create", "delete"],
+      "supports_ephemeral": true,
+      "supports_mask": true,
+      "supported_synthetic_types": ["minimal", "sandboxed", "ephemeral"]
+    }
+  }
+}
+```
+
+#### Linux: Seccomp-BPF
+
+```jsonc
+{
+  "primitive": "seccomp-bpf",
+  "description": "Syscall filtering via in-kernel BPF program",
+  "platform": "linux",
+  "prerequisites": {
+    "min_kernel": "3.17",
+    "kernel_config": ["CONFIG_SECCOMP", "CONFIG_SECCOMP_FILTER"]
+  },
+  "exclusive_with": [],
+
+  "enforcement": {
+    "syscalls": {
+      "supported": true,
+      "model": "kernel-filter",
+      "supported_modes": ["allowlist", "denylist"],
+      "per_argument_filtering": true
+    }
+  }
+}
+```
+
+#### Linux: Network Namespace
+
+```jsonc
+{
+  "primitive": "linux-net-namespace",
+  "description": "Network isolation via network namespace — process gets a separate network stack",
+  "platform": "linux",
+  "prerequisites": {
+    "min_kernel": "2.6.29",
+    "kernel_config": ["CONFIG_NET_NS"]
+  },
+  "exclusive_with": [],
+
+  "enforcement": {
+    "network": {
+      "supported": true,
+      "model": "different-universe",
+      "supported_modes": ["none", "full"],
+      // All-or-nothing: full isolation or shared host network.
+      // Per-port/host rules require composition with iptables.
+      "rule_capabilities": {
+        "direction": false,  "per_port": false,
+        "port_ranges": false, "per_host": false,
+        "per_protocol": [],  "localhost_control": true
+      },
+      "supports_allow_dns": false
+    }
+  }
+}
+```
+
+#### Linux: iptables (composes with net namespace for per-rule filtering)
+
+```jsonc
+{
+  "primitive": "iptables",
+  "description": "Packet filtering via iptables/nftables — per-port/host/protocol network rules",
+  "platform": "linux",
+  "prerequisites": {
+    "runtime": "iptables >= 1.8 or nftables >= 0.9"
+  },
+  "exclusive_with": [],
+
+  "enforcement": {
+    "network": {
+      "supported": true,
+      "model": "guarded-doors",
+      "supported_modes": ["rules"],
+      "rule_capabilities": {
+        "direction":         true,
+        "per_port":          true,
+        "port_ranges":       true,
+        "per_host":          true,
+        "per_protocol":      ["tcp", "udp"],
+        "localhost_control": true
+      },
+      "supports_allow_dns": true,
+
+      // This primitive's enforcement is stronger when composed
+      // with a network namespace (rules apply to an isolated stack
+      // rather than the host stack).
+      "enhanced_by": ["linux-net-namespace"]
+    }
+  }
+}
+```
+
+#### Linux: Landlock
+
+```jsonc
+{
+  "primitive": "landlock",
+  "description": "Process self-restriction for filesystem and network access via Landlock LSM",
+  "platform": "linux",
+  "prerequisites": {
+    "min_kernel": "5.13",
+    "kernel_config": ["CONFIG_SECURITY_LANDLOCK"]
+  },
+  "exclusive_with": [],
+
+  // Landlock capabilities depend on ABI version.
+  // This profile represents ABI v4 (kernel 6.7+).
+  "abi_version": 4,
+
+  "enforcement": {
+    "filesystem": {
+      "supported": true,
+      "model": "guarded-doors",
+      "supported_scopes": ["exact", "subtree"],
+      "supported_operations": ["read", "write", "execute", "create", "delete",
+                                "truncate"],
+      "supports_ephemeral": false,
+      "supports_mask": false,
+      "supported_synthetic_types": []
+    },
+    "network": {
+      "supported": true,
+      "model": "guarded-doors",
+      "supported_modes": ["rules"],
+      "rule_capabilities": {
+        "direction":         true,
+        "per_port":          true,
+        "port_ranges":       false,
+        "per_host":          false,
+        "per_protocol":      ["tcp"],
+        "localhost_control": true
+      },
+      "supports_allow_dns": false
+    }
+  }
+}
+```
+
+#### Linux: SELinux (Targeted Policy)
+
+```jsonc
+{
+  "primitive": "selinux-targeted",
+  "description": "Mandatory access control via SELinux targeted policy — label-based type enforcement",
+  "platform": "linux",
+  "prerequisites": {
+    "min_kernel": "2.6.0",
+    "kernel_config": ["CONFIG_SECURITY_SELINUX"],
+    "runtime": "SELinux in enforcing mode with targeted policy loaded"
+  },
+  "exclusive_with": ["apparmor"],
+
+  "enforcement": {
+    "filesystem": {
+      "supported": true,
+      "model": "guarded-doors",
+      "supported_scopes": ["subtree"],
+      // SELinux operates on types, not paths — "subtree" is the closest
+      // analog since all files with a given type share access rules.
+      "supported_operations": ["read", "write", "execute", "create", "delete",
+                                "metadata", "ioctl"],
+      "supports_ephemeral": false,
+      "supports_mask": false,
+      "supported_synthetic_types": []
+    },
+    "network": {
+      "supported": true,
+      "model": "guarded-doors",
+      "supported_modes": ["rules"],
+      "rule_capabilities": {
+        "direction":         true,
+        "per_port":          true,   // via port type labels
+        "port_ranges":       false,
+        "per_host":          false,  // no host-level granularity
+        "per_protocol":      ["tcp", "udp"],
+        "localhost_control": false
+      },
+      "supports_allow_dns": false
+    },
+    "process": {
+      "supported": true,
+      "model": "guarded-doors",
+      "fork_control":          true,  // domain transitions control exec
+      "exec_allowlist":        true,  // entrypoint rules
+      "visibility_isolation":  false, // no PID namespace
+      "signal_control":        true,  // inter-domain signal rules
+      "hostname_control":      false,
+      "die_with_parent":       false
+    },
+    "ipc": {
+      "supported": true,
+      "model": "guarded-doors",
+      "full_isolation": false,
+      "service_rules":  true   // type enforcement on IPC objects
+    },
+    "devices": {
+      "supported": true,
+      "model": "guarded-doors",
+      "per_device":           true,
+      "supported_operations": ["read", "write", "ioctl"]
+    }
+  }
+}
+```
+
+#### Windows: Job Object
+
+```jsonc
+{
+  "primitive": "job-object",
+  "description": "Windows Job Object — resource limits, process grouping, and termination control",
+  "platform": "windows",
+  "prerequisites": { "min_os": "6.1" },
+  "exclusive_with": [],
+
+  "enforcement": {
+    "process": {
+      "supported": true,
+      "model": "reduced-credentials",
+      "fork_control":          false,
+      "exec_allowlist":        false,
+      "visibility_isolation":  true,
+      "signal_control":        false,
+      "hostname_control":      false,
+      "die_with_parent":       true
+    },
+    "resources": {
+      "supported": true,
+      "memory_limit":        true,
+      "cpu_limit":           true,
+      "process_count_limit": true,
+      "open_files_limit":    false,
+      "wall_time_limit":     true
+    }
+  }
+}
+```
+
+#### Windows: Restricted Token
+
+```jsonc
+{
+  "primitive": "restricted-token",
+  "description": "Windows restricted token — strip SIDs and privileges from process token",
+  "platform": "windows",
+  "prerequisites": { "min_os": "5.1" },
+  "exclusive_with": [],
+
+  "enforcement": {
+    "filesystem": {
+      "supported": true,
+      "model": "reduced-credentials",
+      "supported_scopes": ["exact", "subtree"],
+      "supported_operations": ["read", "write", "execute"],
+      "supports_ephemeral": false,
+      "supports_mask": false,
+      "supported_synthetic_types": []
+    },
+    "ipc": {
+      "supported": true,
+      "model": "reduced-credentials",
+      "full_isolation": false,
+      "service_rules":  false
+    }
+  }
+}
+```
+
+#### Windows: Integrity Level
+
+```jsonc
+{
+  "primitive": "integrity-level",
+  "description": "Windows integrity levels — prevent writes to higher-integrity objects",
+  "platform": "windows",
+  "prerequisites": { "min_os": "6.0" },
+  "exclusive_with": [],
+
+  "enforcement": {
+    "filesystem": {
+      "supported": true,
+      "model": "reduced-credentials",
+      "supported_scopes": ["subtree"],
+      // Only controls write access — low-integrity processes can read
+      // anything DAC allows, but cannot write to medium/high objects.
+      "supported_operations": ["write"],
+      "supports_ephemeral": false,
+      "supports_mask": false,
+      "supported_synthetic_types": []
+    }
+  }
+}
+```
+
+### Composition
+
+No single primitive covers every policy dimension. Real sandboxes are compositions
+of multiple primitives. The policy system composes primitive profiles using
+well-defined merge semantics.
+
+#### Composition Rules
+
+```
+compose(primitives[]) → ComposedProfile:
+
+  1. CONFLICTS    Check exclusive_with — error if any two primitives conflict
+  2. PREREQS      Union of all prerequisites
+  3. PER-DIM      For each policy dimension:
+     a. supported          = OR   across all primitives
+     b. model              = MAX  across supporting primitives
+     c. supported_scopes   = UNION
+     d. supported_ops      = UNION
+     e. boolean fields     = OR   (if any primitive supports it, composition does)
+     f. per_protocol       = UNION
+     g. supported_modes    = UNION
+  4. RESULT       Return composed profile + prerequisite list
+```
+
+The model ordering for the MAX operation:
+
+```
+different-universe > guarded-doors > reduced-credentials
+```
+
+When multiple primitives contribute to the same dimension, the composed model
+reflects the strongest contributor. For example, composing mount namespaces
+(`different-universe`) with Landlock (`guarded-doors`) for filesystem produces a
+composed model of `different-universe` — the namespace isolation is the dominant
+property.
+
+#### Example: Docker Default Composition
+
+```jsonc
+{
+  "backend": "docker-default",
+  "compose": [
+    "linux-mount-namespace",
+    "linux-pid-namespace",
+    "linux-net-namespace",
+    "linux-ipc-namespace",
+    "linux-uts-namespace",
+    "seccomp-bpf",
+    "iptables",
+    "cgroups-v2"
+  ],
+  "description": "Standard Docker container isolation"
+}
+```
+
+The compiler expands this shorthand, loads each primitive profile, checks for
+conflicts, and computes the composed capability profile:
+
+| Dimension | Contributing Primitives | Composed Model | Key Capabilities |
+|---|---|---|---|
+| Filesystem | mount-namespace | different-universe | exact, subtree; read/write/execute/create/delete; ephemeral; mask; synthetics |
+| Network | net-namespace + iptables | different-universe | none/full/rules; per-port; per-host; per-protocol |
+| Syscalls | seccomp-bpf | kernel-filter | allowlist/denylist; per-argument filtering |
+| Process | pid-namespace | different-universe | visibility isolation, die-with-parent |
+| IPC | ipc-namespace | different-universe | full isolation |
+| Resources | cgroups-v2 | — | memory, cpu, process count, open files |
+| Environment | uts-namespace | different-universe | hostname control |
+
+#### Example: Windows AppContainer Composition
+
+```jsonc
+{
+  "backend": "appcontainer-sandbox",
+  "compose": [
+    "appcontainer",
+    "job-object",
+    "integrity-level"
+  ],
+  "description": "AppContainer with Job Object resource limits and low integrity level"
+}
+```
+
+| Dimension | Contributing Primitives | Composed Model | Key Capabilities |
+|---|---|---|---|
+| Filesystem | appcontainer + integrity-level | reduced-credentials | exact, subtree; read/write/execute/create/delete |
+| Network | appcontainer | reduced-credentials | none/full; localhost control |
+| Process | job-object | reduced-credentials | visibility isolation, die-with-parent |
+| IPC | appcontainer | reduced-credentials | full isolation, service rules |
+| Devices | appcontainer | reduced-credentials | read, write |
+| Resources | job-object | — | memory, cpu, process count, wall time |
+
+#### Example: Chromium Renderer on Windows
+
+```jsonc
+{
+  "backend": "chromium-renderer-win",
+  "compose": [
+    "restricted-token",
+    "integrity-level",
+    "job-object",
+    "desktop-isolation"
+  ],
+  "description": "Chromium-style renderer sandbox on Windows"
+}
+```
+
+### The Compiler Pipeline
+
+Shorthands are expanded at the start of the pipeline. Everything downstream sees
+only primitives.
+
+```
+  policy.jsonc + backend ref ("docker-default")
+         │
+         ▼
+  ┌───────────────┐
+  │ Expand         │  "docker-default"
+  │ shorthand      │    → [mount-ns, pid-ns, net-ns, ipc-ns,
+  │                │       uts-ns, seccomp, iptables, cgroups-v2]
+  └───────┬───────┘
+          ▼
+  ┌───────────────┐
+  │ Load           │  Read each primitive profile from the profile library
+  │ primitives     │  Check exclusive_with constraints
+  │                │  Collect union of prerequisites
+  └───────┬───────┘
+          ▼
+  ┌───────────────┐
+  │ Compose        │  Union scopes/ops/modes, MAX model, OR booleans
+  │                │  Produce composed capability profile
+  └───────┬───────┘
+          ▼
+  ┌───────────────┐
+  │ Evaluate       │  Walk policy rules against composed capabilities
+  │ policy         │  For each rule, check every field against the profile
+  └───────┬───────┘
+          ▼
+  ┌───────────────┐
+  │ Result         │  Enforceable / not-enforceable
+  │                │  Per-rule diagnostics
+  │                │  Assurance level per dimension
+  └───────────────┘
+```
+
+### Policy Evaluation Algorithm
+
+The compiler evaluates a declared policy against a composed (or single-primitive)
+backend profile by walking each policy section and checking that every rule field is
+supported.
+
+```
+evaluate(policy, composed_profile) → EvaluationResult:
+
+  failures = []
+
+  // ─── Filesystem ─────────────────────────────────────────────
+  if policy.filesystem has rules:
+    if not composed.enforcement.filesystem.supported:
+      FAIL "Backend does not support filesystem enforcement"
+    for each rule in policy.filesystem.rules:
+      if rule.scope NOT IN composed...supported_scopes:
+        FAIL "Scope '{rule.scope}' not supported"
+      if rule.allowed_ops ⊄ composed...supported_operations:
+        FAIL "Operations {difference} not supported"
+      if rule.ephemeral AND NOT composed...supports_ephemeral:
+        FAIL "Ephemeral mounts not supported"
+
+  if policy.filesystem has masks:
+    if NOT composed...supports_mask:
+      FAIL "Path masking not supported"
+
+  // ─── Network ────────────────────────────────────────────────
+  if policy.network.mode NOT IN composed...supported_modes:
+    FAIL "Network mode '{policy.network.mode}' not supported"
+  if policy.network.mode == "rules":
+    for each rule in policy.network.rules:
+      if rule.port specified AND NOT composed...per_port:
+        FAIL "Per-port network rules not supported"
+      if rule.host != "*" AND NOT composed...per_host:
+        FAIL "Per-host network rules not supported"
+      if rule.protocol NOT IN composed...per_protocol:
+        FAIL "Protocol '{rule.protocol}' filtering not supported"
+
+  // ─── Syscalls ───────────────────────────────────────────────
+  if policy has syscall rules:
+    if not composed.enforcement.syscalls.supported:
+      FAIL "Syscall filtering not supported"
+
+  // ─── Process ────────────────────────────────────────────────
+  if policy.process.visibility == "self"
+     AND NOT composed...visibility_isolation:
+    FAIL "Process visibility isolation not supported"
+  if policy.process.allowed_exec is non-empty
+     AND NOT composed...exec_allowlist:
+    FAIL "Exec allowlisting not supported"
+  // ... same pattern for fork_control, signal_control, etc.
+
+  // ─── IPC ────────────────────────────────────────────────────
+  if policy.ipc.services is non-empty
+     AND NOT composed...service_rules:
+    FAIL "Per-service IPC rules not supported"
+
+  // ─── Resources ──────────────────────────────────────────────
+  if policy.resources.max_wall_time_seconds > 0
+     AND NOT composed...wall_time_limit:
+    FAIL "Wall-time limits not supported"
+  // ... same pattern for each resource field
+
+  return EvaluationResult {
+    enforceable: failures is empty,
+    failures: failures,
+    assurance: { per-dimension model from composed profile }
+  }
+```
+
+### Evaluation Result Format
+
+The compiler produces a structured result:
+
+```jsonc
+{
+  // Overall verdict
+  "enforceable": false,
+
+  // Per-rule failures with actionable diagnostics
+  "failures": [
+    {
+      "dimension": "network",
+      "field": "rule_capabilities.per_host",
+      "rule_index": 2,
+      "reason": "Backend does not support per-host filtering",
+      "policy_value": "api.example.com",
+      "suggestion": "Use host '*' or choose a backend that supports per-host rules"
+    },
+    {
+      "dimension": "resources",
+      "field": "wall_time_limit",
+      "reason": "Backend does not support wall-time limits",
+      "policy_value": 300
+    }
+  ],
+
+  // Assurance level per dimension (for enforceable rules)
+  "assurance": {
+    "filesystem": "different-universe",
+    "network":    "different-universe",
+    "process":    "different-universe",
+    "syscalls":   "kernel-filter",
+    "ipc":        "different-universe",
+    "resources":  null
+  },
+
+  // Prerequisites the host must satisfy
+  "prerequisites": {
+    "min_kernel": "5.13",
+    "kernel_config": ["CONFIG_NAMESPACES", "CONFIG_SECCOMP", "CONFIG_CGROUPS"],
+    "runtime": "containerd >= 1.6"
+  }
+}
+```
+
+### Assurance Requirements
+
+A policy author may optionally require a minimum assurance level per dimension. This
+goes beyond enforceability ("can the rule be applied?") to assurance ("how strongly
+is it enforced?"):
+
+```jsonc
+// In the policy (new optional top-level field)
+"assurance_requirements": {
+  "filesystem": "different-universe",
+  "network":    "different-universe"
+}
+```
+
+The compiler checks: does the composed profile's model for each dimension meet or
+exceed the required level? Using the ordering:
+
+```
+different-universe > guarded-doors > reduced-credentials
+```
+
+For example, a policy requiring `"filesystem": "different-universe"` would pass
+against a Docker backend (mount namespace) but fail against an AppContainer backend
+(reduced-credentials), even though both can enforce filesystem rules.
+
+### Backend Auto-Selection
+
+Given a policy and a library of available primitives, the compiler can search for
+the minimum composition that enforces all rules:
+
+```
+auto_select(policy, available_primitives[]) → Composition:
+
+  Find smallest subset S ⊆ available_primitives such that:
+    1. compose(S) can enforce all rules in policy
+    2. No exclusive_with violations exist within S
+    3. All prerequisites in compose(S) are satisfiable on the target system
+    4. Assurance requirements (if any) are met
+
+  If multiple minimal sets exist, prefer:
+    a. Fewer primitives (simpler composition)
+    b. Stronger assurance models
+    c. Fewer prerequisites
+```
+
+This is a set-cover problem — NP-hard in the general case but tractable in practice
+because the number of available primitives per platform is small (typically 10–15).
