@@ -12,12 +12,13 @@ language compiled to FlatBuffers for efficient runtime consumption.
 - [1. Linux BubbleWrap vs macOS Seatbelt](#1-linux-bubblewrap-vs-macos-seatbelt)
 - [2. Seccomp-BPF Filters](#2-seccomp-bpf-filters)
 - [3. Linux Landlock](#3-linux-landlock)
-- [4. Windows Equivalents](#4-windows-equivalents)
-- [5. Common Policy Dimensions](#5-common-policy-dimensions)
-- [6. macOS Seatbelt Profile Language](#6-macos-seatbelt-profile-language)
-- [7. Proposed Cross-Platform JSON Policy Language](#7-proposed-cross-platform-json-policy-language)
-- [8. FlatBuffer Compiled Format](#8-flatbuffer-compiled-format)
-- [9. Policy Layers](#9-policy-layers)
+- [4. SELinux](#4-selinux)
+- [5. Windows Equivalents](#5-windows-equivalents)
+- [6. Common Policy Dimensions](#6-common-policy-dimensions)
+- [7. macOS Seatbelt Profile Language](#7-macos-seatbelt-profile-language)
+- [8. Proposed Cross-Platform JSON Policy Language](#8-proposed-cross-platform-json-policy-language)
+- [9. FlatBuffer Compiled Format](#9-flatbuffer-compiled-format)
+- [10. Policy Layers](#10-policy-layers)
 
 ---
 
@@ -407,7 +408,221 @@ something risky.
 
 ---
 
-## 4. Windows Equivalents
+## 4. SELinux
+
+### What It Is
+
+Security-Enhanced Linux (SELinux) is a **mandatory access control (MAC) framework**
+built into the Linux kernel as a Linux Security Module (LSM). Originally developed
+by the NSA and released as open source in 2000, it is the most mature and
+comprehensive MAC system on Linux.
+
+Unlike Landlock (self-restriction) or seccomp (syscall filtering), SELinux enforces
+**system-wide policy defined by an administrator**. Every process, file, port, and
+IPC object is assigned a *security label* (called a *security context*), and a
+central policy defines which label-to-label interactions are allowed.
+
+### Where It Fits
+
+```
+  ┌──────────────────────────────────────────────────┐
+  │                  Access Request                    │
+  │         (e.g., open("/etc/shadow", O_RDONLY))      │
+  └──────────────┬───────────────────────────────────┘
+                 │
+                 ▼
+  ┌──────────────────────┐
+  │  DAC (Unix perms)    │  ← owner/group/other, rwx bits
+  │  Must pass           │
+  └──────────┬───────────┘
+             ▼
+  ┌──────────────────────┐
+  │  LSM: SELinux        │  ← admin-defined, system-wide, label-based
+  │  Must pass           │     policy (checks EVERY access)
+  └──────────┬───────────┘
+             ▼
+  ┌──────────────────────┐
+  │  LSM: Landlock       │  ← process-defined, per-process, runtime
+  │  Must pass           │
+  └──────────┬───────────┘
+             ▼
+        Access granted
+```
+
+SELinux checks happen **after** DAC (traditional Unix permissions) and **before**
+Landlock. All must pass.
+
+### Core Concepts
+
+| Concept | Meaning |
+|---|---|
+| **Security context (label)** | A string of the form `user:role:type:level` attached to every object and subject |
+| **Type** | The most important part of the label — most policy rules are written in terms of types |
+| **Type Enforcement (TE)** | The core policy mechanism: rules that say "type A may do operation X on type B" |
+| **Domain** | A type assigned to a *process* (e.g., `httpd_t` for Apache) |
+| **File type** | A type assigned to a *file* (e.g., `httpd_sys_content_t` for web content) |
+| **Role-Based Access Control (RBAC)** | Controls which domains a user/role is allowed to transition into |
+| **Multi-Level Security (MLS)** | Optional sensitivity/category labels for classified environments |
+| **Policy module** | A self-contained unit of policy that can be loaded/unloaded independently |
+
+### The Label System
+
+Everything in SELinux has a security context:
+
+```
+  Process:   system_u:system_r:httpd_t:s0
+  File:      system_u:object_r:httpd_sys_content_t:s0
+  Port:      system_u:object_r:http_port_t:s0
+  Socket:    system_u:object_r:httpd_tmp_t:s0
+                │        │        │         │
+                user     role     type      level (MLS)
+```
+
+Labels are stored as extended attributes (`security.selinux`) on files, and in
+kernel data structures for processes, sockets, and IPC objects.
+
+### Type Enforcement Rules
+
+The policy is expressed as rules allowing specific operations between types:
+
+```
+# Allow Apache to read its content files
+allow httpd_t httpd_sys_content_t:file { read open getattr };
+
+# Allow Apache to listen on HTTP ports
+allow httpd_t http_port_t:tcp_socket { name_bind };
+
+# Allow Apache to connect to database ports
+allow httpd_t postgresql_port_t:tcp_socket { name_connect };
+
+# Allow Apache to execute CGI scripts
+allow httpd_t httpd_sys_script_exec_t:file { execute execute_no_trans };
+
+# Allow Apache to write to its log directory
+allow httpd_t httpd_log_t:file { write create append };
+allow httpd_t httpd_log_t:dir  { search add_name };
+```
+
+Everything not explicitly allowed is **denied by default**.
+
+### Domain Transitions
+
+When a process executes a new binary, SELinux can force a *domain transition* — the
+new process runs in a different (usually more restricted) domain:
+
+```
+# When init_t executes /usr/sbin/httpd (labeled httpd_exec_t),
+# the new process transitions to httpd_t
+type_transition init_t httpd_exec_t:process httpd_t;
+
+# Required supporting rules:
+allow init_t httpd_exec_t:file { execute };       # init can execute the binary
+allow init_t httpd_t:process { transition };       # init can transition to httpd_t
+allow httpd_t httpd_exec_t:file { entrypoint };    # httpd_exec_t is a valid
+                                                    # entrypoint for httpd_t
+```
+
+This is critical for sandboxing: even if an attacker compromises Apache, they are
+confined to `httpd_t`'s permissions — they cannot access files typed for `sshd_t`,
+`mysqld_t`, or `user_home_t`.
+
+### Operating Modes
+
+| Mode | Behavior |
+|---|---|
+| **Enforcing** | Policy is enforced; denied operations are blocked and logged |
+| **Permissive** | Policy is not enforced; violations are logged but allowed (for development/debugging) |
+| **Disabled** | SELinux is completely off |
+
+The mode can be checked and (temporarily) toggled:
+
+```sh
+getenforce            # → Enforcing, Permissive, or Disabled
+setenforce 0          # → switch to Permissive (until reboot)
+setenforce 1          # → switch to Enforcing
+```
+
+### Policy Types
+
+| Policy Type | Use Case |
+|---|---|
+| **Targeted** (default on RHEL/Fedora) | Only specific high-risk daemons are confined; everything else runs as `unconfined_t` |
+| **Strict** | Every process is confined — no unconfined domain |
+| **MLS** | Multi-Level Security for classified environments (government, defense) |
+
+### Practical Workflow
+
+```sh
+# Check a file's security context
+ls -Z /var/www/html/index.html
+# → system_u:object_r:httpd_sys_content_t:s0
+
+# Check a process's security context
+ps -eZ | grep httpd
+# → system_u:system_r:httpd_t:s0   1234  httpd
+
+# Relabel a file to the correct type
+chcon -t httpd_sys_content_t /var/www/html/newfile.html
+
+# Restore default labels from policy
+restorecon -Rv /var/www/html/
+
+# Search for denied operations in the audit log
+ausearch -m avc -ts recent
+
+# Generate a policy module from denials
+audit2allow -a -M mypolicy
+semodule -i mypolicy.pp
+```
+
+### SELinux vs Other Linux Security Mechanisms
+
+| Dimension | SELinux | AppArmor | Landlock | Seccomp-BPF |
+|---|---|---|---|---|
+| **Policy model** | Label-based (types on everything) | Path-based (profiles name files by path) | Path-based (fd-based rules) | Syscall-number-based |
+| **Who defines policy** | System administrator | System administrator | The process itself | The process itself |
+| **Scope** | System-wide, all processes | Per-profile, named processes | Per-process, self-applied | Per-process, self-applied |
+| **What it controls** | Files, network, IPC, processes, devices, capabilities, and more | Files, network, capabilities, some IPC | Files, network (TCP), devices, signals | Which syscalls are allowed |
+| **Granularity** | Fine — per-type, per-operation, per-object-class | Medium — per-path, per-capability | Medium — per-directory-hierarchy | Fine — per-syscall + arg values |
+| **Needs root to configure** | Yes | Yes | No | No |
+| **Stacks with others** | Yes | Mutually exclusive with SELinux on same kernel | Yes | Yes |
+| **Survives exec** | Yes (domain transitions) | Yes (profile follows binary) | Yes (inherited) | Yes (inherited) |
+| **Indirection** | Labels survive rename/move | Path-based — rename can bypass rules | fd-based — survives rename | N/A |
+| **Best for** | System-wide mandatory confinement | Simpler admin-defined confinement | App self-sandboxing (files/net) | App self-sandboxing (syscalls) |
+
+The key architectural difference: SELinux labels are **attached to objects** (via
+xattrs and kernel structures), so policy follows the data even when files are moved
+or renamed. AppArmor matches on **path names**, which is simpler but means a renamed
+file may escape its policy. Landlock and seccomp are **self-restriction** mechanisms
+where the process voluntarily sheds its own power.
+
+### Key Design Principles
+
+1. **Mandatory** — policy is enforced by the kernel, not optional per-process
+2. **Deny-by-default** — everything not explicitly allowed is denied
+3. **Label-based** — policy is decoupled from file paths; labels travel with objects
+4. **Complete mediation** — every kernel access check consults SELinux, not just
+   file opens
+5. **Least privilege** — each domain gets only the permissions it needs
+6. **Composable** — stacks cleanly with DAC, Landlock, seccomp, and other LSMs
+   (since kernel 5.1+ with LSM stacking support)
+
+### Limitations
+
+- **Complexity** — the reference policy has tens of thousands of rules; writing
+  custom policy is notoriously difficult
+- **Admin-only** — unlike Landlock/seccomp, unprivileged processes cannot define
+  their own SELinux policy
+- **Distribution-dependent** — RHEL/Fedora ship with mature policies; Debian/Ubuntu
+  default to AppArmor instead
+- **Labeling overhead** — every file must be correctly labeled; mislabeled files are
+  a common source of access denials
+- **Not self-restriction** — a process cannot voluntarily confine itself further via
+  SELinux (that's what Landlock is for)
+
+---
+
+## 5. Windows Equivalents
 
 Windows does not have a single direct equivalent to BubbleWrap or Seatbelt. Instead,
 it has several complementary mechanisms:
@@ -465,7 +680,7 @@ desktop apps. Aims to close the gap with Linux/macOS app sandboxing for non-Stor
 
 ---
 
-## 5. Common Policy Dimensions
+## 6. Common Policy Dimensions
 
 When you look across all these systems, common policy dimensions emerge. They don't
 all cover every dimension, but they draw from the same well.
@@ -560,12 +775,12 @@ Every sandboxing policy answers the same five questions:
 
 These five questions describe the *shape* of a single policy. But real-world
 sandboxing involves multiple stakeholders, each contributing constraints at
-different layers. See [§9 Policy Layers](#9-policy-layers) for that orthogonal
+different layers. See [§10 Policy Layers](#10-policy-layers) for that orthogonal
 axis.
 
 ---
 
-## 6. macOS Seatbelt Profile Language
+## 7. macOS Seatbelt Profile Language
 
 Profiles are written in an S-expression (Lisp-like) syntax and stored as `.sb` text
 files. Apple ships built-in ones at `/usr/share/sandbox/` (e.g., `sshd.sb`, `mds.sb`,
@@ -722,7 +937,7 @@ sandbox-exec -p '(version 1)(deny default)(allow file-read* (subpath "/tmp"))' /
 
 ---
 
-## 7. Proposed Cross-Platform JSON Policy Language
+## 8. Proposed Cross-Platform JSON Policy Language
 
 ### Design Principles
 
@@ -735,7 +950,7 @@ sandbox-exec -p '(version 1)(deny default)(allow file-read* (subpath "/tmp"))' /
 
 > **Note on policy layers:** This JSON schema primarily represents a *bound
 > deployment policy* — concrete paths, ports, and hosts are specified. In the
-> layered model described in [§9](#9-policy-layers), this corresponds mostly to
+> layered model described in [§10](#10-policy-layers), this corresponds mostly to
 > **Layer 2 (Instance Binding)**, with the platform overrides section touching on
 > **Layer 7 (Container Enforcement Capabilities)**. Abstract resource-type
 > requirements (Layer 1) and authority-based constraints (Layers 3–5) are upstream
@@ -954,7 +1169,7 @@ sandbox-exec -p '(version 1)(deny default)(allow file-read* (subpath "/tmp"))' /
 
 ---
 
-## 8. FlatBuffer Compiled Format
+## 9. FlatBuffer Compiled Format
 
 ### Why FlatBuffers
 
@@ -1312,11 +1527,11 @@ be trusted:
 
 ---
 
-## 9. Policy Layers
+## 10. Policy Layers
 
 The preceding sections describe the *shape* of a sandbox policy — what dimensions
-it covers (§5), what the authoring format looks like (§7), and how it compiles to an
-efficient binary (§8). But they treat policy as a monolithic artifact. In practice,
+it covers (§6), what the authoring format looks like (§8), and how it compiles to an
+efficient binary (§9). But they treat policy as a monolithic artifact. In practice,
 **multiple stakeholders at different layers** contribute to the final effective
 policy. This section introduces that orthogonal axis.
 
@@ -1408,7 +1623,7 @@ becomes "needs to connect to `api.example.com:443`."
 Binding can happen in several ways:
 
 - **Statically** — the developer specifies exact paths/hosts in a policy file (this
-  is what the JSON schema in §7 primarily expresses)
+  is what the JSON schema in §8 primarily expresses)
 - **Via brokered selection** — the user picks a file or folder through a system
   dialog, and that choice becomes the binding (e.g., macOS Powerbox, Android
   `ACTION_OPEN_DOCUMENT`)
@@ -1587,9 +1802,9 @@ The guiding principle is **fail closed** — when in doubt, deny.
 | **User/admin revokes access after compile time** — e.g., user revokes camera permission mid-session | Re-evaluate at access time. The compiled `.sbxp` policy represents a point-in-time snapshot; dynamic consent must be checked at runtime against the live authority. |
 | **Layer contradiction** — code requires network but admin policy forbids all network | Launch denied. The code cannot function within the constraints. Surface a clear diagnostic to the user explaining which layers conflict. |
 
-### How This Relates to the JSON Schema (§7) and Compiled Format (§8)
+### How This Relates to the JSON Schema (§8) and Compiled Format (§9)
 
-The JSON policy schema in §7 is a **bound deployment policy** — it lives primarily
+The JSON policy schema in §8 is a **bound deployment policy** — it lives primarily
 at Layer 2, with concrete paths, ports, and hosts already specified. The platform
 overrides section touches Layer 7 by acknowledging backend-specific knobs.
 
@@ -1598,7 +1813,7 @@ In a fully layered system, additional artifacts would exist upstream:
 | Layer | Artifact |
 |---|---|
 | Layer 1 | **Requirements manifest** — abstract capability declarations (analogous to Android permissions or UWP capabilities) |
-| Layer 2 | **Bound policy** — the current JSON schema (§7), with variables resolved to concrete values |
+| Layer 2 | **Bound policy** — the current JSON schema (§8), with variables resolved to concrete values |
 | Layer 3 | **Consent records** — runtime state tracking user decisions (analogous to macOS TCC database or Android permission grants) |
 | Layer 4 | **Admin policy profiles** — organizational constraints distributed via MDM/GPO (consumed as input to the compiler or enforced at launch) |
 | Layer 5 | **System security baseline** — queried at runtime, not expressed as an artifact |
