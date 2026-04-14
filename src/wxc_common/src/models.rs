@@ -65,12 +65,16 @@ pub struct AgentSessionConfig {
     /// Session size/weight. Default: Small.
     #[serde(rename = "configurationId")]
     pub configuration_id: AgentSessionConfigurationId,
+    /// Path to the isolation proxy executable. Required for StartSessionAsync.
+    #[serde(rename = "proxyPath")]
+    pub proxy_path: String,
 }
 
 impl Default for AgentSessionConfig {
     fn default() -> Self {
         Self {
             configuration_id: AgentSessionConfigurationId::Small,
+            proxy_path: String::new(),
         }
     }
 }

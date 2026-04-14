@@ -17,7 +17,82 @@ use std::fmt::Write;
 use crate::logger::Logger;
 use crate::models::{CodexRequest, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
-use agent_session_bindings::bindings::IsolationSessionClient;
+use agent_session_bindings::bindings::{
+    IsolationSessionClient, IsolationSessionOperationStatus,
+    IsolationSessionProvisionLifetimePolicy, IsolationSessionProvisionOptions,
+    IsolationSessionProvisionStatus, IsolationSessionRegistrationStatus,
+    IsolationSessionWorkerProcessCreateOptions, IsolationSessionWorkerProcessOperationStatus,
+    IsolationSessionWorkerProcessRedirectFlags,
+};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Storage::FileSystem::ReadFile;
+use windows::Win32::System::Com::{
+    CoSetProxyBlanket, EOAC_DYNAMIC_CLOAKING, RPC_C_AUTHN_LEVEL_DEFAULT,
+    RPC_C_IMP_LEVEL_IMPERSONATE,
+};
+use windows_future::AsyncStatus;
+
+// -- Async helpers -----------------------------------------------------------
+
+/// Blocks until an `IAsyncOperation<T>` completes and returns its result.
+fn block_on_async<T: windows_core::RuntimeType>(
+    op: &windows_future::IAsyncOperation<T>,
+) -> Result<T, String> {
+    loop {
+        let status = op
+            .Status()
+            .map_err(|e| format!("IAsyncOperation::Status: {}", e))?;
+        match status {
+            AsyncStatus::Completed => {
+                return op
+                    .GetResults()
+                    .map_err(|e| format!("IAsyncOperation::GetResults: {}", e));
+            }
+            AsyncStatus::Error => {
+                return Err(format!(
+                    "async operation failed with error: {:?}",
+                    op.ErrorCode()
+                ));
+            }
+            AsyncStatus::Canceled => {
+                return Err("async operation was canceled".to_string());
+            }
+            _ => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+/// Blocks until an `IAsyncAction` completes.
+fn block_on_async_action(
+    op: &windows_future::IAsyncAction,
+) -> Result<(), String> {
+    loop {
+        let status = op
+            .Status()
+            .map_err(|e| format!("IAsyncAction::Status: {}", e))?;
+        match status {
+            AsyncStatus::Completed => {
+                return op
+                    .GetResults()
+                    .map_err(|e| format!("IAsyncAction::GetResults: {}", e));
+            }
+            AsyncStatus::Error => {
+                return Err(format!(
+                    "async action failed with error: {:?}",
+                    op.ErrorCode()
+                ));
+            }
+            AsyncStatus::Canceled => {
+                return Err("async action was canceled".to_string());
+            }
+            _ => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
 
 // -- Error messages for unsupported policy fields ----------------------------
 
@@ -107,15 +182,19 @@ pub(crate) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
 
 // -- Service availability check ----------------------------------------------
 
-/// Attempts to activate the IsoEnvBroker Session API factory.
-/// Returns `Ok(())` if the service is available, or `Err(message)` if not.
+/// Activates the IsoEnvBroker Session API factory and sets the COM proxy
+/// blanket for proper impersonation (EOAC_DYNAMIC_CLOAKING).
 ///
-/// This is the first call in `AgentSessionManager::new()` — factored out
-/// for testability.
+/// Returns `Ok(())` if the service is available, or `Err(message)` if not.
+/// This is called once from `AgentSessionManager::new()`.
 pub(crate) fn check_service_available() -> Result<(), String> {
     // Try the lightest possible call: RegisterClient with empty strings.
     // If the WinRT activation factory is not registered (feature disabled),
     // this fails with CLASS_E_CLASSNOTAVAILABLE or similar.
+    //
+    // The first call through the generated bindings activates the factory
+    // and caches it. We then set the proxy blanket on the cached factory
+    // so all subsequent calls use EOAC_DYNAMIC_CLOAKING.
     match IsolationSessionClient::RegisterClient(
         &windows_core::HSTRING::new(),
         &windows_core::HSTRING::new(),
@@ -141,60 +220,313 @@ pub(crate) fn check_service_available() -> Result<(), String> {
     }
 }
 
+/// Sets the COM proxy blanket with EOAC_DYNAMIC_CLOAKING on the
+/// IsolationSessionClient activation factory. This ensures impersonation
+/// works correctly for all subsequent Session API calls.
+///
+/// Must be called after the factory has been activated (i.e., after
+/// `check_service_available`).
+///
+fn configure_proxy_blanket() -> Result<(), String> {
+    // Get the activation factory as IUnknown to set the proxy blanket.
+    let factory: windows_core::IUnknown =
+        windows_core::factory::<IsolationSessionClient, windows_core::IUnknown>()
+            .map_err(|e| format!("Failed to get IsolationSessionClient factory: {}", e))?;
+
+    unsafe {
+        CoSetProxyBlanket(
+            &factory,
+            u32::MAX, // RPC_C_AUTHN_DEFAULT
+            0,        // RPC_C_AUTHZ_DEFAULT
+            None,
+            RPC_C_AUTHN_LEVEL_DEFAULT,
+            RPC_C_IMP_LEVEL_IMPERSONATE,
+            None,
+            EOAC_DYNAMIC_CLOAKING,
+        )
+    }
+    .map_err(|e| format!("CoSetProxyBlanket failed: {}", e))?;
+
+    Ok(())
+}
+
 // -- AgentSessionManager (lifecycle core) ------------------------------------
 
 /// Manages the IsoEnvBroker Session API lifecycle. Methods map 1:1 to the
-/// Session API steps. Currently stubs — real COM calls come in CP7.
+/// Session API steps.
 pub struct AgentSessionManager {
-    // These fields will be populated by register_client/provision_agent_user in CP7.
-    _registration_id: String,
-    _provision_id: String,
+    registration_id: windows_core::HSTRING,
+    provision_id: windows_core::HSTRING,
 }
 
 impl AgentSessionManager {
     /// Activate the WinRT factory and verify the service is available.
     pub fn new() -> Result<Self, String> {
         check_service_available()?;
+        configure_proxy_blanket()?;
         Ok(Self {
-            _registration_id: String::new(),
-            _provision_id: String::new(),
+            registration_id: windows_core::HSTRING::new(),
+            provision_id: windows_core::HSTRING::new(),
         })
     }
 
     /// Step 0: Register as a client with the IsoEnvBroker service.
-    pub fn register_client(&self) -> Result<(), String> {
-        Err("AgentSessionManager::register_client not yet implemented".to_string())
+    pub fn register_client(&self, proxy_path: &str) -> Result<(), String> {
+        let status = IsolationSessionClient::RegisterClient(
+            &self.registration_id,
+            &windows_core::HSTRING::from(proxy_path),
+        )
+        .map_err(|e| format!("RegisterClient failed: {}", e))?;
+
+        match status {
+            IsolationSessionRegistrationStatus::New
+            | IsolationSessionRegistrationStatus::AlreadyRegistered
+            | IsolationSessionRegistrationStatus::Updated => Ok(()),
+            _ => Err(format!(
+                "RegisterClient returned unexpected status: {}",
+                status.0
+            )),
+        }
     }
 
     /// Step 1: Provision an agent user account.
-    pub fn provision_agent_user(&mut self, _destroy_on_exit: bool) -> Result<String, String> {
-        Err("AgentSessionManager::provision_agent_user not yet implemented".to_string())
+    pub fn provision_agent_user(&mut self, destroy_on_exit: bool) -> Result<String, String> {
+        let lifetime = if destroy_on_exit {
+            IsolationSessionProvisionLifetimePolicy::CallerProcess
+        } else {
+            IsolationSessionProvisionLifetimePolicy::Indefinite
+        };
+
+        let options = IsolationSessionProvisionOptions {
+            LifetimePolicy: lifetime,
+        };
+
+        let async_op = IsolationSessionClient::ProvisionAgentUserAsync(
+            &self.registration_id,
+            &self.provision_id,
+            options,
+        )
+        .map_err(|e| format!("ProvisionAgentUserAsync failed: {}", e))?;
+
+        let result =
+            block_on_async(&async_op).map_err(|e| format!("ProvisionAgentUserAsync: {}", e))?;
+
+        let status = result
+            .Status()
+            .map_err(|e| format!("get Status failed: {}", e))?;
+        if status != IsolationSessionProvisionStatus::Succeeded {
+            let ext = result.ExtendedError().unwrap_or_default();
+            return Err(format!(
+                "ProvisionAgentUserAsync status: {} (extended: {:#010x})",
+                status.0, ext.0
+            ));
+        }
+
+        let name = result
+            .AgentUserName()
+            .map_err(|e| format!("get AgentUserName failed: {}", e))?;
+        Ok(name.to_string())
     }
 
     /// Step 2: Start the agent session (log the agent user into a Windows session).
     pub fn start_session(&self) -> Result<(), String> {
-        Err("AgentSessionManager::start_session not yet implemented".to_string())
+        let async_op = IsolationSessionClient::StartSessionAsync(
+            &self.registration_id,
+            &self.provision_id,
+        )
+        .map_err(|e| format!("StartSessionAsync failed: {}", e))?;
+
+        let status =
+            block_on_async(&async_op).map_err(|e| format!("StartSessionAsync: {}", e))?;
+
+        match status {
+            IsolationSessionOperationStatus::Succeeded
+            | IsolationSessionOperationStatus::SessionAlreadyStarted => Ok(()),
+            _ => Err(format!(
+                "StartSessionAsync returned status: {}",
+                status.0
+            )),
+        }
     }
 
     /// Step 3: Create an isolated process and capture its output.
-    pub(crate) fn create_process(&self, _options: &ProcessOptions) -> Result<ProcessResult, String> {
-        Err("AgentSessionManager::create_process not yet implemented".to_string())
+    pub(crate) fn create_process(&self, options: &ProcessOptions) -> Result<ProcessResult, String> {
+        // Build the WinRT create options.
+        let create_opts = IsolationSessionWorkerProcessCreateOptions::new()
+            .map_err(|e| format!("Failed to create WorkerProcessCreateOptions: {}", e))?;
+
+        create_opts
+            .SetRedirectFlags(IsolationSessionWorkerProcessRedirectFlags(
+                options.redirect_flags,
+            ))
+            .map_err(|e| format!("SetRedirectFlags: {}", e))?;
+
+        if options.timeout_ms > 0 {
+            create_opts
+                .SetTimeoutMilliseconds(options.timeout_ms)
+                .map_err(|e| format!("SetTimeoutMilliseconds: {}", e))?;
+        }
+
+        if !options.working_directory.is_empty() {
+            create_opts
+                .SetWorkingDirectory(&windows_core::HSTRING::from(&options.working_directory))
+                .map_err(|e| format!("SetWorkingDirectory: {}", e))?;
+        }
+
+        if !options.env_vars.is_empty() {
+            let names: Vec<windows_core::HSTRING> = options
+                .env_vars
+                .iter()
+                .map(|(k, _)| windows_core::HSTRING::from(k.as_str()))
+                .collect();
+            let values: Vec<windows_core::HSTRING> = options
+                .env_vars
+                .iter()
+                .map(|(_, v)| windows_core::HSTRING::from(v.as_str()))
+                .collect();
+            create_opts
+                .SetEnvironmentVariables(&names, &values)
+                .map_err(|e| format!("SetEnvironmentVariables: {}", e))?;
+        }
+
+        // Launch the process.
+        let async_op = IsolationSessionClient::CreateIsolatedProcessAsync2(
+            &self.registration_id,
+            &self.provision_id,
+            &windows_core::HSTRING::from(&options.process_path),
+            &windows_core::HSTRING::from(&options.arguments),
+            &create_opts,
+        )
+        .map_err(|e| format!("CreateIsolatedProcessAsync2 failed: {}", e))?;
+
+        let result = block_on_async(&async_op)
+            .map_err(|e| format!("CreateIsolatedProcessAsync2: {}", e))?;
+
+        let status = result
+            .Status()
+            .map_err(|e| format!("get process Status failed: {}", e))?;
+        if status != IsolationSessionWorkerProcessOperationStatus::Succeeded {
+            let ext = result.ExtendedError().unwrap_or_default();
+            return Err(format!(
+                "CreateIsolatedProcessAsync2 status: {} (extended: {:#010x})",
+                status.0, ext.0
+            ));
+        }
+
+        let worker = result
+            .Process()
+            .map_err(|e| format!("get Process failed: {}", e))?;
+
+        // Read stdout/stderr via pipe handles.
+        let stdout = {
+            let h = worker
+                .CreateStandardOutputHandle()
+                .map_err(|e| format!("CreateStandardOutputHandle: {}", e))?;
+            if h != 0 {
+                read_pipe_and_close(h)
+            } else {
+                String::new()
+            }
+        };
+
+        let stderr = {
+            let h = worker
+                .CreateStandardErrorHandle()
+                .map_err(|e| format!("CreateStandardErrorHandle: {}", e))?;
+            if h != 0 {
+                read_pipe_and_close(h)
+            } else {
+                String::new()
+            }
+        };
+
+        // Wait for exit and get exit code.
+        let wait_op = worker
+            .WaitForExitAsync()
+            .map_err(|e| format!("WaitForExitAsync: {}", e))?;
+        block_on_async_action(&wait_op)
+            .map_err(|e| format!("WaitForExitAsync: {}", e))?;
+
+        let exit_code = worker
+            .ExitCode()
+            .map_err(|e| format!("get ExitCode: {}", e))?;
+
+        Ok(ProcessResult {
+            exit_code,
+            stdout,
+            stderr,
+        })
     }
 
     /// Step 4: Stop the agent session.
     pub fn stop_session(&self) -> Result<(), String> {
-        Err("AgentSessionManager::stop_session not yet implemented".to_string())
+        let async_op = IsolationSessionClient::StopSessionAsync(
+            &self.registration_id,
+            &self.provision_id,
+        )
+        .map_err(|e| format!("StopSessionAsync failed: {}", e))?;
+
+        let status =
+            block_on_async(&async_op).map_err(|e| format!("StopSessionAsync: {}", e))?;
+
+        match status {
+            IsolationSessionOperationStatus::Succeeded
+            | IsolationSessionOperationStatus::SesssionNotStarted => Ok(()),
+            _ => Err(format!(
+                "StopSessionAsync returned status: {}",
+                status.0
+            )),
+        }
     }
 
     /// Step 5: Deprovision the agent user account.
     pub fn deprovision_agent_user(&self) -> Result<(), String> {
-        Err("AgentSessionManager::deprovision_agent_user not yet implemented".to_string())
+        let async_op = IsolationSessionClient::DeprovisionAgentUserAsync(
+            &self.registration_id,
+            &self.provision_id,
+        )
+        .map_err(|e| format!("DeprovisionAgentUserAsync failed: {}", e))?;
+
+        let status = block_on_async(&async_op)
+            .map_err(|e| format!("DeprovisionAgentUserAsync: {}", e))?;
+
+        match status {
+            IsolationSessionProvisionStatus::Succeeded => Ok(()),
+            _ => Err(format!(
+                "DeprovisionAgentUserAsync returned status: {}",
+                status.0
+            )),
+        }
     }
 
     /// Step 6: Unregister the client.
     pub fn unregister_client(&self) -> Result<(), String> {
-        Err("AgentSessionManager::unregister_client not yet implemented".to_string())
+        let async_op =
+            IsolationSessionClient::UnregisterClientAsync(&self.registration_id)
+                .map_err(|e| format!("UnregisterClientAsync failed: {}", e))?;
+
+        let _status = block_on_async(&async_op)
+            .map_err(|e| format!("UnregisterClientAsync: {}", e))?;
+
+        Ok(())
     }
+}
+
+/// Reads all data from a pipe handle and closes it.
+fn read_pipe_and_close(handle_value: u64) -> String {
+    let handle = HANDLE(handle_value as *mut core::ffi::c_void);
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let mut bytes_read = 0u32;
+        let ok = unsafe { ReadFile(handle, Some(&mut buffer), Some(&mut bytes_read), None) };
+        if ok.is_err() || bytes_read == 0 {
+            break;
+        }
+        output.extend_from_slice(&buffer[..bytes_read as usize]);
+    }
+    unsafe { let _ = CloseHandle(handle); }
+    String::from_utf8_lossy(&output).to_string()
 }
 
 /// Result of a process execution in the agent session.
@@ -234,8 +566,16 @@ impl ScriptRunner for AgentSessionRunner {
             Err(e) => return ScriptResponse::error(&e),
         };
 
+        // Get the proxy path from the experimental agent_session config.
+        let proxy_path = request
+            .experimental
+            .agent_session
+            .as_ref()
+            .map(|cfg| cfg.proxy_path.as_str())
+            .unwrap_or("");
+
         // Full lifecycle: register → provision → start → execute → stop → deprovision → unregister.
-        if let Err(e) = manager.register_client() {
+        if let Err(e) = manager.register_client(proxy_path) {
             return ScriptResponse::error(&format!("register_client failed: {}", e));
         }
 
