@@ -1759,6 +1759,7 @@ dependencies = [
 name = "wxc"
 version = "0.1.0"
 dependencies = [
+ "agent_session_bindings",
  "anyhow",
  "clap",
  "nanvix_binaries",
@@ -1772,6 +1773,7 @@ dependencies = [
 name = "wxc_common"
 version = "0.1.0"
 dependencies = [
+ "agent_session_bindings",
  "base64",
  "flatbuffers",
  "sandbox_spec",
@@ -1784,6 +1786,7 @@ dependencies = [
  "widestring",
  "windows",
  "windows-core",
+ "windows-future",
 ]
 
 [[package]]

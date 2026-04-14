@@ -107,6 +107,15 @@ fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
 }
 
 fn main() {
+    // Initialize COM/WinRT for backends that use WinRT APIs (Agent Session).
+    // COINIT_MULTITHREADED is benign for backends that don't use COM.
+    let _ = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        )
+    };
+
     let cli = Cli::parse();
 
     // Determine config input and whether it's base64
@@ -238,6 +247,12 @@ fn main() {
             Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
         }
         ContainmentBackend::AgentSession => {
+            if !request.experimental_enabled {
+                eprintln!(
+                    "Error: Agent Session is an experimental feature. Use --experimental flag."
+                );
+                process::exit(1);
+            }
             eprintln!("Error: Agent Session backend not yet implemented");
             process::exit(1);
         }

@@ -16,6 +16,7 @@
 #![allow(dead_code)]
 
 use crate::models::{CodexRequest, NetworkPolicy};
+use agent_session_bindings::bindings::IsolationSessionClient;
 
 // -- Error messages for unsupported policy fields ----------------------------
 
@@ -100,6 +101,42 @@ pub(crate) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
         working_directory: request.working_directory.clone(),
         env_vars,
         redirect_flags: REDIRECT_STDOUT | REDIRECT_STDERR,
+    }
+}
+
+// -- Service availability check ----------------------------------------------
+
+/// Attempts to activate the IsoEnvBroker Session API factory.
+/// Returns `Ok(())` if the service is available, or `Err(message)` if not.
+///
+/// This is the first call in `AgentSessionManager::new()` — factored out
+/// for testability.
+pub(crate) fn check_service_available() -> Result<(), String> {
+    // Try the lightest possible call: RegisterClient with empty strings.
+    // If the WinRT activation factory is not registered (feature disabled),
+    // this fails with CLASS_E_CLASSNOTAVAILABLE or similar.
+    match IsolationSessionClient::RegisterClient(
+        &windows_core::HSTRING::new(),
+        &windows_core::HSTRING::new(),
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let code = e.code().0 as u32;
+            // CLASS_E_CLASSNOTAVAILABLE (0x80040111) or REGDB_E_CLASSNOTREG (0x80040154)
+            // indicate the service/feature is not present on this OS build.
+            if code == 0x80040111 || code == 0x80040154 {
+                Err(format!(
+                    "IsoEnvBroker Session API is not available on this OS build (HRESULT: {:#010x}). \
+                     Ensure Feature_IsoBrokerSessionApis is enabled.",
+                    code
+                ))
+            } else {
+                // Other errors (permission denied, cohort check failure, etc.)
+                // mean the service IS present but the call failed for another reason.
+                // That's fine — the service is available.
+                Ok(())
+            }
+        }
     }
 }
 
@@ -287,5 +324,34 @@ mod tests {
         };
         let opts = build_process_options(&request);
         assert_eq!(opts.redirect_flags, REDIRECT_STDOUT | REDIRECT_STDERR);
+    }
+
+    // ====== Service availability test ======
+
+    #[test]
+    fn feature_unavailable_returns_clean_error() {
+        // Initialize COM (required for WinRT activation).
+        let _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            )
+        };
+
+        match check_service_available() {
+            Ok(()) => {
+                // Service IS available on this machine (e.g., a test VM with
+                // the feature enabled). The test is not applicable — skip.
+            }
+            Err(msg) => {
+                // Service is NOT available. Verify the error is clean and
+                // descriptive (not a panic or cryptic COM error).
+                assert!(
+                    msg.contains("not available"),
+                    "Expected descriptive error message, got: {}",
+                    msg
+                );
+            }
+        }
     }
 }
