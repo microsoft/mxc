@@ -254,8 +254,8 @@ pub fn load_request(
 
 // ---------- Cross-field validation ----------
 
-/// Supported schema version (semver). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: (u32, u32) = (0, 4); // 0.4.x
+/// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
+const SUPPORTED_VERSION: &str = ">=0.4, <=0.5";
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
@@ -264,43 +264,35 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
         return Ok(());
     }
 
-    // Strip pre-release suffix (e.g., "0.4.0-alpha" → "0.4.0")
-    let version_core = version.split('-').next().unwrap_or(version);
-    let parts: Vec<&str> = version_core.split('.').collect();
-
-    if parts.len() < 2 {
+    // Parse the version, stripping pre-release suffix for comparison
+    // (e.g., "0.4.0-alpha" is treated as "0.4.0")
+    let parsed = semver::Version::parse(version).map_err(|_| {
         let msg = format!(
-            "Invalid schema version '{}': must be semver (e.g., '0.4.0' or '0.4.0-alpha')",
-            version
-        );
-        logger.log_line(&msg);
-        return Err(WxcError::ConfigParse(msg));
-    }
-
-    let major: u32 = parts[0].parse().map_err(|_| {
-        let msg = format!(
-            "Invalid schema version '{}': major version must be a non-negative integer",
+            "Invalid schema version '{}': must be semver (e.g., 'X.Y.Z' or 'X.Y.Z-alpha')",
             version
         );
         logger.log_line(&msg);
         WxcError::ConfigParse(msg)
     })?;
 
-    let minor: u32 = parts[1].parse().map_err(|_| {
-        let msg = format!(
-            "Invalid schema version '{}': minor version must be a non-negative integer",
-            version
-        );
-        logger.log_line(&msg);
-        WxcError::ConfigParse(msg)
-    })?;
+    let req = semver::VersionReq::parse(SUPPORTED_VERSION).unwrap();
 
-    let (sup_major, sup_minor) = SUPPORTED_VERSION;
-    if major > sup_major || (major == sup_major && minor > sup_minor) {
-        let msg = format!(
-            "Config schema version '{}' is newer than supported (max: {}.{}.x). Upgrade wxc-exec.",
-            version, sup_major, sup_minor
-        );
+    // semver crate treats pre-release as lower precedence, so we compare
+    // against a version without the pre-release label for major.minor check.
+    let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
+    if !req.matches(&comparable) {
+        let min = semver::VersionReq::parse(">=0.4").unwrap();
+        let msg = if !min.matches(&comparable) {
+            format!(
+                "Config schema version '{}' is older than supported (supported: {}). Update your config.",
+                version, SUPPORTED_VERSION
+            )
+        } else {
+            format!(
+                "Config schema version '{}' is newer than supported (supported: {}). Upgrade wxc-exec.",
+                version, SUPPORTED_VERSION
+            )
+        };
         logger.log_line(&msg);
         return Err(WxcError::ConfigParse(msg));
     }
@@ -1234,7 +1226,7 @@ mod tests {
 
     #[test]
     fn schema_version_too_new_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.5.0"}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.6.0"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1244,6 +1236,16 @@ mod tests {
 
     #[test]
     fn schema_version_current_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.5.0-alpha"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "0.5.0-alpha");
+    }
+
+    #[test]
+    fn schema_version_older_accepted() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.4.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -1253,13 +1255,33 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_older_accepted() {
+    fn schema_version_too_old_rejected() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.3.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn full_config_with_0_5_0_alpha_accepted() {
+        let json = r#"{
+            "version": "0.5.0-alpha",
+            "containerId": "test-050",
+            "containment": "appcontainer",
+            "process": { "commandLine": "echo hello", "timeout": 5000 },
+            "filesystem": { "readwritePaths": ["C:\\workspace"] },
+            "network": { "defaultPolicy": "block" }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.3.0-alpha");
+        assert_eq!(req.schema_version, "0.5.0-alpha");
+        assert_eq!(req.container_id, "test-050");
+        assert_eq!(req.script_timeout, 5000);
+        assert_eq!(req.policy.readwrite_paths, vec!["C:\\workspace"]);
     }
 
     #[test]
