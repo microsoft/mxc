@@ -3499,12 +3499,25 @@ When the binder cannot resolve a requirement:
     "rules": [
       { "path": "/usr/bin/python3",    "scope": "exact",   "allow": ["read", "execute"] },
       { "path": "/usr/lib/python3.11", "scope": "subtree", "allow": ["read"] },
-      { "path": "/workspace",          "scope": "subtree", "allow": ["read", "write", "create"] },
+      { "path": "/workspace",          "scope": "subtree", "allow": ["read", "write", "create"],
+                                                            "ephemeral": true },
       { "path": "/input",              "scope": "subtree", "allow": ["read"] },
       { "path": "/tmp",                "scope": "subtree", "allow": ["read", "write", "create",
                                                                       "delete"],
-                                                            "ephemeral": true }
-    ]
+                                                            "ephemeral": true },
+      // Credential mount — tmpfs-backed, never written to disk, read-only to the process.
+      // The orchestrator injects the secret value at bind time.
+      { "path": "/run/secrets/LLM_API_KEY", "scope": "exact", "allow": ["read"],
+                                                               "ephemeral": true }
+    ],
+    // No persistent writable storage exists — /workspace and /tmp are both
+    // ephemeral (overlay upper layer or tmpfs). This is how the intent
+    // constraint "persistent_storage": "forbidden" manifests in the bound
+    // policy: every writable path is ephemeral, and there are no writable
+    // paths without the ephemeral flag.
+    "synthetic": {
+      "/tmp": "ephemeral"
+    }
   },
   "network": {
     "mode": "rules",
@@ -3520,10 +3533,23 @@ When the binder cannot resolve a requirement:
   },
   "environment": {
     "mode": "clean",
-    "set": { "PATH": "/usr/bin", "HOME": "/workspace" }
+    "set": {
+      "PATH": "/usr/bin",
+      "HOME": "/workspace",
+      "LLM_API_KEY_FILE": "/run/secrets/LLM_API_KEY"
+    }
   }
 }
 ```
+
+**How intent constraints map to the bound policy:**
+
+| Intent Constraint | Bound Policy Expression |
+|---|---|
+| `"persistent_storage": "forbidden"` | All writable paths (`/workspace`, `/tmp`) are marked `"ephemeral": true` — backed by overlay or tmpfs, discarded after execution. No writable path without `ephemeral` exists. |
+| `"max_memory_mb": 256` | `resources.max_memory_mb: 256` — direct passthrough |
+| `"max_wall_time_seconds": 60` | `resources.max_wall_time_seconds: 60` — direct passthrough |
+| `credentials[].name: "LLM_API_KEY"` | Filesystem rule for `/run/secrets/LLM_API_KEY` (read-only, ephemeral tmpfs mount) + environment variable `LLM_API_KEY_FILE` pointing to the mount path |
 
 **Layer 2 → FlatBuffer (§9):**
 
