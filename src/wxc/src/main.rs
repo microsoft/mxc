@@ -14,6 +14,7 @@ use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::nanvix_runner::NanVixScriptRunner;
+use wxc_common::agent_session_runner::AgentSessionRunner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 
@@ -253,8 +254,7 @@ fn main() {
                 );
                 process::exit(1);
             }
-            eprintln!("Error: Agent Session backend not yet implemented");
-            process::exit(1);
+            Box::new(AgentSessionRunner::new())
         }
     };
     let run_start = Instant::now();

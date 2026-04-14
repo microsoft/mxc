@@ -12,10 +12,11 @@
 //! - `AgentSessionRunner`: thin `ScriptRunner` impl for v0.1 that calls all lifecycle
 //!   steps per invocation.
 
-// TODO: remove once AgentSessionRunner::run() is implemented (CP6).
-#![allow(dead_code)]
+use std::fmt::Write;
 
-use crate::models::{CodexRequest, NetworkPolicy};
+use crate::logger::Logger;
+use crate::models::{CodexRequest, NetworkPolicy, ScriptResponse};
+use crate::script_runner::ScriptRunner;
 use agent_session_bindings::bindings::IsolationSessionClient;
 
 // -- Error messages for unsupported policy fields ----------------------------
@@ -136,6 +137,147 @@ pub(crate) fn check_service_available() -> Result<(), String> {
                 // That's fine — the service is available.
                 Ok(())
             }
+        }
+    }
+}
+
+// -- AgentSessionManager (lifecycle core) ------------------------------------
+
+/// Manages the IsoEnvBroker Session API lifecycle. Methods map 1:1 to the
+/// Session API steps. Currently stubs — real COM calls come in CP7.
+pub struct AgentSessionManager {
+    // These fields will be populated by register_client/provision_agent_user in CP7.
+    _registration_id: String,
+    _provision_id: String,
+}
+
+impl AgentSessionManager {
+    /// Activate the WinRT factory and verify the service is available.
+    pub fn new() -> Result<Self, String> {
+        check_service_available()?;
+        Ok(Self {
+            _registration_id: String::new(),
+            _provision_id: String::new(),
+        })
+    }
+
+    /// Step 0: Register as a client with the IsoEnvBroker service.
+    pub fn register_client(&self) -> Result<(), String> {
+        Err("AgentSessionManager::register_client not yet implemented".to_string())
+    }
+
+    /// Step 1: Provision an agent user account.
+    pub fn provision_agent_user(&mut self, _destroy_on_exit: bool) -> Result<String, String> {
+        Err("AgentSessionManager::provision_agent_user not yet implemented".to_string())
+    }
+
+    /// Step 2: Start the agent session (log the agent user into a Windows session).
+    pub fn start_session(&self) -> Result<(), String> {
+        Err("AgentSessionManager::start_session not yet implemented".to_string())
+    }
+
+    /// Step 3: Create an isolated process and capture its output.
+    pub(crate) fn create_process(&self, _options: &ProcessOptions) -> Result<ProcessResult, String> {
+        Err("AgentSessionManager::create_process not yet implemented".to_string())
+    }
+
+    /// Step 4: Stop the agent session.
+    pub fn stop_session(&self) -> Result<(), String> {
+        Err("AgentSessionManager::stop_session not yet implemented".to_string())
+    }
+
+    /// Step 5: Deprovision the agent user account.
+    pub fn deprovision_agent_user(&self) -> Result<(), String> {
+        Err("AgentSessionManager::deprovision_agent_user not yet implemented".to_string())
+    }
+
+    /// Step 6: Unregister the client.
+    pub fn unregister_client(&self) -> Result<(), String> {
+        Err("AgentSessionManager::unregister_client not yet implemented".to_string())
+    }
+}
+
+/// Result of a process execution in the agent session.
+pub struct ProcessResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+// -- AgentSessionRunner (ScriptRunner impl) ----------------------------------
+
+/// Thin `ScriptRunner` wrapper that performs the full agent session lifecycle
+/// per invocation. For v0.1, each `run()` call does:
+/// register → provision → start → execute → stop → deprovision → unregister.
+pub struct AgentSessionRunner;
+
+impl AgentSessionRunner {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ScriptRunner for AgentSessionRunner {
+    fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+        // Validate unsupported policy fields.
+        if let Err(msg) = validate_policy(request) {
+            return ScriptResponse::error(&msg);
+        }
+
+        let options = build_process_options(request);
+        let _ = writeln!(logger, "Agent Session: process={}", options.process_path);
+        let _ = writeln!(logger, "Agent Session: arguments={}", options.arguments);
+
+        // Create the session manager (activates the WinRT factory).
+        let mut manager = match AgentSessionManager::new() {
+            Ok(m) => m,
+            Err(e) => return ScriptResponse::error(&e),
+        };
+
+        // Full lifecycle: register → provision → start → execute → stop → deprovision → unregister.
+        if let Err(e) = manager.register_client() {
+            return ScriptResponse::error(&format!("register_client failed: {}", e));
+        }
+
+        let destroy_on_exit = request.lifecycle.destroy_on_exit;
+        match manager.provision_agent_user(destroy_on_exit) {
+            Ok(agent_name) => {
+                let _ = writeln!(logger, "Agent Session: agent user = {}", agent_name);
+            }
+            Err(e) => return ScriptResponse::error(&format!("provision_agent_user failed: {}", e)),
+        }
+
+        if let Err(e) = manager.start_session() {
+            return ScriptResponse::error(&format!("start_session failed: {}", e));
+        }
+
+        let result = match manager.create_process(&options) {
+            Ok(r) => r,
+            Err(e) => {
+                // Attempt cleanup even on failure.
+                let _ = manager.stop_session();
+                let _ = manager.deprovision_agent_user();
+                let _ = manager.unregister_client();
+                return ScriptResponse::error(&format!("create_process failed: {}", e));
+            }
+        };
+
+        // Cleanup: stop → deprovision → unregister.
+        if let Err(e) = manager.stop_session() {
+            let _ = writeln!(logger, "Warning: stop_session failed: {}", e);
+        }
+        if let Err(e) = manager.deprovision_agent_user() {
+            let _ = writeln!(logger, "Warning: deprovision_agent_user failed: {}", e);
+        }
+        if let Err(e) = manager.unregister_client() {
+            let _ = writeln!(logger, "Warning: unregister_client failed: {}", e);
+        }
+
+        ScriptResponse {
+            exit_code: result.exit_code,
+            standard_out: result.stdout,
+            standard_err: result.stderr.clone(),
+            error_message: result.stderr,
         }
     }
 }
