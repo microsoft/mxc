@@ -10,9 +10,9 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
-    LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress,
-    ProxyConfig, TestFeatureConfig, WindowsSandboxConfig,
+    ClipboardPolicy, CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend,
+    ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
+    PortMapping, ProxyAddress, ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -25,6 +25,18 @@ struct RawAppContainer {
     #[serde(rename = "learningMode")]
     learning_mode: Option<bool>,
     capabilities: Option<Vec<String>>,
+    ui: Option<RawBaseProcessUi>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawBaseProcessUi {
+    isolation: Option<String>,
+    #[serde(rename = "desktopSystemControl")]
+    desktop_system_control: Option<bool>,
+    #[serde(rename = "systemSettings")]
+    system_settings: Option<String>,
+    ime: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -132,6 +144,14 @@ struct RawExperimental {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawUi {
+    disable: Option<bool>,
+    clipboard: Option<String>,
+    injection: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawConfig {
     version: Option<String>,
     #[serde(rename = "containerId")]
@@ -146,6 +166,7 @@ struct RawConfig {
     lxc: Option<RawLxc>,
     filesystem: Option<RawFilesystem>,
     network: Option<RawNetwork>,
+    ui: Option<RawUi>,
     experimental: Option<RawExperimental>,
 }
 
@@ -154,14 +175,15 @@ struct RawConfig {
 /// Parse the `proxy` field.
 ///
 /// Accepts either `{ "localhost": <port> }` for an external localhost proxy,
-/// or `{ "builtinTestServer": true }` to have wxc launch its own test proxy.
+/// `{ "builtinTestServer": true }` to have wxc launch its own test proxy,
+/// or `{ "url": "<url>" }` for a proxy URL (parsed into host:port).
 /// When `builtinTestServer` is set it must be the only key in the object.
 fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError> {
     let obj = value
         .as_object()
         .ok_or_else(|| WxcError::ConfigParse("network.proxy must be an object".to_string()))?;
 
-    let mut proxy_addr = ProxyAddress::new("127.0.0.1".to_string(), 0, true);
+    let mut proxy_addr = ProxyAddress::new("127.0.0.1".to_string(), 0);
 
     if let Some(builtin_value) = obj.get("builtinTestServer") {
         if builtin_value.as_bool() != Some(true) {
@@ -204,8 +226,33 @@ fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError
         });
     }
 
+    if let Some(url_value) = obj.get("url") {
+        let url_str = url_value.as_str().ok_or_else(|| {
+            WxcError::ConfigParse("network.proxy.url must be a string".to_string())
+        })?;
+
+        let parsed = url::Url::parse(url_str)
+            .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
+
+        let host = parsed.host_str().ok_or_else(|| {
+            WxcError::ConfigParse(format!(
+                "network.proxy.url must include a host (e.g., http://localhost:8080), got: {url_str}"
+            ))
+        })?.to_string();
+        let port = parsed.port().ok_or_else(|| {
+            WxcError::ConfigParse(format!(
+                "network.proxy.url must include a port (e.g., http://localhost:8080), got: {url_str}"
+            ))
+        })?;
+
+        return Ok(ProxyConfig {
+            address: Some(ProxyAddress::from_url(url_str, host, port)),
+            builtin_test_server: false,
+        });
+    }
+
     Err(WxcError::ConfigParse(
-        "network.proxy must specify either builtinTestServer or localhost".to_string(),
+        "network.proxy must specify builtinTestServer, localhost, or url".to_string(),
     ))
 }
 
@@ -399,6 +446,17 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
                 }
             });
         }
+
+        // BaseProcessContainer-specific UI config
+        if let Some(raw_ui) = ac.ui {
+            policy.base_process_ui.isolation =
+                raw_ui.isolation.unwrap_or_else(|| "container".to_string());
+            policy.base_process_ui.desktop_system_control =
+                raw_ui.desktop_system_control.unwrap_or(false);
+            policy.base_process_ui.system_settings =
+                raw_ui.system_settings.unwrap_or_else(|| "none".to_string());
+            policy.base_process_ui.ime = raw_ui.ime.unwrap_or(false);
+        }
     }
 
     // Filesystem section
@@ -528,6 +586,21 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     } else {
         ExperimentalConfig::default()
     };
+
+    // UI section
+    if let Some(raw_ui) = raw.ui {
+        let clipboard = match raw_ui.clipboard.as_deref() {
+            Some("read") => ClipboardPolicy::Read,
+            Some("write") => ClipboardPolicy::Write,
+            Some("all") => ClipboardPolicy::All,
+            _ => ClipboardPolicy::None,
+        };
+        policy.ui = UiPolicy {
+            disable: raw_ui.disable.unwrap_or(true),
+            clipboard,
+            injection: raw_ui.injection.unwrap_or(false),
+        };
+    }
 
     Ok(CodexRequest {
         schema_version,
@@ -1027,6 +1100,69 @@ mod tests {
     }
 
     #[test]
+    fn proxy_url_parsed() {
+        let json = r#"{
+            "process": {"commandLine": "echo test"},
+            "network": {
+                "proxy": { "url": "http://localhost:3128" }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.port(), 3128);
+        assert_eq!(addr.host(), "localhost");
+    }
+
+    #[test]
+    fn proxy_url_non_localhost() {
+        let json = r#"{
+            "process": {"commandLine": "echo test"},
+            "network": {
+                "proxy": { "url": "http://proxy.example.com:8080" }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.port(), 8080);
+        assert_eq!(addr.host(), "proxy.example.com");
+    }
+
+    #[test]
+    fn proxy_url_missing_port() {
+        let json =
+            r#"{"process":{"commandLine":"x"},"network":{"proxy":{"url":"http://localhost"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_url_ipv6_loopback() {
+        let json = r#"{
+            "process": {"commandLine": "echo test"},
+            "network": {
+                "proxy": { "url": "http://[::1]:8080" }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.port(), 8080);
+        assert_eq!(addr.host(), "[::1]");
+    }
+
+    #[test]
     fn proxy_with_firewall_fields() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
@@ -1466,5 +1602,39 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         let test = req.experimental.test.unwrap();
         assert!(test.message.is_empty());
+    }
+
+    #[test]
+    fn ui_section_parsed() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "ui": {"disable": false, "clipboard": "read", "injection": true}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.ui.disable);
+        assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::Read);
+        assert!(req.policy.ui.injection);
+    }
+
+    #[test]
+    fn ui_section_defaults_when_omitted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.ui.disable); // default-deny: UI disabled
+        assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::None);
+        assert!(!req.policy.ui.injection);
+    }
+
+    #[test]
+    fn ui_clipboard_all_parsed() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "ui": {"clipboard": "all"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::All);
     }
 }

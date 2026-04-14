@@ -1,0 +1,11 @@
+{
+  "version": "0.4.0-alpha",
+  "containerId": "UI-Test-08",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "cmd.exe /c echo PASS: isolation desktop mode active",
+    "timeout": 15000
+  },
+  "appContainer": { "capabilities": [], "ui": { "isolation": "desktop", "desktopSystemControl": false, "systemSettings": "none", "ime": false } },
+  "ui": { "disable": false, "clipboard": "none", "injection": false }
+}
