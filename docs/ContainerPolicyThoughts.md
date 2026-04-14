@@ -19,6 +19,7 @@ language compiled to FlatBuffers for efficient runtime consumption.
 - [8. FlatBuffer Compiled Format](#8-flatbuffer-compiled-format)
 - [9. Authoring Format: Why JSONC over YAML](#9-authoring-format-why-jsonc-over-yaml)
 - [10. JSONC Parser Landscape](#10-jsonc-parser-landscape)
+- [11. Policy Layers](#11-policy-layers)
 
 ---
 
@@ -559,6 +560,11 @@ Every sandboxing policy answers the same five questions:
 5. CAN IT BE UNDONE?   No. (Always no.)
 ```
 
+These five questions describe the *shape* of a single policy. But real-world
+sandboxing involves multiple stakeholders, each contributing constraints at
+different layers. See [§11 Policy Layers](#11-policy-layers) for that orthogonal
+axis.
+
 ---
 
 ## 6. macOS Seatbelt Profile Language
@@ -728,6 +734,14 @@ sandbox-exec -p '(version 1)(deny default)(allow file-read* (subpath "/tmp"))' /
 3. **Platform-specific escape hatches** — because real-world policies will need them
 4. **Graduated granularity** — simple things should be simple; complex things should
    be possible
+
+> **Note on policy layers:** This JSON schema primarily represents a *bound
+> deployment policy* — concrete paths, ports, and hosts are specified. In the
+> layered model described in [§11](#11-policy-layers), this corresponds mostly to
+> **Layer 2 (Instance Binding)**, with the platform overrides section touching on
+> **Layer 7 (Container Enforcement Capabilities)**. Abstract resource-type
+> requirements (Layer 1) and authority-based constraints (Layers 3–5) are upstream
+> of this format.
 
 ### Example Policy
 
@@ -1441,3 +1455,303 @@ the compiler's implementation language:
 | C# | `System.Text.Json` with `ReadCommentHandling.Skip` |
 | Python | `commentjson` |
 | TypeScript | Microsoft `jsonc-parser` |
+
+---
+
+## 11. Policy Layers
+
+The preceding sections describe the *shape* of a sandbox policy — what dimensions
+it covers (§5), what the authoring format looks like (§7), and how it compiles to an
+efficient binary (§8). But they treat policy as a monolithic artifact. In practice,
+**multiple stakeholders at different layers** contribute to the final effective
+policy. This section introduces that orthogonal axis.
+
+### The Seven Layers
+
+```
+                         POLICY INPUTS                    REALIZATION
+                   (what is wanted/allowed)            (what can be delivered)
+              ┌───────────────────────────────┐   ┌──────────────────────────┐
+              │                               │   │                          │
+  Layer 1     │  Code Requirements            │   │                          │
+              │  (resource types)             │   │                          │
+              │         │                     │   │                          │
+  Layer 2     │  Instance Binding             │   │                          │
+              │  (concrete resources)         │   │                          │
+              │         │                     │   │                          │
+  Layer 3     │  User Consent                 │   │                          │
+              │  (what the user allows)       │   │                          │
+              │         │                     │   │                          │
+  Layer 4     │  IT Admin Policy              │   │                          │
+              │  (organizational constraints) │   │                          │
+              │         │                     │   │                          │
+  Layer 5     │  System Policy                │   │                          │
+              │  (OS-level constraints)       │   │                          │
+              │         │                     │   │                          │
+              └─────────┼─────────────────────┘   │                          │
+                        │                         │                          │
+                        ▼                         │                          │
+               Declared/Authorized Policy ───────►│                          │
+                                                  │                          │
+  Layer 6     │                                   │  System Security Promises│
+              │                                   │  (what guarantees hold)  │
+              │                                   │                          │
+  Layer 7     │                                   │  Container Enforcement   │
+              │                                   │  Capabilities            │
+              │                                   │  (what can be enforced)  │
+              │                                   │                          │
+              │                                   └──────────┬───────────────┘
+              │                                              │
+              │                                              ▼
+              │                                    Realized Policy
+              │                                    + Assurance Level
+              └──────────────────────────────────────────────┘
+```
+
+There is a fundamental split between **Layers 1–5** and **Layers 6–7**:
+
+- **Layers 1–5 are normative** — they express what is wanted, consented to, or
+  forbidden. The effective declared policy is the intersection: each layer can only
+  further restrict, never broaden.
+
+- **Layers 6–7 are descriptive** — they express what the system can actually deliver.
+  They do not add permissions or restrictions; they determine whether the declared
+  policy can be faithfully enforced, and with what level of assurance.
+
+### Layer 1: Code Requirements (Resource Types)
+
+What *types* of resources does the code need? This is the most abstract layer — a
+declaration of capabilities the code expects, without specifying concrete instances.
+
+| Example Requirement | What It Means |
+|---|---|
+| "needs filesystem" | The code reads or writes files |
+| "needs network" | The code makes or accepts connections |
+| "needs GPU" | The code uses hardware-accelerated compute |
+| "needs IPC" | The code communicates with other processes |
+| "needs camera" | The code captures video input |
+
+This layer is analogous to Android's `<uses-permission>` declarations, macOS
+entitlements (`com.apple.security.network.client`), or UWP capability declarations
+in `Package.appxmanifest`.
+
+The key property: **Layer 1 does not name specific files, hosts, or devices.** It
+describes the *kinds* of access, not the *instances*.
+
+### Layer 2: Instance Binding (Concrete Resources)
+
+Where abstract requirements meet concrete resources. This is where "needs
+filesystem" becomes "needs read access to `/data/input.csv`" and "needs network"
+becomes "needs to connect to `api.example.com:443`."
+
+| Abstract (Layer 1) | Bound (Layer 2) |
+|---|---|
+| Filesystem access | `/usr/lib` (read), `${WORK_DIR}` (read/write) |
+| Network access | Outbound TCP to `*:443`, DNS on UDP `*:53` |
+| IPC access | Mach lookup `com.apple.system.logger` |
+| Device access | `/dev/dri/renderD128` (GPU) |
+
+Binding can happen in several ways:
+
+- **Statically** — the developer specifies exact paths/hosts in a policy file (this
+  is what the JSON schema in §7 primarily expresses)
+- **Via brokered selection** — the user picks a file or folder through a system
+  dialog, and that choice becomes the binding (e.g., macOS Powerbox, Android
+  `ACTION_OPEN_DOCUMENT`)
+- **Via convention** — the runtime maps abstract requirements to well-known paths
+  (e.g., XDG directories, `%APPDATA%`)
+
+> **Note:** Binding and user consent (Layer 3) are often interleaved in practice.
+> When a user picks a file via a system open-dialog, they are simultaneously
+> binding a concrete resource *and* consenting to its use. The layered model is
+> conceptual, not a strict temporal sequence.
+
+### Layer 3: User Consent (What the User Allows)
+
+The human running the code decides what access they are comfortable granting. This
+layer is the user's opportunity to narrow the policy beyond what the code requests.
+
+| Platform | Consent Mechanism |
+|---|---|
+| **macOS** | TCC dialogs ("App X wants to access your Documents"), Powerbox file picker |
+| **Android** | Runtime permission prompts (camera, location, contacts) |
+| **iOS** | Runtime permission prompts + App Tracking Transparency |
+| **Windows** | UAC prompts, broker-mediated file pickers, privacy settings |
+| **Linux** | XDG portals (file chooser, screen capture), Flatpak permission prompts |
+| **Web** | `navigator.permissions`, `<input type="file">`, getUserMedia prompts |
+
+Key properties:
+
+- The user can **deny** a Layer 1 requirement — the code says "I need camera" but
+  the user says no. The sandbox must handle this gracefully (deny access, not crash).
+- Consent may be **revocable** — the user can change their mind later (unlike sandbox
+  restrictions, which are monotonically shrinking within a session).
+- Consent may be **granular** — "yes to this specific folder, no to the rest of
+  filesystem."
+
+### Layer 4: IT Admin Policy (Organizational Constraints)
+
+Enterprise and organizational policy that constrains what is allowed regardless of
+what the code requests or the user consents to. Defined by **organizational
+authority** — the IT administrator, fleet operator, or MDM profile.
+
+| Platform | Admin Policy Mechanism |
+|---|---|
+| **Windows** | Group Policy (GPO), Intune/MDM, WDAC, AppLocker |
+| **macOS** | MDM profiles (e.g., Jamf), managed TCC overrides, managed App restrictions |
+| **Linux** | Centralized SELinux/AppArmor policy distribution, fleet management tools |
+| **ChromeOS** | Google Admin Console policies |
+
+Examples:
+
+- "No application may access external network endpoints outside `*.corp.example.com`"
+- "Code execution from USB drives is forbidden"
+- "Only signed executables may run"
+
+> **Relationship to Layer 5:** IT admin policy is distinguished from system policy
+> by **who sets it**, not by the enforcement mechanism. An admin may express a
+> constraint through GPO, which is then enforced by WDAC (a system-level mechanism).
+> Layer 4 is the *authority*; Layer 5 is often the *enforcement substrate*.
+
+### Layer 5: System Policy (OS-Level Constraints)
+
+Constraints enforced by the operating system or platform itself, independent of any
+specific application, user, or administrator. These are the platform's own security
+invariants.
+
+| Platform | System Policy Examples |
+|---|---|
+| **macOS** | System Integrity Protection (SIP), Gatekeeper, hardened runtime requirements |
+| **Windows** | Protected Process Light (PPL), kernel-mode code signing (KMCS), Secure Boot |
+| **Linux** | SELinux/AppArmor in enforcing mode (base policy), Secure Boot + IMA, kernel lockdown |
+| **All** | Address space layout randomization (ASLR), W^X enforcement, stack protections |
+
+Key properties:
+
+- System policy applies **universally** — even a root/admin user cannot bypass SIP on
+  macOS without rebooting into recovery mode.
+- It represents the platform's **own security invariants**, not delegated authority.
+- It is the **floor** — nothing below this layer (including admin policy) can
+  weaken it.
+
+### Layer 6: System Security Promises (What Guarantees Hold)
+
+This layer shifts from *intent* to *capability*. What security guarantees can the
+system actually deliver given its current configuration and kernel version?
+
+| Question | Example |
+|---|---|
+| Is kernel Landlock available? | If no: cannot enforce per-file access rules via Landlock; must fall back to mount-based isolation or fail |
+| What Landlock ABI version? | ABI < 4: no network port rules; ABI < 6: no Unix socket or signal scoping |
+| Does the kernel support user namespaces? | If no: BubbleWrap cannot run unprivileged |
+| Is Secure Boot enabled? | If no: kernel integrity chain is unverified |
+| Is the hypervisor present? | If no: VM-based isolation (Windows Sandbox, Hyper-V containers) is unavailable |
+| Is TCC database intact? | If compromised: user consent records may be untrustworthy |
+
+This layer determines the **assurance level** of the realized policy. A policy may
+be *declared* but only *partially enforceable* on a given system. The sandbox
+runtime must decide how to handle the gap (see [Failure Modes](#failure-modes)
+below).
+
+### Layer 7: Container Enforcement Capabilities (What Can Be Enforced)
+
+Given a specific container technology, what subset of the declared policy can it
+actually implement?
+
+| Declared Policy | BubbleWrap | Seatbelt | Landlock + seccomp | AppContainer |
+|---|---|---|---|---|
+| File read/write rules | ✓ (bind mounts) | ✓ (profile rules) | ✓ (path rules) | ✓ (ACLs on SID) |
+| Per-port network rules | ✗ (all-or-nothing) | ✓ | ✓ (ABI ≥ 4) | ✓ (capabilities) |
+| Syscall filtering | ✗ (needs seccomp) | ✓ (built-in) | ✗ (needs seccomp) | ✗ |
+| Resource limits (CPU/mem) | ✗ (needs cgroups) | ✗ | ✗ (needs cgroups) | ✓ (Job Objects) |
+| Process visibility | ✓ (PID namespace) | ✗ | ✗ | Partial (Job Objects) |
+| IPC isolation | ✓ (IPC namespace) | ✓ (Mach port rules) | Partial (ABI ≥ 6) | ✓ (capability-based) |
+| Device access control | ✓ (bind mounts) | ✓ (IOKit rules) | ✓ (ABI ≥ 5) | ✓ (capabilities) |
+
+No single container technology covers every policy dimension. In practice, backends
+are composed: BubbleWrap + seccomp + cgroups on Linux, AppContainer + Job Objects +
+Restricted Tokens on Windows. Layer 7 determines which composition is needed and
+whether any policy rules cannot be realized at all.
+
+### The Evaluation Pipeline
+
+The effective realized policy is computed as follows:
+
+```
+  Layer 1  ─── Code Requirements ──────────────────────┐
+                                                        │
+  Layer 2  ─── Instance Binding ───────────────────┐    │  Normalize each
+                                                   │    │  layer to a common
+  Layer 3  ─── User Consent ──────────────────┐    │    │  policy model
+                                              │    │    │
+  Layer 4  ─── IT Admin Policy ──────────┐    │    │    │
+                                         │    │    │    │
+  Layer 5  ─── System Policy ───────┐    │    │    │    │
+                                    ▼    ▼    ▼    ▼    ▼
+                              ┌─────────────────────────────┐
+                              │  Intersection (greatest      │
+                              │  lower bound of all          │
+                              │  normative inputs)           │
+                              └──────────┬──────────────────┘
+                                         │
+                                   Declared Policy
+                                         │
+                              ┌──────────▼──────────────────┐
+  Layer 6  ─── Security ─────►│  Can the system deliver     │
+               Promises       │  these guarantees?          │
+                              └──────────┬──────────────────┘
+                                         │
+                              ┌──────────▼──────────────────┐
+  Layer 7  ─── Container ────►│  Can the chosen backend     │
+               Capabilities   │  enforce these rules?       │
+                              └──────────┬──────────────────┘
+                                         │
+                                         ▼
+                              ┌─────────────────────────────┐
+                              │  Realized Policy             │
+                              │  + Assurance Level           │
+                              │  + Unenforceable Rule Set    │
+                              └─────────────────────────────┘
+```
+
+The intersection of Layers 1–5 requires **normalization to a common semantic
+model**. These layers do not all speak the same language — Layer 1 deals in resource
+classes, Layer 2 in concrete instances, Layer 3 in consented grants, Layer 5 in
+OS-native controls. If a layer's constraints cannot be translated into the common
+model, evaluation must **fail closed** — deny rather than ignore.
+
+### Failure Modes
+
+When layers disagree or enforcement gaps exist, the system must choose a response.
+The guiding principle is **fail closed** — when in doubt, deny.
+
+| Situation | Response |
+|---|---|
+| **Empty intersection** — no access satisfies all layers | Launch denied. The code's requirements cannot be met within the constraints. |
+| **Backend cannot enforce a rule** — e.g., BubbleWrap cannot do per-port network filtering | Either reject the launch, compose an additional backend that can (BubbleWrap + iptables), or degrade with an explicit reduction in assurance level. Never silently skip the rule. |
+| **System cannot provide promised isolation** — e.g., Landlock unavailable on kernel < 5.13 | Fail closed (refuse to launch) or fall back to a weaker mechanism with a clear assurance downgrade. |
+| **User/admin revokes access after compile time** — e.g., user revokes camera permission mid-session | Re-evaluate at access time. The compiled `.sbxp` policy represents a point-in-time snapshot; dynamic consent must be checked at runtime against the live authority. |
+| **Layer contradiction** — code requires network but admin policy forbids all network | Launch denied. The code cannot function within the constraints. Surface a clear diagnostic to the user explaining which layers conflict. |
+
+### How This Relates to the JSON Schema (§7) and Compiled Format (§8)
+
+The JSON policy schema in §7 is a **bound deployment policy** — it lives primarily
+at Layer 2, with concrete paths, ports, and hosts already specified. The platform
+overrides section touches Layer 7 by acknowledging backend-specific knobs.
+
+In a fully layered system, additional artifacts would exist upstream:
+
+| Layer | Artifact |
+|---|---|
+| Layer 1 | **Requirements manifest** — abstract capability declarations (analogous to Android permissions or UWP capabilities) |
+| Layer 2 | **Bound policy** — the current JSON schema (§7), with variables resolved to concrete values |
+| Layer 3 | **Consent records** — runtime state tracking user decisions (analogous to macOS TCC database or Android permission grants) |
+| Layer 4 | **Admin policy profiles** — organizational constraints distributed via MDM/GPO (consumed as input to the compiler or enforced at launch) |
+| Layer 5 | **System security baseline** — queried at runtime, not expressed as an artifact |
+| Layer 6 | **Capability probe results** — what the system reports it can do (kernel version, LSM availability, hypervisor presence) |
+| Layer 7 | **Backend rule-support matrix** — what the chosen container technology can enforce (drives backend selection and composition) |
+
+The compiled FlatBuffer (`.sbxp`) represents the **realized policy** — the output
+of evaluating all layers. It is what the sandbox runtime consumes: a fully resolved,
+concrete, enforceable rule set with no remaining variables, authorities, or
+capability questions.
