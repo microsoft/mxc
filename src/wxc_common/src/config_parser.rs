@@ -270,7 +270,7 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
 
     if parts.len() < 2 {
         let msg = format!(
-            "Invalid schema version '{}': must be semver (e.g., '0.4.0' or '0.4.0-alpha')",
+            "Invalid schema version '{}': must be semver (e.g., 'X.Y.Z' or 'X.Y.Z-alpha')",
             version
         );
         logger.log_line(&msg);

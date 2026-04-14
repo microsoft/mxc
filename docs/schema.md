@@ -23,7 +23,7 @@ production configs and the dev schema when working on experimental features:
 
 ```json
 {
-    "version": "0.5.0-alpha",              // Schema version (semver, current: "0.5.0-alpha")
+    "version": "0.4.0-alpha",              // Schema version (semver). Current stable: "0.4.0-alpha". Also accepts "0.5.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "appcontainer",         // Backend (see table below)
 

@@ -60,8 +60,9 @@ schemas in `stable/` do not include the experimental section.
 
 ### Shipped vs Experimental
 
-The current config schema has two sections. Configs using experimental
-features should use version `0.5.0-alpha`:
+The current stable schema version is `0.4.0-alpha`. The parser also accepts
+`0.5.0-alpha`, which should be used for configs that include promoted and experimental
+features:
 
 ```json
 {
