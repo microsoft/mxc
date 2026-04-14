@@ -33,3 +33,7 @@ pub mod windows_sandbox_runner;
 // BaseContainer (composable sandbox) support
 #[cfg(target_os = "windows")]
 pub mod base_container_runner;
+
+// Agent Session (IsoEnvBroker Session API) support
+#[cfg(target_os = "windows")]
+pub mod agent_session_runner;
