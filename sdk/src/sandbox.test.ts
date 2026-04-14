@@ -74,6 +74,15 @@ describe('buildSandboxPayload', () => {
     it('should accept a compatible version', () => {
       mockWindows();
       try {
+        assert.doesNotThrow(() => buildSandboxPayload('echo hi', { version: '0.5.0-alpha' }));
+      } finally {
+        restore();
+      }
+    });
+
+    it('should accept older version 0.4.0-alpha', () => {
+      mockWindows();
+      try {
         assert.doesNotThrow(() => buildSandboxPayload('echo hi', { version: '0.4.0-alpha' }));
       } finally {
         restore();
@@ -98,6 +107,18 @@ describe('buildSandboxPayload', () => {
         assert.throws(
           () => buildSandboxPayload('echo hi', { version: '1.0.0' }),
           { message: /newer than supported/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject a version older than minimum', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => buildSandboxPayload('echo hi', { version: '0.3.0-alpha' }),
+          { message: /older than supported/ },
         );
       } finally {
         restore();

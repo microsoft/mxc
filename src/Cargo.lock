@@ -1702,6 +1702,7 @@ dependencies = [
  "base64",
  "flatbuffers",
  "sandbox_spec",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
