@@ -47,6 +47,62 @@ pub(crate) fn validate_policy(request: &CodexRequest) -> Result<(), String> {
     Ok(())
 }
 
+// -- Process options (intermediate struct for testability) --------------------
+
+/// Redirect flags for worker process I/O.
+pub(crate) const REDIRECT_STDOUT: u32 = 0x2;
+pub(crate) const REDIRECT_STDERR: u32 = 0x4;
+
+/// Intermediate representation of process creation options, decoupled from
+/// both `CodexRequest` (MXC-specific) and WinRT types (OS-specific).
+/// Built from `CodexRequest`, later converted to WinRT options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessOptions {
+    /// Full path to the executable (e.g., `C:\Windows\System32\cmd.exe`).
+    pub process_path: String,
+    /// Command-line arguments (e.g., `/c echo hello`).
+    pub arguments: String,
+    /// Execution timeout in milliseconds. 0 = no timeout.
+    pub timeout_ms: u32,
+    /// Working directory for the child process. Empty = default.
+    pub working_directory: String,
+    /// Environment variables as (name, value) pairs.
+    pub env_vars: Vec<(String, String)>,
+    /// Bitfield of I/O redirect flags.
+    pub redirect_flags: u32,
+}
+
+/// Builds `ProcessOptions` from a `CodexRequest`.
+///
+/// The command line is wrapped with `cmd.exe /c` so that shell features
+/// (pipes, redirections, chained commands) work correctly — same pattern
+/// as the LXC backend's `/bin/sh -c`.
+pub(crate) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
+    let env_vars: Vec<(String, String)> = request
+        .env
+        .iter()
+        .filter_map(|entry| {
+            let mut parts = entry.splitn(2, '=');
+            let name = parts.next()?.to_string();
+            let value = parts.next().unwrap_or("").to_string();
+            if name.is_empty() {
+                None
+            } else {
+                Some((name, value))
+            }
+        })
+        .collect();
+
+    ProcessOptions {
+        process_path: r"C:\Windows\System32\cmd.exe".to_string(),
+        arguments: format!("/c {}", request.script_code),
+        timeout_ms: request.script_timeout,
+        working_directory: request.working_directory.clone(),
+        env_vars,
+        redirect_flags: REDIRECT_STDOUT | REDIRECT_STDERR,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +206,86 @@ mod tests {
     fn policy_allows_defaults() {
         let request = CodexRequest::default();
         assert!(validate_policy(&request).is_ok());
+    }
+
+    // ====== ProcessOptions / option building tests ======
+
+    #[test]
+    fn options_wraps_command_with_cmd_exe() {
+        let request = CodexRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let opts = build_process_options(&request);
+        assert_eq!(opts.process_path, r"C:\Windows\System32\cmd.exe");
+        assert_eq!(opts.arguments, "/c echo hello");
+    }
+
+    #[test]
+    fn options_maps_timeout() {
+        let request = CodexRequest {
+            script_code: "echo hi".to_string(),
+            script_timeout: 30000,
+            ..Default::default()
+        };
+        let opts = build_process_options(&request);
+        assert_eq!(opts.timeout_ms, 30000);
+    }
+
+    #[test]
+    fn options_maps_working_directory() {
+        let request = CodexRequest {
+            script_code: "echo hi".to_string(),
+            working_directory: r"C:\Windows".to_string(),
+            ..Default::default()
+        };
+        let opts = build_process_options(&request);
+        assert_eq!(opts.working_directory, r"C:\Windows");
+    }
+
+    #[test]
+    fn options_parses_env_vars() {
+        let request = CodexRequest {
+            script_code: "echo hi".to_string(),
+            env: vec![
+                "FOO=bar".to_string(),
+                "PATH=C:\\bin;C:\\tools".to_string(),
+            ],
+            ..Default::default()
+        };
+        let opts = build_process_options(&request);
+        assert_eq!(opts.env_vars.len(), 2);
+        assert_eq!(opts.env_vars[0], ("FOO".to_string(), "bar".to_string()));
+        assert_eq!(
+            opts.env_vars[1],
+            ("PATH".to_string(), r"C:\bin;C:\tools".to_string())
+        );
+    }
+
+    #[test]
+    fn options_skips_malformed_env_vars() {
+        let request = CodexRequest {
+            script_code: "echo hi".to_string(),
+            env: vec![
+                "GOOD=value".to_string(),
+                "=no_name".to_string(),
+                "ALSO_GOOD=".to_string(),
+            ],
+            ..Default::default()
+        };
+        let opts = build_process_options(&request);
+        assert_eq!(opts.env_vars.len(), 2);
+        assert_eq!(opts.env_vars[0].0, "GOOD");
+        assert_eq!(opts.env_vars[1], ("ALSO_GOOD".to_string(), String::new()));
+    }
+
+    #[test]
+    fn options_sets_redirect_flags() {
+        let request = CodexRequest {
+            script_code: "echo hi".to_string(),
+            ..Default::default()
+        };
+        let opts = build_process_options(&request);
+        assert_eq!(opts.redirect_flags, REDIRECT_STDOUT | REDIRECT_STDERR);
     }
 }
