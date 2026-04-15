@@ -108,6 +108,10 @@ pub fn build_volume_mounts(
 
 /// Map the network default policy to a WSLC networking mode.
 ///
+/// The WSLC SDK provides two networking modes:
+/// - `None` — no network interface, fully isolated
+/// - `Bridged` — NAT networking through the WSL2 VM's virtual adapter
+///
 /// When `allowedHosts` or `blockedHosts` are present, networking must be
 /// `Bridged` (so the container has connectivity), and per-host filtering
 /// is enforced via iptables rules applied post-start.
@@ -142,6 +146,11 @@ pub fn needs_host_filtering(
 }
 
 /// Build iptables commands for per-host network filtering.
+///
+/// These rules are exec'd inside the container after start via
+/// `WslcCreateContainerProcess`. The container must have the `Privileged`
+/// flag set (grants root + NET_ADMIN capability) for iptables to work.
+/// Images without iptables installed will not support per-host filtering.
 ///
 /// When `defaultPolicy` is `Block` + `allowedHosts`:
 ///   - Default DROP all outbound
@@ -190,6 +199,8 @@ pub fn build_iptables_rules(
     if rules.is_empty() {
         None
     } else {
+        // Join with shell && so each rule must succeed before the next runs.
+        // If any iptables command fails, the chain stops and the error propagates.
         Some(rules.join(" && "))
     }
 }

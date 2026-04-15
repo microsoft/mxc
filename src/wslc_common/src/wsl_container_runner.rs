@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use wxc_common::logger::Logger;
 use wxc_common::models::{CodexRequest, NetworkPolicy, ScriptResponse, WslcConfig};
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::string_util::CoTaskMemPWSTR;
 
 use crate::policy_mapping;
 use crate::wslc_bindings::*;
@@ -29,6 +30,12 @@ struct IoContext {
 }
 
 /// Callback invoked by the WSLC SDK for stdout/stderr data.
+///
+/// # Safety
+/// `context` must be a valid pointer to a `Box<IoContext>` that outlives all
+/// callbacks. This is guaranteed because `io_ctx` is kept alive in `run_internal`
+/// until after the exit event wait completes and all callbacks have finished.
+/// The SDK guarantees `data` is valid for `data_size` bytes during the callback.
 unsafe extern "system" fn io_callback(
     io_handle: WslcProcessIOHandle,
     data: *const BYTE,
@@ -42,14 +49,12 @@ unsafe extern "system" fn io_callback(
     let bytes = std::slice::from_raw_parts(data, data_size as usize);
     match io_handle {
         WslcProcessIOHandle::Stdout => {
-            if let Ok(mut buf) = ctx.stdout.lock() {
-                buf.extend_from_slice(bytes);
-            }
+            let mut buf = ctx.stdout.lock().unwrap_or_else(|e| e.into_inner());
+            buf.extend_from_slice(bytes);
         }
         WslcProcessIOHandle::Stderr => {
-            if let Ok(mut buf) = ctx.stderr.lock() {
-                buf.extend_from_slice(bytes);
-            }
+            let mut buf = ctx.stderr.lock().unwrap_or_else(|e| e.into_inner());
+            buf.extend_from_slice(bytes);
         }
         _ => {}
     }
@@ -58,15 +63,18 @@ unsafe extern "system" fn io_callback(
 /// Callback invoked when the process exits and all I/O has been flushed.
 /// Per SDK docs: "Once this callback is invoked, any registered IO callbacks
 /// will no longer be called." This guarantees buffers are complete.
+///
+/// # Safety
+/// Same lifetime requirements as `io_callback` — `context` must point to a
+/// valid `Box<IoContext>` that outlives all callbacks.
 unsafe extern "system" fn exit_callback(_exit_code: i32, context: *mut c_void) {
     if context.is_null() {
         return;
     }
     let ctx = &*(context as *const IoContext);
-    if let Ok(mut exited) = ctx.exited.0.lock() {
-        *exited = true;
-        ctx.exited.1.notify_all();
-    }
+    let mut exited = ctx.exited.0.lock().unwrap_or_else(|e| e.into_inner());
+    *exited = true;
+    ctx.exited.1.notify_all();
 }
 
 /// WSL Container script runner using the WSLC SDK.
@@ -79,27 +87,6 @@ impl WSLContainerRunner {
         Self {
             config: config.clone(),
         }
-    }
-
-    /// Free a PWSTR returned by the SDK (allocated with CoTaskMemAlloc).
-    unsafe fn free_error_message(ptr: PWSTR) {
-        if !ptr.is_null() {
-            windows::Win32::System::Com::CoTaskMemFree(Some(ptr as *const c_void));
-        }
-    }
-
-    /// Read the WSLC error message PWSTR into a Rust String, then free it.
-    unsafe fn take_error_message(ptr: PWSTR) -> String {
-        if ptr.is_null() {
-            return String::new();
-        }
-        let mut len = 0;
-        while *ptr.add(len) != 0 {
-            len += 1;
-        }
-        let msg = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
-        Self::free_error_message(ptr);
-        msg
     }
 
     /// Format an HRESULT failure with optional SDK error message.
@@ -205,10 +192,10 @@ impl WSLContainerRunner {
 
         // -- Step 3: Create session --
         let mut session: WslcSession = ptr::null_mut();
-        let mut err_msg: PWSTR = ptr::null_mut();
-        let hr = WslcCreateSession(&mut session_settings, &mut session, &mut err_msg);
+        let mut err_msg = CoTaskMemPWSTR::null();
+        let hr = WslcCreateSession(&mut session_settings, &mut session, err_msg.as_mut_ptr());
         if hr != S_OK {
-            let msg = Self::take_error_message(err_msg);
+            let msg = err_msg.to_string_lossy();
             return ScriptResponse::error(&Self::format_error(
                 "WslcCreateSession failed",
                 hr,
@@ -268,10 +255,10 @@ impl WSLContainerRunner {
                 progress_callback_context: ptr::null_mut(),
                 auth_info: ptr::null(),
             };
-            err_msg = ptr::null_mut();
-            let hr = WslcPullSessionImage(session_guard.as_raw(), &pull_opts, &mut err_msg);
+            err_msg = CoTaskMemPWSTR::null();
+            let hr = WslcPullSessionImage(session_guard.as_raw(), &pull_opts, err_msg.as_mut_ptr());
             if hr != S_OK {
-                let msg = Self::take_error_message(err_msg);
+                let msg = err_msg.to_string_lossy();
                 return ScriptResponse::error(&Self::format_error(
                     &format!("Failed to pull image '{}'", image_name),
                     hr,
@@ -452,15 +439,15 @@ impl WSLContainerRunner {
 
         // -- Step 9: Create container --
         let mut container: WslcContainer = ptr::null_mut();
-        err_msg = ptr::null_mut();
+        err_msg = CoTaskMemPWSTR::null();
         let hr = WslcCreateContainer(
             session_guard.as_raw(),
             &container_settings,
             &mut container,
-            &mut err_msg,
+            err_msg.as_mut_ptr(),
         );
         if hr != S_OK {
-            let msg = Self::take_error_message(err_msg);
+            let msg = err_msg.to_string_lossy();
             return ScriptResponse::error(&Self::format_error(
                 "WslcCreateContainer failed",
                 hr,
@@ -471,14 +458,14 @@ impl WSLContainerRunner {
         let _ = writeln!(logger, "[WSLC] Container created");
 
         // -- Step 10: Start container --
-        err_msg = ptr::null_mut();
+        err_msg = CoTaskMemPWSTR::null();
         let hr = WslcStartContainer(
             container_guard.as_raw(),
             WslcContainerStartFlags::Attach,
-            &mut err_msg,
+            err_msg.as_mut_ptr(),
         );
         if hr != S_OK {
-            let msg = Self::take_error_message(err_msg);
+            let msg = err_msg.to_string_lossy();
             return ScriptResponse::error(&Self::format_error(
                 "WslcStartContainer failed",
                 hr,
@@ -513,15 +500,15 @@ impl WSLContainerRunner {
                 WslcSetProcessSettingsCmdLine(&mut ipt_settings, ipt_argv.as_ptr(), ipt_argv.len());
 
             let mut ipt_process: WslcProcess = ptr::null_mut();
-            err_msg = ptr::null_mut();
+            err_msg = CoTaskMemPWSTR::null();
             let hr = WslcCreateContainerProcess(
                 container_guard.as_raw(),
                 &mut ipt_settings,
                 &mut ipt_process,
-                &mut err_msg,
+                err_msg.as_mut_ptr(),
             );
             if hr != S_OK {
-                let msg = Self::take_error_message(err_msg);
+                let msg = err_msg.to_string_lossy();
                 return ScriptResponse::error(&Self::format_error(
                     "Failed to exec iptables rules",
                     hr,
@@ -617,22 +604,22 @@ impl WSLContainerRunner {
 
         // -- Step 14: Cleanup --
         if request.lifecycle.destroy_on_exit {
-            err_msg = ptr::null_mut();
+            err_msg = CoTaskMemPWSTR::null();
             let _ = WslcStopContainer(
                 container_guard.as_raw(),
                 WslcSignal::SigTerm,
                 10,
-                &mut err_msg,
+                err_msg.as_mut_ptr(),
             );
-            Self::free_error_message(err_msg);
+            drop(err_msg);
 
-            err_msg = ptr::null_mut();
+            err_msg = CoTaskMemPWSTR::null();
             let _ = WslcDeleteContainer(
                 container_guard.as_raw(),
                 WslcDeleteContainerFlags::Force,
-                &mut err_msg,
+                err_msg.as_mut_ptr(),
             );
-            Self::free_error_message(err_msg);
+            drop(err_msg);
         }
 
         let _ = WslcTerminateSession(session_guard.as_raw());
