@@ -37,7 +37,7 @@ function writeTempPolicy(dir: string, policy: object): string {
   return filePath;
 }
 
-describe('SDK end-to-end', () => {
+describe('Windows Process Container', { skip: os.platform() !== 'win32' ? 'Windows Process Container tests can only be ran on Windows' : undefined }, () => {
   let tempDir = '';
 
   afterEach(() => {
@@ -132,7 +132,7 @@ describe('SDK end-to-end', () => {
   });
 });
 
-// Skipped: requires admin currently and not runnable in pipelines, run locally until then
+// Skipped: requires admin and specific binaries not available in CI pipelines, run locally until then
 describe.skip('SDK proxy end-to-end', () => {
   let tempDir = '';
   let proxyProcess: ChildProcess | null = null;
@@ -193,5 +193,109 @@ describe.skip('SDK proxy end-to-end', () => {
     assert.ok(output.includes('PROXY_RESPONSE:'), 'Expected a response through the proxy');
     assert.ok(output.includes('Process exited with code 0'));
     assert.ok(output.includes('Proxy policy active'), 'Expected proxy policy to be set up');
+  });
+});
+
+// LXC end-to-end tests — only run on Linux with root privileges
+const isLinuxRoot = os.platform() === 'linux' && process.getuid?.() === 0;
+
+describe('LXC end-to-end', { skip: !isLinuxRoot ? 'LXC tests require Linux with root privileges (sudo npm test)' : undefined }, () => {
+  let tempDir = '';
+
+  afterEach(() => {
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+      tempDir = '';
+    }
+  });
+
+  it('should execute hello world in LXC container', () => {
+    tempDir = createTempDir('mxc-lxc-test');
+    const policyFile = writeTempPolicy(tempDir, { version: '0.4.0-alpha' });
+    const output = runCli(`run-sdk --script "echo 'Hello from LXC via CLI'" --container-name "lxc-hello" --policy-file "${policyFile}" --debug`);
+    assert.ok(output.includes('Hello from LXC via CLI'));
+    assert.ok(output.includes('Process exited with code 0'));
+  });
+
+  it('should propagate exit code', () => {
+    tempDir = createTempDir('mxc-lxc-test');
+    const policyFile = writeTempPolicy(tempDir, { version: '0.4.0-alpha' });
+    const output = runCli(`run-sdk --script "echo 'about to exit' && exit 0" --container-name "lxc-exit" --policy-file "${policyFile}" --debug`);
+    assert.ok(output.includes('about to exit'));
+    assert.ok(output.includes('Process exited with code 0'));
+  });
+
+  it('should report system info', () => {
+    tempDir = createTempDir('mxc-lxc-test');
+    const policyFile = writeTempPolicy(tempDir, { version: '0.4.0-alpha' });
+    const output = runCli(`run-sdk --script "uname -a && echo 'System info test passed'" --container-name "lxc-sysinfo" --policy-file "${policyFile}" --debug`);
+    assert.ok(output.includes('System info test passed'));
+    assert.ok(output.includes('Process exited with code 0'));
+  });
+
+  it('should allow outbound network access', () => {
+    tempDir = createTempDir('mxc-lxc-test');
+    const policyFile = writeTempPolicy(tempDir, {
+      version: '0.4.0-alpha',
+      network: { allowOutbound: true },
+    });
+    const output = runCli(`run-sdk --script "wget -q -T 5 -O /dev/null http://example.com && echo 'Network accessible'" --container-name "lxc-net" --policy-file "${policyFile}" --debug`);
+    assert.ok(output.includes('Network accessible'));
+    assert.ok(output.includes('Process exited with code 0'));
+  });
+
+  it('should mount readwrite filesystem path', () => {
+    tempDir = createTempDir('mxc-lxc-test');
+    fs.writeFileSync(path.join(tempDir, 'test.txt'), 'original');
+    const policyFile = writeTempPolicy(tempDir, {
+      version: '0.4.0-alpha',
+      filesystem: { readwritePaths: [tempDir] },
+    });
+    const output = runCli(`run-sdk --script "cat ${tempDir}/test.txt && echo 'overwritten' > ${tempDir}/test.txt && cat ${tempDir}/test.txt" --container-name "lxc-rw" --policy-file "${policyFile}" --debug`);
+    assert.ok(output.includes('overwritten'));
+    assert.ok(output.includes('Process exited with code 0'));
+  });
+
+  it('should mount readonly filesystem path', () => {
+    tempDir = createTempDir('mxc-lxc-test');
+    fs.writeFileSync(path.join(tempDir, 'data.txt'), 'readonly content');
+    const policyFile = writeTempPolicy(tempDir, {
+      version: '0.4.0-alpha',
+      filesystem: { readonlyPaths: [tempDir] },
+    });
+    const output = runCli(`run-sdk --script "cat ${tempDir}/data.txt && echo 'Read succeeded'" --container-name "lxc-ro" --policy-file "${policyFile}" --debug`);
+    assert.ok(output.includes('Read succeeded'));
+    assert.ok(output.includes('Process exited with code 0'));
+  });
+
+  it('should download file to writable mount', () => {
+    tempDir = createTempDir('mxc-lxc-test');
+    const policyFile = writeTempPolicy(tempDir, {
+      version: '0.4.0-alpha',
+      filesystem: { readwritePaths: [tempDir] },
+      network: { allowOutbound: true },
+    });
+    const output = runCli(`run-sdk --script "wget -q -T 10 -O ${tempDir}/download.txt https://api.github.com/zen && cat ${tempDir}/download.txt && echo 'Combined test passed'" --container-name "lxc-combined" --policy-file "${policyFile}" --debug`);
+    assert.ok(output.includes('Combined test passed'));
+    assert.ok(output.includes('Process exited with code 0'));
+  });
+
+  it('should access HTTPS endpoint', () => {
+    tempDir = createTempDir('mxc-lxc-test');
+    const policyFile = writeTempPolicy(tempDir, {
+      version: '0.4.0-alpha',
+      network: { allowOutbound: true },
+    });
+    const output = runCli(`run-sdk --script "wget -q -T 10 -O /dev/null https://api.github.com && echo 'HTTPS endpoint accessible'" --container-name "lxc-https" --policy-file "${policyFile}" --debug`);
+    assert.ok(output.includes('HTTPS endpoint accessible'));
+    assert.ok(output.includes('Process exited with code 0'));
+  });
+
+  it('should run multi-command pipeline', () => {
+    tempDir = createTempDir('mxc-lxc-test');
+    const policyFile = writeTempPolicy(tempDir, { version: '0.4.0-alpha' });
+    const output = runCli(`run-sdk --script "echo 'step 1' && ls / && echo 'step 2' && whoami && echo 'Multi-command passed'" --container-name "lxc-pipeline" --policy-file "${policyFile}" --debug`);
+    assert.ok(output.includes('Multi-command passed'));
+    assert.ok(output.includes('Process exited with code 0'));
   });
 });
