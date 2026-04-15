@@ -37,7 +37,7 @@ function writeTempPolicy(dir: string, policy: object): string {
   return filePath;
 }
 
-describe('SDK end-to-end', { skip: os.platform() !== 'win32' ? 'AppContainer tests require Windows' : undefined }, () => {
+describe('Windows Process Container', { skip: os.platform() !== 'win32' ? 'Windows Process Container tests can only be ran on Windows' : undefined }, () => {
   let tempDir = '';
 
   afterEach(() => {
@@ -197,10 +197,9 @@ describe.skip('SDK proxy end-to-end', () => {
 });
 
 // LXC end-to-end tests — only run on Linux with root privileges
-const isLinux = os.platform() === 'linux';
-const isRoot = isLinux && process.getuid?.() === 0;
+const isLinuxRoot = os.platform() === 'linux' && process.getuid?.() === 0;
 
-describe('LXC end-to-end', { skip: !isRoot ? 'LXC tests require Linux with root privileges (sudo npm test)' : undefined }, () => {
+describe('LXC end-to-end', { skip: !isLinuxRoot ? 'LXC tests require Linux with root privileges (sudo npm test)' : undefined }, () => {
   let tempDir = '';
 
   afterEach(() => {
