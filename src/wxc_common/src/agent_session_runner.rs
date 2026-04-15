@@ -197,9 +197,11 @@ pub struct AgentSessionManager {
 
 impl AgentSessionManager {
     /// Activate the WinRT factory and verify the service is available.
-    pub fn new() -> Result<Self, String> {
+    pub fn new(set_proxy_blanket: bool) -> Result<Self, String> {
         check_service_available()?;
-        configure_proxy_blanket()?;
+        if set_proxy_blanket {
+            configure_proxy_blanket()?;
+        }
         Ok(Self {
             registration_id: windows_core::HSTRING::new(),
             provision_id: windows_core::HSTRING::new(),
@@ -503,19 +505,16 @@ impl ScriptRunner for AgentSessionRunner {
         let _ = writeln!(logger, "Agent Session: process={}", options.process_path);
         let _ = writeln!(logger, "Agent Session: arguments={}", options.arguments);
 
+        // Read agent_session config (proxy path, proxy blanket setting).
+        let agent_cfg = request.experimental.agent_session.as_ref();
+        let proxy_path = agent_cfg.map(|cfg| cfg.proxy_path.as_str()).unwrap_or("");
+        let set_proxy_blanket = agent_cfg.map(|cfg| cfg.set_proxy_blanket).unwrap_or(true);
+
         // Create the session manager (activates the WinRT factory).
-        let mut manager = match AgentSessionManager::new() {
+        let mut manager = match AgentSessionManager::new(set_proxy_blanket) {
             Ok(m) => m,
             Err(e) => return ScriptResponse::error(&e),
         };
-
-        // Get the proxy path from the experimental agent_session config.
-        let proxy_path = request
-            .experimental
-            .agent_session
-            .as_ref()
-            .map(|cfg| cfg.proxy_path.as_str())
-            .unwrap_or("");
 
         // Full lifecycle: register → provision → start → execute → stop → deprovision → unregister.
         if let Err(e) = manager.register_client(proxy_path) {

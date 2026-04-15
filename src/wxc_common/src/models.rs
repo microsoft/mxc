@@ -68,6 +68,10 @@ pub struct AgentSessionConfig {
     /// Path to the isolation proxy executable. Required for StartSessionAsync.
     #[serde(rename = "proxyPath")]
     pub proxy_path: String,
+    /// Whether to set CoSetProxyBlanket with EOAC_DYNAMIC_CLOAKING on the
+    /// WinRT activation factory. Default: true.
+    #[serde(rename = "setProxyBlanket")]
+    pub set_proxy_blanket: bool,
 }
 
 impl Default for AgentSessionConfig {
@@ -75,6 +79,7 @@ impl Default for AgentSessionConfig {
         Self {
             configuration_id: AgentSessionConfigurationId::Small,
             proxy_path: String::new(),
+            set_proxy_blanket: true,
         }
     }
 }
