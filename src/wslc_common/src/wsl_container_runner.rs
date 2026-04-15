@@ -29,12 +29,35 @@ struct IoContext {
     exited: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 }
 
+/// RAII guard that reclaims an Arc<IoContext> from a raw pointer on drop.
+/// Prevents leaking the Arc reference count on early returns.
+struct IoCtxRawGuard {
+    ptr: *mut c_void,
+}
+
+impl IoCtxRawGuard {
+    fn new(ptr: *mut c_void) -> Self {
+        Self { ptr }
+    }
+}
+
+impl Drop for IoCtxRawGuard {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                let _ = Arc::from_raw(self.ptr as *const IoContext);
+            }
+        }
+    }
+}
+
 /// Callback invoked by the WSLC SDK for stdout/stderr data.
 ///
 /// # Safety
-/// `context` must be a valid pointer to a `Box<IoContext>` that outlives all
+/// `context` must be a valid pointer to an `Arc<IoContext>` that outlives all
 /// callbacks. This is guaranteed because `io_ctx` is kept alive in `run_internal`
 /// until after the exit event wait completes and all callbacks have finished.
+/// The `IoCtxRawGuard` ensures the Arc reference is reclaimed on all exit paths.
 /// The SDK guarantees `data` is valid for `data_size` bytes during the callback.
 unsafe extern "system" fn io_callback(
     io_handle: WslcProcessIOHandle,
@@ -66,7 +89,7 @@ unsafe extern "system" fn io_callback(
 ///
 /// # Safety
 /// Same lifetime requirements as `io_callback` — `context` must point to a
-/// valid `Box<IoContext>` that outlives all callbacks.
+/// valid `Arc<IoContext>` that outlives all callbacks.
 unsafe extern "system" fn exit_callback(_exit_code: i32, context: *mut c_void) {
     if context.is_null() {
         return;
@@ -162,7 +185,10 @@ impl WSLContainerRunner {
         }
 
         if let Some(cpu) = self.config.cpu_count {
-            let _ = WslcSetSessionSettingsCpuCount(&mut session_settings, cpu);
+            let hr = WslcSetSessionSettingsCpuCount(&mut session_settings, cpu);
+            if hr != S_OK {
+                return sdk_error("WslcSetSessionSettingsCpuCount failed", hr, "");
+            }
         }
         if let Some(mem_mb) = self.config.memory_mb {
             let mem_mb = match u32::try_from(mem_mb) {
@@ -175,16 +201,25 @@ impl WSLContainerRunner {
                     ));
                 }
             };
-            let _ = WslcSetSessionSettingsMemory(&mut session_settings, mem_mb);
+            let hr = WslcSetSessionSettingsMemory(&mut session_settings, mem_mb);
+            if hr != S_OK {
+                return sdk_error("WslcSetSessionSettingsMemory failed", hr, "");
+            }
         }
         if request.script_timeout > 0 {
-            let _ = WslcSetSessionSettingsTimeout(&mut session_settings, request.script_timeout);
+            let hr = WslcSetSessionSettingsTimeout(&mut session_settings, request.script_timeout);
+            if hr != S_OK {
+                return sdk_error("WslcSetSessionSettingsTimeout failed", hr, "");
+            }
         }
         if self.config.gpu {
-            let _ = WslcSetSessionSettingsFeatureFlags(
+            let hr = WslcSetSessionSettingsFeatureFlags(
                 &mut session_settings,
                 WslcSessionFeatureFlags::EnableGpu,
             );
+            if hr != S_OK {
+                return sdk_error("WslcSetSessionSettingsFeatureFlags failed", hr, "");
+            }
         }
 
         // -- Step 3: Create session --
@@ -281,6 +316,7 @@ impl WSLContainerRunner {
         // the Arc later to avoid leaking the reference count.
         let io_ctx_for_sdk = Arc::clone(&io_ctx);
         let io_ctx_raw = Arc::into_raw(io_ctx_for_sdk) as *mut c_void;
+        let _io_ctx_guard = IoCtxRawGuard::new(io_ctx_raw);
 
         let callbacks = WslcProcessCallbacks {
             on_stdout: Some(io_callback),
@@ -289,8 +325,6 @@ impl WSLContainerRunner {
         };
         let hr = WslcSetProcessSettingsCallbacks(&mut process_settings, &callbacks, io_ctx_raw);
         if hr != S_OK {
-            // Reclaim the Arc reference before returning
-            let _ = Arc::from_raw(io_ctx_raw as *const IoContext);
             return sdk_error("WslcSetProcessSettingsCallbacks failed", hr, "");
         }
 
@@ -304,7 +338,10 @@ impl WSLContainerRunner {
             dash_c.as_ptr() as PCSTR,
             script_bytes.as_ptr() as PCSTR,
         ];
-        let _ = WslcSetProcessSettingsCmdLine(&mut process_settings, argv.as_ptr(), argv.len());
+        let hr = WslcSetProcessSettingsCmdLine(&mut process_settings, argv.as_ptr(), argv.len());
+        if hr != S_OK {
+            return sdk_error("WslcSetProcessSettingsCmdLine failed", hr, "");
+        }
 
         // Set environment variables
         if !request.env.is_empty() {
@@ -314,11 +351,14 @@ impl WSLContainerRunner {
                 .map(|e| format!("{}\0", e).into_bytes())
                 .collect();
             let env_ptrs: Vec<PCSTR> = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
-            let _ = WslcSetProcessSettingsEnvVariables(
+            let hr = WslcSetProcessSettingsEnvVariables(
                 &mut process_settings,
                 env_ptrs.as_ptr(),
                 env_ptrs.len(),
             );
+            if hr != S_OK {
+                return sdk_error("WslcSetProcessSettingsEnvVariables failed", hr, "");
+            }
         }
 
         // Set working directory
@@ -328,10 +368,13 @@ impl WSLContainerRunner {
                 policy_mapping::windows_path_to_container_path(&request.working_directory)
             {
                 _cwd_cstr = format!("{}\0", container_cwd);
-                let _ = WslcSetProcessSettingsCurrentDirectory(
+                let hr = WslcSetProcessSettingsCurrentDirectory(
                     &mut process_settings,
                     _cwd_cstr.as_bytes().as_ptr() as PCSTR,
                 );
+                if hr != S_OK {
+                    return sdk_error("WslcSetProcessSettingsCurrentDirectory failed", hr, "");
+                }
             }
         }
 
@@ -379,11 +422,14 @@ impl WSLContainerRunner {
                 })
                 .collect();
 
-            let _ = WslcSetContainerSettingsVolumes(
+            let hr = WslcSetContainerSettingsVolumes(
                 &mut container_settings,
                 volumes.as_ptr(),
                 volumes.len() as u32,
             );
+            if hr != S_OK {
+                return sdk_error("WslcSetContainerSettingsVolumes failed", hr, "");
+            }
             let _ = writeln!(
                 logger,
                 "[WSLC] {} volume mount(s) configured",
@@ -399,7 +445,10 @@ impl WSLContainerRunner {
             &request.policy.blocked_hosts,
         );
         let net_mode = policy_mapping::map_network_policy(is_default_block, has_host_rules);
-        let _ = WslcSetContainerSettingsNetworkingMode(&mut container_settings, net_mode);
+        let hr = WslcSetContainerSettingsNetworkingMode(&mut container_settings, net_mode);
+        if hr != S_OK {
+            return sdk_error("WslcSetContainerSettingsNetworkingMode failed", hr, "");
+        }
         let _ = writeln!(logger, "[WSLC] Networking mode: {:?}", net_mode);
 
         // Build iptables rules (if per-host filtering is needed)
@@ -421,10 +470,16 @@ impl WSLContainerRunner {
             // Privileged needed for iptables inside the container
             flags = flags | WslcContainerFlags::Privileged;
         }
-        let _ = WslcSetContainerSettingsFlags(&mut container_settings, flags);
+        let hr = WslcSetContainerSettingsFlags(&mut container_settings, flags);
+        if hr != S_OK {
+            return sdk_error("WslcSetContainerSettingsFlags failed", hr, "");
+        }
 
         // Attach init process
-        let _ = WslcSetContainerSettingsInitProcess(&mut container_settings, &mut process_settings);
+        let hr = WslcSetContainerSettingsInitProcess(&mut container_settings, &mut process_settings);
+        if hr != S_OK {
+            return sdk_error("WslcSetContainerSettingsInitProcess failed", hr, "");
+        }
 
         // -- Step 9: Create container --
         let mut container: WslcContainer = ptr::null_mut();
@@ -473,8 +528,11 @@ impl WSLContainerRunner {
                 ipt_c.as_ptr() as PCSTR,
                 ipt_script_bytes.as_ptr() as PCSTR,
             ];
-            let _ =
+            let hr =
                 WslcSetProcessSettingsCmdLine(&mut ipt_settings, ipt_argv.as_ptr(), ipt_argv.len());
+            if hr != S_OK {
+                return sdk_error("WslcSetProcessSettingsCmdLine (iptables) failed", hr, "");
+            }
 
             let mut ipt_process: WslcProcess = ptr::null_mut();
             err_msg = CoTaskMemPWSTR::null();
@@ -492,7 +550,10 @@ impl WSLContainerRunner {
 
             // Wait for iptables to complete
             let mut ipt_exit_event: HANDLE = ptr::null_mut();
-            let _ = WslcGetProcessExitEvent(ipt_guard.as_raw(), &mut ipt_exit_event);
+            let hr = WslcGetProcessExitEvent(ipt_guard.as_raw(), &mut ipt_exit_event);
+            if hr != S_OK {
+                return sdk_error("WslcGetProcessExitEvent (iptables) failed", hr, "");
+            }
             if !ipt_exit_event.is_null() {
                 windows::Win32::System::Threading::WaitForSingleObject(
                     windows::Win32::Foundation::HANDLE(ipt_exit_event),
@@ -501,17 +562,18 @@ impl WSLContainerRunner {
             }
 
             let mut ipt_exit_code: i32 = -1;
-            let _ = WslcGetProcessExitCode(ipt_guard.as_raw(), &mut ipt_exit_code);
+            let hr = WslcGetProcessExitCode(ipt_guard.as_raw(), &mut ipt_exit_code);
+            if hr != S_OK {
+                return sdk_error("WslcGetProcessExitCode (iptables) failed", hr, "");
+            }
             if ipt_exit_code != 0 {
-                let _ = writeln!(
-                    logger,
-                    "[WSLC] Warning: iptables rules exited with code {} \
+                return ScriptResponse::error(&format!(
+                    "iptables rules failed with exit code {} \
                      (image may not have iptables installed)",
                     ipt_exit_code
-                );
-            } else {
-                let _ = writeln!(logger, "[WSLC] iptables rules applied successfully");
+                ));
             }
+            let _ = writeln!(logger, "[WSLC] iptables rules applied successfully");
         }
 
         // -- Step 11: Get init process handle --
@@ -524,7 +586,10 @@ impl WSLContainerRunner {
 
         // -- Step 12: Wait for exit (callbacks capture I/O during execution) --
         let mut exit_event: HANDLE = ptr::null_mut();
-        let _ = WslcGetProcessExitEvent(process_guard.as_raw(), &mut exit_event);
+        let hr = WslcGetProcessExitEvent(process_guard.as_raw(), &mut exit_event);
+        if hr != S_OK {
+            return sdk_error("WslcGetProcessExitEvent failed", hr, "");
+        }
         if !exit_event.is_null() {
             windows::Win32::System::Threading::WaitForSingleObject(
                 windows::Win32::Foundation::HANDLE(exit_event),
@@ -553,7 +618,10 @@ impl WSLContainerRunner {
         }
 
         let mut exit_code: i32 = -1;
-        let _ = WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code);
+        let hr = WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code);
+        if hr != S_OK {
+            return sdk_error("WslcGetProcessExitCode failed", hr, "");
+        }
         let _ = writeln!(logger, "[WSLC] Process exited with code {}", exit_code);
 
         // -- Step 13: Collect captured I/O from callbacks (guaranteed flushed) --
@@ -594,9 +662,8 @@ impl WSLContainerRunner {
         let _ = WslcTerminateSession(session_guard.as_raw());
         let _ = writeln!(logger, "[WSLC] Cleanup complete");
 
-        // Reclaim the Arc reference given to the SDK via raw pointer.
+        // IoCtxRawGuard drops here, reclaiming the Arc reference.
         // All callbacks are guaranteed complete after the exit event wait.
-        let _ = Arc::from_raw(io_ctx_raw as *const IoContext);
 
         // RAII guards will call Release on drop.
         // CoUninitialize is not called explicitly — RAII guards need COM alive
