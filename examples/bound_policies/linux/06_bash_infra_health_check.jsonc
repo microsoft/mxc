@@ -1,0 +1,66 @@
+{
+  "version": "1.0",
+  "name": "infra-health-check",
+  "description": "Bound policy for infra-health-check on Linux x86_64 (from intent manifest 06)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "/usr/bin/bash",                      "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/bin/curl",                      "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/bin/openssl",                   "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/bin/psql",                      "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/bin/jq",                        "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/lib/x86_64-linux-gnu",          "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/lib/x86_64-linux-gnu",              "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/usr/lib/postgresql",                "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/etc/ssl/certs",                     "scope": "subtree", "allow": ["read"] },
+      { "path": "/etc/resolv.conf",                   "scope": "exact",   "allow": ["read"] },
+      { "path": "/usr/share/ca-certificates",         "scope": "subtree", "allow": ["read"] },
+
+      { "path": "/output",             "scope": "subtree", "allow": ["write", "create"],
+                                                            "ephemeral": true },
+      { "path": "/workspace",          "scope": "subtree", "allow": ["read", "write", "create"],
+                                                            "ephemeral": true },
+      { "path": "/config",             "scope": "subtree", "allow": ["read"] },
+      { "path": "/tmp",                "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                            "ephemeral": true },
+      { "path": "/run/secrets/DB_CONNECTION_STRING", "scope": "exact", "allow": ["read"],
+                                                                        "ephemeral": true }
+    ],
+    "synthetic": {
+      "/dev": "minimal",
+      "/proc": "sandboxed",
+      "/tmp": "ephemeral"
+    }
+  },
+
+  "network": {
+    "mode": "rules",
+    "rules": [
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "api-gateway.internal.example.com", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "auth.internal.example.com", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "db-primary.internal.example.com", "port": 5432 }
+    ],
+    "allow_dns": true,
+    "allow_localhost": false
+  },
+
+  "resources": {
+    "max_memory_mb": 256,
+    "max_processes": 16,
+    "max_wall_time_seconds": 120,
+    "max_open_files": 256
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "/usr/bin:/usr/local/bin",
+      "HOME": "/workspace",
+      "DB_CONNECTION_STRING_FILE": "/run/secrets/DB_CONNECTION_STRING"
+    }
+  }
+}

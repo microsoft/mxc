@@ -1,0 +1,79 @@
+{
+  "version": "1.0",
+  "name": "research-agent-tool",
+  "description": "Bound policy for research-agent-tool on Windows x64 (from intent manifest 04)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "C:\\Python311\\python.exe",        "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "C:\\Python311\\python311.dll",     "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "C:\\Python311\\Lib",               "scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Python311\\DLLs",              "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "C:\\Python311\\Lib\\site-packages","scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Windows\\System32\\vcruntime140.dll",  "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Windows\\System32\\ucrtbase.dll",      "scope": "exact",
+        "allow": ["read", "execute"] },
+
+      { "path": "C:\\Sandbox\\Workspace",    "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                                  "ephemeral": true },
+      { "path": "C:\\Sandbox\\Output",       "scope": "subtree", "allow": ["write", "create"],
+                                                                  "ephemeral": true },
+      { "path": "C:\\Sandbox\\Cache\\http",  "scope": "subtree", "allow": ["read", "write", "create", "delete"] },
+      { "path": "C:\\Sandbox\\Temp",         "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                                  "ephemeral": true },
+      { "path": "C:\\Sandbox\\Secrets\\LLM_API_KEY", "scope": "exact", "allow": ["read"],
+                                                                        "ephemeral": true }
+    ],
+    "mask": [
+      "C:\\Users",
+      "%USERPROFILE%\\.ssh",
+      "%USERPROFILE%\\.aws"
+    ]
+  },
+
+  "network": {
+    "mode": "rules",
+    "rules": [
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "api.anthropic.com", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "*", "port": 443 }
+    ],
+    "allow_dns": true,
+    "allow_localhost": false
+  },
+
+  "resources": {
+    "max_memory_mb": 1024,
+    "max_cpu_percent": 200,
+    "max_processes": 8,
+    "max_wall_time_seconds": 600,
+    "max_open_files": 256
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "C:\\Python311;C:\\Windows\\System32",
+      "TEMP": "C:\\Sandbox\\Temp",
+      "TMP": "C:\\Sandbox\\Temp",
+      "USERPROFILE": "C:\\Sandbox\\Workspace",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONUNBUFFERED": "1",
+      "LLM_API_KEY_FILE": "C:\\Sandbox\\Secrets\\LLM_API_KEY"
+    }
+  },
+
+  "platform": {
+    "windows": {
+      "appcontainer": {
+        "capabilities": ["internetClient"]
+      },
+      "bfs": {
+        "enabled": true,
+        "policy_broker": true
+      }
+    }
+  }
+}

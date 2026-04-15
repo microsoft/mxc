@@ -1,0 +1,53 @@
+{
+  "version": "1.0",
+  "name": "csv-data-analyzer",
+  "description": "Bound policy for csv-data-analyzer on Linux x86_64 (from intent manifest 01)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "/usr/bin/python3.10",                "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/bin/python3",                   "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/lib/python3.10",                "scope": "subtree", "allow": ["read"] },
+      { "path": "/usr/lib/python3/dist-packages",     "scope": "subtree", "allow": ["read"] },
+      { "path": "/usr/lib/x86_64-linux-gnu",          "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/lib/x86_64-linux-gnu",              "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/usr/local/lib/python3.10/dist-packages", "scope": "subtree", "allow": ["read"] },
+      { "path": "/etc/ssl/certs",                     "scope": "subtree", "allow": ["read"] },
+
+      { "path": "/workspace",        "scope": "subtree", "allow": ["read", "write", "create"],
+                                                          "ephemeral": true },
+      { "path": "/input",            "scope": "subtree", "allow": ["read"] },
+      { "path": "/output",           "scope": "subtree", "allow": ["write", "create"],
+                                                          "ephemeral": true },
+      { "path": "/tmp",              "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                          "ephemeral": true }
+    ],
+    "synthetic": {
+      "/dev": "minimal",
+      "/proc": "sandboxed",
+      "/tmp": "ephemeral"
+    }
+  },
+
+  "network": {
+    "mode": "none"
+  },
+
+  "resources": {
+    "max_memory_mb": 1024,
+    "max_cpu_percent": 200,
+    "max_processes": 1,
+    "max_wall_time_seconds": 120,
+    "max_open_files": 256
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "/usr/bin:/usr/local/bin",
+      "HOME": "/workspace",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONUNBUFFERED": "1"
+    }
+  }
+}

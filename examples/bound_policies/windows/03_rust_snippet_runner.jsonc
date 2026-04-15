@@ -1,0 +1,95 @@
+{
+  "version": "1.0",
+  "name": "rust-snippet-runner",
+  "description": "Bound policy for rust-snippet-runner on Windows x64 (from intent manifest 03)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "C:\\Rust\\.cargo\\bin\\cargo.exe",    "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "C:\\Rust\\.cargo\\bin\\rustc.exe",    "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "C:\\Rust\\toolchains\\stable-x86_64-pc-windows-msvc", "scope": "subtree",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC",
+        "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "C:\\Program Files (x86)\\Windows Kits\\10\\Include",
+        "scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Program Files (x86)\\Windows Kits\\10\\Lib",
+        "scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Windows\\System32\\vcruntime140.dll", "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Windows\\System32\\ucrtbase.dll",     "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Windows\\System32\\kernel32.dll",     "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Windows\\System32\\ntdll.dll",        "scope": "exact",
+        "allow": ["read", "execute"] },
+
+      { "path": "C:\\Sandbox\\Input",        "scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Sandbox\\Output",       "scope": "subtree", "allow": ["write", "create"],
+                                                                  "ephemeral": true },
+      { "path": "C:\\Sandbox\\Workspace",    "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                                  "ephemeral": true },
+      { "path": "C:\\Sandbox\\Cache\\cargo-registry", "scope": "subtree",
+        "allow": ["read", "write", "create", "delete"] },
+      { "path": "C:\\Sandbox\\Cache\\cargo-target",   "scope": "subtree",
+        "allow": ["read", "write", "create", "delete"] },
+      { "path": "C:\\Sandbox\\Temp",         "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                                  "ephemeral": true }
+    ],
+    "mask": [
+      "C:\\Users",
+      "%USERPROFILE%\\.ssh",
+      "%USERPROFILE%\\.aws"
+    ]
+  },
+
+  "network": {
+    "mode": "rules",
+    "rules": [
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "crates.io", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "static.crates.io", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "index.crates.io", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "github.com", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "objects.githubusercontent.com", "port": 443 }
+    ],
+    "allow_dns": true,
+    "allow_localhost": false
+  },
+
+  "resources": {
+    "max_memory_mb": 4096,
+    "max_cpu_percent": 400,
+    "max_processes": 32,
+    "max_wall_time_seconds": 300,
+    "max_open_files": 4096
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "C:\\Rust\\.cargo\\bin;C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.39.33519\\bin\\Hostx64\\x64;C:\\Windows\\System32",
+      "TEMP": "C:\\Sandbox\\Temp",
+      "TMP": "C:\\Sandbox\\Temp",
+      "USERPROFILE": "C:\\Sandbox\\Workspace",
+      "CARGO_HOME": "C:\\Sandbox\\Cache\\cargo-registry",
+      "CARGO_TARGET_DIR": "C:\\Sandbox\\Cache\\cargo-target"
+    }
+  },
+
+  "platform": {
+    "windows": {
+      "appcontainer": {
+        "capabilities": ["internetClient"]
+      },
+      "bfs": {
+        "enabled": true,
+        "policy_broker": true
+      }
+    }
+  }
+}

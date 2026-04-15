@@ -1,0 +1,68 @@
+{
+  "version": "1.0",
+  "name": "csv-data-analyzer",
+  "description": "Bound policy for csv-data-analyzer on Windows x64 (from intent manifest 01)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "C:\\Python310\\python.exe",        "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "C:\\Python310\\python310.dll",     "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "C:\\Python310\\Lib",               "scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Python310\\DLLs",              "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "C:\\Python310\\Lib\\site-packages","scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Windows\\System32\\vcruntime140.dll",  "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Windows\\System32\\ucrtbase.dll",      "scope": "exact",
+        "allow": ["read", "execute"] },
+
+      { "path": "C:\\Sandbox\\Workspace",   "scope": "subtree", "allow": ["read", "write", "create"],
+                                                                 "ephemeral": true },
+      { "path": "C:\\Sandbox\\Input",       "scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Sandbox\\Output",      "scope": "subtree", "allow": ["write", "create"],
+                                                                 "ephemeral": true },
+      { "path": "C:\\Sandbox\\Temp",        "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                                 "ephemeral": true }
+    ],
+    "mask": [
+      "C:\\Users",
+      "%USERPROFILE%\\.ssh",
+      "%USERPROFILE%\\.aws"
+    ]
+  },
+
+  "network": {
+    "mode": "none"
+  },
+
+  "resources": {
+    "max_memory_mb": 1024,
+    "max_cpu_percent": 200,
+    "max_processes": 1,
+    "max_wall_time_seconds": 120,
+    "max_open_files": 256
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "C:\\Python310;C:\\Windows\\System32",
+      "TEMP": "C:\\Sandbox\\Temp",
+      "TMP": "C:\\Sandbox\\Temp",
+      "USERPROFILE": "C:\\Sandbox\\Workspace",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONUNBUFFERED": "1"
+    }
+  },
+
+  "platform": {
+    "windows": {
+      "appcontainer": {
+        "capabilities": []
+      },
+      "bfs": {
+        "enabled": true,
+        "policy_broker": true
+      }
+    }
+  }
+}

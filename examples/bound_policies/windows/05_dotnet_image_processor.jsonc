@@ -1,0 +1,74 @@
+{
+  "version": "1.0",
+  "name": "image-processor",
+  "description": "Bound policy for image-processor on Windows x64 (from intent manifest 05)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "C:\\Program Files\\dotnet\\dotnet.exe", "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Program Files\\dotnet\\shared",     "scope": "subtree",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Program Files\\dotnet\\host",       "scope": "subtree",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Windows\\System32\\vcruntime140.dll", "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Windows\\System32\\ucrtbase.dll",     "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Windows\\System32\\kernel32.dll",     "scope": "exact",
+        "allow": ["read", "execute"] },
+
+      { "path": "C:\\Sandbox\\App",           "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "C:\\Sandbox\\Input",         "scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Sandbox\\Output",        "scope": "subtree", "allow": ["write", "create"],
+                                                                   "ephemeral": true },
+      { "path": "C:\\Sandbox\\Workspace",     "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                                   "ephemeral": true },
+      { "path": "C:\\Sandbox\\Config",        "scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Sandbox\\Temp",          "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                                   "ephemeral": true }
+    ],
+    "mask": [
+      "C:\\Users",
+      "%USERPROFILE%\\.ssh",
+      "%USERPROFILE%\\.aws"
+    ]
+  },
+
+  "network": {
+    "mode": "none"
+  },
+
+  "resources": {
+    "max_memory_mb": 2048,
+    "max_cpu_percent": 400,
+    "max_processes": 12,
+    "max_wall_time_seconds": 600,
+    "max_open_files": 1024
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "C:\\Program Files\\dotnet;C:\\Windows\\System32",
+      "TEMP": "C:\\Sandbox\\Temp",
+      "TMP": "C:\\Sandbox\\Temp",
+      "USERPROFILE": "C:\\Sandbox\\Workspace",
+      "DOTNET_ROOT": "C:\\Program Files\\dotnet",
+      "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+      "DOTNET_NOLOGO": "1"
+    }
+  },
+
+  "platform": {
+    "windows": {
+      "appcontainer": {
+        "capabilities": []
+      },
+      "bfs": {
+        "enabled": true,
+        "policy_broker": true
+      }
+    }
+  }
+}
