@@ -1712,6 +1712,294 @@ Key properties:
 - It is the **floor** — nothing below this layer (including admin policy) can
   weaken it.
 
+#### System Policy Operates on the Bound Policy
+
+System policy is evaluated against the **bound policy (§8)**, not the intent
+manifest (§13). The intent manifest names abstract resources (`"runtime": "python"`,
+`"storage": [{ "class": "workspace" }]`) — there is nothing platform-specific to
+check against. Only after binding resolves these to concrete paths (`/usr/bin/python3`,
+`C:\Sandbox\Workspace`) can the system policy verify that no invariants are
+violated.
+
+```
+Intent → bind → Bound Policy → SYSTEM POLICY CHECK → compile → .sbxp
+                                      ↑
+                              Checks concrete paths,
+                              ports, registry keys,
+                              Mach services
+```
+
+#### System Policy Schema
+
+System policy is a **deny-overlay** — it does not describe a complete sandbox.
+It describes things that are *never allowed regardless of what other layers say*.
+It is inherently platform-specific: the paths, mechanisms (Windows registry,
+macOS Mach services), and dangerous capabilities differ across platforms.
+
+System policy is authored by the **platform team**, not by code authors or
+deployers. It ships with the platform and is updated alongside OS releases.
+
+```jsonc
+// Example: system-policy-windows.jsonc
+{
+  "system_policy_version": "1.0",
+  "platform": "windows",
+  "description": "System-wide invariants for sandboxed workloads on Windows",
+
+  "deny": {
+    "filesystem": [
+      {
+        "path": "C:\\Windows\\System32",
+        "scope": "subtree",
+        "deny_operations": ["write", "create", "delete"],
+        "reason": "OS binaries and system DLLs"
+      },
+      {
+        "path": "C:\\Windows\\SysWOW64",
+        "scope": "subtree",
+        "deny_operations": ["write", "create", "delete"],
+        "reason": "32-bit system binaries on 64-bit Windows"
+      },
+      {
+        "path": "C:\\Windows\\Boot",
+        "scope": "subtree",
+        "deny_operations": ["read", "write", "create", "delete", "execute"],
+        "reason": "Boot manager — no sandbox access whatsoever"
+      },
+      {
+        "path": "C:\\ProgramData\\Microsoft\\Crypto",
+        "scope": "subtree",
+        "deny_operations": ["read", "write"],
+        "reason": "Machine certificate private keys"
+      }
+    ],
+
+    "registry": [
+      {
+        "key": "HKLM\\SYSTEM",
+        "scope": "subtree",
+        "deny_operations": ["write"],
+        "reason": "System hive — service configuration, driver loading"
+      },
+      {
+        "key": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+        "scope": "subtree",
+        "deny_operations": ["write"],
+        "reason": "Auto-start programs — persistence mechanism"
+      }
+    ],
+
+    "process": {
+      "deny_capabilities": [
+        "SE_DEBUG_PRIVILEGE",
+        "SE_TAKE_OWNERSHIP_PRIVILEGE",
+        "SE_LOAD_DRIVER_PRIVILEGE",
+        "SE_TCB_PRIVILEGE"
+      ],
+      "reason": "Dangerous privileges that could escape the sandbox"
+    }
+  }
+}
+```
+
+```jsonc
+// Example: system-policy-linux.jsonc
+{
+  "system_policy_version": "1.0",
+  "platform": "linux",
+  "description": "System-wide invariants for sandboxed workloads on Linux",
+
+  "deny": {
+    "filesystem": [
+      {
+        "path": "/usr/bin",
+        "scope": "subtree",
+        "deny_operations": ["write", "create", "delete"],
+        "reason": "OS binaries"
+      },
+      {
+        "path": "/usr/sbin",
+        "scope": "subtree",
+        "deny_operations": ["write", "create", "delete"],
+        "reason": "System administration binaries"
+      },
+      {
+        "path": "/usr/lib",
+        "scope": "subtree",
+        "deny_operations": ["write", "create", "delete"],
+        "reason": "Shared libraries"
+      },
+      {
+        "path": "/boot",
+        "scope": "subtree",
+        "deny_operations": ["read", "write", "create", "delete", "execute"],
+        "reason": "Kernel and bootloader"
+      },
+      {
+        "path": "/etc/shadow",
+        "scope": "exact",
+        "deny_operations": ["read", "write"],
+        "reason": "Password hashes"
+      },
+      {
+        "path": "/proc/sysrq-trigger",
+        "scope": "exact",
+        "deny_operations": ["write"],
+        "reason": "Kernel debug interface"
+      }
+    ],
+
+    "network": [
+      {
+        "direction": "inbound",
+        "port_range": [1, 1023],
+        "reason": "Privileged ports — sandboxed workloads may not bind"
+      }
+    ],
+
+    "process": {
+      "deny_capabilities": [
+        "CAP_SYS_ADMIN",
+        "CAP_NET_ADMIN",
+        "CAP_SYS_PTRACE",
+        "CAP_DAC_OVERRIDE",
+        "CAP_SYS_RAWIO"
+      ],
+      "reason": "Dangerous capabilities that could escape the sandbox"
+    }
+  }
+}
+```
+
+```jsonc
+// Example: system-policy-macos.jsonc
+{
+  "system_policy_version": "1.0",
+  "platform": "macos",
+  "description": "System-wide invariants for sandboxed workloads on macOS",
+
+  "deny": {
+    "filesystem": [
+      {
+        "path": "/System",
+        "scope": "subtree",
+        "deny_operations": ["write", "create", "delete"],
+        "reason": "System volume — SIP-protected"
+      },
+      {
+        "path": "/usr/bin",
+        "scope": "subtree",
+        "deny_operations": ["write", "create", "delete"],
+        "reason": "OS binaries — SIP-protected"
+      },
+      {
+        "path": "/usr/lib",
+        "scope": "subtree",
+        "deny_operations": ["write", "create", "delete"],
+        "reason": "System frameworks and dylibs — SIP-protected"
+      },
+      {
+        "path": "/Library/Keychains",
+        "scope": "subtree",
+        "deny_operations": ["read", "write"],
+        "reason": "System keychain — stored credentials"
+      }
+    ],
+
+    "mach_services": [
+      {
+        "name": "com.apple.security.authtrampoline",
+        "deny_operations": ["lookup"],
+        "reason": "Authorization trampoline — privilege escalation vector"
+      }
+    ]
+  }
+}
+```
+
+#### System Policy Dimensions Are a Superset of Bound Policy Dimensions
+
+The system policy schema must be able to deny things in **dimensions the bound
+policy doesn't express**. The bound policy (§8) has sections for filesystem,
+network, process, IPC, devices, resources, and environment. System policy needs
+these plus platform-specific dimensions:
+
+| Dimension | In Bound Policy (§8)? | In System Policy? | Platform |
+|---|---|---|---|
+| Filesystem paths | ✓ | ✓ | All |
+| Network rules | ✓ | ✓ | All |
+| Process capabilities | ✓ | ✓ | All |
+| IPC / services | ✓ | ✓ | All |
+| Devices | ✓ | ✓ | All |
+| **Registry keys** | ✗ | ✓ | Windows |
+| **Mach services** | ✗ | ✓ | macOS |
+| **Kernel parameters (sysctl)** | ✗ | ✓ | Linux |
+
+This is by design. The bound policy only expresses what is *allowed* — it uses
+deny-by-default. The system policy expresses what is *never allowed* — an
+additional deny-overlay on top of deny-by-default. The system policy can cover
+dimensions that the bound policy doesn't even have a section for, as an extra
+layer of defense.
+
+#### Evaluation: Compile-Time vs Runtime
+
+System policy checks happen at **two points**:
+
+**Compile-time (static check):** When the bound policy is compiled to a
+FlatBuffer, every explicit rule is checked against the system deny list:
+
+```
+for each bound_rule in bound_policy.filesystem.rules:
+  for each deny_rule in system_policy.deny.filesystem:
+    if paths_overlap(bound_rule.path, deny_rule.path):
+      if bound_rule.operations ∩ deny_rule.deny_operations ≠ ∅:
+        REJECT with diagnostic:
+          "Rule grants {operations} on {path}, which system policy
+           forbids: {reason}"
+```
+
+This catches explicit grants — if the bound policy says "write to
+`C:\Windows\System32`," the compiler rejects it immediately.
+
+**Runtime (dynamic check):** Some enforcement mechanisms grant implicit access
+that doesn't appear as explicit rules in the bound policy. For example, an
+AppContainer capability like `registryRead` may grant broad registry read access
+without enumerating specific keys. The bound policy has no registry section — the
+access comes from the AppContainer mechanism, not from an explicit policy rule.
+
+If the system policy says "deny read on `HKLM\SAM`," the compile-time check
+finds nothing to reject (there's no registry rule in the bound policy). The
+runtime must enforce this denial dynamically — the sandbox runtime checks each
+registry access against the system deny list at access time.
+
+```
+Compile-time check:                 Runtime check:
+  ✓ Catches explicit grants           ✓ Catches implicit grants from
+    in the bound policy                  enforcement mechanisms
+  ✗ Cannot see implicit grants        ✗ Per-access overhead
+    from AppContainer capabilities,
+    broad namespace access, etc.
+```
+
+Both checks are necessary. The compile-time check provides fast feedback and
+clear diagnostics. The runtime check provides defense-in-depth against grants
+that are invisible at the policy level.
+
+#### Redundancy with OS Enforcement
+
+Some system policy deny rules are redundant with existing OS enforcement:
+- macOS SIP already prevents writing to `/System` and `/usr/bin`
+- Windows integrity levels already prevent low-integrity processes from writing
+  to `System32`
+- Linux DAC permissions already prevent non-root writes to `/usr/bin`
+
+The system policy makes these protections **explicit in our framework** so that:
+1. The compiler catches violations early with clear diagnostics, rather than
+   letting them fail at runtime with cryptic OS errors
+2. The invariants are documented and auditable in one place
+3. The protection holds even if the underlying OS mechanism is misconfigured
+   (defense-in-depth)
+
 ### Layer 6: System Security Promises (What Guarantees Hold)
 
 This layer shifts from *intent* to *capability*. What security guarantees can the
