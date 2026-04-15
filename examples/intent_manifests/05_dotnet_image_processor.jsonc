@@ -1,0 +1,69 @@
+{
+  // Image processing pipeline using .NET and ImageSharp. Reads images
+  // from input, applies transformations (resize, watermark, format
+  // conversion), writes processed images to output. No network access,
+  // no credentials — purely offline computation.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "image-processor",
+    "version": "1.4.0",
+    "description": "Batch image processing: resize, watermark, and format conversion"
+  },
+
+  "requires": {
+    "runtime": {
+      "language": "dotnet",
+      "min_version": "8.0",
+      "packages": ["SixLabors.ImageSharp"]
+    },
+
+    "storage": [
+      { "class": "app_code", "access": "read", "description": "Published .NET application" },
+      {
+        "class": "input_data",
+        "access": "read",
+        "description": "Source images (JPEG, PNG, WebP)"
+      },
+      {
+        "class": "output_data",
+        "access": "write",
+        "description": "Processed images"
+      },
+      { "class": "workspace", "access": "read-write", "description": "Intermediate processing directory" },
+      { "class": "config", "access": "read", "description": "Processing pipeline configuration (JSON)" },
+      { "class": "temp", "access": "read-write", "persistence": "ephemeral" }
+    ],
+
+    "network": [],
+
+    "process": {
+      "spawn": true,
+      "max_children": 8,
+      "signals": "self"
+    },
+
+    "ipc": "none",
+    "devices": "none",
+    "credentials": []
+  },
+
+  "constraints": {
+    "max_memory_mb": 2048,
+    "max_cpu_cores": 4,
+    "max_wall_time_seconds": 600,
+    "max_processes": 12,
+    "max_open_files": 1024,
+    "max_output_bytes": 524288000,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  },
+
+  "claims": {
+    "deterministic": true,
+    "idempotent": true,
+    "no_side_effects_beyond_output": true
+  }
+}

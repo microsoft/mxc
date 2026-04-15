@@ -1,0 +1,94 @@
+{
+  // Bash/shell script that runs infrastructure health checks — pinging
+  // internal services, checking certificate expiry, querying a database
+  // for replication lag. Uses standard Unix tools (curl, openssl, psql).
+  // Needs access to multiple internal services and a database credential.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "infra-health-check",
+    "version": "2.0.0",
+    "description": "Shell-based infrastructure health checker: HTTP endpoints, TLS certs, DB replication"
+  },
+
+  "requires": {
+    "runtime": {
+      "language": "bash",
+      "min_version": "5.0"
+    },
+
+    "tools": [
+      { "name": "curl", "access": "execute" },
+      { "name": "openssl", "access": "execute" },
+      { "name": "psql", "access": "execute" },
+      { "name": "jq", "access": "execute" }
+    ],
+
+    "storage": [
+      { "class": "output_data", "access": "write", "description": "Health check report (JSON)" },
+      { "class": "workspace", "access": "read-write", "description": "Scratch space for intermediate results" },
+      { "class": "config", "access": "read", "description": "List of endpoints and thresholds" },
+      { "class": "temp", "access": "read-write", "persistence": "ephemeral" }
+    ],
+
+    "network": [
+      {
+        "service": "internal-api-gateway",
+        "protocol": "https",
+        "operations": ["health-check"],
+        "description": "Internal API gateway health endpoint"
+      },
+      {
+        "service": "internal-auth-service",
+        "protocol": "https",
+        "operations": ["health-check"],
+        "description": "Authentication service health endpoint"
+      },
+      {
+        "service": "primary-database",
+        "protocol": "tcp",
+        "operations": ["query"],
+        "auth": "injected-token",
+        "description": "PostgreSQL primary for replication lag check"
+      },
+      { "capability": "dns" }
+    ],
+
+    "process": {
+      "spawn": true,
+      "max_children": 8,
+      "exec": ["curl", "openssl", "psql", "jq", "bash"],
+      "signals": "self"
+    },
+
+    "ipc": "none",
+    "devices": "none",
+
+    "credentials": [
+      {
+        "name": "DB_CONNECTION_STRING",
+        "type": "connection-string",
+        "description": "PostgreSQL connection string with read-only credentials"
+      }
+    ]
+  },
+
+  "constraints": {
+    "max_memory_mb": 256,
+    "max_cpu_cores": 1,
+    "max_wall_time_seconds": 120,
+    "max_processes": 16,
+    "max_output_bytes": 1048576,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  },
+
+  "claims": {
+    "deterministic": false,
+    "idempotent": true,
+    "no_credential_exfiltration": true,
+    "no_side_effects_beyond_output": true
+  }
+}

@@ -1,0 +1,83 @@
+{
+  // Rust CLI tool that compiles and runs a user-supplied Rust snippet.
+  // Needs the Rust toolchain, cargo, and network access to download
+  // crate dependencies from crates.io. Spawns child processes (cargo,
+  // rustc). Cache is used for the cargo registry and build artifacts.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "rust-snippet-runner",
+    "version": "1.0.0",
+    "description": "Compiles and executes a user-supplied Rust code snippet with cargo"
+  },
+
+  "requires": {
+    "runtime": {
+      "language": "rust",
+      "min_version": "1.75"
+    },
+
+    "tools": [
+      { "name": "cargo", "access": "execute" },
+      { "name": "rustc", "access": "execute" }
+    ],
+
+    "storage": [
+      { "class": "input_data", "access": "read", "description": "Rust source file to compile" },
+      { "class": "output_data", "access": "write", "description": "Compiled binary output and stdout" },
+      { "class": "workspace", "access": "read-write", "description": "Cargo project directory" },
+      { "class": "temp", "access": "read-write", "persistence": "ephemeral" },
+      {
+        "class": "cache",
+        "access": "read-write",
+        "persistence": "discardable",
+        "description": "Cargo registry cache and build artifacts — survives across invocations"
+      }
+    ],
+
+    "network": [
+      {
+        "service": "crates-io",
+        "protocol": "https",
+        "operations": ["download"],
+        "description": "Rust crate registry for dependency resolution"
+      },
+      {
+        "service": "github-crate-sources",
+        "protocol": "https",
+        "operations": ["download"],
+        "description": "GitHub-hosted crate source archives"
+      },
+      { "capability": "dns" }
+    ],
+
+    "process": {
+      "spawn": true,
+      "max_children": 16,
+      "exec": ["cargo", "rustc", "cc", "ld"],
+      "signals": "self"
+    },
+
+    "ipc": "none",
+    "devices": "none",
+    "credentials": []
+  },
+
+  "constraints": {
+    "max_memory_mb": 4096,
+    "max_cpu_cores": 4,
+    "max_wall_time_seconds": 300,
+    "max_processes": 32,
+    "max_open_files": 4096,
+    "max_output_bytes": 52428800,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  },
+
+  "claims": {
+    "deterministic": false,
+    "idempotent": false
+  }
+}
