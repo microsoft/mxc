@@ -57,7 +57,7 @@ type PfnCreateProcessInSandbox = unsafe extern "system" fn(
 pub struct BaseContainerRunner;
 
 /// Windows error code for a function that exists but is not implemented
-/// (e.g., disabled via velocity keys).
+/// (e.g., disabled via feature-enablement mechanisms).
 const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 
 impl BaseContainerRunner {
@@ -73,7 +73,7 @@ impl BaseContainerRunner {
     ///
     /// Note: a successful probe only means the symbol exists. The OS may
     /// still reject calls at runtime with `ERROR_CALL_NOT_IMPLEMENTED` if
-    /// the feature is disabled (e.g., via internal velocity keys).
+    /// the feature is disabled (e.g., via internal feature-enablement mechanisms).
     pub fn is_base_container_api_present() -> Result<(), String> {
         Self::load_api().map(|_| ())
     }
@@ -429,7 +429,7 @@ impl ScriptRunner for BaseContainerRunner {
                 return ScriptResponse::error(
                     "Experimental_CreateProcessInSandbox returned ERROR_CALL_NOT_IMPLEMENTED. \
                      The BaseContainer feature may be disabled on this OS build \
-                     (e.g., via velocity keys). \
+                     (e.g., via feature-enablement mechanisms). \
                      Use schema version '0.4.0-alpha' to fall back to the AppContainer backend.",
                 );
             }
