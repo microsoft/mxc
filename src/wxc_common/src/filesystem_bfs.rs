@@ -168,12 +168,24 @@ fn test_for_root_path(path: &str) -> bool {
 }
 
 // We control the arguments and ensure they are properly quoted, so this simple implementation
-// is sufficient for our needs. The only time we expect spaces in our arguments is for the user
-// provided path argument and user provided container name, both of which are properly quoted here.
+// is sufficient for our needs. Arguments are only quoted when they contain spaces. When quoting
+// is needed, trailing backslashes are doubled to prevent them from escaping the closing quote
+// (e.g. `C:\My Folder\` becomes `"C:\My Folder\\"` so bfscfg sees the path correctly).
 fn build_bfscfg_cmd_line(args: &[&str]) -> String {
     let mut cmd_line = BFSCFG_EXE.to_string();
     for arg in args {
-        cmd_line.push_str(&format!(" \"{arg}\""));
+        if arg.contains(' ') {
+            // Double any trailing backslashes so they don't escape the closing quote
+            let escaped = if arg.ends_with('\\') {
+                format!("{}\\", arg)
+            } else {
+                arg.to_string()
+            };
+            cmd_line.push_str(&format!(" \"{escaped}\""));
+        } else {
+            cmd_line.push(' ');
+            cmd_line.push_str(arg);
+        }
     }
     cmd_line
 }
@@ -211,7 +223,56 @@ mod tests {
         ]);
         assert_eq!(
             cmd,
-            r#"bfscfg.exe "--addpolicy" "--filename" "C:\Program Files\PowerShell\7" "--appid" "test_container""#
+            r#"bfscfg.exe --addpolicy --filename "C:\Program Files\PowerShell\7" --appid test_container"#
+        );
+    }
+
+    #[test]
+    fn test_build_cmd_line_no_quotes_without_spaces() {
+        let cmd = build_bfscfg_cmd_line(&[
+            "--addpolicy",
+            "--policybrokerreadonly",
+            "--filename",
+            r"C:\Users",
+            "--appid",
+            "test",
+        ]);
+        assert_eq!(
+            cmd,
+            r"bfscfg.exe --addpolicy --policybrokerreadonly --filename C:\Users --appid test"
+        );
+    }
+
+    #[test]
+    fn test_build_cmd_line_trailing_backslash() {
+        let cmd = build_bfscfg_cmd_line(&[
+            "--addpolicy",
+            "--policybrokerreadonly",
+            "--filename",
+            r"C:\",
+            "--appid",
+            "test",
+        ]);
+        // C:\ has no spaces, so no quoting needed — trailing backslash is safe
+        assert_eq!(
+            cmd,
+            r"bfscfg.exe --addpolicy --policybrokerreadonly --filename C:\ --appid test"
+        );
+    }
+
+    #[test]
+    fn test_build_cmd_line_path_with_spaces_and_trailing_backslash() {
+        let cmd = build_bfscfg_cmd_line(&[
+            "--addpolicy",
+            "--filename",
+            r"C:\My Folder\",
+            "--appid",
+            "test",
+        ]);
+        // Trailing backslash is doubled inside quotes to prevent escaping the quote
+        assert_eq!(
+            cmd,
+            r#"bfscfg.exe --addpolicy --filename "C:\My Folder\\" --appid test"#
         );
     }
 }
