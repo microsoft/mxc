@@ -304,6 +304,27 @@ pub fn load_request(
 /// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
 const SUPPORTED_VERSION: &str = ">=0.4, <=0.5";
 
+/// The minimum schema version that implies BaseContainer backend usage.
+const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
+
+/// Returns `true` if `version` is a BaseContainer-era schema version (>= 0.5.0).
+///
+/// Pre-release labels are stripped before comparison, so `"0.5.0-alpha"` is
+/// treated identically to `"0.5.0"`.  Returns `false` for empty or
+/// unparseable version strings.
+pub fn is_base_container_version(version: &str) -> bool {
+    if version.is_empty() {
+        return false;
+    }
+    let parsed = match semver::Version::parse(version) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
+    let threshold = semver::Version::parse(BASE_CONTAINER_MIN_VERSION).unwrap();
+    comparable >= threshold
+}
+
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
 fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), WxcError> {
@@ -1636,5 +1657,23 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::All);
+    }
+
+    #[test]
+    fn is_base_container_version_recognizes_050() {
+        assert!(is_base_container_version("0.5.0-alpha"));
+        assert!(is_base_container_version("0.5.0"));
+        assert!(is_base_container_version("0.5.1"));
+        assert!(is_base_container_version("0.6.0"));
+        assert!(is_base_container_version("1.0.0"));
+    }
+
+    #[test]
+    fn is_base_container_version_rejects_040() {
+        assert!(!is_base_container_version("0.4.0-alpha"));
+        assert!(!is_base_container_version("0.4.0"));
+        assert!(!is_base_container_version("0.4.9"));
+        assert!(!is_base_container_version(""));
+        assert!(!is_base_container_version("not-a-version"));
     }
 }
