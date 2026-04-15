@@ -30,70 +30,6 @@ use windows::Win32::System::Com::{
     CoSetProxyBlanket, EOAC_DYNAMIC_CLOAKING, RPC_C_AUTHN_LEVEL_DEFAULT,
     RPC_C_IMP_LEVEL_IMPERSONATE,
 };
-use windows_future::AsyncStatus;
-
-// -- Async helpers -----------------------------------------------------------
-
-/// Blocks until an `IAsyncOperation<T>` completes and returns its result.
-fn block_on_async<T: windows_core::RuntimeType>(
-    op: &windows_future::IAsyncOperation<T>,
-) -> Result<T, String> {
-    loop {
-        let status = op
-            .Status()
-            .map_err(|e| format!("IAsyncOperation::Status: {}", e))?;
-        match status {
-            AsyncStatus::Completed => {
-                return op
-                    .GetResults()
-                    .map_err(|e| format!("IAsyncOperation::GetResults: {}", e));
-            }
-            AsyncStatus::Error => {
-                return Err(format!(
-                    "async operation failed with error: {:?}",
-                    op.ErrorCode()
-                ));
-            }
-            AsyncStatus::Canceled => {
-                return Err("async operation was canceled".to_string());
-            }
-            _ => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        }
-    }
-}
-
-/// Blocks until an `IAsyncAction` completes.
-fn block_on_async_action(
-    op: &windows_future::IAsyncAction,
-) -> Result<(), String> {
-    loop {
-        let status = op
-            .Status()
-            .map_err(|e| format!("IAsyncAction::Status: {}", e))?;
-        match status {
-            AsyncStatus::Completed => {
-                return op
-                    .GetResults()
-                    .map_err(|e| format!("IAsyncAction::GetResults: {}", e));
-            }
-            AsyncStatus::Error => {
-                return Err(format!(
-                    "async action failed with error: {:?}",
-                    op.ErrorCode()
-                ));
-            }
-            AsyncStatus::Canceled => {
-                return Err("async action was canceled".to_string());
-            }
-            _ => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        }
-    }
-}
-
 // -- Error messages for unsupported policy fields ----------------------------
 
 pub(crate) const ERR_FILESYSTEM_POLICY: &str =
@@ -308,8 +244,9 @@ impl AgentSessionManager {
         )
         .map_err(|e| format!("ProvisionAgentUserAsync failed: {}", e))?;
 
-        let result =
-            block_on_async(&async_op).map_err(|e| format!("ProvisionAgentUserAsync: {}", e))?;
+        let result = async_op
+            .join()
+            .map_err(|e| format!("ProvisionAgentUserAsync: {}", e))?;
 
         let status = result
             .Status()
@@ -336,8 +273,9 @@ impl AgentSessionManager {
         )
         .map_err(|e| format!("StartSessionAsync failed: {}", e))?;
 
-        let status =
-            block_on_async(&async_op).map_err(|e| format!("StartSessionAsync: {}", e))?;
+        let status = async_op
+            .join()
+            .map_err(|e| format!("StartSessionAsync: {}", e))?;
 
         match status {
             IsolationSessionOperationStatus::Succeeded
@@ -399,7 +337,8 @@ impl AgentSessionManager {
         )
         .map_err(|e| format!("CreateIsolatedProcessAsync2 failed: {}", e))?;
 
-        let result = block_on_async(&async_op)
+        let result = async_op
+            .join()
             .map_err(|e| format!("CreateIsolatedProcessAsync2: {}", e))?;
 
         let status = result
@@ -444,7 +383,8 @@ impl AgentSessionManager {
         let wait_op = worker
             .WaitForExitAsync()
             .map_err(|e| format!("WaitForExitAsync: {}", e))?;
-        block_on_async_action(&wait_op)
+        wait_op
+            .join()
             .map_err(|e| format!("WaitForExitAsync: {}", e))?;
 
         let exit_code = worker
@@ -466,8 +406,9 @@ impl AgentSessionManager {
         )
         .map_err(|e| format!("StopSessionAsync failed: {}", e))?;
 
-        let status =
-            block_on_async(&async_op).map_err(|e| format!("StopSessionAsync: {}", e))?;
+        let status = async_op
+            .join()
+            .map_err(|e| format!("StopSessionAsync: {}", e))?;
 
         match status {
             IsolationSessionOperationStatus::Succeeded
@@ -487,7 +428,8 @@ impl AgentSessionManager {
         )
         .map_err(|e| format!("DeprovisionAgentUserAsync failed: {}", e))?;
 
-        let status = block_on_async(&async_op)
+        let status = async_op
+            .join()
             .map_err(|e| format!("DeprovisionAgentUserAsync: {}", e))?;
 
         match status {
@@ -505,7 +447,8 @@ impl AgentSessionManager {
             IsolationSessionClient::UnregisterClientAsync(&self.registration_id)
                 .map_err(|e| format!("UnregisterClientAsync failed: {}", e))?;
 
-        let _status = block_on_async(&async_op)
+        let _status = async_op
+            .join()
             .map_err(|e| format!("UnregisterClientAsync: {}", e))?;
 
         Ok(())
