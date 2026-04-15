@@ -3372,17 +3372,340 @@ A claim of `"no_credential_exfiltration": true` does **not** mean the runtime
 skips credential protection. The runtime always protects credentials regardless
 of claims. Claims are metadata, not policy.
 
+### Layer 2 Is Never Hand-Authored
+
+A key design decision: **the bound policy (§8) is always produced by the binder,
+never written directly by humans or agents.** It is an intermediate artifact —
+the output of the binding step, the input to compilation. No one authors it.
+
+This means there is exactly one way to express policy requirements: the intent
+manifest. There are no shortcuts, no "advanced mode" where you write Layer 2
+directly, no intent annotations mixed into Layer 2. The system has one policy
+authoring format, and it is intent.
+
+This decision has several consequences:
+
+1. **All authority checks (Layers 3–5) operate on intent.** Admin policy says
+   "no external network access," and that matches against `"service": "public-web"`,
+   not against `"host": "104.18.32.7"`. The authority doesn't need to understand
+   platform-specific details.
+
+2. **Audit trails are readable.** "The agent requested LLM API access and
+   read-write workspace" is more useful than "the agent requested TCP connect to
+   104.18.32.7:443 and subtree read-write on /workspace."
+
+3. **The binder is the single point of platform knowledge.** All platform-specific
+   decisions (where Python lives, what ports services use, what filesystem layout
+   to use) are made in one place, not scattered across policy files.
+
+4. **Agents don't need platform knowledge.** An agent loop generating a Python
+   script emits `"runtime": { "language": "python" }` regardless of whether the
+   workload will execute on Linux, Windows, or in a VM. The binder handles
+   resolution.
+
+### Agents as Policy Authors
+
+In agentic systems, the "code author" is often an LLM-based agent loop that
+generates both the code and the policy for that code. This raises the question:
+if the agent wrote the code and knows exactly what it does, why make it go
+through an abstract intent manifest instead of emitting concrete config directly?
+
+**The agent should still emit intent, for three reasons:**
+
+1. **The agent doesn't have full platform knowledge.** It knows it generated
+   `import json` in Python, but it may not know that this requires read access to
+   `/usr/lib/python3.11/json/__init__.py`, `decoder.py`, `encoder.py`,
+   `scanner.py`, and a C extension at
+   `/usr/lib/python3.11/lib-dynload/_json.cpython-311-x86_64-linux-gnu.so`.
+   The intent manifest says `"runtime": "python"` and the binder handles the
+   rest via a base policy (see below).
+
+2. **The agent shouldn't hardcode infrastructure decisions.** If the agent emits
+   `"host": "api.anthropic.com"`, it has baked in a deployment choice that
+   belongs to the orchestrator. The orchestrator might route to a different LLM
+   provider, or admin policy might block one provider but allow another. Intent
+   says `"service": "llm-api"`; the service catalog resolves it.
+
+3. **Multi-platform dispatch.** An agent loop running on one machine may dispatch
+   workloads to different platforms (Linux workers, Windows workers, cloud VMs).
+   It doesn't know the target platform at code-generation time. Intent is
+   platform-independent; config is not.
+
+The overhead of intent → bind → config is minimal (the binder is fast) and the
+correctness and portability benefits are significant.
+
+### Base Policies (Runtime Profiles)
+
+When the manifest says `"runtime": { "language": "python", "min_version": "3.11" }`,
+the binder needs to know everything Python requires at the filesystem level —
+interpreter binary, standard library, compiled extensions, certificate bundles,
+dynamic linker paths, etc. This is a large, platform-specific set of rules that
+no policy author (human or agent) should enumerate.
+
+**Base policies** (also called runtime profiles) are curated, system-provided
+policy fragments that capture this knowledge. They are analogous to OCI base
+images — you select `python:3.11-slim` and trust that it contains the right
+dependencies.
+
+#### Schema
+
+```jsonc
+{
+  "base_policy_version": "1.0",
+  "name": "python3.11-linux-x64",
+  "description": "CPython 3.11 on Linux x86_64 — interpreter, stdlib, and common extensions",
+  "platform": "linux",
+  "architecture": "x86_64",
+
+  "matches": {
+    // Which intent manifest runtime declarations this profile satisfies
+    "language": "python",
+    "version_range": ">=3.11.0, <3.12.0"
+  },
+
+  // Filesystem rules this profile contributes to the bound policy
+  "filesystem_rules": [
+    { "path": "/usr/bin/python3.11",       "scope": "exact",   "allow": ["read", "execute"] },
+    { "path": "/usr/bin/python3",          "scope": "exact",   "allow": ["read", "execute"] },
+    { "path": "/usr/lib/python3.11",       "scope": "subtree", "allow": ["read"] },
+    { "path": "/usr/lib/python3/dist-packages", "scope": "subtree", "allow": ["read"] },
+    { "path": "/usr/lib/x86_64-linux-gnu", "scope": "subtree", "allow": ["read", "execute"] },
+    { "path": "/etc/ssl/certs",            "scope": "subtree", "allow": ["read"] },
+    { "path": "/etc/resolv.conf",          "scope": "exact",   "allow": ["read"] },
+    { "path": "/lib/x86_64-linux-gnu",     "scope": "subtree", "allow": ["read", "execute"] },
+    { "path": "/usr/local/lib/python3.11/dist-packages", "scope": "subtree",
+      "allow": ["read"] }
+  ],
+
+  // Environment variables this profile sets
+  "environment": {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUNBUFFERED": "1"
+  }
+}
+```
+
+A corresponding Windows profile:
+
+```jsonc
+{
+  "base_policy_version": "1.0",
+  "name": "python3.11-windows-x64",
+  "description": "CPython 3.11 on Windows x64",
+  "platform": "windows",
+  "architecture": "x86_64",
+
+  "matches": {
+    "language": "python",
+    "version_range": ">=3.11.0, <3.12.0"
+  },
+
+  "filesystem_rules": [
+    { "path": "C:\\Python311\\python.exe",    "scope": "exact",   "allow": ["read", "execute"] },
+    { "path": "C:\\Python311\\python311.dll",  "scope": "exact",   "allow": ["read", "execute"] },
+    { "path": "C:\\Python311\\Lib",            "scope": "subtree", "allow": ["read"] },
+    { "path": "C:\\Python311\\DLLs",           "scope": "subtree", "allow": ["read", "execute"] },
+    { "path": "C:\\Windows\\System32\\vcruntime140.dll", "scope": "exact",
+      "allow": ["read", "execute"] },
+    { "path": "C:\\Windows\\System32\\ucrtbase.dll", "scope": "exact",
+      "allow": ["read", "execute"] }
+  ],
+
+  "environment": {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUNBUFFERED": "1"
+  }
+}
+```
+
+#### Composition
+
+A workload that needs Python plus additional tools references multiple profiles.
+The binder merges their filesystem rules:
+
+```jsonc
+// Intent manifest:
+{
+  "requires": {
+    "runtime": { "language": "python", "min_version": "3.11" },
+    "tools": [
+      { "name": "ffmpeg", "access": "execute" },
+      { "name": "curl", "access": "execute" }
+    ]
+  }
+}
+```
+
+The binder finds `python3.11-linux-x64`, `ffmpeg-linux-x64`, and
+`curl-linux-x64` profiles and merges their filesystem rules into the bound
+policy. The merge is a simple union — all paths from all matching profiles are
+included.
+
+#### Connection to §12 (Lifecycle)
+
+Base policies also drive **warm container initialization**. When a warm pool
+(§12) is configured for Python workloads, the base policy determines what gets
+installed and configured at container creation time:
+
+```
+  Base policy "python3.11-linux-x64"
+       │
+       ├── Container creation: install Python, grant filesystem access
+       │   (expensive, done once)
+       │
+       └── Workload arrival: binder only resolves workspace, network,
+           credentials (cheap, per-workload)
+```
+
+The base policy's filesystem rules become part of the container's **base
+policy** (§12), and each workload's resolved requirements become the **workload
+policy** that further restricts within it.
+
+### Policy Discovery (Learning Mode)
+
+When a developer has existing code but no intent manifest, a **learning mode**
+can help bootstrap one. The idea — used by SELinux's `audit2allow`, AppArmor's
+`aa-logprof`, and MXC's existing `permissiveLearningMode` — is to run the
+workload in a permissive sandbox that logs every access without blocking, then
+generate policy from the log.
+
+#### What Learning Mode Captures
+
+Learning mode observes **concrete access events** at the mechanism level:
+
+```
+Process 1234 opened /usr/lib/python3.11/json/__init__.py  READ
+Process 1234 opened /home/alice/project/input.csv         READ
+Process 1234 opened /tmp/tmpxyz123                        WRITE CREATE
+Process 1234 connected TCP 10.0.0.1 → 104.18.32.7:443
+Process 1234 connected TCP 10.0.0.1 → 8.8.8.8:53
+Process 1234 called clone()
+```
+
+This is Layer 2 data — concrete paths, concrete IPs, concrete syscalls.
+Generating a bound config (§8) from this is mechanical: group paths by prefix,
+determine read vs write, list hosts/ports. SELinux's `audit2allow` does exactly
+this.
+
+#### The Uplift Problem: Layer 2 → Layer 1
+
+Generating an *intent manifest* (Layer 1) from observation is harder because
+**intent is about purpose, and purpose is not observable from system calls.**
+Learning mode tells you *what the code did*; intent tells you *what the code is
+trying to accomplish.*
+
+| Category | Automation Quality | Why |
+|---|---|---|
+| **Runtime detection** | ✓ High | Strong patterns — Python loading `/usr/lib/python3.11/**` is unmistakable |
+| **Temp/scratch** | ✓ High | Path conventions — `/tmp/tmp*`, `%TEMP%` |
+| **DNS/NTP** | ✓ High | Port patterns — UDP port 53 is unambiguous |
+| **Process spawning** | ✓ High | Syscall trace — `clone()`, `fork()` |
+| **Workspace/input/output** | ⚠ Medium | Heuristics — read-only vs read-write observed, but one run may not show all code paths |
+| **Network services** | ⚠ Medium | Requires a service catalog to map `104.18.32.7` → `"service": "llm-api"` |
+| **Credentials** | ⚠ Medium | Pattern matching on paths (`/run/secrets/*`) and env vars (`*_API_KEY`) |
+| **Resource constraints** | ⚠ Medium | Single-run observation is a lower bound; needs safety margin |
+| **Claims** | ✗ Cannot automate | Semantic properties like `idempotent` require author knowledge |
+| **Persistence intent** | ✗ Cannot automate | *Why* a file was written is not observable |
+
+#### The Two-Pass Workflow
+
+Learning mode produces a draft intent manifest through a two-pass process:
+
+**Pass 1: Generate Layer 2 config** — mechanical, high accuracy. Group file
+accesses, identify read/write/execute, list network destinations.
+
+**Pass 2: Uplift to Layer 1** — apply heuristics to classify Layer 2 data into
+intent categories:
+
+1. **Strip runtime accesses.** Match observed paths against a known-runtimes
+   database. Everything that matches gets collapsed into
+   `"runtime": { "language": "python" }` and removed from the storage rules.
+
+2. **Classify storage.** Apply heuristics:
+   - Read-only files → `input_data`
+   - Created and written files that didn't exist before → `output_data`
+   - Read-and-write files → `workspace`
+   - `/tmp` and temp-patterned paths → `temp`
+
+3. **Resolve network.** Match observed hosts against a service catalog. Matches
+   become named service references; unmatched hosts get flagged for review.
+
+4. **Set constraints conservatively.** Observed maximums × a safety margin
+   (e.g., observed 200MB memory → suggest `max_memory_mb: 512`).
+
+5. **Leave claims empty.** Cannot be inferred.
+
+#### Draft Output With Annotations
+
+The learning tool produces a **draft manifest with confidence annotations** that
+indicate what was inferred confidently vs what needs review:
+
+```jsonc
+{
+  "manifest_version": "1.0",
+  "metadata": { "name": "unknown-workload" },
+
+  "requires": {
+    "runtime": { "language": "python", "min_version": "3.11" },
+    // ✓ CONFIDENT: Process executed /usr/bin/python3.11, loaded stdlib
+
+    "storage": [
+      { "class": "workspace", "access": "read-write" },
+      // ⚠ REVIEW: /home/alice/project/** — read+write observed; could
+      //   be split into input_data (r) + output_data (w) if author knows
+
+      { "class": "temp", "access": "read-write", "persistence": "ephemeral" }
+      // ✓ CONFIDENT: /tmp/tmp* — classic temp pattern
+    ],
+
+    "network": [
+      { "service": "llm-api", "protocol": "https" },
+      // ✓ MATCHED: api.anthropic.com:443 found in service catalog
+
+      { "capability": "dns" }
+      // ✓ CONFIDENT: UDP 8.8.8.8:53 observed
+    ]
+  },
+
+  "constraints": {
+    "max_memory_mb": 512,
+    // ⚠ ESTIMATED: peak 203MB observed — padded 2.5×
+
+    "max_wall_time_seconds": 120
+    // ⚠ ESTIMATED: completed in 47s — padded 2.5×
+  },
+
+  "claims": {
+    // ✗ EMPTY: Cannot be inferred. Author must fill in.
+  }
+}
+```
+
+The annotations (✓ CONFIDENT, ⚠ REVIEW, ⚠ ESTIMATED, ✗ EMPTY) are not part of
+the schema — they are comments in the draft output that the author (human or
+agent) reviews before finalizing.
+
+#### Practical Assessment
+
+Learning mode can automate approximately **60–70%** of an intent manifest. The
+remaining 30–40% requires author knowledge — primarily storage classification
+refinement, claims, and persistence intent. For agent-authored code, the agent
+already has this knowledge (it wrote the code), so the agent can fill in the
+gaps. For legacy code without an available author, the draft with review
+annotations is the best achievable outcome.
+
 ### The Binding Step
 
 Binding resolves an intent manifest to a bound policy (§8) on a specific
 platform. It consumes:
 
 1. **Intent manifest** (Layer 1) — what the code needs
-2. **Platform inventory** — what the target system has (runtime locations, kernel
+2. **Base policies** — runtime profiles for the declared runtime and tools
+3. **Platform inventory** — what the target system has (runtime locations, kernel
    version, available backends)
-3. **Service catalog** — named service → concrete host/port mapping
-4. **User consent** (Layer 3) — what the user approves
-5. **Admin policy** (Layer 4) — what organizational constraints apply
+4. **Service catalog** — named service → concrete host/port mapping
+5. **User consent** (Layer 3) — what the user approves
+6. **Admin policy** (Layer 4) — what organizational constraints apply
 
 And produces:
 
@@ -3390,11 +3713,16 @@ And produces:
 7. **Bind report** — what was resolved, what was denied, what requires consent
 
 ```
-resolve(manifest, platform, services, consent, admin_policy) → BoundPolicy:
+resolve(manifest, base_policies, platform, services, consent, admin_policy)
+    → BoundPolicy:
 
-  // Runtime resolution
-  runtime_path = platform.locate_runtime(manifest.requires.runtime)
-  stdlib_paths = platform.locate_stdlib(manifest.requires.runtime)
+  // Base policy resolution
+  base = find_base_policy(manifest.requires.runtime, platform)
+  merge base.filesystem_rules into bound policy
+  merge base.environment into bound policy
+  for each tool in manifest.requires.tools:
+    tool_base = find_base_policy(tool, platform)
+    merge tool_base.filesystem_rules into bound policy
 
   // Storage binding
   for each storage requirement:
