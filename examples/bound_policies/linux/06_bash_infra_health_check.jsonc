@@ -62,5 +62,14 @@
       "HOME": "/workspace",
       "DB_CONNECTION_STRING_FILE": "/run/secrets/DB_CONNECTION_STRING"
     }
+  },
+
+  "platform": {
+    "linux": {
+      "namespaces": {
+        "user": true, "mount": true, "pid": true,
+        "net": true, "ipc": true, "uts": true, "cgroup": true
+      }
+    }
   }
 }

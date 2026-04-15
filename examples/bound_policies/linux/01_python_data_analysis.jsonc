@@ -49,5 +49,14 @@
       "PYTHONDONTWRITEBYTECODE": "1",
       "PYTHONUNBUFFERED": "1"
     }
+  },
+
+  "platform": {
+    "linux": {
+      "namespaces": {
+        "user": true, "mount": true, "pid": true,
+        "net": true, "ipc": true, "uts": true, "cgroup": true
+      }
+    }
   }
 }

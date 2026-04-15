@@ -61,5 +61,14 @@
       "WEATHER_API_KEY_FILE": "/run/secrets/WEATHER_API_KEY",
       "GEOCODING_API_KEY_FILE": "/run/secrets/GEOCODING_API_KEY"
     }
+  },
+
+  "platform": {
+    "linux": {
+      "namespaces": {
+        "user": true, "mount": true, "pid": true,
+        "net": true, "ipc": true, "uts": true, "cgroup": true
+      }
+    }
   }
 }

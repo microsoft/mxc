@@ -68,5 +68,14 @@
       "CARGO_TARGET_DIR": "/cache/cargo-target",
       "RUSTUP_HOME": "/usr/lib/rustlib"
     }
+  },
+
+  "platform": {
+    "linux": {
+      "namespaces": {
+        "user": true, "mount": true, "pid": true,
+        "net": true, "ipc": true, "uts": true, "cgroup": true
+      }
+    }
   }
 }
