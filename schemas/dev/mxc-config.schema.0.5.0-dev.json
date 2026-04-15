@@ -230,7 +230,7 @@
             "image": {
               "type": "string",
               "default": "alpine:latest",
-              "description": "Container image name. Images should be pre-pulled externally; the runner will attempt an auto-pull if not found (temporary behavior — to be moved to a setup script).",
+              "description": "Container image name (e.g., 'alpine:latest', 'python:3.12').",
               "examples": ["alpine:latest", "python:3.12", "ubuntu:24.04"]
             },
             "cpuCount": {
