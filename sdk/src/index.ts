@@ -28,6 +28,7 @@
 // Export types
 export {
   SandboxPolicy,
+  SandboxingMethod,
   ContainerConfig,
   PlatformSupport,
 } from './types';
