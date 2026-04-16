@@ -3,8 +3,5 @@
   "process": {
     "commandLine": "echo Hello from sandbox!",
     "timeout": 60000
-  },
-  "ui": {
-    "disable": false
   }
 }
