@@ -177,6 +177,8 @@ export function findWxcExecutable(): string | null {
   const possiblePaths = [
     // Bundled in the SDK package (e.g. when installed via npm)
     path.join(__dirname, '..', 'bin', getSdkArch(), 'wxc-exec.exe'),
+    // Bundled under Rust target triple (npm pack may use this layout)
+    path.join(__dirname, '..', 'bin', targetTriple, 'wxc-exec.exe'),
     // Architecture-specific release build output (monorepo dev)
     path.join(targetDir, targetTriple, 'release', 'wxc-exec.exe'),
     // Architecture-specific debug build output (monorepo dev)
@@ -230,6 +232,8 @@ export function findLxcExecutable(): string | null {
   const possiblePaths = [
     // Bundled in the SDK package
     path.join(__dirname, '..', 'bin', getSdkArch(), 'lxc-exec'),
+    // Bundled under Rust target triple (npm pack may use this layout)
+    path.join(__dirname, '..', 'bin', targetTriple, 'lxc-exec'),
     // Architecture-specific release build
     path.join(targetDir, targetTriple, 'release', 'lxc-exec'),
     // Architecture-specific debug build
