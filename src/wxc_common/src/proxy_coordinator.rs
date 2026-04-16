@@ -326,7 +326,7 @@ impl ProxyCoordinator {
     }
 
     /// Launch `wxc-test-proxy.exe` and read its port from the ready file.
-    fn launch_test_proxy(&mut self, logger: &mut Logger) -> Result<u16, WxcError> {
+    pub fn launch_test_proxy(&mut self, logger: &mut Logger) -> Result<u16, WxcError> {
         logger.log_line(
             "WARNING: Starting builtin test proxy — this is for integration testing only, \
              NOT for production use.",

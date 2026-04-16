@@ -21,7 +21,6 @@ const policy: SandboxPolicy = {
   version: "0.4.0-alpha",
   filesystem: { ... },
   network: { ... },
-  ui: { ... },
   timeoutMs: 30000,
 };
 ```
@@ -131,7 +130,8 @@ const pty = spawnSandbox("python app.py", policy, {
 
 // Or with config:
 const config = createConfigFromPolicy(policy, "process");
-const pty = spawnSandbox("python app.py", config, {
+config.process!.commandLine = "python app.py";
+const pty = spawnSandboxFromConfig(config, {
   experimental: true,
   debug: false,
 });
