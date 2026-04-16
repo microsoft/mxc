@@ -69,9 +69,15 @@ node --test dist/sandbox.test.js
 node --test dist/cli.test.js
 
 # Integration tests — run from repo root, requires built wxc-exec.exe
-test_scripts\run_test_configs.bat           # All test configs via wxc_test_driver
-test_scripts\run_basicac_test.bat           # Single AppContainer test
+test_scripts\run_test_configs.ps1           # All test configs via wxc_test_driver
+test_scripts\run_basicac_test.ps1           # Single AppContainer test
 test_scripts\run_lxc_all_tests.sh           # All LXC tests (Linux)
+
+# E2E test crate — orchestrates all integration tests (from src/)
+cargo test -p wxc_e2e_tests                 # Runs all E2E tests (skips if prereqs missing)
+cargo test -p wxc_e2e_tests -- test_sdk     # SDK tests only
+cargo test -p wxc_e2e_tests -- test_cli     # CLI tests only
+cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests (run_on_repeat)
 ```
 
 ## Architecture
