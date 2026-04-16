@@ -585,7 +585,7 @@ impl WSLContainerRunner {
         }
         let process_guard = WslcProcessGuard::from_raw(process);
 
-        // -- Step 12:Wait for exit (callbacks capture I/O during execution) --
+        // -- Step 12: Wait for exit (callbacks capture I/O during execution) --
         let mut exit_event: HANDLE = ptr::null_mut();
         let hr = WslcGetProcessExitEvent(process_guard.as_raw(), &mut exit_event);
         if hr != S_OK {
