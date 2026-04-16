@@ -56,9 +56,26 @@ type PfnCreateProcessInSandbox = unsafe extern "system" fn(
 #[derive(Default)]
 pub struct BaseContainerRunner;
 
+/// Windows error code for a function that exists but is not implemented
+/// (e.g., disabled via feature-enablement mechanisms).
+const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
+
 impl BaseContainerRunner {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Pre-flight probe: check whether the current OS build exports the
+    /// `Experimental_CreateProcessInSandbox` symbol from `processmodel.dll`.
+    ///
+    /// Returns `Ok(())` if the export is resolvable, or `Err` with a
+    /// human-readable description when the DLL or export is missing.
+    ///
+    /// Note: a successful probe only means the symbol exists. The OS may
+    /// still reject calls at runtime with `ERROR_CALL_NOT_IMPLEMENTED` if
+    /// the feature is disabled (e.g., via internal feature-enablement mechanisms).
+    pub fn is_base_container_api_present() -> Result<(), String> {
+        Self::load_api().map(|_| ())
     }
 
     /// JOB_OBJECT_UILIMIT_* flag constants (from UIPolicy_Schema.md).
@@ -408,6 +425,14 @@ impl ScriptRunner for BaseContainerRunner {
 
         if success == 0 {
             let err = unsafe { GetLastError() };
+            if err.0 == ERROR_CALL_NOT_IMPLEMENTED {
+                return ScriptResponse::error(
+                    "Experimental_CreateProcessInSandbox returned ERROR_CALL_NOT_IMPLEMENTED. \
+                     The BaseContainer feature may be disabled on this OS build \
+                     (e.g., via feature-enablement mechanisms). \
+                     Use schema version '0.4.0-alpha' to fall back to the AppContainer backend.",
+                );
+            }
             return ScriptResponse::error(&format!(
                 "Experimental_CreateProcessInSandbox failed: {err:?}"
             ));
