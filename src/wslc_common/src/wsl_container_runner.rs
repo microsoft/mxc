@@ -476,7 +476,8 @@ impl WSLContainerRunner {
         }
 
         // Attach init process
-        let hr = WslcSetContainerSettingsInitProcess(&mut container_settings, &mut process_settings);
+        let hr =
+            WslcSetContainerSettingsInitProcess(&mut container_settings, &mut process_settings);
         if hr != S_OK {
             return sdk_error("WslcSetContainerSettingsInitProcess failed", hr, "");
         }
