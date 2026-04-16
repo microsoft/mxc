@@ -57,10 +57,17 @@ fn main() {
     let dll_src = sdk_path.join("wslcsdk.dll");
     if dll_src.exists() {
         let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-        if let Some(profile_dir) = out_dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+        if let Some(profile_dir) = out_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
             let dll_dst = profile_dir.join("wslcsdk.dll");
             if let Err(e) = std::fs::copy(&dll_src, &dll_dst) {
-                println!("cargo:warning=WSLC SDK: failed to copy DLL to output dir: {}", e);
+                println!(
+                    "cargo:warning=WSLC SDK: failed to copy DLL to output dir: {}",
+                    e
+                );
             } else {
                 println!(
                     "cargo:warning=WSLC SDK: copied wslcsdk.dll to {}",
