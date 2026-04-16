@@ -145,6 +145,17 @@ pub fn needs_host_filtering(
     }
 }
 
+/// Validate that a host string is safe for use in an iptables command.
+/// Accepts hostnames (a-z, 0-9, dots, hyphens) and IPv4/IPv6 addresses
+/// (digits, dots, colons, brackets, slash for CIDR).
+/// Rejects empty strings and anything containing shell metacharacters.
+fn is_valid_host(host: &str) -> bool {
+    !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-:[]/_".contains(&b))
+}
+
 /// Build iptables commands for per-host network filtering.
 ///
 /// These rules are exec'd inside the container after start via
@@ -162,6 +173,8 @@ pub fn needs_host_filtering(
 ///   - DROP to each blocked host
 ///
 /// Returns a shell command string to be exec'd inside the container.
+///
+/// Host values are validated to prevent shell command injection.
 pub fn build_iptables_rules(
     allowed_hosts: &[String],
     blocked_hosts: &[String],
@@ -184,6 +197,9 @@ pub fn build_iptables_rules(
 
         // Allow each specified host
         for host in allowed_hosts {
+            if !is_valid_host(host) {
+                continue;
+            }
             rules.push(format!("iptables -A OUTPUT -d {} -j ACCEPT", host));
         }
 
@@ -192,6 +208,9 @@ pub fn build_iptables_rules(
     } else if !is_default_block && !blocked_hosts.is_empty() {
         // Block specific hosts
         for host in blocked_hosts {
+            if !is_valid_host(host) {
+                continue;
+            }
             rules.push(format!("iptables -A OUTPUT -d {} -j DROP", host));
         }
     }
@@ -409,5 +428,44 @@ mod tests {
         assert!(rules.contains("iptables -A OUTPUT -d evil.com -j DROP"));
         assert!(rules.contains("iptables -A OUTPUT -d 10.0.0.1 -j DROP"));
         assert!(!rules.contains("-j ACCEPT"));
+    }
+
+    #[test]
+    fn is_valid_host_accepts_valid_entries() {
+        assert!(is_valid_host("example.com"));
+        assert!(is_valid_host("192.168.1.1"));
+        assert!(is_valid_host("10.0.0.0/8"));
+        assert!(is_valid_host("my-host.example.com"));
+        assert!(is_valid_host("::1"));
+        assert!(is_valid_host("[::1]"));
+        assert!(is_valid_host("2001:db8::1"));
+    }
+
+    #[test]
+    fn is_valid_host_rejects_injection() {
+        assert!(!is_valid_host(""));
+        assert!(!is_valid_host("; rm -rf /"));
+        assert!(!is_valid_host("host && echo pwned"));
+        assert!(!is_valid_host("host | cat /etc/passwd"));
+        assert!(!is_valid_host("$(whoami)"));
+        assert!(!is_valid_host("host`id`"));
+        assert!(!is_valid_host("host name with spaces"));
+    }
+
+    #[test]
+    fn iptables_skips_invalid_hosts() {
+        let rules = build_iptables_rules(
+            &[],
+            &[
+                "good.com".to_string(),
+                "; rm -rf /".to_string(),
+                "10.0.0.1".to_string(),
+            ],
+            false,
+        )
+        .unwrap();
+        assert!(rules.contains("good.com"));
+        assert!(rules.contains("10.0.0.1"));
+        assert!(!rules.contains("rm"));
     }
 }

@@ -81,7 +81,7 @@ impl CoTaskMemPWSTR {
         &mut self.ptr
     }
 
-    /// Read the wide string into a Rust `String`, consuming the content.
+    /// Convert the pointed-to wide string into a Rust `String`.
     /// Returns an empty string if the pointer is null.
     pub fn to_string_lossy(&self) -> String {
         if self.ptr.is_null() {

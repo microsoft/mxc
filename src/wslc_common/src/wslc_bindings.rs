@@ -287,6 +287,12 @@ extern "system" {
     pub fn WslcReleaseSession(session: WslcSession) -> HRESULT;
 
     // -- Image management --
+
+    /// List images available in the session's image store.
+    ///
+    /// On success, `images` is set to a CoTaskMem-allocated array of
+    /// `WslcImageInfo` structs and `count` to the number of elements.
+    /// The caller must free the array with `CoTaskMemFree` when done.
     pub fn WslcListSessionImages(
         session: WslcSession,
         images: *mut *mut WslcImageInfo,
