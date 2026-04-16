@@ -163,6 +163,7 @@ impl Drop for OwnedHandle {
 /// Read all data from a pipe as UTF-8 text, capped at 1MB of characters.
 pub fn read_from_pipe(pipe: HANDLE) -> String {
     let mut result = String::with_capacity(BUFFER_SIZE as usize);
+    let mut char_count: usize = 0;
     let mut buffer = [0u8; BUFFER_SIZE as usize];
     loop {
         let mut bytes_read = 0u32;
@@ -171,17 +172,19 @@ pub fn read_from_pipe(pipe: HANDLE) -> String {
             break;
         }
         let chunk = String::from_utf8_lossy(&buffer[..bytes_read as usize]);
-        let remaining = MAX_OUTPUT_CHARS.saturating_sub(result.len());
+        let remaining = MAX_OUTPUT_CHARS.saturating_sub(char_count);
         if remaining == 0 {
             break;
         }
-        if chunk.len() > remaining {
+        let chunk_char_count = chunk.chars().count();
+        if chunk_char_count > remaining {
             // Take only up to `remaining` chars
             let truncated: String = chunk.chars().take(remaining).collect();
             result.push_str(&truncated);
             break;
         }
         result.push_str(&chunk);
+        char_count += chunk_char_count;
     }
     result
 }
