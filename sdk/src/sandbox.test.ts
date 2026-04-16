@@ -391,4 +391,26 @@ describe('createConfigFromPolicy', () => {
       }
     });
   });
+
+  describe('network validation', () => {
+    it('should reject allowedHosts without allowOutbound', () => {
+      assert.throws(
+        () => createConfigFromPolicy({
+          version: '0.4.0-alpha',
+          network: { allowedHosts: ['example.com'] },
+        }),
+        { message: /allowedHosts\/blockedHosts require allowOutbound/ },
+      );
+    });
+
+    it('should reject blockedHosts without allowOutbound', () => {
+      assert.throws(
+        () => createConfigFromPolicy({
+          version: '0.4.0-alpha',
+          network: { blockedHosts: ['evil.com'] },
+        }),
+        { message: /allowedHosts\/blockedHosts require allowOutbound/ },
+      );
+    });
+  });
 });

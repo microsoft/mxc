@@ -99,7 +99,7 @@ Windows, LXC on Linux).
 ### Flow
 
 ```
-SandboxPolicy --> createConfigFromPolicy(policy, containment) --> ContainerConfig --> spawnSandbox() --> executor --> OS
+SandboxPolicy --> createConfigFromPolicy(policy, containment) --> ContainerConfig --> spawnSandboxFromConfig() --> executor --> OS
 ```
 
 ### Two API paths
@@ -110,11 +110,11 @@ spawnSandbox(script, policy);
 
 // Advanced: choose containment, get config, modify, then spawn.
 const config = createConfigFromPolicy(policy, "process");
-config.appcontainer.ui.isolation = "atoms";  // backend-specific tweak
-spawnSandbox(script, config);
+config.appContainer!.ui!.isolation = "atoms";  // backend-specific tweak
+spawnSandboxFromConfig(config);
 ```
 
-`spawnSandbox` is overloaded: it accepts either a SandboxPolicy or a ContainerConfig.
+`spawnSandbox` accepts a SandboxPolicy. For pre-built configs, use `spawnSandboxFromConfig`.
 
 ### Layer diagram
 
@@ -128,7 +128,7 @@ spawnSandbox(script, config);
 │ Simple:   spawnSandbox(script, policy)                        │
 │ Advanced: createConfigFromPolicy(policy, "process")           │
 │             → modify config                                   │
-│             → spawnSandbox(script, config)                    │
+│             → spawnSandboxFromConfig(config)                  │
 └─────────────────────────────┬─────────────────────────────────┘
                               │ ContainerConfig (JSON)
                               ▼
@@ -252,8 +252,7 @@ spawnSandbox("script.sh", { version: "0.5.0-dev" });
 
 `createConfigFromPolicy()` returns a ContainerConfig: the complete configuration for one
 specific backend. Users receive it, may modify backend-specific fields, then pass it to
-`spawnSandbox()`.
-
+`spawnSandboxFromConfig()`.
 Key rules:
 
 - **One backend per Config.** A Windows process config has an `appcontainer` section; no `lxc`
@@ -425,8 +424,8 @@ spawnSandbox("myapp.exe --flag1 arg", policy);
 
 ```typescript
 const config = createConfigFromPolicy(policy, "process");
-config.appcontainer.ui.isolation = "atoms";
-spawnSandbox("myapp.exe --flag1 arg", config);
+config.appContainer!.ui!.isolation = "atoms";
+spawnSandboxFromConfig(config);
 ```
 
 ### 10.2 MXC developer perspective
@@ -555,7 +554,7 @@ inside ProcessContainerConfig). Policy stays cross-platform.
 ### "Can a developer bypass the SDK defaults?"
 
 Yes, via the advanced path. `createConfigFromPolicy()` returns secure defaults; the user
-modifies any Config field before calling `spawnSandbox()`. No bypass needed: Config is the
+modifies any Config field before calling `spawnSandboxFromConfig()`. No bypass needed: Config is the
 thing they modify.
 
 ### "What happens if I omit all policy fields?"

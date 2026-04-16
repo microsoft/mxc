@@ -77,9 +77,9 @@ function buildLinuxProcessConfig(
 }
 
 /**
- * Builds the Windows process container (BaseProcessContainer) portion of a ContainerConfig.
+ * Builds the Windows process container portion of a ContainerConfig.
  */
-function buildWindowsProcessConfig(
+function buildProcessBaseContainerConfig(
     config: ContainerConfig,
     policy: SandboxPolicy,
     containerId: string,
@@ -127,7 +127,7 @@ function buildWindowsProcessConfig(
  * @example
  * ```typescript
  * const policy: SandboxPolicy = {
- *   version: '0.4.0-alpha',
+ *   version: '0.5.0-alpha',
  *   network: { allowOutbound: true },
  *   ui: { allowWindows: true, clipboard: 'read' },
  * };
@@ -150,12 +150,13 @@ export function createConfigFromPolicy(
     const platform = os.platform();
     const containerId = containerName ?? generateRandomContainerName();
 
+    const clearPolicy = policy.filesystem?.clearPolicyOnExit ?? true;
     const config: ContainerConfig = {
         version: policy.version,
         containerId,
         lifecycle: {
             destroyOnExit: true,
-            preservePolicy: false,
+            preservePolicy: !clearPolicy,
         },
         process: {
             commandLine: '',
@@ -181,6 +182,10 @@ export function createConfigFromPolicy(
             throw new Error('Proxy configuration is not supported on Linux');
         }
 
+        if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
+            throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
+        }
+
         config.network = {
             defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
             allowedHosts: policy.network.allowedHosts,
@@ -194,7 +199,7 @@ export function createConfigFromPolicy(
         if (platform === 'linux') {
             return buildLinuxProcessConfig(config, containerId);
         }
-        return buildWindowsProcessConfig(config, policy, containerId);
+        return buildProcessBaseContainerConfig(config, policy, containerId);
     }
 
     throw new Error(`Containment type '${containment}' is not yet supported.`);
@@ -246,12 +251,15 @@ export interface SandboxSpawnOptions {
  * Internal helper: resolves the executor binary path and spawns a PTY process.
  */
 function spawnWithConfig(
-  script: string,
   config: ContainerConfig,
   options: SandboxSpawnOptions,
   workingDirectory?: string,
   env?: { [key: string]: string | undefined },
 ): pty.IPty {
+  if (!config.process?.commandLine) {
+    throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
+  }
+
   const platformSupport = getPlatformSupport();
   if (!platformSupport.isSupported) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
@@ -328,7 +336,7 @@ export function spawnSandbox(
   env?: { [key: string]: string | undefined }
 ): pty.IPty {
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
-  return spawnWithConfig(script, config, options, workingDirectory, env);
+  return spawnWithConfig(config, options, workingDirectory, env);
 }
 
 /**
@@ -357,10 +365,7 @@ export function spawnSandboxFromConfig(
   workingDirectory?: string,
   env?: { [key: string]: string | undefined }
 ): pty.IPty {
-  if (!config.process?.commandLine) {
-    throw new Error('ContainerConfig.process.commandLine is required');
-  }
-  return spawnWithConfig(config.process.commandLine, config, options, workingDirectory, env);
+  return spawnWithConfig(config, options, workingDirectory, env);
 }
 
 /**
