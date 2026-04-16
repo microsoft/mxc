@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+wxc_common = { workspace = true }
+windows = { workspace = true }
 
 [build-dependencies]
 zip = "2"

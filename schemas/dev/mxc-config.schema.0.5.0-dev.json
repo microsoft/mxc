@@ -19,9 +19,9 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm"],
+      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc"],
       "default": "appcontainer",
-      "description": "Containment backend to use for execution. Note: 'windows_sandbox' is experimental and requires the --experimental CLI flag."
+      "description": "Containment backend to use for execution. Note: 'windows_sandbox' and 'wslc' are experimental and require the --experimental CLI flag."
     },
 
     "lifecycle": {
@@ -265,6 +265,42 @@
               "type": "string",
               "default": "wxc-windows-sandbox",
               "description": "Named pipe name the daemon listens on (without \\\\.\\pipe\\ prefix)."
+            }
+          }
+        },
+        "wslc": {
+          "type": "object",
+          "description": "WSL Container (WSLC SDK) settings. Used when containment is 'wslc'.",
+          "properties": {
+            "targetOs": {
+              "type": "string",
+              "default": "linux",
+              "description": "Target OS for the container. Currently only 'linux' is supported."
+            },
+            "image": {
+              "type": "string",
+              "default": "alpine:latest",
+              "description": "Container image name (e.g., 'alpine:latest', 'python:3.12').",
+              "examples": ["alpine:latest", "python:3.12", "ubuntu:24.04"]
+            },
+            "cpuCount": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of CPUs allocated to the WSLC session. Omit for host-determined default."
+            },
+            "memoryMb": {
+              "type": "integer",
+              "minimum": 256,
+              "description": "Memory in MB allocated to the WSLC session. Omit for host-determined default."
+            },
+            "gpu": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable GPU passthrough to the container."
+            },
+            "storagePath": {
+              "type": "string",
+              "description": "Storage path for the WSLC session image store. Omit to use a temporary directory."
             }
           }
         }

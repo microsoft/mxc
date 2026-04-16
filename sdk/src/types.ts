@@ -149,14 +149,17 @@ export interface ContainerConfig {
   process?: ProcessConfig;
   /** AppContainer configuration */
   appContainer?: AppContainerConfig;
-  /** WSLC SDK configuration */
-  wslc?: WslcConfig;
   /** LXC container configuration (Linux only) */
   lxc?: LxcConfig;
   /** Filesystem access configuration */
   filesystem?: FilesystemConfig;
   /** Network access configuration */
   network?: NetworkConfig;
+  /** Experimental features (only applied when --experimental flag is set) */
+  experimental?: {
+    /** WSLC SDK configuration for Linux containers from Windows */
+    wslc?: WslcConfig;
+  };
   /** Cross-platform UI configuration */
   ui?: UiConfig;
 }

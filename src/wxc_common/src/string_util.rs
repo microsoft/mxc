@@ -55,6 +55,66 @@ pub fn base64_encode(input: &[u8]) -> String {
     STANDARD.encode(input)
 }
 
+/// RAII wrapper for a PWSTR allocated with `CoTaskMemAlloc`.
+/// Automatically frees the memory with `CoTaskMemFree` on drop.
+/// Used for error messages and other strings returned by COM/Win32 APIs.
+pub struct CoTaskMemPWSTR {
+    ptr: *mut u16,
+}
+
+impl CoTaskMemPWSTR {
+    /// Create a new wrapper from a raw PWSTR pointer.
+    /// Takes ownership — the pointer will be freed on drop.
+    pub fn new(ptr: *mut u16) -> Self {
+        Self { ptr }
+    }
+
+    /// Create a wrapper initialized to null.
+    pub fn null() -> Self {
+        Self {
+            ptr: std::ptr::null_mut(),
+        }
+    }
+
+    /// Get the raw pointer (for passing to SDK functions as an out-parameter).
+    pub fn as_mut_ptr(&mut self) -> *mut *mut u16 {
+        &mut self.ptr
+    }
+
+    /// Convert the pointed-to wide string into a Rust `String`.
+    /// Returns an empty string if the pointer is null.
+    pub fn to_string_lossy(&self) -> String {
+        if self.ptr.is_null() {
+            return String::new();
+        }
+        unsafe {
+            let mut len = 0;
+            while *self.ptr.add(len) != 0 {
+                len += 1;
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(self.ptr, len))
+        }
+    }
+
+    /// Returns true if the pointer is null.
+    pub fn is_null(&self) -> bool {
+        self.ptr.is_null()
+    }
+}
+
+impl Drop for CoTaskMemPWSTR {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                windows::Win32::System::Com::CoTaskMemFree(Some(
+                    self.ptr as *const std::ffi::c_void,
+                ));
+            }
+            self.ptr = std::ptr::null_mut();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

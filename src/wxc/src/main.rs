@@ -191,8 +191,28 @@ fn main() {
             }
         }
         ContainmentBackend::Wslc => {
-            eprintln!("Error: WSLC backend not yet implemented (Phase 3)");
-            process::exit(1);
+            #[cfg(feature = "wslc")]
+            {
+                if !request.experimental_enabled {
+                    eprintln!("Error: WSLC is an experimental feature. Use --experimental flag.");
+                    process::exit(1);
+                }
+                let _ = writeln!(logger, "Using WSLContainer runner (--experimental)");
+                let wslc_config = request
+                    .experimental
+                    .wslc
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_default();
+                Box::new(wslc_common::wsl_container_runner::WSLContainerRunner::new(
+                    &wslc_config,
+                ))
+            }
+            #[cfg(not(feature = "wslc"))]
+            {
+                eprintln!("Error: WSLC backend not compiled. Rebuild with --features wslc.");
+                process::exit(1);
+            }
         }
         ContainmentBackend::Lxc => {
             eprintln!("Error: LXC backend not available on Windows");

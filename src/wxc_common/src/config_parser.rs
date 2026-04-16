@@ -10,9 +10,9 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    ClipboardPolicy, CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend,
-    ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
-    PortMapping, ProxyAddress, ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
+    ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
+    LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress,
+    ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -140,6 +140,7 @@ struct RawExperimental {
     test: Option<RawTestFeature>,
     #[serde(rename = "windows_sandbox")]
     windows_sandbox: Option<RawSandbox>,
+    wslc: Option<RawContainerConfig>,
 }
 
 #[derive(Deserialize, Default)]
@@ -162,7 +163,6 @@ struct RawConfig {
     containment: Option<String>,
     #[serde(rename = "appContainer")]
     app_container: Option<RawAppContainer>,
-    wslc: Option<RawContainerConfig>,
     lxc: Option<RawLxc>,
     filesystem: Option<RawFilesystem>,
     network: Option<RawNetwork>,
@@ -545,33 +545,6 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     }
 
-    // Container configuration (WSLC SDK)
-    let mut container_config = ContainerConfig::default();
-    if let Some(cc) = raw.wslc {
-        if let Some(os) = cc.target_os {
-            container_config.target_os = os;
-        }
-        if let Some(img) = cc.image {
-            container_config.image = img;
-        }
-        container_config.cpu_count = cc.cpu_count;
-        container_config.memory_mb = cc.memory_mb;
-        if let Some(gpu) = cc.gpu {
-            container_config.gpu = gpu;
-        }
-        container_config.storage_path = cc.storage_path;
-        if let Some(mappings) = cc.port_mappings {
-            container_config.port_mappings = mappings
-                .into_iter()
-                .map(|m| PortMapping {
-                    windows_port: m.windows_port.unwrap_or(0),
-                    container_port: m.container_port.unwrap_or(0),
-                    protocol: m.protocol.unwrap_or_else(|| "tcp".to_string()),
-                })
-                .collect();
-        }
-    }
-
     // Lifecycle section
     let lifecycle = {
         let lc = raw.lifecycle.unwrap_or_default();
@@ -600,9 +573,36 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             }
             config
         });
+        let wslc = raw_exp.wslc.map(|cc| {
+            let mut config = WslcConfig::default();
+            if let Some(os) = cc.target_os {
+                config.target_os = os;
+            }
+            if let Some(img) = cc.image {
+                config.image = img;
+            }
+            config.cpu_count = cc.cpu_count;
+            config.memory_mb = cc.memory_mb;
+            if let Some(gpu) = cc.gpu {
+                config.gpu = gpu;
+            }
+            config.storage_path = cc.storage_path;
+            if let Some(mappings) = cc.port_mappings {
+                config.port_mappings = mappings
+                    .into_iter()
+                    .map(|m| PortMapping {
+                        windows_port: m.windows_port.unwrap_or(0),
+                        container_port: m.container_port.unwrap_or(0),
+                        protocol: m.protocol.unwrap_or_else(|| "tcp".to_string()),
+                    })
+                    .collect();
+            }
+            config
+        });
         ExperimentalConfig {
             test,
             windows_sandbox,
+            wslc,
         }
     } else {
         ExperimentalConfig::default()
@@ -634,7 +634,6 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         containment,
         lifecycle,
         policy,
-        container_config,
         lxc_config,
         experimental_enabled: false,
         experimental,
@@ -1552,12 +1551,13 @@ mod tests {
 
     #[test]
     fn wslc_section_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12"}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.container_config.image, "python:3.12");
+        let wslc = req.experimental.wslc.unwrap();
+        assert_eq!(wslc.image, "python:3.12");
     }
 
     // ---------- Experimental feature tests ----------

@@ -225,7 +225,7 @@ pub struct PortMapping {
 /// Used when containment == Wslc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ContainerConfig {
+pub struct WslcConfig {
     /// Target OS for the container. Currently only "linux" is supported.
     pub target_os: String,
     /// Container image name (e.g., "alpine:latest", "python:3.12").
@@ -242,7 +242,7 @@ pub struct ContainerConfig {
     pub port_mappings: Vec<PortMapping>,
 }
 
-impl Default for ContainerConfig {
+impl Default for WslcConfig {
     fn default() -> Self {
         Self {
             target_os: "linux".to_string(),
@@ -300,6 +300,8 @@ pub struct ExperimentalConfig {
     /// Windows Sandbox backend (experimental).
     #[serde(rename = "windows_sandbox")]
     pub windows_sandbox: Option<WindowsSandboxConfig>,
+    /// WSL Container (WSLC SDK) backend (experimental).
+    pub wslc: Option<WslcConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,8 +324,6 @@ pub struct CodexRequest {
     pub lifecycle: LifecycleConfig,
     /// AppContainer-specific policy (used when containment == AppContainer).
     pub policy: ContainerPolicy,
-    /// Container configuration (used when containment == Wslc).
-    pub container_config: ContainerConfig,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
     /// Whether the --experimental flag was passed.
@@ -345,7 +345,6 @@ impl Default for CodexRequest {
             containment: ContainmentBackend::default(),
             lifecycle: LifecycleConfig::default(),
             policy: ContainerPolicy::default(),
-            container_config: ContainerConfig::default(),
             lxc_config: LxcConfig::default(),
             experimental_enabled: false,
             experimental: ExperimentalConfig::default(),
