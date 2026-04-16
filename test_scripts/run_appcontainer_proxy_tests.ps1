@@ -5,7 +5,8 @@
 # The test driver starts its own built-in test proxy via --proxy.
 
 param(
-    [switch]$Release
+    [switch]$Release,
+    [string]$BinDir
 )
 
 $ErrorActionPreference = "Stop"

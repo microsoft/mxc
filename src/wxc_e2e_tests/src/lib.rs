@@ -174,13 +174,31 @@ pub fn has_npm() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Bin directory helper
+// ---------------------------------------------------------------------------
+
+/// Return the directory containing build output binaries.
+///
+/// Searches for any known binary (`wxc-exec.exe`, `wxc-test-driver.exe`,
+/// `wxc-windows-sandbox-daemon.exe`) and returns the parent directory of the
+/// first match. This ensures the Rust test harness and the PS1 scripts agree
+/// on where binaries live — even for triple-prefixed target directories.
+pub fn bin_dir() -> Option<PathBuf> {
+    find_binary("wxc-exec.exe")
+        .or_else(|| find_binary("wxc-test-driver.exe"))
+        .or_else(|| find_binary("wxc-windows-sandbox-daemon.exe"))
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+}
+
+// ---------------------------------------------------------------------------
 // PS1 script runner
 // ---------------------------------------------------------------------------
 
 /// Run a PS1 script and return its output.
 ///
 /// Returns `None` if pwsh is unavailable or the script doesn't exist (test
-/// should skip). Automatically passes `-Release` when built in release mode.
+/// should skip). Automatically passes `-Release` when built in release mode
+/// and `-BinDir` when a binary directory is found.
 pub fn run_ps1_script(script_name: &str) -> Option<std::process::Output> {
     if !has_pwsh() {
         return None;
@@ -198,6 +216,10 @@ pub fn run_ps1_script(script_name: &str) -> Option<std::process::Output> {
 
     if is_release_mode() {
         cmd.arg("-Release");
+    }
+
+    if let Some(dir) = bin_dir() {
+        cmd.args(["-BinDir", &dir.to_string_lossy()]);
     }
 
     let output = cmd.output().expect("failed to execute pwsh");

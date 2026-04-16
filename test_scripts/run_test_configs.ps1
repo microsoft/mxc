@@ -10,16 +10,19 @@
 #   .\run_test_configs.ps1 -Release     # release build
 
 param(
-    [switch]$Release
+    [switch]$Release,
+    [string]$BinDir
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 
-if ($Release) {
-    $BinDir = Join-Path $RepoRoot "src\target\release"
-} else {
-    $BinDir = Join-Path $RepoRoot "src\target\debug"
+if (-not $BinDir) {
+    if ($Release) {
+        $BinDir = Join-Path $RepoRoot "src\target\release"
+    } else {
+        $BinDir = Join-Path $RepoRoot "src\target\debug"
+    }
 }
 
 $TestDriver = Join-Path $BinDir "wxc-test-driver.exe"

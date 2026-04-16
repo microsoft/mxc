@@ -10,7 +10,8 @@
 #   .\run_sandbox_tests.ps1 -Release     # release build
 
 param(
-    [switch]$Release
+    [switch]$Release,
+    [string]$BinDir
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,10 +19,12 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $TestConfigs = Join-Path $RepoRoot "test_configs"
 
 # Find binaries
-if ($Release) {
-    $BinDir = Join-Path $RepoRoot "src\target\release"
-} else {
-    $BinDir = Join-Path $RepoRoot "src\target\debug"
+if (-not $BinDir) {
+    if ($Release) {
+        $BinDir = Join-Path $RepoRoot "src\target\release"
+    } else {
+        $BinDir = Join-Path $RepoRoot "src\target\debug"
+    }
 }
 
 $WxcExec = Join-Path $BinDir "wxc-exec.exe"

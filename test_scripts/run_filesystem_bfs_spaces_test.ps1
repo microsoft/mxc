@@ -2,23 +2,23 @@
 # quoted correctly when passed to bfscfg.exe.
 
 param(
-    [ValidateSet(
-        "x86_64-pc-windows-msvc",
-        "aarch64-pc-windows-msvc",
-        "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu")
-    ]
-    [System.String]
-    $Target = "x86_64-pc-windows-msvc",
-
-    [ValidateSet('debug', 'release')]
-    [System.String]
-    $Config = "release"
+    [switch]$Release,
+    [string]$BinDir
 )
 
 $ErrorActionPreference = 'Stop'
-$wxcExe = Join-Path $PSScriptRoot "..\src\target\$Target\$Config\wxc-exec.exe"
-$testConfig = Join-Path $PSScriptRoot "..\test_configs\filesystem_bfs_spaces_test.json"
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+
+if (-not $BinDir) {
+    if ($Release) {
+        $BinDir = Join-Path $RepoRoot "src\target\release"
+    } else {
+        $BinDir = Join-Path $RepoRoot "src\target\debug"
+    }
+}
+
+$wxcExe = Join-Path $BinDir "wxc-exec.exe"
+$testConfig = Join-Path $RepoRoot "test_configs\filesystem_bfs_spaces_test.json"
 $testDir = "C:\Users\Public\wxc bfs test"
 
 if (-not (Test-Path $wxcExe)) {
