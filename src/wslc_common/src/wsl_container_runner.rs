@@ -45,6 +45,7 @@ impl Drop for IoCtxRawGuard {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unsafe {
+                eprintln!("[WSLC][debug] IoCtxRawGuard dropped -- reclaiming Arc<IoContext>");
                 let _ = Arc::from_raw(self.ptr as *const IoContext);
             }
         }
@@ -54,10 +55,9 @@ impl Drop for IoCtxRawGuard {
 /// Callback invoked by the WSLC SDK for stdout/stderr data.
 ///
 /// # Safety
-/// `context` must be a valid pointer to an `Arc<IoContext>` that outlives all
-/// callbacks. This is guaranteed because `io_ctx` is kept alive in `run_internal`
-/// until after the exit event wait completes and all callbacks have finished.
-/// The `IoCtxRawGuard` ensures the Arc reference is reclaimed on all exit paths.
+/// `context` must be a valid pointer obtained from `Arc::into_raw(Arc<IoContext>)`.
+/// The `Arc` is kept alive in `run_internal` via `IoCtxRawGuard` (which reclaims it
+/// on drop), so the pointer remains valid for the duration of all callbacks.
 /// The SDK guarantees `data` is valid for `data_size` bytes during the callback.
 unsafe extern "system" fn io_callback(
     io_handle: WslcProcessIOHandle,
@@ -88,8 +88,8 @@ unsafe extern "system" fn io_callback(
 /// will no longer be called." This guarantees buffers are complete.
 ///
 /// # Safety
-/// Same lifetime requirements as `io_callback` — `context` must point to a
-/// valid `Arc<IoContext>` that outlives all callbacks.
+/// Same lifetime requirements as `io_callback` — `context` must be a valid
+/// pointer from `Arc::into_raw(Arc<IoContext>)`, kept alive by `IoCtxRawGuard`.
 unsafe extern "system" fn exit_callback(_exit_code: i32, context: *mut c_void) {
     if context.is_null() {
         return;

@@ -436,6 +436,7 @@ impl Drop for WslcSessionGuard {
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe {
+                eprintln!("[WSLC][debug] WslcSessionGuard dropped -- releasing session");
                 WslcReleaseSession(self.handle);
             }
         }
@@ -467,6 +468,7 @@ impl Drop for WslcContainerGuard {
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe {
+                eprintln!("[WSLC][debug] WslcContainerGuard dropped -- releasing container");
                 WslcReleaseContainer(self.handle);
             }
         }
@@ -498,6 +500,7 @@ impl Drop for WslcProcessGuard {
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe {
+                eprintln!("[WSLC][debug] WslcProcessGuard dropped -- releasing process");
                 WslcReleaseProcess(self.handle);
             }
         }
