@@ -23,11 +23,16 @@ use windows::Win32::System::Threading::{
 use windows_core::PCWSTR;
 
 use crate::logger::Logger;
-use crate::models::{CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
+use crate::models::{
+    BaseProcessUiConfig, ClipboardPolicy, CodexRequest, NetworkEnforcementMode, NetworkPolicy,
+    ProxyAddress, ScriptResponse, UiPolicy,
+};
+use crate::proxy_coordinator::ProxyCoordinator;
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::string_util;
 use sandbox_spec::base_container_layout::{
-    finish_sandbox_spec_buffer, SandboxSpec, SandboxSpecArgs,
+    finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs, NetworkPolicy as FbsNetworkPolicy,
+    NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
 };
 
 /// Function pointer type matching `Experimental_CreateProcessInSandbox` from processmodel.dll.
@@ -50,21 +55,132 @@ type PfnCreateProcessInSandbox = unsafe extern "system" fn(
 /// Script runner that uses `Experimental_CreateProcessInSandbox` API
 /// to launch a sandboxed process.
 #[derive(Default)]
-pub struct BaseContainerRunner;
+pub struct BaseContainerRunner {
+    proxy_coordinator: ProxyCoordinator,
+}
+
+/// Windows error code for a function that exists but is not implemented
+/// (e.g., disabled via feature-enablement mechanisms).
+const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 
 impl BaseContainerRunner {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Pre-flight probe: check whether the current OS build exports the
+    /// `Experimental_CreateProcessInSandbox` symbol from `processmodel.dll`.
+    ///
+    /// Returns `Ok(())` if the export is resolvable, or `Err` with a
+    /// human-readable description when the DLL or export is missing.
+    ///
+    /// Note: a successful probe only means the symbol exists. The OS may
+    /// still reject calls at runtime with `ERROR_CALL_NOT_IMPLEMENTED` if
+    /// the feature is disabled (e.g., via internal feature-enablement mechanisms).
+    pub fn is_base_container_api_present() -> Result<(), String> {
+        Self::load_api().map(|_| ())
+    }
+
+    /// JOB_OBJECT_UILIMIT_* flag constants (from UIPolicy_Schema.md).
+    const UILIMIT_HANDLES: u64 = 0x0001;
+    const UILIMIT_READCLIPBOARD: u64 = 0x0002;
+    const UILIMIT_WRITECLIPBOARD: u64 = 0x0004;
+    const UILIMIT_SYSTEMPARAMETERS: u64 = 0x0008;
+    const UILIMIT_DISPLAYSETTINGS: u64 = 0x0010;
+    const UILIMIT_GLOBALATOMS: u64 = 0x0020;
+    const UILIMIT_DESKTOP: u64 = 0x0040;
+    const UILIMIT_EXITWINDOWS: u64 = 0x0080;
+    const UILIMIT_IME: u64 = 0x0100;
+    const UILIMIT_INJECTION: u64 = 0x0200;
+
+    /// Build the JOB_OBJECT_UILIMIT_* bitmask from the cross-platform UI policy
+    /// and the BaseProcessContainer-specific UI config.
+    /// Mapping follows docs/UIPolicy_Schema.md.
+    fn ui_restrictions_bitmask(ui: &UiPolicy, base_proc_ui: &BaseProcessUiConfig) -> u64 {
+        // When UI is fully disabled: DisallowWin32kSystemCalls handles everything
+        // except atoms (NT executive syscalls, not Win32k). Only set GLOBALATOMS.
+        if ui.disable {
+            return Self::UILIMIT_GLOBALATOMS;
+        }
+
+        let mut mask: u64 = 0;
+
+        // Cross-platform: clipboard (default: "none" = block both)
+        match ui.clipboard {
+            ClipboardPolicy::All => {}
+            ClipboardPolicy::Read => {
+                mask |= Self::UILIMIT_WRITECLIPBOARD;
+            }
+            ClipboardPolicy::Write => {
+                mask |= Self::UILIMIT_READCLIPBOARD;
+            }
+            // "none" or unrecognized → default-deny: block both
+            _ => {
+                mask |= Self::UILIMIT_READCLIPBOARD | Self::UILIMIT_WRITECLIPBOARD;
+            }
+        }
+
+        // Cross-platform: input injection
+        if !ui.injection {
+            mask |= Self::UILIMIT_INJECTION;
+        }
+
+        // Backend-specific: isolation level (default: "container" = HANDLES + GLOBALATOMS)
+        match base_proc_ui.isolation.as_str() {
+            "desktop" => {
+                // No isolation flags
+            }
+            "handles" => {
+                mask |= Self::UILIMIT_HANDLES;
+            }
+            "atoms" => {
+                mask |= Self::UILIMIT_GLOBALATOMS;
+            }
+            // "container" or unrecognized → default-deny: full isolation
+            _ => {
+                mask |= Self::UILIMIT_HANDLES | Self::UILIMIT_GLOBALATOMS;
+            }
+        }
+
+        // Backend-specific: desktop system control
+        if !base_proc_ui.desktop_system_control {
+            mask |= Self::UILIMIT_DESKTOP | Self::UILIMIT_EXITWINDOWS;
+        }
+
+        // Backend-specific: system settings (default: "none" = block all)
+        match base_proc_ui.system_settings.as_str() {
+            "all" => {}
+            "parameters" => {
+                mask |= Self::UILIMIT_DISPLAYSETTINGS;
+            }
+            "display" => {
+                mask |= Self::UILIMIT_SYSTEMPARAMETERS;
+            }
+            // "none" or unrecognized → default-deny: block all
+            _ => {
+                mask |= Self::UILIMIT_SYSTEMPARAMETERS | Self::UILIMIT_DISPLAYSETTINGS;
+            }
+        }
+
+        // Backend-specific: IME
+        if !base_proc_ui.ime {
+            mask |= Self::UILIMIT_IME;
+        }
+
+        mask
     }
 
     /// Build a FlatBuffer `SandboxSpec` from the container policy in the request.
     ///
-    /// Maps `ContainerPolicy` fields to the BaseContainer schema:
+    /// Maps `ContainerPolicy` and `UiPolicy` fields to the BaseContainer schema:
     /// - `app_container` is always `true` (AppContainer is the base sandbox primitive)
     /// - `least_privilege` from `policy.least_privilege_mode`
     /// - `capabilities` from `policy.capabilities` (comma-joined)
     /// - `fs_read_write` from `policy.readwrite_paths`
     /// - `fs_read_only` from `policy.readonly_paths`
+    /// - `disallowWin32kSystemCalls` from `ui.disable`
+    /// - `ui_restrictions` bitmask from `ui.to_ui_restrictions_bitmask()`
+    /// - `network_policy.proxy.url` from proxy config
     fn build_sandbox_spec(request: &CodexRequest) -> Vec<u8> {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
 
@@ -115,17 +231,52 @@ impl BaseContainerRunner {
             Some(builder.create_vector(&offsets))
         };
 
+        // Build NetworkPolicy with proxy URL if configured
+        let network_policy = if request.policy.network_proxy.is_enabled() {
+            let proxy_url = request
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .map(|addr| addr.to_url());
+
+            let proxy = if let Some(url) = &proxy_url {
+                let url_offset = builder.create_string(url);
+                Some(proxy_info::create(
+                    &mut builder,
+                    &proxy_infoArgs {
+                        url: Some(url_offset),
+                    },
+                ))
+            } else {
+                None
+            };
+
+            Some(FbsNetworkPolicy::create(
+                &mut builder,
+                &NetworkPolicyArgs { proxy },
+            ))
+        } else {
+            None
+        };
+
+        // UI restrictions
+        let ui_restrictions =
+            Self::ui_restrictions_bitmask(&request.policy.ui, &request.policy.base_process_ui);
+
         let spec = SandboxSpec::create(
             &mut builder,
             &SandboxSpecArgs {
                 version: Some(version),
                 app_container: true,
                 integrity_level: 0,
-                ui_restrictions: 0,
+                disallowWin32kSystemCalls: request.policy.ui.disable,
+                ui_restrictions,
                 least_privilege: request.policy.least_privilege_mode,
                 capabilities,
                 fs_read_write,
                 fs_read_only,
+                network_policy,
             },
         );
 
@@ -172,12 +323,74 @@ impl ScriptRunner for BaseContainerRunner {
     fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         let _ = writeln!(logger, "BaseContainer: building sandbox specification...");
 
+        // Launch builtin test proxy if requested (before building spec so we have the port).
+        let mut request = request.clone();
+        if request.policy.network_proxy.builtin_test_server {
+            match self.proxy_coordinator.launch_test_proxy(logger) {
+                Ok(port) => {
+                    let addr = ProxyAddress::new("127.0.0.1".to_string(), port);
+                    request.policy.network_proxy.address = Some(addr);
+                }
+                Err(e) => {
+                    return ScriptResponse::error(&format!(
+                        "Failed to start builtin test proxy: {e}"
+                    ));
+                }
+            }
+        }
+
         // 1. Build the FlatBuffer sandbox spec from the request policy.
-        let spec_bytes = Self::build_sandbox_spec(request);
+        let spec_bytes = Self::build_sandbox_spec(&request);
+
+        // Print proxy URL in debug mode
+        if let Some(ref addr) = request.policy.network_proxy.address {
+            let _ = writeln!(
+                logger,
+                "BaseContainer: proxy URL in spec: {}",
+                addr.to_url()
+            );
+        }
+
+        let ui_restrictions =
+            Self::ui_restrictions_bitmask(&request.policy.ui, &request.policy.base_process_ui);
         let _ = writeln!(
             logger,
             "BaseContainer: sandbox spec built ({} bytes)",
             spec_bytes.len()
+        );
+
+        // Print flags in debug mode
+        let _ = writeln!(
+            logger,
+            "BaseContainer: disallowWin32kSystemCalls={}, ui_restrictions=0x{:04X}",
+            request.policy.ui.disable, ui_restrictions
+        );
+        let _ = writeln!(
+            logger,
+            "BaseContainer: ui.clipboard={:?}, ui.injection={}",
+            request.policy.ui.clipboard, request.policy.ui.injection
+        );
+        let _ = writeln!(
+            logger,
+            "BaseContainer: base_process_ui: isolation={}, desktopSystemControl={}, systemSettings={}, ime={}",
+            request.policy.base_process_ui.isolation,
+            request.policy.base_process_ui.desktop_system_control,
+            request.policy.base_process_ui.system_settings,
+            request.policy.base_process_ui.ime
+        );
+        let _ = writeln!(
+            logger,
+            "BaseContainer: UILIMIT flags: HANDLES={} READCLIP={} WRITECLIP={} SYSPARAM={} DISPLAY={} ATOMS={} DESKTOP={} EXIT={} IME={} INJECT={}",
+            ui_restrictions & Self::UILIMIT_HANDLES != 0,
+            ui_restrictions & Self::UILIMIT_READCLIPBOARD != 0,
+            ui_restrictions & Self::UILIMIT_WRITECLIPBOARD != 0,
+            ui_restrictions & Self::UILIMIT_SYSTEMPARAMETERS != 0,
+            ui_restrictions & Self::UILIMIT_DISPLAYSETTINGS != 0,
+            ui_restrictions & Self::UILIMIT_GLOBALATOMS != 0,
+            ui_restrictions & Self::UILIMIT_DESKTOP != 0,
+            ui_restrictions & Self::UILIMIT_EXITWINDOWS != 0,
+            ui_restrictions & Self::UILIMIT_IME != 0,
+            ui_restrictions & Self::UILIMIT_INJECTION != 0,
         );
 
         // 2. Dynamically load the API from processmodel.dll.
@@ -241,6 +454,14 @@ impl ScriptRunner for BaseContainerRunner {
 
         if success == 0 {
             let err = unsafe { GetLastError() };
+            if err.0 == ERROR_CALL_NOT_IMPLEMENTED {
+                return ScriptResponse::error(
+                    "Experimental_CreateProcessInSandbox returned ERROR_CALL_NOT_IMPLEMENTED. \
+                     The BaseContainer feature may be disabled on this OS build \
+                     (e.g., via feature-enablement mechanisms). \
+                     Use schema version '0.4.0-alpha' to fall back to the AppContainer backend.",
+                );
+            }
             return ScriptResponse::error(&format!(
                 "Experimental_CreateProcessInSandbox failed: {err:?}"
             ));
@@ -280,6 +501,9 @@ impl ScriptRunner for BaseContainerRunner {
             "BaseContainer: process exited with code {exit_code}"
         );
 
+        // Stop the builtin test proxy if it was started.
+        self.proxy_coordinator.stop(logger);
+
         ScriptResponse {
             exit_code: exit_code as i32,
             standard_out: String::new(),
@@ -292,6 +516,7 @@ impl ScriptRunner for BaseContainerRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::ProxyConfig;
     use sandbox_spec::base_container_layout;
 
     #[test]
@@ -317,7 +542,11 @@ mod tests {
         assert!(spec.least_privilege());
         assert_eq!(spec.capabilities(), Some("internetClient,registryRead"));
         assert_eq!(spec.integrity_level(), 0);
-        assert_eq!(spec.ui_restrictions(), 0);
+        assert!(spec.disallowWin32kSystemCalls());
+        assert_eq!(
+            spec.ui_restrictions(),
+            BaseContainerRunner::UILIMIT_GLOBALATOMS
+        ); // default: disable=true → only GLOBALATOMS
 
         let rw = spec.fs_read_write().unwrap();
         assert_eq!(rw.len(), 1);
@@ -326,6 +555,8 @@ mod tests {
         let ro = spec.fs_read_only().unwrap();
         assert_eq!(ro.len(), 1);
         assert_eq!(ro.get(0), "C:\\Windows");
+
+        assert!(spec.network_policy().is_none());
     }
 
     #[test]
@@ -346,6 +577,8 @@ mod tests {
         assert_eq!(spec.capabilities(), Some("internetClient"));
         assert!(spec.fs_read_write().is_none());
         assert!(spec.fs_read_only().is_none());
+        assert!(spec.disallowWin32kSystemCalls());
+        assert!(spec.network_policy().is_none());
     }
 
     #[test]
@@ -356,5 +589,173 @@ mod tests {
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
         assert!(spec.capabilities().is_none());
+    }
+
+    #[test]
+    fn build_sandbox_spec_ui_disabled() {
+        use crate::models::UiPolicy;
+
+        let mut request = CodexRequest::default();
+        request.policy.ui = UiPolicy {
+            disable: true,
+            ..Default::default()
+        };
+
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+
+        assert!(spec.disallowWin32kSystemCalls());
+        // disable=true → only GLOBALATOMS (Win32k disable handles the rest)
+        assert_eq!(
+            spec.ui_restrictions(),
+            BaseContainerRunner::UILIMIT_GLOBALATOMS
+        );
+    }
+
+    #[test]
+    fn build_sandbox_spec_ui_clipboard_read_only() {
+        let mut request = CodexRequest::default();
+        request.policy.ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::Read,
+            injection: true,
+        };
+
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+
+        assert!(!spec.disallowWin32kSystemCalls());
+        // WRITECLIPBOARD + backend defaults (isolation=container: HANDLES+GLOBALATOMS,
+        // desktopSystemControl=false: DESKTOP+EXITWINDOWS, systemSettings=none: SYSTEMPARAMETERS+DISPLAYSETTINGS, ime=false: IME)
+        let expected = BaseContainerRunner::UILIMIT_WRITECLIPBOARD
+            | BaseContainerRunner::UILIMIT_HANDLES
+            | BaseContainerRunner::UILIMIT_GLOBALATOMS
+            | BaseContainerRunner::UILIMIT_DESKTOP
+            | BaseContainerRunner::UILIMIT_EXITWINDOWS
+            | BaseContainerRunner::UILIMIT_SYSTEMPARAMETERS
+            | BaseContainerRunner::UILIMIT_DISPLAYSETTINGS
+            | BaseContainerRunner::UILIMIT_IME;
+        assert_eq!(spec.ui_restrictions(), expected);
+    }
+
+    #[test]
+    fn build_sandbox_spec_ui_clipboard_readwrite_no_injection() {
+        let mut request = CodexRequest::default();
+        request.policy.ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::All,
+            injection: false,
+        };
+
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+
+        assert!(!spec.disallowWin32kSystemCalls());
+        // INJECTION + backend defaults
+        let expected = BaseContainerRunner::UILIMIT_INJECTION
+            | BaseContainerRunner::UILIMIT_HANDLES
+            | BaseContainerRunner::UILIMIT_GLOBALATOMS
+            | BaseContainerRunner::UILIMIT_DESKTOP
+            | BaseContainerRunner::UILIMIT_EXITWINDOWS
+            | BaseContainerRunner::UILIMIT_SYSTEMPARAMETERS
+            | BaseContainerRunner::UILIMIT_DISPLAYSETTINGS
+            | BaseContainerRunner::UILIMIT_IME;
+        assert_eq!(spec.ui_restrictions(), expected);
+    }
+
+    #[test]
+    fn build_sandbox_spec_proxy_url() {
+        use crate::models::ProxyAddress;
+
+        let mut request = CodexRequest::default();
+        request.policy.default_network_policy = NetworkPolicy::Block;
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+
+        let net = spec.network_policy().expect("network_policy should be set");
+        let proxy = net.proxy().expect("proxy should be set");
+        assert_eq!(proxy.url(), Some("http://127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn build_sandbox_spec_no_proxy() {
+        let request = CodexRequest::default();
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+        assert!(spec.network_policy().is_none());
+    }
+
+    #[test]
+    fn ui_bitmask_disabled() {
+        use crate::models::BaseProcessUiConfig;
+        let ui = UiPolicy {
+            disable: true,
+            ..Default::default()
+        };
+        let bp = BaseProcessUiConfig::default();
+        // disable=true → only GLOBALATOMS
+        assert_eq!(
+            BaseContainerRunner::ui_restrictions_bitmask(&ui, &bp),
+            BaseContainerRunner::UILIMIT_GLOBALATOMS
+        );
+    }
+
+    #[test]
+    fn ui_bitmask_default_deny() {
+        use crate::models::BaseProcessUiConfig;
+        // UiPolicy default: disable=true → only GLOBALATOMS
+        assert_eq!(
+            BaseContainerRunner::ui_restrictions_bitmask(
+                &UiPolicy::default(),
+                &BaseProcessUiConfig::default()
+            ),
+            BaseContainerRunner::UILIMIT_GLOBALATOMS
+        );
+    }
+
+    #[test]
+    fn ui_bitmask_clipboard_read_with_default_backend() {
+        use crate::models::BaseProcessUiConfig;
+        let ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::Read,
+            injection: true,
+        };
+        let bp = BaseProcessUiConfig::default(); // isolation=container, desktopSystemControl=false, systemSettings=none, ime=false
+        let expected = BaseContainerRunner::UILIMIT_WRITECLIPBOARD
+            | BaseContainerRunner::UILIMIT_HANDLES
+            | BaseContainerRunner::UILIMIT_GLOBALATOMS
+            | BaseContainerRunner::UILIMIT_DESKTOP
+            | BaseContainerRunner::UILIMIT_EXITWINDOWS
+            | BaseContainerRunner::UILIMIT_SYSTEMPARAMETERS
+            | BaseContainerRunner::UILIMIT_DISPLAYSETTINGS
+            | BaseContainerRunner::UILIMIT_IME;
+        assert_eq!(
+            BaseContainerRunner::ui_restrictions_bitmask(&ui, &bp),
+            expected
+        );
+    }
+
+    #[test]
+    fn ui_bitmask_no_backend_restrictions() {
+        use crate::models::BaseProcessUiConfig;
+        let ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::All,
+            injection: true,
+        };
+        let bp = BaseProcessUiConfig {
+            isolation: "desktop".to_string(),
+            desktop_system_control: true,
+            system_settings: "all".to_string(),
+            ime: true,
+        };
+        // No cross-platform restrictions + no backend restrictions = 0
+        assert_eq!(BaseContainerRunner::ui_restrictions_bitmask(&ui, &bp), 0);
     }
 }

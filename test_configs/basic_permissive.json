@@ -7,6 +7,11 @@
     "timeout": 30000
   },
   "filesystem": {
-    "readwritePaths": [ "C:\\Users\\AdminUser\\AppData\\Local\\Programs" ]
+    "readwritePaths": [
+      "C:\\Users\\AdminUser\\AppData\\Local\\Programs"
+    ]
+  },
+  "ui": {
+    "disable": false
   }
 }

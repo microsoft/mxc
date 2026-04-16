@@ -10,6 +10,11 @@
     "leastPrivilege": true
   },
   "filesystem": {
-    "readwritePaths": [ "C:\\Users\\AdminUser\\AppData\\Local\\Programs" ]
+    "readwritePaths": [
+      "C:\\Users\\AdminUser\\AppData\\Local\\Programs"
+    ]
+  },
+  "ui": {
+    "disable": false
   }
 }

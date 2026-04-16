@@ -9,5 +9,8 @@
     "test": {
       "message": "Test feature from AppContainer experimental!"
     }
+  },
+  "ui": {
+    "disable": false
   }
 }

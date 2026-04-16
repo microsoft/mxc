@@ -3,7 +3,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { buildSandboxPayload } from './sandbox';
+import { buildSandboxPayload, createConfigFromPolicy } from './sandbox';
 import { SandboxPolicy } from './types';
 
 describe('buildSandboxPayload', () => {
@@ -154,7 +154,7 @@ describe('buildSandboxPayload', () => {
       try {
         const policy: SandboxPolicy = {
           version: '0.4.0-alpha',
-          network: { allowOutbound: true, proxy: { builtinTestServer: true } },
+          network: { proxy: { builtinTestServer: true } },
         };
         const payload = buildSandboxPayload('echo hi', policy);
         assert.deepStrictEqual(payload.network!.proxy, { builtinTestServer: true });
@@ -168,7 +168,7 @@ describe('buildSandboxPayload', () => {
       try {
         const policy: SandboxPolicy = {
           version: '0.4.0-alpha',
-          network: { allowOutbound: true, proxy: { localhost: 8080 } },
+          network: { proxy: { localhost: 8080 } },
         };
         const payload = buildSandboxPayload('echo hi', policy);
         assert.deepStrictEqual(payload.network!.proxy, { localhost: 8080 });
@@ -222,7 +222,7 @@ describe('buildSandboxPayload', () => {
       try {
         const policy: SandboxPolicy = {
           version: '0.4.0-alpha',
-          network: { allowOutbound: true, proxy: { builtinTestServer: true } },
+          network: { proxy: { builtinTestServer: true } },
         };
         assert.throws(
           () => buildSandboxPayload('echo hi', policy),
@@ -231,6 +231,186 @@ describe('buildSandboxPayload', () => {
       } finally {
         restore();
       }
+    });
+  });
+});
+
+describe('createConfigFromPolicy', () => {
+  const defaultPolicy: SandboxPolicy = { version: '0.4.0-alpha' };
+
+  it('should produce a locked-down config when only version is set', () => {
+    const config = createConfigFromPolicy(defaultPolicy);
+    assert.strictEqual(config.version, '0.4.0-alpha');
+    assert.deepStrictEqual(config.filesystem!.readwritePaths, []);
+    assert.deepStrictEqual(config.filesystem!.readonlyPaths, []);
+    assert.deepStrictEqual(config.filesystem!.deniedPaths, []);
+    assert.strictEqual(config.ui!.disable, true);
+    assert.strictEqual(config.ui!.clipboard, 'none');
+    assert.strictEqual(config.ui!.injection, false);
+    assert.strictEqual(config.process!.timeout, 0);
+    assert.strictEqual(config.process!.commandLine, '');
+    assert.strictEqual(config.lifecycle!.destroyOnExit, true);
+    assert.strictEqual(config.lifecycle!.preservePolicy, false);
+  });
+
+  it('should pass filesystem paths through', () => {
+    const config = createConfigFromPolicy({
+      version: '0.4.0-alpha',
+      filesystem: {
+        readwritePaths: ['/workspace'],
+        readonlyPaths: ['/tools'],
+        deniedPaths: ['/secrets'],
+      },
+    });
+    assert.deepStrictEqual(config.filesystem!.readwritePaths, ['/workspace']);
+    assert.deepStrictEqual(config.filesystem!.readonlyPaths, ['/tools']);
+    assert.deepStrictEqual(config.filesystem!.deniedPaths, ['/secrets']);
+  });
+
+  it('should map UI fields correctly', () => {
+    const config = createConfigFromPolicy({
+      version: '0.4.0-alpha',
+      ui: { allowWindows: true, clipboard: 'read', allowInputInjection: true },
+    });
+    assert.strictEqual(config.ui!.disable, false);
+    assert.strictEqual(config.ui!.clipboard, 'read');
+    assert.strictEqual(config.ui!.injection, true);
+  });
+
+  it('should map timeoutMs to process.timeout', () => {
+    const config = createConfigFromPolicy({ version: '0.4.0-alpha', timeoutMs: 30000 });
+    assert.strictEqual(config.process!.timeout, 30000);
+  });
+
+  describe('Windows', () => {
+    let originalPlatform: PropertyDescriptor | undefined;
+
+    const mockWindows = () => {
+      originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+    };
+
+    const restore = () => {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    };
+
+    it('should set appContainer with UI defaults for process containment', () => {
+      mockWindows();
+      try {
+        const config = createConfigFromPolicy(defaultPolicy, 'process');
+        assert.ok(config.appContainer);
+        assert.deepStrictEqual(config.appContainer!.capabilities, []);
+        assert.strictEqual(config.appContainer!.ui!.isolation, 'container');
+        assert.strictEqual(config.appContainer!.ui!.desktopSystemControl, false);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should map network policy to capabilities and hosts', () => {
+      mockWindows();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.4.0-alpha',
+          network: {
+            allowOutbound: true,
+            allowLocalNetwork: true,
+            allowedHosts: ['example.com'],
+            blockedHosts: ['evil.com'],
+          },
+        });
+        assert.ok(config.appContainer!.capabilities!.includes('internetClient'));
+        assert.ok(config.appContainer!.capabilities!.includes('privateNetworkClientServer'));
+        assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
+        assert.deepStrictEqual(config.network!.blockedHosts, ['evil.com']);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should pass proxy through to config', () => {
+      mockWindows();
+      try {
+        const builtin = createConfigFromPolicy({
+          version: '0.4.0-alpha',
+          network: { proxy: { builtinTestServer: true } },
+        });
+        assert.deepStrictEqual(builtin.network!.proxy, { builtinTestServer: true });
+
+        const url = createConfigFromPolicy({
+          version: '0.4.0-alpha',
+          network: { proxy: { url: 'http://localhost:8080' } },
+        });
+        assert.deepStrictEqual(url.network!.proxy, { url: 'http://localhost:8080' });
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  describe('Linux', () => {
+    let originalPlatform: PropertyDescriptor | undefined;
+
+    const mockLinux = () => {
+      originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+    };
+
+    const restore = () => {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    };
+
+    it('should default to lxc containment', () => {
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy(defaultPolicy);
+        assert.strictEqual(config.containment, 'lxc');
+        assert.strictEqual(config.lxc!.distribution, 'alpine');
+        assert.strictEqual(config.lxc!.destroyOnExit, true);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject proxy on Linux', () => {
+      mockLinux();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.4.0-alpha',
+            network: { proxy: { builtinTestServer: true } },
+          }),
+          { message: /not supported on Linux/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  describe('network validation', () => {
+    it('should reject allowedHosts without allowOutbound', () => {
+      assert.throws(
+        () => createConfigFromPolicy({
+          version: '0.4.0-alpha',
+          network: { allowedHosts: ['example.com'] },
+        }),
+        { message: /allowedHosts\/blockedHosts require allowOutbound/ },
+      );
+    });
+
+    it('should reject blockedHosts without allowOutbound', () => {
+      assert.throws(
+        () => createConfigFromPolicy({
+          version: '0.4.0-alpha',
+          network: { blockedHosts: ['evil.com'] },
+        }),
+        { message: /allowedHosts\/blockedHosts require allowOutbound/ },
+      );
     });
   });
 });

@@ -29,6 +29,7 @@
 export {
   SandboxPolicy,
   SandboxingMethod,
+  ContainerConfig,
   PlatformSupport,
 } from './types';
 
@@ -39,7 +40,9 @@ export {
 
 // Export sandbox spawning functions
 export {
+  createConfigFromPolicy,
   spawnSandbox,
+  spawnSandboxFromConfig,
   spawnSandboxAsync,
   SandboxSpawnOptions
 } from './sandbox';

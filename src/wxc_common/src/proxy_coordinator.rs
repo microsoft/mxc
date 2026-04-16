@@ -296,7 +296,7 @@ impl ProxyCoordinator {
 
         let address = if proxy_config.builtin_test_server {
             let port = self.launch_test_proxy(logger)?;
-            ProxyAddress::new("127.0.0.1".to_string(), port, true)
+            ProxyAddress::new("127.0.0.1".to_string(), port)
         } else if let Some(ref addr) = proxy_config.address {
             addr.clone()
         } else {
@@ -326,7 +326,7 @@ impl ProxyCoordinator {
     }
 
     /// Launch `wxc-test-proxy.exe` and read its port from the ready file.
-    fn launch_test_proxy(&mut self, logger: &mut Logger) -> Result<u16, WxcError> {
+    pub fn launch_test_proxy(&mut self, logger: &mut Logger) -> Result<u16, WxcError> {
         logger.log_line(
             "WARNING: Starting builtin test proxy — this is for integration testing only, \
              NOT for production use.",

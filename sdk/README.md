@@ -259,7 +259,7 @@ console.log('Temp paths:', tempPolicy.readwritePaths);
 
 ### SandboxPolicy
 
-The `SandboxPolicy` type is the public interface for defining what a sandboxed payload is allowed to do. The SDK translates this into the internal container configuration automatically.
+The `SandboxPolicy` type is the public interface for defining what a sandboxed payload is allowed to do. Policy describes *what* the caller wants restricted — cross-platform, no OS-specific content. Omitted fields default to most restrictive (default-deny). The SDK translates this into the internal container configuration automatically via `createConfigFromPolicy()`.
 
 ```typescript
 type SandboxPolicy = {
@@ -275,12 +275,22 @@ type SandboxPolicy = {
   network?: {
     allowOutbound?: boolean;
     allowLocalNetwork?: boolean;
-    proxy?: { builtinTestServer: true } | { localhost: number };
+    allowedHosts?: string[];
+    blockedHosts?: string[];
+    proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   };
+
+  ui?: {
+    allowWindows?: boolean;
+    clipboard?: "none" | "read" | "write" | "all";
+    allowInputInjection?: boolean;
+  };
+
+  timeoutMs?: number;
 };
 ```
 
-> **Note**: Low-level container options are managed internally by the SDK based on the policy and platform. You don't need to configure them directly.
+> **Note**: Low-level container options are managed internally by the SDK based on the policy and platform. Use the advanced path (`createConfigFromPolicy()` → modify → `spawnSandboxFromConfig()`) if you need to tweak backend-specific settings.
 
 ### Merging Policy Fragments
 

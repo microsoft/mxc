@@ -153,6 +153,29 @@
       }
     },
 
+    "ui": {
+      "type": "object",
+      "description": "Cross-platform UI policy. Mapped from SandboxPolicy.ui by createConfigFromPolicy.",
+      "properties": {
+        "disable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether UI is disabled (no visible windows)."
+        },
+        "clipboard": {
+          "type": "string",
+          "enum": ["none", "read", "write", "all"],
+          "default": "none",
+          "description": "Clipboard access level."
+        },
+        "injection": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether input injection (keyboard/mouse) is allowed."
+        }
+      }
+    },
+
     "appContainer": {
       "type": "object",
       "description": "AppContainer-specific settings. Used when containment is 'appcontainer'.",
@@ -167,6 +190,33 @@
           "items": { "type": "string" },
           "default": [],
           "description": "AppContainer capabilities (e.g., 'internetClient', 'registryRead')."
+        },
+        "ui": {
+          "type": "object",
+          "description": "BaseProcessContainer-specific UI settings (Windows only).",
+          "properties": {
+            "isolation": {
+              "type": "string",
+              "enum": ["desktop", "handles", "atoms", "container"],
+              "default": "container",
+              "description": "UI isolation level for the desktop."
+            },
+            "desktopSystemControl": {
+              "type": "boolean",
+              "default": false,
+              "description": "Whether desktop system control is allowed."
+            },
+            "systemSettings": {
+              "type": "string",
+              "default": "none",
+              "description": "System settings access level."
+            },
+            "ime": {
+              "type": "boolean",
+              "default": false,
+              "description": "Whether IME (Input Method Editor) is allowed."
+            }
+          }
         }
       }
     },

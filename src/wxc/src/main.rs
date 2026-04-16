@@ -8,7 +8,7 @@ use clap::Parser;
 use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
 use wxc_common::appcontainer_runner::AppContainerScriptRunner;
 use wxc_common::base_container_runner::BaseContainerRunner;
-use wxc_common::config_parser::load_request;
+use wxc_common::config_parser::{is_base_container_version, load_request};
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
@@ -148,11 +148,43 @@ fn main() {
     log_request(&request, &mut logger);
 
     // Run script in selected containment backend.
-    // Sandbox, BaseContainer and MicroVM require --experimental flag.
+    // BaseContainer is used when --experimental is passed or schema version >= 0.5.
+    // Sandbox and MicroVM require --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::AppContainer => {
-            if request.experimental_enabled {
-                let _ = writeln!(logger, "Using BaseContainer runner (--experimental)");
+            let version_implies_base_container = is_base_container_version(&request.schema_version);
+            let use_base_container = request.experimental_enabled || version_implies_base_container;
+
+            if use_base_container {
+                if let Err(e) = BaseContainerRunner::is_base_container_api_present() {
+                    if version_implies_base_container {
+                        eprintln!(
+                            "Error: Config schema version '{}' requires the BaseContainer \
+                             backend, but this OS build does not support it: {}",
+                            request.schema_version, e
+                        );
+                        eprintln!(
+                            "Hint: Use schema version '0.4.0-alpha' to fall back to AppContainer."
+                        );
+                    } else {
+                        eprintln!(
+                            "Error: --experimental requested BaseContainer, but this OS build \
+                             does not support it: {}",
+                            e
+                        );
+                        eprintln!(
+                            "Hint: Remove --experimental to use the AppContainer backend, \
+                             or use an OS build with BaseContainer support."
+                        );
+                    }
+                    process::exit(1);
+                }
+                let reason = if version_implies_base_container {
+                    format!("schema version {}", request.schema_version)
+                } else {
+                    "--experimental".to_string()
+                };
+                let _ = writeln!(logger, "Using BaseContainer runner ({reason})");
                 Box::new(BaseContainerRunner::new())
             } else {
                 Box::new(AppContainerScriptRunner::new())
