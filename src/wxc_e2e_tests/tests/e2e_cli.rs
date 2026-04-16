@@ -6,44 +6,14 @@
 //! Invokes `npm test` in the `cli/` directory.
 //! Skips gracefully when Node.js or the CLI build output is missing.
 
-use std::path::PathBuf;
 use std::process::Command;
 
-fn repo_root() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent() // src/
-        .and_then(|p| p.parent()) // repo root
-        .expect("could not determine repo root")
-        .to_path_buf()
-}
-
-fn node_available() -> bool {
-    Command::new("node")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn npm_available() -> bool {
-    Command::new("npm")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
+use wxc_e2e_tests::{has_node, has_npm, repo_root};
 
 #[test]
 fn test_cli() {
-    if !node_available() {
-        println!("SKIPPED: node not available");
-        return;
-    }
-    if !npm_available() {
-        println!("SKIPPED: npm not available");
-        return;
-    }
+    if !has_node() { return; }
+    if !has_npm() { return; }
 
     let cli_dir = repo_root().join("cli");
     let dist_dir = cli_dir.join("dist");

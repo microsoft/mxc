@@ -6,44 +6,14 @@
 //! Invokes `npm test` in the `sdk/` directory.
 //! Skips gracefully when Node.js or the SDK build output is missing.
 
-use std::path::PathBuf;
 use std::process::Command;
 
-fn repo_root() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent() // src/
-        .and_then(|p| p.parent()) // repo root
-        .expect("could not determine repo root")
-        .to_path_buf()
-}
-
-fn node_available() -> bool {
-    Command::new("node")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn npm_available() -> bool {
-    Command::new("npm")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
+use wxc_e2e_tests::{has_node, has_npm, repo_root};
 
 #[test]
 fn test_sdk() {
-    if !node_available() {
-        println!("SKIPPED: node not available");
-        return;
-    }
-    if !npm_available() {
-        println!("SKIPPED: npm not available");
-        return;
-    }
+    if !has_node() { return; }
+    if !has_npm() { return; }
 
     let sdk_dir = repo_root().join("sdk");
     let dist_dir = sdk_dir.join("dist");
