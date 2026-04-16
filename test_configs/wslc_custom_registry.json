@@ -1,0 +1,16 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "wslc-custom-registry",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo 'Image pulled from MCR' && cat /etc/os-release | head -4"
+  },
+  "network": {
+    "defaultPolicy": "allow"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0"
+    }
+  }
+}
