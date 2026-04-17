@@ -285,7 +285,7 @@
             },
             "imageTarPath": {
               "type": "string",
-              "description": "Path to a local tar file to import as the container image. When set, the image is imported from this file instead of pulling from a registry.",
+              "description": "Path to a local rootfs filesystem tar to import as the container image. When set, the image is imported from this file instead of pulling from a registry. The tar must contain an extracted root filesystem layout (for example, from `docker export`), not a layered Docker image archive produced by `docker save`.",
               "examples": ["C:\\images\\alpine.tar", "/home/user/images/alpine.tar"]
             },
             "cpuCount": {

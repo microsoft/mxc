@@ -268,7 +268,7 @@ impl WSLContainerRunner {
                 let path = std::path::Path::new(tar_path);
                 if !path.exists() {
                     return ScriptResponse::error(&format!(
-                        "Image tar file not found: '{}'. Provide a valid path to a Docker image tar.",
+                        "Image tar file not found: '{}'. Provide a valid path to a rootfs tar created via 'docker export'.",
                         tar_path
                     ));
                 }

@@ -1561,6 +1561,22 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         let wslc = req.experimental.wslc.unwrap();
         assert_eq!(wslc.image, "python:3.12");
+        assert!(wslc.image_tar_path.is_none());
+    }
+
+    #[test]
+    fn wslc_image_tar_path_parsed() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "my-image:latest", "imageTarPath": "C:\\images\\alpine.tar"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let wslc = req.experimental.wslc.unwrap();
+        assert_eq!(wslc.image, "my-image:latest");
+        assert_eq!(
+            wslc.image_tar_path.as_deref(),
+            Some("C:\\images\\alpine.tar")
+        );
     }
 
     // ---------- Experimental feature tests ----------

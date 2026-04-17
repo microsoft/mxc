@@ -115,17 +115,18 @@ $null = $results.Add((Run-WslcTest "wslc_custom_registry.json" -OutputContains "
 $null = $results.Add((Run-WslcTest "wslc_tar_import.json" -OutputContains "Hello from tar-imported image"))
 
 # Summary
-$passed = ($results | Where-Object { $_.Pass }).Count
-$failed = ($results | Where-Object { -not $_.Pass }).Count
+$passed = ($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count
+$failed = ($results | Where-Object { -not $_.Pass -and -not $_.Skipped }).Count
 $skipped = ($results | Where-Object { $_.Skipped }).Count
 $total = $results.Count
+$executed = $passed + $failed
 
 Write-Host "`n==============" -ForegroundColor Cyan
 if ($failed -eq 0) {
-    Write-Host "ALL $total TESTS PASSED$(if ($skipped -gt 0) { " ($skipped skipped)" })" -ForegroundColor Green
+    Write-Host "$passed/$total passed$(if ($skipped -gt 0) { ", $skipped skipped" })" -ForegroundColor Green
 } else {
-    Write-Host "$passed/$total passed, $failed FAILED:" -ForegroundColor Red
-    $results | Where-Object { -not $_.Pass } | ForEach-Object {
+    Write-Host "$passed/$executed passed, $failed FAILED$(if ($skipped -gt 0) { " ($skipped skipped)" }):" -ForegroundColor Red
+    $results | Where-Object { -not $_.Pass -and -not $_.Skipped } | ForEach-Object {
         Write-Host "  FAIL: $($_.Name) - $($_.Reason)" -ForegroundColor Red
     }
 }
