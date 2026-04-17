@@ -1,0 +1,16 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "wslc-stderr",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo 'stdout message' && echo 'stderr message' >&2 && echo 'another stdout'"
+  },
+  "network": {
+    "defaultPolicy": "block"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "alpine:latest"
+    }
+  }
+}
