@@ -55,7 +55,12 @@ fn main() {
     // OUT_DIR is <target>/<triple>/<profile>/build/<crate>-<hash>/out,
     // so three levels up reaches the profile directory where binaries are placed.
     let dll_src = sdk_path.join("wslcsdk.dll");
-    if dll_src.exists() {
+    if !dll_src.exists() {
+        println!(
+            "cargo:warning=WSLC SDK: wslcsdk.dll not found at {}. Runtime will fail to load.",
+            dll_src.display()
+        );
+    } else {
         let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
         if let Some(profile_dir) = out_dir
             .parent()
