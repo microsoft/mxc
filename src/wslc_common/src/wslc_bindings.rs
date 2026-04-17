@@ -213,6 +213,13 @@ pub type WslcContainerImageProgressCallback = unsafe extern "system" fn(
     context: *mut c_void,
 ) -> HRESULT;
 
+/// Options for importing a container image via `WslcImportSessionImageFromFile`.
+#[repr(C)]
+pub struct WslcImportImageOptions {
+    pub progress_callback: Option<WslcContainerImageProgressCallback>,
+    pub progress_callback_context: *mut c_void,
+}
+
 // ---------------------------------------------------------------------------
 // Callback types for process I/O
 // ---------------------------------------------------------------------------
@@ -302,6 +309,14 @@ extern "system" {
     pub fn WslcPullSessionImage(
         session: WslcSession,
         options: *const WslcPullImageOptions,
+        error_message: *mut PWSTR,
+    ) -> HRESULT;
+
+    pub fn WslcImportSessionImageFromFile(
+        session: WslcSession,
+        image_name: PCSTR,
+        path: PCWSTR,
+        options: *const WslcImportImageOptions,
         error_message: *mut PWSTR,
     ) -> HRESULT;
 

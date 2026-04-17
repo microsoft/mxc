@@ -91,6 +91,8 @@ struct RawContainerConfig {
     #[serde(rename = "targetOs")]
     target_os: Option<String>,
     image: Option<String>,
+    #[serde(rename = "imageTarPath")]
+    image_tar_path: Option<String>,
     #[serde(rename = "cpuCount")]
     cpu_count: Option<u32>,
     #[serde(rename = "memoryMb")]
@@ -581,6 +583,7 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             if let Some(img) = cc.image {
                 config.image = img;
             }
+            config.image_tar_path = cc.image_tar_path;
             config.cpu_count = cc.cpu_count;
             config.memory_mb = cc.memory_mb;
             if let Some(gpu) = cc.gpu {

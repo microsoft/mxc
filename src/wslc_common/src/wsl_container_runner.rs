@@ -263,29 +263,75 @@ impl WSLContainerRunner {
         }
 
         if !image_found {
-            // TODO: Move image pulling to a setup script (scripts/setup-wslc.ps1) as
-            // described in docs/wsl-container-support-plan.md Phase 5. MXC is an execution
-            // layer — image management should be handled externally. For now, auto-pull is
-            // used during development/testing.
-            let _ = writeln!(
-                logger,
-                "[WSLC] Image '{}' not found locally, attempting pull...",
-                image_name
-            );
-            let uri_cstr = format!("{}\0", image_name);
-            let pull_opts = WslcPullImageOptions {
-                uri: uri_cstr.as_bytes().as_ptr() as PCSTR,
-                progress_callback: None,
-                progress_callback_context: ptr::null_mut(),
-                auth_info: ptr::null(),
-            };
-            err_msg = CoTaskMemPWSTR::null();
-            let hr = WslcPullSessionImage(session_guard.as_raw(), &pull_opts, err_msg.as_mut_ptr());
-            if hr != S_OK {
-                let msg = err_msg.to_string_lossy();
-                return sdk_error(&format!("Failed to pull image '{}'", image_name), hr, &msg);
+            if let Some(tar_path) = &self.config.image_tar_path {
+                // Import from local tar file
+                let path = std::path::Path::new(tar_path);
+                if !path.exists() {
+                    return ScriptResponse::error(&format!(
+                        "Image tar file not found: '{}'. Provide a valid path to a Docker image tar.",
+                        tar_path
+                    ));
+                }
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Importing image '{}' from tar: {}",
+                    image_name, tar_path
+                );
+                let name_cstr = format!("{}\0", image_name);
+                let wide_path: Vec<u16> =
+                    tar_path.encode_utf16().chain(std::iter::once(0)).collect();
+                let import_opts = WslcImportImageOptions {
+                    progress_callback: None,
+                    progress_callback_context: ptr::null_mut(),
+                };
+                err_msg = CoTaskMemPWSTR::null();
+                let hr = WslcImportSessionImageFromFile(
+                    session_guard.as_raw(),
+                    name_cstr.as_bytes().as_ptr() as PCSTR,
+                    wide_path.as_ptr() as PCWSTR,
+                    &import_opts,
+                    err_msg.as_mut_ptr(),
+                );
+                if hr != S_OK {
+                    let msg = err_msg.to_string_lossy();
+                    return sdk_error(
+                        &format!("Failed to import image '{}' from tar", image_name),
+                        hr,
+                        &msg,
+                    );
+                }
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Image '{}' imported successfully from tar",
+                    image_name
+                );
+            } else {
+                // Pull from registry
+                // TODO: Move image pulling to a setup script (scripts/setup-wslc.ps1) as
+                // described in docs/wsl-container-support-plan.md Phase 5. MXC is an execution
+                // layer — image management should be handled externally. For now, auto-pull is
+                // used during development/testing.
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Image '{}' not found locally, attempting pull...",
+                    image_name
+                );
+                let uri_cstr = format!("{}\0", image_name);
+                let pull_opts = WslcPullImageOptions {
+                    uri: uri_cstr.as_bytes().as_ptr() as PCSTR,
+                    progress_callback: None,
+                    progress_callback_context: ptr::null_mut(),
+                    auth_info: ptr::null(),
+                };
+                err_msg = CoTaskMemPWSTR::null();
+                let hr =
+                    WslcPullSessionImage(session_guard.as_raw(), &pull_opts, err_msg.as_mut_ptr());
+                if hr != S_OK {
+                    let msg = err_msg.to_string_lossy();
+                    return sdk_error(&format!("Failed to pull image '{}'", image_name), hr, &msg);
+                }
+                let _ = writeln!(logger, "[WSLC] Image '{}' pulled successfully", image_name);
             }
-            let _ = writeln!(logger, "[WSLC] Image '{}' pulled successfully", image_name);
         } else {
             let _ = writeln!(logger, "[WSLC] Image '{}' found", image_name);
         }

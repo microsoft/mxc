@@ -283,6 +283,11 @@
               "description": "Container image name (e.g., 'alpine:latest', 'python:3.12').",
               "examples": ["alpine:latest", "python:3.12", "ubuntu:24.04"]
             },
+            "imageTarPath": {
+              "type": "string",
+              "description": "Path to a local tar file to import as the container image. When set, the image is imported from this file instead of pulling from a registry.",
+              "examples": ["C:\\images\\alpine.tar", "/home/user/images/alpine.tar"]
+            },
             "cpuCount": {
               "type": "integer",
               "minimum": 1,

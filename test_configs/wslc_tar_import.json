@@ -1,0 +1,17 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "wslc-tar-import",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo 'Hello from tar-imported image!' && cat /etc/alpine-release"
+  },
+  "network": {
+    "defaultPolicy": "block"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "alpine-export:latest",
+      "imageTarPath": "C:\\workspace\\alpine.tar"
+    }
+  }
+}

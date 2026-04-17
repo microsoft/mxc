@@ -368,6 +368,104 @@ These need team decisions before implementation:
 
 7. **Session reuse** — Each `WSLContainerRunner.run()` currently creates and destroys a full WSL2 session (micro-VM). For rapid successive invocations, should we pool/reuse sessions to reduce startup overhead?
 
+## Supported Image Sources
+
+The WSLC backend supports three ways to provide a container image:
+
+### 1. Pull from DockerHub
+
+The default path. Specify an image name in the `wslc` config section and the
+WSLC SDK pulls it from DockerHub automatically if not already cached locally.
+
+```json
+{
+  "containment": "wslc",
+  "process": { "commandLine": "echo hello" },
+  "network": { "defaultPolicy": "block" },
+  "experimental": {
+    "wslc": {
+      "image": "alpine:latest"
+    }
+  }
+}
+```
+
+No additional setup needed — DockerHub is the default registry.
+
+### 2. Pull from a custom registry (no auth)
+
+Specify the full registry URL as the image name. The WSLC SDK resolves it
+directly. Currently only registries that do not require authentication are
+supported. Private registry auth support is planned for a future WSLC SDK
+release.
+
+```json
+{
+  "containment": "wslc",
+  "process": { "commandLine": "cat /etc/os-release" },
+  "network": { "defaultPolicy": "allow" },
+  "experimental": {
+    "wslc": {
+      "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0"
+    }
+  }
+}
+```
+
+**Setup:** Network access is required for the pull, so set
+`"defaultPolicy": "allow"` (or at minimum ensure the registry host is
+reachable). No Docker Desktop or local Docker daemon is needed — the WSLC SDK
+handles the pull internally.
+
+**Tested registries:**
+- `mcr.microsoft.com` (Microsoft Container Registry)
+- `ghcr.io` (GitHub Container Registry, public images)
+- `quay.io` (Red Hat Quay, public images)
+
+### 3. Import from a local tar file
+
+Use the `imageTarPath` config field to import a container image from a local
+tar file instead of pulling from a registry. The tar must be in **rootfs
+format** (a flat filesystem archive), not Docker image format.
+
+```json
+{
+  "containment": "wslc",
+  "process": { "commandLine": "echo 'Hello from tar!'" },
+  "network": { "defaultPolicy": "block" },
+  "experimental": {
+    "wslc": {
+      "image": "my-image:latest",
+      "imageTarPath": "C:\\workspace\\alpine.tar"
+    }
+  }
+}
+```
+
+**Setup — creating a rootfs tar from Docker:**
+
+```powershell
+# 1. Pull the image in Docker Desktop
+docker pull alpine:latest
+
+# 2. Create a temporary container (does not start it)
+docker run --name alpine-tmp alpine:latest true
+
+# 3. Export the container filesystem as a flat rootfs tar
+docker export alpine-tmp -o C:\workspace\alpine.tar
+
+# 4. Clean up the temporary container
+docker rm alpine-tmp
+```
+
+> **Important:** Use `docker export` (rootfs tar), not `docker save` (multi-layer
+> image archive). `docker save` produces a layered archive with manifests that
+> the WSLC SDK does not fully unpack, resulting in missing binaries at runtime.
+
+If the tar file does not exist at the specified path, MXC fails fast with a
+clear error message. MXC does not download or create tar files — image
+management is the caller's responsibility.
+
 ## Prerequisites for End Users
 
 - Windows 11 or Windows Server 2022/2025
