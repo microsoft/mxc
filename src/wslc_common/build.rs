@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script for wslc_common — links against the WSLC SDK.
+//! Build script for wslc_common — links against the WSLC SDK and copies
+//! wslcsdk.dll next to the final binary so it can be loaded at runtime.
 //!
 //! The SDK lib is resolved from:
 //! 1. `WSLC_SDK_PATH` environment variable (if set, points to a directory
@@ -72,11 +73,6 @@ fn main() {
                 println!(
                     "cargo:warning=WSLC SDK: failed to copy DLL to output dir: {}",
                     e
-                );
-            } else {
-                println!(
-                    "cargo:warning=WSLC SDK: copied wslcsdk.dll to {}",
-                    dll_dst.display()
                 );
             }
         }
