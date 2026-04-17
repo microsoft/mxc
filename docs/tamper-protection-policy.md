@@ -1,4 +1,4 @@
-## Tessera Per-Application Protection Policy Schema - "appProtection" Section
+## Tessera Per-Application Tamper Protection Policy Schema - "appProtection" Section
 
 **Status:** Draft for review
 
