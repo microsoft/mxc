@@ -3,6 +3,7 @@
 
 import * as pty from 'node-pty';
 import * as os from 'os';
+import * as fs from 'fs';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
 import { SandboxPolicy, ContainerConfig, ContainmentType } from './types';
@@ -104,9 +105,13 @@ function buildProcessBaseContainerConfig(
         },
     };
 
-    // Windows uses both capabilities and firewall for network enforcement
+    // Network enforcement: use firewall only when host filtering is needed (requires admin)
     if (config.network) {
-        config.network.enforcementMode = 'both';
+        if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
+            config.network.enforcementMode = 'both';
+        } else {
+            config.network.enforcementMode = 'capabilities';
+        }
     }
 
     return config;
@@ -176,7 +181,7 @@ export function createConfigFromPolicy(
         injection: policy.ui?.allowInputInjection ?? false,
     };
 
-    // Network mapping (cross-platform)
+    // Network mapping (cross-platform) — default-deny: block if not explicitly allowed
     if (policy.network) {
         if (policy.network.proxy && platform === 'linux') {
             throw new Error('Proxy configuration is not supported on Linux');
@@ -191,6 +196,10 @@ export function createConfigFromPolicy(
             allowedHosts: policy.network.allowedHosts,
             blockedHosts: policy.network.blockedHosts,
             proxy: policy.network.proxy,
+        };
+    } else {
+        config.network = {
+            defaultPolicy: 'block',
         };
     }
 
@@ -242,6 +251,14 @@ export interface SandboxSpawnOptions {
   experimental?: boolean;
 
   /**
+   * Explicit path to the wxc-exec (or lxc-exec) binary.
+   * When set, the SDK uses this path directly instead of searching.
+   * Useful for packaged apps (e.g., Electron) where the binary
+   * is bundled in a known location.
+   */
+  executablePath?: string;
+
+  /**
    * PTY options to pass to node-pty
    */
   ptyOptions?: pty.IPtyForkOptions;
@@ -268,7 +285,14 @@ function spawnWithConfig(
   const platform = os.platform();
   let executablePath: string | null;
 
-  if (platform === 'linux') {
+  if (options.executablePath) {
+    if (!fs.existsSync(options.executablePath)) {
+      throw new Error(
+        `File not found: ${options.executablePath}`
+      );
+    }
+    executablePath = options.executablePath;
+  } else if (platform === 'linux') {
     executablePath = findLxcExecutable();
     if (!executablePath) {
       throw new Error(
@@ -279,7 +303,7 @@ function spawnWithConfig(
     executablePath = findWxcExecutable();
     if (!executablePath) {
       throw new Error(
-        'wxc-exec.exe not found. Please specify the path or ensure it exists in a standard location.'
+        'wxc-exec.exe not found. Set options.executablePath or ensure it exists in a standard location.'
       );
     }
   }
