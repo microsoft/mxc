@@ -59,6 +59,17 @@ production configs and the dev schema when working on experimental features:
     "lxc": {                               // LXC-specific
         "distribution": "alpine",
         "release": "3.19"
+    },
+
+    "experimental": {                      // Experimental features (requires --experimental)
+        "wslc": {                          // WSL Container settings
+            "image": "alpine:latest",      // Container image name
+            "imageTarPath": "C:\\images\\alpine.tar",  // Import image from local tar file
+            "cpuCount": 4,                 // CPU count for WSLC session
+            "memoryMb": 2048,              // Memory in MB for WSLC session
+            "gpu": false,                  // GPU passthrough
+            "storagePath": "C:\\wslc-storage"  // Image store path
+        }
     }
 }
 ```

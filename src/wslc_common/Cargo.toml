@@ -8,5 +8,8 @@ wxc_common = { workspace = true }
 windows = { workspace = true }
 tar = "0.4"
 
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
 zip = "2"

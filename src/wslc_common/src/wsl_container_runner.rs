@@ -135,14 +135,15 @@ impl WSLContainerRunner {
                 )
             })?;
 
-            // Tar archives often prefix entries with `./`. Match Docker-save
-            // archives by the final component so both `manifest.json` and
-            // `./manifest.json` are detected.
-            if entry_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name == "manifest.json")
-            {
+            // Docker-save archives have `manifest.json` at the top level.
+            // Match only the root entry — not nested `manifest.json` files
+            // (e.g., from NPM packages). Handles both `manifest.json` and
+            // `./manifest.json` (common tar prefix).
+            let normalized: std::path::PathBuf = entry_path
+                .components()
+                .filter(|c| !matches!(c, std::path::Component::CurDir))
+                .collect();
+            if normalized.as_os_str() == "manifest.json" {
                 return Ok(TarFormat::DockerSave);
             }
 
@@ -196,7 +197,12 @@ impl WSLContainerRunner {
             )));
         }
 
-        let tar_format = match Self::detect_tar_format(tar_path) {
+        // Resolve to absolute path, following symlinks. Fall back to the
+        // original path if canonicalization fails (e.g., permissions).
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let tar_path = canonical.to_string_lossy();
+
+        let tar_format = match Self::detect_tar_format(&tar_path) {
             Ok(fmt) => fmt,
             Err(e) => {
                 return Err(ScriptResponse::error(&format!(
@@ -878,5 +884,91 @@ impl WSLContainerRunner {
             standard_err: stderr,
             error_message: String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Create a temporary tar file from in-memory entries and return its path.
+    fn build_test_tar(entries: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ar = tar::Builder::new(file.as_file());
+        for (path, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_cksum();
+            ar.append_data(&mut header, path, *data).unwrap();
+        }
+        ar.into_inner().unwrap().flush().unwrap();
+        file
+    }
+
+    #[test]
+    fn detect_docker_save_tar() {
+        let file = build_test_tar(&[("manifest.json", b"{}")]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::DockerSave)));
+    }
+
+    #[test]
+    fn detect_docker_save_tar_with_dot_prefix() {
+        let file = build_test_tar(&[("./manifest.json", b"{}")]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::DockerSave)));
+    }
+
+    #[test]
+    fn detect_rootfs_tar() {
+        let file = build_test_tar(&[("bin/sh", b""), ("etc/passwd", b"")]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::Rootfs)));
+    }
+
+    #[test]
+    fn detect_rootfs_tar_with_dot_prefix() {
+        let file = build_test_tar(&[("./bin/sh", b""), ("./etc/passwd", b"")]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::Rootfs)));
+    }
+
+    #[test]
+    fn detect_unknown_tar() {
+        let file = build_test_tar(&[("random/file.txt", b"hello")]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::Unknown)));
+    }
+
+    #[test]
+    fn detect_empty_tar() {
+        let file = build_test_tar(&[]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::Unknown)));
+    }
+
+    #[test]
+    fn nested_manifest_json_is_not_docker_save() {
+        let file = build_test_tar(&[("app/manifest.json", b"{}")]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(!matches!(result, Ok(TarFormat::DockerSave)));
+    }
+
+    #[test]
+    fn docker_save_takes_priority_over_rootfs_markers() {
+        let file = build_test_tar(&[
+            ("bin/sh", b""),
+            ("etc/passwd", b""),
+            ("manifest.json", b"{}"),
+        ]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::DockerSave)));
+    }
+
+    #[test]
+    fn nonexistent_file_returns_error() {
+        let result = WSLContainerRunner::detect_tar_format("/nonexistent/path.tar");
+        assert!(result.is_err());
     }
 }

@@ -1729,6 +1729,7 @@ name = "wslc_common"
 version = "0.1.0"
 dependencies = [
  "tar",
+ "tempfile",
  "windows",
  "wxc_common",
  "zip",
