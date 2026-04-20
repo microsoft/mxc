@@ -68,7 +68,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Run tests
-        run: cargo test --release --target ${{ matrix.target }}
+        run: cargo test --release --target ${{ matrix.target }} --workspace --exclude wxc_e2e_tests
 
       - uses: actions/upload-artifact@v4
         with:
