@@ -61,6 +61,31 @@ function validatePolicyVersion(version: string): void {
 
 
 /**
+ * Builds the WSLC (WSL Container) portion of a ContainerConfig.
+ * WSLC runs Linux containers on Windows via the WSL Container SDK.
+ * Config goes under `experimental.wslc` since WSLC is experimental.
+ */
+function buildWslcContainerConfig(
+    config: ContainerConfig,
+    policy: SandboxPolicy,
+    containerId: string,
+): ContainerConfig {
+    config.containment = 'wslc';
+    config.containerId = containerId;
+
+    config.experimental = {
+        wslc: {
+            image: 'alpine:latest',
+        },
+    };
+
+    // WSLC uses its own networking mode (None/Bridged) derived from
+    // the network.defaultPolicy field — no firewall enforcement needed.
+
+    return config;
+}
+
+/**
  * Builds the Linux process container (LXC) portion of a ContainerConfig.
  */
 function buildLinuxProcessConfig(
@@ -242,6 +267,10 @@ export function createConfigFromPolicy(
     }
 
     // Backend-specific config based on containment type
+    if (containment === 'wslc') {
+        return buildWslcContainerConfig(config, policy, containerId);
+    }
+
     if (containment === 'process') {
         if (platform === 'linux') {
             return buildLinuxProcessConfig(config, containerId);
@@ -289,6 +318,13 @@ export interface SandboxSpawnOptions {
    * Enable experimental features
    */
   experimental?: boolean;
+
+  /**
+   * Containment backend to use. Defaults to "process" (AppContainer on
+   * Windows, LXC on Linux). Set to "wslc" for Linux containers on Windows
+   * via the WSL Container SDK.
+   */
+  containment?: ContainmentType;
 
   /**
    * Explicit path to the wxc-exec (or lxc-exec) binary.
@@ -437,7 +473,7 @@ export function spawnSandbox(
   env?: { [key: string]: string | undefined },
   containment?: ContainmentType,
 ): pty.IPty {
-  const config = buildSandboxPayload(script, policy, workingDirectory, containerName, containment);
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName, containment ?? options.containment);
   return spawnWithConfig(config, options, workingDirectory, env);
 }
 

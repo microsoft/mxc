@@ -361,6 +361,31 @@ describe('buildSandboxPayload', () => {
     });
 
   });
+
+  describe('WSLC', () => {
+    it('should set containment to wslc when containment option is passed', () => {
+      const payload = buildSandboxPayload('echo hello', { version: '0.5.0-alpha' }, undefined, undefined, 'wslc');
+      assert.strictEqual(payload.containment, 'wslc');
+      assert.strictEqual(payload.process!.commandLine, 'echo hello');
+    });
+
+    it('should populate experimental.wslc with default image', () => {
+      const payload = buildSandboxPayload('echo hello', { version: '0.5.0-alpha' }, undefined, undefined, 'wslc');
+      assert.ok(payload.experimental?.wslc);
+      assert.strictEqual(payload.experimental!.wslc!.image, 'alpine:latest');
+    });
+
+    it('should not set appContainer or lxc config', () => {
+      const payload = buildSandboxPayload('echo hello', { version: '0.5.0-alpha' }, undefined, undefined, 'wslc');
+      assert.strictEqual(payload.appContainer, undefined);
+      assert.strictEqual(payload.lxc, undefined);
+    });
+
+    it('should set default-deny network', () => {
+      const payload = buildSandboxPayload('echo hello', { version: '0.5.0-alpha' }, undefined, undefined, 'wslc');
+      assert.strictEqual(payload.network!.defaultPolicy, 'block');
+    });
+  });
 });
 
 describe('createConfigFromPolicy', () => {
@@ -539,6 +564,73 @@ describe('createConfigFromPolicy', () => {
         }),
         { message: /allowedHosts\/blockedHosts require allowOutbound/ },
       );
+    });
+  });
+
+  describe('WSLC', () => {
+    it('should set containment to wslc and populate experimental.wslc', () => {
+      const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'wslc');
+      assert.strictEqual(config.containment, 'wslc');
+      assert.ok(config.experimental?.wslc);
+      assert.strictEqual(config.experimental!.wslc!.image, 'alpine:latest');
+    });
+
+    it('should set default-deny network when no network policy is specified', () => {
+      const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'wslc');
+      assert.strictEqual(config.network!.defaultPolicy, 'block');
+    });
+
+    it('should map allowOutbound to network allow policy', () => {
+      const config = createConfigFromPolicy({
+        version: '0.5.0-alpha',
+        network: { allowOutbound: true },
+      }, 'wslc');
+      assert.strictEqual(config.network!.defaultPolicy, 'allow');
+    });
+
+    it('should not set enforcementMode for wslc', () => {
+      const config = createConfigFromPolicy({
+        version: '0.5.0-alpha',
+        network: { allowOutbound: true },
+      }, 'wslc');
+      assert.strictEqual(config.network!.enforcementMode, undefined);
+    });
+
+    it('should not set appContainer config for wslc', () => {
+      const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'wslc');
+      assert.strictEqual(config.appContainer, undefined);
+    });
+
+    it('should not set lxc config for wslc', () => {
+      const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'wslc');
+      assert.strictEqual(config.lxc, undefined);
+    });
+
+    it('should map filesystem paths correctly', () => {
+      const config = createConfigFromPolicy({
+        version: '0.5.0-alpha',
+        filesystem: {
+          readwritePaths: ['C:\\workspace'],
+          readonlyPaths: ['C:\\data'],
+          deniedPaths: ['C:\\secrets'],
+        },
+      }, 'wslc');
+      assert.deepStrictEqual(config.filesystem!.readwritePaths, ['C:\\workspace']);
+      assert.deepStrictEqual(config.filesystem!.readonlyPaths, ['C:\\data']);
+      assert.deepStrictEqual(config.filesystem!.deniedPaths, ['C:\\secrets']);
+    });
+
+    it('should map timeoutMs to process.timeout', () => {
+      const config = createConfigFromPolicy({
+        version: '0.5.0-alpha',
+        timeoutMs: 30000,
+      }, 'wslc');
+      assert.strictEqual(config.process!.timeout, 30000);
+    });
+
+    it('should set containerId', () => {
+      const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'wslc', 'my-container');
+      assert.strictEqual(config.containerId, 'my-container');
     });
   });
 });
