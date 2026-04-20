@@ -155,6 +155,105 @@ impl WSLContainerRunner {
             TarFormat::Unknown
         }
     }
+
+    /// Import a container image from a local tar file.
+    ///
+    /// Supports both rootfs tars (`docker export`) and Docker image archives
+    /// (`docker save`). The format is auto-detected via `detect_tar_format`.
+    /// Returns `Ok(())` on success or `Err(ScriptResponse)` on failure.
+    unsafe fn import_image_from_tar(
+        session: WslcSession,
+        image_name: &str,
+        tar_path: &str,
+        logger: &mut Logger,
+    ) -> Result<(), ScriptResponse> {
+        let path = std::path::Path::new(tar_path);
+        if !path.exists() {
+            return Err(ScriptResponse::error(&format!(
+                "Image tar file not found: '{}'. Provide a valid rootfs tar \
+                 (via 'docker export') or Docker image archive (via 'docker save').",
+                tar_path
+            )));
+        }
+
+        let tar_format = Self::detect_tar_format(tar_path);
+        let wide_path: Vec<u16> = tar_path.encode_utf16().chain(std::iter::once(0)).collect();
+
+        match tar_format {
+            TarFormat::DockerSave => {
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Loading Docker image archive from tar: {}",
+                    tar_path
+                );
+                let load_opts = WslcLoadImageOptions {
+                    progress_callback: None,
+                    progress_callback_context: ptr::null_mut(),
+                };
+                let mut err_msg = CoTaskMemPWSTR::null();
+                let hr = WslcLoadSessionImageFromFile(
+                    session,
+                    wide_path.as_ptr() as PCWSTR,
+                    &load_opts,
+                    err_msg.as_mut_ptr(),
+                );
+                if hr != S_OK {
+                    let msg = err_msg.to_string_lossy();
+                    return Err(sdk_error(
+                        &format!("Failed to load Docker image archive from '{}'", tar_path),
+                        hr,
+                        &msg,
+                    ));
+                }
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Docker image archive loaded successfully from tar"
+                );
+            }
+            TarFormat::Rootfs => {
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Importing rootfs image '{}' from tar: {}",
+                    image_name, tar_path
+                );
+                let name_cstr = format!("{}\0", image_name);
+                let import_opts = WslcImportImageOptions {
+                    progress_callback: None,
+                    progress_callback_context: ptr::null_mut(),
+                };
+                let mut err_msg = CoTaskMemPWSTR::null();
+                let hr = WslcImportSessionImageFromFile(
+                    session,
+                    name_cstr.as_bytes().as_ptr() as PCSTR,
+                    wide_path.as_ptr() as PCWSTR,
+                    &import_opts,
+                    err_msg.as_mut_ptr(),
+                );
+                if hr != S_OK {
+                    let msg = err_msg.to_string_lossy();
+                    return Err(sdk_error(
+                        &format!("Failed to import image '{}' from tar", image_name),
+                        hr,
+                        &msg,
+                    ));
+                }
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Image '{}' imported successfully from tar",
+                    image_name
+                );
+            }
+            TarFormat::Unknown => {
+                return Err(ScriptResponse::error(&format!(
+                    "Unrecognized tar format: '{}'. Provide a rootfs tar \
+                     (via 'docker export') or a Docker image archive (via 'docker save').",
+                    tar_path
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Detected tar file format for image import.
@@ -318,96 +417,13 @@ impl WSLContainerRunner {
 
         if !image_found {
             if let Some(tar_path) = &self.config.image_tar_path {
-                // Import from local tar file — supports both rootfs tars
-                // (`docker export`) and Docker image archives (`docker save`).
-                let path = std::path::Path::new(tar_path);
-                if !path.exists() {
-                    return ScriptResponse::error(&format!(
-                        "Image tar file not found: '{}'. Provide a valid rootfs tar \
-                         (via 'docker export') or Docker image archive (via 'docker save').",
-                        tar_path
-                    ));
-                }
-
-                let tar_format = Self::detect_tar_format(tar_path);
-                let wide_path: Vec<u16> =
-                    tar_path.encode_utf16().chain(std::iter::once(0)).collect();
-
-                match tar_format {
-                    TarFormat::DockerSave => {
-                        // Docker image archive — use WslcLoadSessionImageFromFile.
-                        // The SDK extracts the image name from the archive metadata.
-                        let _ = writeln!(
-                            logger,
-                            "[WSLC] Loading Docker image archive from tar: {}",
-                            tar_path
-                        );
-                        let load_opts = WslcLoadImageOptions {
-                            progress_callback: None,
-                            progress_callback_context: ptr::null_mut(),
-                        };
-                        err_msg = CoTaskMemPWSTR::null();
-                        let hr = WslcLoadSessionImageFromFile(
-                            session_guard.as_raw(),
-                            wide_path.as_ptr() as PCWSTR,
-                            &load_opts,
-                            err_msg.as_mut_ptr(),
-                        );
-                        if hr != S_OK {
-                            let msg = err_msg.to_string_lossy();
-                            return sdk_error(
-                                &format!("Failed to load Docker image archive from '{}'", tar_path),
-                                hr,
-                                &msg,
-                            );
-                        }
-                        let _ = writeln!(
-                            logger,
-                            "[WSLC] Docker image archive loaded successfully from tar"
-                        );
-                    }
-                    TarFormat::Rootfs => {
-                        // Rootfs tar — use WslcImportSessionImageFromFile with
-                        // the caller-supplied image name.
-                        let _ = writeln!(
-                            logger,
-                            "[WSLC] Importing rootfs image '{}' from tar: {}",
-                            image_name, tar_path
-                        );
-                        let name_cstr = format!("{}\0", image_name);
-                        let import_opts = WslcImportImageOptions {
-                            progress_callback: None,
-                            progress_callback_context: ptr::null_mut(),
-                        };
-                        err_msg = CoTaskMemPWSTR::null();
-                        let hr = WslcImportSessionImageFromFile(
-                            session_guard.as_raw(),
-                            name_cstr.as_bytes().as_ptr() as PCSTR,
-                            wide_path.as_ptr() as PCWSTR,
-                            &import_opts,
-                            err_msg.as_mut_ptr(),
-                        );
-                        if hr != S_OK {
-                            let msg = err_msg.to_string_lossy();
-                            return sdk_error(
-                                &format!("Failed to import image '{}' from tar", image_name),
-                                hr,
-                                &msg,
-                            );
-                        }
-                        let _ = writeln!(
-                            logger,
-                            "[WSLC] Image '{}' imported successfully from tar",
-                            image_name
-                        );
-                    }
-                    TarFormat::Unknown => {
-                        return ScriptResponse::error(&format!(
-                            "Unrecognized tar format: '{}'. Provide a rootfs tar \
-                             (via 'docker export') or a Docker image archive (via 'docker save').",
-                            tar_path
-                        ));
-                    }
+                if let Err(resp) = Self::import_image_from_tar(
+                    session_guard.as_raw(),
+                    image_name,
+                    tar_path,
+                    logger,
+                ) {
+                    return resp;
                 }
             } else {
                 // Pull from registry
