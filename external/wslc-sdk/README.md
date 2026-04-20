@@ -15,8 +15,9 @@ The `wslc_common` crate's `build.rs` extracts the `.nupkg` (which is a zip
 file) into the cargo build output directory at compile time, then links
 against `wslcsdk.lib`.
 
-At runtime, `wslcsdk.dll` must be available on the system — it is installed
-by the WSLC SDK MSI and is **not** bundled with MXC.
+At runtime, `wslcsdk.dll` must be next to `wxc-exec.exe`. The `build.rs`
+script automatically extracts it from the nupkg and copies it to the build
+output directory alongside the binary.
 
 ### SDK resolution order
 

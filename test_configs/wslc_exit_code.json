@@ -1,0 +1,16 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "wslc-exit-code",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "sh -c 'echo About to exit with code 42; exit 42'"
+  },
+  "network": {
+    "defaultPolicy": "block"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "alpine:latest"
+    }
+  }
+}

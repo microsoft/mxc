@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script for wslc_common — links against the WSLC SDK.
+//! Build script for wslc_common — links against the WSLC SDK and copies
+//! wslcsdk.dll next to the final binary so it can be loaded at runtime.
 //!
 //! The SDK lib is resolved from:
 //! 1. `WSLC_SDK_PATH` environment variable (if set, points to a directory
@@ -50,6 +51,32 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", sdk_path.display());
     println!("cargo:rustc-link-lib=dylib=wslcsdk");
     println!("cargo:rerun-if-env-changed=WSLC_SDK_PATH");
+
+    // Copy wslcsdk.dll next to the final binary so it can be found at runtime.
+    // OUT_DIR is <target>/<triple>/<profile>/build/<crate>-<hash>/out,
+    // so three levels up reaches the profile directory where binaries are placed.
+    let dll_src = sdk_path.join("wslcsdk.dll");
+    if !dll_src.exists() {
+        println!(
+            "cargo:warning=WSLC SDK: wslcsdk.dll not found at {}. Runtime will fail to load.",
+            dll_src.display()
+        );
+    } else {
+        let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+        if let Some(profile_dir) = out_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
+            let dll_dst = profile_dir.join("wslcsdk.dll");
+            if let Err(e) = std::fs::copy(&dll_src, &dll_dst) {
+                println!(
+                    "cargo:warning=WSLC SDK: failed to copy DLL to output dir: {}",
+                    e
+                );
+            }
+        }
+    }
 }
 
 /// Extract the WSLC SDK nupkg and return the path to the runtime libs for
