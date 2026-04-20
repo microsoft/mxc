@@ -111,6 +111,199 @@ impl WSLContainerRunner {
             config: config.clone(),
         }
     }
+
+    /// Detect the format of a tar file by scanning its entries in a single pass.
+    ///
+    /// - `manifest.json` present → Docker image archive (`docker save`)
+    /// - Top-level Linux directories (`bin`, `etc`, `usr`, etc.) → rootfs (`docker export`)
+    /// - Neither found after a successful scan → `TarFormat::Unknown`
+    /// - Open/read/parse failures → propagated as `std::io::Error`
+    fn detect_tar_format(path: &str) -> std::io::Result<TarFormat> {
+        let file = std::fs::File::open(path)?;
+        let mut archive = tar::Archive::new(file);
+        let entries = archive.entries()?;
+
+        const ROOTFS_MARKERS: &[&str] = &["bin", "etc", "usr", "lib", "sbin", "var"];
+        let mut has_rootfs_dirs = false;
+
+        for entry in entries {
+            let entry = entry?;
+            let entry_path = entry.path().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("failed to read tar entry path: {}", e),
+                )
+            })?;
+
+            // Docker-save archives have `manifest.json` at the top level.
+            // Match only the root entry — not nested `manifest.json` files
+            // (e.g., from NPM packages). Handles both `manifest.json` and
+            // `./manifest.json` (common tar prefix).
+            let normalized: std::path::PathBuf = entry_path
+                .components()
+                .filter(|c| !matches!(c, std::path::Component::CurDir))
+                .collect();
+            if normalized.as_os_str() == "manifest.json" {
+                return Ok(TarFormat::DockerSave);
+            }
+
+            if !has_rootfs_dirs {
+                // Skip a leading `.` component that is commonly present
+                // in tar archives (e.g., `./bin/...`).
+                let first_component =
+                    entry_path
+                        .components()
+                        .find_map(|component| match component {
+                            std::path::Component::CurDir => None,
+                            other => Some(other),
+                        });
+
+                if let Some(first) = first_component {
+                    let first_str = first.as_os_str().to_string_lossy();
+                    if ROOTFS_MARKERS
+                        .iter()
+                        .any(|marker| *marker == first_str.as_ref())
+                    {
+                        has_rootfs_dirs = true;
+                    }
+                }
+            }
+        }
+
+        if has_rootfs_dirs {
+            Ok(TarFormat::Rootfs)
+        } else {
+            Ok(TarFormat::Unknown)
+        }
+    }
+
+    /// Import a container image from a local tar file.
+    ///
+    /// Supports both rootfs tars (`docker export`) and Docker image archives
+    /// (`docker save`). The format is auto-detected via `detect_tar_format`.
+    /// Returns `Ok(())` on success or `Err(ScriptResponse)` on failure.
+    unsafe fn import_image_from_tar(
+        session: WslcSession,
+        image_name: &str,
+        tar_path: &str,
+        logger: &mut Logger,
+    ) -> Result<(), ScriptResponse> {
+        let path = std::path::Path::new(tar_path);
+        if !path.exists() {
+            return Err(ScriptResponse::error(&format!(
+                "Image tar file not found: '{}'. Provide a valid rootfs tar \
+                 (via 'docker export') or Docker image archive (via 'docker save').",
+                tar_path
+            )));
+        }
+
+        // Resolve to absolute path, following symlinks. Fall back to the
+        // original path if canonicalization fails (e.g., permissions).
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let tar_path = canonical.to_string_lossy();
+
+        let tar_format = match Self::detect_tar_format(&tar_path) {
+            Ok(fmt) => fmt,
+            Err(e) => {
+                return Err(ScriptResponse::error(&format!(
+                    "Failed to read tar file '{}': {}",
+                    tar_path, e
+                )));
+            }
+        };
+        let wide_path: Vec<u16> = tar_path.encode_utf16().chain(std::iter::once(0)).collect();
+
+        match tar_format {
+            TarFormat::DockerSave => {
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Loading Docker image archive from tar: {}",
+                    tar_path
+                );
+                let load_opts = WslcLoadImageOptions {
+                    progress_callback: None,
+                    progress_callback_context: ptr::null_mut(),
+                };
+                let mut err_msg = CoTaskMemPWSTR::null();
+                let hr = WslcLoadSessionImageFromFile(
+                    session,
+                    wide_path.as_ptr() as PCWSTR,
+                    &load_opts,
+                    err_msg.as_mut_ptr(),
+                );
+                if hr != S_OK {
+                    let msg = err_msg.to_string_lossy();
+                    return Err(sdk_error(
+                        &format!("Failed to load Docker image archive from '{}'", tar_path),
+                        hr,
+                        &msg,
+                    ));
+                }
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Docker image archive loaded successfully from tar"
+                );
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Note: container will use image '{}' — ensure this \
+                     matches the tag inside the Docker archive",
+                    image_name
+                );
+            }
+            TarFormat::Rootfs => {
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Importing rootfs image '{}' from tar: {}",
+                    image_name, tar_path
+                );
+                let name_cstr = format!("{}\0", image_name);
+                let import_opts = WslcImportImageOptions {
+                    progress_callback: None,
+                    progress_callback_context: ptr::null_mut(),
+                };
+                let mut err_msg = CoTaskMemPWSTR::null();
+                let hr = WslcImportSessionImageFromFile(
+                    session,
+                    name_cstr.as_bytes().as_ptr() as PCSTR,
+                    wide_path.as_ptr() as PCWSTR,
+                    &import_opts,
+                    err_msg.as_mut_ptr(),
+                );
+                if hr != S_OK {
+                    let msg = err_msg.to_string_lossy();
+                    return Err(sdk_error(
+                        &format!("Failed to import image '{}' from tar", image_name),
+                        hr,
+                        &msg,
+                    ));
+                }
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Image '{}' imported successfully from tar",
+                    image_name
+                );
+            }
+            TarFormat::Unknown => {
+                return Err(ScriptResponse::error(&format!(
+                    "Unrecognized tar format: '{}'. Provide a rootfs tar \
+                     (via 'docker export') or a Docker image archive (via 'docker save').",
+                    tar_path
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Detected tar file format for image import.
+enum TarFormat {
+    /// Docker image archive from `docker save` (contains `manifest.json`).
+    DockerSave,
+    /// Rootfs filesystem tar from `docker export` (contains Linux root directories).
+    Rootfs,
+    /// Unrecognized format — not a valid tar or missing expected entries.
+    Unknown,
 }
 
 /// Create a ScriptResponse error from an HRESULT failure with optional SDK error message.
@@ -262,7 +455,24 @@ impl WSLContainerRunner {
             windows::Win32::System::Com::CoTaskMemFree(Some(images as *const c_void));
         }
 
-        if !image_found {
+        if image_found {
+            if self.config.image_tar_path.is_some() {
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Image '{}' already cached, skipping tar import",
+                    image_name
+                );
+            } else {
+                let _ = writeln!(logger, "[WSLC] Image '{}' found", image_name);
+            }
+        } else if let Some(tar_path) = &self.config.image_tar_path {
+            if let Err(resp) =
+                Self::import_image_from_tar(session_guard.as_raw(), image_name, tar_path, logger)
+            {
+                return resp;
+            }
+        } else {
+            // Pull from registry
             // TODO: Move image pulling to a setup script (scripts/setup-wslc.ps1) as
             // described in docs/wsl-container-support-plan.md Phase 5. MXC is an execution
             // layer — image management should be handled externally. For now, auto-pull is
@@ -286,8 +496,6 @@ impl WSLContainerRunner {
                 return sdk_error(&format!("Failed to pull image '{}'", image_name), hr, &msg);
             }
             let _ = writeln!(logger, "[WSLC] Image '{}' pulled successfully", image_name);
-        } else {
-            let _ = writeln!(logger, "[WSLC] Image '{}' found", image_name);
         }
 
         // -- Step 5: Process settings --
@@ -676,5 +884,91 @@ impl WSLContainerRunner {
             standard_err: stderr,
             error_message: String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Create a temporary tar file from in-memory entries and return its path.
+    fn build_test_tar(entries: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ar = tar::Builder::new(file.as_file());
+        for (path, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_cksum();
+            ar.append_data(&mut header, path, *data).unwrap();
+        }
+        ar.into_inner().unwrap().flush().unwrap();
+        file
+    }
+
+    #[test]
+    fn detect_docker_save_tar() {
+        let file = build_test_tar(&[("manifest.json", b"{}")]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::DockerSave)));
+    }
+
+    #[test]
+    fn detect_docker_save_tar_with_dot_prefix() {
+        let file = build_test_tar(&[("./manifest.json", b"{}")]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::DockerSave)));
+    }
+
+    #[test]
+    fn detect_rootfs_tar() {
+        let file = build_test_tar(&[("bin/sh", b""), ("etc/passwd", b"")]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::Rootfs)));
+    }
+
+    #[test]
+    fn detect_rootfs_tar_with_dot_prefix() {
+        let file = build_test_tar(&[("./bin/sh", b""), ("./etc/passwd", b"")]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::Rootfs)));
+    }
+
+    #[test]
+    fn detect_unknown_tar() {
+        let file = build_test_tar(&[("random/file.txt", b"hello")]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::Unknown)));
+    }
+
+    #[test]
+    fn detect_empty_tar() {
+        let file = build_test_tar(&[]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::Unknown)));
+    }
+
+    #[test]
+    fn nested_manifest_json_is_not_docker_save() {
+        let file = build_test_tar(&[("app/manifest.json", b"{}")]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(!matches!(result, Ok(TarFormat::DockerSave)));
+    }
+
+    #[test]
+    fn docker_save_takes_priority_over_rootfs_markers() {
+        let file = build_test_tar(&[
+            ("bin/sh", b""),
+            ("etc/passwd", b""),
+            ("manifest.json", b"{}"),
+        ]);
+        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
+        assert!(matches!(result, Ok(TarFormat::DockerSave)));
+    }
+
+    #[test]
+    fn nonexistent_file_returns_error() {
+        let result = WSLContainerRunner::detect_tar_format("/nonexistent/path.tar");
+        assert!(result.is_err());
     }
 }

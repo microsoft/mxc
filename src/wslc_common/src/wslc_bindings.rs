@@ -213,6 +213,23 @@ pub type WslcContainerImageProgressCallback = unsafe extern "system" fn(
     context: *mut c_void,
 ) -> HRESULT;
 
+/// Options for importing a container image via `WslcImportSessionImageFromFile`.
+#[repr(C)]
+pub struct WslcImportImageOptions {
+    pub progress_callback: Option<WslcContainerImageProgressCallback>,
+    pub progress_callback_context: *mut c_void,
+}
+
+/// Options for loading a Docker image archive via `WslcLoadSessionImageFromFile`.
+///
+/// Used for `docker save` format tars (multi-layer archives with `manifest.json`).
+/// The image name is extracted from the archive metadata automatically.
+#[repr(C)]
+pub struct WslcLoadImageOptions {
+    pub progress_callback: Option<WslcContainerImageProgressCallback>,
+    pub progress_callback_context: *mut c_void,
+}
+
 // ---------------------------------------------------------------------------
 // Callback types for process I/O
 // ---------------------------------------------------------------------------
@@ -302,6 +319,26 @@ extern "system" {
     pub fn WslcPullSessionImage(
         session: WslcSession,
         options: *const WslcPullImageOptions,
+        error_message: *mut PWSTR,
+    ) -> HRESULT;
+
+    pub fn WslcImportSessionImageFromFile(
+        session: WslcSession,
+        image_name: PCSTR,
+        path: PCWSTR,
+        options: *const WslcImportImageOptions,
+        error_message: *mut PWSTR,
+    ) -> HRESULT;
+
+    /// Load a Docker image archive (`docker save` format) from a local file.
+    ///
+    /// Unlike `WslcImportSessionImageFromFile` (which takes a rootfs tar and a
+    /// caller-supplied image name), this function reads the multi-layer Docker
+    /// image archive and extracts the image name from the archive metadata.
+    pub fn WslcLoadSessionImageFromFile(
+        session: WslcSession,
+        path: PCWSTR,
+        options: *const WslcLoadImageOptions,
         error_message: *mut PWSTR,
     ) -> HRESULT;
 
