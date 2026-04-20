@@ -10,9 +10,9 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, ContainerConfig, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
+    ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
     LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress,
-    ProxyConfig, TestFeatureConfig, WindowsSandboxConfig,
+    ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -25,6 +25,18 @@ struct RawAppContainer {
     #[serde(rename = "learningMode")]
     learning_mode: Option<bool>,
     capabilities: Option<Vec<String>>,
+    ui: Option<RawBaseProcessUi>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawBaseProcessUi {
+    isolation: Option<String>,
+    #[serde(rename = "desktopSystemControl")]
+    desktop_system_control: Option<bool>,
+    #[serde(rename = "systemSettings")]
+    system_settings: Option<String>,
+    ime: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -128,6 +140,15 @@ struct RawExperimental {
     test: Option<RawTestFeature>,
     #[serde(rename = "windows_sandbox")]
     windows_sandbox: Option<RawSandbox>,
+    wslc: Option<RawContainerConfig>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawUi {
+    disable: Option<bool>,
+    clipboard: Option<String>,
+    injection: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -142,10 +163,10 @@ struct RawConfig {
     containment: Option<String>,
     #[serde(rename = "appContainer")]
     app_container: Option<RawAppContainer>,
-    wslc: Option<RawContainerConfig>,
     lxc: Option<RawLxc>,
     filesystem: Option<RawFilesystem>,
     network: Option<RawNetwork>,
+    ui: Option<RawUi>,
     experimental: Option<RawExperimental>,
 }
 
@@ -154,14 +175,15 @@ struct RawConfig {
 /// Parse the `proxy` field.
 ///
 /// Accepts either `{ "localhost": <port> }` for an external localhost proxy,
-/// or `{ "builtinTestServer": true }` to have wxc launch its own test proxy.
+/// `{ "builtinTestServer": true }` to have wxc launch its own test proxy,
+/// or `{ "url": "<url>" }` for a proxy URL (parsed into host:port).
 /// When `builtinTestServer` is set it must be the only key in the object.
 fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError> {
     let obj = value
         .as_object()
         .ok_or_else(|| WxcError::ConfigParse("network.proxy must be an object".to_string()))?;
 
-    let mut proxy_addr = ProxyAddress::new("127.0.0.1".to_string(), 0, true);
+    let mut proxy_addr = ProxyAddress::new("127.0.0.1".to_string(), 0);
 
     if let Some(builtin_value) = obj.get("builtinTestServer") {
         if builtin_value.as_bool() != Some(true) {
@@ -204,8 +226,33 @@ fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError
         });
     }
 
+    if let Some(url_value) = obj.get("url") {
+        let url_str = url_value.as_str().ok_or_else(|| {
+            WxcError::ConfigParse("network.proxy.url must be a string".to_string())
+        })?;
+
+        let parsed = url::Url::parse(url_str)
+            .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
+
+        let host = parsed.host_str().ok_or_else(|| {
+            WxcError::ConfigParse(format!(
+                "network.proxy.url must include a host (e.g., http://localhost:8080), got: {url_str}"
+            ))
+        })?.to_string();
+        let port = parsed.port().ok_or_else(|| {
+            WxcError::ConfigParse(format!(
+                "network.proxy.url must include a port (e.g., http://localhost:8080), got: {url_str}"
+            ))
+        })?;
+
+        return Ok(ProxyConfig {
+            address: Some(ProxyAddress::from_url(url_str, host, port)),
+            builtin_test_server: false,
+        });
+    }
+
     Err(WxcError::ConfigParse(
-        "network.proxy must specify either builtinTestServer or localhost".to_string(),
+        "network.proxy must specify builtinTestServer, localhost, or url".to_string(),
     ))
 }
 
@@ -254,8 +301,29 @@ pub fn load_request(
 
 // ---------- Cross-field validation ----------
 
-/// Supported schema version (semver). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: (u32, u32) = (0, 4); // 0.4.x
+/// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
+const SUPPORTED_VERSION: &str = ">=0.4, <=0.5";
+
+/// The minimum schema version that implies BaseContainer backend usage.
+const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
+
+/// Returns `true` if `version` is a BaseContainer-era schema version (>= 0.5.0).
+///
+/// Pre-release labels are stripped before comparison, so `"0.5.0-alpha"` is
+/// treated identically to `"0.5.0"`.  Returns `false` for empty or
+/// unparseable version strings.
+pub fn is_base_container_version(version: &str) -> bool {
+    if version.is_empty() {
+        return false;
+    }
+    let parsed = match semver::Version::parse(version) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
+    let threshold = semver::Version::parse(BASE_CONTAINER_MIN_VERSION).unwrap();
+    comparable >= threshold
+}
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
@@ -264,43 +332,35 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
         return Ok(());
     }
 
-    // Strip pre-release suffix (e.g., "0.4.0-alpha" → "0.4.0")
-    let version_core = version.split('-').next().unwrap_or(version);
-    let parts: Vec<&str> = version_core.split('.').collect();
-
-    if parts.len() < 2 {
+    // Parse the version, stripping pre-release suffix for comparison
+    // (e.g., "0.4.0-alpha" is treated as "0.4.0")
+    let parsed = semver::Version::parse(version).map_err(|_| {
         let msg = format!(
-            "Invalid schema version '{}': must be semver (e.g., '0.4.0' or '0.4.0-alpha')",
-            version
-        );
-        logger.log_line(&msg);
-        return Err(WxcError::ConfigParse(msg));
-    }
-
-    let major: u32 = parts[0].parse().map_err(|_| {
-        let msg = format!(
-            "Invalid schema version '{}': major version must be a non-negative integer",
+            "Invalid schema version '{}': must be semver (e.g., 'X.Y.Z' or 'X.Y.Z-alpha')",
             version
         );
         logger.log_line(&msg);
         WxcError::ConfigParse(msg)
     })?;
 
-    let minor: u32 = parts[1].parse().map_err(|_| {
-        let msg = format!(
-            "Invalid schema version '{}': minor version must be a non-negative integer",
-            version
-        );
-        logger.log_line(&msg);
-        WxcError::ConfigParse(msg)
-    })?;
+    let req = semver::VersionReq::parse(SUPPORTED_VERSION).unwrap();
 
-    let (sup_major, sup_minor) = SUPPORTED_VERSION;
-    if major > sup_major || (major == sup_major && minor > sup_minor) {
-        let msg = format!(
-            "Config schema version '{}' is newer than supported (max: {}.{}.x). Upgrade wxc-exec.",
-            version, sup_major, sup_minor
-        );
+    // semver crate treats pre-release as lower precedence, so we compare
+    // against a version without the pre-release label for major.minor check.
+    let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
+    if !req.matches(&comparable) {
+        let min = semver::VersionReq::parse(">=0.4").unwrap();
+        let msg = if !min.matches(&comparable) {
+            format!(
+                "Config schema version '{}' is older than supported (supported: {}). Update your config.",
+                version, SUPPORTED_VERSION
+            )
+        } else {
+            format!(
+                "Config schema version '{}' is newer than supported (supported: {}). Upgrade wxc-exec.",
+                version, SUPPORTED_VERSION
+            )
+        };
         logger.log_line(&msg);
         return Err(WxcError::ConfigParse(msg));
     }
@@ -407,6 +467,17 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
                 }
             });
         }
+
+        // BaseProcessContainer-specific UI config
+        if let Some(raw_ui) = ac.ui {
+            policy.base_process_ui.isolation =
+                raw_ui.isolation.unwrap_or_else(|| "container".to_string());
+            policy.base_process_ui.desktop_system_control =
+                raw_ui.desktop_system_control.unwrap_or(false);
+            policy.base_process_ui.system_settings =
+                raw_ui.system_settings.unwrap_or_else(|| "none".to_string());
+            policy.base_process_ui.ime = raw_ui.ime.unwrap_or(false);
+        }
     }
 
     // Filesystem section
@@ -474,33 +545,6 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     }
 
-    // Container configuration (WSLC SDK)
-    let mut container_config = ContainerConfig::default();
-    if let Some(cc) = raw.wslc {
-        if let Some(os) = cc.target_os {
-            container_config.target_os = os;
-        }
-        if let Some(img) = cc.image {
-            container_config.image = img;
-        }
-        container_config.cpu_count = cc.cpu_count;
-        container_config.memory_mb = cc.memory_mb;
-        if let Some(gpu) = cc.gpu {
-            container_config.gpu = gpu;
-        }
-        container_config.storage_path = cc.storage_path;
-        if let Some(mappings) = cc.port_mappings {
-            container_config.port_mappings = mappings
-                .into_iter()
-                .map(|m| PortMapping {
-                    windows_port: m.windows_port.unwrap_or(0),
-                    container_port: m.container_port.unwrap_or(0),
-                    protocol: m.protocol.unwrap_or_else(|| "tcp".to_string()),
-                })
-                .collect();
-        }
-    }
-
     // Lifecycle section
     let lifecycle = {
         let lc = raw.lifecycle.unwrap_or_default();
@@ -529,13 +573,55 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             }
             config
         });
+        let wslc = raw_exp.wslc.map(|cc| {
+            let mut config = WslcConfig::default();
+            if let Some(os) = cc.target_os {
+                config.target_os = os;
+            }
+            if let Some(img) = cc.image {
+                config.image = img;
+            }
+            config.cpu_count = cc.cpu_count;
+            config.memory_mb = cc.memory_mb;
+            if let Some(gpu) = cc.gpu {
+                config.gpu = gpu;
+            }
+            config.storage_path = cc.storage_path;
+            if let Some(mappings) = cc.port_mappings {
+                config.port_mappings = mappings
+                    .into_iter()
+                    .map(|m| PortMapping {
+                        windows_port: m.windows_port.unwrap_or(0),
+                        container_port: m.container_port.unwrap_or(0),
+                        protocol: m.protocol.unwrap_or_else(|| "tcp".to_string()),
+                    })
+                    .collect();
+            }
+            config
+        });
         ExperimentalConfig {
             test,
             windows_sandbox,
+            wslc,
         }
     } else {
         ExperimentalConfig::default()
     };
+
+    // UI section
+    if let Some(raw_ui) = raw.ui {
+        let clipboard = match raw_ui.clipboard.as_deref() {
+            Some("read") => ClipboardPolicy::Read,
+            Some("write") => ClipboardPolicy::Write,
+            Some("all") => ClipboardPolicy::All,
+            _ => ClipboardPolicy::None,
+        };
+        policy.ui = UiPolicy {
+            disable: raw_ui.disable.unwrap_or(true),
+            clipboard,
+            injection: raw_ui.injection.unwrap_or(false),
+        };
+    }
 
     Ok(CodexRequest {
         schema_version,
@@ -548,7 +634,6 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         containment,
         lifecycle,
         policy,
-        container_config,
         lxc_config,
         experimental_enabled: false,
         experimental,
@@ -1035,6 +1120,69 @@ mod tests {
     }
 
     #[test]
+    fn proxy_url_parsed() {
+        let json = r#"{
+            "process": {"commandLine": "echo test"},
+            "network": {
+                "proxy": { "url": "http://localhost:3128" }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.port(), 3128);
+        assert_eq!(addr.host(), "localhost");
+    }
+
+    #[test]
+    fn proxy_url_non_localhost() {
+        let json = r#"{
+            "process": {"commandLine": "echo test"},
+            "network": {
+                "proxy": { "url": "http://proxy.example.com:8080" }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.port(), 8080);
+        assert_eq!(addr.host(), "proxy.example.com");
+    }
+
+    #[test]
+    fn proxy_url_missing_port() {
+        let json =
+            r#"{"process":{"commandLine":"x"},"network":{"proxy":{"url":"http://localhost"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_url_ipv6_loopback() {
+        let json = r#"{
+            "process": {"commandLine": "echo test"},
+            "network": {
+                "proxy": { "url": "http://[::1]:8080" }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.port(), 8080);
+        assert_eq!(addr.host(), "[::1]");
+    }
+
+    #[test]
     fn proxy_with_firewall_fields() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
@@ -1234,7 +1382,7 @@ mod tests {
 
     #[test]
     fn schema_version_too_new_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.5.0"}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.6.0"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1244,6 +1392,16 @@ mod tests {
 
     #[test]
     fn schema_version_current_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.5.0-alpha"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "0.5.0-alpha");
+    }
+
+    #[test]
+    fn schema_version_older_accepted() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.4.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -1253,13 +1411,33 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_older_accepted() {
+    fn schema_version_too_old_rejected() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.3.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn full_config_with_0_5_0_alpha_accepted() {
+        let json = r#"{
+            "version": "0.5.0-alpha",
+            "containerId": "test-050",
+            "containment": "appcontainer",
+            "process": { "commandLine": "echo hello", "timeout": 5000 },
+            "filesystem": { "readwritePaths": ["C:\\workspace"] },
+            "network": { "defaultPolicy": "block" }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.3.0-alpha");
+        assert_eq!(req.schema_version, "0.5.0-alpha");
+        assert_eq!(req.container_id, "test-050");
+        assert_eq!(req.script_timeout, 5000);
+        assert_eq!(req.policy.readwrite_paths, vec!["C:\\workspace"]);
     }
 
     #[test]
@@ -1373,12 +1551,13 @@ mod tests {
 
     #[test]
     fn wslc_section_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12"}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.container_config.image, "python:3.12");
+        let wslc = req.experimental.wslc.unwrap();
+        assert_eq!(wslc.image, "python:3.12");
     }
 
     // ---------- Experimental feature tests ----------
@@ -1444,5 +1623,57 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         let test = req.experimental.test.unwrap();
         assert!(test.message.is_empty());
+    }
+
+    #[test]
+    fn ui_section_parsed() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "ui": {"disable": false, "clipboard": "read", "injection": true}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.ui.disable);
+        assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::Read);
+        assert!(req.policy.ui.injection);
+    }
+
+    #[test]
+    fn ui_section_defaults_when_omitted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.ui.disable); // default-deny: UI disabled
+        assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::None);
+        assert!(!req.policy.ui.injection);
+    }
+
+    #[test]
+    fn ui_clipboard_all_parsed() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "ui": {"clipboard": "all"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::All);
+    }
+
+    #[test]
+    fn is_base_container_version_recognizes_050() {
+        assert!(is_base_container_version("0.5.0-alpha"));
+        assert!(is_base_container_version("0.5.0"));
+        assert!(is_base_container_version("0.5.1"));
+        assert!(is_base_container_version("0.6.0"));
+        assert!(is_base_container_version("1.0.0"));
+    }
+
+    #[test]
+    fn is_base_container_version_rejects_040() {
+        assert!(!is_base_container_version("0.4.0-alpha"));
+        assert!(!is_base_container_version("0.4.0"));
+        assert!(!is_base_container_version("0.4.9"));
+        assert!(!is_base_container_version(""));
+        assert!(!is_base_container_version("not-a-version"));
     }
 }

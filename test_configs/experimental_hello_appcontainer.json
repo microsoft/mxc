@@ -1,5 +1,5 @@
 {
-  "version": "0.4.0-alpha",
+  "version": "0.5.0-alpha",
   "containerId": "CLI-Experimental-Hello",
   "containment": "appcontainer",
   "process": {
@@ -9,5 +9,8 @@
     "test": {
       "message": "Test feature from AppContainer experimental!"
     }
+  },
+  "ui": {
+    "disable": false
   }
 }

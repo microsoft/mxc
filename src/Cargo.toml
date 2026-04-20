@@ -57,3 +57,4 @@ wslc_common = { path = "wslc_common" }
 flatbuffers = "25"
 sandbox_spec = { path = "generated/base_container_specification" }
 widestring = "1"
+url = "2"

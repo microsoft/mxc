@@ -81,7 +81,7 @@ Both paths converge here:
      NTFS ACLs         Windows       via Rust FFI
      WFP firewall      Sandbox VM    ├── WSL2 micro-VM
                                      ├── OCI containers
-                                     └── Win32 HANDLE I/O
+                                     └── I/O via SDK callbacks
 ```
 
 All backends implement the `ScriptRunner` trait. `main.rs` uses `Box<dyn ScriptRunner>` with a `match` on `request.containment`. Experimental backends (Sandbox, WSLC) require the `--experimental` flag:

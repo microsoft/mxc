@@ -23,7 +23,7 @@ production configs and the dev schema when working on experimental features:
 
 ```json
 {
-    "version": "0.4.0-alpha",              // Schema version (semver, current: "0.4.0-alpha")
+    "version": "0.4.0-alpha",              // Schema version (semver). Current stable: "0.4.0-alpha". Also accepts "0.5.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "appcontainer",         // Backend (see table below)
 
@@ -94,11 +94,12 @@ The parser compares the config's major.minor against its supported version
 
 | Config `version` | Parser supports | Result |
 |---|---|---|
-| absent | 0.4.0-alpha | Accepted (assumed compatible) |
-| `"0.3.0-alpha"` | 0.4.0-alpha | Accepted (0.3 ≤ 0.4) |
-| `"0.4.0-alpha"` | 0.4.0-alpha | Accepted (0.4 ≤ 0.4) |
-| `"0.5.0"` | 0.4.0-alpha | **Rejected** — "upgrade wxc-exec" |
-| `"1.0.0"` | 0.4.0-alpha | **Rejected** — "upgrade wxc-exec" |
+| absent | >=0.4, <=0.5 | Accepted (assumed compatible) |
+| `"0.3.0-alpha"` | >=0.4, <=0.5 | **Rejected** — "older than supported" |
+| `"0.4.0-alpha"` | >=0.4, <=0.5 | Accepted (0.4 in range) |
+| `"0.5.0-alpha"` | >=0.4, <=0.5 | Accepted (0.5 in range) |
+| `"0.6.0"` | >=0.4, <=0.5 | **Rejected** — "newer than supported" |
+| `"1.0.0"` | >=0.4, <=0.5 | **Rejected** — "newer than supported" |
 
 #### When to bump
 

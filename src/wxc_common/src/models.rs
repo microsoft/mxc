@@ -74,15 +74,25 @@ pub enum NetworkEnforcementMode {
 pub struct ProxyAddress {
     pub address: String,
     pub port: u16,
-    pub is_localhost: bool,
+    /// Original URL string if provided via `{ "url": "..." }`.
+    pub original_url: Option<String>,
 }
 
 impl ProxyAddress {
-    pub fn new(address: String, port: u16, is_localhost: bool) -> Self {
+    pub fn new(address: String, port: u16) -> Self {
         Self {
             address,
             port,
-            is_localhost,
+            original_url: None,
+        }
+    }
+
+    /// Create a ProxyAddress from a parsed URL, preserving the original string.
+    pub fn from_url(url: &str, host: String, port: u16) -> Self {
+        Self {
+            address: host,
+            port,
+            original_url: Some(url.to_string()),
         }
     }
 
@@ -94,14 +104,13 @@ impl ProxyAddress {
         self.port
     }
 
+    /// Returns the proxy URL. Uses the original URL if one was provided,
+    /// otherwise constructs `http://127.0.0.1:{port}` for localhost proxies.
     pub fn to_url(&self) -> String {
-        if self.is_localhost {
-            format!("http://127.0.0.1:{}", self.port)
-        } else {
-            // For non-localhost proxies, return in "host:port" format since
-            // the scheme is not implied.
-            format!("{}:{}", self.address, self.port)
+        if let Some(url) = &self.original_url {
+            return url.clone();
         }
+        format!("http://127.0.0.1:{}", self.port)
     }
 }
 
@@ -115,6 +124,69 @@ pub struct ProxyConfig {
 impl ProxyConfig {
     pub fn is_enabled(&self) -> bool {
         self.address.is_some() || self.builtin_test_server
+    }
+}
+
+/// Clipboard access policy for UI restrictions.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipboardPolicy {
+    #[default]
+    None,
+    Read,
+    Write,
+    #[serde(rename = "all")]
+    All,
+}
+
+/// Cross-platform UI policy parsed from the `ui` JSON section.
+/// Default-deny: UI is disabled, no clipboard, no injection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiPolicy {
+    /// When true, the sandbox cannot create visible windows (disables Win32k).
+    pub disable: bool,
+    /// Clipboard access level.
+    pub clipboard: ClipboardPolicy,
+    /// Whether input injection (keyboard/mouse) is allowed.
+    pub injection: bool,
+}
+
+impl Default for UiPolicy {
+    fn default() -> Self {
+        Self {
+            disable: true,
+            clipboard: ClipboardPolicy::None,
+            injection: false,
+        }
+    }
+}
+
+/// BaseProcessContainer-specific UI configuration (Windows only).
+/// Parsed from `appContainer.ui` in the JSON config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BaseProcessUiConfig {
+    /// UI isolation level for the desktop.
+    pub isolation: String,
+    /// Whether desktop system control is allowed.
+    #[serde(rename = "desktopSystemControl")]
+    pub desktop_system_control: bool,
+    /// System settings access level.
+    #[serde(rename = "systemSettings")]
+    pub system_settings: String,
+    /// Whether IME (Input Method Editor) is allowed.
+    pub ime: bool,
+}
+
+impl Default for BaseProcessUiConfig {
+    fn default() -> Self {
+        Self {
+            isolation: "container".to_string(),
+            desktop_system_control: false,
+            system_settings: "none".to_string(),
+            ime: false,
+        }
     }
 }
 
@@ -132,6 +204,10 @@ pub struct ContainerPolicy {
     pub blocked_hosts: Vec<String>,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
+    /// Cross-platform UI policy.
+    pub ui: UiPolicy,
+    /// BaseProcessContainer-specific UI config (Windows only, from appContainer.ui).
+    pub base_process_ui: BaseProcessUiConfig,
 }
 
 /// Port mapping for host↔container port forwarding.
@@ -149,7 +225,7 @@ pub struct PortMapping {
 /// Used when containment == Wslc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ContainerConfig {
+pub struct WslcConfig {
     /// Target OS for the container. Currently only "linux" is supported.
     pub target_os: String,
     /// Container image name (e.g., "alpine:latest", "python:3.12").
@@ -166,7 +242,7 @@ pub struct ContainerConfig {
     pub port_mappings: Vec<PortMapping>,
 }
 
-impl Default for ContainerConfig {
+impl Default for WslcConfig {
     fn default() -> Self {
         Self {
             target_os: "linux".to_string(),
@@ -224,6 +300,8 @@ pub struct ExperimentalConfig {
     /// Windows Sandbox backend (experimental).
     #[serde(rename = "windows_sandbox")]
     pub windows_sandbox: Option<WindowsSandboxConfig>,
+    /// WSL Container (WSLC SDK) backend (experimental).
+    pub wslc: Option<WslcConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,8 +324,6 @@ pub struct CodexRequest {
     pub lifecycle: LifecycleConfig,
     /// AppContainer-specific policy (used when containment == AppContainer).
     pub policy: ContainerPolicy,
-    /// Container configuration (used when containment == Wslc).
-    pub container_config: ContainerConfig,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
     /// Whether the --experimental flag was passed.
@@ -269,7 +345,6 @@ impl Default for CodexRequest {
             containment: ContainmentBackend::default(),
             lifecycle: LifecycleConfig::default(),
             policy: ContainerPolicy::default(),
-            container_config: ContainerConfig::default(),
             lxc_config: LxcConfig::default(),
             experimental_enabled: false,
             experimental: ExperimentalConfig::default(),

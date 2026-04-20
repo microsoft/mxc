@@ -7,7 +7,14 @@
     "timeout": 30000
   },
   "filesystem": {
-    "readwritePaths": [ "C:\\Users\\AdminUser\\AppData\\Local\\Programs" ],
-    "readonlyPaths": [ "C:\\temp\\wxc_test_allowedreadonly" ]
+    "readwritePaths": [
+      "C:\\Users\\AdminUser\\AppData\\Local\\Programs"
+    ],
+    "readonlyPaths": [
+      "C:\\temp\\wxc_test_allowedreadonly"
+    ]
+  },
+  "ui": {
+    "disable": false
   }
 }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use crate::tcp_bridge;
 use crate::{rendezvous, sandbox_vm, DaemonState};
@@ -34,7 +34,11 @@ const GUEST_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// This is a simplified implementation that uses a TCP listener on localhost
 /// as the "named pipe" transport.  A future iteration will use actual Win32
 /// named pipes via `tokio::net::windows::named_pipe`.
-pub async fn run(pipe_name: &str, state: Arc<Mutex<DaemonState>>) -> Result<()> {
+pub async fn run(
+    pipe_name: &str,
+    state: Arc<Mutex<DaemonState>>,
+    shutdown: Arc<Notify>,
+) -> Result<()> {
     // For now, use a localhost TCP port as the IPC channel.  The port is
     // deterministic from the pipe name to allow wxc-exec to find us.
     let port = pipe_name_to_port(pipe_name);
@@ -44,16 +48,26 @@ pub async fn run(pipe_name: &str, state: Arc<Mutex<DaemonState>>) -> Result<()> 
     eprintln!("[daemon] IPC listening on 127.0.0.1:{}", port);
 
     loop {
-        let (stream, peer) = listener.accept().await.context("accept IPC client")?;
-        eprintln!("[daemon] client connected from {}", peer);
+        tokio::select! {
+            result = listener.accept() => {
+                let (stream, peer) = result.context("accept IPC client")?;
+                eprintln!("[daemon] client connected from {}", peer);
 
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, state).await {
-                eprintln!("[daemon] client error: {:#}", e);
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_client(stream, state).await {
+                        eprintln!("[daemon] client error: {:#}", e);
+                    }
+                });
             }
-        });
+            _ = shutdown.notified() => {
+                eprintln!("[daemon] shutdown signal received, stopping pipe server");
+                break;
+            }
+        }
     }
+
+    Ok(())
 }
 
 /// Handle a single wxc-exec client connection.

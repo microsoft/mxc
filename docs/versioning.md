@@ -21,7 +21,6 @@ const policy: SandboxPolicy = {
   version: "0.4.0-alpha",
   filesystem: { ... },
   network: { ... },
-  ui: { ... },
   timeoutMs: 30000,
 };
 ```
@@ -60,11 +59,13 @@ schemas in `stable/` do not include the experimental section.
 
 ### Shipped vs Experimental
 
-The current config schema has two sections:
+The current stable schema version is `0.4.0-alpha`. The parser also accepts
+`0.5.0-alpha`, which should be used for configs that include promoted and experimental
+features:
 
 ```json
 {
-  "version": "0.4.0-alpha",
+  "version": "0.5.0-alpha",
   "process": { ... },
   "filesystem": { ... },
   "network": { ... },
@@ -129,7 +130,8 @@ const pty = spawnSandbox("python app.py", policy, {
 
 // Or with config:
 const config = createConfigFromPolicy(policy, "process");
-const pty = spawnSandbox("python app.py", config, {
+config.process!.commandLine = "python app.py";
+const pty = spawnSandboxFromConfig(config, {
   experimental: true,
   debug: false,
 });

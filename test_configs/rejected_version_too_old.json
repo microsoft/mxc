@@ -1,0 +1,11 @@
+{
+  "version": "0.3.0-alpha",
+  "containerId": "rejected-too-old",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "echo 'This should not run — version 0.3.0-alpha is rejected'"
+  },
+  "ui": {
+    "disable": false
+  }
+}

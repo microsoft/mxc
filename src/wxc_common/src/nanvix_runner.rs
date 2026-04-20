@@ -669,7 +669,6 @@ mod tests {
                     address: Some(crate::models::ProxyAddress::new(
                         "127.0.0.1".to_string(),
                         8080,
-                        true,
                     )),
                     builtin_test_server: false,
                 },
