@@ -84,12 +84,12 @@ extends:
         parameters:
           targets:
             - artifact: wxc-binaries-x86_64-pc-windows-msvc
-              path: x86_64-pc-windows-msvc
+              sdkArch: x64
             - artifact: wxc-binaries-aarch64-pc-windows-msvc
-              path: aarch64-pc-windows-msvc
+              sdkArch: arm64
             - artifact: lxc-binaries-x86_64-unknown-linux-gnu
-              path: x86_64-unknown-linux-gnu
+              sdkArch: x64
             - artifact: lxc-binaries-aarch64-unknown-linux-gnu
-              path: aarch64-unknown-linux-gnu
+              sdkArch: arm64
 
           ESRPInfo: ${{ parameters.ESRPInfo }}
