@@ -230,6 +230,9 @@ pub struct WslcConfig {
     pub target_os: String,
     /// Container image name (e.g., "alpine:latest", "python:3.12").
     pub image: String,
+    /// Path to a local tar file to import as the container image.
+    /// When set, the image is imported from this file instead of pulling from a registry.
+    pub image_tar_path: Option<String>,
     /// Number of CPUs allocated to the session. None = host-determined.
     pub cpu_count: Option<u32>,
     /// Memory in MB allocated to the session. None = host-determined.
@@ -247,6 +250,7 @@ impl Default for WslcConfig {
         Self {
             target_os: "linux".to_string(),
             image: "alpine:latest".to_string(),
+            image_tar_path: None,
             cpu_count: None,
             memory_mb: None,
             gpu: false,
