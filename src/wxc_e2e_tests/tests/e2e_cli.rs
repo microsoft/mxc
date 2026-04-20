@@ -12,8 +12,12 @@ use wxc_e2e_tests::{has_node, has_npm, repo_root};
 
 #[test]
 fn test_cli() {
-    if !has_node() { return; }
-    if !has_npm() { return; }
+    if !has_node() {
+        return;
+    }
+    if !has_npm() {
+        return;
+    }
 
     let cli_dir = repo_root().join("cli");
     let dist_dir = cli_dir.join("dist");

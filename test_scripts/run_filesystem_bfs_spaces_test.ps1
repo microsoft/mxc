@@ -23,7 +23,7 @@ $testDir = "C:\Users\Public\wxc bfs test"
 
 if (-not (Test-Path $wxcExe)) {
     Write-Host "ERROR: wxc-exec.exe not found at $wxcExe" -ForegroundColor Red
-    Write-Host "Run 'build.bat --debug' from the repo root first." -ForegroundColor Yellow
+    Write-Host "Run 'cargo build$(if ($Release) { ' --release' })' from src/ first." -ForegroundColor Yellow
     exit 1
 }
 

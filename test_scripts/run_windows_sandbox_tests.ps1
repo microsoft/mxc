@@ -6,8 +6,8 @@
 # Cannot run in GitHub Actions CI (needs Hyper-V + Sandbox feature).
 #
 # Usage:
-#   .\run_sandbox_tests.ps1              # debug build
-#   .\run_sandbox_tests.ps1 -Release     # release build
+#   .\run_windows_sandbox_tests.ps1              # debug build
+#   .\run_windows_sandbox_tests.ps1 -Release     # release build
 
 param(
     [switch]$Release,

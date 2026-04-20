@@ -54,10 +54,9 @@ cargo build --features microvm --target x86_64-pc-windows-msvc
 
 ```powershell
 cd test_scripts
-$repoRoot = Resolve-Path ..
-$wxcExe = Join-Path $repoRoot "src\target\x86_64-pc-windows-msvc\debug\wxc-exec.exe"
-$configDir = Join-Path $repoRoot "test_configs"
-.\run_microvm_tests.ps1 -WxcExePath $wxcExe -ConfigDir $configDir
+.\run_microvm_tests.ps1                     # debug build (default)
+.\run_microvm_tests.ps1 -Release             # release build
+.\run_microvm_tests.ps1 -BinDir "C:\path"    # explicit binary directory
 ```
 
 The MicroVM suite runs 6 functional tests + 1 timeout behavior test.

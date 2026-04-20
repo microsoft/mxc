@@ -32,7 +32,7 @@ for ($n = 1; $n -le $Iterations; $n++) {
     Write-Host "=== Pass $n of $Iterations ===" -ForegroundColor Cyan
     foreach ($script in $TestScripts) {
         $scriptPath = Join-Path $PSScriptRoot $script
-        & $scriptPath @passThrough
+        pwsh -File $scriptPath @passThrough
         if ($LASTEXITCODE -ne 0) {
             Write-Host "FAILED: $script on pass $n (exit code $LASTEXITCODE)" -ForegroundColor Red
             exit $LASTEXITCODE

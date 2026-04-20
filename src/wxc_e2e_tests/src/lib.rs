@@ -128,9 +128,14 @@ pub fn has_nanvix_binaries() -> bool {
         return false;
     };
     let bin_dir = exe.parent().unwrap_or(Path::new("."));
-    let present = ["nanvixd.exe", "kernel.elf", "python.elf", "cpython-ramfs.img"]
-        .iter()
-        .all(|name| bin_dir.join(name).exists());
+    let present = [
+        "nanvixd.exe",
+        "kernel.elf",
+        "python.elf",
+        "cpython-ramfs.img",
+    ]
+    .iter()
+    .all(|name| bin_dir.join(name).exists());
     if !present {
         println!("SKIPPED: NanVix binaries not found next to wxc-exec.exe");
     }

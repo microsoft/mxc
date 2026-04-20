@@ -12,8 +12,12 @@ use wxc_e2e_tests::{has_node, has_npm, repo_root};
 
 #[test]
 fn test_sdk() {
-    if !has_node() { return; }
-    if !has_npm() { return; }
+    if !has_node() {
+        return;
+    }
+    if !has_npm() {
+        return;
+    }
 
     let sdk_dir = repo_root().join("sdk");
     let dist_dir = sdk_dir.join("dist");
