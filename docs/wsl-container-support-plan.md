@@ -474,7 +474,10 @@ docker save alpine:latest -o C:\workspace\alpine.tar
 
 **Format auto-detection:** MXC inspects the tar for a `manifest.json` entry.
 If found, it uses the WSLC SDK's `WslcLoadSessionImageFromFile` (Docker image
-format). Otherwise, it uses `WslcImportSessionImageFromFile` (rootfs format).
+format). If `manifest.json` is not present, MXC only treats the tar as a
+rootfs image when it finds standard top-level directories (`bin/`, `etc/`,
+`usr/`, etc.) and uses `WslcImportSessionImageFromFile`. Otherwise, MXC
+reports an unrecognized tar format error.
 
 If the tar file does not exist at the specified path, MXC fails fast with a
 clear error message. MXC does not download or create tar files — image

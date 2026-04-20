@@ -25,25 +25,34 @@
 #   - Tar import tests are skipped if the tar files are not present
 
 param(
-    [switch]$Debug
+    [switch]$Debug,
+    [string]$WxcExecPath
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $TestConfigs = Join-Path $RepoRoot "test_configs"
 
-# Find binary
+# Find binary — prefer explicit path, then probe target-specific and default dirs.
 $Target = "x86_64-pc-windows-msvc"
-if ($Debug) {
-    $BinDir = Join-Path $RepoRoot "src\target\$Target\debug"
+$Profile = if ($Debug) { "debug" } else { "release" }
+
+if ($WxcExecPath) {
+    $WxcExec = $WxcExecPath
 } else {
-    $BinDir = Join-Path $RepoRoot "src\target\$Target\release"
+    $CandidatePaths = @(
+        (Join-Path $RepoRoot "src\target\$Target\$Profile\wxc-exec.exe"),
+        (Join-Path $RepoRoot "src\target\$Profile\wxc-exec.exe")
+    )
+    $WxcExec = $CandidatePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
 
-$WxcExec = Join-Path $BinDir "wxc-exec.exe"
-if (-not (Test-Path $WxcExec)) {
-    Write-Host "ERROR: wxc-exec.exe not found at $WxcExec" -ForegroundColor Red
-    Write-Host "Run 'cargo build --features wslc $(if (-not $Debug) { '--release ' })--target $Target' first." -ForegroundColor Yellow
+if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
+    Write-Host "ERROR: wxc-exec.exe not found." -ForegroundColor Red
+    Write-Host "Searched:" -ForegroundColor Yellow
+    foreach ($p in $CandidatePaths) { Write-Host "  - $p" -ForegroundColor Yellow }
+    Write-Host "Build with: cargo build --features wslc $(if (-not $Debug) { '--release ' })--target $Target" -ForegroundColor Yellow
+    Write-Host "Or pass -WxcExecPath explicitly." -ForegroundColor Yellow
     exit 1
 }
 

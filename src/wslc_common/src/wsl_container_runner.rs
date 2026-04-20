@@ -116,43 +116,63 @@ impl WSLContainerRunner {
     ///
     /// - `manifest.json` present → Docker image archive (`docker save`)
     /// - Top-level Linux directories (`bin`, `etc`, `usr`, etc.) → rootfs (`docker export`)
-    /// - Neither found or not a valid tar → Unknown
-    fn detect_tar_format(path: &str) -> TarFormat {
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => return TarFormat::Unknown,
-        };
+    /// - Neither found after a successful scan → `TarFormat::Unknown`
+    /// - Open/read/parse failures → propagated as `std::io::Error`
+    fn detect_tar_format(path: &str) -> std::io::Result<TarFormat> {
+        let file = std::fs::File::open(path)?;
         let mut archive = tar::Archive::new(file);
-        let entries = match archive.entries() {
-            Ok(e) => e,
-            Err(_) => return TarFormat::Unknown,
-        };
+        let entries = archive.entries()?;
 
         const ROOTFS_MARKERS: &[&str] = &["bin", "etc", "usr", "lib", "sbin", "var"];
         let mut has_rootfs_dirs = false;
 
-        for entry in entries.flatten() {
-            if let Ok(entry_path) = entry.path() {
-                let path_str = entry_path.to_string_lossy();
-                if path_str == "manifest.json" {
-                    return TarFormat::DockerSave;
-                }
-                if !has_rootfs_dirs {
-                    // Check if any top-level component matches a rootfs marker
-                    if let Some(first) = entry_path.iter().next() {
-                        let first_str = first.to_string_lossy();
-                        if ROOTFS_MARKERS.iter().any(|m| *m == first_str.as_ref()) {
-                            has_rootfs_dirs = true;
-                        }
+        for entry in entries {
+            let entry = entry?;
+            let entry_path = entry.path().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("failed to read tar entry path: {}", e),
+                )
+            })?;
+
+            // Tar archives often prefix entries with `./`. Match Docker-save
+            // archives by the final component so both `manifest.json` and
+            // `./manifest.json` are detected.
+            if entry_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "manifest.json")
+            {
+                return Ok(TarFormat::DockerSave);
+            }
+
+            if !has_rootfs_dirs {
+                // Skip a leading `.` component that is commonly present
+                // in tar archives (e.g., `./bin/...`).
+                let first_component =
+                    entry_path
+                        .components()
+                        .find_map(|component| match component {
+                            std::path::Component::CurDir => None,
+                            other => Some(other),
+                        });
+
+                if let Some(first) = first_component {
+                    let first_str = first.as_os_str().to_string_lossy();
+                    if ROOTFS_MARKERS
+                        .iter()
+                        .any(|marker| *marker == first_str.as_ref())
+                    {
+                        has_rootfs_dirs = true;
                     }
                 }
             }
         }
 
         if has_rootfs_dirs {
-            TarFormat::Rootfs
+            Ok(TarFormat::Rootfs)
         } else {
-            TarFormat::Unknown
+            Ok(TarFormat::Unknown)
         }
     }
 
@@ -176,7 +196,15 @@ impl WSLContainerRunner {
             )));
         }
 
-        let tar_format = Self::detect_tar_format(tar_path);
+        let tar_format = match Self::detect_tar_format(tar_path) {
+            Ok(fmt) => fmt,
+            Err(e) => {
+                return Err(ScriptResponse::error(&format!(
+                    "Failed to read tar file '{}': {}",
+                    tar_path, e
+                )));
+            }
+        };
         let wide_path: Vec<u16> = tar_path.encode_utf16().chain(std::iter::once(0)).collect();
 
         match tar_format {
@@ -208,6 +236,12 @@ impl WSLContainerRunner {
                 let _ = writeln!(
                     logger,
                     "[WSLC] Docker image archive loaded successfully from tar"
+                );
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Note: container will use image '{}' — ensure this \
+                     matches the tag inside the Docker archive",
+                    image_name
                 );
             }
             TarFormat::Rootfs => {
@@ -415,45 +449,47 @@ impl WSLContainerRunner {
             windows::Win32::System::Com::CoTaskMemFree(Some(images as *const c_void));
         }
 
-        if !image_found {
-            if let Some(tar_path) = &self.config.image_tar_path {
-                if let Err(resp) = Self::import_image_from_tar(
-                    session_guard.as_raw(),
-                    image_name,
-                    tar_path,
-                    logger,
-                ) {
-                    return resp;
-                }
-            } else {
-                // Pull from registry
-                // TODO: Move image pulling to a setup script (scripts/setup-wslc.ps1) as
-                // described in docs/wsl-container-support-plan.md Phase 5. MXC is an execution
-                // layer — image management should be handled externally. For now, auto-pull is
-                // used during development/testing.
+        if image_found {
+            if self.config.image_tar_path.is_some() {
                 let _ = writeln!(
                     logger,
-                    "[WSLC] Image '{}' not found locally, attempting pull...",
+                    "[WSLC] Image '{}' already cached, skipping tar import",
                     image_name
                 );
-                let uri_cstr = format!("{}\0", image_name);
-                let pull_opts = WslcPullImageOptions {
-                    uri: uri_cstr.as_bytes().as_ptr() as PCSTR,
-                    progress_callback: None,
-                    progress_callback_context: ptr::null_mut(),
-                    auth_info: ptr::null(),
-                };
-                err_msg = CoTaskMemPWSTR::null();
-                let hr =
-                    WslcPullSessionImage(session_guard.as_raw(), &pull_opts, err_msg.as_mut_ptr());
-                if hr != S_OK {
-                    let msg = err_msg.to_string_lossy();
-                    return sdk_error(&format!("Failed to pull image '{}'", image_name), hr, &msg);
-                }
-                let _ = writeln!(logger, "[WSLC] Image '{}' pulled successfully", image_name);
+            } else {
+                let _ = writeln!(logger, "[WSLC] Image '{}' found", image_name);
+            }
+        } else if let Some(tar_path) = &self.config.image_tar_path {
+            if let Err(resp) =
+                Self::import_image_from_tar(session_guard.as_raw(), image_name, tar_path, logger)
+            {
+                return resp;
             }
         } else {
-            let _ = writeln!(logger, "[WSLC] Image '{}' found", image_name);
+            // Pull from registry
+            // TODO: Move image pulling to a setup script (scripts/setup-wslc.ps1) as
+            // described in docs/wsl-container-support-plan.md Phase 5. MXC is an execution
+            // layer — image management should be handled externally. For now, auto-pull is
+            // used during development/testing.
+            let _ = writeln!(
+                logger,
+                "[WSLC] Image '{}' not found locally, attempting pull...",
+                image_name
+            );
+            let uri_cstr = format!("{}\0", image_name);
+            let pull_opts = WslcPullImageOptions {
+                uri: uri_cstr.as_bytes().as_ptr() as PCSTR,
+                progress_callback: None,
+                progress_callback_context: ptr::null_mut(),
+                auth_info: ptr::null(),
+            };
+            err_msg = CoTaskMemPWSTR::null();
+            let hr = WslcPullSessionImage(session_guard.as_raw(), &pull_opts, err_msg.as_mut_ptr());
+            if hr != S_OK {
+                let msg = err_msg.to_string_lossy();
+                return sdk_error(&format!("Failed to pull image '{}'", image_name), hr, &msg);
+            }
+            let _ = writeln!(logger, "[WSLC] Image '{}' pulled successfully", image_name);
         }
 
         // -- Step 5: Process settings --
