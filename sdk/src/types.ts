@@ -145,8 +145,20 @@ export interface WslcConfig {
   memoryMb?: number;
   /** Enable GPU passthrough to the container (default: false) */
   gpu?: boolean;
-  /** Path to a local tar file to import as the container image */
-  imageTarPath?: string;
+  /** Host↔container port mappings (TCP only) */
+  portMappings?: PortMapping[];
+}
+
+/**
+ * Port mapping for host↔container port forwarding
+ */
+export interface PortMapping {
+  /** Port on the Windows host */
+  windowsPort: number;
+  /** Port inside the Linux container */
+  containerPort: number;
+  /** Protocol: "tcp" or "udp" (default: "tcp") */
+  protocol?: string;
 }
 
 /**

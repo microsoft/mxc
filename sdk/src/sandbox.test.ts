@@ -3,7 +3,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { buildSandboxPayload, createConfigFromPolicy } from './sandbox';
+import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from './sandbox';
 import { SandboxPolicy } from './types';
 
 describe('buildSandboxPayload', () => {
@@ -596,6 +596,15 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.network!.enforcementMode, undefined);
     });
 
+    it('should allow allowedHosts without allowOutbound (block + allowlist)', () => {
+      const config = createConfigFromPolicy({
+        version: '0.5.0-alpha',
+        network: { allowedHosts: ['example.com'] },
+      }, 'wslc');
+      assert.strictEqual(config.network!.defaultPolicy, 'block');
+      assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
+    });
+
     it('should not set appContainer config for wslc', () => {
       const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'wslc');
       assert.strictEqual(config.appContainer, undefined);
@@ -631,6 +640,22 @@ describe('createConfigFromPolicy', () => {
     it('should set containerId', () => {
       const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'wslc', 'my-container');
       assert.strictEqual(config.containerId, 'my-container');
+    });
+
+    it('should throw from spawnSandbox when experimental is not set', () => {
+      assert.throws(
+        () => spawnSandbox('echo hello', { version: '0.5.0-alpha' }, { containment: 'wslc' }),
+        { message: /experimental mode/ },
+      );
+    });
+
+    it('should throw from spawnSandboxFromConfig when experimental is not set', () => {
+      const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
+      assert.throws(
+        () => spawnSandboxFromConfig(config),
+        { message: /experimental mode/ },
+      );
     });
   });
 });
