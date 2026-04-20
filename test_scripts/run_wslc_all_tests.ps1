@@ -9,10 +9,20 @@
 #   .\run_wslc_all_tests.ps1              # release build (default)
 #   .\run_wslc_all_tests.ps1 -Debug       # debug build
 #
+# Prerequisites for tar import tests:
+#
+#   1. Rootfs tar (wslc_tar_import_rootfs.json):
+#      docker pull alpine:latest
+#      docker run --name alpine-tmp alpine:latest true
+#      docker export alpine-tmp -o C:\workspace\alpine.tar
+#      docker rm alpine-tmp
+#
+#   2. Docker image archive (wslc_tar_import_docker_save.json):
+#      docker save alpine:latest -o C:\workspace\alpine-docker-save.tar
+#
 # Notes:
 #   - wslc_custom_registry.json requires network access to mcr.microsoft.com
-#   - wslc_tar_import.json requires a rootfs tar at C:\workspace\alpine.tar
-#     (create with: docker export <container> -o C:\workspace\alpine.tar)
+#   - Tar import tests are skipped if the tar files are not present
 
 param(
     [switch]$Debug
@@ -112,7 +122,8 @@ Write-Host "`n--- Image Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_python_hello.json" -OutputContains "Hello from Python"))
 $null = $results.Add((Run-WslcTest "wslc_python_stdlib.json"))
 $null = $results.Add((Run-WslcTest "wslc_custom_registry.json" -OutputContains "Image pulled from MCR"))
-$null = $results.Add((Run-WslcTest "wslc_tar_import.json" -OutputContains "Hello from tar-imported image"))
+$null = $results.Add((Run-WslcTest "wslc_tar_import_rootfs.json" -OutputContains "Hello from tar-imported image"))
+$null = $results.Add((Run-WslcTest "wslc_tar_import_docker_save.json" -OutputContains "Hello from docker-save image"))
 
 # Summary
 $passed = ($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count

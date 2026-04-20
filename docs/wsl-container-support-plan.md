@@ -425,8 +425,9 @@ handles the pull internally.
 ### 3. Import from a local tar file
 
 Use the `imageTarPath` config field to import a container image from a local
-tar file instead of pulling from a registry. The tar must be in **rootfs
-format** (a flat filesystem archive), not Docker image format.
+tar file instead of pulling from a registry. Both **rootfs tars** (`docker
+export`) and **Docker image archives** (`docker save`) are supported — the
+format is auto-detected.
 
 ```json
 {
@@ -442,7 +443,13 @@ format** (a flat filesystem archive), not Docker image format.
 }
 ```
 
-**Setup — creating a rootfs tar from Docker:**
+> **Note:** The `image` field is required when using rootfs tars (`docker
+> export`) — it provides the name under which the image is registered. For
+> Docker image archives (`docker save`), the image name is extracted from
+> the archive metadata automatically, but the `image` field is still
+> required for the container settings.
+
+**Option A — rootfs tar via `docker export`:**
 
 ```powershell
 # 1. Pull the image in Docker Desktop
@@ -458,9 +465,16 @@ docker export alpine-tmp -o C:\workspace\alpine.tar
 docker rm alpine-tmp
 ```
 
-> **Important:** Use `docker export` (rootfs tar), not `docker save` (multi-layer
-> image archive). `docker save` produces a layered archive with manifests that
-> the WSLC SDK does not fully unpack, resulting in missing binaries at runtime.
+**Option B — Docker image archive via `docker save`:**
+
+```powershell
+# Save the image directly (multi-layer archive with manifest)
+docker save alpine:latest -o C:\workspace\alpine.tar
+```
+
+**Format auto-detection:** MXC inspects the tar for a `manifest.json` entry.
+If found, it uses the WSLC SDK's `WslcLoadSessionImageFromFile` (Docker image
+format). Otherwise, it uses `WslcImportSessionImageFromFile` (rootfs format).
 
 If the tar file does not exist at the specified path, MXC fails fast with a
 clear error message. MXC does not download or create tar files — image

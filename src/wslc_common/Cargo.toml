@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 wxc_common = { workspace = true }
 windows = { workspace = true }
+tar = "0.4"
 
 [build-dependencies]
 zip = "2"
