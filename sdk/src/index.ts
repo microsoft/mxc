@@ -32,6 +32,7 @@ export {
   ContainmentType,
   ExperimentalBackends,
   ContainerConfig,
+  ContainmentType,
   PlatformSupport,
 } from './types';
 
