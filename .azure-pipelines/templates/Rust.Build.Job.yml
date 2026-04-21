@@ -46,10 +46,6 @@ jobs:
         CARGO_TARGET_DIR: c:/t/target
         artifactPrefix: wxc-binaries
         workingDirectory: src
-        ${{ if eq(parameters.enableWslc, true) }}:
-          buildExtraArgs: '--workspace --exclude lxc --exclude lxc_common --features wslc'
-        ${{ else }}:
-          buildExtraArgs: '--workspace --exclude lxc --exclude lxc_common'
         signPattern: |
             wxc-exec.exe
             winhttp-proxy-shim.exe
@@ -62,7 +58,6 @@ jobs:
         CARGO_TARGET_DIR: /tmp/target
         artifactPrefix: lxc-binaries
         workingDirectory: $(Build.SourcesDirectory)/src/lxc
-        buildExtraArgs: ''
         signPattern: |
           lxc-exec
 
