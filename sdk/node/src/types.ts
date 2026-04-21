@@ -158,6 +158,12 @@ export interface ProcessContainerConfig {
   leastPrivilege?: boolean;
   /** Additional AppContainer capabilities (e.g., "registryRead", "internetClient") */
   capabilities?: string[];
+  /**
+   * Named minimum-policy floor enforced by CreateProcessInSandbox
+   * (e.g., "AgenticDefault"). When set, the OS applies the named floor
+   * to all security axes in addition to whatever this config requests.
+   */
+  policy?: string;
   /** BaseProcess-specific UI settings (Windows only) */
   ui?: BaseProcessUiConfig;
 }
@@ -369,6 +375,13 @@ export type SandboxPolicy = {
   };
   /** Execution timeout in milliseconds. Omitted = no timeout. */
   timeoutMs?: number;
+  /**
+   * Named minimum-policy floor to apply. Platform-agnostic intent; the
+   * backend maps this to an OS-specific enforcement mechanism (e.g., on
+   * Windows, CreateProcessInSandbox enforces the named floor across all
+   * security axes). Example: "AgenticDefault".
+   */
+  minimumPolicy?: string;
 }
 
 /**
