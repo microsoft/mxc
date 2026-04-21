@@ -77,6 +77,17 @@ table SandboxSpec {
 
     // File Paths that have been denied access
     fs_deny:[string];
+
+    // Name of the minimum policy floor to enforce on top of the caller's spec.
+    //  - Empty/null: no floor is applied (legacy behavior).
+    //  - Non-empty: the engine looks the name up in its built-in policy table
+    //    and enforces a lower bound (force required flags on, reject integrity
+    //    levels above the policy ceiling, apply path deny-lists and capability
+    //    allowlists, OR in a minimum UI-restriction bitmask, etc.).
+    //
+    // See EnforceMinimumPolicy in SandboxEngine.cpp for the enforcement rules
+    // and c_policies[] for the built-in policy table.
+    policy:string;
 }
 
 table proxy_info {
