@@ -1,0 +1,8 @@
+
+# Use static CRT for Windows targets so vcruntime DLLs don't need to be
+# pre-installed on the machine.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -90,12 +90,10 @@ jobs:
         displayName: Install ARM64 toolchain
         condition: and(eq('${{ item.os }}','linux'), eq('${{ item.arch }}','arm64'))
 
-      - task: CopyFiles@2
+      # Append pipeline-specific Cargo settings (registry, cross-compile linker) to the workspace config
+      - powershell: |
+          Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
         displayName: Setup Cargo Config
-        inputs:
-          SourceFolder: '$(Build.SourcesDirectory)/.azure-pipelines/.cargo'
-          Contents: 'config.toml'
-          TargetFolder: '$(Build.SourcesDirectory)/.cargo'
 
       - task: 1ES.Build.Rust.Setup@1
       - task: 1ES.Build.Rust.Restore@1
