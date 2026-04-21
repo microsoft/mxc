@@ -11,6 +11,9 @@ parameters:
 - name: ESRPInfo
   type: object
   default: {}
+- name: enableWslc
+  type: boolean
+  default: true
 
 jobs:
 - ${{ each item in parameters.matrix }}:
@@ -43,7 +46,10 @@ jobs:
         CARGO_TARGET_DIR: c:/t/target
         artifactPrefix: wxc-binaries
         workingDirectory: src
-        buildExtraArgs: '--workspace --exclude lxc --exclude lxc_common'
+        ${{ if eq(parameters.enableWslc, true) }}:
+          buildExtraArgs: '--workspace --exclude lxc --exclude lxc_common --features wslc'
+        ${{ else }}:
+          buildExtraArgs: '--workspace --exclude lxc --exclude lxc_common'
         signPattern: |
             wxc-exec.exe
             winhttp-proxy-shim.exe
@@ -159,6 +165,15 @@ jobs:
           contents: |
             $(signPattern)
           targetFolder: $(outputDirectory)/$(targetTriple)
+
+      # Copy wslcsdk.dll when WSLC support is enabled
+      - ${{ if and(eq(parameters.enableWslc, true), eq(item.os, 'windows')) }}:
+        - task: CopyFiles@2
+          displayName: Copy wslcsdk.dll
+          inputs:
+            sourceFolder: $(targetTripleDir)
+            contents: wslcsdk.dll
+            targetFolder: $(outputDirectory)/$(targetTriple)
 
       - task: 1ES.PublishPipelineArtifact@1
         displayName: Publish
