@@ -122,6 +122,7 @@ function buildProcessBaseContainerConfig(
         name: containerId,
         leastPrivilege: false,
         capabilities,
+        ...(policy.minimumPolicy ? { policy: policy.minimumPolicy } : {}),
         ui: {
             isolation: "container",
             desktopSystemControl: false,

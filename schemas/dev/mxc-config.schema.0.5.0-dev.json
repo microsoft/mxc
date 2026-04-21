@@ -191,6 +191,10 @@
           "default": [],
           "description": "AppContainer capabilities (e.g., 'internetClient', 'registryRead')."
         },
+        "policy": {
+          "type": "string",
+          "description": "Named minimum-policy floor enforced by CreateProcessInSandbox (e.g., 'AgenticDefault'). When set, the OS applies the named floor to all security axes in addition to whatever this config requests."
+        },
         "ui": {
           "type": "object",
           "description": "BaseProcessContainer-specific UI settings (Windows only).",

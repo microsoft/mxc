@@ -462,6 +462,29 @@ describe('createConfigFromPolicy', () => {
       }
     });
 
+    it('should map minimumPolicy to appContainer.policy', () => {
+      mockWindows();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.4.0-alpha',
+          minimumPolicy: 'AgenticDefault',
+        }, 'process');
+        assert.strictEqual(config.appContainer!.policy, 'AgenticDefault');
+      } finally {
+        restore();
+      }
+    });
+
+    it('should omit appContainer.policy when minimumPolicy is unset', () => {
+      mockWindows();
+      try {
+        const config = createConfigFromPolicy(defaultPolicy, 'process');
+        assert.strictEqual(config.appContainer!.policy, undefined);
+      } finally {
+        restore();
+      }
+    });
+
     it('should map network policy to capabilities and hosts', () => {
       mockWindows();
       try {
