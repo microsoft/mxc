@@ -254,203 +254,263 @@ pub struct WslcProcessCallbacks {
 }
 
 // ---------------------------------------------------------------------------
-// Extern function declarations — MVP subset for the runner lifecycle
+// Runtime-loaded SDK function table
 //
-// Memory ownership: several functions return heap-allocated strings via
-// `error_message: *mut PWSTR` out-parameters. These are allocated with
-// `CoTaskMemAlloc` by the SDK. The caller owns the returned memory and
-// must free it with `CoTaskMemFree` when no longer needed. A safe wrapper
-// should be provided in the runner layer to avoid leaks.
+// Instead of static `extern "system"` declarations (which require wslcsdk.dll
+// at process startup), we load the DLL at runtime via `libloading`. This
+// makes wslcsdk.dll a runtime dependency — the binary starts without it
+// and only fails when the WSLC backend is actually used.
 // ---------------------------------------------------------------------------
 
-extern "system" {
-    // -- Prerequisites --
-    pub fn WslcCanRun(can_run: *mut BOOL, missing_components: *mut WslcComponentFlags) -> HRESULT;
+/// Function pointer type aliases for all WSLC SDK functions used by MXC.
+mod ffi_types {
+    use super::*;
 
-    // -- Session management --
-    pub fn WslcInitSessionSettings(
-        name: PCWSTR,
-        storage_path: PCWSTR,
-        session_settings: *mut WslcSessionSettings,
+    pub type WslcCanRunFn =
+        unsafe extern "system" fn(*mut BOOL, *mut WslcComponentFlags) -> HRESULT;
+    pub type WslcInitSessionSettingsFn =
+        unsafe extern "system" fn(PCWSTR, PCWSTR, *mut WslcSessionSettings) -> HRESULT;
+    pub type WslcSetSessionSettingsCpuCountFn =
+        unsafe extern "system" fn(*mut WslcSessionSettings, u32) -> HRESULT;
+    pub type WslcSetSessionSettingsMemoryFn =
+        unsafe extern "system" fn(*mut WslcSessionSettings, u32) -> HRESULT;
+    pub type WslcSetSessionSettingsTimeoutFn =
+        unsafe extern "system" fn(*mut WslcSessionSettings, u32) -> HRESULT;
+    pub type WslcSetSessionSettingsFeatureFlagsFn =
+        unsafe extern "system" fn(*mut WslcSessionSettings, WslcSessionFeatureFlags) -> HRESULT;
+    pub type WslcCreateSessionFn = unsafe extern "system" fn(
+        *mut WslcSessionSettings,
+        *mut WslcSession,
+        *mut PWSTR,
     ) -> HRESULT;
-
-    pub fn WslcSetSessionSettingsCpuCount(
-        session_settings: *mut WslcSessionSettings,
-        cpu_count: u32,
+    pub type WslcTerminateSessionFn = unsafe extern "system" fn(WslcSession) -> HRESULT;
+    pub type WslcReleaseSessionFn = unsafe extern "system" fn(WslcSession) -> HRESULT;
+    pub type WslcListSessionImagesFn =
+        unsafe extern "system" fn(WslcSession, *mut *mut WslcImageInfo, *mut u32) -> HRESULT;
+    pub type WslcPullSessionImageFn =
+        unsafe extern "system" fn(WslcSession, *const WslcPullImageOptions, *mut PWSTR) -> HRESULT;
+    pub type WslcImportSessionImageFromFileFn = unsafe extern "system" fn(
+        WslcSession,
+        PCSTR,
+        PCWSTR,
+        *const WslcImportImageOptions,
+        *mut PWSTR,
     ) -> HRESULT;
-
-    pub fn WslcSetSessionSettingsMemory(
-        session_settings: *mut WslcSessionSettings,
-        memory_mb: u32,
+    pub type WslcLoadSessionImageFromFileFn = unsafe extern "system" fn(
+        WslcSession,
+        PCWSTR,
+        *const WslcLoadImageOptions,
+        *mut PWSTR,
     ) -> HRESULT;
-
-    pub fn WslcSetSessionSettingsTimeout(
-        session_settings: *mut WslcSessionSettings,
-        timeout_ms: u32,
+    pub type WslcInitContainerSettingsFn =
+        unsafe extern "system" fn(PCSTR, *mut WslcContainerSettings) -> HRESULT;
+    pub type WslcSetContainerSettingsNetworkingModeFn = unsafe extern "system" fn(
+        *mut WslcContainerSettings,
+        WslcContainerNetworkingMode,
     ) -> HRESULT;
-
-    pub fn WslcSetSessionSettingsFeatureFlags(
-        session_settings: *mut WslcSessionSettings,
-        flags: WslcSessionFeatureFlags,
+    pub type WslcSetContainerSettingsFlagsFn =
+        unsafe extern "system" fn(*mut WslcContainerSettings, WslcContainerFlags) -> HRESULT;
+    pub type WslcSetContainerSettingsVolumesFn = unsafe extern "system" fn(
+        *mut WslcContainerSettings,
+        *const WslcContainerVolume,
+        u32,
     ) -> HRESULT;
-
-    pub fn WslcCreateSession(
-        session_settings: *mut WslcSessionSettings,
-        session: *mut WslcSession,
-        error_message: *mut PWSTR,
+    pub type WslcSetContainerSettingsInitProcessFn =
+        unsafe extern "system" fn(*mut WslcContainerSettings, *mut WslcProcessSettings) -> HRESULT;
+    pub type WslcCreateContainerFn = unsafe extern "system" fn(
+        WslcSession,
+        *const WslcContainerSettings,
+        *mut WslcContainer,
+        *mut PWSTR,
     ) -> HRESULT;
+    pub type WslcStartContainerFn =
+        unsafe extern "system" fn(WslcContainer, WslcContainerStartFlags, *mut PWSTR) -> HRESULT;
+    pub type WslcStopContainerFn =
+        unsafe extern "system" fn(WslcContainer, WslcSignal, u32, *mut PWSTR) -> HRESULT;
+    pub type WslcDeleteContainerFn =
+        unsafe extern "system" fn(WslcContainer, WslcDeleteContainerFlags, *mut PWSTR) -> HRESULT;
+    pub type WslcGetContainerInitProcessFn =
+        unsafe extern "system" fn(WslcContainer, *mut WslcProcess) -> HRESULT;
+    pub type WslcReleaseContainerFn = unsafe extern "system" fn(WslcContainer) -> HRESULT;
+    pub type WslcCreateContainerProcessFn = unsafe extern "system" fn(
+        WslcContainer,
+        *mut WslcProcessSettings,
+        *mut WslcProcess,
+        *mut PWSTR,
+    ) -> HRESULT;
+    pub type WslcInitProcessSettingsFn =
+        unsafe extern "system" fn(*mut WslcProcessSettings) -> HRESULT;
+    pub type WslcSetProcessSettingsCmdLineFn =
+        unsafe extern "system" fn(*mut WslcProcessSettings, *const PCSTR, usize) -> HRESULT;
+    pub type WslcSetProcessSettingsEnvVariablesFn =
+        unsafe extern "system" fn(*mut WslcProcessSettings, *const PCSTR, usize) -> HRESULT;
+    pub type WslcSetProcessSettingsCurrentDirectoryFn =
+        unsafe extern "system" fn(*mut WslcProcessSettings, PCSTR) -> HRESULT;
+    pub type WslcSetProcessSettingsCallbacksFn = unsafe extern "system" fn(
+        *mut WslcProcessSettings,
+        *const WslcProcessCallbacks,
+        *mut c_void,
+    ) -> HRESULT;
+    pub type WslcGetProcessExitEventFn =
+        unsafe extern "system" fn(WslcProcess, *mut HANDLE) -> HRESULT;
+    pub type WslcGetProcessExitCodeFn = unsafe extern "system" fn(WslcProcess, *mut i32) -> HRESULT;
+    pub type WslcReleaseProcessFn = unsafe extern "system" fn(WslcProcess) -> HRESULT;
+}
 
-    pub fn WslcTerminateSession(session: WslcSession) -> HRESULT;
-    pub fn WslcReleaseSession(session: WslcSession) -> HRESULT;
+/// Runtime-loaded WSLC SDK. Holds the loaded library and resolved function pointers.
+///
+/// Created via `WslcSdk::load()`. The library remains loaded for the lifetime
+/// of this struct. All function pointers are valid as long as `WslcSdk` is alive.
+pub struct WslcSdk {
+    // Keep the library alive — function pointers are only valid while it's loaded.
+    _lib: libloading::Library,
 
-    // -- Image management --
+    pub WslcCanRun: ffi_types::WslcCanRunFn,
+    pub WslcInitSessionSettings: ffi_types::WslcInitSessionSettingsFn,
+    pub WslcSetSessionSettingsCpuCount: ffi_types::WslcSetSessionSettingsCpuCountFn,
+    pub WslcSetSessionSettingsMemory: ffi_types::WslcSetSessionSettingsMemoryFn,
+    pub WslcSetSessionSettingsTimeout: ffi_types::WslcSetSessionSettingsTimeoutFn,
+    pub WslcSetSessionSettingsFeatureFlags: ffi_types::WslcSetSessionSettingsFeatureFlagsFn,
+    pub WslcCreateSession: ffi_types::WslcCreateSessionFn,
+    pub WslcTerminateSession: ffi_types::WslcTerminateSessionFn,
+    pub WslcReleaseSession: ffi_types::WslcReleaseSessionFn,
+    pub WslcListSessionImages: ffi_types::WslcListSessionImagesFn,
+    pub WslcPullSessionImage: ffi_types::WslcPullSessionImageFn,
+    pub WslcImportSessionImageFromFile: ffi_types::WslcImportSessionImageFromFileFn,
+    pub WslcLoadSessionImageFromFile: ffi_types::WslcLoadSessionImageFromFileFn,
+    pub WslcInitContainerSettings: ffi_types::WslcInitContainerSettingsFn,
+    pub WslcSetContainerSettingsNetworkingMode: ffi_types::WslcSetContainerSettingsNetworkingModeFn,
+    pub WslcSetContainerSettingsFlags: ffi_types::WslcSetContainerSettingsFlagsFn,
+    pub WslcSetContainerSettingsVolumes: ffi_types::WslcSetContainerSettingsVolumesFn,
+    pub WslcSetContainerSettingsInitProcess: ffi_types::WslcSetContainerSettingsInitProcessFn,
+    pub WslcCreateContainer: ffi_types::WslcCreateContainerFn,
+    pub WslcStartContainer: ffi_types::WslcStartContainerFn,
+    pub WslcStopContainer: ffi_types::WslcStopContainerFn,
+    pub WslcDeleteContainer: ffi_types::WslcDeleteContainerFn,
+    pub WslcGetContainerInitProcess: ffi_types::WslcGetContainerInitProcessFn,
+    pub WslcReleaseContainer: ffi_types::WslcReleaseContainerFn,
+    pub WslcCreateContainerProcess: ffi_types::WslcCreateContainerProcessFn,
+    pub WslcInitProcessSettings: ffi_types::WslcInitProcessSettingsFn,
+    pub WslcSetProcessSettingsCmdLine: ffi_types::WslcSetProcessSettingsCmdLineFn,
+    pub WslcSetProcessSettingsEnvVariables: ffi_types::WslcSetProcessSettingsEnvVariablesFn,
+    pub WslcSetProcessSettingsCurrentDirectory: ffi_types::WslcSetProcessSettingsCurrentDirectoryFn,
+    pub WslcSetProcessSettingsCallbacks: ffi_types::WslcSetProcessSettingsCallbacksFn,
+    pub WslcGetProcessExitEvent: ffi_types::WslcGetProcessExitEventFn,
+    pub WslcGetProcessExitCode: ffi_types::WslcGetProcessExitCodeFn,
+    pub WslcReleaseProcess: ffi_types::WslcReleaseProcessFn,
+}
 
-    /// List images available in the session's image store.
+// `WslcSdk` intentionally does not implement `Send` or `Sync`.
+// Cross-thread use of the runtime-loaded SDK may require additional
+// guarantees (such as per-thread COM initialization) that are not enforced
+// by this type.
+
+impl WslcSdk {
+    /// Load `wslcsdk.dll` at runtime and resolve all required function pointers.
     ///
-    /// On success, `images` is set to a CoTaskMem-allocated array of
-    /// `WslcImageInfo` structs and `count` to the number of elements.
-    /// The caller must free the array with `CoTaskMemFree` when done.
-    pub fn WslcListSessionImages(
-        session: WslcSession,
-        images: *mut *mut WslcImageInfo,
-        count: *mut u32,
-    ) -> HRESULT;
+    /// Loads from the same directory as the running executable to avoid DLL
+    /// search-order hijacking. Returns an error if the DLL is not found or
+    /// any function cannot be resolved.
+    pub fn load() -> Result<Self, String> {
+        unsafe {
+            let dll_path = std::env::current_exe()
+                .map_err(|e| format!("Failed to determine current executable path: {}", e))?
+                .parent()
+                .ok_or_else(|| "Failed to determine current executable directory".to_string())?
+                .join("wslcsdk.dll");
 
-    pub fn WslcPullSessionImage(
-        session: WslcSession,
-        options: *const WslcPullImageOptions,
-        error_message: *mut PWSTR,
-    ) -> HRESULT;
+            let lib = libloading::Library::new(&dll_path).map_err(|e| {
+                format!(
+                    "Failed to load wslcsdk.dll from {}: {}. \
+                     Ensure the WSLC SDK runtime is installed or the DLL is \
+                     in the same directory as the running executable.",
+                    dll_path.display(),
+                    e
+                )
+            })?;
 
-    pub fn WslcImportSessionImageFromFile(
-        session: WslcSession,
-        image_name: PCSTR,
-        path: PCWSTR,
-        options: *const WslcImportImageOptions,
-        error_message: *mut PWSTR,
-    ) -> HRESULT;
+            macro_rules! load_fn {
+                ($lib:expr, $name:literal) => {{
+                    let sym: libloading::Symbol<_> = $lib.get($name).map_err(|e| {
+                        format!(
+                            "Failed to resolve {} from wslcsdk.dll: {}",
+                            stringify!($name),
+                            e
+                        )
+                    })?;
+                    *sym
+                }};
+            }
 
-    /// Load a Docker image archive (`docker save` format) from a local file.
-    ///
-    /// Unlike `WslcImportSessionImageFromFile` (which takes a rootfs tar and a
-    /// caller-supplied image name), this function reads the multi-layer Docker
-    /// image archive and extracts the image name from the archive metadata.
-    pub fn WslcLoadSessionImageFromFile(
-        session: WslcSession,
-        path: PCWSTR,
-        options: *const WslcLoadImageOptions,
-        error_message: *mut PWSTR,
-    ) -> HRESULT;
-
-    // -- Container management --
-    pub fn WslcInitContainerSettings(
-        image_name: PCSTR,
-        container_settings: *mut WslcContainerSettings,
-    ) -> HRESULT;
-
-    pub fn WslcSetContainerSettingsNetworkingMode(
-        container_settings: *mut WslcContainerSettings,
-        networking_mode: WslcContainerNetworkingMode,
-    ) -> HRESULT;
-
-    pub fn WslcSetContainerSettingsFlags(
-        container_settings: *mut WslcContainerSettings,
-        flags: WslcContainerFlags,
-    ) -> HRESULT;
-
-    pub fn WslcSetContainerSettingsVolumes(
-        container_settings: *mut WslcContainerSettings,
-        volumes: *const WslcContainerVolume,
-        volume_count: u32,
-    ) -> HRESULT;
-
-    pub fn WslcSetContainerSettingsInitProcess(
-        container_settings: *mut WslcContainerSettings,
-        init_process: *mut WslcProcessSettings,
-    ) -> HRESULT;
-
-    pub fn WslcCreateContainer(
-        session: WslcSession,
-        container_settings: *const WslcContainerSettings,
-        container: *mut WslcContainer,
-        error_message: *mut PWSTR,
-    ) -> HRESULT;
-
-    pub fn WslcStartContainer(
-        container: WslcContainer,
-        flags: WslcContainerStartFlags,
-        error_message: *mut PWSTR,
-    ) -> HRESULT;
-
-    pub fn WslcStopContainer(
-        container: WslcContainer,
-        signal: WslcSignal,
-        timeout_seconds: u32,
-        error_message: *mut PWSTR,
-    ) -> HRESULT;
-
-    pub fn WslcDeleteContainer(
-        container: WslcContainer,
-        flags: WslcDeleteContainerFlags,
-        error_message: *mut PWSTR,
-    ) -> HRESULT;
-
-    pub fn WslcGetContainerInitProcess(
-        container: WslcContainer,
-        init_process: *mut WslcProcess,
-    ) -> HRESULT;
-
-    pub fn WslcReleaseContainer(container: WslcContainer) -> HRESULT;
-
-    // -- Process management --
-    /// Create a new process in a running container (used for post-start exec,
-    /// e.g., iptables rules before the user script).
-    pub fn WslcCreateContainerProcess(
-        container: WslcContainer,
-        new_process_settings: *mut WslcProcessSettings,
-        new_process: *mut WslcProcess,
-        error_message: *mut PWSTR,
-    ) -> HRESULT;
-
-    pub fn WslcInitProcessSettings(process_settings: *mut WslcProcessSettings) -> HRESULT;
-
-    pub fn WslcSetProcessSettingsCmdLine(
-        process_settings: *mut WslcProcessSettings,
-        argv: *const PCSTR,
-        argc: usize,
-    ) -> HRESULT;
-
-    pub fn WslcSetProcessSettingsEnvVariables(
-        process_settings: *mut WslcProcessSettings,
-        key_value: *const PCSTR,
-        argc: usize,
-    ) -> HRESULT;
-
-    pub fn WslcSetProcessSettingsCurrentDirectory(
-        process_settings: *mut WslcProcessSettings,
-        current_directory: PCSTR,
-    ) -> HRESULT;
-
-    pub fn WslcSetProcessSettingsCallbacks(
-        process_settings: *mut WslcProcessSettings,
-        callbacks: *const WslcProcessCallbacks,
-        context: *mut c_void,
-    ) -> HRESULT;
-
-    pub fn WslcGetProcessExitEvent(process: WslcProcess, exit_event: *mut HANDLE) -> HRESULT;
-
-    pub fn WslcGetProcessExitCode(process: WslcProcess, exit_code: *mut i32) -> HRESULT;
-
-    pub fn WslcReleaseProcess(process: WslcProcess) -> HRESULT;
+            Ok(Self {
+                WslcCanRun: load_fn!(lib, b"WslcCanRun\0"),
+                WslcInitSessionSettings: load_fn!(lib, b"WslcInitSessionSettings\0"),
+                WslcSetSessionSettingsCpuCount: load_fn!(lib, b"WslcSetSessionSettingsCpuCount\0"),
+                WslcSetSessionSettingsMemory: load_fn!(lib, b"WslcSetSessionSettingsMemory\0"),
+                WslcSetSessionSettingsTimeout: load_fn!(lib, b"WslcSetSessionSettingsTimeout\0"),
+                WslcSetSessionSettingsFeatureFlags: load_fn!(
+                    lib,
+                    b"WslcSetSessionSettingsFeatureFlags\0"
+                ),
+                WslcCreateSession: load_fn!(lib, b"WslcCreateSession\0"),
+                WslcTerminateSession: load_fn!(lib, b"WslcTerminateSession\0"),
+                WslcReleaseSession: load_fn!(lib, b"WslcReleaseSession\0"),
+                WslcListSessionImages: load_fn!(lib, b"WslcListSessionImages\0"),
+                WslcPullSessionImage: load_fn!(lib, b"WslcPullSessionImage\0"),
+                WslcImportSessionImageFromFile: load_fn!(lib, b"WslcImportSessionImageFromFile\0"),
+                WslcLoadSessionImageFromFile: load_fn!(lib, b"WslcLoadSessionImageFromFile\0"),
+                WslcInitContainerSettings: load_fn!(lib, b"WslcInitContainerSettings\0"),
+                WslcSetContainerSettingsNetworkingMode: load_fn!(
+                    lib,
+                    b"WslcSetContainerSettingsNetworkingMode\0"
+                ),
+                WslcSetContainerSettingsFlags: load_fn!(lib, b"WslcSetContainerSettingsFlags\0"),
+                WslcSetContainerSettingsVolumes: load_fn!(
+                    lib,
+                    b"WslcSetContainerSettingsVolumes\0"
+                ),
+                WslcSetContainerSettingsInitProcess: load_fn!(
+                    lib,
+                    b"WslcSetContainerSettingsInitProcess\0"
+                ),
+                WslcCreateContainer: load_fn!(lib, b"WslcCreateContainer\0"),
+                WslcStartContainer: load_fn!(lib, b"WslcStartContainer\0"),
+                WslcStopContainer: load_fn!(lib, b"WslcStopContainer\0"),
+                WslcDeleteContainer: load_fn!(lib, b"WslcDeleteContainer\0"),
+                WslcGetContainerInitProcess: load_fn!(lib, b"WslcGetContainerInitProcess\0"),
+                WslcReleaseContainer: load_fn!(lib, b"WslcReleaseContainer\0"),
+                WslcCreateContainerProcess: load_fn!(lib, b"WslcCreateContainerProcess\0"),
+                WslcInitProcessSettings: load_fn!(lib, b"WslcInitProcessSettings\0"),
+                WslcSetProcessSettingsCmdLine: load_fn!(lib, b"WslcSetProcessSettingsCmdLine\0"),
+                WslcSetProcessSettingsEnvVariables: load_fn!(
+                    lib,
+                    b"WslcSetProcessSettingsEnvVariables\0"
+                ),
+                WslcSetProcessSettingsCurrentDirectory: load_fn!(
+                    lib,
+                    b"WslcSetProcessSettingsCurrentDirectory\0"
+                ),
+                WslcSetProcessSettingsCallbacks: load_fn!(
+                    lib,
+                    b"WslcSetProcessSettingsCallbacks\0"
+                ),
+                WslcGetProcessExitEvent: load_fn!(lib, b"WslcGetProcessExitEvent\0"),
+                WslcGetProcessExitCode: load_fn!(lib, b"WslcGetProcessExitCode\0"),
+                WslcReleaseProcess: load_fn!(lib, b"WslcReleaseProcess\0"),
+                _lib: lib,
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // RAII Guard types
 // ---------------------------------------------------------------------------
 
-/// RAII guard for a WSLC session handle. Calls `WslcReleaseSession` on drop.
+/// RAII guard for a WSLC session handle. Calls the release function on drop.
 pub struct WslcSessionGuard {
     handle: WslcSession,
+    release_fn: ffi_types::WslcReleaseSessionFn,
 }
 
 impl WslcSessionGuard {
@@ -458,9 +518,12 @@ impl WslcSessionGuard {
     ///
     /// # Safety
     /// The handle must be a valid, non-null session returned by `WslcCreateSession`.
-    pub unsafe fn from_raw(handle: WslcSession) -> Self {
+    pub unsafe fn from_raw(
+        handle: WslcSession,
+        release_fn: ffi_types::WslcReleaseSessionFn,
+    ) -> Self {
         debug_assert!(!handle.is_null());
-        Self { handle }
+        Self { handle, release_fn }
     }
 
     /// Get the raw handle for passing to SDK functions.
@@ -474,15 +537,16 @@ impl Drop for WslcSessionGuard {
         if !self.handle.is_null() {
             unsafe {
                 eprintln!("[WSLC][debug] WslcSessionGuard dropped -- releasing session");
-                WslcReleaseSession(self.handle);
+                (self.release_fn)(self.handle);
             }
         }
     }
 }
 
-/// RAII guard for a WSLC container handle. Calls `WslcReleaseContainer` on drop.
+/// RAII guard for a WSLC container handle. Calls the release function on drop.
 pub struct WslcContainerGuard {
     handle: WslcContainer,
+    release_fn: ffi_types::WslcReleaseContainerFn,
 }
 
 impl WslcContainerGuard {
@@ -490,9 +554,12 @@ impl WslcContainerGuard {
     ///
     /// # Safety
     /// The handle must be a valid, non-null container returned by `WslcCreateContainer`.
-    pub unsafe fn from_raw(handle: WslcContainer) -> Self {
+    pub unsafe fn from_raw(
+        handle: WslcContainer,
+        release_fn: ffi_types::WslcReleaseContainerFn,
+    ) -> Self {
         debug_assert!(!handle.is_null());
-        Self { handle }
+        Self { handle, release_fn }
     }
 
     /// Get the raw handle for passing to SDK functions.
@@ -506,15 +573,16 @@ impl Drop for WslcContainerGuard {
         if !self.handle.is_null() {
             unsafe {
                 eprintln!("[WSLC][debug] WslcContainerGuard dropped -- releasing container");
-                WslcReleaseContainer(self.handle);
+                (self.release_fn)(self.handle);
             }
         }
     }
 }
 
-/// RAII guard for a WSLC process handle. Calls `WslcReleaseProcess` on drop.
+/// RAII guard for a WSLC process handle. Calls the release function on drop.
 pub struct WslcProcessGuard {
     handle: WslcProcess,
+    release_fn: ffi_types::WslcReleaseProcessFn,
 }
 
 impl WslcProcessGuard {
@@ -522,9 +590,12 @@ impl WslcProcessGuard {
     ///
     /// # Safety
     /// The handle must be a valid, non-null process returned by `WslcGetContainerInitProcess`.
-    pub unsafe fn from_raw(handle: WslcProcess) -> Self {
+    pub unsafe fn from_raw(
+        handle: WslcProcess,
+        release_fn: ffi_types::WslcReleaseProcessFn,
+    ) -> Self {
         debug_assert!(!handle.is_null());
-        Self { handle }
+        Self { handle, release_fn }
     }
 
     /// Get the raw handle for passing to SDK functions.
@@ -538,7 +609,7 @@ impl Drop for WslcProcessGuard {
         if !self.handle.is_null() {
             unsafe {
                 eprintln!("[WSLC][debug] WslcProcessGuard dropped -- releasing process");
-                WslcReleaseProcess(self.handle);
+                (self.release_fn)(self.handle);
             }
         }
     }

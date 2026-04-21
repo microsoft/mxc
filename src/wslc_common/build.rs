@@ -13,14 +13,14 @@
 use std::path::PathBuf;
 
 fn main() {
-    // Skip nupkg extraction and linking unless the `link-sdk` feature is
+    // Skip nupkg extraction and DLL copy unless the `link-wslcsdk` feature is
     // enabled. Without this gate, workspace builds would extract the nupkg
-    // and emit linker directives even when no binary depends on wslc_common.
+    // even when no binary depends on wslc_common.
     if std::env::var("CARGO_FEATURE_LINK_WSLCSDK").is_err() {
         return;
     }
 
-    // WSLC SDK is Windows-only — skip linking entirely on other platforms.
+    // WSLC SDK is Windows-only — skip entirely on other platforms.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -29,7 +29,7 @@ fn main() {
         Ok("x86_64") => "x64",
         Ok("aarch64") => "arm64",
         _ => {
-            println!("cargo:warning=WSLC SDK: unsupported target architecture, skipping link");
+            println!("cargo:warning=WSLC SDK: unsupported target architecture, skipping");
             return;
         }
     };
@@ -47,21 +47,11 @@ fn main() {
         }
     };
 
-    if !sdk_path.join("wslcsdk.lib").exists() {
-        println!(
-            "cargo:warning=WSLC SDK lib not found at {}. WSLC features will not link.",
-            sdk_path.display()
-        );
-        return;
-    }
-
-    println!("cargo:rustc-link-search=native={}", sdk_path.display());
-    println!("cargo:rustc-link-lib=dylib=wslcsdk");
     println!("cargo:rerun-if-env-changed=WSLC_SDK_PATH");
 
-    // Copy wslcsdk.dll next to the final binary so it can be found at runtime.
-    // OUT_DIR is <target>/<triple>/<profile>/build/<crate>-<hash>/out,
-    // so three levels up reaches the profile directory where binaries are placed.
+    // The SDK is loaded at runtime via libloading — no static linking.
+    // We only need to copy wslcsdk.dll next to the final binary so it
+    // can be found by LoadLibrary at runtime.
     let dll_src = sdk_path.join("wslcsdk.dll");
     if !dll_src.exists() {
         println!(
