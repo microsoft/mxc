@@ -92,6 +92,12 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
                 )
             )
         )
+        if "%WITH_WSLC%"=="1" (
+            if exist "!BIN_DIR!\wslcsdk.dll" (
+                copy /Y "!BIN_DIR!\wslcsdk.dll" "sdk\bin\!SDK_ARCH!\" >nul
+                echo   Copied !SDK_ARCH!\wslcsdk.dll
+            )
+        )
     )
 )
 
