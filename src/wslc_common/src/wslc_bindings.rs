@@ -400,23 +400,31 @@ pub struct WslcSdk {
     pub WslcReleaseProcess: ffi_types::WslcReleaseProcessFn,
 }
 
-// Safety: WslcSdk holds function pointers from a loaded DLL. The DLL's
-// functions are thread-safe (COM-based API), and the library handle is
-// kept alive for the struct's lifetime.
-unsafe impl Send for WslcSdk {}
-unsafe impl Sync for WslcSdk {}
+// `WslcSdk` intentionally does not implement `Send` or `Sync`.
+// Cross-thread use of the runtime-loaded SDK may require additional
+// guarantees (such as per-thread COM initialization) that are not enforced
+// by this type.
 
 impl WslcSdk {
     /// Load `wslcsdk.dll` at runtime and resolve all required function pointers.
     ///
-    /// Returns an error if the DLL is not found or any function cannot be resolved.
+    /// Loads from the same directory as the running executable to avoid DLL
+    /// search-order hijacking. Returns an error if the DLL is not found or
+    /// any function cannot be resolved.
     pub fn load() -> Result<Self, String> {
         unsafe {
-            let lib = libloading::Library::new("wslcsdk.dll").map_err(|e| {
+            let dll_path = std::env::current_exe()
+                .map_err(|e| format!("Failed to determine current executable path: {}", e))?
+                .parent()
+                .ok_or_else(|| "Failed to determine current executable directory".to_string())?
+                .join("wslcsdk.dll");
+
+            let lib = libloading::Library::new(&dll_path).map_err(|e| {
                 format!(
-                    "Failed to load wslcsdk.dll: {}. \
+                    "Failed to load wslcsdk.dll from {}: {}. \
                      Ensure the WSLC SDK runtime is installed or the DLL is \
-                     in the same directory as wxc-exec.",
+                     in the same directory as the running executable.",
+                    dll_path.display(),
                     e
                 )
             })?;
