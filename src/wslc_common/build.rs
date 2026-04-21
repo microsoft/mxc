@@ -13,6 +13,13 @@
 use std::path::PathBuf;
 
 fn main() {
+    // Skip nupkg extraction and linking unless the `link-sdk` feature is
+    // enabled. Without this gate, workspace builds would extract the nupkg
+    // and emit linker directives even when no binary depends on wslc_common.
+    if std::env::var("CARGO_FEATURE_LINK_WSLCSDK").is_err() {
+        return;
+    }
+
     // WSLC SDK is Windows-only — skip linking entirely on other platforms.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
