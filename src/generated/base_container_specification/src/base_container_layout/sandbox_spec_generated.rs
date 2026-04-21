@@ -20,16 +20,17 @@ impl<'a> ::flatbuffers::Follow<'a> for SandboxSpec<'a> {
 }
 
 impl<'a> SandboxSpec<'a> {
-    pub const VT_VERSION: ::flatbuffers::VOffsetT = 4;
-    pub const VT_APP_CONTAINER: ::flatbuffers::VOffsetT = 6;
-    pub const VT_DISALLOW_WIN32K_SYSTEM_CALLS: ::flatbuffers::VOffsetT = 10;
-    pub const VT_UI_RESTRICTIONS: ::flatbuffers::VOffsetT = 12;
-    pub const VT_LEAST_PRIVILEGE: ::flatbuffers::VOffsetT = 14;
-    pub const VT_CAPABILITIES: ::flatbuffers::VOffsetT = 16;
-    pub const VT_FS_READ_WRITE: ::flatbuffers::VOffsetT = 18;
-    pub const VT_FS_READ_ONLY: ::flatbuffers::VOffsetT = 20;
-    pub const VT_NETWORK_POLICY: ::flatbuffers::VOffsetT = 22;
-    pub const VT_INTEGRITY: ::flatbuffers::VOffsetT = 24;
+    pub const VT_VERSION: flatbuffers::VOffsetT = 4;
+    pub const VT_APP_CONTAINER: flatbuffers::VOffsetT = 6;
+    pub const VT_DISALLOW_WIN32K_SYSTEM_CALLS: flatbuffers::VOffsetT = 10;
+    pub const VT_UI_RESTRICTIONS: flatbuffers::VOffsetT = 12;
+    pub const VT_LEAST_PRIVILEGE: flatbuffers::VOffsetT = 14;
+    pub const VT_CAPABILITIES: flatbuffers::VOffsetT = 16;
+    pub const VT_FS_READ_WRITE: flatbuffers::VOffsetT = 18;
+    pub const VT_FS_READ_ONLY: flatbuffers::VOffsetT = 20;
+    pub const VT_NETWORK_POLICY: flatbuffers::VOffsetT = 22;
+    pub const VT_INTEGRITY: flatbuffers::VOffsetT = 24;
+    pub const VT_POLICY: flatbuffers::VOffsetT = 26;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -47,6 +48,9 @@ impl<'a> SandboxSpec<'a> {
     ) -> ::flatbuffers::WIPOffset<SandboxSpec<'bldr>> {
         let mut builder = SandboxSpecBuilder::new(_fbb);
         builder.add_ui_restrictions(args.ui_restrictions);
+        if let Some(x) = args.policy {
+            builder.add_policy(x);
+        }
         if let Some(x) = args.network_policy {
             builder.add_network_policy(x);
         }
@@ -95,6 +99,7 @@ impl<'a> SandboxSpec<'a> {
             .network_policy()
             .map(|x| alloc::boxed::Box::new(x.unpack()));
         let integrity = self.integrity();
+        let policy = self.policy().map(|x| x.to_string());
         SandboxSpecT {
             version,
             app_container,
@@ -106,6 +111,7 @@ impl<'a> SandboxSpec<'a> {
             fs_read_only,
             network_policy,
             integrity,
+            policy,
         }
     }
 
@@ -227,6 +233,16 @@ impl<'a> SandboxSpec<'a> {
                 .unwrap()
         }
     }
+    #[inline]
+    pub fn policy(&self) -> Option<&'a str> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<flatbuffers::ForwardsUOffset<&str>>(SandboxSpec::VT_POLICY, None)
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for SandboxSpec<'_> {
@@ -262,6 +278,7 @@ impl ::flatbuffers::Verifiable for SandboxSpec<'_> {
                 false,
             )?
             .visit_field::<IntegrityLevel>("integrity", Self::VT_INTEGRITY, false)?
+            .visit_field::<flatbuffers::ForwardsUOffset<&str>>("policy", Self::VT_POLICY, false)?
             .finish();
         Ok(())
     }
@@ -285,6 +302,7 @@ pub struct SandboxSpecArgs<'a> {
     >,
     pub network_policy: Option<::flatbuffers::WIPOffset<NetworkPolicy<'a>>>,
     pub integrity: IntegrityLevel,
+    pub policy: Option<flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for SandboxSpecArgs<'a> {
     #[inline]
@@ -300,6 +318,7 @@ impl<'a> Default for SandboxSpecArgs<'a> {
             fs_read_only: None,
             network_policy: None,
             integrity: IntegrityLevel::system_default,
+            policy: None,
         }
     }
 }
@@ -388,9 +407,12 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SandboxSpecBuilder<'a, 'b, A>
         );
     }
     #[inline]
-    pub fn new(
-        _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
-    ) -> SandboxSpecBuilder<'a, 'b, A> {
+    pub fn add_policy(&mut self, policy: flatbuffers::WIPOffset<&'b str>) {
+        self.fbb_
+            .push_slot_always::<flatbuffers::WIPOffset<_>>(SandboxSpec::VT_POLICY, policy);
+    }
+    #[inline]
+    pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> SandboxSpecBuilder<'a, 'b> {
         let start = _fbb.start_table();
         SandboxSpecBuilder {
             fbb_: _fbb,
@@ -421,6 +443,7 @@ impl ::core::fmt::Debug for SandboxSpec<'_> {
         ds.field("fs_read_only", &self.fs_read_only());
         ds.field("network_policy", &self.network_policy());
         ds.field("integrity", &self.integrity());
+        ds.field("policy", &self.policy());
         ds.finish()
     }
 }
@@ -437,6 +460,7 @@ pub struct SandboxSpecT {
     pub fs_read_only: Option<alloc::vec::Vec<alloc::string::String>>,
     pub network_policy: Option<alloc::boxed::Box<NetworkPolicyT>>,
     pub integrity: IntegrityLevel,
+    pub policy: Option<String>,
 }
 impl Default for SandboxSpecT {
     fn default() -> Self {
@@ -451,6 +475,7 @@ impl Default for SandboxSpecT {
             fs_read_only: None,
             network_policy: None,
             integrity: IntegrityLevel::system_default,
+            policy: None,
         }
     }
 }
@@ -478,6 +503,7 @@ impl SandboxSpecT {
         });
         let network_policy = self.network_policy.as_ref().map(|x| x.pack(_fbb));
         let integrity = self.integrity;
+        let policy = self.policy.as_ref().map(|x| _fbb.create_string(x));
         SandboxSpec::create(
             _fbb,
             &SandboxSpecArgs {
@@ -491,6 +517,7 @@ impl SandboxSpecT {
                 fs_read_only,
                 network_policy,
                 integrity,
+                policy,
             },
         )
     }
