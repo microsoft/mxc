@@ -27,6 +27,10 @@ struct RawAppContainer {
     learning_mode: Option<bool>,
     capabilities: Option<Vec<String>>,
     ui: Option<RawBaseProcessUi>,
+    /// Name of a minimum-policy floor enforced by the OS on top of
+    /// the caller's spec (e.g. "AgenticDefault"). Unknown names are
+    /// rejected by CreateProcessInSandbox.
+    policy: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -497,6 +501,13 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             policy.capabilities.extend(caps);
         }
 
+        // Minimum-policy floor name (enforced by the OS).
+        if let Some(name) = ac.policy {
+            if !name.is_empty() {
+                policy.minimum_policy = Some(name);
+            }
+        }
+
         // SECURITY: Strip permissiveLearningMode in release builds
         #[cfg(not(debug_assertions))]
         {
@@ -933,6 +944,45 @@ mod tests {
         assert_eq!(req.policy.capabilities[0], "internetClient");
         assert_eq!(req.policy.capabilities[1], "privateNetworkClientServer");
         assert_eq!(req.policy.capabilities[2], "documentsLibrary");
+    }
+
+    #[test]
+    fn app_container_minimum_policy() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "appContainer": {"policy": "AgenticDefault"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.minimum_policy.as_deref(), Some("AgenticDefault"));
+    }
+
+    #[test]
+    fn app_container_empty_minimum_policy_is_none() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "appContainer": {"policy": ""}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.minimum_policy.is_none());
+    }
+
+    #[test]
+    fn app_container_no_policy_field() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "appContainer": {}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.minimum_policy.is_none());
     }
 
     #[test]
