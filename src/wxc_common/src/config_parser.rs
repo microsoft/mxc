@@ -144,8 +144,6 @@ struct RawAgentSession {
     configuration_id: Option<String>,
     #[serde(rename = "proxyPath")]
     proxy_path: Option<String>,
-    #[serde(rename = "setProxyBlanket")]
-    set_proxy_blanket: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -667,9 +665,6 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             }
             if let Some(path) = as_cfg.proxy_path {
                 config.proxy_path = path;
-            }
-            if let Some(blanket) = as_cfg.set_proxy_blanket {
-                config.set_proxy_blanket = blanket;
             }
             config
         });
@@ -1924,37 +1919,4 @@ mod tests {
         assert!(cfg.proxy_path.is_empty());
     }
 
-    #[test]
-    fn agent_session_set_proxy_blanket_defaults_to_true() {
-        let json =
-            r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.agent_session.unwrap();
-        assert!(cfg.set_proxy_blanket);
-    }
-
-    #[test]
-    fn agent_session_set_proxy_blanket_explicit_true() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"setProxyBlanket": true}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.agent_session.unwrap();
-        assert!(cfg.set_proxy_blanket);
-    }
-
-    #[test]
-    fn agent_session_set_proxy_blanket_explicit_false() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"setProxyBlanket": false}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.agent_session.unwrap();
-        assert!(!cfg.set_proxy_blanket);
-    }
 }

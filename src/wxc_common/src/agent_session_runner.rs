@@ -26,10 +26,7 @@ use agent_session_bindings::bindings::{
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::ReadFile;
-use windows::Win32::System::Com::{
-    CoSetProxyBlanket, EOAC_DYNAMIC_CLOAKING, RPC_C_AUTHN_LEVEL_DEFAULT,
-    RPC_C_IMP_LEVEL_IMPERSONATE,
-};
+
 // -- Error messages for unsupported policy fields ----------------------------
 
 pub(crate) const ERR_FILESYSTEM_POLICY: &str =
@@ -118,8 +115,8 @@ pub(crate) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
 
 // -- Service availability check ----------------------------------------------
 
-/// Activates the IsoEnvBroker Session API factory and sets the COM proxy
-/// blanket for proper impersonation (EOAC_DYNAMIC_CLOAKING).
+/// Activates the IsoEnvBroker Session API factory and verifies the service
+/// is available on this OS build.
 ///
 /// Returns `Ok(())` if the service is available, or `Err(message)` if not.
 /// This is called once from `AgentSessionManager::new()`.
@@ -127,10 +124,6 @@ pub(crate) fn check_service_available() -> Result<(), String> {
     // Try the lightest possible call: RegisterClient with empty strings.
     // If the WinRT activation factory is not registered (feature disabled),
     // this fails with CLASS_E_CLASSNOTAVAILABLE or similar.
-    //
-    // The first call through the generated bindings activates the factory
-    // and caches it. We then set the proxy blanket on the cached factory
-    // so all subsequent calls use EOAC_DYNAMIC_CLOAKING.
     match IsolationSessionClient::RegisterClient(
         &windows_core::HSTRING::new(),
         &windows_core::HSTRING::new(),
@@ -156,36 +149,6 @@ pub(crate) fn check_service_available() -> Result<(), String> {
     }
 }
 
-/// Sets the COM proxy blanket with EOAC_DYNAMIC_CLOAKING on the
-/// IsolationSessionClient activation factory. This ensures impersonation
-/// works correctly for all subsequent Session API calls.
-///
-/// Must be called after the factory has been activated (i.e., after
-/// `check_service_available`).
-///
-fn configure_proxy_blanket() -> Result<(), String> {
-    // Get the activation factory as IUnknown to set the proxy blanket.
-    let factory: windows_core::IUnknown =
-        windows_core::factory::<IsolationSessionClient, windows_core::IUnknown>()
-            .map_err(|e| format!("Failed to get IsolationSessionClient factory: {}", e))?;
-
-    unsafe {
-        CoSetProxyBlanket(
-            &factory,
-            u32::MAX, // RPC_C_AUTHN_DEFAULT
-            0,        // RPC_C_AUTHZ_DEFAULT
-            None,
-            RPC_C_AUTHN_LEVEL_DEFAULT,
-            RPC_C_IMP_LEVEL_IMPERSONATE,
-            None,
-            EOAC_DYNAMIC_CLOAKING,
-        )
-    }
-    .map_err(|e| format!("CoSetProxyBlanket failed: {}", e))?;
-
-    Ok(())
-}
-
 // -- AgentSessionManager (lifecycle core) ------------------------------------
 
 /// Manages the IsoEnvBroker Session API lifecycle. Methods map 1:1 to the
@@ -197,11 +160,8 @@ pub struct AgentSessionManager {
 
 impl AgentSessionManager {
     /// Activate the WinRT factory and verify the service is available.
-    pub fn new(set_proxy_blanket: bool) -> Result<Self, String> {
+    pub fn new() -> Result<Self, String> {
         check_service_available()?;
-        if set_proxy_blanket {
-            configure_proxy_blanket()?;
-        }
         Ok(Self {
             registration_id: windows_core::HSTRING::new(),
             provision_id: windows_core::HSTRING::new(),
@@ -505,13 +465,12 @@ impl ScriptRunner for AgentSessionRunner {
         let _ = writeln!(logger, "Agent Session: process={}", options.process_path);
         let _ = writeln!(logger, "Agent Session: arguments={}", options.arguments);
 
-        // Read agent_session config (proxy path, proxy blanket setting).
+        // Read agent_session config (proxy path).
         let agent_cfg = request.experimental.agent_session.as_ref();
         let proxy_path = agent_cfg.map(|cfg| cfg.proxy_path.as_str()).unwrap_or("");
-        let set_proxy_blanket = agent_cfg.map(|cfg| cfg.set_proxy_blanket).unwrap_or(true);
 
         // Create the session manager (activates the WinRT factory).
-        let mut manager = match AgentSessionManager::new(set_proxy_blanket) {
+        let mut manager = match AgentSessionManager::new() {
             Ok(m) => m,
             Err(e) => return ScriptResponse::error(&e),
         };
