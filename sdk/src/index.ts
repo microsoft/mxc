@@ -8,7 +8,7 @@
  *
  * @example
  * ```typescript
- * import { spawnSandbox, SandboxPolicy, getPlatformSupport } from '@microsoft/mxc-sdk';
+ * import { spawnSandbox, spawnSandboxWithPty, SandboxPolicy, getPlatformSupport } from '@microsoft/mxc-sdk';
  *
  * if (getPlatformSupport().isSupported) {
  *   const policy: SandboxPolicy = {
@@ -16,7 +16,7 @@
  *     network: { allowOutbound: true },
  *   };
  *
- *   const ptyProcess = spawnSandbox('python -c "print(\'Hello from sandbox\')"', policy);
+ *   const ptyProcess = spawnSandboxWithPty('python -c "print(\'Hello from sandbox\')"', policy);
  *   ptyProcess.onData((data) => console.log(data));
  *   ptyProcess.onExit((event) => console.log('Exit code:', event.exitCode));
  * }
@@ -29,6 +29,7 @@
 export {
   SandboxPolicy,
   SandboxingMethod,
+  ContainmentType,
   ContainerConfig,
   PlatformSupport,
 } from './types';
@@ -36,15 +37,17 @@ export {
 // Export platform detection functions
 export {
   getPlatformSupport,
+  findWxcExecutable,
 } from './platform';
 
 // Export sandbox spawning functions
 export {
   createConfigFromPolicy,
   spawnSandbox,
+  spawnSandboxWithPty,
   spawnSandboxFromConfig,
-  spawnSandboxAsync,
-  SandboxSpawnOptions
+  buildSandboxPayload,
+  SandboxSpawnOptions,
 } from './sandbox';
 
 // Export policy discovery functions
