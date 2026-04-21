@@ -158,7 +158,7 @@ jobs:
             $(signPattern)
           targetFolder: $(outputDirectory)/$(targetTriple)
 
-      # Copy wslcsdk.dll when WSLC support is enabled
+      # Copy wslcsdk.dll
       - task: CopyFiles@2
         displayName: Copy wslcsdk.dll
         inputs:
