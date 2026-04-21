@@ -11,9 +11,6 @@ parameters:
 - name: ESRPInfo
   type: object
   default: {}
-- name: enableWslc
-  type: boolean
-  default: true
 
 jobs:
 - ${{ each item in parameters.matrix }}:
@@ -162,13 +159,12 @@ jobs:
           targetFolder: $(outputDirectory)/$(targetTriple)
 
       # Copy wslcsdk.dll when WSLC support is enabled
-      - ${{ if and(eq(parameters.enableWslc, true), eq(item.os, 'windows')) }}:
-        - task: CopyFiles@2
-          displayName: Copy wslcsdk.dll
-          inputs:
-            sourceFolder: $(targetTripleDir)
-            contents: wslcsdk.dll
-            targetFolder: $(outputDirectory)/$(targetTriple)
+      - task: CopyFiles@2
+        displayName: Copy wslcsdk.dll
+        inputs:
+          sourceFolder: $(targetTripleDir)
+          contents: wslcsdk.dll
+          targetFolder: $(outputDirectory)/$(targetTriple)
 
       - task: 1ES.PublishPipelineArtifact@1
         displayName: Publish
