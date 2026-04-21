@@ -369,7 +369,13 @@ function resolveExecutableAndArgs(
     args.push('--debug');
   }
 
-  if (options.experimental || ExperimentalBackends.includes(config.containment as ContainmentType)) {
+  if (ExperimentalBackends.includes(config.containment as ContainmentType) && !options.experimental) {
+    throw new Error(
+      `'${config.containment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
+    );
+  }
+
+  if (options.experimental) {
     args.push('--experimental');
   }
 
