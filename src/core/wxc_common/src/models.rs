@@ -556,6 +556,11 @@ pub struct ContainerPolicy {
     pub ui: UiPolicy,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
+    /// Name of a minimum-policy floor enforced by the OS
+    /// (e.g. "AgenticDefault"). `None` or empty = no floor is applied
+    /// (legacy behaviour). Consumed by the BaseContainer backend and
+    /// surfaced to CreateProcessInSandbox via `SandboxSpec.policy`.
+    pub minimum_policy: Option<String>,
 }
 
 /// Port mapping for host↔container port forwarding.

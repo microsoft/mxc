@@ -416,6 +416,14 @@ impl BaseContainerRunner {
             ),
         ) as u64;
 
+        // Optional minimum-policy floor (enforced inside CreateProcessInSandbox).
+        let policy_offset = request
+            .policy
+            .minimum_policy
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| builder.create_string(s));
+
         let spec = SandboxSpec::create(
             &mut builder,
             &SandboxSpecArgs {
@@ -429,6 +437,7 @@ impl BaseContainerRunner {
                 fs_read_only,
                 fs_deny,
                 network_policy,
+                policy: policy_offset,
                 ..Default::default()
             },
         );
@@ -1613,6 +1622,39 @@ mod tests {
         assert!(spec.fs_deny().is_none());
         assert!(spec.disallow_win32k_system_calls());
         assert!(spec.network_policy().is_none());
+    }
+
+    #[test]
+    fn build_sandbox_spec_with_minimum_policy() {
+        let mut request = ExecutionRequest::default();
+        request.policy.minimum_policy = Some("AgenticDefault".to_string());
+
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+
+        assert_eq!(spec.policy(), Some("AgenticDefault"));
+    }
+
+    #[test]
+    fn build_sandbox_spec_without_minimum_policy() {
+        // Default: no policy name set -> field should be absent on the wire.
+        let request = ExecutionRequest::default();
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+
+        assert!(spec.policy().is_none());
+    }
+
+    #[test]
+    fn build_sandbox_spec_empty_minimum_policy_treated_as_absent() {
+        // An empty string must not be serialized: empty = no floor.
+        let mut request = ExecutionRequest::default();
+        request.policy.minimum_policy = Some(String::new());
+
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+
+        assert!(spec.policy().is_none());
     }
 
     #[test]

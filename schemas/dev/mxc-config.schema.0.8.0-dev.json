@@ -660,6 +660,13 @@
             "null"
           ]
         },
+        "policy": {
+          "description": "Name of a minimum-policy floor enforced by the OS on top of the caller's spec (e.g. `AgenticDefault`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "ui": {
           "anyOf": [
             {

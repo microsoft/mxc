@@ -732,6 +732,13 @@ fn convert_wire_config(
             policy.capabilities.extend(caps);
         }
 
+        // Minimum-policy floor name (enforced by the OS).
+        if let Some(name) = ac.policy {
+            if !name.is_empty() {
+                policy.minimum_policy = Some(name);
+            }
+        }
+
         // SECURITY: Strip permissiveLearningMode in release builds.
         #[cfg(not(debug_assertions))]
         {

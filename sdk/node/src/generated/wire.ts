@@ -308,6 +308,10 @@ export interface ProcessContainer {
    */
   leastPrivilege?: boolean | null;
   /**
+   * Name of a minimum-policy floor enforced by the OS on top of the caller's spec (e.g. `AgenticDefault`).
+   */
+  policy?: string | null;
+  /**
    * BaseProcessContainer UI settings (Windows).
    */
   ui?: BaseProcessUi | null;

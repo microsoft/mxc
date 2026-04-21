@@ -195,6 +195,9 @@ pub struct ProcessContainer {
     pub capabilities: Option<Vec<String>>,
     /// BaseProcessContainer UI settings (Windows).
     pub ui: Option<BaseProcessUi>,
+    /// Name of a minimum-policy floor enforced by the OS on top of the
+    /// caller's spec (e.g. `AgenticDefault`).
+    pub policy: Option<String>,
 }
 
 /// BaseProcessContainer UI isolation settings.
