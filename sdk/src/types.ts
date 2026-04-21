@@ -40,6 +40,11 @@ export interface LifecycleConfig {
 export type ContainmentType = "process" | "microvm";
 
 /**
+ * Containment backends that require the --experimental flag.
+ */
+export const ExperimentalBackends: readonly ContainmentType[] = ['microvm'];
+
+/**
  * Clipboard access policy levels
  */
 export type ClipboardPolicy = "none" | "read" | "write" | "all";

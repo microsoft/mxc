@@ -7,7 +7,7 @@ import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, SandboxingMethod, ContainerConfig, ContainmentType } from './types';
+import { SandboxPolicy, SandboxingMethod, ContainerConfig, ContainmentType, ExperimentalBackends } from './types';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
 
 const SUPPORTED_VERSION = '0.5.0-alpha';
@@ -119,6 +119,37 @@ function buildProcessBaseContainerConfig(
 }
 
 /**
+ * Builds the MicroVM (NanVix) portion of a ContainerConfig.
+ * MicroVM is Windows-only and does not support network or UI policies.
+ */
+function buildMicroVmConfig(
+    config: ContainerConfig,
+    policy: SandboxPolicy,
+): ContainerConfig {
+    if (os.platform() !== 'win32') {
+        throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
+    }
+    if (policy.network) {
+        throw new Error(
+            'The microvm backend does not support network policy enforcement. ' +
+            'Remove policy.network or use a different containment backend.'
+        );
+    }
+    if (policy.filesystem?.readwritePaths?.length ||
+        policy.filesystem?.readonlyPaths?.length ||
+        policy.filesystem?.deniedPaths?.length) {
+        config.filesystem = {
+            readwritePaths: policy.filesystem?.readwritePaths,
+            readonlyPaths: policy.filesystem?.readonlyPaths,
+            deniedPaths: policy.filesystem?.deniedPaths,
+            clearPolicyOnExit: policy.filesystem?.clearPolicyOnExit ?? true,
+        };
+    }
+    config.containment = 'microvm';
+    return config;
+}
+
+/**
  * Creates a ContainerConfig from a SandboxPolicy and optional containment type.
  *
  * This is the primary API for translating user-facing security intent (SandboxPolicy)
@@ -170,29 +201,9 @@ export function createConfigFromPolicy(
         },
     };
 
-    // Microvm: minimal config with early return — no UI/network mapping needed
+    // Microvm: delegate to dedicated builder
     if (containment === 'microvm') {
-        if (os.platform() !== 'win32') {
-            throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
-        }
-        if (policy.network) {
-            throw new Error(
-                'The microvm backend does not support network policy enforcement. ' +
-                'Remove policy.network or use a different containment backend.'
-            );
-        }
-        if (policy.filesystem?.readwritePaths?.length ||
-            policy.filesystem?.readonlyPaths?.length ||
-            policy.filesystem?.deniedPaths?.length) {
-            config.filesystem = {
-                readwritePaths: policy.filesystem?.readwritePaths,
-                readonlyPaths: policy.filesystem?.readonlyPaths,
-                deniedPaths: policy.filesystem?.deniedPaths,
-                clearPolicyOnExit: policy.filesystem?.clearPolicyOnExit ?? true,
-            };
-        }
-        config.containment = containment;
-        return config;
+        return buildMicroVmConfig(config, policy);
     }
 
     config.filesystem = {
@@ -255,9 +266,9 @@ export function buildSandboxPayload(
     policy: SandboxPolicy,
     workingDirectory?: string,
     containerName?: string,
-    containment?: ContainmentType,
+    containment: ContainmentType = "process",
 ): ContainerConfig {
-    const config = createConfigFromPolicy(policy, containment ?? "process", containerName);
+    const config = createConfigFromPolicy(policy, containment, containerName);
 
     config.process!.commandLine = script;
     config.process!.cwd = workingDirectory;
@@ -288,7 +299,7 @@ export interface SandboxSpawnOptions {
   executablePath?: string;
 
   /**
-   * PTY options to pass to node-pty (only used by spawnSandboxWithPty)
+   * PTY options to pass to node-pty (only used by spawnSandbox)
    */
   ptyOptions?: pty.IPtyForkOptions;
 }
@@ -315,8 +326,8 @@ function resolveExecutableAndArgs(
     if (config.containment === 'microvm' && os.platform() !== 'win32') {
       throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
     }
-    const experimentalBackends: string[] = ['microvm'];
-    if (!experimentalBackends.includes(config.containment) &&
+    const experimentalList: readonly string[] = ExperimentalBackends;
+    if (!experimentalList.includes(config.containment) &&
         !platformSupport.availableMethods.includes(config.containment as SandboxingMethod)) {
       throw new Error(
         `Containment backend '${config.containment}' is not available on this platform. ` +
@@ -358,7 +369,7 @@ function resolveExecutableAndArgs(
     args.push('--debug');
   }
 
-  if (options.experimental || config.containment === 'microvm') {
+  if (options.experimental || ExperimentalBackends.includes(config.containment as ContainmentType)) {
     args.push('--experimental');
   }
 
@@ -407,12 +418,12 @@ function spawnWithConfig(
  * const script = 'python -c "import sys; print(sys.version)"';
  * const policy: SandboxPolicy = { version: '0.4.0-alpha' };
  *
- * const ptyProcess = spawnSandboxWithPty(script, policy);
+ * const ptyProcess = spawnSandbox(script, policy);
  * ptyProcess.onData((data) => console.log(data));
  * ptyProcess.onExit((e) => console.log('Exit code:', e.exitCode));
  * ```
  */
-export function spawnSandboxWithPty(
+export function spawnSandbox(
   script: string,
   policy: SandboxPolicy,
   options: SandboxSpawnOptions = {},
@@ -444,7 +455,7 @@ export function spawnSandboxWithPty(
  *
  * @example
  * ```typescript
- * const child = spawnSandbox(
+ * const child = spawnSandboxWithoutPty(
  *   "print('Hello from sandbox!')",
  *   { version: '0.4.0-alpha' },
  *   { experimental: true }
@@ -453,7 +464,7 @@ export function spawnSandboxWithPty(
  * child.on('close', (code) => console.log('Exit code:', code));
  * ```
  */
-export function spawnSandbox(
+export function spawnSandboxWithoutPty(
   script: string,
   policy: SandboxPolicy,
   options: SandboxSpawnOptions = {},
@@ -463,7 +474,7 @@ export function spawnSandbox(
   containment?: ContainmentType,
 ): ChildProcess {
   if (options.ptyOptions) {
-    console.warn('Warning: ptyOptions are ignored by spawnSandbox (non-PTY). Use spawnSandboxWithPty for PTY support.');
+    console.warn('Warning: ptyOptions are ignored by spawnSandboxWithoutPty (non-PTY). Use spawnSandbox for PTY support.');
   }
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName, containment);
   const { executablePath, args } = resolveExecutableAndArgs(config, options);

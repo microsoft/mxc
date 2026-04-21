@@ -2,10 +2,10 @@
 // Licensed under the MIT License.
 
 
-import { Command, InvalidArgumentError } from 'commander';
+import { Command } from 'commander';
 import {
   spawnSandbox,
-  spawnSandboxWithPty,
+  spawnSandboxWithoutPty,
   getPlatformSupport,
   SandboxPolicy,
   ContainmentType,
@@ -90,14 +90,7 @@ program
   .option('--policy-file <path>', 'Path to a SandboxPolicy JSON file')
   .option('--cwd <path>', 'Working directory for the sandboxed process')
   .option('--container-name <name>', 'Name for the sandbox container')
-  .option('--containment <backend>', 'Override containment backend',
-    (value: string) => {
-      const valid = ['microvm'];
-      if (!valid.includes(value)) {
-        throw new InvalidArgumentError(`Must be one of: ${valid.join(', ')}`);
-      }
-      return value;
-    })
+  .option('--containment <backend>', 'Override containment backend')
   .option('--no-pty', 'Use child_process.spawn instead of node-pty (reliable exit codes)')
   .option('--debug', 'Enable debug output')
   .option('--experimental', 'Enable experimental features')
@@ -160,12 +153,12 @@ program
       };
 
       if (options.pty === false) {
-        // Non-PTY mode using spawnSandbox() (child_process.spawn).
+        // Non-PTY mode using spawnSandboxWithoutPty() (child_process.spawn).
         // This provides reliable exit code propagation and separate stdout/stderr
         // streams. Use this for CI, automation, or any scenario where correct exit
         // codes matter. The default PTY mode (node-pty/ConPTY) returns exit code -1
         // for all processes on Windows due to a known ConPTY limitation.
-        const child = spawnSandbox(scriptCommand, policy, spawnOptions, options.cwd, options.containerName, undefined, containment);
+        const child = spawnSandboxWithoutPty(scriptCommand, policy, spawnOptions, options.cwd, options.containerName, undefined, containment);
 
         child.stdout?.on('data', (data: Buffer) => {
           process.stdout.write(data);
@@ -183,7 +176,7 @@ program
       } else {
         // PTY mode: interactive terminal with colors/input
         console.log('Spawning sandboxed process using SDK...');
-        const ptyProcess = spawnSandboxWithPty(scriptCommand, policy, spawnOptions, options.cwd, options.containerName, undefined, containment);
+        const ptyProcess = spawnSandbox(scriptCommand, policy, spawnOptions, options.cwd, options.containerName, undefined, containment);
 
         ptyProcess.onData((data: string) => {
           process.stdout.write(data);

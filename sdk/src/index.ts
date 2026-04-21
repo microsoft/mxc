@@ -30,6 +30,7 @@ export {
   SandboxPolicy,
   SandboxingMethod,
   ContainmentType,
+  ExperimentalBackends,
   ContainerConfig,
   PlatformSupport,
 } from './types';
@@ -44,7 +45,7 @@ export {
 export {
   createConfigFromPolicy,
   spawnSandbox,
-  spawnSandboxWithPty,
+  spawnSandboxWithoutPty,
   spawnSandboxFromConfig,
   buildSandboxPayload,
   SandboxSpawnOptions,
