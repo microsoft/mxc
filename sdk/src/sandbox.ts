@@ -3,10 +3,11 @@
 
 import * as pty from 'node-pty';
 import * as os from 'os';
+import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, ContainerConfig, ContainmentType } from './types';
+import { SandboxPolicy, SandboxingMethod, ContainerConfig, ContainmentType, ExperimentalBackends } from './types';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
 
 const SUPPORTED_VERSION = '0.5.0-alpha';
@@ -118,6 +119,37 @@ function buildProcessBaseContainerConfig(
 }
 
 /**
+ * Builds the MicroVM (NanVix) portion of a ContainerConfig.
+ * MicroVM is Windows-only and does not support network or UI policies.
+ */
+function buildMicroVmConfig(
+    config: ContainerConfig,
+    policy: SandboxPolicy,
+): ContainerConfig {
+    if (os.platform() !== 'win32') {
+        throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
+    }
+    if (policy.network) {
+        throw new Error(
+            'The microvm backend does not support network policy enforcement. ' +
+            'Remove policy.network or use a different containment backend.'
+        );
+    }
+    if (policy.filesystem?.readwritePaths?.length ||
+        policy.filesystem?.readonlyPaths?.length ||
+        policy.filesystem?.deniedPaths?.length) {
+        config.filesystem = {
+            readwritePaths: policy.filesystem?.readwritePaths,
+            readonlyPaths: policy.filesystem?.readonlyPaths,
+            deniedPaths: policy.filesystem?.deniedPaths,
+            clearPolicyOnExit: policy.filesystem?.clearPolicyOnExit ?? true,
+        };
+    }
+    config.containment = 'microvm';
+    return config;
+}
+
+/**
  * Creates a ContainerConfig from a SandboxPolicy and optional containment type.
  *
  * This is the primary API for translating user-facing security intent (SandboxPolicy)
@@ -167,11 +199,17 @@ export function createConfigFromPolicy(
             commandLine: '',
             timeout: policy.timeoutMs ?? 0,
         },
-        filesystem: {
-            readwritePaths: [...(policy.filesystem?.readwritePaths ?? [])],
-            readonlyPaths: [...(policy.filesystem?.readonlyPaths ?? [])],
-            deniedPaths: [...(policy.filesystem?.deniedPaths ?? [])],
-        },
+    };
+
+    // Microvm: delegate to dedicated builder
+    if (containment === 'microvm') {
+        return buildMicroVmConfig(config, policy);
+    }
+
+    config.filesystem = {
+        readwritePaths: [...(policy.filesystem?.readwritePaths ?? [])],
+        readonlyPaths: [...(policy.filesystem?.readonlyPaths ?? [])],
+        deniedPaths: [...(policy.filesystem?.deniedPaths ?? [])],
     };
 
     // UI mapping (cross-platform)
@@ -220,6 +258,7 @@ export function createConfigFromPolicy(
  * @param policy The sandbox policy configuration
  * @param workingDirectory Optional working directory path
  * @param containerName Optional container name; if not provided, a random name will be generated
+ * @param containment Optional containment backend type
  * @returns The sandbox payload object
  */
 export function buildSandboxPayload(
@@ -227,8 +266,9 @@ export function buildSandboxPayload(
     policy: SandboxPolicy,
     workingDirectory?: string,
     containerName?: string,
+    containment: ContainmentType = "process",
 ): ContainerConfig {
-    const config = createConfigFromPolicy(policy, "process", containerName);
+    const config = createConfigFromPolicy(policy, containment, containerName);
 
     config.process!.commandLine = script;
     config.process!.cwd = workingDirectory;
@@ -259,20 +299,19 @@ export interface SandboxSpawnOptions {
   executablePath?: string;
 
   /**
-   * PTY options to pass to node-pty
+   * PTY options to pass to node-pty (only used by spawnSandbox)
    */
   ptyOptions?: pty.IPtyForkOptions;
 }
 
 /**
- * Internal helper: resolves the executor binary path and spawns a PTY process.
+ * Resolves the executable path and builds CLI arguments for a sandbox invocation.
+ * Shared setup used by both PTY and non-PTY spawn paths.
  */
-function spawnWithConfig(
+function resolveExecutableAndArgs(
   config: ContainerConfig,
-  options: SandboxSpawnOptions,
-  workingDirectory?: string,
-  env?: { [key: string]: string | undefined },
-): pty.IPty {
+  options: SandboxSpawnOptions = {},
+): { executablePath: string; args: string[] } {
   if (!config.process?.commandLine) {
     throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
   }
@@ -282,14 +321,26 @@ function spawnWithConfig(
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
+  // Validate containment against platform
+  if (config.containment) {
+    if (config.containment === 'microvm' && os.platform() !== 'win32') {
+      throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
+    }
+    if (!(ExperimentalBackends as readonly string[]).includes(config.containment) &&
+        !platformSupport.availableMethods.includes(config.containment as SandboxingMethod)) {
+      throw new Error(
+        `Containment backend '${config.containment}' is not available on this platform. ` +
+        `Available methods: ${platformSupport.availableMethods.join(', ')}`
+      );
+    }
+  }
+
   const platform = os.platform();
   let executablePath: string | null;
 
   if (options.executablePath) {
     if (!fs.existsSync(options.executablePath)) {
-      throw new Error(
-        `File not found: ${options.executablePath}`
-      );
+      throw new Error(`File not found: ${options.executablePath}`);
     }
     executablePath = options.executablePath;
   } else if (platform === 'linux') {
@@ -317,38 +368,64 @@ function spawnWithConfig(
     args.push('--debug');
   }
 
+  if (ExperimentalBackends.includes(config.containment as ContainmentType) && !options.experimental) {
+    throw new Error(
+      `'${config.containment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
+    );
+  }
+
   if (options.experimental) {
     args.push('--experimental');
   }
+
+  return { executablePath, args };
+}
+
+/**
+ * Internal helper: resolves the executor binary path and spawns a PTY process.
+ */
+function spawnWithConfig(
+  config: ContainerConfig,
+  options: SandboxSpawnOptions,
+  workingDirectory?: string,
+  env?: { [key: string]: string | undefined },
+): pty.IPty {
+  const { executablePath, args } = resolveExecutableAndArgs(config, options);
 
   const ptyOpts: pty.IPtyForkOptions = {
     name: "xterm-color",
     cols: 120,
     rows: 80,
+    ...options.ptyOptions,
     cwd: workingDirectory || process.cwd(),
-    env: env
+    env: env ?? options.ptyOptions?.env,
   };
 
   return pty.spawn(executablePath, args, ptyOpts);
 }
 
 /**
- * Spawn a sandboxed process from a SandboxPolicy.
+ * Spawn a sandboxed process using wxc-exec with a PTY (node-pty) for
+ * interactive terminal I/O (colors, input forwarding).
  *
  * @param script The command line script to execute
  * @param policy The sandbox policy
  * @param options - Spawn options
  * @param workingDirectory Optional working directory path
  * @param containerName Optional container name; if not provided, a random name will be generated
+ * @param env Optional environment variables
+ * @param containment Optional containment backend
  * @returns IPty object for interacting with the sandboxed process
+ * @throws Error if platform is not supported or wxc-exec is not found
  *
  * @example
  * ```typescript
- * const policy: SandboxPolicy = {
- *   version: '0.4.0-alpha',
- *   network: { allowOutbound: true },
- * };
- * const ptyProcess = spawnSandbox('echo hello', policy);
+ * const script = 'python -c "import sys; print(sys.version)"';
+ * const policy: SandboxPolicy = { version: '0.4.0-alpha' };
+ *
+ * const ptyProcess = spawnSandbox(script, policy);
+ * ptyProcess.onData((data) => console.log(data));
+ * ptyProcess.onExit((e) => console.log('Exit code:', e.exitCode));
  * ```
  */
 export function spawnSandbox(
@@ -357,10 +434,61 @@ export function spawnSandbox(
   options: SandboxSpawnOptions = {},
   workingDirectory?: string,
   containerName?: string,
-  env?: { [key: string]: string | undefined }
+  env?: { [key: string]: string | undefined },
+  containment?: ContainmentType,
 ): pty.IPty {
-  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName, containment);
   return spawnWithConfig(config, options, workingDirectory, env);
+}
+
+/**
+ * Spawn a sandboxed process using child_process.spawn (non-PTY).
+ *
+ * Returns the `ChildProcess` directly so the caller can manage stdout, stderr,
+ * and exit events. Use this for CI/automation where reliable exit codes and
+ * separate output streams are required.
+ *
+ * @param script The command line script to execute
+ * @param policy The sandbox policy
+ * @param options - Spawn options
+ * @param workingDirectory Optional working directory path
+ * @param containerName Optional container name
+ * @param env Optional environment variables
+ * @param containment Optional containment backend
+ *
+ * @returns The spawned ChildProcess
+ *
+ * @example
+ * ```typescript
+ * const child = spawnSandboxWithoutPty(
+ *   "print('Hello from sandbox!')",
+ *   { version: '0.4.0-alpha' },
+ *   { experimental: true }
+ * );
+ * child.stdout?.on('data', (data) => console.log(data.toString()));
+ * child.on('close', (code) => console.log('Exit code:', code));
+ * ```
+ */
+export function spawnSandboxWithoutPty(
+  script: string,
+  policy: SandboxPolicy,
+  options: SandboxSpawnOptions = {},
+  workingDirectory?: string,
+  containerName?: string,
+  env?: { [key: string]: string | undefined },
+  containment?: ContainmentType,
+): ChildProcess {
+  if (options.ptyOptions) {
+    console.warn('Warning: ptyOptions are ignored by spawnSandboxWithoutPty (non-PTY). Use spawnSandbox for PTY support.');
+  }
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName, containment);
+  const { executablePath, args } = resolveExecutableAndArgs(config, options);
+
+  return spawn(executablePath, args, {
+    cwd: workingDirectory || process.cwd(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+    ...(env ? { env: env as NodeJS.ProcessEnv } : {}),
+  });
 }
 
 /**
@@ -401,7 +529,7 @@ export function spawnSandboxFromConfig(
  * @param options - Spawn options
  * @param workingDirectory Optional working directory path
  * @param containerName Optional container name; if not provided, a random name will be generated
- * 
+ *
  * @returns Promise that resolves with stdout/stderr and exit code
  *
  * @example

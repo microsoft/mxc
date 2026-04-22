@@ -35,8 +35,14 @@ export interface LifecycleConfig {
  * Containment type abstraction for createConfigFromPolicy.
  * Maps to platform-specific backends:
  * - "process": BaseProcessContainer (Windows) / LXC (Linux)
+ * - "microvm": MicroVM/Nanvix backend (Windows only, experimental)
  */
-export type ContainmentType = "process";
+export type ContainmentType = "process" | "microvm";
+
+/**
+ * Containment backends that require the --experimental flag.
+ */
+export const ExperimentalBackends: readonly ContainmentType[] = ['microvm'];
 
 /**
  * Clipboard access policy levels

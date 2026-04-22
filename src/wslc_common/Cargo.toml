@@ -3,10 +3,15 @@ name = "wslc_common"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+link-wslcsdk = []
+
 [dependencies]
 wxc_common = { workspace = true }
 windows = { workspace = true }
 tar = "0.4"
+libloading = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
