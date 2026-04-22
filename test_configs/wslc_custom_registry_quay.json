@@ -1,0 +1,16 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "wslc-quay-registry",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo 'Image pulled from Quay' && cat /etc/os-release | head -4"
+  },
+  "network": {
+    "defaultPolicy": "allow"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "quay.io/fedora/fedora-minimal:latest"
+    }
+  }
+}

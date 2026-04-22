@@ -145,6 +145,8 @@ Write-Host "`n--- Image Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_python_hello.json" -OutputContains "Hello from Python"))
 $null = $results.Add((Run-WslcTest "wslc_python_stdlib.json"))
 $null = $results.Add((Run-WslcTest "wslc_custom_registry.json" -OutputContains "Image pulled from MCR"))
+$null = $results.Add((Run-WslcTest "wslc_custom_registry_ghcr.json" -OutputContains "Image pulled from GHCR"))
+$null = $results.Add((Run-WslcTest "wslc_custom_registry_quay.json" -OutputContains "Image pulled from Quay"))
 $null = $results.Add((Run-WslcTest "wslc_tar_import_rootfs.json" -OutputContains "Hello from tar-imported image"))
 $null = $results.Add((Run-WslcTest "wslc_tar_import_docker_save.json" -OutputContains "Hello from docker-save image"))
 
