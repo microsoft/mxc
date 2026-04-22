@@ -519,3 +519,58 @@ export function spawnSandboxFromConfig(
 ): pty.IPty {
   return spawnWithConfig(config, options, workingDirectory, env);
 }
+
+/**
+ * Spawn a sandboxed process and return a promise that resolves with output.
+ * Convenience wrapper around spawnSandbox for non-interactive use cases.
+ *
+ * @param script The command line script to execute
+ * @param policy The sandbox policy
+ * @param options - Spawn options
+ * @param workingDirectory Optional working directory path
+ * @param containerName Optional container name; if not provided, a random name will be generated
+ *
+ * @returns Promise that resolves with stdout/stderr and exit code
+ *
+ * @example
+ * ```typescript
+ * const policy: SandboxPolicy = {
+ *   version: '0.4.0-alpha',
+ *   filesystem: { readwritePaths: ['/workspace'] },
+ * };
+ *
+ * const result = await spawnSandboxAsync('echo hello', policy);
+ * console.log('Output:', result.stdout);
+ * console.log('Exit code:', result.exitCode);
+ * ```
+ */
+export function spawnSandboxAsync(
+  script: string,
+  policy: SandboxPolicy,
+  options: SandboxSpawnOptions = {},
+  workingDirectory?: string,
+  containerName?: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve, reject) => {
+    try {
+      const ptyProcess = spawnSandbox(script, policy, options, workingDirectory, containerName);
+      let output = '';
+
+      ptyProcess.onData((data: string) => {
+        output += data;
+      });
+
+      ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
+        // Note: wxc-exec doesn't separate stdout/stderr when using PTY
+        // All output is combined
+        resolve({
+          stdout: output,
+          stderr: '',
+          exitCode: event.exitCode
+        });
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
