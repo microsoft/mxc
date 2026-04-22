@@ -325,13 +325,6 @@ export interface SandboxSpawnOptions {
   experimental?: boolean;
 
   /**
-   * Containment backend to use. Defaults to "process" (AppContainer on
-   * Windows, LXC on Linux). Set to "wslc" for Linux containers on Windows
-   * via the WSL Container SDK.
-   */
-  containment?: ContainmentType;
-
-  /**
    * Explicit path to the wxc-exec (or lxc-exec) binary.
    * When set, the SDK uses this path directly instead of searching.
    * Useful for packaged apps (e.g., Electron) where the binary
@@ -478,7 +471,7 @@ export function spawnSandbox(
   env?: { [key: string]: string | undefined },
   containment?: ContainmentType,
 ): pty.IPty {
-  const config = buildSandboxPayload(script, policy, workingDirectory, containerName, containment ?? options.containment);
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName, containment);
   return spawnWithConfig(config, options, workingDirectory, env);
 }
 

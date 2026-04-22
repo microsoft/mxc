@@ -644,7 +644,7 @@ describe('createConfigFromPolicy', () => {
 
     it('should throw from spawnSandbox when experimental is not set', () => {
       assert.throws(
-        () => spawnSandbox('echo hello', { version: '0.5.0-alpha' }, { containment: 'wslc' }),
+        () => spawnSandbox('echo hello', { version: '0.5.0-alpha' }, {}, undefined, undefined, undefined, 'wslc'),
         { message: /experimental mode/ },
       );
     });
