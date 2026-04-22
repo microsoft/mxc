@@ -124,6 +124,7 @@ jobs:
           Pattern: |
             $(signPattern)
           UseMinimatch: true
+          signConfigType: 'inlineSignParams'
           inlineOperation: >-
             [
               {
