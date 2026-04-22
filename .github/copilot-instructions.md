@@ -168,3 +168,95 @@ When changing behavior covered by existing documentation, update the relevant do
 ### Policy versioning
 
 The `SandboxPolicy.version` in the SDK must match the JSON schema version (currently `0.4.0-alpha`). The SDK validates this in `sandbox.ts` — if the policy version is newer than `SUPPORTED_VERSION`, it throws. See `docs/versioning.md` for the full design.
+
+## Creating Issues
+
+When creating issues in this repository, follow the structure defined by the issue templates in `.github/ISSUE_TEMPLATE/`. Every issue **must** match one of the four categories below and include the corresponding labels, issue type, and required fields.
+
+### Issue categories, types, and labels
+
+| Category | GitHub Issue Type | Labels | Template |
+|----------|------------------|--------|----------|
+| 🐛 Bug Report | `Bug` | `Issue-Bug`, `Needs-Triage` | `Bug_Report.yml` |
+| 🚀 Feature Request / Idea | `Feature` | `Issue-Feature`, `Needs-Triage` | `Feature_Request.yml` |
+| 📚 Documentation Issue | `Task` | `Issue-Docs`, `Needs-Triage` | `Documentation_Issue.yml` |
+| 📋 Task | `Task` | `Issue-Task`, `Needs-Triage` | `Task.yml` |
+
+- Always apply `Needs-Triage` alongside the category-specific label.
+- Apply exactly the labels listed above — do not invent new labels.
+- When creating issues via the API, set labels and issue type explicitly — they are not applied automatically.
+
+### Required body structure by category
+
+Issues created via the API or by agents do not inherit the form layout from the YAML templates. Reproduce the structure in the issue body using the markdown skeletons below.
+
+**🐛 Bug Report** — use when something is broken or behaving unexpectedly:
+
+> ⚠️ **Security notice:** When reporting BSODs or security issues, **DO NOT** attach memory dumps, logs, or traces to GitHub issues. Instead, send them to secure@microsoft.com referencing the GitHub issue. For application crashes, include a Feedback Hub link if possible (open with Win+F, choose "Share My Feedback" after submission).
+
+```markdown
+### Relevant area(s)
+<!-- One or more of: Linux, macOS, Windows -->
+
+### Brief description of your issue
+
+### Steps to reproduce
+1.
+2.
+3.
+
+### Expected behavior
+
+### Actual behavior
+```
+
+All five sections are **required**.
+
+**🚀 Feature Request / Idea** — use for new functionality or improvements:
+
+```markdown
+### Description of the new feature / enhancement
+<!-- What problem does it solve? Why and how would a user use it? -->
+
+### Proposed technical implementation details
+<!-- Optional: how it could be built -->
+```
+
+"Description of the new feature / enhancement" is **required**. Omit "Proposed technical implementation details" if there is nothing meaningful to add.
+
+**📚 Documentation Issue** — use when docs are incorrect, incomplete, or confusing:
+
+```markdown
+### Brief description of your issue
+<!-- Which document needs correction and why -->
+```
+
+This section is **required**.
+
+**📋 Task** — use for actionable work items:
+
+```markdown
+### Description of the task
+<!-- Clear description of the task and expected outcome -->
+
+### Additional context
+<!-- Optional: links, references, or background information -->
+```
+
+"Description of the task" is **required**. Omit "Additional context" if there is nothing meaningful to add.
+
+### Choosing the right category
+
+- Something **used to work** or **doesn't work as documented** → Bug Report
+- Proposing **new behavior or capabilities** → Feature Request / Idea
+- **Incorrect, missing, or unclear documentation** → Documentation Issue
+- A **discrete unit of work** that doesn't fit the above → Task
+
+### Style guidelines
+
+- Use the section headers exactly as shown in the skeletons above
+- Be specific and concise — avoid vague descriptions like "it doesn't work"
+- For bug reports, always include concrete reproduction steps
+- For feature requests, explain the *why* (user problem) before the *how* (implementation)
+- Reference relevant source files, config fields, or docs when applicable
+- If any required field is unknown, **ask for the information rather than fabricating content**
