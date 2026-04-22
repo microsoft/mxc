@@ -13,6 +13,8 @@ configuration:
           - payloadType: Issues
           - isAction:
               action: Assigned
+          - hasLabel:
+              label: Needs-Triage
         then:
           - removeLabel:
               label: Needs-Triage
