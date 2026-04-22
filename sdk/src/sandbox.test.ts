@@ -233,6 +233,134 @@ describe('buildSandboxPayload', () => {
       }
     });
   });
+
+  describe('Containment override', () => {
+    let originalPlatform: PropertyDescriptor | undefined;
+
+    const mockWindows = () => {
+      originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+    };
+
+    const restore = () => {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    };
+
+    it('should return minimal config for microvm without filesystem', () => {
+      mockWindows();
+      try {
+        const payload = buildSandboxPayload('print(42)', defaultPolicy, undefined, undefined, 'microvm');
+        assert.strictEqual(payload.containment, 'microvm');
+        assert.strictEqual(payload.filesystem, undefined);
+        assert.strictEqual(payload.appContainer, undefined);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should include filesystem with clearPolicyOnExit for microvm when policy has paths', () => {
+      mockWindows();
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.4.0-alpha',
+          filesystem: { readwritePaths: ['/tmp'] },
+        };
+        const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
+        assert.strictEqual(payload.containment, 'microvm');
+        assert.deepStrictEqual(payload.filesystem!.readwritePaths, ['/tmp']);
+        assert.strictEqual(payload.filesystem!.clearPolicyOnExit, true);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should honor clearPolicyOnExit false for microvm', () => {
+      mockWindows();
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.4.0-alpha',
+          filesystem: { readwritePaths: ['/tmp'], clearPolicyOnExit: false },
+        };
+        const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
+        assert.strictEqual(payload.filesystem!.clearPolicyOnExit, false);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should build appcontainer config on Windows with default process containment', () => {
+      mockWindows();
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.4.0-alpha',
+          network: { allowOutbound: true },
+        };
+        const payload = buildSandboxPayload('echo hi', policy);
+        assert.ok(payload.appContainer, 'appContainer section should be present');
+        assert.ok(payload.appContainer!.capabilities!.includes('internetClient'));
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject network policies for microvm', () => {
+      mockWindows();
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.4.0-alpha',
+          network: { allowOutbound: true },
+        };
+        assert.throws(
+          () => buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm'),
+          { message: /does not support network policy/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject microvm on non-Windows platforms', () => {
+      const orig = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      try {
+        assert.throws(
+          () => buildSandboxPayload('print(42)', defaultPolicy, undefined, undefined, 'microvm'),
+          { message: /only supported on Windows/ },
+        );
+      } finally {
+        if (orig) Object.defineProperty(process, 'platform', orig);
+      }
+    });
+
+    it('should preserve lifecycle config for microvm', () => {
+      mockWindows();
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.4.0-alpha',
+          filesystem: { clearPolicyOnExit: false },
+        };
+        const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
+        assert.strictEqual(payload.lifecycle!.destroyOnExit, true);
+        assert.strictEqual(payload.lifecycle!.preservePolicy, true);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should set process commandLine and containerId for microvm', () => {
+      mockWindows();
+      try {
+        const payload = buildSandboxPayload('print(42)', defaultPolicy, undefined, 'my-container', 'microvm');
+        assert.strictEqual(payload.process!.commandLine, 'print(42)');
+        assert.strictEqual(payload.containerId, 'my-container');
+      } finally {
+        restore();
+      }
+    });
+
+  });
 });
 
 describe('createConfigFromPolicy', () => {
