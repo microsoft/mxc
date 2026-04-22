@@ -3,11 +3,12 @@
 
 
 import { Command } from 'commander';
-import { ContainerExecutor } from './wxc-executor';
 import {
   spawnSandbox,
+  spawnSandboxWithoutPty,
   getPlatformSupport,
   SandboxPolicy,
+  ContainmentType,
   getAvailableToolsPolicy,
 } from '@microsoft/mxc-sdk';
 
@@ -81,7 +82,7 @@ program
 
 program
   .command('run-sdk')
-  .description('Simulate SDK usage: build a sandbox payload from a SandboxPolicy and spawn it')
+  .description('Run a workload in a sandbox using the MXC SDK')
   .option('--script <command>', 'Command line to execute')
   .option('--script-file <path>', 'Path to a script file (contents are read and passed as the command)')
   // Policy JSON should match the SandboxPolicy type defined in sdk/src/types.ts
@@ -89,9 +90,11 @@ program
   .option('--policy-file <path>', 'Path to a SandboxPolicy JSON file')
   .option('--cwd <path>', 'Working directory for the sandboxed process')
   .option('--container-name <name>', 'Name for the sandbox container')
+  .option('--containment <backend>', 'Override containment backend')
+  .option('--no-pty', 'Use child_process.spawn instead of node-pty (reliable exit codes)')
   .option('--debug', 'Enable debug output')
   .option('--experimental', 'Enable experimental features')
-  .action(async (options: { script?: string; scriptFile?: string; policy?: string; policyFile?: string; cwd?: string; containerName?: string; debug?: boolean; experimental?: boolean }) => {
+  .action(async (options: { script?: string; scriptFile?: string; policy?: string; policyFile?: string; cwd?: string; containerName?: string; containment?: string; pty?: boolean; debug?: boolean; experimental?: boolean }) => {
     try {
       let scriptCommand: string;
       if (options.script) {
@@ -142,21 +145,48 @@ program
         ];
       }
 
-      console.log('Spawning sandboxed process using SDK...');
+      const containment = options.containment as ContainmentType | undefined;
 
-      const ptyProcess = spawnSandbox(scriptCommand, policy, {
+      const spawnOptions = {
         debug: options.debug ?? false,
         experimental: options.experimental ?? false,
-      }, options.cwd, options.containerName);
+      };
 
-      ptyProcess.onData((data: string) => {
-        process.stdout.write(data);
-      });
+      if (options.pty === false) {
+        // Non-PTY mode using spawnSandboxWithoutPty() (child_process.spawn).
+        // This provides reliable exit code propagation and separate stdout/stderr
+        // streams. Use this for CI, automation, or any scenario where correct exit
+        // codes matter. The default PTY mode (node-pty/ConPTY) returns exit code -1
+        // for all processes on Windows due to a known ConPTY limitation.
+        const child = spawnSandboxWithoutPty(scriptCommand, policy, spawnOptions, options.cwd, options.containerName, undefined, containment);
 
-      ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
-        console.log(`\nProcess exited with code ${event.exitCode}`);
-        process.exit(event.exitCode);
-      });
+        child.stdout?.on('data', (data: Buffer) => {
+          process.stdout.write(data);
+        });
+        child.stderr?.on('data', (data: Buffer) => {
+          process.stderr.write(data);
+        });
+        child.on('close', (code: number | null) => {
+          process.exit(code ?? 1);
+        });
+        child.on('error', (err: Error) => {
+          console.error('Error:', err.message);
+          process.exit(1);
+        });
+      } else {
+        // PTY mode: interactive terminal with colors/input
+        console.log('Spawning sandboxed process using SDK...');
+        const ptyProcess = spawnSandbox(scriptCommand, policy, spawnOptions, options.cwd, options.containerName, undefined, containment);
+
+        ptyProcess.onData((data: string) => {
+          process.stdout.write(data);
+        });
+
+        ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
+          console.log(`\nProcess exited with code ${event.exitCode}`);
+          process.exit(event.exitCode);
+        });
+      }
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : String(error));
       process.exit(1);
