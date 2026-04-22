@@ -326,8 +326,7 @@ function resolveExecutableAndArgs(
     if (config.containment === 'microvm' && os.platform() !== 'win32') {
       throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
     }
-    const experimentalList: readonly string[] = ExperimentalBackends;
-    if (!experimentalList.includes(config.containment) &&
+    if (!(ExperimentalBackends as readonly string[]).includes(config.containment) &&
         !platformSupport.availableMethods.includes(config.containment as SandboxingMethod)) {
       throw new Error(
         `Containment backend '${config.containment}' is not available on this platform. ` +
@@ -398,7 +397,7 @@ function spawnWithConfig(
     cols: 120,
     rows: 80,
     ...options.ptyOptions,
-    cwd: workingDirectory || options.ptyOptions?.cwd || process.cwd(),
+    cwd: workingDirectory || process.cwd(),
     env: env ?? options.ptyOptions?.env,
   };
 
