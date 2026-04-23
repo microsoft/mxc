@@ -13,6 +13,7 @@ import {
 } from '@microsoft/mxc-sdk';
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { ContainerConfig } from '@microsoft/mxc-sdk/dist/types';
 
@@ -92,7 +93,7 @@ program
   .option('--container-name <name>', 'Name for the sandbox container')
   .option('--containment <backend>', 'Override containment backend')
   .option('--no-pty', 'Use child_process.spawn instead of node-pty (reliable exit codes)')
-  .option('--debug', 'Enable debug output')
+  .option('--debug', 'Enable debug output and diagnostic log file')
   .option('--experimental', 'Enable experimental features')
   .action(async (options: { script?: string; scriptFile?: string; policy?: string; policyFile?: string; cwd?: string; containerName?: string; containment?: string; pty?: boolean; debug?: boolean; experimental?: boolean }) => {
     try {
@@ -147,9 +148,16 @@ program
 
       const containment = options.containment as ContainmentType | undefined;
 
+      // When --debug is passed, write diagnostic logs to temp directory
+      let logDir: string | undefined;
+      if (options.debug) {
+        logDir = path.join(os.tmpdir(), 'mxc-logs');
+      }
+
       const spawnOptions = {
         debug: options.debug ?? false,
         experimental: options.experimental ?? false,
+        logDir,
       };
 
       if (options.pty === false) {

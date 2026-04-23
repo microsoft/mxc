@@ -12,7 +12,7 @@
     "build": "tsc",
     "watch": "tsc --watch",
     "clean": "rimraf dist",
-    "test": "node --test dist/sandbox.test.js",
+    "test": "node --test dist/sandbox.test.js dist/policy.test.js dist/logger.test.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

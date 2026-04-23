@@ -42,6 +42,10 @@ struct Cli {
     /// Enable experimental features
     #[arg(long)]
     experimental: bool,
+
+    /// Path to diagnostic log file (appends, creates if missing)
+    #[arg(long = "log-file")]
+    log_file: Option<String>,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
@@ -102,6 +106,12 @@ fn main() {
     } else {
         Mode::Buffer
     });
+
+    if let Some(ref log_path) = cli.log_file {
+        if let Err(e) = logger.enable_file_sink(std::path::Path::new(log_path)) {
+            eprintln!("Warning: could not open log file '{}': {}", log_path, e);
+        }
+    }
 
     // Delete mode
     if cli.delete {
