@@ -3,6 +3,7 @@
 
 use std::fmt::Write;
 use std::process;
+use std::time::Instant;
 
 use clap::Parser;
 use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
@@ -255,7 +256,10 @@ fn main() {
             Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
         }
     };
+    let run_start = Instant::now();
     let response = runner.run(&request, &mut logger);
+    let run_elapsed = run_start.elapsed();
+    let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
     display_script_results(&response, &mut logger);
 
     // Output was already relayed to the console by pipe threads.

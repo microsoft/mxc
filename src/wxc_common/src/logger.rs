@@ -5,6 +5,7 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -30,10 +31,7 @@ impl Logger {
 
     /// Enable writing to a log file in addition to console/buffer output.
     pub fn enable_file_sink(&mut self, path: &Path) -> std::io::Result<()> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
         self.file = Some(file);
         Ok(())
     }
@@ -44,7 +42,11 @@ impl Logger {
             Mode::Buffer => self.buffer.push_str(msg),
         }
         if let Some(ref mut f) = self.file {
-            let _ = write!(f, "{}", msg);
+            let secs = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _ = write!(f, "[{}] {}", secs, msg);
         }
     }
 
@@ -57,7 +59,11 @@ impl Logger {
             }
         }
         if let Some(ref mut f) = self.file {
-            let _ = writeln!(f, "{}", msg);
+            let secs = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _ = writeln!(f, "[{}] {}", secs, msg);
         }
     }
 

@@ -446,6 +446,7 @@ function spawnWithConfig(
   if (logDir) {
     logFile = makeLogFilePath(logDir);
     logger = new FileLogger(logFile);
+    logger.log('info', 'mxc.log.created', { logFile });
   }
 
   const startTime = Date.now();

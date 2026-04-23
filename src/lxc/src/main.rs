@@ -3,6 +3,7 @@
 
 use std::fmt::Write;
 use std::process;
+use std::time::Instant;
 
 use clap::Parser;
 use wxc_common::config_parser::load_request;
@@ -152,7 +153,10 @@ fn main() {
         &request.container_id,
         &request.lifecycle,
     );
+    let run_start = Instant::now();
     let response = runner.run(&request, &mut logger);
+    let run_elapsed = run_start.elapsed();
+    let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
     display_script_results(&response, &mut logger);
 
     print!("{}", response.standard_out);
