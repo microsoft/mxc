@@ -61,6 +61,31 @@ function validatePolicyVersion(version: string): void {
 
 
 /**
+ * Builds the WSLC (WSL Container) portion of a ContainerConfig.
+ * WSLC runs Linux containers on Windows via the WSL Container SDK.
+ * Config goes under `experimental.wslc` since WSLC is experimental.
+ */
+function buildWslcContainerConfig(
+    config: ContainerConfig,
+    policy: SandboxPolicy,
+    containerId: string,
+): ContainerConfig {
+    config.containment = 'wslc';
+    config.containerId = containerId;
+
+    config.experimental = {
+        wslc: {
+            image: 'alpine:latest',
+        },
+    };
+
+    // WSLC uses its own networking mode (None/Bridged) derived from
+    // the network.defaultPolicy field — no firewall enforcement needed.
+
+    return config;
+}
+
+/**
  * Builds the Linux process container (LXC) portion of a ContainerConfig.
  */
 function buildLinuxProcessConfig(
@@ -225,8 +250,13 @@ export function createConfigFromPolicy(
             throw new Error('Proxy configuration is not supported on Linux');
         }
 
-        if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
-            throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
+        // WSLC supports block + allowedHosts via iptables (Bridged networking
+        // with per-host filtering). Other backends require allowOutbound for
+        // host filtering since it maps to AppContainer capabilities.
+        if (containment !== 'wslc') {
+            if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
+                throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
+            }
         }
 
         config.network = {
@@ -242,6 +272,10 @@ export function createConfigFromPolicy(
     }
 
     // Backend-specific config based on containment type
+    if (containment === 'wslc') {
+        return buildWslcContainerConfig(config, policy, containerId);
+    }
+
     if (containment === 'process') {
         if (platform === 'linux') {
             return buildLinuxProcessConfig(config, containerId);
