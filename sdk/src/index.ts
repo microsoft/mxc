@@ -63,3 +63,9 @@ export {
 export {
   FileLogger,
 } from './logger';
+
+// Export diagnostic logging
+export {
+  diagLog,
+  diagClose,
+} from './diagnostic';

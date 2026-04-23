@@ -11,6 +11,7 @@ members = [
     "lxc_common",
     "wslc_common",
     "generated/base_container_specification",
+    "mxc_diagnostic_console",
 ]
 resolver = "3"
 
@@ -39,6 +40,10 @@ windows = { version = "0.62", features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_Shell",
     "Win32_System_Registry",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Time",
 ] }
 windows-core = "0.62"
 serde = { version = "1", features = ["derive"] }

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use std::fmt::Write;
+use std::fs;
 use std::process;
 use std::time::Instant;
 
@@ -10,6 +11,7 @@ use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
 use wxc_common::appcontainer_runner::AppContainerScriptRunner;
 use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::{is_base_container_version, load_request};
+use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
@@ -156,7 +158,77 @@ fn main() {
 
     request.experimental_enabled = cli.experimental;
 
+    // Inject learningModeLogging capability if ForceLearningMode registry key is set.
+    let learning_mode_injected = if DiagnosticConfig::force_learning_mode()
+        && !request
+            .policy
+            .capabilities
+            .iter()
+            .any(|c| c == "learningModeLogging")
+    {
+        request
+            .policy
+            .capabilities
+            .push("learningModeLogging".to_string());
+        true
+    } else {
+        false
+    };
+
+    // Initialize diagnostic logging (registry/env-controlled).
+    let diag_config = DiagnosticConfig::from_environment();
+    if diag_config.console_enabled {
+        logger.enable_diagnostics(&diag_config);
+
+        // Log the preamble
+        let exe_path = std::env::current_exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let parent_info = wxc_common::diagnostic::get_parent_process_info();
+        let _ = writeln!(
+            logger,
+            "wxc-exec v{} (PID {})",
+            env!("CARGO_PKG_VERSION"),
+            std::process::id()
+        );
+        let _ = writeln!(logger, "\tpath: {}", exe_path);
+        let _ = writeln!(logger, "\tparent: {}", parent_info);
+
+        // Log if we're injecting Learning Mode
+        if learning_mode_injected {
+            let _ = writeln!(
+                logger,
+                "WARNING: injected 'learningModeLogging' capability via ForceLearningMode registry key"
+            );
+        }
+
+        // Log the raw input JSON config before any transformation.
+        let raw_json = if is_base64 {
+            wxc_common::encoding::base64_decode(&config_data)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+        } else {
+            fs::read_to_string(&config_data).ok()
+        };
+        if let Some(json) = raw_json {
+            let _ = writeln!(logger, "SECTION: JSON Config");
+            let _ = writeln!(logger, "{}", json.trim());
+        }
+    }
+
+    let _ = writeln!(logger, "SECTION: Request simplified");
     log_request(&request, &mut logger);
+
+    // Emit the full (redacted) request policy for diagnostics.
+    let _ = writeln!(
+        logger,
+        "SECTION: Full `CodexRequest` configuration (redacted)"
+    );
+    let _ = writeln!(
+        logger,
+        "{}",
+        wxc_common::diagnostic::redacted_request_json(&request)
+    );
 
     // Run script in selected containment backend.
     // BaseContainer is used when --experimental is passed or schema version >= 0.5.
@@ -256,11 +328,15 @@ fn main() {
             Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
         }
     };
+
     let run_start = Instant::now();
     let response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
     display_script_results(&response, &mut logger);
+
+    // Close diagnostic pipe.
+    logger.close_diagnostics();
 
     // Output was already relayed to the console by pipe threads.
     // Only print captured output if present (e.g. from error paths).

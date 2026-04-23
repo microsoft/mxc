@@ -8,6 +8,34 @@ import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
 import { SandboxPolicy, ContainerConfig, ContainmentType } from './types';
 import { prepareSpawn } from './helper';
+import { diagLog } from './diagnostic';
+
+// Read SDK version from package.json at module load time.
+const SDK_VERSION = (() => {
+    try {
+        const pkgPath = require.resolve('@microsoft/mxc-sdk/package.json');
+        return require(pkgPath).version as string;
+    } catch {
+        try {
+            // Fallback: relative path during dev builds.
+            const path = require('path');
+            return require(path.resolve(__dirname, '..', 'package.json')).version as string;
+        } catch {
+            return 'unknown';
+        }
+    }
+})();
+
+let sdkVersionLogged = false;
+
+/** Log the SDK version to the diagnostic console (once per process). */
+function diagLogVersion(): void {
+    if (!sdkVersionLogged) {
+        sdkVersionLogged = true;
+        const sdkPath = require.resolve('@microsoft/mxc-sdk/package.json').replace(/[/\\]package\.json$/, '');
+        diagLog(`mxc-sdk v${SDK_VERSION} (PID ${process.pid}) @ ${sdkPath}`);
+    }
+}
 
 const SUPPORTED_VERSION = '0.5.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';
@@ -206,6 +234,7 @@ export function createConfigFromPolicy(
     containment: ContainmentType = "process",
     containerName?: string,
 ): ContainerConfig {
+    diagLogVersion();
     validatePolicyVersion(policy.version);
 
     const platform = os.platform();
@@ -227,6 +256,7 @@ export function createConfigFromPolicy(
 
     // Microvm: delegate to dedicated builder
     if (containment === 'microvm') {
+        diagLog(`createConfigFromPolicy: containment=microvm, id=${containerId}`);
         return buildMicroVmConfig(config, policy);
     }
 
@@ -277,8 +307,10 @@ export function createConfigFromPolicy(
 
     if (containment === 'process') {
         if (platform === 'linux') {
+            diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
             return buildLinuxProcessConfig(config, containerId);
         }
+        diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
         return buildProcessBaseContainerConfig(config, policy, containerId);
     }
 
@@ -369,6 +401,8 @@ function spawnWithConfig(
       cwd: workingDirectory || process.cwd(),
       env: env ?? options.ptyOptions?.env,
     };
+
+    diagLog(`spawnWithConfig: spawning PTY process, cwd=${ptyOpts.cwd}`);
 
     const ptyProcess = pty.spawn(executablePath, args, ptyOpts);
 
@@ -490,6 +524,8 @@ export function spawnSandboxFromConfig(
       throw err;
     }
   }
+
+  diagLogVersion();
   return spawnWithConfig(config, options, workingDirectory, env);
 }
 

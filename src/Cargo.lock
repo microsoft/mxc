@@ -877,6 +877,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxc_diagnostic_console"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "nanvix_binaries"
 version = "0.1.0"
 dependencies = [
