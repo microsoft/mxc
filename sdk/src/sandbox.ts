@@ -349,9 +349,7 @@ export interface SandboxSpawnOptions {
   ptyOptions?: pty.IPtyForkOptions;
 
   /**
-   * Directory for diagnostic log files. Both the SDK and the native
-   * binary (wxc-exec/lxc-exec) append to a timestamped file in this
-   * directory (e.g. mxc-diag-2026-04-23T10-36-55-a1b2c3.log).
+   * Directory for diagnostic log files
    */
   logDir?: string;
 }
@@ -444,8 +442,9 @@ function spawnWithConfig(
 ): pty.IPty {
   let logger: FileLogger | undefined;
   let logFile: string | undefined;
-  if (options.logDir) {
-    logFile = makeLogFilePath(options.logDir);
+  const logDir = options.logDir ?? (options.debug ? path.join(os.tmpdir(), 'mxc-logs') : undefined);
+  if (logDir) {
+    logFile = makeLogFilePath(logDir);
     logger = new FileLogger(logFile);
   }
 

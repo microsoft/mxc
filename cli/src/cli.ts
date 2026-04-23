@@ -13,7 +13,6 @@ import {
 } from '@microsoft/mxc-sdk';
 
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import { ContainerConfig } from '@microsoft/mxc-sdk/dist/types';
 
@@ -148,16 +147,9 @@ program
 
       const containment = options.containment as ContainmentType | undefined;
 
-      // When --debug is passed, write diagnostic logs to temp directory
-      let logDir: string | undefined;
-      if (options.debug) {
-        logDir = path.join(os.tmpdir(), 'mxc-logs');
-      }
-
       const spawnOptions = {
         debug: options.debug ?? false,
         experimental: options.experimental ?? false,
-        logDir,
       };
 
       if (options.pty === false) {
