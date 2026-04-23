@@ -7,7 +7,7 @@ import {
   spawnSandbox,
   spawnSandboxWithoutPty,
   getPlatformSupport,
-  SandboxPolicy,
+  SandboxPolicySpec,
   ContainmentType,
   getAvailableToolsPolicy,
 } from '@microsoft/mxc-sdk';
@@ -110,7 +110,7 @@ program
         process.exit(1);
       }
 
-      let policy: SandboxPolicy;
+      let policy: SandboxPolicySpec;
       if (options.policy) {
         policy = JSON.parse(options.policy);
       } else if (options.policyFile) {

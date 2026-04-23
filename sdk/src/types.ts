@@ -196,12 +196,13 @@ export interface ContainerConfig {
 
 /**
  * The main sandbox policy configuration interface for external consumers
- * to define sandboxed execution environments.
+/**
+ * A directly-specified sandbox policy with explicit constraints.
  *
  * Policy describes *what* the caller wants restricted. Cross-platform.
  * No OS-specific content. Omitted fields = most restrictive (default-deny).
  */
-export type SandboxPolicy = {
+export interface SandboxPolicySpec {
   /** Policy version (semver). Must match a supported schema version. */
   version: string;
   /** Filesystem access restrictions */
@@ -243,6 +244,29 @@ export type SandboxPolicy = {
   /** Execution timeout in milliseconds. Omitted = no timeout. */
   timeoutMs?: number;
 }
+
+/**
+ * An AEGIS governance cookie. When provided instead of a policy spec,
+ * the mxc SDK redeems the cookie with the AEGIS daemon to obtain the
+ * execution envelope. The agent runtime never sees the envelope.
+ */
+export interface SandboxPolicyCookie {
+  /** Opaque cookie from the AEGIS daemon (32 hex chars). */
+  cookie: string;
+  /** Tool name for context verification on redemption. */
+  toolName: string;
+  /** Tool arguments as JSON string for context verification. */
+  toolArgsJson: string;
+}
+
+/**
+ * Sandbox policy: either a directly-specified policy or an AEGIS cookie.
+ *
+ * Use a `SandboxPolicySpec` when the caller controls the sandbox constraints.
+ * Use a `SandboxPolicyCookie` when AEGIS governance is active — the daemon
+ * holds the execution envelope and the cookie is redeemed at spawn time.
+ */
+export type SandboxPolicy = SandboxPolicySpec | SandboxPolicyCookie;
 
 /**
  * LXC container configuration for Linux sandbox

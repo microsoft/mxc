@@ -324,6 +324,44 @@ const policy: SandboxPolicy = {
 const ptyProcess = spawnSandbox('python script.py', policy, {}, 'C:\\workspace');
 ```
 
+### AEGIS Governance (Cookie-Based Policy)
+
+`SandboxPolicy` is a union type: `SandboxPolicySpec | SandboxPolicyCookie`.
+
+When an enterprise governance daemon (AEGIS) is active, callers pass a **cookie** instead of a policy spec. The SDK redeems the cookie with the daemon to obtain the execution envelope — the caller never sees it.
+
+```typescript
+// Cookie-based policy — envelope retrieved from AEGIS daemon
+const cookiePolicy: SandboxPolicy = {
+  cookie: 'a3f8b2c1d4e5f6071829304a5b6c7d8e',
+  toolName: 'bash',
+  toolArgsJson: '{"command":"git status"}',  // JSON-serialized tool arguments
+};
+
+// Use the async variant (cookie redemption is async)
+const ptyProcess = await spawnSandboxPty('bash -c "git status"', cookiePolicy, {}, cwd);
+```
+
+#### `SandboxPolicyCookie`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cookie` | `string` | Opaque 32-hex-char token from the AEGIS daemon |
+| `toolName` | `string` | Tool being executed (for context verification on redemption) |
+| `toolArgsJson` | `string` | Tool arguments as a JSON string (exact string match on redemption) |
+
+#### `spawnSandboxPty(script, policy, options?, workingDirectory?, containerName?, env?): Promise<IPty>`
+
+Async spawn that accepts both `SandboxPolicySpec` and `SandboxPolicyCookie`. When a cookie is provided, it is redeemed with the AEGIS daemon on `\\.\pipe\aegis-{username}` before spawning. Returns an `IPty` for interactive terminal I/O.
+
+> **Security note:** The SDK connects to the daemon pipe by well-known name and currently does not verify the server process identity. A Phase 4 hardening step will add server PID verification via `GetNamedPipeServerProcessId`. In practice, the daemon is auto-launched on first use, making pipe-squatting attacks difficult.
+
+> **Security note:** Governance enforcement (managed mode check, cookie redemption) lives in the SDK. If a caller invokes `wxc-exec` directly with a hand-crafted config JSON, it bypasses these checks entirely. Phase 4 will address this at the `wxc-exec` level.
+
+#### `isAegisManagedMode(): boolean`
+
+Returns `true` when `HKLM\Software\Policies\Aegis\ManagedMode` is set to `1`. In managed mode, the sync spawn functions (`spawnSandbox`, `spawnSandboxWithoutPty`, `spawnSandboxFromConfig`) throw, requiring callers to use `spawnSandboxPty` or `spawnSandboxAsync` with a cookie policy. Result is cached for the process lifetime.
+
 ## Examples
 
 ### Minimal — Run a Command

@@ -98,7 +98,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 
 ### TypeScript layers
 
-- **SDK** (`sdk/`, `@microsoft/mxc-sdk`) — the public API. `spawnSandbox()` builds a `ContainerConfig` from a `SandboxPolicy`, serializes to base64, and spawns the correct native binary (`wxc-exec.exe` or `lxc-exec`) via `node-pty`. Platform detection is in `platform.ts`.
+- **SDK** (`sdk/`, `@microsoft/mxc-sdk`) — the public API. `SandboxPolicy` is a union type: `SandboxPolicySpec` (caller-specified constraints) or `SandboxPolicyCookie` (AEGIS governance cookie redeemed with the daemon at spawn time). `spawnSandbox()` accepts a spec and spawns synchronously; `spawnSandboxPty()` accepts either type asynchronously. The SDK builds a `ContainerConfig` from the policy, serializes to base64, and spawns the correct native binary (`wxc-exec.exe` or `lxc-exec`) via `node-pty`. Platform detection is in `platform.ts`.
 - **CLI** (`cli/`, `mxc-cli`) — thin Commander.js wrapper around the SDK. Depends on `@microsoft/mxc-sdk` via `file:../sdk`.
 
 The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (npm-packaged) and `src/target/<target-triple>/{release,debug}/` (local dev). The `build.bat`/`build.sh` scripts copy binaries into the SDK bin directory.

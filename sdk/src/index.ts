@@ -28,6 +28,8 @@
 // Export types
 export {
   SandboxPolicy,
+  SandboxPolicySpec,
+  SandboxPolicyCookie,
   SandboxingMethod,
   ContainmentType,
   ExperimentalBackends,
@@ -44,10 +46,12 @@ export {
 export {
   createConfigFromPolicy,
   spawnSandbox,
+  spawnSandboxFromConfig,
   spawnSandboxAsync,
   spawnSandboxWithoutPty,
-  spawnSandboxFromConfig,
+  spawnSandboxPty,
   buildSandboxPayload,
+  isAegisManagedMode,
   SandboxSpawnOptions,
 } from './sandbox';
 
@@ -59,3 +63,10 @@ export {
   FilesystemPolicyResult,
   ToolsPolicyOptions,
 } from './policy';
+
+// Export cookie redemption functions
+export {
+  redeemCookie,
+  getPipePath,
+  RedeemResult,
+} from './cookieRedeemer';

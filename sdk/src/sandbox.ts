@@ -4,14 +4,98 @@
 import * as pty from 'node-pty';
 import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
+import { execFileSync } from "child_process";
 import * as fs from 'fs';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, SandboxingMethod, ContainerConfig, ContainmentType, ExperimentalBackends } from './types';
+import { SandboxPolicy, SandboxPolicySpec, SandboxPolicyCookie, SandboxingMethod, ContainerConfig, ContainmentType, ExperimentalBackends } from './types';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
 
 const SUPPORTED_VERSION = '0.5.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';
+
+const AEGIS_MANAGED_MODE_KEY = "HKLM\\Software\\Policies\\Aegis";
+
+let _managedModeCache: boolean | undefined;
+
+/**
+ * Checks whether AEGIS managed mode is active via the HKLM registry.
+ * When managed mode is on, all sandbox spawns must provide a cookie.
+ * Result is cached for the lifetime of the process (managed mode
+ * doesn't change at runtime).
+ *
+ * Returns false on non-Windows platforms or if the registry key is absent.
+ */
+export function isAegisManagedMode(): boolean {
+  if (_managedModeCache !== undefined) return _managedModeCache;
+  if (os.platform() !== 'win32') { _managedModeCache = false; return false; }
+
+  try {
+    const stdout = execFileSync("reg.exe", [
+      "query", AEGIS_MANAGED_MODE_KEY, "/v", "ManagedMode"
+    ], { encoding: "utf8", windowsHide: true, timeout: 3000 });
+
+    const match = stdout.match(/ManagedMode\s+REG_DWORD\s+0x(\d+)/i);
+    _managedModeCache = match !== null && parseInt(match[1], 16) !== 0;
+  } catch {
+    _managedModeCache = false;
+  }
+  return _managedModeCache;
+}
+
+/** Type guard: is this policy a cookie-based policy? */
+function isCookiePolicy(policy: SandboxPolicy): policy is SandboxPolicyCookie {
+  return 'cookie' in policy;
+}
+
+/**
+ * Resolve a SandboxPolicy to a SandboxPolicySpec. If the policy is a cookie,
+ * redeem it with the AEGIS daemon to obtain the execution envelope.
+ */
+async function resolvePolicy(policy: SandboxPolicy, cwd?: string): Promise<SandboxPolicySpec> {
+  if (!isCookiePolicy(policy)) {
+    if (isAegisManagedMode()) {
+      throw new Error(
+        'AEGIS managed mode is active — sandbox policy must include a governance cookie.'
+      );
+    }
+    return policy;
+  }
+
+  const { redeemCookie } = await import('./cookieRedeemer');
+  const result = await redeemCookie(policy.cookie, policy.toolName, policy.toolArgsJson, cwd);
+
+  if (!result.valid || !result.envelope) {
+    throw new Error(
+      `AEGIS cookie redemption failed: ${result.error || 'no envelope returned'}`
+    );
+  }
+
+  const envelope = result.envelope;
+  const spec: SandboxPolicySpec = {
+    version: SUPPORTED_VERSION,
+    filesystem: {
+      readwritePaths: envelope.readwritePaths,
+      readonlyPaths: envelope.readonlyPaths,
+      deniedPaths: envelope.deniedPaths,
+    },
+    network: envelope.networkEnabled !== undefined ? {
+      allowOutbound: envelope.networkEnabled,
+      allowLocalNetwork: envelope.allowLocalNetwork,
+    } : undefined,
+    timeoutMs: envelope.timeoutSeconds ? envelope.timeoutSeconds * 1000 : undefined,
+  };
+
+  // Validate the resolved policy — a malformed daemon response should not
+  // silently produce an invalid sandbox config.
+  try {
+    validatePolicyVersion(spec.version);
+  } catch (err) {
+    throw new Error(`AEGIS daemon returned an invalid policy: ${(err as Error).message}`);
+  }
+
+  return spec;
+}
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -19,7 +103,6 @@ const MIN_VERSION = '0.4.0-alpha';
 function generateRandomContainerName(): string {
     return randomBytes(4).toString("hex");
 }
-
 function validatePolicyVersion(version: string): void {
     if (!version) {
         throw new Error('Policy version is required');
@@ -108,7 +191,7 @@ function buildLinuxProcessConfig(
  */
 function buildProcessBaseContainerConfig(
     config: ContainerConfig,
-    policy: SandboxPolicy,
+    policy: SandboxPolicySpec,
     containerId: string,
 ): ContainerConfig {
     const capabilities: string[] = [];
@@ -149,7 +232,7 @@ function buildProcessBaseContainerConfig(
  */
 function buildMicroVmConfig(
     config: ContainerConfig,
-    policy: SandboxPolicy,
+    policy: SandboxPolicySpec,
 ): ContainerConfig {
     if (os.platform() !== 'win32') {
         throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
@@ -203,7 +286,7 @@ function buildMicroVmConfig(
  * ```
  */
 export function createConfigFromPolicy(
-    policy: SandboxPolicy,
+    policy: SandboxPolicySpec,
     containment: ContainmentType = "process",
     containerName?: string,
 ): ContainerConfig {
@@ -297,7 +380,7 @@ export function createConfigFromPolicy(
  */
 export function buildSandboxPayload(
     script: string,
-    policy: SandboxPolicy,
+    policy: SandboxPolicySpec,
     workingDirectory?: string,
     containerName?: string,
     containment: ContainmentType = "process",
@@ -471,6 +554,16 @@ export function spawnSandbox(
   env?: { [key: string]: string | undefined },
   containment?: ContainmentType,
 ): pty.IPty {
+  if (isCookiePolicy(policy)) {
+    throw new Error(
+      'Cookie-based policy requires async resolution. Use spawnSandboxAsync() instead.'
+    );
+  }
+  if (isAegisManagedMode()) {
+    throw new Error(
+      'AEGIS managed mode is active — pass a { cookie } policy to spawnSandboxAsync().'
+    );
+  }
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName, containment);
   return spawnWithConfig(config, options, workingDirectory, env);
 }
@@ -512,6 +605,16 @@ export function spawnSandboxWithoutPty(
   env?: { [key: string]: string | undefined },
   containment?: ContainmentType,
 ): ChildProcess {
+  if (isCookiePolicy(policy)) {
+    throw new Error(
+      'Cookie-based policy requires async resolution. Use spawnSandboxAsync() instead.'
+    );
+  }
+  if (isAegisManagedMode()) {
+    throw new Error(
+      'AEGIS managed mode is active — pass a { cookie } policy to spawnSandboxAsync().'
+    );
+  }
   if (options.ptyOptions) {
     console.warn('Warning: ptyOptions are ignored by spawnSandboxWithoutPty (non-PTY). Use spawnSandbox for PTY support.');
   }
@@ -551,6 +654,33 @@ export function spawnSandboxFromConfig(
   workingDirectory?: string,
   env?: { [key: string]: string | undefined }
 ): pty.IPty {
+  if (isAegisManagedMode()) {
+    throw new Error(
+      'AEGIS managed mode is active — pass a { cookie } policy to spawnSandboxAsync().'
+    );
+  }
+  return spawnWithConfig(config, options, workingDirectory, env);
+}
+
+/**
+ * Async spawn that accepts both policy specs and cookie-based policies,
+ * returning an IPty for interactive terminal I/O.
+ *
+ * When a cookie policy is provided, the cookie is redeemed with the AEGIS
+ * daemon to obtain the execution envelope before spawning. The caller
+ * never sees the envelope.
+ */
+export async function spawnSandboxPty(
+  script: string,
+  policy: SandboxPolicy,
+  options: SandboxSpawnOptions = {},
+  workingDirectory?: string,
+  containerName?: string,
+  env?: { [key: string]: string | undefined },
+  containment?: ContainmentType,
+): Promise<pty.IPty> {
+  const spec = await resolvePolicy(policy, workingDirectory);
+  const config = buildSandboxPayload(script, spec, workingDirectory, containerName, containment);
   return spawnWithConfig(config, options, workingDirectory, env);
 }
 
@@ -578,16 +708,18 @@ export function spawnSandboxFromConfig(
  * console.log('Exit code:', result.exitCode);
  * ```
  */
-export function spawnSandboxAsync(
+export async function spawnSandboxAsync(
   script: string,
   policy: SandboxPolicy,
   options: SandboxSpawnOptions = {},
   workingDirectory?: string,
   containerName?: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const spec = await resolvePolicy(policy, workingDirectory);
   return new Promise((resolve, reject) => {
     try {
-      const ptyProcess = spawnSandbox(script, policy, options, workingDirectory, containerName);
+      const config = buildSandboxPayload(script, spec, workingDirectory, containerName);
+      const ptyProcess = spawnWithConfig(config, options, workingDirectory);
       let output = '';
 
       ptyProcess.onData((data: string) => {
