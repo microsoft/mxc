@@ -84,9 +84,46 @@ production configs and the dev schema when working on experimental features:
 | `"lxc"` | Native LXC container isolation |
 | `"vm"` | VM-based isolation (not yet implemented) |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
+| `"lithium"` | Remote sandbox managed via the Lithium HTTP API (experimental) |
 
 Only the backend section matching the selected `containment` value is used;
 other backend sections are ignored.
+
+### Lithium backend (experimental)
+
+The `lithium` backend delegates sandbox lifecycle to the Lithium remote
+management service. Configuration lives under `experimental.lithium`:
+
+```json
+"experimental": {
+  "lithium": {
+    "apiEndpoint": "https://lithium.example.com",
+    "partnerId": "contoso",
+    "poolId": "hello-world-pool",
+    "imageId": "hello-world:latest",
+    "shapeName": "2c4g",
+    "maxIdleInSeconds": 300,
+    "maxLifetimeInSeconds": 3600,
+    "apiVersion": "1.0",
+    "tokenEnvVar": "MXC_LITHIUM_TOKEN",
+    "requestTimeoutMs": 30000
+  }
+}
+```
+
+`apiEndpoint`, `partnerId`, `poolId`, `imageId`, and `shapeName` are required.
+
+The bearer token required for authentication is read from the environment
+variable named by `tokenEnvVar` (default `MXC_LITHIUM_TOKEN`) at run time — it
+is never stored in the config file.
+
+The runner currently drives the checkout/teardown lifecycle only: it `POST`s
+to `/partners/{partnerId}/pools/{poolId}/sandboxes`, logs the resulting
+sandbox metadata (sandboxId, state, toolUri, expiresAt), then `DELETE`s the
+sandbox when `lifecycle.destroyOnExit` is true (the default). In-sandbox
+workload execution via the sandbox tool API is not yet implemented; the
+`process.commandLine` value is forwarded as a `tags.commandLine` entry on the
+checkout request for forward compatibility.
 
 ### Schema Versioning
 

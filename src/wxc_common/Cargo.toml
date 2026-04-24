@@ -10,6 +10,7 @@ thiserror = { workspace = true }
 base64 = { workspace = true }
 url = { workspace = true }
 semver = "1"
+ureq = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }

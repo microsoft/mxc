@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build *)",
+      "PowerShell(cargo --version 2>&1)",
+      "PowerShell(rustc --version 2>&1)",
+      "Bash(export PATH=\"/c/Users/mstark/.cargo/bin:$PATH\")",
+      "Bash(cargo --version)",
+      "Bash(rustc --version)",
+      "Bash(cargo fmt *)",
+      "Bash(cargo test *)",
+      "Bash(cargo clippy *)"
+    ]
+  }
+}

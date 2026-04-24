@@ -11,8 +11,8 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
-    LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress,
-    ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    LifecycleConfig, LithiumConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping,
+    ProxyAddress, ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -138,11 +138,37 @@ struct RawTestFeature {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawLithium {
+    #[serde(rename = "apiEndpoint")]
+    api_endpoint: Option<String>,
+    #[serde(rename = "partnerId")]
+    partner_id: Option<String>,
+    #[serde(rename = "poolId")]
+    pool_id: Option<String>,
+    #[serde(rename = "imageId")]
+    image_id: Option<String>,
+    #[serde(rename = "shapeName")]
+    shape_name: Option<String>,
+    #[serde(rename = "maxIdleInSeconds")]
+    max_idle_in_seconds: Option<u32>,
+    #[serde(rename = "maxLifetimeInSeconds")]
+    max_lifetime_in_seconds: Option<u32>,
+    #[serde(rename = "apiVersion")]
+    api_version: Option<String>,
+    #[serde(rename = "tokenEnvVar")]
+    token_env_var: Option<String>,
+    #[serde(rename = "requestTimeoutMs")]
+    request_timeout_ms: Option<u32>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawExperimental {
     test: Option<RawTestFeature>,
     #[serde(rename = "windows_sandbox")]
     windows_sandbox: Option<RawSandbox>,
     wslc: Option<RawContainerConfig>,
+    lithium: Option<RawLithium>,
 }
 
 #[derive(Deserialize, Default)]
@@ -410,9 +436,10 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         Some("lxc") => ContainmentBackend::Lxc,
         Some("vm") => ContainmentBackend::Vm,
         Some("microvm") => ContainmentBackend::MicroVm,
+        Some("lithium") => ContainmentBackend::Lithium,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'wslc', 'lxc', 'vm', or 'microvm')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'wslc', 'lxc', 'vm', 'microvm', or 'lithium')",
                 other
             );
             logger.log_line(&msg);
@@ -602,10 +629,45 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             }
             config
         });
+        let lithium = raw_exp.lithium.map(|li| {
+            let mut config = LithiumConfig::default();
+            if let Some(v) = li.api_endpoint {
+                config.api_endpoint = v;
+            }
+            if let Some(v) = li.partner_id {
+                config.partner_id = v;
+            }
+            if let Some(v) = li.pool_id {
+                config.pool_id = v;
+            }
+            if let Some(v) = li.image_id {
+                config.image_id = v;
+            }
+            if let Some(v) = li.shape_name {
+                config.shape_name = v;
+            }
+            if let Some(v) = li.max_idle_in_seconds {
+                config.max_idle_in_seconds = v;
+            }
+            if let Some(v) = li.max_lifetime_in_seconds {
+                config.max_lifetime_in_seconds = v;
+            }
+            if let Some(v) = li.api_version {
+                config.api_version = v;
+            }
+            if let Some(v) = li.token_env_var {
+                config.token_env_var = v;
+            }
+            if let Some(v) = li.request_timeout_ms {
+                config.request_timeout_ms = v;
+            }
+            config
+        });
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
+            lithium,
         }
     } else {
         ExperimentalConfig::default()

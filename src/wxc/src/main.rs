@@ -10,6 +10,7 @@ use wxc_common::appcontainer_runner::AppContainerScriptRunner;
 use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::{is_base_container_version, load_request};
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
+use wxc_common::lithium_runner::LithiumScriptRunner;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::nanvix_runner::NanVixScriptRunner;
@@ -243,6 +244,20 @@ fn main() {
                 .cloned()
                 .unwrap_or_default();
             Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
+        }
+        ContainmentBackend::Lithium => {
+            if !request.experimental_enabled {
+                eprintln!("Error: Lithium is an experimental feature. Use --experimental flag.");
+                process::exit(1);
+            }
+            let lithium_config = request
+                .experimental
+                .lithium
+                .as_ref()
+                .cloned()
+                .unwrap_or_default();
+            let _ = writeln!(logger, "Using Lithium runner (--experimental)");
+            Box::new(LithiumScriptRunner::new(&lithium_config))
         }
     };
     let response = runner.run(&request, &mut logger);

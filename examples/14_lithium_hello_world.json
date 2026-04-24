@@ -1,0 +1,21 @@
+{
+  "$schema": "../schemas/dev/mxc-config.schema.0.5.0-dev.json",
+  "version": "0.5.0-alpha",
+  "containerId": "mxc-lithium-hello-world",
+  "containment": "lithium",
+  "process": {
+    "commandLine": "echo 'Hello from Lithium!'"
+  },
+  "experimental": {
+    "lithium": {
+      "apiEndpoint": "https://lithium.example.com",
+      "partnerId": "contoso",
+      "poolId": "hello-world-pool",
+      "imageId": "hello-world:latest",
+      "shapeName": "2c4g",
+      "maxIdleInSeconds": 300,
+      "maxLifetimeInSeconds": 600,
+      "tokenEnvVar": "MXC_LITHIUM_TOKEN"
+    }
+  }
+}

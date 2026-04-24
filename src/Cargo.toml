@@ -58,3 +58,4 @@ flatbuffers = "25"
 sandbox_spec = { path = "generated/base_container_specification" }
 widestring = "1"
 url = "2"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }

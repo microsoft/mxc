@@ -5,6 +5,7 @@
 pub mod config_parser;
 pub mod encoding;
 pub mod error;
+pub mod lithium_runner;
 pub mod logger;
 pub mod models;
 #[cfg(target_os = "windows")]

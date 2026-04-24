@@ -21,6 +21,8 @@ pub enum ContainmentBackend {
     MicroVm,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
     WindowsSandbox,
+    /// Lithium — remote sandbox managed via HTTP API (experimental, requires --experimental flag).
+    Lithium,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
@@ -295,6 +297,57 @@ impl TestFeatureConfig {
     }
 }
 
+/// Configuration specific to the Lithium remote backend.
+///
+/// Lithium is a remote sandbox management service (see the OpenAPI spec at
+/// `docs/lithium-api.yaml`). The runner calls the service to check out a
+/// sandbox, logs the response, and deletes the sandbox on exit.
+///
+/// The bearer token for authentication is **not** stored in this struct — at
+/// runtime the runner reads it from the environment variable named by
+/// `token_env_var` (default `MXC_LITHIUM_TOKEN`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LithiumConfig {
+    /// Base URL of the Lithium service (e.g. `https://lithium.example.com`).
+    pub api_endpoint: String,
+    /// Partner identifier path segment.
+    pub partner_id: String,
+    /// Pool identifier path segment.
+    pub pool_id: String,
+    /// Image identifier passed as `imageId` in the checkout request.
+    pub image_id: String,
+    /// Named shape (e.g. `2c4g`) passed as `shapeName` in the checkout request.
+    pub shape_name: String,
+    /// Maximum idle time in seconds before the sandbox is terminated (1–86400).
+    pub max_idle_in_seconds: u32,
+    /// Maximum lifetime in seconds for the sandbox (1–86400).
+    pub max_lifetime_in_seconds: u32,
+    /// API version sent in the `api-version` request header.
+    pub api_version: String,
+    /// Environment variable the runner reads the bearer token from.
+    pub token_env_var: String,
+    /// HTTP request timeout in milliseconds for each call.
+    pub request_timeout_ms: u32,
+}
+
+impl Default for LithiumConfig {
+    fn default() -> Self {
+        Self {
+            api_endpoint: String::new(),
+            partner_id: String::new(),
+            pool_id: String::new(),
+            image_id: String::new(),
+            shape_name: String::new(),
+            max_idle_in_seconds: 300,
+            max_lifetime_in_seconds: 3600,
+            api_version: "1.0".to_string(),
+            token_env_var: "MXC_LITHIUM_TOKEN".to_string(),
+            request_timeout_ms: 30_000,
+        }
+    }
+}
+
 /// Container for all experimental feature configs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -306,6 +359,8 @@ pub struct ExperimentalConfig {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// WSL Container (WSLC SDK) backend (experimental).
     pub wslc: Option<WslcConfig>,
+    /// Lithium remote backend (experimental).
+    pub lithium: Option<LithiumConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

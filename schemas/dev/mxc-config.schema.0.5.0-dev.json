@@ -19,9 +19,9 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc"],
+      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "lithium"],
       "default": "appcontainer",
-      "description": "Containment backend to use for execution. Note: 'windows_sandbox' and 'wslc' are experimental and require the --experimental CLI flag."
+      "description": "Containment backend to use for execution. Note: 'windows_sandbox', 'wslc', 'microvm', and 'lithium' are experimental and require the --experimental CLI flag."
     },
 
     "lifecycle": {
@@ -306,6 +306,66 @@
             "storagePath": {
               "type": "string",
               "description": "Storage path for the WSLC session image store. Omit to use a temporary directory."
+            }
+          }
+        },
+        "lithium": {
+          "type": "object",
+          "description": "Lithium remote backend (experimental). Delegates sandbox lifecycle to the Lithium HTTP management service. The runner currently checks out and tears down a sandbox; in-sandbox workload execution (via the tool API) is not yet implemented.",
+          "required": ["apiEndpoint", "partnerId", "poolId", "imageId", "shapeName"],
+          "properties": {
+            "apiEndpoint": {
+              "type": "string",
+              "format": "uri",
+              "description": "Base URL of the Lithium service (e.g. 'https://lithium.example.com').",
+              "examples": ["https://lithium.example.com"]
+            },
+            "partnerId": {
+              "type": "string",
+              "description": "Partner identifier path segment in the Lithium API."
+            },
+            "poolId": {
+              "type": "string",
+              "description": "Pool identifier path segment in the Lithium API."
+            },
+            "imageId": {
+              "type": "string",
+              "description": "Image identifier passed as 'imageId' in the checkout request (max 256 characters)."
+            },
+            "shapeName": {
+              "type": "string",
+              "description": "Named shape identifier (e.g. '2c4g') that maps to a predefined resource allocation.",
+              "examples": ["2c4g"]
+            },
+            "maxIdleInSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400,
+              "default": 300,
+              "description": "Maximum idle time in seconds before the sandbox is terminated."
+            },
+            "maxLifetimeInSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400,
+              "default": 3600,
+              "description": "Maximum lifetime in seconds for the sandbox."
+            },
+            "apiVersion": {
+              "type": "string",
+              "default": "1.0",
+              "description": "Value of the 'api-version' request header."
+            },
+            "tokenEnvVar": {
+              "type": "string",
+              "default": "MXC_LITHIUM_TOKEN",
+              "description": "Name of the environment variable the runner reads the bearer token from. The token itself is never stored in this config."
+            },
+            "requestTimeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 30000,
+              "description": "Per-request HTTP timeout in milliseconds."
             }
           }
         }
