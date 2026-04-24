@@ -16,44 +16,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import os from 'os';
-import { createConfigFromPolicy } from './sandbox';
+import { createConfigFromPolicy, spawnSandboxFromConfigWithoutPty } from './sandbox';
 import { SandboxPolicy } from './types';
-
-/**
- * Helper: spawn a container from a pre-built config using child_process.
- * Uses child_process.spawn (non-PTY) for reliable exit codes on Windows.
- * Tests the full flow: createConfigFromPolicy → customize → spawn → capture output.
- */
-function spawnConfigAndCollect(
-  config: ReturnType<typeof createConfigFromPolicy>,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve) => {
-    const { spawn } = require('child_process');
-    const configJson = JSON.stringify(config);
-    const configBase64 = Buffer.from(configJson, 'utf-8').toString('base64');
-
-    // Find wxc-exec.exe using the SDK's platform module
-    const { findWxcExecutable } = require('./platform');
-    const executablePath = findWxcExecutable();
-    if (!executablePath) {
-      resolve({ stdout: '', stderr: 'wxc-exec.exe not found', exitCode: -1 });
-      return;
-    }
-
-    const args = ['--config-base64', configBase64, '--experimental', '--debug'];
-    const child = spawn(executablePath, args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-    child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-    child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
-    child.on('close', (code: number | null) => {
-      resolve({ stdout, stderr, exitCode: code ?? -1 });
-    });
-  });
-}
 
 const isWslcAvailable = os.platform() === 'win32';
 
@@ -80,9 +44,19 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
     config.experimental!.wslc!.memoryMb = 1024;
     config.experimental!.wslc!.storagePath = 'C:\\workspace\\wslc-all-fields-test';
 
-    const result = await spawnConfigAndCollect(config);
-    assert.strictEqual(result.exitCode, 0);
-    assert.ok(result.stdout.includes('Python 3.12'));
-    assert.ok(result.stdout.includes('All fields work'));
+    const { stdout, exitCode } = await new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
+      const child = spawnSandboxFromConfigWithoutPty(config, { experimental: true, debug: true });
+      let stdout = '';
+      let stderr = '';
+      child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
+      child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
+      child.on('close', (code: number | null) => {
+        resolve({ stdout, stderr, exitCode: code ?? -1 });
+      });
+    });
+
+    assert.strictEqual(exitCode, 0);
+    assert.ok(stdout.includes('Python 3.12'));
+    assert.ok(stdout.includes('All fields work'));
   });
 });

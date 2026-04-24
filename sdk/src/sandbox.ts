@@ -608,6 +608,42 @@ export function spawnSandboxFromConfig(
 }
 
 /**
+ * Spawn a sandboxed process from a pre-built ContainerConfig using child_process.spawn (non-PTY).
+ *
+ * Use with `createConfigFromPolicy()` when you need to customize backend-specific
+ * settings before spawning, and need reliable exit codes and separate stdout/stderr streams.
+ *
+ * @param config The container configuration (from createConfigFromPolicy)
+ * @param options - Spawn options
+ * @param workingDirectory Optional working directory path
+ * @returns The spawned ChildProcess
+ *
+ * @example
+ * ```typescript
+ * const config = createConfigFromPolicy(policy, 'wslc');
+ * config.process!.commandLine = 'echo hello';
+ * config.experimental!.wslc!.image = 'python:3.12';
+ * const child = spawnSandboxFromConfigWithoutPty(config, { experimental: true });
+ * child.stdout?.on('data', (data) => console.log(data.toString()));
+ * child.on('close', (code) => console.log('Exit code:', code));
+ * ```
+ */
+export function spawnSandboxFromConfigWithoutPty(
+  config: ContainerConfig,
+  options: SandboxSpawnOptions = {},
+  workingDirectory?: string,
+  env?: { [key: string]: string | undefined }
+): ChildProcess {
+  const { executablePath, args } = resolveExecutableAndArgs(config, options);
+
+  return spawn(executablePath, args, {
+    cwd: workingDirectory || process.cwd(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+    ...(env ? { env: env as NodeJS.ProcessEnv } : {}),
+  });
+}
+
+/**
  * Spawn a sandboxed process and return a promise that resolves with output.
  * Convenience wrapper around spawnSandbox for non-interactive use cases.
  *

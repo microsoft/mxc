@@ -47,6 +47,7 @@ export {
   spawnSandboxAsync,
   spawnSandboxWithoutPty,
   spawnSandboxFromConfig,
+  spawnSandboxFromConfigWithoutPty,
   buildSandboxPayload,
   SandboxSpawnOptions,
 } from './sandbox';
