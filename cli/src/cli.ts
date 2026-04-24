@@ -92,7 +92,7 @@ program
   .option('--container-name <name>', 'Name for the sandbox container')
   .option('--containment <backend>', 'Override containment backend')
   .option('--no-pty', 'Use child_process.spawn instead of node-pty (reliable exit codes)')
-  .option('--debug', 'Enable debug output')
+  .option('--debug', 'Enable debug output and diagnostic log file')
   .option('--experimental', 'Enable experimental features')
   .action(async (options: { script?: string; scriptFile?: string; policy?: string; policyFile?: string; cwd?: string; containerName?: string; containment?: string; pty?: boolean; debug?: boolean; experimental?: boolean }) => {
     try {

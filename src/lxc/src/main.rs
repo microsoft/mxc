@@ -3,6 +3,7 @@
 
 use std::fmt::Write;
 use std::process;
+use std::time::Instant;
 
 use clap::Parser;
 use wxc_common::config_parser::load_request;
@@ -42,6 +43,10 @@ struct Cli {
     /// Enable experimental features
     #[arg(long)]
     experimental: bool,
+
+    /// Path to diagnostic log file (appends, creates if missing)
+    #[arg(long = "log-file")]
+    log_file: Option<String>,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
@@ -103,6 +108,12 @@ fn main() {
         Mode::Buffer
     });
 
+    if let Some(ref log_path) = cli.log_file {
+        if let Err(e) = logger.enable_file_sink(std::path::Path::new(log_path)) {
+            eprintln!("Warning: could not open log file '{}': {}", log_path, e);
+        }
+    }
+
     // Delete mode
     if cli.delete {
         let name = match cli.containername {
@@ -142,7 +153,10 @@ fn main() {
         &request.container_id,
         &request.lifecycle,
     );
+    let run_start = Instant::now();
     let response = runner.run(&request, &mut logger);
+    let run_elapsed = run_start.elapsed();
+    let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
     display_script_results(&response, &mut logger);
 
     print!("{}", response.standard_out);

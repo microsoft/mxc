@@ -5,10 +5,21 @@ import * as pty from 'node-pty';
 import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
 import { SandboxPolicy, SandboxingMethod, ContainerConfig, ContainmentType, ExperimentalBackends } from './types';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
+import { FileLogger } from './logger';
+
+/**
+ * Generate a timestamped log file path in the given directory.
+ */
+function makeLogFilePath(dir: string): string {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, '');
+  const suffix = randomBytes(3).toString('hex');
+  return path.join(dir, `mxc-diag-${ts}-${suffix}.log`);
+}
 
 const SUPPORTED_VERSION = '0.5.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';
@@ -336,6 +347,11 @@ export interface SandboxSpawnOptions {
    * PTY options to pass to node-pty (only used by spawnSandbox)
    */
   ptyOptions?: pty.IPtyForkOptions;
+
+  /**
+   * Directory for diagnostic log files
+   */
+  logDir?: string;
 }
 
 /**
@@ -424,7 +440,30 @@ function spawnWithConfig(
   workingDirectory?: string,
   env?: { [key: string]: string | undefined },
 ): pty.IPty {
-  const { executablePath, args } = resolveExecutableAndArgs(config, options);
+  let logger: FileLogger | undefined;
+  let logFile: string | undefined;
+  const logDir = options.logDir ?? (options.debug ? path.join(os.tmpdir(), 'mxc-logs') : undefined);
+  if (logDir) {
+    logFile = makeLogFilePath(logDir);
+    logger = new FileLogger(logFile);
+    logger.log('info', 'mxc.log.created', { logFile });
+  }
+
+  const startTime = Date.now();
+  logger?.log('info', 'mxc.spawn.start', {
+    platform: os.platform(),
+    arch: os.arch(),
+    containment: config.containment,
+  });
+
+  try {
+    const { executablePath, args } = resolveExecutableAndArgs(config, options);
+
+    if (logFile) {
+      args.push('--log-file', logFile);
+    }
+
+    logger?.log('info', 'mxc.binary.resolved', { resolved: !!executablePath });
 
   const ptyOpts: pty.IPtyForkOptions = {
     name: "xterm-color",
@@ -435,7 +474,21 @@ function spawnWithConfig(
     env: env ?? options.ptyOptions?.env,
   };
 
-  return pty.spawn(executablePath, args, ptyOpts);
+  const ptyProcess = pty.spawn(executablePath, args, ptyOpts);
+
+  ptyProcess.onExit((event) => {
+    logger?.log('info', 'mxc.spawn.exit', {
+      exitCode: event.exitCode,
+      durationMs: Date.now() - startTime,
+    });
+    logger?.close();
+  });
+
+  return ptyProcess;
+  } catch (err) {
+    logger?.close();
+    throw err;
+  }
 }
 
 /**

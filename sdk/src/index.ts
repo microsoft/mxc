@@ -59,3 +59,8 @@ export {
   FilesystemPolicyResult,
   ToolsPolicyOptions,
 } from './policy';
+
+// Export diagnostic logging
+export {
+  FileLogger,
+} from './logger';
