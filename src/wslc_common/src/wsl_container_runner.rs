@@ -845,7 +845,7 @@ impl WSLContainerRunner {
                 // Send SIGTERM with 2-second grace period; the SDK escalates
                 // to SIGKILL automatically if the process doesn't exit.
                 err_msg = CoTaskMemPWSTR::null();
-                let _ = WslcStopContainer(
+                let _ = (sdk.WslcStopContainer)(
                     container_guard.as_raw(),
                     WslcSignal::SigTerm,
                     2,
