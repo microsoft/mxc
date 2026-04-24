@@ -48,7 +48,7 @@ impl Default for WindowsSandboxConfig {
 
 /// Session configuration size for the Agent Session backend.
 /// Maps to `IsolationConfigurationId` in the IsoEnvBroker Session API.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentSessionConfigurationId {
     #[default]
@@ -59,24 +59,12 @@ pub enum AgentSessionConfigurationId {
 }
 
 /// Configuration specific to the Agent Session backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentSessionConfig {
     /// Session size/weight. Default: Small.
     #[serde(rename = "configurationId")]
     pub configuration_id: AgentSessionConfigurationId,
-    /// Path to the isolation proxy executable. Required for StartSessionAsync.
-    #[serde(rename = "proxyPath")]
-    pub proxy_path: String,
-}
-
-impl Default for AgentSessionConfig {
-    fn default() -> Self {
-        Self {
-            configuration_id: AgentSessionConfigurationId::Small,
-            proxy_path: String::new(),
-        }
-    }
 }
 
 /// Configuration specific to the LXC container backend.

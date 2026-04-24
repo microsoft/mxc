@@ -22,7 +22,15 @@ cargo run --manifest-path tools/generate-agent-session-bindings/Cargo.toml -- <p
 
 After regeneration:
 1. Review the generated `src/agent_session_bindings/src/bindings.rs`
-2. Update `GENERATION_INFO.toml` with the OS commit and WinMD SHA256
+2. Update `GENERATION_INFO.toml` manually — the generator does not touch it. Fields:
+   - `os_build_branch` — the `build/.../<label>` branch containing the commit (immutable
+     snapshot; matches the VM build number).
+   - `os_official_branch` — the `official/...` rolling branch (development lineage).
+   - `os_commit` — full 40-char commit SHA.
+   - `winmd_sha256` — SHA-256 of the WinMD file.
+   - `windows_bindgen_version` — version reported on line 1 of the generated `bindings.rs`.
+   - `target_windows_crate` — major.minor of the `windows` crate in `src/Cargo.lock`.
+   - `generated_date` — ISO date.
 3. Build and test: `cd src && cargo test --workspace`
 
 ## Version Coupling

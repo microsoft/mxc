@@ -64,80 +64,9 @@ pub struct IClosable_Vtbl {
     pub Close: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
-    IIsolationSessionClientRequestEventArgs,
-    IIsolationSessionClientRequestEventArgs_Vtbl,
-    0x90a507fc_188f_5abc_9ebd_a17d89f90464
-);
-impl windows_core::RuntimeType for IIsolationSessionClientRequestEventArgs {
-    const SIGNATURE: windows_core::imp::ConstBuffer =
-        windows_core::imp::ConstBuffer::for_interface::<Self>();
-}
-impl windows_core::RuntimeName for IIsolationSessionClientRequestEventArgs {
-    const NAME: &'static str =
-        "Windows.AI.IsolationEnvironment.Session.IIsolationSessionClientRequestEventArgs";
-}
-pub trait IIsolationSessionClientRequestEventArgs_Impl: windows_core::IUnknownImpl {
-    fn Completed(&self) -> windows_core::Result<()>;
-    fn Failed(&self, error: windows_core::HRESULT) -> windows_core::Result<()>;
-}
-impl IIsolationSessionClientRequestEventArgs_Vtbl {
-    pub const fn new<
-        Identity: IIsolationSessionClientRequestEventArgs_Impl,
-        const OFFSET: isize,
-    >() -> Self {
-        unsafe extern "system" fn Completed<
-            Identity: IIsolationSessionClientRequestEventArgs_Impl,
-            const OFFSET: isize,
-        >(
-            this: *mut core::ffi::c_void,
-        ) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity =
-                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IIsolationSessionClientRequestEventArgs_Impl::Completed(this).into()
-            }
-        }
-        unsafe extern "system" fn Failed<
-            Identity: IIsolationSessionClientRequestEventArgs_Impl,
-            const OFFSET: isize,
-        >(
-            this: *mut core::ffi::c_void,
-            error: windows_core::HRESULT,
-        ) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity =
-                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IIsolationSessionClientRequestEventArgs_Impl::Failed(this, error).into()
-            }
-        }
-        Self {
-            base__: windows_core::IInspectable_Vtbl::new::<
-                Identity,
-                IIsolationSessionClientRequestEventArgs,
-                OFFSET,
-            >(),
-            Completed: Completed::<Identity, OFFSET>,
-            Failed: Failed::<Identity, OFFSET>,
-        }
-    }
-    pub fn matches(iid: &windows_core::GUID) -> bool {
-        iid == &<IIsolationSessionClientRequestEventArgs as windows_core::Interface>::IID
-    }
-}
-#[repr(C)]
-#[doc(hidden)]
-pub struct IIsolationSessionClientRequestEventArgs_Vtbl {
-    pub base__: windows_core::IInspectable_Vtbl,
-    pub Completed: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
-    pub Failed: unsafe extern "system" fn(
-        *mut core::ffi::c_void,
-        windows_core::HRESULT,
-    ) -> windows_core::HRESULT,
-}
-windows_core::imp::define_interface!(
     IIsolationSessionClientStatics,
     IIsolationSessionClientStatics_Vtbl,
-    0x9b49485c_3a48_53d1_b573_351737966e15
+    0xe05dfdeb_e5cc_5040_b5a4_17133774d2ce
 );
 impl windows_core::RuntimeType for IIsolationSessionClientStatics {
     const SIGNATURE: windows_core::imp::ConstBuffer =
@@ -151,7 +80,6 @@ pub trait IIsolationSessionClientStatics_Impl: windows_core::IUnknownImpl {
     fn RegisterClient(
         &self,
         optRegistrationId: &windows_core::HSTRING,
-        optAgentProxyPath: &windows_core::HSTRING,
     ) -> windows_core::Result<IsolationSessionRegistrationStatus>;
     fn UnregisterClientAsync(
         &self,
@@ -172,6 +100,7 @@ pub trait IIsolationSessionClientStatics_Impl: windows_core::IUnknownImpl {
         &self,
         optRegistrationId: &windows_core::HSTRING,
         optProvisionId: &windows_core::HSTRING,
+        configId: IsolationSessionConfigurationId,
     ) -> windows_core::Result<windows_future::IAsyncOperation<IsolationSessionOperationStatus>>;
     fn CreateIsolatedProcessAsync(
         &self,
@@ -221,7 +150,6 @@ impl IIsolationSessionClientStatics_Vtbl {
         >(
             this: *mut core::ffi::c_void,
             optregistrationid: *mut core::ffi::c_void,
-            optagentproxypath: *mut core::ffi::c_void,
             result__: *mut IsolationSessionRegistrationStatus,
         ) -> windows_core::HRESULT {
             unsafe {
@@ -230,7 +158,6 @@ impl IIsolationSessionClientStatics_Vtbl {
                 match IIsolationSessionClientStatics_Impl::RegisterClient(
                     this,
                     core::mem::transmute(&optregistrationid),
-                    core::mem::transmute(&optagentproxypath),
                 ) {
                     Ok(ok__) => {
                         result__.write(core::mem::transmute_copy(&ok__));
@@ -325,6 +252,7 @@ impl IIsolationSessionClientStatics_Vtbl {
             this: *mut core::ffi::c_void,
             optregistrationid: *mut core::ffi::c_void,
             optprovisionid: *mut core::ffi::c_void,
+            configid: IsolationSessionConfigurationId,
             result__: *mut *mut core::ffi::c_void,
         ) -> windows_core::HRESULT {
             unsafe {
@@ -334,6 +262,7 @@ impl IIsolationSessionClientStatics_Vtbl {
                     this,
                     core::mem::transmute(&optregistrationid),
                     core::mem::transmute(&optprovisionid),
+                    configid,
                 ) {
                     Ok(ok__) => {
                         result__.write(core::mem::transmute_copy(&ok__));
@@ -571,7 +500,6 @@ pub struct IIsolationSessionClientStatics_Vtbl {
     pub RegisterClient: unsafe extern "system" fn(
         *mut core::ffi::c_void,
         *mut core::ffi::c_void,
-        *mut core::ffi::c_void,
         *mut IsolationSessionRegistrationStatus,
     ) -> windows_core::HRESULT,
     pub UnregisterClientAsync: unsafe extern "system" fn(
@@ -596,6 +524,7 @@ pub struct IIsolationSessionClientStatics_Vtbl {
         *mut core::ffi::c_void,
         *mut core::ffi::c_void,
         *mut core::ffi::c_void,
+        IsolationSessionConfigurationId,
         *mut *mut core::ffi::c_void,
     ) -> windows_core::HRESULT,
     pub CreateIsolatedProcessAsync: unsafe extern "system" fn(
@@ -838,104 +767,189 @@ pub struct IIsolationSessionProvisionResult_Vtbl {
     ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
-    IIsolationSessionProxyConnection,
-    IIsolationSessionProxyConnection_Vtbl,
-    0x0b6418a0_3412_57fe_9c37_130f8d9730bf
+    IIsolationSessionProxyCallback,
+    IIsolationSessionProxyCallback_Vtbl,
+    0x4f6da6de_c4c1_5ad4_998f_4db8e19ad023
 );
-impl windows_core::RuntimeType for IIsolationSessionProxyConnection {
+impl windows_core::RuntimeType for IIsolationSessionProxyCallback {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::for_interface::<Self>();
 }
-impl windows_core::RuntimeName for IIsolationSessionProxyConnection {
-    const NAME: &'static str =
-        "Windows.AI.IsolationEnvironment.Session.IIsolationSessionProxyConnection";
-}
-pub trait IIsolationSessionProxyConnection_Impl: windows_core::IUnknownImpl {
-    fn GetProvisionId(&self) -> windows_core::Result<windows_core::HSTRING>;
-    fn GetSingleUseAgentCredential(
+windows_core::imp::interface_hierarchy!(
+    IIsolationSessionProxyCallback,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl IIsolationSessionProxyCallback {
+    pub fn RequestProxyAsyncShutdown(&self) -> windows_core::Result<()> {
+        let this = self;
+        unsafe {
+            (windows_core::Interface::vtable(this).RequestProxyAsyncShutdown)(
+                windows_core::Interface::as_raw(this),
+            )
+            .ok()
+        }
+    }
+    pub fn StartSession(
         &self,
-        singleUseEncodedDomainName: &mut windows_core::HSTRING,
-        singleUseEncodedAccountName: &mut windows_core::HSTRING,
-        singleUseEncodedPassword: &mut windows_core::HSTRING,
-    ) -> windows_core::Result<()>;
+        optprovisionid: &windows_core::HSTRING,
+        singleuseencodeddomainname: &windows_core::HSTRING,
+        singleuseencodedaccountname: &windows_core::HSTRING,
+        singleuseencodedpassword: &windows_core::HSTRING,
+    ) -> windows_core::Result<IsolationSessionOperationStatus> {
+        let this = self;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).StartSession)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(optprovisionid),
+                core::mem::transmute_copy(singleuseencodeddomainname),
+                core::mem::transmute_copy(singleuseencodedaccountname),
+                core::mem::transmute_copy(singleuseencodedpassword),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn StopSession(
+        &self,
+        optprovisionid: &windows_core::HSTRING,
+    ) -> windows_core::Result<IsolationSessionOperationStatus> {
+        let this = self;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).StopSession)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(optprovisionid),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
 }
-impl IIsolationSessionProxyConnection_Vtbl {
-    pub const fn new<Identity: IIsolationSessionProxyConnection_Impl, const OFFSET: isize>() -> Self
-    {
-        unsafe extern "system" fn GetProvisionId<
-            Identity: IIsolationSessionProxyConnection_Impl,
+impl windows_core::RuntimeName for IIsolationSessionProxyCallback {
+    const NAME: &'static str =
+        "Windows.AI.IsolationEnvironment.Session.IIsolationSessionProxyCallback";
+}
+pub trait IIsolationSessionProxyCallback_Impl: windows_core::IUnknownImpl {
+    fn RequestProxyAsyncShutdown(&self) -> windows_core::Result<()>;
+    fn StartSession(
+        &self,
+        optProvisionId: &windows_core::HSTRING,
+        singleUseEncodedDomainName: &windows_core::HSTRING,
+        singleUseEncodedAccountName: &windows_core::HSTRING,
+        singleUseEncodedPassword: &windows_core::HSTRING,
+    ) -> windows_core::Result<IsolationSessionOperationStatus>;
+    fn StopSession(
+        &self,
+        optProvisionId: &windows_core::HSTRING,
+    ) -> windows_core::Result<IsolationSessionOperationStatus>;
+}
+impl IIsolationSessionProxyCallback_Vtbl {
+    pub const fn new<Identity: IIsolationSessionProxyCallback_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn RequestProxyAsyncShutdown<
+            Identity: IIsolationSessionProxyCallback_Impl,
             const OFFSET: isize,
         >(
             this: *mut core::ffi::c_void,
-            result__: *mut *mut core::ffi::c_void,
         ) -> windows_core::HRESULT {
             unsafe {
                 let this: &Identity =
                     &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                match IIsolationSessionProxyConnection_Impl::GetProvisionId(this) {
+                IIsolationSessionProxyCallback_Impl::RequestProxyAsyncShutdown(this).into()
+            }
+        }
+        unsafe extern "system" fn StartSession<
+            Identity: IIsolationSessionProxyCallback_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            optprovisionid: *mut core::ffi::c_void,
+            singleuseencodeddomainname: *mut core::ffi::c_void,
+            singleuseencodedaccountname: *mut core::ffi::c_void,
+            singleuseencodedpassword: *mut core::ffi::c_void,
+            result__: *mut IsolationSessionOperationStatus,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsolationSessionProxyCallback_Impl::StartSession(
+                    this,
+                    core::mem::transmute(&optprovisionid),
+                    core::mem::transmute(&singleuseencodeddomainname),
+                    core::mem::transmute(&singleuseencodedaccountname),
+                    core::mem::transmute(&singleuseencodedpassword),
+                ) {
                     Ok(ok__) => {
                         result__.write(core::mem::transmute_copy(&ok__));
-                        core::mem::forget(ok__);
                         windows_core::HRESULT(0)
                     }
                     Err(err) => err.into(),
                 }
             }
         }
-        unsafe extern "system" fn GetSingleUseAgentCredential<
-            Identity: IIsolationSessionProxyConnection_Impl,
+        unsafe extern "system" fn StopSession<
+            Identity: IIsolationSessionProxyCallback_Impl,
             const OFFSET: isize,
         >(
             this: *mut core::ffi::c_void,
-            singleuseencodeddomainname: *mut *mut core::ffi::c_void,
-            singleuseencodedaccountname: *mut *mut core::ffi::c_void,
-            singleuseencodedpassword: *mut *mut core::ffi::c_void,
+            optprovisionid: *mut core::ffi::c_void,
+            result__: *mut IsolationSessionOperationStatus,
         ) -> windows_core::HRESULT {
             unsafe {
                 let this: &Identity =
                     &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IIsolationSessionProxyConnection_Impl::GetSingleUseAgentCredential(
+                match IIsolationSessionProxyCallback_Impl::StopSession(
                     this,
-                    core::mem::transmute_copy(&singleuseencodeddomainname),
-                    core::mem::transmute_copy(&singleuseencodedaccountname),
-                    core::mem::transmute_copy(&singleuseencodedpassword),
-                )
-                .into()
+                    core::mem::transmute(&optprovisionid),
+                ) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
             }
         }
         Self {
             base__: windows_core::IInspectable_Vtbl::new::<
                 Identity,
-                IIsolationSessionProxyConnection,
+                IIsolationSessionProxyCallback,
                 OFFSET,
             >(),
-            GetProvisionId: GetProvisionId::<Identity, OFFSET>,
-            GetSingleUseAgentCredential: GetSingleUseAgentCredential::<Identity, OFFSET>,
+            RequestProxyAsyncShutdown: RequestProxyAsyncShutdown::<Identity, OFFSET>,
+            StartSession: StartSession::<Identity, OFFSET>,
+            StopSession: StopSession::<Identity, OFFSET>,
         }
     }
     pub fn matches(iid: &windows_core::GUID) -> bool {
-        iid == &<IIsolationSessionProxyConnection as windows_core::Interface>::IID
+        iid == &<IIsolationSessionProxyCallback as windows_core::Interface>::IID
     }
 }
 #[repr(C)]
 #[doc(hidden)]
-pub struct IIsolationSessionProxyConnection_Vtbl {
+pub struct IIsolationSessionProxyCallback_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
-    pub GetProvisionId: unsafe extern "system" fn(
+    pub RequestProxyAsyncShutdown:
+        unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub StartSession: unsafe extern "system" fn(
         *mut core::ffi::c_void,
-        *mut *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut IsolationSessionOperationStatus,
     ) -> windows_core::HRESULT,
-    pub GetSingleUseAgentCredential: unsafe extern "system" fn(
+    pub StopSession: unsafe extern "system" fn(
         *mut core::ffi::c_void,
-        *mut *mut core::ffi::c_void,
-        *mut *mut core::ffi::c_void,
-        *mut *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut IsolationSessionOperationStatus,
     ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
     IIsolationSessionProxyConnectionStatics,
     IIsolationSessionProxyConnectionStatics_Vtbl,
-    0x66f17e1e_752c_57ad_97da_f914cfdc9a5d
+    0x9ac29561_f85d_561b_8fd1_8073c331e7ea
 );
 impl windows_core::RuntimeType for IIsolationSessionProxyConnectionStatics {
     const SIGNATURE: windows_core::imp::ConstBuffer =
@@ -947,10 +961,10 @@ impl windows_core::RuntimeName for IIsolationSessionProxyConnectionStatics {
 }
 pub trait IIsolationSessionProxyConnectionStatics_Impl: windows_core::IUnknownImpl {
     fn GetRegistrationId(&self) -> windows_core::Result<windows_core::HSTRING>;
-    fn RemoveProxyShutdownRequested(&self, token: i64) -> windows_core::Result<()>;
-    fn RemoveSessionStartRequested(&self, token: i64) -> windows_core::Result<()>;
-    fn RemoveSessionStopRequested(&self, token: i64) -> windows_core::Result<()>;
-    fn EnableEvents(&self) -> windows_core::Result<()>;
+    fn SetProxyCallback(
+        &self,
+        proxyCallback: windows_core::Ref<'_, IIsolationSessionProxyCallback>,
+    ) -> windows_core::Result<()>;
 }
 impl IIsolationSessionProxyConnectionStatics_Vtbl {
     pub const fn new<
@@ -977,64 +991,21 @@ impl IIsolationSessionProxyConnectionStatics_Vtbl {
                 }
             }
         }
-        unsafe extern "system" fn RemoveProxyShutdownRequested<
+        unsafe extern "system" fn SetProxyCallback<
             Identity: IIsolationSessionProxyConnectionStatics_Impl,
             const OFFSET: isize,
         >(
             this: *mut core::ffi::c_void,
-            token: i64,
+            proxycallback: *mut core::ffi::c_void,
         ) -> windows_core::HRESULT {
             unsafe {
                 let this: &Identity =
                     &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IIsolationSessionProxyConnectionStatics_Impl::RemoveProxyShutdownRequested(
-                    this, token,
+                IIsolationSessionProxyConnectionStatics_Impl::SetProxyCallback(
+                    this,
+                    core::mem::transmute_copy(&proxycallback),
                 )
                 .into()
-            }
-        }
-        unsafe extern "system" fn RemoveSessionStartRequested<
-            Identity: IIsolationSessionProxyConnectionStatics_Impl,
-            const OFFSET: isize,
-        >(
-            this: *mut core::ffi::c_void,
-            token: i64,
-        ) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity =
-                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IIsolationSessionProxyConnectionStatics_Impl::RemoveSessionStartRequested(
-                    this, token,
-                )
-                .into()
-            }
-        }
-        unsafe extern "system" fn RemoveSessionStopRequested<
-            Identity: IIsolationSessionProxyConnectionStatics_Impl,
-            const OFFSET: isize,
-        >(
-            this: *mut core::ffi::c_void,
-            token: i64,
-        ) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity =
-                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IIsolationSessionProxyConnectionStatics_Impl::RemoveSessionStopRequested(
-                    this, token,
-                )
-                .into()
-            }
-        }
-        unsafe extern "system" fn EnableEvents<
-            Identity: IIsolationSessionProxyConnectionStatics_Impl,
-            const OFFSET: isize,
-        >(
-            this: *mut core::ffi::c_void,
-        ) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity =
-                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IIsolationSessionProxyConnectionStatics_Impl::EnableEvents(this).into()
             }
         }
         Self {
@@ -1044,13 +1015,7 @@ impl IIsolationSessionProxyConnectionStatics_Vtbl {
                 OFFSET,
             >(),
             GetRegistrationId: GetRegistrationId::<Identity, OFFSET>,
-            ProxyShutdownRequested: 0,
-            RemoveProxyShutdownRequested: RemoveProxyShutdownRequested::<Identity, OFFSET>,
-            SessionStartRequested: 0,
-            RemoveSessionStartRequested: RemoveSessionStartRequested::<Identity, OFFSET>,
-            SessionStopRequested: 0,
-            RemoveSessionStopRequested: RemoveSessionStopRequested::<Identity, OFFSET>,
-            EnableEvents: EnableEvents::<Identity, OFFSET>,
+            SetProxyCallback: SetProxyCallback::<Identity, OFFSET>,
         }
     }
     pub fn matches(iid: &windows_core::GUID) -> bool {
@@ -1065,16 +1030,10 @@ pub struct IIsolationSessionProxyConnectionStatics_Vtbl {
         *mut core::ffi::c_void,
         *mut *mut core::ffi::c_void,
     ) -> windows_core::HRESULT,
-    ProxyShutdownRequested: usize,
-    pub RemoveProxyShutdownRequested:
-        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
-    SessionStartRequested: usize,
-    pub RemoveSessionStartRequested:
-        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
-    SessionStopRequested: usize,
-    pub RemoveSessionStopRequested:
-        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
-    pub EnableEvents: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetProxyCallback: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
     IIsolationSessionWorkerProcess,
@@ -1773,14 +1732,12 @@ pub struct IsolationSessionClient;
 impl IsolationSessionClient {
     pub fn RegisterClient(
         optregistrationid: &windows_core::HSTRING,
-        optagentproxypath: &windows_core::HSTRING,
     ) -> windows_core::Result<IsolationSessionRegistrationStatus> {
         Self::IIsolationSessionClientStatics(|this| unsafe {
             let mut result__ = core::mem::zeroed();
             (windows_core::Interface::vtable(this).RegisterClient)(
                 windows_core::Interface::as_raw(this),
                 core::mem::transmute_copy(optregistrationid),
-                core::mem::transmute_copy(optagentproxypath),
                 &mut result__,
             )
             .map(|| result__)
@@ -1836,6 +1793,7 @@ impl IsolationSessionClient {
     pub fn StartSessionAsync(
         optregistrationid: &windows_core::HSTRING,
         optprovisionid: &windows_core::HSTRING,
+        configid: IsolationSessionConfigurationId,
     ) -> windows_core::Result<windows_future::IAsyncOperation<IsolationSessionOperationStatus>>
     {
         Self::IIsolationSessionClientStatics(|this| unsafe {
@@ -1844,6 +1802,7 @@ impl IsolationSessionClient {
                 windows_core::Interface::as_raw(this),
                 core::mem::transmute_copy(optregistrationid),
                 core::mem::transmute_copy(optprovisionid),
+                configid,
                 &mut result__,
             )
             .and_then(|| windows_core::Type::from_abi(result__))
@@ -1994,48 +1953,22 @@ impl windows_core::RuntimeName for IsolationSessionClient {
     const NAME: &'static str = "Windows.AI.IsolationEnvironment.Session.IsolationSessionClient";
 }
 #[repr(transparent)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IsolationSessionClientRequestEventArgs(windows_core::IUnknown);
-windows_core::imp::interface_hierarchy!(
-    IsolationSessionClientRequestEventArgs,
-    windows_core::IUnknown,
-    windows_core::IInspectable
-);
-impl IsolationSessionClientRequestEventArgs {
-    pub fn Completed(&self) -> windows_core::Result<()> {
-        let this = self;
-        unsafe {
-            (windows_core::Interface::vtable(this).Completed)(windows_core::Interface::as_raw(this))
-                .ok()
-        }
-    }
-    pub fn Failed(&self, error: windows_core::HRESULT) -> windows_core::Result<()> {
-        let this = self;
-        unsafe {
-            (windows_core::Interface::vtable(this).Failed)(
-                windows_core::Interface::as_raw(this),
-                error,
-            )
-            .ok()
-        }
-    }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct IsolationSessionConfigurationId(pub i32);
+impl IsolationSessionConfigurationId {
+    pub const Small: Self = Self(1i32);
+    pub const Medium: Self = Self(2i32);
+    pub const Large: Self = Self(3i32);
+    pub const CommandLine: Self = Self(4i32);
 }
-impl windows_core::RuntimeType for IsolationSessionClientRequestEventArgs {
-    const SIGNATURE: windows_core::imp::ConstBuffer =
-        windows_core::imp::ConstBuffer::for_class::<Self, IIsolationSessionClientRequestEventArgs>(
-        );
+impl windows_core::TypeKind for IsolationSessionConfigurationId {
+    type TypeKind = windows_core::CopyType;
 }
-unsafe impl windows_core::Interface for IsolationSessionClientRequestEventArgs {
-    type Vtable = <IIsolationSessionClientRequestEventArgs as windows_core::Interface>::Vtable;
-    const IID: windows_core::GUID =
-        <IIsolationSessionClientRequestEventArgs as windows_core::Interface>::IID;
+impl windows_core::RuntimeType for IsolationSessionConfigurationId {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
+        b"enum(Windows.AI.IsolationEnvironment.Session.IsolationSessionConfigurationId;i4)",
+    );
 }
-impl windows_core::RuntimeName for IsolationSessionClientRequestEventArgs {
-    const NAME: &'static str =
-        "Windows.AI.IsolationEnvironment.Session.IsolationSessionClientRequestEventArgs";
-}
-unsafe impl Send for IsolationSessionClientRequestEventArgs {}
-unsafe impl Sync for IsolationSessionClientRequestEventArgs {}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IsolationSessionOperationStatus(pub i32);
@@ -2044,7 +1977,7 @@ impl IsolationSessionOperationStatus {
     pub const Failed: Self = Self(1i32);
     pub const PermissionDenied: Self = Self(2i32);
     pub const SessionAlreadyStarted: Self = Self(3i32);
-    pub const SesssionNotStarted: Self = Self(4i32);
+    pub const SessionNotStarted: Self = Self(4i32);
 }
 impl windows_core::TypeKind for IsolationSessionOperationStatus {
     type TypeKind = windows_core::CopyType;
@@ -2188,43 +2121,8 @@ impl windows_core::RuntimeType for IsolationSessionProvisionStatus {
         b"enum(Windows.AI.IsolationEnvironment.Session.IsolationSessionProvisionStatus;i4)",
     );
 }
-#[repr(transparent)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IsolationSessionProxyConnection(windows_core::IUnknown);
-windows_core::imp::interface_hierarchy!(
-    IsolationSessionProxyConnection,
-    windows_core::IUnknown,
-    windows_core::IInspectable
-);
+pub struct IsolationSessionProxyConnection;
 impl IsolationSessionProxyConnection {
-    pub fn GetProvisionId(&self) -> windows_core::Result<windows_core::HSTRING> {
-        let this = self;
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(this).GetProvisionId)(
-                windows_core::Interface::as_raw(this),
-                &mut result__,
-            )
-            .map(|| core::mem::transmute(result__))
-        }
-    }
-    pub fn GetSingleUseAgentCredential(
-        &self,
-        singleuseencodeddomainname: &mut windows_core::HSTRING,
-        singleuseencodedaccountname: &mut windows_core::HSTRING,
-        singleuseencodedpassword: &mut windows_core::HSTRING,
-    ) -> windows_core::Result<()> {
-        let this = self;
-        unsafe {
-            (windows_core::Interface::vtable(this).GetSingleUseAgentCredential)(
-                windows_core::Interface::as_raw(this),
-                singleuseencodeddomainname as *mut _ as _,
-                singleuseencodedaccountname as *mut _ as _,
-                singleuseencodedpassword as *mut _ as _,
-            )
-            .ok()
-        }
-    }
     pub fn GetRegistrationId() -> windows_core::Result<windows_core::HSTRING> {
         Self::IIsolationSessionProxyConnectionStatics(|this| unsafe {
             let mut result__ = core::mem::zeroed();
@@ -2235,38 +2133,15 @@ impl IsolationSessionProxyConnection {
             .map(|| core::mem::transmute(result__))
         })
     }
-    pub fn RemoveProxyShutdownRequested(token: i64) -> windows_core::Result<()> {
+    pub fn SetProxyCallback<P0>(proxycallback: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<IIsolationSessionProxyCallback>,
+    {
         Self::IIsolationSessionProxyConnectionStatics(|this| unsafe {
-            (windows_core::Interface::vtable(this).RemoveProxyShutdownRequested)(
+            (windows_core::Interface::vtable(this).SetProxyCallback)(
                 windows_core::Interface::as_raw(this),
-                token,
+                proxycallback.param().abi(),
             )
-            .ok()
-        })
-    }
-    pub fn RemoveSessionStartRequested(token: i64) -> windows_core::Result<()> {
-        Self::IIsolationSessionProxyConnectionStatics(|this| unsafe {
-            (windows_core::Interface::vtable(this).RemoveSessionStartRequested)(
-                windows_core::Interface::as_raw(this),
-                token,
-            )
-            .ok()
-        })
-    }
-    pub fn RemoveSessionStopRequested(token: i64) -> windows_core::Result<()> {
-        Self::IIsolationSessionProxyConnectionStatics(|this| unsafe {
-            (windows_core::Interface::vtable(this).RemoveSessionStopRequested)(
-                windows_core::Interface::as_raw(this),
-                token,
-            )
-            .ok()
-        })
-    }
-    pub fn EnableEvents() -> windows_core::Result<()> {
-        Self::IIsolationSessionProxyConnectionStatics(|this| unsafe {
-            (windows_core::Interface::vtable(this).EnableEvents)(windows_core::Interface::as_raw(
-                this,
-            ))
             .ok()
         })
     }
@@ -2283,21 +2158,10 @@ impl IsolationSessionProxyConnection {
         SHARED.call(callback)
     }
 }
-impl windows_core::RuntimeType for IsolationSessionProxyConnection {
-    const SIGNATURE: windows_core::imp::ConstBuffer =
-        windows_core::imp::ConstBuffer::for_class::<Self, IIsolationSessionProxyConnection>();
-}
-unsafe impl windows_core::Interface for IsolationSessionProxyConnection {
-    type Vtable = <IIsolationSessionProxyConnection as windows_core::Interface>::Vtable;
-    const IID: windows_core::GUID =
-        <IIsolationSessionProxyConnection as windows_core::Interface>::IID;
-}
 impl windows_core::RuntimeName for IsolationSessionProxyConnection {
     const NAME: &'static str =
         "Windows.AI.IsolationEnvironment.Session.IsolationSessionProxyConnection";
 }
-unsafe impl Send for IsolationSessionProxyConnection {}
-unsafe impl Sync for IsolationSessionProxyConnection {}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IsolationSessionRegistrationStatus(pub i32);

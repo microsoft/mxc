@@ -142,8 +142,6 @@ struct RawTestFeature {
 struct RawAgentSession {
     #[serde(rename = "configurationId")]
     configuration_id: Option<String>,
-    #[serde(rename = "proxyPath")]
-    proxy_path: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -662,9 +660,6 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
                         AgentSessionConfigurationId::Small
                     }
                 };
-            }
-            if let Some(path) = as_cfg.proxy_path {
-                config.proxy_path = path;
             }
             config
         });
@@ -1894,29 +1889,6 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.experimental.agent_session.is_none());
-    }
-
-    #[test]
-    fn agent_session_proxy_path_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"proxyPath": "C:\\test\\IsolationProxy.exe"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.agent_session.unwrap();
-        assert_eq!(cfg.proxy_path, r"C:\test\IsolationProxy.exe");
-    }
-
-    #[test]
-    fn agent_session_proxy_path_defaults_to_empty() {
-        let json =
-            r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.agent_session.unwrap();
-        assert!(cfg.proxy_path.is_empty());
     }
 
 }

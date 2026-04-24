@@ -15,10 +15,10 @@
 use std::fmt::Write;
 
 use crate::logger::Logger;
-use crate::models::{CodexRequest, NetworkPolicy, ScriptResponse};
+use crate::models::{AgentSessionConfigurationId, CodexRequest, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 use agent_session_bindings::bindings::{
-    IsolationSessionClient, IsolationSessionOperationStatus,
+    IsolationSessionClient, IsolationSessionConfigurationId, IsolationSessionOperationStatus,
     IsolationSessionProvisionLifetimePolicy, IsolationSessionProvisionOptions,
     IsolationSessionProvisionStatus, IsolationSessionRegistrationStatus,
     IsolationSessionWorkerProcessCreateOptions, IsolationSessionWorkerProcessOperationStatus,
@@ -26,6 +26,19 @@ use agent_session_bindings::bindings::{
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::ReadFile;
+
+impl From<AgentSessionConfigurationId> for IsolationSessionConfigurationId {
+    fn from(value: AgentSessionConfigurationId) -> Self {
+        match value {
+            AgentSessionConfigurationId::Small => IsolationSessionConfigurationId::Small,
+            AgentSessionConfigurationId::Medium => IsolationSessionConfigurationId::Medium,
+            AgentSessionConfigurationId::Large => IsolationSessionConfigurationId::Large,
+            AgentSessionConfigurationId::CommandLine => {
+                IsolationSessionConfigurationId::CommandLine
+            }
+        }
+    }
+}
 
 // -- Error messages for unsupported policy fields ----------------------------
 
@@ -121,13 +134,10 @@ pub(crate) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
 /// Returns `Ok(())` if the service is available, or `Err(message)` if not.
 /// This is called once from `AgentSessionManager::new()`.
 pub(crate) fn check_service_available() -> Result<(), String> {
-    // Try the lightest possible call: RegisterClient with empty strings.
+    // Try the lightest possible call: RegisterClient with an empty registration id.
     // If the WinRT activation factory is not registered (feature disabled),
     // this fails with CLASS_E_CLASSNOTAVAILABLE or similar.
-    match IsolationSessionClient::RegisterClient(
-        &windows_core::HSTRING::new(),
-        &windows_core::HSTRING::new(),
-    ) {
+    match IsolationSessionClient::RegisterClient(&windows_core::HSTRING::new()) {
         Ok(_) => Ok(()),
         Err(e) => {
             let code = e.code().0 as u32;
@@ -169,12 +179,9 @@ impl AgentSessionManager {
     }
 
     /// Step 0: Register as a client with the IsoEnvBroker service.
-    pub fn register_client(&self, proxy_path: &str) -> Result<(), String> {
-        let status = IsolationSessionClient::RegisterClient(
-            &self.registration_id,
-            &windows_core::HSTRING::from(proxy_path),
-        )
-        .map_err(|e| format!("RegisterClient failed: {}", e))?;
+    pub fn register_client(&self) -> Result<(), String> {
+        let status = IsolationSessionClient::RegisterClient(&self.registration_id)
+            .map_err(|e| format!("RegisterClient failed: {}", e))?;
 
         match status {
             IsolationSessionRegistrationStatus::New
@@ -228,10 +235,14 @@ impl AgentSessionManager {
     }
 
     /// Step 2: Start the agent session (log the agent user into a Windows session).
-    pub fn start_session(&self) -> Result<(), String> {
+    pub fn start_session(
+        &self,
+        config_id: IsolationSessionConfigurationId,
+    ) -> Result<(), String> {
         let async_op = IsolationSessionClient::StartSessionAsync(
             &self.registration_id,
             &self.provision_id,
+            config_id,
         )
         .map_err(|e| format!("StartSessionAsync failed: {}", e))?;
 
@@ -374,7 +385,7 @@ impl AgentSessionManager {
 
         match status {
             IsolationSessionOperationStatus::Succeeded
-            | IsolationSessionOperationStatus::SesssionNotStarted => Ok(()),
+            | IsolationSessionOperationStatus::SessionNotStarted => Ok(()),
             _ => Err(format!(
                 "StopSessionAsync returned status: {}",
                 status.0
@@ -465,9 +476,12 @@ impl ScriptRunner for AgentSessionRunner {
         let _ = writeln!(logger, "Agent Session: process={}", options.process_path);
         let _ = writeln!(logger, "Agent Session: arguments={}", options.arguments);
 
-        // Read agent_session config (proxy path).
+        // Read agent_session config (configuration id).
         let agent_cfg = request.experimental.agent_session.as_ref();
-        let proxy_path = agent_cfg.map(|cfg| cfg.proxy_path.as_str()).unwrap_or("");
+        let config_id: IsolationSessionConfigurationId = agent_cfg
+            .map(|cfg| cfg.configuration_id)
+            .unwrap_or_default()
+            .into();
 
         // Create the session manager (activates the WinRT factory).
         let mut manager = match AgentSessionManager::new() {
@@ -476,7 +490,7 @@ impl ScriptRunner for AgentSessionRunner {
         };
 
         // Full lifecycle: register → provision → start → execute → stop → deprovision → unregister.
-        if let Err(e) = manager.register_client(proxy_path) {
+        if let Err(e) = manager.register_client() {
             return ScriptResponse::error(&format!("register_client failed: {}", e));
         }
 
@@ -488,7 +502,7 @@ impl ScriptRunner for AgentSessionRunner {
             Err(e) => return ScriptResponse::error(&format!("provision_agent_user failed: {}", e)),
         }
 
-        if let Err(e) = manager.start_session() {
+        if let Err(e) = manager.start_session(config_id) {
             return ScriptResponse::error(&format!("start_session failed: {}", e));
         }
 
