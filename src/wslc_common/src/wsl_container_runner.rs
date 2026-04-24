@@ -814,17 +814,45 @@ impl WSLContainerRunner {
         }
         let process_guard = WslcProcessGuard::from_raw(process, sdk.WslcReleaseProcess);
 
-        // -- Step 12: Wait for exit (callbacks capture I/O during execution) --
+        // -- Step 12: Wait for exit with timeout enforcement --
         let mut exit_event: HANDLE = ptr::null_mut();
         let hr = (sdk.WslcGetProcessExitEvent)(process_guard.as_raw(), &mut exit_event);
         if hr != S_OK {
             return sdk_error("WslcGetProcessExitEvent failed", hr, "");
         }
+
+        // Use configured timeout, or wait indefinitely if not set.
+        let wait_ms = if request.script_timeout > 0 {
+            request.script_timeout
+        } else {
+            u32::MAX
+        };
+
+        let mut timed_out = false;
         if !exit_event.is_null() {
-            windows::Win32::System::Threading::WaitForSingleObject(
+            let wait_result = windows::Win32::System::Threading::WaitForSingleObject(
                 windows::Win32::Foundation::HANDLE(exit_event),
-                u32::MAX,
+                wait_ms,
             );
+            // WAIT_TIMEOUT = 0x00000102 (258)
+            if wait_result.0 == 258 {
+                timed_out = true;
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Execution timeout ({}ms) reached — stopping container",
+                    wait_ms
+                );
+                // Send SIGTERM with 2-second grace period; the SDK escalates
+                // to SIGKILL automatically if the process doesn't exit.
+                err_msg = CoTaskMemPWSTR::null();
+                let _ = (sdk.WslcStopContainer)(
+                    container_guard.as_raw(),
+                    WslcSignal::SigTerm,
+                    2,
+                    err_msg.as_mut_ptr(),
+                );
+                drop(err_msg);
+            }
         }
 
         // Wait for exit callback to fire — this guarantees all I/O is flushed
@@ -849,10 +877,14 @@ impl WSLContainerRunner {
 
         let mut exit_code: i32 = -1;
         let hr = (sdk.WslcGetProcessExitCode)(process_guard.as_raw(), &mut exit_code);
-        if hr != S_OK {
+        if hr != S_OK && !timed_out {
             return sdk_error("WslcGetProcessExitCode failed", hr, "");
         }
-        let _ = writeln!(logger, "[WSLC] Process exited with code {}", exit_code);
+        if timed_out {
+            let _ = writeln!(logger, "[WSLC] Process killed after timeout");
+        } else {
+            let _ = writeln!(logger, "[WSLC] Process exited with code {}", exit_code);
+        }
 
         // -- Step 13: Collect captured I/O from callbacks (guaranteed flushed) --
         let stdout =
@@ -900,10 +932,14 @@ impl WSLContainerRunner {
         // for the Release calls, and the process exits shortly after.
 
         ScriptResponse {
-            exit_code,
+            exit_code: if timed_out { -1 } else { exit_code },
             standard_out: stdout,
             standard_err: stderr,
-            error_message: String::new(),
+            error_message: if timed_out {
+                format!("Process timed out after {}ms and was terminated", wait_ms)
+            } else {
+                String::new()
+            },
         }
     }
 }
