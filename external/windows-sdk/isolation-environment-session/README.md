@@ -1,7 +1,7 @@
 # IsoEnvBroker Session API — WinMD Provenance
 
 This directory tracks provenance for the generated Rust bindings in
-`src/agent_session_bindings/`. The WinMD file itself is NOT checked in.
+`src/isolation_session_bindings/`. The WinMD file itself is NOT checked in.
 
 ## Source
 
@@ -17,11 +17,11 @@ Requires:
 - Rust toolchain (the generation tool builds from source)
 
 ```sh
-cargo run --manifest-path tools/generate-agent-session-bindings/Cargo.toml -- <path-to-winmd>
+cargo run --manifest-path tools/generate-isolation-session-bindings/Cargo.toml -- <path-to-winmd>
 ```
 
 After regeneration:
-1. Review the generated `src/agent_session_bindings/src/bindings.rs`
+1. Review the generated `src/isolation_session_bindings/src/bindings.rs`
 2. Update `GENERATION_INFO.toml` manually — the generator does not touch it. Fields:
    - `os_build_branch` — the `build/.../<label>` branch containing the commit (immutable
      snapshot; matches the VM build number).

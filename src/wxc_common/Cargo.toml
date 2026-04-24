@@ -17,7 +17,7 @@ windows-core = { workspace = true }
 flatbuffers = { workspace = true }
 sandbox_spec = { workspace = true }
 widestring = { workspace = true }
-agent_session_bindings = { workspace = true }
+isolation_session_bindings = { workspace = true }
 windows-future = "0.3"
 
 [dev-dependencies]

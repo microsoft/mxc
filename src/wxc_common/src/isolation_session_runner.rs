@@ -1,41 +1,40 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `AgentSessionRunner` — executes scripts in an IsoEnvBroker Agent Session.
+//! `IsolationSessionRunner` — executes scripts in an IsoEnvBroker Isolation Session.
 //!
 //! Uses the `Windows.AI.IsolationEnvironment.Session` WinRT API to create an
 //! isolated Windows session with a dedicated agent user account and run
 //! processes within it.
 //!
 //! This module has two layers:
-//! - `AgentSessionManager`: reusable core, methods map 1:1 to the Session API lifecycle.
-//! - `AgentSessionRunner`: thin `ScriptRunner` impl for v0.1 that calls all lifecycle
+//! - `IsolationSessionManager`: reusable core, methods map 1:1 to the Session API lifecycle.
+//! - `IsolationSessionRunner`: thin `ScriptRunner` impl for v0.1 that calls all lifecycle
 //!   steps per invocation.
 
 use std::fmt::Write;
 
 use crate::logger::Logger;
-use crate::models::{AgentSessionConfigurationId, CodexRequest, NetworkPolicy, ScriptResponse};
+use crate::models::{CodexRequest, IsolationSessionConfigurationId, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
-use agent_session_bindings::bindings::{
-    IsolationSessionClient, IsolationSessionConfigurationId, IsolationSessionOperationStatus,
-    IsolationSessionProvisionLifetimePolicy, IsolationSessionProvisionOptions,
-    IsolationSessionProvisionStatus, IsolationSessionRegistrationStatus,
-    IsolationSessionWorkerProcessCreateOptions, IsolationSessionWorkerProcessOperationStatus,
-    IsolationSessionWorkerProcessRedirectFlags,
+use isolation_session_bindings::bindings::{
+    IsolationSessionClient,
+    IsolationSessionConfigurationId as BindingsConfigurationId,
+    IsolationSessionOperationStatus, IsolationSessionProvisionLifetimePolicy,
+    IsolationSessionProvisionOptions, IsolationSessionProvisionStatus,
+    IsolationSessionRegistrationStatus, IsolationSessionWorkerProcessCreateOptions,
+    IsolationSessionWorkerProcessOperationStatus, IsolationSessionWorkerProcessRedirectFlags,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::ReadFile;
 
-impl From<AgentSessionConfigurationId> for IsolationSessionConfigurationId {
-    fn from(value: AgentSessionConfigurationId) -> Self {
+impl From<IsolationSessionConfigurationId> for BindingsConfigurationId {
+    fn from(value: IsolationSessionConfigurationId) -> Self {
         match value {
-            AgentSessionConfigurationId::Small => IsolationSessionConfigurationId::Small,
-            AgentSessionConfigurationId::Medium => IsolationSessionConfigurationId::Medium,
-            AgentSessionConfigurationId::Large => IsolationSessionConfigurationId::Large,
-            AgentSessionConfigurationId::CommandLine => {
-                IsolationSessionConfigurationId::CommandLine
-            }
+            IsolationSessionConfigurationId::Small => BindingsConfigurationId::Small,
+            IsolationSessionConfigurationId::Medium => BindingsConfigurationId::Medium,
+            IsolationSessionConfigurationId::Large => BindingsConfigurationId::Large,
+            IsolationSessionConfigurationId::CommandLine => BindingsConfigurationId::CommandLine,
         }
     }
 }
@@ -43,14 +42,14 @@ impl From<AgentSessionConfigurationId> for IsolationSessionConfigurationId {
 // -- Error messages for unsupported policy fields ----------------------------
 
 pub(crate) const ERR_FILESYSTEM_POLICY: &str =
-    "filesystem policy is not supported by the agent session backend";
+    "filesystem policy is not supported by the isolation session backend";
 pub(crate) const ERR_NETWORK_POLICY: &str =
-    "network policy is not supported by the agent session backend";
+    "network policy is not supported by the isolation session backend";
 pub(crate) const ERR_PROXY_POLICY: &str =
-    "network proxy is not supported by the agent session backend";
+    "network proxy is not supported by the isolation session backend";
 
 /// Validates that the request does not contain policy fields unsupported by
-/// the agent session backend. Returns `Ok(())` if valid, or `Err(message)`.
+/// the isolation session backend. Returns `Ok(())` if valid, or `Err(message)`.
 pub(crate) fn validate_policy(request: &CodexRequest) -> Result<(), String> {
     if !request.policy.readwrite_paths.is_empty()
         || !request.policy.readonly_paths.is_empty()
@@ -132,7 +131,7 @@ pub(crate) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
 /// is available on this OS build.
 ///
 /// Returns `Ok(())` if the service is available, or `Err(message)` if not.
-/// This is called once from `AgentSessionManager::new()`.
+/// This is called once from `IsolationSessionManager::new()`.
 pub(crate) fn check_service_available() -> Result<(), String> {
     // Try the lightest possible call: RegisterClient with an empty registration id.
     // If the WinRT activation factory is not registered (feature disabled),
@@ -159,16 +158,16 @@ pub(crate) fn check_service_available() -> Result<(), String> {
     }
 }
 
-// -- AgentSessionManager (lifecycle core) ------------------------------------
+// -- IsolationSessionManager (lifecycle core) --------------------------------
 
 /// Manages the IsoEnvBroker Session API lifecycle. Methods map 1:1 to the
 /// Session API steps.
-pub struct AgentSessionManager {
+pub struct IsolationSessionManager {
     registration_id: windows_core::HSTRING,
     provision_id: windows_core::HSTRING,
 }
 
-impl AgentSessionManager {
+impl IsolationSessionManager {
     /// Activate the WinRT factory and verify the service is available.
     pub fn new() -> Result<Self, String> {
         check_service_available()?;
@@ -234,15 +233,16 @@ impl AgentSessionManager {
         Ok(name.to_string())
     }
 
-    /// Step 2: Start the agent session (log the agent user into a Windows session).
+    /// Step 2: Start the isolation session (log the agent user into a Windows session).
     pub fn start_session(
         &self,
         config_id: IsolationSessionConfigurationId,
     ) -> Result<(), String> {
+        let config_id_com: BindingsConfigurationId = config_id.into();
         let async_op = IsolationSessionClient::StartSessionAsync(
             &self.registration_id,
             &self.provision_id,
-            config_id,
+            config_id_com,
         )
         .map_err(|e| format!("StartSessionAsync failed: {}", e))?;
 
@@ -371,7 +371,7 @@ impl AgentSessionManager {
         })
     }
 
-    /// Step 4: Stop the agent session.
+    /// Step 4: Stop the isolation session.
     pub fn stop_session(&self) -> Result<(), String> {
         let async_op = IsolationSessionClient::StopSessionAsync(
             &self.registration_id,
@@ -445,27 +445,27 @@ fn read_pipe_and_close(handle_value: u64) -> String {
     String::from_utf8_lossy(&output).to_string()
 }
 
-/// Result of a process execution in the agent session.
+/// Result of a process execution in the isolation session.
 pub struct ProcessResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
 }
 
-// -- AgentSessionRunner (ScriptRunner impl) ----------------------------------
+// -- IsolationSessionRunner (ScriptRunner impl) ------------------------------
 
-/// Thin `ScriptRunner` wrapper that performs the full agent session lifecycle
+/// Thin `ScriptRunner` wrapper that performs the full isolation session lifecycle
 /// per invocation. For v0.1, each `run()` call does:
 /// register → provision → start → execute → stop → deprovision → unregister.
-pub struct AgentSessionRunner;
+pub struct IsolationSessionRunner;
 
-impl AgentSessionRunner {
+impl IsolationSessionRunner {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl ScriptRunner for AgentSessionRunner {
+impl ScriptRunner for IsolationSessionRunner {
     fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         // Validate unsupported policy fields.
         if let Err(msg) = validate_policy(request) {
@@ -473,18 +473,17 @@ impl ScriptRunner for AgentSessionRunner {
         }
 
         let options = build_process_options(request);
-        let _ = writeln!(logger, "Agent Session: process={}", options.process_path);
-        let _ = writeln!(logger, "Agent Session: arguments={}", options.arguments);
+        let _ = writeln!(logger, "Isolation Session: process={}", options.process_path);
+        let _ = writeln!(logger, "Isolation Session: arguments={}", options.arguments);
 
-        // Read agent_session config (configuration id).
-        let agent_cfg = request.experimental.agent_session.as_ref();
-        let config_id: IsolationSessionConfigurationId = agent_cfg
+        // Read isolation_session config (configuration id).
+        let session_cfg = request.experimental.isolation_session.as_ref();
+        let config_id: IsolationSessionConfigurationId = session_cfg
             .map(|cfg| cfg.configuration_id)
-            .unwrap_or_default()
-            .into();
+            .unwrap_or_default();
 
         // Create the session manager (activates the WinRT factory).
-        let mut manager = match AgentSessionManager::new() {
+        let mut manager = match IsolationSessionManager::new() {
             Ok(m) => m,
             Err(e) => return ScriptResponse::error(&e),
         };
@@ -497,7 +496,7 @@ impl ScriptRunner for AgentSessionRunner {
         let destroy_on_exit = request.lifecycle.destroy_on_exit;
         match manager.provision_agent_user(destroy_on_exit) {
             Ok(agent_name) => {
-                let _ = writeln!(logger, "Agent Session: agent user = {}", agent_name);
+                let _ = writeln!(logger, "Isolation Session: agent user = {}", agent_name);
             }
             Err(e) => return ScriptResponse::error(&format!("provision_agent_user failed: {}", e)),
         }

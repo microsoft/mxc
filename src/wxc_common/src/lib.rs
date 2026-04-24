@@ -34,6 +34,6 @@ pub mod windows_sandbox_runner;
 #[cfg(target_os = "windows")]
 pub mod base_container_runner;
 
-// Agent Session (IsoEnvBroker Session API) support
+// Isolation Session (IsoEnvBroker Session API) support
 #[cfg(target_os = "windows")]
-pub mod agent_session_runner;
+pub mod isolation_session_runner;

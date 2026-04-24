@@ -20,15 +20,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent_session_bindings"
-version = "0.1.0"
-dependencies = [
- "windows",
- "windows-core",
- "windows-future",
-]
-
-[[package]]
 name = "anstream"
 version = "0.6.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -718,6 +709,15 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+
+[[package]]
+name = "isolation_session_bindings"
+version = "0.1.0"
+dependencies = [
+ "windows",
+ "windows-core",
+ "windows-future",
+]
 
 [[package]]
 name = "itoa"
@@ -1759,9 +1759,9 @@ dependencies = [
 name = "wxc"
 version = "0.1.0"
 dependencies = [
- "agent_session_bindings",
  "anyhow",
  "clap",
+ "isolation_session_bindings",
  "nanvix_binaries",
  "nanvix_common",
  "windows",
@@ -1773,9 +1773,9 @@ dependencies = [
 name = "wxc_common"
 version = "0.1.0"
 dependencies = [
- "agent_session_bindings",
  "base64",
  "flatbuffers",
+ "isolation_session_bindings",
  "sandbox_spec",
  "semver",
  "serde",

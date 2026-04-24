@@ -8,7 +8,7 @@
 //!
 //! To regenerate:
 //! ```sh
-//! cargo run --manifest-path tools/generate-agent-session-bindings/Cargo.toml -- <winmd-path>
+//! cargo run --manifest-path tools/generate-isolation-session-bindings/Cargo.toml -- <winmd-path>
 //! ```
 //!
 //! See `external/windows-sdk/isolation-environment-session/GENERATION_INFO.toml`

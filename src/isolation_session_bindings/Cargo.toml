@@ -1,5 +1,5 @@
 [package]
-name = "agent_session_bindings"
+name = "isolation_session_bindings"
 version = "0.1.0"
 edition = "2021"
 publish = false

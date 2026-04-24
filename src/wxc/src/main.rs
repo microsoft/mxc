@@ -14,7 +14,7 @@ use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::nanvix_runner::NanVixScriptRunner;
-use wxc_common::agent_session_runner::AgentSessionRunner;
+use wxc_common::isolation_session_runner::IsolationSessionRunner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 
@@ -108,7 +108,7 @@ fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
 }
 
 fn main() {
-    // Initialize COM/WinRT for backends that use WinRT APIs (Agent Session).
+    // Initialize COM/WinRT for backends that use WinRT APIs (Isolation Session).
     // COINIT_MULTITHREADED is benign for backends that don't use COM.
     let _ = unsafe {
         windows::Win32::System::Com::CoInitializeEx(
@@ -247,14 +247,14 @@ fn main() {
                 .unwrap_or_default();
             Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
         }
-        ContainmentBackend::AgentSession => {
+        ContainmentBackend::IsolationSession => {
             if !request.experimental_enabled {
                 eprintln!(
-                    "Error: Agent Session is an experimental feature. Use --experimental flag."
+                    "Error: Isolation Session is an experimental feature. Use --experimental flag."
                 );
                 process::exit(1);
             }
-            Box::new(AgentSessionRunner::new())
+            Box::new(IsolationSessionRunner::new())
         }
     };
     let run_start = Instant::now();

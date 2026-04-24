@@ -21,9 +21,9 @@ pub enum ContainmentBackend {
     MicroVm,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
     WindowsSandbox,
-    /// Agent Session — process isolation via IsoEnvBroker Session API (experimental).
-    #[serde(rename = "agent_session")]
-    AgentSession,
+    /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
+    #[serde(rename = "isolation_session")]
+    IsolationSession,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
@@ -46,11 +46,11 @@ impl Default for WindowsSandboxConfig {
     }
 }
 
-/// Session configuration size for the Agent Session backend.
+/// Session configuration size for the Isolation Session backend.
 /// Maps to `IsolationConfigurationId` in the IsoEnvBroker Session API.
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum AgentSessionConfigurationId {
+pub enum IsolationSessionConfigurationId {
     #[default]
     Small,
     Medium,
@@ -58,13 +58,13 @@ pub enum AgentSessionConfigurationId {
     CommandLine,
 }
 
-/// Configuration specific to the Agent Session backend.
+/// Configuration specific to the Isolation Session backend.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AgentSessionConfig {
+pub struct IsolationSessionConfig {
     /// Session size/weight. Default: Small.
     #[serde(rename = "configurationId")]
-    pub configuration_id: AgentSessionConfigurationId,
+    pub configuration_id: IsolationSessionConfigurationId,
 }
 
 /// Configuration specific to the LXC container backend.
@@ -330,9 +330,9 @@ pub struct ExperimentalConfig {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// WSL Container (WSLC SDK) backend (experimental).
     pub wslc: Option<WslcConfig>,
-    /// Agent Session backend (experimental).
-    #[serde(rename = "agent_session")]
-    pub agent_session: Option<AgentSessionConfig>,
+    /// Isolation Session backend (experimental).
+    #[serde(rename = "isolation_session")]
+    pub isolation_session: Option<IsolationSessionConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

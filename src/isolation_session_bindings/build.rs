@@ -80,10 +80,10 @@ fn main() {
         if !actual.starts_with(&expected_version) {
             panic!(
                 "\n\n\
-                 agent_session_bindings: generated code targets windows crate {expected},\n\
+                 isolation_session_bindings: generated code targets windows crate {expected},\n\
                  but workspace has {actual}. Regenerate bindings:\n\
                  \n\
-                 cargo run --manifest-path tools/generate-agent-session-bindings/Cargo.toml -- <winmd-path>\n\
+                 cargo run --manifest-path tools/generate-isolation-session-bindings/Cargo.toml -- <winmd-path>\n\
                  \n",
                 expected = expected_version,
                 actual = actual,

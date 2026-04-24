@@ -4,7 +4,7 @@
 //! Generates Rust bindings for the IsoEnvBroker Session API from a WinMD file.
 //!
 //! Usage:
-//!   cargo run --manifest-path tools/generate-agent-session-bindings/Cargo.toml -- <winmd-path>
+//!   cargo run --manifest-path tools/generate-isolation-session-bindings/Cargo.toml -- <winmd-path>
 //!
 //! The WinMD file is built from the OS repo (amd64chk flavor):
 //!   obj/<flavor>/onecoreuap/windows/core/isoenvbroker/src/published/objchk/amd64/windows.ai.isolationenvironment.winmd
@@ -19,7 +19,7 @@ fn main() {
         eprintln!("Usage: {} <winmd-path>", args[0]);
         eprintln!();
         eprintln!("Generates Rust bindings from the IsoEnvBroker WinMD file.");
-        eprintln!("Output is written to src/agent_session_bindings/src/bindings.rs");
+        eprintln!("Output is written to src/isolation_session_bindings/src/bindings.rs");
         process::exit(1);
     }
 
@@ -38,7 +38,7 @@ fn main() {
 
     let output_path = repo_root
         .join("src")
-        .join("agent_session_bindings")
+        .join("isolation_session_bindings")
         .join("src")
         .join("bindings.rs");
 

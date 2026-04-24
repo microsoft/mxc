@@ -10,7 +10,7 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    AgentSessionConfig, ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend,
+    IsolationSessionConfig, ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend,
     ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
     PortMapping, ProxyAddress, ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
     WslcConfig,
@@ -139,7 +139,7 @@ struct RawTestFeature {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct RawAgentSession {
+struct RawIsolationSession {
     #[serde(rename = "configurationId")]
     configuration_id: Option<String>,
 }
@@ -151,8 +151,8 @@ struct RawExperimental {
     #[serde(rename = "windows_sandbox")]
     windows_sandbox: Option<RawSandbox>,
     wslc: Option<RawContainerConfig>,
-    #[serde(rename = "agent_session")]
-    agent_session: Option<RawAgentSession>,
+    #[serde(rename = "isolation_session")]
+    isolation_session: Option<RawIsolationSession>,
 }
 
 #[derive(Deserialize, Default)]
@@ -449,10 +449,10 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         Some("lxc") => ContainmentBackend::Lxc,
         Some("vm") => ContainmentBackend::Vm,
         Some("microvm") => ContainmentBackend::MicroVm,
-        Some("agent_session") => ContainmentBackend::AgentSession,
+        Some("isolation_session") => ContainmentBackend::IsolationSession,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'agent_session', 'wslc', 'lxc', 'vm', or 'microvm')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', or 'microvm')",
                 other
             );
             logger.log_line(&msg);
@@ -643,21 +643,21 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             }
             config
         });
-        let agent_session = raw_exp.agent_session.map(|as_cfg| {
-            let mut config = AgentSessionConfig::default();
+        let isolation_session = raw_exp.isolation_session.map(|as_cfg| {
+            let mut config = IsolationSessionConfig::default();
             if let Some(id) = as_cfg.configuration_id {
-                use crate::models::AgentSessionConfigurationId;
+                use crate::models::IsolationSessionConfigurationId;
                 config.configuration_id = match id.as_str() {
-                    "small" => AgentSessionConfigurationId::Small,
-                    "medium" => AgentSessionConfigurationId::Medium,
-                    "large" => AgentSessionConfigurationId::Large,
-                    "commandline" => AgentSessionConfigurationId::CommandLine,
+                    "small" => IsolationSessionConfigurationId::Small,
+                    "medium" => IsolationSessionConfigurationId::Medium,
+                    "large" => IsolationSessionConfigurationId::Large,
+                    "commandline" => IsolationSessionConfigurationId::CommandLine,
                     _ => {
                         logger.log_line(&format!(
-                            "Unknown agent_session configurationId '{}', defaulting to 'small'",
+                            "Unknown isolation_session configurationId '{}', defaulting to 'small'",
                             id
                         ));
-                        AgentSessionConfigurationId::Small
+                        IsolationSessionConfigurationId::Small
                     }
                 };
             }
@@ -667,7 +667,7 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             test,
             windows_sandbox,
             wslc,
-            agent_session,
+            isolation_session,
         }
     } else {
         ExperimentalConfig::default()
@@ -1784,111 +1784,111 @@ mod tests {
         assert!(!is_base_container_version("not-a-version"));
     }
 
-    // ====== Agent Session containment and config tests ======
+    // ====== Isolation Session containment and config tests ======
 
     #[test]
-    fn containment_agent_session_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "agent_session"}"#;
+    fn containment_isolation_session_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::AgentSession);
+        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
     }
 
     #[test]
-    fn agent_session_config_defaults() {
+    fn isolation_session_config_defaults() {
         let json =
-            r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {}}}"#;
+            r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.agent_session.unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
-            crate::models::AgentSessionConfigurationId::Small
+            crate::models::IsolationSessionConfigurationId::Small
         );
     }
 
     #[test]
-    fn agent_session_config_small() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"configurationId": "small"}}}"#;
+    fn isolation_session_config_small() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "small"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.agent_session.unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
-            crate::models::AgentSessionConfigurationId::Small
+            crate::models::IsolationSessionConfigurationId::Small
         );
     }
 
     #[test]
-    fn agent_session_config_medium() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"configurationId": "medium"}}}"#;
+    fn isolation_session_config_medium() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.agent_session.unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
-            crate::models::AgentSessionConfigurationId::Medium
+            crate::models::IsolationSessionConfigurationId::Medium
         );
     }
 
     #[test]
-    fn agent_session_config_large() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"configurationId": "large"}}}"#;
+    fn isolation_session_config_large() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "large"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.agent_session.unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
-            crate::models::AgentSessionConfigurationId::Large
+            crate::models::IsolationSessionConfigurationId::Large
         );
     }
 
     #[test]
-    fn agent_session_config_commandline() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"configurationId": "commandline"}}}"#;
+    fn isolation_session_config_commandline() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "commandline"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.agent_session.unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
-            crate::models::AgentSessionConfigurationId::CommandLine
+            crate::models::IsolationSessionConfigurationId::CommandLine
         );
     }
 
     #[test]
-    fn agent_session_config_unknown_defaults_to_small() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"agent_session": {"configurationId": "xlarge"}}}"#;
+    fn isolation_session_config_unknown_defaults_to_small() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "xlarge"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.agent_session.unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
-            crate::models::AgentSessionConfigurationId::Small
+            crate::models::IsolationSessionConfigurationId::Small
         );
     }
 
     #[test]
-    fn agent_session_absent_from_experimental() {
+    fn isolation_session_absent_from_experimental() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.experimental.agent_session.is_none());
+        assert!(req.experimental.isolation_session.is_none());
     }
 
 }
