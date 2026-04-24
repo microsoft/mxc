@@ -139,17 +139,26 @@ pub enum ClipboardPolicy {
     All,
 }
 
-/// Cross-platform UI policy parsed from the `ui` JSON section.
-/// Default-deny: UI is disabled, no clipboard, no injection.
+/// UI policy. All fields default to deny.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiPolicy {
-    /// When true, the sandbox cannot create visible windows (disables Win32k).
+    /// When true, the sandbox cannot use UI APIs (disables Win32k).
     pub disable: bool,
     /// Clipboard access level.
     pub clipboard: ClipboardPolicy,
     /// Whether input injection (keyboard/mouse) is allowed.
     pub injection: bool,
+    /// UI isolation level for the desktop (Windows BaseProcessContainer only).
+    pub isolation: String,
+    /// Whether desktop system control is allowed (Windows BaseProcessContainer only).
+    #[serde(rename = "desktopSystemControl")]
+    pub desktop_system_control: bool,
+    /// System settings access level (Windows BaseProcessContainer only).
+    #[serde(rename = "systemSettings")]
+    pub system_settings: String,
+    /// Whether IME (Input Method Editor) is allowed (Windows BaseProcessContainer only).
+    pub ime: bool,
 }
 
 impl Default for UiPolicy {
@@ -158,30 +167,6 @@ impl Default for UiPolicy {
             disable: true,
             clipboard: ClipboardPolicy::None,
             injection: false,
-        }
-    }
-}
-
-/// BaseProcessContainer-specific UI configuration (Windows only).
-/// Parsed from `appContainer.ui` in the JSON config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct BaseProcessUiConfig {
-    /// UI isolation level for the desktop.
-    pub isolation: String,
-    /// Whether desktop system control is allowed.
-    #[serde(rename = "desktopSystemControl")]
-    pub desktop_system_control: bool,
-    /// System settings access level.
-    #[serde(rename = "systemSettings")]
-    pub system_settings: String,
-    /// Whether IME (Input Method Editor) is allowed.
-    pub ime: bool,
-}
-
-impl Default for BaseProcessUiConfig {
-    fn default() -> Self {
-        Self {
             isolation: "container".to_string(),
             desktop_system_control: false,
             system_settings: "none".to_string(),
@@ -204,10 +189,8 @@ pub struct ContainerPolicy {
     pub blocked_hosts: Vec<String>,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
-    /// Cross-platform UI policy.
+    /// UI policy.
     pub ui: UiPolicy,
-    /// BaseProcessContainer-specific UI config (Windows only, from appContainer.ui).
-    pub base_process_ui: BaseProcessUiConfig,
 }
 
 /// Port mapping for host↔container port forwarding.

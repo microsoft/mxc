@@ -6,6 +6,16 @@
     "commandLine": "powershell.exe -NoProfile -Command \"$r = Get-Clipboard; Write-Output 'PASS: clipboard read allowed'\"",
     "timeout": 15000
   },
-  "appContainer": { "capabilities": [], "ui": { "isolation": "desktop", "desktopSystemControl": false, "systemSettings": "none", "ime": false } },
-  "ui": { "disable": false, "clipboard": "read", "injection": false }
+  "appContainer": {
+    "capabilities": []
+  },
+  "ui": {
+    "disable": false,
+    "clipboard": "read",
+    "injection": false,
+    "isolation": "desktop",
+    "desktopSystemControl": false,
+    "systemSettings": "none",
+    "ime": false
+  }
 }

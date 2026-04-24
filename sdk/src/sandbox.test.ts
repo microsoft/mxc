@@ -422,12 +422,35 @@ describe('createConfigFromPolicy', () => {
 
   it('should map UI fields correctly', () => {
     const config = createConfigFromPolicy({
-      version: '0.4.0-alpha',
-      ui: { allowWindows: true, clipboard: 'read', allowInputInjection: true },
+      version: '0.5.0-dev',
+      ui: {
+        allowWindows: true,
+        clipboard: 'read',
+        allowInputInjection: true,
+        isolation: 'desktop',
+        desktopSystemControl: true,
+        systemSettings: 'all',
+        ime: true,
+      },
     });
     assert.strictEqual(config.ui!.disable, false);
     assert.strictEqual(config.ui!.clipboard, 'read');
     assert.strictEqual(config.ui!.injection, true);
+    assert.strictEqual(config.ui!.isolation, 'desktop');
+    assert.strictEqual(config.ui!.desktopSystemControl, true);
+    assert.strictEqual(config.ui!.systemSettings, 'all');
+    assert.strictEqual(config.ui!.ime, true);
+  });
+
+  it('should default UI isolation fields to deny', () => {
+    const config = createConfigFromPolicy({ version: '0.5.0-dev' });
+    assert.strictEqual(config.ui!.disable, true);
+    assert.strictEqual(config.ui!.clipboard, 'none');
+    assert.strictEqual(config.ui!.injection, false);
+    assert.strictEqual(config.ui!.isolation, 'container');
+    assert.strictEqual(config.ui!.desktopSystemControl, false);
+    assert.strictEqual(config.ui!.systemSettings, 'none');
+    assert.strictEqual(config.ui!.ime, false);
   });
 
   it('should map timeoutMs to process.timeout', () => {
@@ -449,14 +472,14 @@ describe('createConfigFromPolicy', () => {
       }
     };
 
-    it('should set appContainer with UI defaults for process containment', () => {
+    it('should set appContainer and UI defaults for process containment', () => {
       mockWindows();
       try {
         const config = createConfigFromPolicy(defaultPolicy, 'process');
         assert.ok(config.appContainer);
         assert.deepStrictEqual(config.appContainer!.capabilities, []);
-        assert.strictEqual(config.appContainer!.ui!.isolation, 'container');
-        assert.strictEqual(config.appContainer!.ui!.desktopSystemControl, false);
+        assert.strictEqual(config.ui!.isolation, 'container');
+        assert.strictEqual(config.ui!.desktopSystemControl, false);
       } finally {
         restore();
       }

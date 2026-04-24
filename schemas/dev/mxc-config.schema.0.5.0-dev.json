@@ -155,12 +155,12 @@
 
     "ui": {
       "type": "object",
-      "description": "Cross-platform UI policy. Mapped from SandboxPolicy.ui by createConfigFromPolicy.",
+      "description": "UI policy for container.",
       "properties": {
         "disable": {
           "type": "boolean",
           "default": true,
-          "description": "Whether UI is disabled (no visible windows)."
+          "description": "Whether UI is disabled."
         },
         "clipboard": {
           "type": "string",
@@ -172,6 +172,27 @@
           "type": "boolean",
           "default": false,
           "description": "Whether input injection (keyboard/mouse) is allowed."
+        },
+        "isolation": {
+          "type": "string",
+          "enum": ["desktop", "handles", "atoms", "container"],
+          "default": "container",
+          "description": "UI isolation level for the desktop (Windows BaseProcessContainer only)."
+        },
+        "desktopSystemControl": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether desktop system control is allowed (Windows BaseProcessContainer only)."
+        },
+        "systemSettings": {
+          "type": "string",
+          "default": "none",
+          "description": "System settings access level (Windows BaseProcessContainer only)."
+        },
+        "ime": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether IME (Input Method Editor) is allowed (Windows BaseProcessContainer only)."
         }
       }
     },
@@ -190,33 +211,6 @@
           "items": { "type": "string" },
           "default": [],
           "description": "AppContainer capabilities (e.g., 'internetClient', 'registryRead')."
-        },
-        "ui": {
-          "type": "object",
-          "description": "BaseProcessContainer-specific UI settings (Windows only).",
-          "properties": {
-            "isolation": {
-              "type": "string",
-              "enum": ["desktop", "handles", "atoms", "container"],
-              "default": "container",
-              "description": "UI isolation level for the desktop."
-            },
-            "desktopSystemControl": {
-              "type": "boolean",
-              "default": false,
-              "description": "Whether desktop system control is allowed."
-            },
-            "systemSettings": {
-              "type": "string",
-              "default": "none",
-              "description": "System settings access level."
-            },
-            "ime": {
-              "type": "boolean",
-              "default": false,
-              "description": "Whether IME (Input Method Editor) is allowed."
-            }
-          }
         }
       }
     },

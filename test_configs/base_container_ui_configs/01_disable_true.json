@@ -6,6 +6,16 @@
     "commandLine": "cmd.exe /c echo PASS: process ran with Win32k disabled",
     "timeout": 15000
   },
-  "appContainer": { "capabilities": [], "ui": { "isolation": "container", "desktopSystemControl": false, "systemSettings": "none", "ime": false } },
-  "ui": { "disable": true, "clipboard": "none", "injection": false }
+  "appContainer": {
+    "capabilities": []
+  },
+  "ui": {
+    "disable": true,
+    "clipboard": "none",
+    "injection": false,
+    "isolation": "container",
+    "desktopSystemControl": false,
+    "systemSettings": "none",
+    "ime": false
+  }
 }

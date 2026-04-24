@@ -50,31 +50,23 @@ export const ExperimentalBackends: readonly ContainmentType[] = ['microvm', 'wsl
 export type ClipboardPolicy = "none" | "read" | "write" | "all";
 
 /**
- * Cross-platform UI configuration in ContainerConfig.
- * Mapped from SandboxPolicy.ui by createConfigFromPolicy.
+ * UI configuration in ContainerConfig. All fields default to deny.
  */
 export interface UiConfig {
-  /** Whether UI is disabled (no visible windows). Maps from !policy.ui.allowWindows. */
+  /** Whether UI is disabled. Maps from !policy.ui.allowWindows. */
   disable: boolean;
   /** Clipboard access level */
   clipboard: ClipboardPolicy;
   /** Whether input injection is allowed */
   injection: boolean;
-}
-
-/**
- * BaseProcess-specific UI configuration (Windows only).
- * Lives under appContainer.ui in ContainerConfig.
- */
-export interface BaseProcessUiConfig {
-  /** UI isolation level for the desktop */
-  isolation: "desktop" | "handles" | "atoms" | "container";
-  /** Whether desktop system control is allowed */
-  desktopSystemControl: boolean;
-  /** System settings access level */
-  systemSettings: string;
-  /** Whether IME (Input Method Editor) is allowed */
-  ime: boolean;
+  /** UI isolation level for the desktop (Windows BaseProcessContainer only) */
+  isolation?: "desktop" | "handles" | "atoms" | "container";
+  /** Whether desktop system control is allowed (Windows BaseProcessContainer only) */
+  desktopSystemControl?: boolean;
+  /** System settings access level (Windows BaseProcessContainer only) */
+  systemSettings?: string;
+  /** Whether IME (Input Method Editor) is allowed (Windows BaseProcessContainer only) */
+  ime?: boolean;
 }
 
 /**
@@ -87,8 +79,6 @@ export interface AppContainerConfig {
   leastPrivilege?: boolean;
   /** Additional AppContainer capabilities (e.g., "registryRead", "internetClient") */
   capabilities?: string[];
-  /** BaseProcess-specific UI settings (Windows only) */
-  ui?: BaseProcessUiConfig;
 }
 
 /**
@@ -233,12 +223,20 @@ export type SandboxPolicy = {
   };
   /** UI access restrictions. All flags default to denied. */
   ui?: {
-      /** Whether the sandbox may create visible windows. (default: false) */
+      /** Whether the sandbox may use UI APIs (e.g. Win32k system calls). (default: false) */
       allowWindows?: boolean;
       /** Clipboard access level. (default: "none") */
       clipboard?: ClipboardPolicy;
       /** Whether the sandbox may inject keyboard/mouse input. (default: false) */
       allowInputInjection?: boolean;
+      /** UI isolation level for the desktop. (default: "container") */
+      isolation?: "desktop" | "handles" | "atoms" | "container";
+      /** Whether desktop system control is allowed. (default: false) */
+      desktopSystemControl?: boolean;
+      /** System settings access level. (default: "none") */
+      systemSettings?: string;
+      /** Whether IME (Input Method Editor) is allowed. (default: false) */
+      ime?: boolean;
   };
   /** Execution timeout in milliseconds. Omitted = no timeout. */
   timeoutMs?: number;
