@@ -150,6 +150,9 @@ $null = $results.Add((Run-WslcTest "wslc_custom_registry_quay.json" -OutputConta
 $null = $results.Add((Run-WslcTest "wslc_tar_import_rootfs.json" -OutputContains "Hello from tar-imported image"))
 $null = $results.Add((Run-WslcTest "wslc_tar_import_docker_save.json" -OutputContains "Hello from docker-save image"))
 
+Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
+$null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -OutputContains "Starting long task"))
+
 # Summary
 $passed = ($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count
 $failed = ($results | Where-Object { -not $_.Pass -and -not $_.Skipped }).Count
