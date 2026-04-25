@@ -70,9 +70,10 @@ npm run test:integration
 node --test dist/cli.test.js
 
 # Local PowerShell helpers — run from repo root, require built binaries
-test_scripts\run_test_configs.ps1           # All test configs via wxc_test_driver
-test_scripts\run_basicac_test.ps1           # Single AppContainer test
-test_scripts\run_lxc_all_tests.sh           # All LXC tests (Linux)
+test_scripts\run_test_configs.ps1            # All test configs via wxc_test_driver
+test_scripts\run_basicac_test.ps1            # Single AppContainer test
+test_scripts\run_isolation_session_tests.ps1 # IsolationSession E2E (requires IsoEnvBroker host)
+test_scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
 
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
@@ -93,6 +94,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 | BaseContainer (OS sandbox API) | `wxc-exec.exe` | Windows | `base_container_runner.rs` — calls `Experimental_CreateProcessInSandbox` via FlatBuffer |
 | Windows Sandbox | `wxc-exec.exe` | Windows | `windows_sandbox_runner.rs` |
 | MicroVM (NanVix) | `wxc-exec.exe` | Windows | `nanvix_runner.rs` — feature-gated behind `microvm` |
+| IsolationSession | `wxc-exec.exe` | Windows | `isolation_session_runner.rs` — feature-gated behind `isolation_session`, experimental, calls the IsoEnvBroker `Windows.AI.IsolationEnvironment.Session` API |
 | LXC | `lxc-exec` | Linux | `lxc/src/main.rs` + `lxc_common/` |
 
 ### Config flow
@@ -122,6 +124,7 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
 - `docs/lxc-backend.md` — LXC container backend details
 - `docs/windows-sandbox.md` / `docs/windows-sandbox-reference.md` — Windows Sandbox backend
+- `docs/isolation-session-plan.md` — IsolationSession backend (experimental, isolated user account per execution via the OS-side IsoEnvBroker)
 - `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
 
 ## Key Conventions
