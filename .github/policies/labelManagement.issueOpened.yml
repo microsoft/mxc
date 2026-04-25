@@ -23,5 +23,88 @@ configuration:
         then:
           - addLabel:
               label: Needs-Triage
+      ### Issue Type Labels
+      - description: Add Issue-Bug label to bug reports
+        if:
+          - payloadType: Issues
+          - isAction:
+              action: Opened
+          - bodyContains:
+              pattern: '### Steps to reproduce'
+              isRegex: False
+        then:
+          - addLabel:
+              label: Issue-Bug
+      - description: Add Issue-Feature label to feature requests
+        if:
+          - payloadType: Issues
+          - isAction:
+              action: Opened
+          - bodyContains:
+              pattern: '### Description of the new feature'
+              isRegex: False
+        then:
+          - addLabel:
+              label: Issue-Feature
+      - description: Add Issue-Task label to tasks
+        if:
+          - payloadType: Issues
+          - isAction:
+              action: Opened
+          - bodyContains:
+              pattern: '### Description of the task'
+              isRegex: False
+        then:
+          - addLabel:
+              label: Issue-Task
+      - description: Add Issue-Docs label to documentation issues
+        if:
+          - payloadType: Issues
+          - isAction:
+              action: Opened
+          - bodyContains:
+              pattern: '### Brief description of your issue'
+              isRegex: False
+          - not:
+              bodyContains:
+                pattern: '### Steps to reproduce'
+                isRegex: False
+        then:
+          - addLabel:
+              label: Issue-Docs
+      ### OS Area Labels
+      - description: Add OS-Linux label from bug report area
+        if:
+          - payloadType: Issues
+          - isAction:
+              action: Opened
+          - bodyContains:
+              pattern: 'Relevant area\(s\)\s*\n.*Linux'
+              isRegex: True
+        then:
+          - addLabel:
+              label: OS-Linux
+      - description: Add OS-MacOS label from bug report area
+        if:
+          - payloadType: Issues
+          - isAction:
+              action: Opened
+          - bodyContains:
+              pattern: 'Relevant area\(s\)\s*\n.*macOS'
+              isRegex: True
+        then:
+          - addLabel:
+              label: OS-MacOS
+      - description: Add OS-Windows label from bug report area
+        if:
+          - payloadType: Issues
+          - isAction:
+              action: Opened
+          - bodyContains:
+              pattern: 'Relevant area\(s\)\s*\n.*Windows'
+              isRegex: True
+        then:
+          - addLabel:
+              label: OS-Windows
 onFailure:
 onSuccess:
