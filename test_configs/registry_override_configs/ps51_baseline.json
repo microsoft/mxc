@@ -1,0 +1,26 @@
+{
+  "version": "0.5.0-dev",
+  "containerId": "RegOverride-Baseline",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoProfile -Command \"Set-Content -Path C:\\MxcTestOutput\\marker.txt -Value 'baseline config'; $PSVersionTable.PSVersion\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\Windows\\System32\\WindowsPowerShell",
+      "C:\\MxcTestOutput"
+    ],
+    "readonlyPaths": [
+      "C:\\"
+    ]
+  },
+  "ui": {
+    "disable": false
+  },
+  "appContainer": {
+    "ui": {
+      "isolation": "desktop"
+    }
+  }
+}

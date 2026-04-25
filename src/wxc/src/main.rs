@@ -14,6 +14,7 @@ use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::nanvix_runner::NanVixScriptRunner;
+use wxc_common::registry_config::check_registry_override;
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 
@@ -155,6 +156,18 @@ fn main() {
     };
 
     request.experimental_enabled = cli.experimental;
+
+    // Check for registry-based per-executable config override.
+    match check_registry_override(&mut request, &mut logger) {
+        Ok(true) => {
+            let _ = writeln!(logger, "Registry override applied");
+        }
+        Ok(false) => {} // No override found — continue normally.
+        Err(e) => {
+            let _ = writeln!(logger, "Registry override error: {}", e);
+            // Non-fatal: proceed with original config.
+        }
+    }
 
     log_request(&request, &mut logger);
 

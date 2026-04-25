@@ -33,3 +33,7 @@ pub mod windows_sandbox_runner;
 // BaseContainer (composable sandbox) support
 #[cfg(target_os = "windows")]
 pub mod base_container_runner;
+
+// Registry-based per-executable config override
+#[cfg(target_os = "windows")]
+pub mod registry_config;

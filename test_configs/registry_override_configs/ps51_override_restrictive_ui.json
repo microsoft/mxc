@@ -1,0 +1,20 @@
+{
+  "version": "0.5.0-dev",
+  "containerId": "RegOverride-PS51-RestrictUI",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoProfile -Command \"Write-Output 'Hello with restrictive UI'\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\Windows\\System32\\WindowsPowerShell"
+    ],
+    "readonlyPaths": [
+      "C:\\"
+    ]
+  },
+  "ui": {
+    "disable": true
+  }
+}
