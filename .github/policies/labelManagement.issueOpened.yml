@@ -32,6 +32,16 @@ configuration:
           - bodyContains:
               pattern: '### Steps to reproduce'
               isRegex: False
+          - not:
+              or:
+                - hasLabel:
+                    label: Issue-Bug
+                - hasLabel:
+                    label: Issue-Feature
+                - hasLabel:
+                    label: Issue-Task
+                - hasLabel:
+                    label: Issue-Docs
         then:
           - addLabel:
               label: Issue-Bug
@@ -43,6 +53,16 @@ configuration:
           - bodyContains:
               pattern: '### Description of the new feature'
               isRegex: False
+          - not:
+              or:
+                - hasLabel:
+                    label: Issue-Bug
+                - hasLabel:
+                    label: Issue-Feature
+                - hasLabel:
+                    label: Issue-Task
+                - hasLabel:
+                    label: Issue-Docs
         then:
           - addLabel:
               label: Issue-Feature
@@ -54,6 +74,16 @@ configuration:
           - bodyContains:
               pattern: '### Description of the task'
               isRegex: False
+          - not:
+              or:
+                - hasLabel:
+                    label: Issue-Bug
+                - hasLabel:
+                    label: Issue-Feature
+                - hasLabel:
+                    label: Issue-Task
+                - hasLabel:
+                    label: Issue-Docs
         then:
           - addLabel:
               label: Issue-Task
@@ -69,6 +99,16 @@ configuration:
               bodyContains:
                 pattern: '### Steps to reproduce'
                 isRegex: False
+          - not:
+              or:
+                - hasLabel:
+                    label: Issue-Bug
+                - hasLabel:
+                    label: Issue-Feature
+                - hasLabel:
+                    label: Issue-Task
+                - hasLabel:
+                    label: Issue-Docs
         then:
           - addLabel:
               label: Issue-Docs
