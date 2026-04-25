@@ -10,8 +10,8 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    IsolationSessionConfig, ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend,
-    ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
+    ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
+    IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
     PortMapping, ProxyAddress, ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
     WslcConfig,
 };
@@ -1890,5 +1890,4 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.experimental.isolation_session.is_none());
     }
-
 }

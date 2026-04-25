@@ -24,18 +24,16 @@ fn main() {
     let contents = std::fs::read_to_string(&info_path).unwrap_or_default();
 
     // Extract the expected windows crate version from the TOML.
-    let expected = contents
-        .lines()
-        .find_map(|line| {
-            let line = line.trim();
-            if line.starts_with("target_windows_crate") {
-                line.split('=').nth(1).map(|v| {
-                    v.trim().trim_matches('"').to_string()
-                })
-            } else {
-                None
-            }
-        });
+    let expected = contents.lines().find_map(|line| {
+        let line = line.trim();
+        if line.starts_with("target_windows_crate") {
+            line.split('=')
+                .nth(1)
+                .map(|v| v.trim().trim_matches('"').to_string())
+        } else {
+            None
+        }
+    });
 
     let Some(expected_version) = expected else {
         // No version constraint found — skip check.

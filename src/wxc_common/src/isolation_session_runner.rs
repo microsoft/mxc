@@ -18,8 +18,7 @@ use crate::logger::Logger;
 use crate::models::{CodexRequest, IsolationSessionConfigurationId, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 use isolation_session_bindings::bindings::{
-    IsolationSessionClient,
-    IsolationSessionConfigurationId as BindingsConfigurationId,
+    IsolationSessionClient, IsolationSessionConfigurationId as BindingsConfigurationId,
     IsolationSessionOperationStatus, IsolationSessionProvisionLifetimePolicy,
     IsolationSessionProvisionOptions, IsolationSessionProvisionStatus,
     IsolationSessionRegistrationStatus, IsolationSessionWorkerProcessCreateOptions,
@@ -234,10 +233,7 @@ impl IsolationSessionManager {
     }
 
     /// Step 2: Start the isolation session (log the agent user into a Windows session).
-    pub fn start_session(
-        &self,
-        config_id: IsolationSessionConfigurationId,
-    ) -> Result<(), String> {
+    pub fn start_session(&self, config_id: IsolationSessionConfigurationId) -> Result<(), String> {
         let config_id_com: BindingsConfigurationId = config_id.into();
         let async_op = IsolationSessionClient::StartSessionAsync(
             &self.registration_id,
@@ -253,10 +249,7 @@ impl IsolationSessionManager {
         match status {
             IsolationSessionOperationStatus::Succeeded
             | IsolationSessionOperationStatus::SessionAlreadyStarted => Ok(()),
-            _ => Err(format!(
-                "StartSessionAsync returned status: {}",
-                status.0
-            )),
+            _ => Err(format!("StartSessionAsync returned status: {}", status.0)),
         }
     }
 
@@ -373,11 +366,9 @@ impl IsolationSessionManager {
 
     /// Step 4: Stop the isolation session.
     pub fn stop_session(&self) -> Result<(), String> {
-        let async_op = IsolationSessionClient::StopSessionAsync(
-            &self.registration_id,
-            &self.provision_id,
-        )
-        .map_err(|e| format!("StopSessionAsync failed: {}", e))?;
+        let async_op =
+            IsolationSessionClient::StopSessionAsync(&self.registration_id, &self.provision_id)
+                .map_err(|e| format!("StopSessionAsync failed: {}", e))?;
 
         let status = async_op
             .join()
@@ -386,10 +377,7 @@ impl IsolationSessionManager {
         match status {
             IsolationSessionOperationStatus::Succeeded
             | IsolationSessionOperationStatus::SessionNotStarted => Ok(()),
-            _ => Err(format!(
-                "StopSessionAsync returned status: {}",
-                status.0
-            )),
+            _ => Err(format!("StopSessionAsync returned status: {}", status.0)),
         }
     }
 
@@ -416,9 +404,8 @@ impl IsolationSessionManager {
 
     /// Step 6: Unregister the client.
     pub fn unregister_client(&self) -> Result<(), String> {
-        let async_op =
-            IsolationSessionClient::UnregisterClientAsync(&self.registration_id)
-                .map_err(|e| format!("UnregisterClientAsync failed: {}", e))?;
+        let async_op = IsolationSessionClient::UnregisterClientAsync(&self.registration_id)
+            .map_err(|e| format!("UnregisterClientAsync failed: {}", e))?;
 
         let _status = async_op
             .join()
@@ -441,7 +428,9 @@ fn read_pipe_and_close(handle_value: u64) -> String {
         }
         output.extend_from_slice(&buffer[..bytes_read as usize]);
     }
-    unsafe { let _ = CloseHandle(handle); }
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
     String::from_utf8_lossy(&output).to_string()
 }
 
@@ -479,7 +468,11 @@ impl ScriptRunner for IsolationSessionRunner {
         }
 
         let options = build_process_options(request);
-        let _ = writeln!(logger, "Isolation Session: process={}", options.process_path);
+        let _ = writeln!(
+            logger,
+            "Isolation Session: process={}",
+            options.process_path
+        );
         let _ = writeln!(logger, "Isolation Session: arguments={}", options.arguments);
 
         // Read isolation_session config (configuration id).
@@ -686,10 +679,7 @@ mod tests {
     fn options_parses_env_vars() {
         let request = CodexRequest {
             script_code: "echo hi".to_string(),
-            env: vec![
-                "FOO=bar".to_string(),
-                "PATH=C:\\bin;C:\\tools".to_string(),
-            ],
+            env: vec!["FOO=bar".to_string(), "PATH=C:\\bin;C:\\tools".to_string()],
             ..Default::default()
         };
         let opts = build_process_options(&request);
