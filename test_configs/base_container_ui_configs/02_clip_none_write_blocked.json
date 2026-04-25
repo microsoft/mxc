@@ -6,16 +6,6 @@
     "commandLine": "cmd.exe /c \"echo test | clip.exe && echo FAIL: wrote clipboard || echo PASS: clipboard write blocked\"",
     "timeout": 15000
   },
-  "appContainer": {
-    "capabilities": []
-  },
-  "ui": {
-    "disable": false,
-    "clipboard": "none",
-    "injection": false,
-    "isolation": "desktop",
-    "desktopSystemControl": false,
-    "systemSettings": "none",
-    "ime": false
-  }
+  "appContainer": { "capabilities": [], "ui": { "isolation": "desktop", "desktopSystemControl": false, "systemSettings": "none", "ime": false } },
+  "ui": { "disable": false, "clipboard": "none", "injection": false }
 }

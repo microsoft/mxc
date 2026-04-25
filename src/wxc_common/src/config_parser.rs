@@ -25,6 +25,18 @@ struct RawAppContainer {
     #[serde(rename = "learningMode")]
     learning_mode: Option<bool>,
     capabilities: Option<Vec<String>>,
+    ui: Option<RawBaseProcessUi>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawBaseProcessUi {
+    isolation: Option<String>,
+    #[serde(rename = "desktopSystemControl")]
+    desktop_system_control: Option<bool>,
+    #[serde(rename = "systemSettings")]
+    system_settings: Option<String>,
+    ime: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -139,12 +151,6 @@ struct RawUi {
     disable: Option<bool>,
     clipboard: Option<String>,
     injection: Option<bool>,
-    isolation: Option<String>,
-    #[serde(rename = "desktopSystemControl")]
-    desktop_system_control: Option<bool>,
-    #[serde(rename = "systemSettings")]
-    system_settings: Option<String>,
-    ime: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -463,6 +469,17 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
                 }
             });
         }
+
+        // BaseProcessContainer-specific UI config
+        if let Some(raw_ui) = ac.ui {
+            policy.base_process_ui.isolation =
+                raw_ui.isolation.unwrap_or_else(|| "container".to_string());
+            policy.base_process_ui.desktop_system_control =
+                raw_ui.desktop_system_control.unwrap_or(false);
+            policy.base_process_ui.system_settings =
+                raw_ui.system_settings.unwrap_or_else(|| "none".to_string());
+            policy.base_process_ui.ime = raw_ui.ime.unwrap_or(false);
+        }
     }
 
     // Filesystem section
@@ -606,10 +623,6 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             disable: raw_ui.disable.unwrap_or(true),
             clipboard,
             injection: raw_ui.injection.unwrap_or(false),
-            isolation: raw_ui.isolation.unwrap_or_else(|| "container".to_string()),
-            desktop_system_control: raw_ui.desktop_system_control.unwrap_or(false),
-            system_settings: raw_ui.system_settings.unwrap_or_else(|| "none".to_string()),
-            ime: raw_ui.ime.unwrap_or(false),
         };
     }
 

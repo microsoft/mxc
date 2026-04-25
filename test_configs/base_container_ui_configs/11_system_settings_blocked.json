@@ -6,16 +6,6 @@
     "commandLine": "cmd.exe /c \"mode con cols=40 2>nul && echo FAIL: display settings changed || echo PASS: display settings blocked\"",
     "timeout": 15000
   },
-  "appContainer": {
-    "capabilities": []
-  },
-  "ui": {
-    "disable": false,
-    "clipboard": "none",
-    "injection": false,
-    "isolation": "desktop",
-    "desktopSystemControl": false,
-    "systemSettings": "none",
-    "ime": false
-  }
+  "appContainer": { "capabilities": [], "ui": { "isolation": "desktop", "desktopSystemControl": false, "systemSettings": "none", "ime": false } },
+  "ui": { "disable": false, "clipboard": "none", "injection": false }
 }

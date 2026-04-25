@@ -134,6 +134,12 @@ function buildProcessBaseContainerConfig(
         name: containerId,
         leastPrivilege: false,
         capabilities,
+        ui: {
+            isolation: "container",
+            desktopSystemControl: false,
+            systemSettings: "none",
+            ime: false,
+        },
     };
 
     // Network enforcement: use firewall only when host filtering is needed (requires admin)
@@ -204,7 +210,7 @@ function buildMicroVmConfig(
  *
  * // Advanced: tweak backend-specific settings
  * const config = createConfigFromPolicy(policy, "process");
- * config.ui!.isolation = "atoms";
+ * config.appContainer!.ui!.isolation = "atoms";
  * ```
  */
 export function createConfigFromPolicy(
@@ -242,15 +248,11 @@ export function createConfigFromPolicy(
         deniedPaths: [...(policy.filesystem?.deniedPaths ?? [])],
     };
 
-    // UI mapping
+    // UI mapping (cross-platform)
     config.ui = {
         disable: !(policy.ui?.allowWindows ?? false),
         clipboard: policy.ui?.clipboard ?? "none",
         injection: policy.ui?.allowInputInjection ?? false,
-        isolation: policy.ui?.isolation ?? "container",
-        desktopSystemControl: policy.ui?.desktopSystemControl ?? false,
-        systemSettings: policy.ui?.systemSettings ?? "none",
-        ime: policy.ui?.ime ?? false,
     };
 
     // Network mapping (cross-platform) — default-deny: block if not explicitly allowed
@@ -592,7 +594,7 @@ export function spawnSandboxWithoutPty(
  * ```typescript
  * const config = createConfigFromPolicy(policy, "process");
  * config.process!.commandLine = 'echo hello';
- * config.ui!.isolation = "atoms";
+ * config.appContainer!.ui!.isolation = "atoms";
  * const ptyProcess = spawnSandboxFromConfig(config);
  * ```
  */
