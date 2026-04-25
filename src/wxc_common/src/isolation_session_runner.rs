@@ -465,6 +465,12 @@ impl IsolationSessionRunner {
     }
 }
 
+impl Default for IsolationSessionRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScriptRunner for IsolationSessionRunner {
     fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         // Validate unsupported policy fields.
