@@ -453,6 +453,15 @@ impl ScriptRunner for BaseContainerRunner {
         };
 
         if success == 0 {
+            // Clean up any partially-populated handles from the failed API call.
+            unsafe {
+                if !pi.hProcess.is_invalid() {
+                    let _ = CloseHandle(pi.hProcess);
+                }
+                if !pi.hThread.is_invalid() {
+                    let _ = CloseHandle(pi.hThread);
+                }
+            }
             let err = unsafe { GetLastError() };
             if err.0 == ERROR_CALL_NOT_IMPLEMENTED {
                 return ScriptResponse::error(

@@ -7,6 +7,8 @@
 use serde::ser::Error as _;
 use serde::{Deserialize, Serialize};
 
+const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024; // 16 MB
+
 // ---------------------------------------------------------------------------
 // Message types
 // ---------------------------------------------------------------------------
@@ -105,6 +107,9 @@ pub fn decode_message(buf: &[u8]) -> Result<DecodeResult, serde_json::Error> {
         return Ok(DecodeResult::Incomplete);
     }
     let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if len > MAX_FRAME_SIZE {
+        return Err(serde_json::Error::custom("frame too large"));
+    }
     let total = 4 + len;
     if buf.len() < total {
         return Ok(DecodeResult::Incomplete);
