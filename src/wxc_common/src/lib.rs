@@ -6,6 +6,8 @@ pub mod config_parser;
 pub mod encoding;
 pub mod error;
 pub mod logger;
+#[cfg(target_os = "windows")]
+pub mod microvm_staging;
 pub mod models;
 #[cfg(target_os = "windows")]
 pub mod nanvix_runner;

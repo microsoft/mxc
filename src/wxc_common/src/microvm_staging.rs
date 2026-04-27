@@ -1,0 +1,496 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! MicroVM staging directory builder for mount-based script delivery.
+
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use uuid::Uuid;
+
+/// Maximum allowed total staging directory size (16 MB).
+pub const MAX_STAGING_BYTES: u64 = 16 * 1024 * 1024;
+/// Bootstrap Python loader filename.
+pub const BOOTSTRAP_FILENAME: &str = ".mxc-bootstrap.py";
+/// User script filename in staging.
+pub const SCRIPT_FILENAME: &str = ".mxc-script.py";
+/// Path map JSON filename in staging.
+pub const PATHMAP_FILENAME: &str = ".mxc-pathmap.json";
+/// Subdirectory for read-write staged host paths.
+pub const RW_DIR: &str = "rw";
+/// Subdirectory for read-only staged host paths.
+pub const RO_DIR: &str = "ro";
+/// Bootstrap Python source used by the guest runtime.
+pub const BOOTSTRAP_SOURCE: &str = "import json, os, runpy, sys
+with open('/mnt/.mxc-pathmap.json') as f:
+    for slug, guest_path in json.load(f).items():
+        os.environ[f'MXC_PATH_{slug}'] = guest_path
+sys.argv = ['/mnt/.mxc-script.py']
+runpy.run_path(sys.argv[0], run_name='__main__')
+";
+
+/// Errors produced while creating or validating a staging directory.
+#[derive(Debug)]
+pub enum StagingError {
+    /// A requested host path does not exist.
+    PathNotFound(String),
+    /// Total staged content exceeded the configured cap.
+    SizeCapExceeded { actual_mb: f64, limit_mb: f64 },
+    /// Denied-path policy is not supported.
+    DeniedPathsNotSupported,
+    /// A symlink was found in a source path.
+    SymlinkFound(String),
+    /// I/O failure.
+    Io(std::io::Error),
+}
+
+impl fmt::Display for StagingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StagingError::PathNotFound(path) => {
+                write!(f, "host path does not exist: {}", path)
+            }
+            StagingError::SizeCapExceeded {
+                actual_mb,
+                limit_mb,
+            } => write!(
+                f,
+                "staging size cap exceeded: {:.2} MB > {:.2} MB",
+                actual_mb, limit_mb
+            ),
+            StagingError::DeniedPathsNotSupported => {
+                write!(f, "denied_paths are not supported in microvm staging")
+            }
+            StagingError::SymlinkFound(path) => {
+                write!(f, "symlink found in source path: {}", path)
+            }
+            StagingError::Io(err) => write!(f, "staging I/O error: {}", err),
+        }
+    }
+}
+
+impl From<std::io::Error> for StagingError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+/// RAII wrapper over a temporary staging directory.
+#[derive(Debug)]
+pub struct StagingDir {
+    path: PathBuf,
+    path_map: BTreeMap<String, String>,
+}
+
+impl StagingDir {
+    /// Creates and populates a staging directory under `root`.
+    pub fn new(
+        root: PathBuf,
+        script: &str,
+        readwrite_paths: &[String],
+        readonly_paths: &[String],
+    ) -> Result<Self, StagingError> {
+        fs::create_dir_all(&root)?;
+        let path = root.join(format!("mxc-staging-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&path)?;
+
+        let build_result = || -> Result<BTreeMap<String, String>, StagingError> {
+            fs::write(path.join(BOOTSTRAP_FILENAME), BOOTSTRAP_SOURCE)?;
+            fs::write(path.join(SCRIPT_FILENAME), script)?;
+
+            let mut used_slugs: Vec<String> = Vec::new();
+            let mut path_map: BTreeMap<String, String> = BTreeMap::new();
+
+            if !readwrite_paths.is_empty() {
+                fs::create_dir_all(path.join(RW_DIR))?;
+            }
+            for source in readwrite_paths {
+                let host_path = PathBuf::from(source);
+                if !host_path.exists() {
+                    return Err(StagingError::PathNotFound(source.clone()));
+                }
+                check_no_symlinks(&host_path)?;
+
+                let slug = allocate_slug(&host_path, &mut used_slugs);
+                let slot_dir = path.join(RW_DIR).join(&slug);
+                stage_host_path(&host_path, &slot_dir)?;
+                path_map.insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RW_DIR, slug));
+            }
+
+            if !readonly_paths.is_empty() {
+                fs::create_dir_all(path.join(RO_DIR))?;
+            }
+            for source in readonly_paths {
+                let host_path = PathBuf::from(source);
+                if !host_path.exists() {
+                    return Err(StagingError::PathNotFound(source.clone()));
+                }
+                check_no_symlinks(&host_path)?;
+
+                let slug = allocate_slug(&host_path, &mut used_slugs);
+                let slot_dir = path.join(RO_DIR).join(&slug);
+                if host_path.is_dir() {
+                    copy_dir_recursive(&host_path, &slot_dir)?;
+                } else {
+                    fs::create_dir_all(&slot_dir)?;
+                    let file_name = host_path
+                        .file_name()
+                        .ok_or_else(|| StagingError::PathNotFound(source.clone()))?;
+                    fs::copy(&host_path, slot_dir.join(file_name))?;
+                }
+                set_readonly_recursive(&slot_dir)?;
+                path_map.insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RO_DIR, slug));
+            }
+
+            let serialized = serde_json::to_string(&path_map).map_err(|e| {
+                StagingError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            })?;
+            fs::write(path.join(PATHMAP_FILENAME), serialized)?;
+
+            let size = dir_size(&path)?;
+            if size > MAX_STAGING_BYTES {
+                return Err(StagingError::SizeCapExceeded {
+                    actual_mb: size as f64 / (1024.0 * 1024.0),
+                    limit_mb: MAX_STAGING_BYTES as f64 / (1024.0 * 1024.0),
+                });
+            }
+
+            Ok(path_map)
+        }();
+
+        let path_map = match build_result {
+            Ok(path_map) => path_map,
+            Err(err) => {
+                let _ = fs::remove_dir_all(&path);
+                return Err(err);
+            }
+        };
+
+        Ok(Self { path, path_map })
+    }
+
+    /// Returns the host path to the staging directory.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns the host-path slug to guest-path map.
+    pub fn path_map(&self) -> &BTreeMap<String, String> {
+        &self.path_map
+    }
+
+    /// Returns additional staging overhead in milliseconds.
+    pub fn staging_overhead_ms(&self) -> u64 {
+        let bytes = dir_size(&self.path).unwrap_or(0);
+        let ms = ((bytes as f64 / (1024.0 * 1024.0)) * 100.0) as u64;
+        ms.min(30_000)
+    }
+}
+
+impl Drop for StagingDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Allocates a unique slug from a source host path.
+fn allocate_slug(host_path: &Path, used: &mut Vec<String>) -> String {
+    let base = host_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("path")
+        .to_ascii_lowercase()
+        .replace('-', "_");
+
+    if !used.iter().any(|s| s == &base) {
+        used.push(base.clone());
+        return base;
+    }
+
+    let mut counter = 2_u64;
+    loop {
+        let candidate = format!("{}_{}", base, counter);
+        if !used.iter().any(|s| s == &candidate) {
+            used.push(candidate.clone());
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+/// Converts a slug to an upper snake case environment key suffix.
+pub fn slug_to_env_key(slug: &str) -> String {
+    slug.chars()
+        .map(|ch| match ch {
+            'a'..='z' => ch.to_ascii_uppercase(),
+            'A'..='Z' | '0'..='9' => ch,
+            _ => '_',
+        })
+        .collect()
+}
+
+/// Stages a single host path in a target slot directory.
+fn stage_host_path(host_path: &Path, slot_dir: &Path) -> Result<(), StagingError> {
+    if host_path.is_dir() {
+        if try_create_junction(host_path, slot_dir) {
+            return Ok(());
+        }
+        return copy_dir_recursive(host_path, slot_dir);
+    }
+
+    fs::create_dir_all(slot_dir)?;
+    let file_name = host_path
+        .file_name()
+        .ok_or_else(|| StagingError::PathNotFound(host_path.display().to_string()))?;
+    fs::copy(host_path, slot_dir.join(file_name))?;
+    Ok(())
+}
+
+/// Attempts to create a junction from `target` to `source`.
+#[cfg(target_os = "windows")]
+fn try_create_junction(source: &Path, target: &Path) -> bool {
+    let source_text = source.display().to_string();
+    let target_text = target.display().to_string();
+    let cmdline = format!("mklink /J \"{}\" \"{}\"", target_text, source_text);
+
+    Command::new("cmd")
+        .arg("/C")
+        .arg(cmdline)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Copies a directory recursively.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), StagingError> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let source = entry.path();
+        let target = dst.join(entry.file_name());
+        if source.is_dir() {
+            copy_dir_recursive(&source, &target)?;
+        } else {
+            fs::copy(source, target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Sets the read-only attribute recursively for all files in `dir`.
+fn set_readonly_recursive(dir: &Path) -> Result<(), StagingError> {
+    if dir.is_file() {
+        let mut perms = fs::metadata(dir)?.permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(dir, perms)?;
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            set_readonly_recursive(&path)?;
+        } else {
+            let mut perms = fs::metadata(&path)?.permissions();
+            perms.set_readonly(true);
+            fs::set_permissions(&path, perms)?;
+        }
+    }
+    Ok(())
+}
+
+/// Ensures no symlink is present in `path` or descendants.
+fn check_no_symlinks(path: &Path) -> Result<(), StagingError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(StagingError::SymlinkFound(path.display().to_string()));
+    }
+
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            check_no_symlinks(&entry?.path())?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Computes the recursive total size in bytes for all files in `path`.
+fn dir_size(path: &Path) -> Result<u64, StagingError> {
+    if path.is_file() {
+        return Ok(fs::metadata(path)?.len());
+    }
+
+    let mut total = 0_u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            total = total.saturating_add(dir_size(&entry_path)?);
+        } else {
+            total = total.saturating_add(fs::metadata(entry_path)?.len());
+        }
+    }
+    Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_file(path: &Path, content: &str) {
+        fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn staging_creates_bootstrap_and_script() {
+        let root = tempdir().unwrap();
+        let script = "print('hello')";
+        let staging = StagingDir::new(root.path().to_path_buf(), script, &[], &[]).unwrap();
+
+        let bootstrap = staging.path().join(BOOTSTRAP_FILENAME);
+        let script_path = staging.path().join(SCRIPT_FILENAME);
+        assert!(bootstrap.exists());
+        assert!(script_path.exists());
+        assert_eq!(fs::read_to_string(script_path).unwrap(), script);
+    }
+
+    #[test]
+    fn staging_empty_policy() {
+        let root = tempdir().unwrap();
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &[]).unwrap();
+        assert!(!staging.path().join(RW_DIR).exists());
+        assert!(!staging.path().join(RO_DIR).exists());
+        assert!(staging.path_map().is_empty());
+    }
+
+    #[test]
+    fn staging_single_rw_path() {
+        let root = tempdir().unwrap();
+        let source_root = tempdir().unwrap();
+        let source = source_root.path().join("sample");
+        fs::create_dir_all(&source).unwrap();
+        write_file(&source.join("data.txt"), "abc");
+
+        let rw = vec![source.display().to_string()];
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        assert!(staging.path().join(RW_DIR).join("sample").exists());
+        assert_eq!(
+            staging.path_map().get("SAMPLE").map(String::as_str),
+            Some("/mnt/rw/sample")
+        );
+    }
+
+    #[test]
+    fn staging_ro_path_has_readonly_attribute() {
+        let root = tempdir().unwrap();
+        let source_root = tempdir().unwrap();
+        let source = source_root.path().join("readonly");
+        fs::create_dir_all(&source).unwrap();
+        write_file(&source.join("data.txt"), "abc");
+
+        let ro = vec![source.display().to_string()];
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &ro).unwrap();
+        let staged_file = staging
+            .path()
+            .join(RO_DIR)
+            .join("readonly")
+            .join("data.txt");
+        let metadata = fs::metadata(staged_file).unwrap();
+        assert!(metadata.permissions().readonly());
+    }
+
+    #[test]
+    fn staging_slug_collision() {
+        let root = tempdir().unwrap();
+        let source_root = tempdir().unwrap();
+        let first = source_root.path().join("input");
+        let second_parent = source_root.path().join("other");
+        let second = second_parent.join("input");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+
+        let rw = vec![first.display().to_string(), second.display().to_string()];
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        assert!(staging.path_map().contains_key("INPUT"));
+        assert!(staging.path_map().contains_key("INPUT_2"));
+    }
+
+    #[test]
+    fn staging_pathmap_json_shape() {
+        let root = tempdir().unwrap();
+        let source_root = tempdir().unwrap();
+        let source = source_root.path().join("sample");
+        fs::create_dir_all(&source).unwrap();
+
+        let rw = vec![source.display().to_string()];
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+
+        let json = fs::read_to_string(staging.path().join(PATHMAP_FILENAME)).unwrap();
+        let parsed: BTreeMap<String, String> = serde_json::from_str(&json).unwrap();
+        assert!(parsed.contains_key("SAMPLE"));
+        assert_eq!(parsed, *staging.path_map());
+    }
+
+    #[test]
+    fn staging_bootstrap_is_stable() {
+        let root = tempdir().unwrap();
+        let a = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &[]).unwrap();
+        let b = StagingDir::new(root.path().to_path_buf(), "print(2)", &[], &[]).unwrap();
+
+        let left = fs::read_to_string(a.path().join(BOOTSTRAP_FILENAME)).unwrap();
+        let right = fs::read_to_string(b.path().join(BOOTSTRAP_FILENAME)).unwrap();
+        assert_eq!(left, right);
+        assert_eq!(left, BOOTSTRAP_SOURCE);
+    }
+
+    #[test]
+    fn staging_cleanup_on_drop() {
+        let root = tempdir().unwrap();
+        let path_to_check = {
+            let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &[]).unwrap();
+            let p = staging.path().to_path_buf();
+            assert!(p.exists());
+            p
+        };
+        assert!(!path_to_check.exists());
+    }
+
+    #[test]
+    fn staging_missing_path_returns_error() {
+        let root = tempdir().unwrap();
+        let rw = vec![root.path().join("missing").display().to_string()];
+        let err = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap_err();
+        assert!(matches!(err, StagingError::PathNotFound(_)));
+    }
+
+    #[test]
+    fn staging_single_file_rw_wrapped_in_slot() {
+        let root = tempdir().unwrap();
+        let source_root = tempdir().unwrap();
+        let source_file = source_root.path().join("payload");
+        write_file(&source_file, "data");
+
+        let rw = vec![source_file.display().to_string()];
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        let staged_file = staging.path().join(RW_DIR).join("payload").join("payload");
+        assert!(staged_file.exists());
+    }
+
+    #[test]
+    fn slug_generation_dash_to_underscore() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("ref-data");
+        fs::create_dir_all(&source).unwrap();
+
+        let mut used = Vec::new();
+        let slug = allocate_slug(&source, &mut used);
+        assert_eq!(slug, "ref_data");
+        assert_eq!(slug_to_env_key(&slug), "REF_DATA");
+    }
+}
