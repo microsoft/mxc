@@ -595,20 +595,34 @@ export function spawnSandboxWithoutPty(
  * @param config The container configuration (from createConfigFromPolicy)
  * @param options - Spawn options
  * @param workingDirectory Optional working directory path
- * @returns IPty object for interacting with the sandboxed process
+ * @returns IPty when usePty is true or unset; ChildProcess when usePty is false
  *
  * @example
  * ```typescript
  * const config = createConfigFromPolicy(policy, "process");
  * config.process!.commandLine = 'echo hello';
  * config.appContainer!.ui!.isolation = "atoms";
+ *
+ * // PTY mode (default) — returns IPty:
  * const ptyProcess = spawnSandboxFromConfig(config);
  *
- * // Non-PTY mode for reliable exit codes:
+ * // Non-PTY mode — returns ChildProcess with reliable exit codes:
  * const child = spawnSandboxFromConfig(config, { usePty: false });
  * child.stdout?.on('data', (data) => console.log(data.toString()));
  * ```
  */
+export function spawnSandboxFromConfig(
+  config: ContainerConfig,
+  options: SandboxSpawnOptions & { usePty: false },
+  workingDirectory?: string,
+  env?: { [key: string]: string | undefined }
+): ChildProcess;
+export function spawnSandboxFromConfig(
+  config: ContainerConfig,
+  options?: SandboxSpawnOptions,
+  workingDirectory?: string,
+  env?: { [key: string]: string | undefined }
+): pty.IPty;
 export function spawnSandboxFromConfig(
   config: ContainerConfig,
   options: SandboxSpawnOptions = {},
@@ -620,7 +634,7 @@ export function spawnSandboxFromConfig(
     return spawn(executablePath, args, {
       cwd: workingDirectory || process.cwd(),
       stdio: ['pipe', 'pipe', 'pipe'],
-      ...(env ? { env: env as NodeJS.ProcessEnv } : {}),
+      ...(env ? { env: { ...process.env, ...env } as NodeJS.ProcessEnv } : {}),
     });
   }
   return spawnWithConfig(config, options, workingDirectory, env);
