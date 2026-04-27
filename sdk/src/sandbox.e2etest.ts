@@ -15,6 +15,8 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import fs from 'node:fs';
+import path from 'node:path';
 import os from 'os';
 import { createConfigFromPolicy, spawnSandboxFromConfig } from './sandbox';
 import { SandboxPolicy } from './types';
@@ -27,37 +29,51 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
 }, () => {
 
   it('should run with all WSLC-specific fields set', async () => {
-    const policy: SandboxPolicy = {
-      version: '0.5.0-alpha',
-      network: { allowOutbound: true },
-      filesystem: { readwritePaths: ['C:\\workspace'] },
-    };
-    const config = createConfigFromPolicy(policy, 'wslc');
-    config.process!.commandLine = [
-      "python3 -c \"import sys; print(f'Python {sys.version_info.major}.{sys.version_info.minor}')\"",
-      "nproc",
-      "cat /proc/meminfo | grep MemTotal",
-      "ls /mnt/c/workspace",
-      "echo 'All fields work'",
-    ].join(' && ');
-    config.experimental!.wslc!.image = 'python:3.12-alpine';
-    config.experimental!.wslc!.cpuCount = 2;
-    config.experimental!.wslc!.memoryMb = 1024;
-    config.experimental!.wslc!.storagePath = 'C:\\workspace\\wslc-all-fields-test';
+    // Create temp directories for volume mount and storage.
+    // Use short paths under os.tmpdir() — WSLC SDK can fail with very long paths.
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-e2e-'));
+    const storageDir = path.join(testDir, 'storage');
+    const mountDir = path.join(testDir, 'mount');
+    fs.mkdirSync(storageDir);
+    fs.mkdirSync(mountDir);
 
-    const { stdout, exitCode } = await new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
-      const child = spawnSandboxFromConfig(config, { experimental: true, debug: true, usePty: false }) as ChildProcess;
-      let stdout = '';
-      let stderr = '';
-      child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-      child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
-      child.on('close', (code: number | null) => {
-        resolve({ stdout, stderr, exitCode: code ?? -1 });
+    try {
+      const policy: SandboxPolicy = {
+        version: '0.5.0-alpha',
+        network: { allowOutbound: true },
+        filesystem: { readwritePaths: [mountDir] },
+      };
+      const config = createConfigFromPolicy(policy, 'wslc');
+      config.process!.commandLine = [
+        "python3 -c \"import sys; print(f'Python {sys.version_info.major}.{sys.version_info.minor}')\"",
+        "nproc",
+        "cat /proc/meminfo | grep MemTotal",
+        "echo 'All fields work'",
+      ].join(' && ');
+      config.experimental!.wslc!.image = 'python:3.12-alpine';
+      config.experimental!.wslc!.cpuCount = 2;
+      config.experimental!.wslc!.memoryMb = 1024;
+      config.experimental!.wslc!.storagePath = storageDir;
+
+      const { stdout, exitCode } = await new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve, reject) => {
+        const child = spawnSandboxFromConfig(config, { experimental: true, debug: true, usePty: false }) as ChildProcess;
+        let stdout = '';
+        let stderr = '';
+        child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
+        child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
+        child.on('error', (error: Error) => {
+          reject(new Error(`Failed to spawn WSLC sandbox process: ${error.message}${stderr ? `\n${stderr}` : ''}`));
+        });
+        child.on('close', (code: number | null) => {
+          resolve({ stdout, stderr, exitCode: code ?? -1 });
+        });
       });
-    });
 
-    assert.strictEqual(exitCode, 0);
-    assert.ok(stdout.includes('Python 3.12'));
-    assert.ok(stdout.includes('All fields work'));
+      assert.strictEqual(exitCode, 0);
+      assert.ok(stdout.includes('Python 3.12'));
+      assert.ok(stdout.includes('All fields work'));
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
   });
 });
