@@ -270,15 +270,18 @@ impl NanVixScriptRunner {
 
     fn build_guest_args() -> String {
         // Build the NanVix guest argument string for mount-based script delivery.
-        // Format: "/mnt/.mxc-bootstrap.py;PYTHONHOME=/sysroot"
+        // Format: "-S -B /mnt/.mxc-bootstrap.py;PYTHONHOME=/sysroot"
+        //
+        // -S: skip site.py (critical — site import is very slow with large ramfs)
+        // -B: no .pyc writing (read-only filesystem)
         //
         // The bootstrap script lives in the staging directory mounted at /mnt.
         // It reads /mnt/.mxc-pathmap.json, exports MXC_PATH_* env vars,
         // then runs /mnt/.mxc-script.py via runpy.run_path().
         //
-        // No spaces in the path → survives NanVix's space-splitting.
-        // ';' separates argv from env vars (kernel splits on ';').
-        format!("/mnt/.mxc-bootstrap.py;PYTHONHOME={}", PYTHON_HOME)
+        // NanVix splits on spaces: argv = ["python.elf", "-S", "-B", "/mnt/..."]
+        // NanVix splits on ';': env = ["PYTHONHOME=/sysroot"]
+        format!("-S -B /mnt/.mxc-bootstrap.py;PYTHONHOME={}", PYTHON_HOME)
     }
 
     fn spawn_nanvixd(
@@ -711,14 +714,14 @@ mod tests {
 
     #[test]
     fn guest_args_format_is_correct() {
-        let expected = "/mnt/.mxc-bootstrap.py;PYTHONHOME=/sysroot";
+        let expected = "-S -B /mnt/.mxc-bootstrap.py;PYTHONHOME=/sysroot";
         let actual = NanVixScriptRunner::build_guest_args();
         assert_eq!(actual, expected);
-        // No spaces in the bootstrap path segment.
-        let argv_part = actual.split(';').next().unwrap();
+        // The bootstrap path segment itself must not contain spaces.
+        // (The -S and -B flags are intentional space-separated argv entries.)
         assert!(
-            !argv_part.contains(' '),
-            "argv portion must not contain spaces for NanVix splitting"
+            actual.contains("/mnt/.mxc-bootstrap.py"),
+            "must contain bootstrap path"
         );
     }
 
