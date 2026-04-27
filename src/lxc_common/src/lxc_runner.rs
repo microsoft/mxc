@@ -146,7 +146,9 @@ impl LxcScriptRunner {
         if !container.is_running() {
             let _ = writeln!(logger, "Starting LXC container...");
             if let Err(e) = container.start() {
-                let _ = container.destroy();
+                if self.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
                 return ScriptResponse::error(&format!("Failed to start container: {}", e));
             }
             let _ = writeln!(logger, "Container started successfully.");
