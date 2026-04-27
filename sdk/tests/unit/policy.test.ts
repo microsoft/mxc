@@ -3,7 +3,7 @@
 
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { getAvailableToolsPolicy } from './policy';
+import { getAvailableToolsPolicy } from '../../src/policy';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';

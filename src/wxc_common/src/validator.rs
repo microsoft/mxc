@@ -1,42 +1,41 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::error::WxcError;
-use crate::models::CodexRequest;
+use crate::models::{CodexRequest, ScriptResponse};
 
-pub fn validate_request(request: &CodexRequest) -> Result<(), WxcError> {
+/// Validates non-backend-specific parts of the request (e.g. non-empty script).
+pub fn validate_common(request: &CodexRequest) -> Result<(), ScriptResponse> {
     if request.script_code.is_empty() {
-        return Err(WxcError::Validation(
-            "Script content must not be empty.".into(),
-        ));
+        return Err(ScriptResponse::error("Script content must not be empty."));
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::validate_common;
+    use crate::models::CodexRequest;
 
     #[test]
-    fn validate_request_with_valid_script() {
-        let req = CodexRequest {
-            script_code: "echo hello".to_string(),
-            ..Default::default()
-        };
-        assert!(validate_request(&req).is_ok());
-    }
-
-    #[test]
-    fn validate_request_with_empty_script() {
+    fn rejects_empty_script() {
         let req = CodexRequest {
             script_code: String::new(),
             ..Default::default()
         };
-        assert!(validate_request(&req).is_err());
+        assert!(validate_common(&req).is_err());
     }
 
     #[test]
-    fn validate_request_with_full_config() {
+    fn accepts_valid_script() {
+        let req = CodexRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        assert!(validate_common(&req).is_ok());
+    }
+
+    #[test]
+    fn accepts_full_config() {
         let req = CodexRequest {
             script_code: "print('test')".to_string(),
             working_directory: "C:\\temp".to_string(),
@@ -44,14 +43,17 @@ mod tests {
             container_id: "Test".to_string(),
             ..Default::default()
         };
-        assert!(validate_request(&req).is_ok());
+        assert!(validate_common(&req).is_ok());
     }
 
     #[test]
-    fn validate_request_error_contains_message() {
+    fn error_mentions_empty() {
         let req = CodexRequest::default();
-        let err = validate_request(&req).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(msg.contains("empty"), "Error should mention empty: {}", msg);
+        let err = validate_common(&req).unwrap_err();
+        assert!(
+            err.error_message.contains("empty"),
+            "Error should mention empty: {}",
+            err.error_message
+        );
     }
 }

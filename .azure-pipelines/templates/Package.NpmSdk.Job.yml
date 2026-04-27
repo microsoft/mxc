@@ -14,11 +14,11 @@ jobs:
   displayName: Package Mxc Npm Sdk
   pool:
     name: Azure-Pipelines-1ESPT-ExDShared
-    image: windows-latest
-    os: windows
+    image: ubuntu-latest
+    os: linux
   variables:
-    outputDirectory: $(Build.SourcesDirectory)\out
-    sdkDirectory: $(Build.SourcesDirectory)\sdk
+    outputDirectory: $(Build.SourcesDirectory)/out
+    sdkDirectory: $(Build.SourcesDirectory)/sdk
     artifactBaseName: mxc-npm-sdk-package
 
   steps:
@@ -52,6 +52,10 @@ jobs:
     - script: npm run build
       workingDirectory: $(sdkDirectory)
       displayName: npm run build
+
+    - script: npm test
+      workingDirectory: $(sdkDirectory)
+      displayName: npm test
 
     - script: npm pack
       workingDirectory: $(sdkDirectory)

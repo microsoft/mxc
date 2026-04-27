@@ -494,14 +494,9 @@ impl Default for AppContainerScriptRunner {
 }
 
 impl ScriptRunner for AppContainerScriptRunner {
-    fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         use crate::filesystem_bfs::FileSystemBfsManager;
         use crate::network_manager::NetworkManager;
-        use crate::validator::validate_request;
-
-        if let Err(e) = validate_request(request) {
-            return ScriptResponse::error(&e.to_string());
-        }
 
         // Apply experimental features when flag is set
         if request.experimental_enabled {

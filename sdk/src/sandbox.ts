@@ -349,6 +349,12 @@ export interface SandboxSpawnOptions {
   ptyOptions?: pty.IPtyForkOptions;
 
   /**
+   * Dry run mode: parse and validate config without executing.
+   * The native binary validates the config then exits.
+   */
+  dryRun?: boolean;
+
+  /**
    * Directory for diagnostic log files
    */
   logDir?: string;
@@ -366,9 +372,28 @@ function resolveExecutableAndArgs(
     throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
   }
 
+  // Check experimental mode before resolving binaries
+  if (ExperimentalBackends.includes(config.containment as ContainmentType) && !options.experimental) {
+    throw new Error(
+      `'${config.containment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
+    );
+  }
+
   const platformSupport = getPlatformSupport();
+
   if (!platformSupport.isSupported) {
-    throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
+    if (options.dryRun) {
+      const platformHint = os.platform() === 'win32'
+        ? 'Requires Windows build 26100+ (with UBR 7965+ for builds 26100-26500).'
+        : `Platform issue: ${platformSupport.reason}.`;
+      console.warn(
+        `[mxc] Warning: ${platformSupport.reason}.\n` +
+        `  ${platformHint}\n` +
+        `  Dry-run will attempt config validation but a normal run would fail.`
+      );
+    } else {
+      throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
+    }
   }
 
   // Validate containment against platform
@@ -418,14 +443,12 @@ function resolveExecutableAndArgs(
     args.push('--debug');
   }
 
-  if (ExperimentalBackends.includes(config.containment as ContainmentType) && !options.experimental) {
-    throw new Error(
-      `'${config.containment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
-    );
-  }
-
   if (options.experimental) {
     args.push('--experimental');
+  }
+
+  if (options.dryRun) {
+    args.push('--dry-run');
   }
 
   return { executablePath, args };

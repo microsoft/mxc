@@ -109,6 +109,12 @@ call npm install & call npm run build
 popd
 
 echo.
+echo Building SDK integration tests...
+pushd sdk\tests\integration
+call npm install & call npm run build
+popd
+
+echo.
 echo Build complete.
 exit /b 0
 

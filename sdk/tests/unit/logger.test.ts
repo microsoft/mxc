@@ -1,10 +1,10 @@
-// sdk/src/logger.test.ts
+// sdk/tests/unit/logger.test.ts
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { FileLogger } from './logger';
+import { FileLogger } from '../../src/logger';
 
 describe('FileLogger', () => {
   let tmpDir: string;

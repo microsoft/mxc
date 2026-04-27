@@ -320,7 +320,29 @@ impl BaseContainerRunner {
 }
 
 impl ScriptRunner for BaseContainerRunner {
-    fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
+        Self::is_base_container_api_present().map_err(|e| {
+            let hint = if !request.experimental_enabled {
+                format!(
+                    "BaseContainer API unavailable: {e}\n\
+                     Hint: Config schema version '{}' requires the BaseContainer backend, \
+                     but this OS build does not support it. \
+                     Use schema version '0.4.0-alpha' to fall back to AppContainer.",
+                    request.schema_version
+                )
+            } else {
+                format!(
+                    "BaseContainer API unavailable: {e}\n\
+                     Hint: --experimental requested BaseContainer, but this OS build \
+                     does not support it. Remove --experimental to use the AppContainer \
+                     backend, or use an OS build with BaseContainer support."
+                )
+            };
+            ScriptResponse::error(&hint)
+        })
+    }
+
+    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         let _ = writeln!(logger, "BaseContainer: building sandbox specification...");
 
         // Launch builtin test proxy if requested (before building spec so we have the port).

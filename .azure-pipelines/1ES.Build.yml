@@ -93,3 +93,9 @@ extends:
               sdkArch: arm64
 
           ESRPInfo: ${{ parameters.ESRPInfo }}
+
+    - stage: SDK_Integration_Tests
+      displayName: 'SDK Integration Tests'
+      dependsOn: Package_MXC_NPM_SDK
+      jobs:
+      - template: .azure-pipelines/templates/SDK.Integration.Test.Job.yml@self
