@@ -1,0 +1,10 @@
+{
+    "process": {
+        "commandLine": "print('should not run')",
+        "timeout": 30000
+    },
+    "containment": "microvm",
+    "filesystem": {
+        "deniedPaths": ["/secret"]
+    }
+}

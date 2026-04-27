@@ -1,0 +1,10 @@
+{
+    "process": {
+        "commandLine": "import os\npath = os.environ['MXC_PATH_INPUT']\nwith open(os.path.join(path, 'data.txt')) as f:\n    print(f.read().strip())\nwith open(os.path.join(path, 'output.txt'), 'w') as f:\n    f.write('written by guest')",
+        "timeout": 30000
+    },
+    "containment": "microvm",
+    "filesystem": {
+        "readwritePaths": []
+    }
+}

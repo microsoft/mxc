@@ -1,0 +1,7 @@
+{
+    "process": {
+        "commandLine": "name = input('What is your name? ')\nprint(f'Hello, {name}!')",
+        "timeout": 30000
+    },
+    "containment": "microvm"
+}

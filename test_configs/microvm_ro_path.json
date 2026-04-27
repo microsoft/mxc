@@ -1,0 +1,10 @@
+{
+    "process": {
+        "commandLine": "import os\npath = os.environ['MXC_PATH_REF']\ntry:\n    with open(os.path.join(path, 'test.txt'), 'w') as f:\n        f.write('should fail')\n    print('ERROR: write succeeded')\n    import sys; sys.exit(1)\nexcept (OSError, PermissionError) as e:\n    print(f'OK: {e}')",
+        "timeout": 30000
+    },
+    "containment": "microvm",
+    "filesystem": {
+        "readonlyPaths": []
+    }
+}

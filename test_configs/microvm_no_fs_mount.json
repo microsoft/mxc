@@ -1,0 +1,7 @@
+{
+    "process": {
+        "commandLine": "import sys\nprint(f'Python {sys.version_info[0]}.{sys.version_info[1]} on {sys.platform}')",
+        "timeout": 30000
+    },
+    "containment": "microvm"
+}
