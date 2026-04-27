@@ -16,8 +16,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import os from 'os';
-import { createConfigFromPolicy, spawnSandboxFromConfigWithoutPty } from './sandbox';
+import { createConfigFromPolicy, spawnSandboxFromConfig } from './sandbox';
 import { SandboxPolicy } from './types';
+import { ChildProcess } from 'child_process';
 
 const isWslcAvailable = os.platform() === 'win32';
 
@@ -45,7 +46,7 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
     config.experimental!.wslc!.storagePath = 'C:\\workspace\\wslc-all-fields-test';
 
     const { stdout, exitCode } = await new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
-      const child = spawnSandboxFromConfigWithoutPty(config, { experimental: true, debug: true });
+      const child = spawnSandboxFromConfig(config, { experimental: true, debug: true, usePty: false }) as ChildProcess;
       let stdout = '';
       let stderr = '';
       child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });

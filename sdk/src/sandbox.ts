@@ -352,6 +352,13 @@ export interface SandboxSpawnOptions {
    * Directory for diagnostic log files
    */
   logDir?: string;
+
+  /**
+   * When false, uses child_process.spawn instead of node-pty.
+   * Provides reliable exit codes and separate stdout/stderr streams.
+   * Defaults to true (uses PTY).
+   */
+  usePty?: boolean;
 }
 
 /**
@@ -596,6 +603,10 @@ export function spawnSandboxWithoutPty(
  * config.process!.commandLine = 'echo hello';
  * config.appContainer!.ui!.isolation = "atoms";
  * const ptyProcess = spawnSandboxFromConfig(config);
+ *
+ * // Non-PTY mode for reliable exit codes:
+ * const child = spawnSandboxFromConfig(config, { usePty: false });
+ * child.stdout?.on('data', (data) => console.log(data.toString()));
  * ```
  */
 export function spawnSandboxFromConfig(
@@ -603,44 +614,16 @@ export function spawnSandboxFromConfig(
   options: SandboxSpawnOptions = {},
   workingDirectory?: string,
   env?: { [key: string]: string | undefined }
-): pty.IPty {
+): pty.IPty | ChildProcess {
+  if (options.usePty === false) {
+    const { executablePath, args } = resolveExecutableAndArgs(config, options);
+    return spawn(executablePath, args, {
+      cwd: workingDirectory || process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      ...(env ? { env: env as NodeJS.ProcessEnv } : {}),
+    });
+  }
   return spawnWithConfig(config, options, workingDirectory, env);
-}
-
-/**
- * Spawn a sandboxed process from a pre-built ContainerConfig using child_process.spawn (non-PTY).
- *
- * Use with `createConfigFromPolicy()` when you need to customize backend-specific
- * settings before spawning, and need reliable exit codes and separate stdout/stderr streams.
- *
- * @param config The container configuration (from createConfigFromPolicy)
- * @param options - Spawn options
- * @param workingDirectory Optional working directory path
- * @returns The spawned ChildProcess
- *
- * @example
- * ```typescript
- * const config = createConfigFromPolicy(policy, 'wslc');
- * config.process!.commandLine = 'echo hello';
- * config.experimental!.wslc!.image = 'python:3.12';
- * const child = spawnSandboxFromConfigWithoutPty(config, { experimental: true });
- * child.stdout?.on('data', (data) => console.log(data.toString()));
- * child.on('close', (code) => console.log('Exit code:', code));
- * ```
- */
-export function spawnSandboxFromConfigWithoutPty(
-  config: ContainerConfig,
-  options: SandboxSpawnOptions = {},
-  workingDirectory?: string,
-  env?: { [key: string]: string | undefined }
-): ChildProcess {
-  const { executablePath, args } = resolveExecutableAndArgs(config, options);
-
-  return spawn(executablePath, args, {
-    cwd: workingDirectory || process.cwd(),
-    stdio: ['pipe', 'pipe', 'pipe'],
-    ...(env ? { env: env as NodeJS.ProcessEnv } : {}),
-  });
 }
 
 /**
