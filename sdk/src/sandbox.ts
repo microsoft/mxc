@@ -21,6 +21,37 @@ function makeLogFilePath(dir: string): string {
   return path.join(dir, `mxc-diag-${ts}-${suffix}.log`);
 }
 
+/**
+ * Sets up logging and resolves the executable path + args.
+ * Shared by both PTY and non-PTY spawn paths.
+ */
+function prepareSpawn(
+  config: ContainerConfig,
+  options: SandboxSpawnOptions,
+): { executablePath: string; args: string[]; logger?: FileLogger; logFile?: string; startTime: number } {
+  let logger: FileLogger | undefined;
+  let logFile: string | undefined;
+  const logDir = options.logDir ?? (options.debug ? path.join(os.tmpdir(), 'mxc-logs') : undefined);
+  if (logDir) {
+    logFile = makeLogFilePath(logDir);
+    logger = new FileLogger(logFile);
+    logger.log('info', 'mxc.log.created', { logFile });
+  }
+
+  const startTime = Date.now();
+  logger?.log('info', 'mxc.spawn.start', {
+    platform: os.platform(),
+    arch: os.arch(),
+    containment: config.containment,
+  });
+
+  const { executablePath, args } = resolveExecutableAndArgs(config, options);
+
+  logger?.log('info', 'mxc.binary.resolved', { resolved: !!executablePath });
+
+  return { executablePath, args, logger, logFile, startTime };
+}
+
 const SUPPORTED_VERSION = '0.5.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';
 
@@ -447,51 +478,29 @@ function spawnWithConfig(
   workingDirectory?: string,
   env?: { [key: string]: string | undefined },
 ): pty.IPty {
-  let logger: FileLogger | undefined;
-  let logFile: string | undefined;
-  const logDir = options.logDir ?? (options.debug ? path.join(os.tmpdir(), 'mxc-logs') : undefined);
-  if (logDir) {
-    logFile = makeLogFilePath(logDir);
-    logger = new FileLogger(logFile);
-    logger.log('info', 'mxc.log.created', { logFile });
-  }
-
-  const startTime = Date.now();
-  logger?.log('info', 'mxc.spawn.start', {
-    platform: os.platform(),
-    arch: os.arch(),
-    containment: config.containment,
-  });
+  const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
 
   try {
-    const { executablePath, args } = resolveExecutableAndArgs(config, options);
+    const ptyOpts: pty.IPtyForkOptions = {
+      name: "xterm-color",
+      cols: 120,
+      rows: 80,
+      ...options.ptyOptions,
+      cwd: workingDirectory || process.cwd(),
+      env: env ?? options.ptyOptions?.env,
+    };
 
-    if (logFile) {
-      args.push('--log-file', logFile);
-    }
+    const ptyProcess = pty.spawn(executablePath, args, ptyOpts);
 
-    logger?.log('info', 'mxc.binary.resolved', { resolved: !!executablePath });
-
-  const ptyOpts: pty.IPtyForkOptions = {
-    name: "xterm-color",
-    cols: 120,
-    rows: 80,
-    ...options.ptyOptions,
-    cwd: workingDirectory || process.cwd(),
-    env: env ?? options.ptyOptions?.env,
-  };
-
-  const ptyProcess = pty.spawn(executablePath, args, ptyOpts);
-
-  ptyProcess.onExit((event) => {
-    logger?.log('info', 'mxc.spawn.exit', {
-      exitCode: event.exitCode,
-      durationMs: Date.now() - startTime,
+    ptyProcess.onExit((event) => {
+      logger?.log('info', 'mxc.spawn.exit', {
+        exitCode: event.exitCode,
+        durationMs: Date.now() - startTime,
+      });
+      logger?.close();
     });
-    logger?.close();
-  });
 
-  return ptyProcess;
+    return ptyProcess;
   } catch (err) {
     logger?.close();
     throw err;
@@ -630,12 +639,28 @@ export function spawnSandboxFromConfig(
   env?: { [key: string]: string | undefined }
 ): pty.IPty | ChildProcess {
   if (options.usePty === false) {
-    const { executablePath, args } = resolveExecutableAndArgs(config, options);
-    return spawn(executablePath, args, {
-      cwd: workingDirectory || process.cwd(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-      ...(env ? { env: { ...process.env, ...env } as NodeJS.ProcessEnv } : {}),
-    });
+    const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
+    try {
+      const child = spawn(executablePath, args, {
+        cwd: workingDirectory || process.cwd(),
+        stdio: ['pipe', 'pipe', 'pipe'],
+        ...(env ? { env: { ...process.env, ...env } as NodeJS.ProcessEnv } : {}),
+      });
+      child.on('close', (code) => {
+        logger?.log('info', 'mxc.spawn.exit', {
+          exitCode: code ?? -1,
+          durationMs: Date.now() - startTime,
+        });
+        logger?.close();
+      });
+      child.on('error', () => {
+        logger?.close();
+      });
+      return child;
+    } catch (err) {
+      logger?.close();
+      throw err;
+    }
   }
   return spawnWithConfig(config, options, workingDirectory, env);
 }
