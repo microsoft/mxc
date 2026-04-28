@@ -39,11 +39,14 @@ for (const schemaVersion of supportedVersions) {
       timeoutMs: 30000,
     };
 
-    it('should dry-run via spawnSandboxWithoutPty', async () => {
+    it('should dry-run via spawnSandboxFromConfig with usePty: false', async () => {
+      const config = sdk.createConfigFromPolicy(policy);
+      config.process = config.process || {};
+      config.process.commandLine = 'cmd.exe /c echo test';
+      config.containerName = `dryrun-npty-${schemaVersion}`;
+
       const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
-        const child = sdk.spawnSandboxWithoutPty(
-          'cmd.exe /c echo test', policy, { dryRun: true, ...debugSpawnOptions }, undefined, `dryrun-npty-${schemaVersion}`,
-        );
+        const child = sdk.spawnSandboxFromConfig(config, { dryRun: true, usePty: false, ...debugSpawnOptions });
         let stdout = '';
         let stderr = '';
         child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
