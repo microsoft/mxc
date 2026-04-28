@@ -20,10 +20,15 @@ describe('Platform support', () => {
   });
 });
 
+const platformSupport = sdk.getPlatformSupport();
+
 for (const schemaVersion of supportedVersions) {
   const dryRunExpectation = expectDryRunValidationPass(schemaVersion);
+  const skipReason = !platformSupport.isSupported
+    ? `Platform not supported: ${platformSupport.reason}`
+    : undefined;
 
-  describe(`Dry-run smoke tests (schema ${schemaVersion})`, () => {
+  describe(`Dry-run smoke tests (schema ${schemaVersion})`, { skip: skipReason }, () => {
     const policy = {
       version: schemaVersion.raw,
       filesystem: {
