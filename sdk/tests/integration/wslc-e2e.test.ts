@@ -21,10 +21,12 @@ import os from 'os';
 import { ChildProcess } from 'child_process';
 import { sdk } from './test-helpers';
 
-const isWslcAvailable = os.platform() === 'win32';
+// WSLC tests require a Windows machine with WSL2 and WSLC SDK installed.
+// Opt-in via MXC_ENABLE_WSLC_TESTS=1 since most CI agents lack the runtime.
+const isWslcAvailable = os.platform() === 'win32' && process.env.MXC_ENABLE_WSLC_TESTS === '1';
 
 describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
-  skip: !isWslcAvailable ? 'WSLC tests require Windows with WSL2 and WSLC SDK' : undefined,
+  skip: !isWslcAvailable ? 'WSLC tests require MXC_ENABLE_WSLC_TESTS=1 on Windows with WSL2 and WSLC SDK' : undefined,
 }, () => {
 
   it('should run with all WSLC-specific fields set', async () => {
