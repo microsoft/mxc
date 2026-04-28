@@ -514,10 +514,23 @@ impl ScriptRunner for IsolationSessionRunner {
             Ok(agent_name) => {
                 let _ = writeln!(logger, "Isolation Session: agent user = {}", agent_name);
             }
-            Err(e) => return ScriptResponse::error(&format!("provision_agent_user failed: {}", e)),
+            Err(e) => {
+                // provision_agent_user may return Err *after* a successful broker-side
+                // provision (e.g., the AgentUserName fetch fails on a Succeeded result).
+                // Defensively deprovision so an Indefinite-lifetime agent user does not
+                // leak. The broker no-ops these calls on absent state.
+                let _ = manager.deprovision_agent_user();
+                let _ = manager.unregister_client();
+                return ScriptResponse::error(&format!("provision_agent_user failed: {}", e));
+            }
         }
 
         if let Err(e) = manager.start_session(config_id) {
+            // Provision succeeded; start did not. Clean up the provisioned agent
+            // user. stop_session is a no-op on an unstarted session.
+            let _ = manager.stop_session();
+            let _ = manager.deprovision_agent_user();
+            let _ = manager.unregister_client();
             return ScriptResponse::error(&format!("start_session failed: {}", e));
         }
 
