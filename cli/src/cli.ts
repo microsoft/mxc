@@ -5,7 +5,8 @@
 import { Command } from 'commander';
 import {
   spawnSandbox,
-  spawnSandboxWithoutPty,
+  spawnSandboxFromConfig,
+  createConfigFromPolicy,
   getPlatformSupport,
   SandboxPolicy,
   ContainmentType,
@@ -153,12 +154,15 @@ program
       };
 
       if (options.pty === false) {
-        // Non-PTY mode using spawnSandboxWithoutPty() (child_process.spawn).
+        // Non-PTY mode using spawnSandboxFromConfig with usePty: false.
         // This provides reliable exit code propagation and separate stdout/stderr
         // streams. Use this for CI, automation, or any scenario where correct exit
         // codes matter. The default PTY mode (node-pty/ConPTY) returns exit code -1
         // for all processes on Windows due to a known ConPTY limitation.
-        const child = spawnSandboxWithoutPty(scriptCommand, policy, spawnOptions, options.cwd, options.containerName, undefined, containment);
+        const config = createConfigFromPolicy(policy, containment);
+        config.process!.commandLine = scriptCommand;
+        config.process!.cwd = options.cwd;
+        const child = spawnSandboxFromConfig(config, { ...spawnOptions, usePty: false }, options.cwd);
 
         child.stdout?.on('data', (data: Buffer) => {
           process.stdout.write(data);
@@ -176,7 +180,7 @@ program
       } else {
         // PTY mode: interactive terminal with colors/input
         console.log('Spawning sandboxed process using SDK...');
-        const ptyProcess = spawnSandbox(scriptCommand, policy, spawnOptions, options.cwd, options.containerName, undefined, containment);
+        const ptyProcess = spawnSandbox(scriptCommand, policy, spawnOptions, options.cwd, options.containerName);
 
         ptyProcess.onData((data: string) => {
           process.stdout.write(data);

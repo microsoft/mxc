@@ -45,7 +45,6 @@ export {
   createConfigFromPolicy,
   spawnSandbox,
   spawnSandboxAsync,
-  spawnSandboxWithoutPty,
   spawnSandboxFromConfig,
   buildSandboxPayload,
   SandboxSpawnOptions,
