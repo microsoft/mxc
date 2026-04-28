@@ -20,9 +20,6 @@ describe('Platform support', () => {
   });
 });
 
-const isLinux = os.platform() === 'linux';
-const echoCommand = isLinux ? 'echo test' : 'cmd.exe /c echo test';
-
 for (const schemaVersion of supportedVersions) {
   const dryRunExpectation = expectDryRunValidationPass(schemaVersion);
 
@@ -45,7 +42,7 @@ for (const schemaVersion of supportedVersions) {
     it('should dry-run via spawnSandboxFromConfig with usePty: false', async () => {
       const config = sdk.createConfigFromPolicy(policy);
       config.process = config.process || {};
-      config.process.commandLine = echoCommand;
+      config.process.commandLine = 'cmd.exe /c echo test';
       config.containerName = `dryrun-npty-${schemaVersion}`;
 
       const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
@@ -62,7 +59,7 @@ for (const schemaVersion of supportedVersions) {
 
     it('should dry-run via spawnSandboxAsync', async () => {
       const result = await sdk.spawnSandboxAsync(
-        echoCommand, policy, { dryRun: true, ...debugSpawnOptions }, undefined, `dryrun-async-${schemaVersion}`,
+        'cmd.exe /c echo test', policy, { dryRun: true, ...debugSpawnOptions }, undefined, `dryrun-async-${schemaVersion}`,
       );
       assertDryRunResult(result.stdout, result.exitCode, dryRunExpectation, schemaVersion.raw);
     });
@@ -70,7 +67,7 @@ for (const schemaVersion of supportedVersions) {
     it('should dry-run via spawnSandboxFromConfig', async () => {
       const config = sdk.createConfigFromPolicy(policy);
       config.process = config.process || {};
-      config.process.commandLine = echoCommand;
+      config.process.commandLine = 'cmd.exe /c echo test';
       config.containerName = `dryrun-fromcfg-${schemaVersion}`;
 
       const result = await new Promise<{ exitCode: number; stdout: string }>((resolve) => {
@@ -87,7 +84,7 @@ for (const schemaVersion of supportedVersions) {
     it('should dry-run via spawnSandbox (PTY)', async () => {
       const result = await new Promise<{ exitCode: number; stdout: string }>((resolve) => {
         const ptyProcess = sdk.spawnSandbox(
-          echoCommand, policy, { dryRun: true, ...debugSpawnOptions }, undefined, `dryrun-pty-${schemaVersion}`,
+          'cmd.exe /c echo test', policy, { dryRun: true, ...debugSpawnOptions }, undefined, `dryrun-pty-${schemaVersion}`,
         );
         let stdout = '';
         ptyProcess.onData((data: string) => { stdout += data; });
