@@ -3,6 +3,9 @@ name = "wxc_common"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+isolation_session = ["dep:isolation_session_bindings", "dep:windows-future"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -17,8 +20,8 @@ windows-core = { workspace = true }
 flatbuffers = { workspace = true }
 sandbox_spec = { workspace = true }
 widestring = { workspace = true }
-isolation_session_bindings = { workspace = true }
-windows-future = "0.3"
+isolation_session_bindings = { workspace = true, optional = true }
+windows-future = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

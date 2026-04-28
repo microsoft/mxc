@@ -25,4 +25,4 @@ nanvix_common = { path = "../nanvix_common" }
 default = []
 microvm = ["nanvix_binaries"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
-isolation_session = ["dep:isolation_session_bindings"]
+isolation_session = ["dep:isolation_session_bindings", "wxc_common/isolation_session"]

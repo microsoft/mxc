@@ -11,6 +11,7 @@ use wxc_common::appcontainer_runner::AppContainerScriptRunner;
 use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::{is_base_container_version, load_request};
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
+#[cfg(feature = "isolation_session")]
 use wxc_common::isolation_session_runner::IsolationSessionRunner;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
@@ -248,13 +249,23 @@ fn main() {
             Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
         }
         ContainmentBackend::IsolationSession => {
-            if !request.experimental_enabled {
+            #[cfg(feature = "isolation_session")]
+            {
+                if !request.experimental_enabled {
+                    eprintln!(
+                        "Error: Isolation Session is an experimental feature. Use --experimental flag."
+                    );
+                    process::exit(1);
+                }
+                Box::new(IsolationSessionRunner::new())
+            }
+            #[cfg(not(feature = "isolation_session"))]
+            {
                 eprintln!(
-                    "Error: Isolation Session is an experimental feature. Use --experimental flag."
+                    "Error: IsolationSession backend not compiled. Rebuild with --features isolation_session."
                 );
                 process::exit(1);
             }
-            Box::new(IsolationSessionRunner::new())
         }
     };
     let run_start = Instant::now();
