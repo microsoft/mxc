@@ -24,7 +24,9 @@ use isolation_session_bindings::bindings::{
     IsolationSessionRegistrationStatus, IsolationSessionWorkerProcessCreateOptions,
     IsolationSessionWorkerProcessOperationStatus, IsolationSessionWorkerProcessRedirectFlags,
 };
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{
+    CloseHandle, CLASS_E_CLASSNOTAVAILABLE, HANDLE, REGDB_E_CLASSNOTREG,
+};
 use windows::Win32::Storage::FileSystem::ReadFile;
 
 impl From<IsolationSessionConfigurationId> for BindingsConfigurationId {
@@ -138,14 +140,14 @@ pub(crate) fn check_service_available() -> Result<(), String> {
     match IsolationSessionClient::RegisterClient(&windows_core::HSTRING::new()) {
         Ok(_) => Ok(()),
         Err(e) => {
-            let code = e.code().0 as u32;
-            // CLASS_E_CLASSNOTAVAILABLE (0x80040111) or REGDB_E_CLASSNOTREG (0x80040154)
-            // indicate the service/feature is not present on this OS build.
-            if code == 0x80040111 || code == 0x80040154 {
+            let code = e.code();
+            // CLASS_E_CLASSNOTAVAILABLE / REGDB_E_CLASSNOTREG indicate the
+            // service/feature is not present on this OS build.
+            if code == CLASS_E_CLASSNOTAVAILABLE || code == REGDB_E_CLASSNOTREG {
                 Err(format!(
                     "IsoEnvBroker Session API is not available on this OS build (HRESULT: {:#010x}). \
                      Ensure Feature_IsoBrokerSessionApis is enabled.",
-                    code
+                    code.0 as u32
                 ))
             } else {
                 // Other errors (permission denied, cohort check failure, etc.)
