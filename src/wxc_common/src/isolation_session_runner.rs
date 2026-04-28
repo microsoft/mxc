@@ -40,6 +40,45 @@ impl From<IsolationSessionConfigurationId> for BindingsConfigurationId {
     }
 }
 
+// -- IsolationSessionError ---------------------------------------------------
+
+/// Categorised errors from the IsolationSession backend.
+#[derive(Debug)]
+pub enum IsolationSessionError {
+    /// The caller-supplied container policy contains a field this backend
+    /// does not support (filesystem rules, network rules, proxy).
+    Policy(String),
+    /// The IsoEnvBroker Session API is not available on this host
+    /// (`Feature_IsoBrokerSessionApis` disabled or service not present).
+    ServiceUnavailable(String),
+    /// A broker-side lifecycle step (register / provision / start / exec /
+    /// stop / deprovision / unregister) returned a failure.
+    Lifecycle(String),
+}
+
+impl std::fmt::Display for IsolationSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Policy(msg) => write!(f, "Isolation Session policy error: {}", msg),
+            Self::ServiceUnavailable(msg) => {
+                write!(f, "Isolation Session service unavailable: {}", msg)
+            }
+            Self::Lifecycle(msg) => write!(f, "Isolation Session lifecycle error: {}", msg),
+        }
+    }
+}
+
+impl From<IsolationSessionError> for ScriptResponse {
+    fn from(err: IsolationSessionError) -> Self {
+        ScriptResponse::error(&err.to_string())
+    }
+}
+
+/// Helper to construct an `IsolationSessionError::Lifecycle` from a formatted message.
+fn lifecycle_err(msg: impl Into<String>) -> IsolationSessionError {
+    IsolationSessionError::Lifecycle(msg.into())
+}
+
 // -- Error messages for unsupported policy fields ----------------------------
 
 pub(crate) const ERR_FILESYSTEM_POLICY: &str =
@@ -50,22 +89,27 @@ pub(crate) const ERR_PROXY_POLICY: &str =
     "network proxy is not supported by the isolation session backend";
 
 /// Validates that the request does not contain policy fields unsupported by
-/// the isolation session backend. Returns `Ok(())` if valid, or `Err(message)`.
-pub(crate) fn validate_policy(request: &CodexRequest) -> Result<(), String> {
+/// the isolation session backend. Returns `Ok(())` if valid, or a
+/// `Policy`-variant error on rejection.
+pub(crate) fn validate_policy(request: &CodexRequest) -> Result<(), IsolationSessionError> {
     if !request.policy.readwrite_paths.is_empty()
         || !request.policy.readonly_paths.is_empty()
         || !request.policy.denied_paths.is_empty()
     {
-        return Err(ERR_FILESYSTEM_POLICY.to_string());
+        return Err(IsolationSessionError::Policy(
+            ERR_FILESYSTEM_POLICY.to_string(),
+        ));
     }
     if !request.policy.allowed_hosts.is_empty()
         || !request.policy.blocked_hosts.is_empty()
         || request.policy.default_network_policy != NetworkPolicy::Allow
     {
-        return Err(ERR_NETWORK_POLICY.to_string());
+        return Err(IsolationSessionError::Policy(
+            ERR_NETWORK_POLICY.to_string(),
+        ));
     }
     if request.policy.network_proxy.is_enabled() {
-        return Err(ERR_PROXY_POLICY.to_string());
+        return Err(IsolationSessionError::Policy(ERR_PROXY_POLICY.to_string()));
     }
     Ok(())
 }
@@ -138,9 +182,9 @@ pub(crate) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
 /// Activates the IsoEnvBroker Session API factory and verifies the service
 /// is available on this OS build.
 ///
-/// Returns `Ok(())` if the service is available, or `Err(message)` if not.
-/// This is called once from `IsolationSessionManager::new()`.
-pub(crate) fn check_service_available() -> Result<(), String> {
+/// Returns `Ok(())` if the service is available, or a `ServiceUnavailable`
+/// variant if not. This is called once from `IsolationSessionManager::new()`.
+pub(crate) fn check_service_available() -> Result<(), IsolationSessionError> {
     // Try the lightest possible call: RegisterClient with an empty registration id.
     // If the WinRT activation factory is not registered (feature disabled),
     // this fails with CLASS_E_CLASSNOTAVAILABLE or similar.
@@ -151,11 +195,11 @@ pub(crate) fn check_service_available() -> Result<(), String> {
             // CLASS_E_CLASSNOTAVAILABLE / REGDB_E_CLASSNOTREG indicate the
             // service/feature is not present on this OS build.
             if code == CLASS_E_CLASSNOTAVAILABLE || code == REGDB_E_CLASSNOTREG {
-                Err(format!(
+                Err(IsolationSessionError::ServiceUnavailable(format!(
                     "IsoEnvBroker Session API is not available on this OS build (HRESULT: {:#010x}). \
                      Ensure Feature_IsoBrokerSessionApis is enabled.",
                     code.0 as u32
-                ))
+                )))
             } else {
                 // Other errors (permission denied, cohort check failure, etc.)
                 // mean the service IS present but the call failed for another reason.
@@ -184,7 +228,7 @@ pub struct IsolationSessionManager {
 
 impl IsolationSessionManager {
     /// Activate the WinRT factory and verify the service is available.
-    pub fn new() -> Result<Self, String> {
+    pub fn new() -> Result<Self, IsolationSessionError> {
         check_service_available()?;
         Ok(Self {
             registration_id: windows_core::HSTRING::new(),
@@ -193,23 +237,26 @@ impl IsolationSessionManager {
     }
 
     /// Step 0: Register as a client with the IsoEnvBroker service.
-    pub fn register_client(&self) -> Result<(), String> {
+    pub fn register_client(&self) -> Result<(), IsolationSessionError> {
         let status = IsolationSessionClient::RegisterClient(&self.registration_id)
-            .map_err(|e| format!("RegisterClient failed: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("RegisterClient failed: {}", e)))?;
 
         match status {
             IsolationSessionRegistrationStatus::New
             | IsolationSessionRegistrationStatus::AlreadyRegistered
             | IsolationSessionRegistrationStatus::Updated => Ok(()),
-            _ => Err(format!(
+            _ => Err(lifecycle_err(format!(
                 "RegisterClient returned unexpected status: {}",
                 status.0
-            )),
+            ))),
         }
     }
 
     /// Step 1: Provision an agent user account.
-    pub fn provision_agent_user(&mut self, destroy_on_exit: bool) -> Result<String, String> {
+    pub fn provision_agent_user(
+        &mut self,
+        destroy_on_exit: bool,
+    ) -> Result<String, IsolationSessionError> {
         let lifetime = if destroy_on_exit {
             IsolationSessionProvisionLifetimePolicy::CallerProcess
         } else {
@@ -225,73 +272,86 @@ impl IsolationSessionManager {
             &self.provision_id,
             options,
         )
-        .map_err(|e| format!("ProvisionAgentUserAsync failed: {}", e))?;
+        .map_err(|e| lifecycle_err(format!("ProvisionAgentUserAsync failed: {}", e)))?;
 
         let result = async_op
             .join()
-            .map_err(|e| format!("ProvisionAgentUserAsync: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("ProvisionAgentUserAsync: {}", e)))?;
 
         let status = result
             .Status()
-            .map_err(|e| format!("get Status failed: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("get Status failed: {}", e)))?;
         if status != IsolationSessionProvisionStatus::Succeeded {
             let ext = result.ExtendedError().unwrap_or_default();
-            return Err(format!(
+            return Err(lifecycle_err(format!(
                 "ProvisionAgentUserAsync status: {} (extended: {:#010x})",
                 status.0, ext.0
-            ));
+            )));
         }
 
         let name = result
             .AgentUserName()
-            .map_err(|e| format!("get AgentUserName failed: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("get AgentUserName failed: {}", e)))?;
         Ok(name.to_string())
     }
 
     /// Step 2: Start the isolation session (log the agent user into a Windows session).
-    pub fn start_session(&self, config_id: IsolationSessionConfigurationId) -> Result<(), String> {
+    pub fn start_session(
+        &self,
+        config_id: IsolationSessionConfigurationId,
+    ) -> Result<(), IsolationSessionError> {
         let config_id_com: BindingsConfigurationId = config_id.into();
         let async_op = IsolationSessionClient::StartSessionAsync(
             &self.registration_id,
             &self.provision_id,
             config_id_com,
         )
-        .map_err(|e| format!("StartSessionAsync failed: {}", e))?;
+        .map_err(|e| lifecycle_err(format!("StartSessionAsync failed: {}", e)))?;
 
         let status = async_op
             .join()
-            .map_err(|e| format!("StartSessionAsync: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("StartSessionAsync: {}", e)))?;
 
         match status {
             IsolationSessionOperationStatus::Succeeded
             | IsolationSessionOperationStatus::SessionAlreadyStarted => Ok(()),
-            _ => Err(format!("StartSessionAsync returned status: {}", status.0)),
+            _ => Err(lifecycle_err(format!(
+                "StartSessionAsync returned status: {}",
+                status.0
+            ))),
         }
     }
 
     /// Step 3: Create a process inside the started isolation session and
     /// capture its output.
-    pub(crate) fn create_process(&self, options: &ProcessOptions) -> Result<ProcessResult, String> {
+    pub(crate) fn create_process(
+        &self,
+        options: &ProcessOptions,
+    ) -> Result<ProcessResult, IsolationSessionError> {
         // Build the WinRT create options.
-        let create_opts = IsolationSessionWorkerProcessCreateOptions::new()
-            .map_err(|e| format!("Failed to create WorkerProcessCreateOptions: {}", e))?;
+        let create_opts = IsolationSessionWorkerProcessCreateOptions::new().map_err(|e| {
+            lifecycle_err(format!(
+                "Failed to create WorkerProcessCreateOptions: {}",
+                e
+            ))
+        })?;
 
         create_opts
             .SetRedirectFlags(IsolationSessionWorkerProcessRedirectFlags(
                 options.redirect_flags,
             ))
-            .map_err(|e| format!("SetRedirectFlags: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("SetRedirectFlags: {}", e)))?;
 
         if options.timeout_ms > 0 {
             create_opts
                 .SetTimeoutMilliseconds(options.timeout_ms)
-                .map_err(|e| format!("SetTimeoutMilliseconds: {}", e))?;
+                .map_err(|e| lifecycle_err(format!("SetTimeoutMilliseconds: {}", e)))?;
         }
 
         if !options.working_directory.is_empty() {
             create_opts
                 .SetWorkingDirectory(&windows_core::HSTRING::from(&options.working_directory))
-                .map_err(|e| format!("SetWorkingDirectory: {}", e))?;
+                .map_err(|e| lifecycle_err(format!("SetWorkingDirectory: {}", e)))?;
         }
 
         if !options.env_vars.is_empty() {
@@ -307,7 +367,7 @@ impl IsolationSessionManager {
                 .collect();
             create_opts
                 .SetEnvironmentVariables(&names, &values)
-                .map_err(|e| format!("SetEnvironmentVariables: {}", e))?;
+                .map_err(|e| lifecycle_err(format!("SetEnvironmentVariables: {}", e)))?;
         }
 
         // Launch the process.
@@ -318,32 +378,32 @@ impl IsolationSessionManager {
             &windows_core::HSTRING::from(&options.arguments),
             &create_opts,
         )
-        .map_err(|e| format!("CreateIsolatedProcessAsync2 failed: {}", e))?;
+        .map_err(|e| lifecycle_err(format!("CreateIsolatedProcessAsync2 failed: {}", e)))?;
 
         let result = async_op
             .join()
-            .map_err(|e| format!("CreateIsolatedProcessAsync2: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("CreateIsolatedProcessAsync2: {}", e)))?;
 
         let status = result
             .Status()
-            .map_err(|e| format!("get process Status failed: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("get process Status failed: {}", e)))?;
         if status != IsolationSessionWorkerProcessOperationStatus::Succeeded {
             let ext = result.ExtendedError().unwrap_or_default();
-            return Err(format!(
+            return Err(lifecycle_err(format!(
                 "CreateIsolatedProcessAsync2 status: {} (extended: {:#010x})",
                 status.0, ext.0
-            ));
+            )));
         }
 
         let worker = result
             .Process()
-            .map_err(|e| format!("get Process failed: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("get Process failed: {}", e)))?;
 
         // Read stdout/stderr via pipe handles.
         let stdout = {
             let out_handle = worker
                 .CreateStandardOutputHandle()
-                .map_err(|e| format!("CreateStandardOutputHandle: {}", e))?;
+                .map_err(|e| lifecycle_err(format!("CreateStandardOutputHandle: {}", e)))?;
             if out_handle != 0 {
                 read_pipe_and_close(out_handle)
             } else {
@@ -354,7 +414,7 @@ impl IsolationSessionManager {
         let stderr = {
             let err_handle = worker
                 .CreateStandardErrorHandle()
-                .map_err(|e| format!("CreateStandardErrorHandle: {}", e))?;
+                .map_err(|e| lifecycle_err(format!("CreateStandardErrorHandle: {}", e)))?;
             if err_handle != 0 {
                 read_pipe_and_close(err_handle)
             } else {
@@ -365,14 +425,14 @@ impl IsolationSessionManager {
         // Wait for exit and get exit code.
         let wait_op = worker
             .WaitForExitAsync()
-            .map_err(|e| format!("WaitForExitAsync: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("WaitForExitAsync: {}", e)))?;
         wait_op
             .join()
-            .map_err(|e| format!("WaitForExitAsync: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("WaitForExitAsync: {}", e)))?;
 
         let exit_code = worker
             .ExitCode()
-            .map_err(|e| format!("get ExitCode: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("get ExitCode: {}", e)))?;
 
         Ok(ProcessResult {
             exit_code,
@@ -382,51 +442,54 @@ impl IsolationSessionManager {
     }
 
     /// Step 4: Stop the isolation session.
-    pub fn stop_session(&self) -> Result<(), String> {
+    pub fn stop_session(&self) -> Result<(), IsolationSessionError> {
         let async_op =
             IsolationSessionClient::StopSessionAsync(&self.registration_id, &self.provision_id)
-                .map_err(|e| format!("StopSessionAsync failed: {}", e))?;
+                .map_err(|e| lifecycle_err(format!("StopSessionAsync failed: {}", e)))?;
 
         let status = async_op
             .join()
-            .map_err(|e| format!("StopSessionAsync: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("StopSessionAsync: {}", e)))?;
 
         match status {
             IsolationSessionOperationStatus::Succeeded
             | IsolationSessionOperationStatus::SessionNotStarted => Ok(()),
-            _ => Err(format!("StopSessionAsync returned status: {}", status.0)),
+            _ => Err(lifecycle_err(format!(
+                "StopSessionAsync returned status: {}",
+                status.0
+            ))),
         }
     }
 
     /// Step 5: Deprovision the agent user account.
-    pub fn deprovision_agent_user(&self) -> Result<(), String> {
+    pub fn deprovision_agent_user(&self) -> Result<(), IsolationSessionError> {
         let async_op = IsolationSessionClient::DeprovisionAgentUserAsync(
             &self.registration_id,
             &self.provision_id,
         )
-        .map_err(|e| format!("DeprovisionAgentUserAsync failed: {}", e))?;
+        .map_err(|e| lifecycle_err(format!("DeprovisionAgentUserAsync failed: {}", e)))?;
 
         let status = async_op
             .join()
-            .map_err(|e| format!("DeprovisionAgentUserAsync: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("DeprovisionAgentUserAsync: {}", e)))?;
 
         match status {
             IsolationSessionProvisionStatus::Succeeded => Ok(()),
-            _ => Err(format!(
+            _ => Err(lifecycle_err(format!(
                 "DeprovisionAgentUserAsync returned status: {}",
                 status.0
-            )),
+            ))),
         }
     }
 
     /// Step 6: Unregister the client.
-    pub fn unregister_client(&self) -> Result<(), String> {
+    pub fn unregister_client(&self) -> Result<(), IsolationSessionError> {
         let async_op = IsolationSessionClient::UnregisterClientAsync(&self.registration_id)
-            .map_err(|e| format!("UnregisterClientAsync failed: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("UnregisterClientAsync failed: {}", e)))?;
 
         let _status = async_op
             .join()
-            .map_err(|e| format!("UnregisterClientAsync: {}", e))?;
+            .map_err(|e| lifecycle_err(format!("UnregisterClientAsync: {}", e)))?;
 
         Ok(())
     }
@@ -487,8 +550,8 @@ impl Default for IsolationSessionRunner {
 impl ScriptRunner for IsolationSessionRunner {
     fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         // Validate unsupported policy fields.
-        if let Err(msg) = validate_policy(request) {
-            return ScriptResponse::error(&msg);
+        if let Err(e) = validate_policy(request) {
+            return e.into();
         }
 
         let options = build_process_options(request);
@@ -508,12 +571,12 @@ impl ScriptRunner for IsolationSessionRunner {
         // Create the session manager (activates the WinRT factory).
         let mut manager = match IsolationSessionManager::new() {
             Ok(m) => m,
-            Err(e) => return ScriptResponse::error(&e),
+            Err(e) => return e.into(),
         };
 
         // Full lifecycle: register → provision → start → execute → stop → deprovision → unregister.
         if let Err(e) = manager.register_client() {
-            return ScriptResponse::error(&format!("register_client failed: {}", e));
+            return e.into();
         }
 
         let destroy_on_exit = request.lifecycle.destroy_on_exit;
@@ -528,7 +591,7 @@ impl ScriptRunner for IsolationSessionRunner {
                 // leak. The broker no-ops these calls on absent state.
                 let _ = manager.deprovision_agent_user();
                 let _ = manager.unregister_client();
-                return ScriptResponse::error(&format!("provision_agent_user failed: {}", e));
+                return e.into();
             }
         }
 
@@ -538,7 +601,7 @@ impl ScriptRunner for IsolationSessionRunner {
             let _ = manager.stop_session();
             let _ = manager.deprovision_agent_user();
             let _ = manager.unregister_client();
-            return ScriptResponse::error(&format!("start_session failed: {}", e));
+            return e.into();
         }
 
         let result = match manager.create_process(&options) {
@@ -548,7 +611,7 @@ impl ScriptRunner for IsolationSessionRunner {
                 let _ = manager.stop_session();
                 let _ = manager.deprovision_agent_user();
                 let _ = manager.unregister_client();
-                return ScriptResponse::error(&format!("create_process failed: {}", e));
+                return e.into();
             }
         };
 
@@ -577,6 +640,15 @@ mod tests {
     use super::*;
     use crate::models::{CodexRequest, ContainerPolicy, NetworkPolicy, ProxyAddress, ProxyConfig};
 
+    fn assert_policy_err_contains(err: IsolationSessionError, expected: &str) {
+        match err {
+            IsolationSessionError::Policy(msg) => {
+                assert!(msg.contains(expected), "expected '{}' in {}", expected, msg)
+            }
+            other => panic!("expected Policy variant, got {:?}", other),
+        }
+    }
+
     #[test]
     fn policy_rejects_readwrite_paths() {
         let request = CodexRequest {
@@ -586,8 +658,10 @@ mod tests {
             },
             ..Default::default()
         };
-        let err = validate_policy(&request).unwrap_err();
-        assert!(err.contains(ERR_FILESYSTEM_POLICY));
+        assert_policy_err_contains(
+            validate_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
     }
 
     #[test]
@@ -599,8 +673,10 @@ mod tests {
             },
             ..Default::default()
         };
-        let err = validate_policy(&request).unwrap_err();
-        assert!(err.contains(ERR_FILESYSTEM_POLICY));
+        assert_policy_err_contains(
+            validate_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
     }
 
     #[test]
@@ -612,8 +688,10 @@ mod tests {
             },
             ..Default::default()
         };
-        let err = validate_policy(&request).unwrap_err();
-        assert!(err.contains(ERR_FILESYSTEM_POLICY));
+        assert_policy_err_contains(
+            validate_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
     }
 
     #[test]
@@ -625,8 +703,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let err = validate_policy(&request).unwrap_err();
-        assert!(err.contains(ERR_NETWORK_POLICY));
+        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
     }
 
     #[test]
@@ -638,8 +715,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let err = validate_policy(&request).unwrap_err();
-        assert!(err.contains(ERR_NETWORK_POLICY));
+        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
     }
 
     #[test]
@@ -651,8 +727,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let err = validate_policy(&request).unwrap_err();
-        assert!(err.contains(ERR_NETWORK_POLICY));
+        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
     }
 
     #[test]
@@ -667,8 +742,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let err = validate_policy(&request).unwrap_err();
-        assert!(err.contains(ERR_PROXY_POLICY));
+        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_PROXY_POLICY);
     }
 
     #[test]
@@ -778,7 +852,7 @@ mod tests {
                 // Service IS available on this machine (e.g., a test VM with
                 // the feature enabled). The test is not applicable — skip.
             }
-            Err(msg) => {
+            Err(IsolationSessionError::ServiceUnavailable(msg)) => {
                 // Service is NOT available. Verify the error is clean and
                 // descriptive (not a panic or cryptic COM error).
                 assert!(
@@ -786,6 +860,9 @@ mod tests {
                     "Expected descriptive error message, got: {}",
                     msg
                 );
+            }
+            Err(other) => {
+                panic!("expected ServiceUnavailable variant, got: {:?}", other);
             }
         }
     }
