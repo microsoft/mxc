@@ -116,8 +116,15 @@ pub(crate) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
         })
         .collect();
 
+    // Resolve the cmd.exe path off the host's `SystemDrive` (which the agent
+    // session inherits since it runs on the same OS host) rather than
+    // hardcoding `C:`. Falls back to `C:` on the unlikely chance the env
+    // var is absent.
+    let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+    let process_path = format!(r"{}\Windows\System32\cmd.exe", system_drive);
+
     ProcessOptions {
-        process_path: r"C:\Windows\System32\cmd.exe".to_string(),
+        process_path,
         arguments: format!("/c {}", request.script_code),
         timeout_ms: request.script_timeout,
         working_directory: request.working_directory.clone(),
@@ -679,7 +686,13 @@ mod tests {
             ..Default::default()
         };
         let opts = build_process_options(&request);
-        assert_eq!(opts.process_path, r"C:\Windows\System32\cmd.exe");
+        // Host-relative — drive comes from %SYSTEMDRIVE% (typically `C:`),
+        // so assert the trailing path shape rather than the full literal.
+        assert!(
+            opts.process_path.ends_with(r"\Windows\System32\cmd.exe"),
+            "unexpected process_path: {}",
+            opts.process_path
+        );
         assert_eq!(opts.arguments, "/c echo hello");
     }
 
