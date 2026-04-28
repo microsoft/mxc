@@ -42,8 +42,5 @@
   "os": [
     "win32",
     "linux"
-  ],
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
-  }
+  ]
 }
