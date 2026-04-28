@@ -49,7 +49,11 @@ export function resolveExecutableAndArgs(
   }
 
   const platformSupport = getPlatformSupport();
-  if (!platformSupport.isSupported) {
+  // Experimental backends (microvm, wslc) have their own platform validation below,
+  // so they bypass the general platform support check.
+  const isExperimental = config.containment &&
+    (ExperimentalBackends as readonly string[]).includes(config.containment);
+  if (!platformSupport.isSupported && !isExperimental) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 

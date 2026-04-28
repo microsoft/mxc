@@ -11,80 +11,61 @@
 //
 // Run: npx tsc && node --test dist/sandbox.microvm.e2etest.js
 //
-// Note: These tests use child_process.spawn directly (non-PTY mode) because:
-//   1. The platform check in getPlatformSupport() may reject dev machines
-//   2. Non-PTY mode gives reliable exit codes and separate stdout/stderr
-//   3. This matches the usePty:false pattern from PR #209
-//
-// When PR #209's usePty:false lands, these can switch to spawnSandboxFromConfig.
+// Uses spawnSandboxFromConfig with usePty:false for reliable exit codes
+// and separate stdout/stderr streams.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'os';
-import { spawn } from 'child_process';
+import { spawnSandboxFromConfig } from './sandbox';
 import { ContainerConfig } from './types';
+import { ChildProcess } from 'child_process';
 
 const isMicrovmAvailable = os.platform() === 'win32';
 
 /**
- * Find wxc-exec.exe next to the SDK (in src/target/debug/).
- */
-function findWxcExec(): string | null {
-  const sdkDir = path.resolve(__dirname, '..');
-  const repoRoot = path.resolve(sdkDir, '..');
-  const candidates = [
-    path.join(repoRoot, 'src', 'target', 'debug', 'wxc-exec.exe'),
-    path.join(repoRoot, 'src', 'target', 'x86_64-pc-windows-msvc', 'debug', 'wxc-exec.exe'),
-    path.join(repoRoot, 'src', 'target', 'x86_64-pc-windows-msvc', 'release', 'wxc-exec.exe'),
-  ];
-  return candidates.find(c => fs.existsSync(c)) ?? null;
-}
-
-/**
- * Spawn wxc-exec with a microvm config and collect stdout/stderr/exitCode.
+ * Spawn a microvm sandbox using spawnSandboxFromConfig with usePty:false.
+ * Returns stdout, stderr, and exit code.
  */
 function runMicrovm(
   config: ContainerConfig,
   options: { timeoutMs?: number } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve, reject) => {
-    const wxcExec = findWxcExec();
-    if (!wxcExec) {
-      return reject(new Error('wxc-exec.exe not found. Build it first: cd src && cargo build -p wxc'));
-    }
-
-    const configJson = JSON.stringify(config);
-    const configBase64 = Buffer.from(configJson, 'utf-8').toString('base64');
-    const args = ['--config-base64', configBase64, '--experimental', '--debug'];
     const timeout = options.timeoutMs ?? 120_000;
 
-    const child = spawn(wxcExec, args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      cwd: process.cwd(),
-    });
+    try {
+      const child: ChildProcess = spawnSandboxFromConfig(config, {
+        experimental: true,
+        debug: true,
+        usePty: false,
+      });
 
-    let stdout = '';
-    let stderr = '';
+      let stdout = '';
+      let stderr = '';
 
-    child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-    child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
+      child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
+      child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
 
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`MicroVM test timed out after ${timeout}ms.\nstdout: ${stdout}\nstderr: ${stderr}`));
-    }, timeout);
+      const timer = setTimeout(() => {
+        child.kill();
+        reject(new Error(`MicroVM test timed out after ${timeout}ms.\nstdout: ${stdout}\nstderr: ${stderr}`));
+      }, timeout);
 
-    child.on('error', (error: Error) => {
-      clearTimeout(timer);
-      reject(new Error(`Failed to spawn wxc-exec: ${error.message}`));
-    });
+      child.on('error', (error: Error) => {
+        clearTimeout(timer);
+        reject(new Error(`Failed to spawn wxc-exec: ${error.message}`));
+      });
 
-    child.on('close', (code: number | null) => {
-      clearTimeout(timer);
-      resolve({ stdout, stderr, exitCode: code ?? -1 });
-    });
+      child.on('close', (code: number | null) => {
+        clearTimeout(timer);
+        resolve({ stdout, stderr, exitCode: code ?? -1 });
+      });
+    } catch (error) {
+      reject(error);
+    }
   });
 }
 
