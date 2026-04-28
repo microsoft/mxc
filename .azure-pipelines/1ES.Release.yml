@@ -57,8 +57,6 @@ extends:
             artifactName: mxc-npm-sdk-package
 
         displayName: Publish to NPM
-        pool:
-          type: release
         steps:
         - task: EsrpRelease@10
           displayName: 'Publish to NPM'
