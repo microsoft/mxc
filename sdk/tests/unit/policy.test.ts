@@ -1,25 +1,22 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { describe, it, afterEach } from 'node:test';
+import { describe, it, afterEach, mock } from 'node:test';
 import assert from 'node:assert';
 import { getAvailableToolsPolicy } from '../../src/policy';
 import * as fs from 'fs';
-import * as os from 'os';
+import os from 'os';
 import * as path from 'path';
 
 describe('getAvailableToolsPolicy - PowerShell discovery', () => {
-    let originalPlatform: PropertyDescriptor | undefined;
     let tmpDir: string | undefined;
 
     const mockWindows = () => {
-        originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
-        Object.defineProperty(process, 'platform', { value: 'win32' });
+        mock.method(os, 'platform', () => 'win32');
     };
 
     const mockLinux = () => {
-        originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
-        Object.defineProperty(process, 'platform', { value: 'linux' });
+        mock.method(os, 'platform', () => 'linux');
     };
 
     /** Create a temp directory containing a fake pwsh.exe and return its path. */
@@ -30,10 +27,7 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
     };
 
     afterEach(() => {
-        if (originalPlatform) {
-            Object.defineProperty(process, 'platform', originalPlatform);
-            originalPlatform = undefined;
-        }
+        mock.restoreAll();
         if (tmpDir) {
             fs.rmSync(tmpDir, { recursive: true, force: true });
             tmpDir = undefined;
@@ -78,14 +72,13 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         );
     });
 
-    it('should not add PowerShell paths on non-Windows platforms', () => {
+    it('should return empty policy on non-Windows even when pwsh.exe is on PATH', () => {
         mockLinux();
         const pwshDir = createFakePwshDir();
         const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' };
         const result = getAvailableToolsPolicy(env);
-        assert.ok(
-            !result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
-            'System root should not be added on Linux',
+        assert.strictEqual(result.readonlyPaths.length, 0,
+            'readonlyPaths should be empty on Linux',
         );
         assert.strictEqual(result.readwritePaths.length, 0,
             'readwritePaths should be empty on Linux',

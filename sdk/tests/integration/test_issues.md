@@ -2,12 +2,12 @@
 
 ## Store Python fails in AppContainer and BaseContainer
 
-**Tests:** `should execute python in process container`, `should allow writing to brokered readwrite path`
-
-Store Python's App Execution Alias reparse points can't be resolved inside sandboxes. Use MSI Python with `ALL APPLICATION PACKAGES:(RX)` ACL instead.
+Store Python App Execution Alias reparse points can't be resolved inside sandboxes. See #66.
 
 ## Proxy tests timeout
 
-**Tests:** `should route traffic through built-in proxy`, `should route traffic through external proxy`
+Base process container proxy test stalls mid-round-trip when using 0.5.0 schema. Traffic reaches the proxy but times out on external requests.
 
-Base process container proxy test stalls mid-round-trip. Tests should use PowerShell and WinHTTP COM instead of curl.
+## LXC network tests fail in CI
+
+LXC containers lack network bridge/NAT config on hosted Ubuntu runners, causing outbound connectivity failures.
