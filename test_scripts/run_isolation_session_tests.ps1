@@ -44,14 +44,27 @@ if (-not $ConfigDir) {
     $ConfigDir = Join-Path $RepoRoot "test_configs"
 }
 
-# Locate wxc-exec.exe — explicit path > target-specific release > default release.
-$Target = "x86_64-pc-windows-msvc"
+# Locate wxc-exec.exe — explicit path > host-arch target dir > other-arch
+# target dir > default release dir. Detect the host arch so we look for the
+# matching build first, but also probe the other Windows target so a
+# cross-built binary is still discoverable.
+$HostTarget = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
+    'aarch64-pc-windows-msvc'
+} else {
+    'x86_64-pc-windows-msvc'
+}
+$OtherTarget = if ($HostTarget -eq 'aarch64-pc-windows-msvc') {
+    'x86_64-pc-windows-msvc'
+} else {
+    'aarch64-pc-windows-msvc'
+}
 
 if ($WxcExePath) {
     $WxcExec = $WxcExePath
 } else {
     $CandidatePaths = @(
-        (Join-Path $RepoRoot "src\target\$Target\release\wxc-exec.exe"),
+        (Join-Path $RepoRoot "src\target\$HostTarget\release\wxc-exec.exe"),
+        (Join-Path $RepoRoot "src\target\$OtherTarget\release\wxc-exec.exe"),
         (Join-Path $RepoRoot "src\target\release\wxc-exec.exe")
     )
     $WxcExec = $CandidatePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -61,7 +74,7 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
     Write-Host "ERROR: wxc-exec.exe not found." -ForegroundColor Red
     Write-Host "Searched:" -ForegroundColor Yellow
     foreach ($p in $CandidatePaths) { Write-Host "  - $p" -ForegroundColor Yellow }
-    Write-Host "Build with: cargo build --release --features isolation_session --target $Target" -ForegroundColor Yellow
+    Write-Host "Build with: cargo build --release --features isolation_session --target $HostTarget" -ForegroundColor Yellow
     Write-Host "Or pass -WxcExecPath explicitly." -ForegroundColor Yellow
     exit 1
 }
