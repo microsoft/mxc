@@ -21,8 +21,7 @@ import os from 'os';
 import { ChildProcess } from 'child_process';
 import { sdk } from './test-helpers';
 
-const skipInCi = process.env.MXC_SKIP_OS_BUILD_DEPENDENT_TESTS === '1';
-const isWslcAvailable = os.platform() === 'win32' && !skipInCi;
+const isWslcAvailable = os.platform() === 'win32';
 
 describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
   skip: !isWslcAvailable ? 'WSLC tests require Windows with WSL2 and WSLC SDK' : undefined,
