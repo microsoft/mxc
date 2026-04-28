@@ -98,37 +98,7 @@ extends:
       displayName: 'SDK Unit Tests'
       dependsOn: []
       jobs:
-      - job: sdk_unit_tests_windows
-        displayName: SDK Unit Tests (Windows)
-        pool:
-          name: Azure-Pipelines-1ESPT-ExDShared
-          image: windows-2022
-          os: windows
-        steps:
-          - checkout: self
-          - task: NodeTool@0
-            displayName: Use Node.js 20
-            inputs:
-              versionSpec: '20.x'
-          - task: CopyFiles@2
-            displayName: Copy .npmrc to SDK
-            inputs:
-              SourceFolder: '$(Build.SourcesDirectory)/.azure-pipelines/.npm'
-              Contents: '.npmrc'
-              TargetFolder: '$(Build.SourcesDirectory)/sdk'
-          - task: NpmAuthenticate@0
-            displayName: NPM Authenticate
-            inputs:
-              workingFile: '$(Build.SourcesDirectory)/sdk/.npmrc'
-          - script: npm ci
-            workingDirectory: $(Build.SourcesDirectory)/sdk
-            displayName: npm ci
-          - script: npm run build
-            workingDirectory: $(Build.SourcesDirectory)/sdk
-            displayName: npm run build
-          - script: npm test
-            workingDirectory: $(Build.SourcesDirectory)/sdk
-            displayName: npm test
+      - template: .azure-pipelines/templates/SDK.Unit.Test.Job.yml@self
 
     - stage: SDK_Integration_Tests
       displayName: 'SDK Integration Tests'

@@ -1,0 +1,60 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+parameters:
+- name: targets
+  type: object
+  default:
+    - name: windows
+      os: windows
+    - name: linux
+      os: linux
+
+jobs:
+- ${{ each target in parameters.targets }}:
+  - job: 'sdk_unit_tests_${{ target.name }}'
+    displayName: 'SDK Unit Tests (${{ target.name }})'
+
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      ${{ if eq(target.os, 'windows') }}:
+        image: windows-2022
+        os: windows
+      ${{ if eq(target.os, 'linux') }}:
+        image: ubuntu-latest
+        os: linux
+
+    variables:
+      sdkDirectory: $(Build.SourcesDirectory)/sdk
+
+    steps:
+      - checkout: self
+
+      - task: NodeTool@0
+        displayName: Use Node.js 20
+        inputs:
+          versionSpec: '20.x'
+
+      - task: CopyFiles@2
+        displayName: Copy .npmrc to SDK
+        inputs:
+          SourceFolder: '$(Build.SourcesDirectory)/.azure-pipelines/.npm'
+          Contents: '.npmrc'
+          TargetFolder: '$(sdkDirectory)'
+
+      - task: NpmAuthenticate@0
+        displayName: NPM Authenticate
+        inputs:
+          workingFile: '$(sdkDirectory)/.npmrc'
+
+      - script: npm ci
+        workingDirectory: $(sdkDirectory)
+        displayName: npm ci
+
+      - script: npm run build
+        workingDirectory: $(sdkDirectory)
+        displayName: npm run build
+
+      - script: npm test
+        workingDirectory: $(sdkDirectory)
+        displayName: npm test

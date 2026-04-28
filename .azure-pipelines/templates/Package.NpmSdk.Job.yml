@@ -63,10 +63,6 @@ jobs:
       workingDirectory: $(sdkDirectory)
       displayName: npm run build
 
-    - script: npm test
-      workingDirectory: $(sdkDirectory)
-      displayName: npm test
-
     - script: npm pack
       workingDirectory: $(sdkDirectory)
       displayName: npm pack
