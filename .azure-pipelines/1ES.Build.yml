@@ -106,6 +106,10 @@ extends:
           os: windows
         steps:
           - checkout: self
+          - task: NodeTool@0
+            displayName: Use Node.js 20
+            inputs:
+              versionSpec: '20.x'
           - script: npm ci
             workingDirectory: $(Build.SourcesDirectory)/sdk
             displayName: npm ci

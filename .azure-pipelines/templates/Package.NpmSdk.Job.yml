@@ -24,6 +24,11 @@ jobs:
   steps:
     - checkout: self
 
+    - task: NodeTool@0
+      displayName: Use Node.js 20
+      inputs:
+        versionSpec: '20.x'
+
     # Download all artifacts dynamically
     - ${{ each target in parameters.targets }}:
       - task: DownloadPipelineArtifact@2
@@ -31,6 +36,11 @@ jobs:
         inputs:
           artifact: ${{ target.artifact }}
           path: $(sdkDirectory)/bin/${{ target.sdkArch }}
+
+    # Pipeline artifact downloads strip Unix execute permissions.
+    # Restore +x on Linux binaries so the tarball preserves them.
+    - script: chmod +x $(sdkDirectory)/bin/*/lxc-exec
+      displayName: Restore execute permission on lxc-exec
 
     # Copy .npmrc to the SDK directory so Azure artifacts feed is used for npm install.
     - task: CopyFiles@2
