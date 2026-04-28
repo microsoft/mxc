@@ -110,6 +110,16 @@ extends:
             displayName: Use Node.js 20
             inputs:
               versionSpec: '20.x'
+          - task: CopyFiles@2
+            displayName: Copy .npmrc to SDK
+            inputs:
+              SourceFolder: '$(Build.SourcesDirectory)/.azure-pipelines/.npm'
+              Contents: '.npmrc'
+              TargetFolder: '$(Build.SourcesDirectory)/sdk'
+          - task: NpmAuthenticate@0
+            displayName: NPM Authenticate
+            inputs:
+              workingFile: '$(Build.SourcesDirectory)/sdk/.npmrc'
           - script: npm ci
             workingDirectory: $(Build.SourcesDirectory)/sdk
             displayName: npm ci
