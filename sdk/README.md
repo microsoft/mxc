@@ -1,5 +1,7 @@
 # MXC SDK
 
+> **Status: Public Preview** - MXC is experimental and in active development.
+
 ## Overview
 
 The MXC SDK provides a Node.js interface for creating and managing policy-based containers. It exposes APIs for:
