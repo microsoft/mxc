@@ -47,14 +47,20 @@ impl Default for WindowsSandboxConfig {
 }
 
 /// Session configuration size for the Isolation Session backend.
-/// Maps to `IsolationConfigurationId` in the IsoEnvBroker Session API.
+/// Maps to `IsolationSessionConfigurationId` in the IsoEnvBroker Session API,
+/// whose values must in turn match `ISOLATION_CONFIG_ID` in `winsta.h`.
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum IsolationSessionConfigurationId {
+    /// `Small` (1) — smallest pre-defined configuration; the default.
     #[default]
     Small,
+    /// `Medium` (2) — middle pre-defined configuration.
     Medium,
+    /// `Large` (3) — largest pre-defined configuration.
     Large,
+    /// `CommandLine` (4) — configuration shape intended for non-interactive
+    /// command-line workloads.
     CommandLine,
 }
 

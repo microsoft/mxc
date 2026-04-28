@@ -111,6 +111,11 @@ fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
 fn main() {
     // Initialize COM/WinRT for backends that use WinRT APIs (Isolation Session).
     // COINIT_MULTITHREADED is benign for backends that don't use COM.
+    //
+    // SAFETY: `CoInitializeEx` is sound to call once at process start before
+    // any WinRT or COM activation. `pvReserved` must be `None` per the API
+    // contract. The return value is intentionally ignored — repeat-init
+    // outcomes (`S_FALSE`, `RPC_E_CHANGED_MODE`) are benign here.
     let _ = unsafe {
         windows::Win32::System::Com::CoInitializeEx(
             None,

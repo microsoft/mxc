@@ -162,7 +162,14 @@ pub(crate) fn check_service_available() -> Result<(), String> {
 /// Manages the IsoEnvBroker Session API lifecycle. Methods map 1:1 to the
 /// Session API steps.
 pub struct IsolationSessionManager {
+    /// Cohort/registration identifier passed to every Session API call.
+    /// The broker accepts an empty `HSTRING` as the default cohort, which
+    /// is what the v0.1 one-shot runner uses.
     registration_id: windows_core::HSTRING,
+    /// Provision identifier scoping the agent user across the lifecycle
+    /// steps. An empty `HSTRING` selects the broker's single default slot
+    /// per registration — sufficient for the v0.1 single-session-per-process
+    /// lifecycle.
     provision_id: windows_core::HSTRING,
 }
 
@@ -253,7 +260,8 @@ impl IsolationSessionManager {
         }
     }
 
-    /// Step 3: Create an isolated process and capture its output.
+    /// Step 3: Create a process inside the started isolation session and
+    /// capture its output.
     pub(crate) fn create_process(&self, options: &ProcessOptions) -> Result<ProcessResult, String> {
         // Build the WinRT create options.
         let create_opts = IsolationSessionWorkerProcessCreateOptions::new()
@@ -324,22 +332,22 @@ impl IsolationSessionManager {
 
         // Read stdout/stderr via pipe handles.
         let stdout = {
-            let h = worker
+            let out_handle = worker
                 .CreateStandardOutputHandle()
                 .map_err(|e| format!("CreateStandardOutputHandle: {}", e))?;
-            if h != 0 {
-                read_pipe_and_close(h)
+            if out_handle != 0 {
+                read_pipe_and_close(out_handle)
             } else {
                 String::new()
             }
         };
 
         let stderr = {
-            let h = worker
+            let err_handle = worker
                 .CreateStandardErrorHandle()
                 .map_err(|e| format!("CreateStandardErrorHandle: {}", e))?;
-            if h != 0 {
-                read_pipe_and_close(h)
+            if err_handle != 0 {
+                read_pipe_and_close(err_handle)
             } else {
                 String::new()
             }
@@ -422,12 +430,19 @@ fn read_pipe_and_close(handle_value: u64) -> String {
     let mut buffer = [0u8; 4096];
     loop {
         let mut bytes_read = 0u32;
+        // SAFETY: `handle` is a kernel handle returned to this function by
+        // the IsoEnvBroker (`CreateStandardOutputHandle` /
+        // `CreateStandardErrorHandle`); we own it for the duration of this
+        // call. `buffer` and `bytes_read` are stack-allocated and live for
+        // the entire `ReadFile` call.
         let ok = unsafe { ReadFile(handle, Some(&mut buffer), Some(&mut bytes_read), None) };
         if ok.is_err() || bytes_read == 0 {
             break;
         }
         output.extend_from_slice(&buffer[..bytes_read as usize]);
     }
+    // SAFETY: `handle` was used in `ReadFile` above and is closed exactly
+    // once here at end-of-scope, matching the kernel-handle teardown contract.
     unsafe {
         let _ = CloseHandle(handle);
     }
