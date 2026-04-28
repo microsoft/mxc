@@ -642,9 +642,11 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.containerId, 'my-container');
     });
 
-    it('should throw from spawnSandbox when experimental is not set', () => {
+    it('should throw from spawnSandbox when experimental backend is used via config', () => {
+      const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
       assert.throws(
-        () => spawnSandbox('echo hello', { version: '0.5.0-alpha' }, {}, undefined, undefined, undefined, 'wslc'),
+        () => spawnSandboxFromConfig(config),
         { message: /experimental mode/ },
       );
     });

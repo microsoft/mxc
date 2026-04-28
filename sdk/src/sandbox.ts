@@ -477,7 +477,6 @@ function spawnWithConfig(
  * @param workingDirectory Optional working directory path
  * @param containerName Optional container name; if not provided, a random name will be generated
  * @param env Optional environment variables
- * @param containment Optional containment backend
  * @returns IPty object for interacting with the sandboxed process
  * @throws Error if platform is not supported or wxc-exec is not found
  *
@@ -498,60 +497,9 @@ export function spawnSandbox(
   workingDirectory?: string,
   containerName?: string,
   env?: { [key: string]: string | undefined },
-  containment?: ContainmentType,
 ): pty.IPty {
-  const config = buildSandboxPayload(script, policy, workingDirectory, containerName, containment);
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
   return spawnWithConfig(config, options, workingDirectory, env);
-}
-
-/**
- * Spawn a sandboxed process using child_process.spawn (non-PTY).
- *
- * Returns the `ChildProcess` directly so the caller can manage stdout, stderr,
- * and exit events. Use this for CI/automation where reliable exit codes and
- * separate output streams are required.
- *
- * @param script The command line script to execute
- * @param policy The sandbox policy
- * @param options - Spawn options
- * @param workingDirectory Optional working directory path
- * @param containerName Optional container name
- * @param env Optional environment variables
- * @param containment Optional containment backend
- *
- * @returns The spawned ChildProcess
- *
- * @example
- * ```typescript
- * const child = spawnSandboxWithoutPty(
- *   "print('Hello from sandbox!')",
- *   { version: '0.4.0-alpha' },
- *   { experimental: true }
- * );
- * child.stdout?.on('data', (data) => console.log(data.toString()));
- * child.on('close', (code) => console.log('Exit code:', code));
- * ```
- */
-export function spawnSandboxWithoutPty(
-  script: string,
-  policy: SandboxPolicy,
-  options: SandboxSpawnOptions = {},
-  workingDirectory?: string,
-  containerName?: string,
-  env?: { [key: string]: string | undefined },
-  containment?: ContainmentType,
-): ChildProcess {
-  if (options.ptyOptions) {
-    console.warn('Warning: ptyOptions are ignored by spawnSandboxWithoutPty (non-PTY). Use spawnSandbox for PTY support.');
-  }
-  const config = buildSandboxPayload(script, policy, workingDirectory, containerName, containment);
-  const { executablePath, args } = resolveExecutableAndArgs(config, options);
-
-  return spawn(executablePath, args, {
-    cwd: workingDirectory || process.cwd(),
-    stdio: ['pipe', 'pipe', 'pipe'],
-    ...(env ? { env: env as NodeJS.ProcessEnv } : {}),
-  });
 }
 
 /**
