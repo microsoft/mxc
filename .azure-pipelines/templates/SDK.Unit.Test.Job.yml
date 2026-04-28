@@ -2,6 +2,9 @@
 # Licensed under the MIT License.
 
 parameters:
+- name: debug
+  type: boolean
+  default: false
 - name: targets
   type: object
   default:
@@ -58,3 +61,5 @@ jobs:
       - script: npm test
         workingDirectory: $(sdkDirectory)
         displayName: npm test
+        env:
+          MXC_DEBUG: ${{ parameters.debug }}

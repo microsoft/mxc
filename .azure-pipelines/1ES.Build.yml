@@ -31,6 +31,11 @@ parameters:
       signCertName: ''
       clientId: ''
 
+  - name: debug
+    displayName: Enable debug output for SDK tests
+    type: boolean
+    default: false
+
 variables:
   # Prevents failure when no Rust tests are found; pipeline runs will still fail if present
   # tests do not pass.
@@ -99,9 +104,13 @@ extends:
       dependsOn: []
       jobs:
       - template: .azure-pipelines/templates/SDK.Unit.Test.Job.yml@self
+        parameters:
+          debug: ${{ parameters.debug }}
 
     - stage: SDK_Integration_Tests
       displayName: 'SDK Integration Tests'
       dependsOn: Package_MXC_NPM_SDK
       jobs:
       - template: .azure-pipelines/templates/SDK.Integration.Test.Job.yml@self
+        parameters:
+          debug: ${{ parameters.debug }}
