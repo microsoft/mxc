@@ -4,12 +4,9 @@
 import * as pty from 'node-pty';
 import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
-import * as fs from 'fs';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, SandboxingMethod, ContainerConfig, ContainmentType, ExperimentalBackends } from './types';
-import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
-import { FileLogger } from './logger';
+import { SandboxPolicy, ContainerConfig, ContainmentType } from './types';
 import { prepareSpawn } from './helper';
 
 const SUPPORTED_VERSION = '0.5.0-alpha';
@@ -353,83 +350,6 @@ export interface SandboxSpawnOptions {
 }
 
 /**
- * Resolves the executable path and builds CLI arguments for a sandbox invocation.
- * Shared setup used by both PTY and non-PTY spawn paths.
- */
-function resolveExecutableAndArgs(
-  config: ContainerConfig,
-  options: SandboxSpawnOptions = {},
-): { executablePath: string; args: string[] } {
-  if (!config.process?.commandLine) {
-    throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
-  }
-
-  const platformSupport = getPlatformSupport();
-  if (!platformSupport.isSupported) {
-    throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
-  }
-
-  // Validate containment against platform
-  if (config.containment) {
-    if (config.containment === 'microvm' && os.platform() !== 'win32') {
-      throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
-    }
-    if (!(ExperimentalBackends as readonly string[]).includes(config.containment) &&
-        !platformSupport.availableMethods.includes(config.containment as SandboxingMethod)) {
-      throw new Error(
-        `Containment backend '${config.containment}' is not available on this platform. ` +
-        `Available methods: ${platformSupport.availableMethods.join(', ')}`
-      );
-    }
-  }
-
-  const platform = os.platform();
-  let executablePath: string | null;
-
-  if (options.executablePath) {
-    if (!fs.existsSync(options.executablePath)) {
-      throw new Error(`File not found: ${options.executablePath}`);
-    }
-    executablePath = options.executablePath;
-  } else if (platform === 'linux') {
-    executablePath = findLxcExecutable();
-    if (!executablePath) {
-      throw new Error(
-        'lxc-exec not found. Ensure it is built and available in a standard location.'
-      );
-    }
-  } else {
-    executablePath = findWxcExecutable();
-    if (!executablePath) {
-      throw new Error(
-        'wxc-exec.exe not found. Set options.executablePath or ensure it exists in a standard location.'
-      );
-    }
-  }
-
-  const args: string[] = [];
-  const configJson = JSON.stringify(config);
-  const configBase64 = Buffer.from(configJson, 'utf-8').toString('base64');
-  args.push('--config-base64', configBase64);
-
-  if (options.debug) {
-    args.push('--debug');
-  }
-
-  if (ExperimentalBackends.includes(config.containment as ContainmentType) && !options.experimental) {
-    throw new Error(
-      `'${config.containment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
-    );
-  }
-
-  if (options.experimental) {
-    args.push('--experimental');
-  }
-
-  return { executablePath, args };
-}
-
-/**
  * Internal helper: resolves the executor binary path and spawns a PTY process.
  */
 function spawnWithConfig(
@@ -438,7 +358,7 @@ function spawnWithConfig(
   workingDirectory?: string,
   env?: { [key: string]: string | undefined },
 ): pty.IPty {
-  const { executablePath, args, logger, startTime } = prepareSpawn(config, options, resolveExecutableAndArgs);
+  const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
 
   try {
     const ptyOpts: pty.IPtyForkOptions = {
@@ -547,7 +467,7 @@ export function spawnSandboxFromConfig(
   env?: { [key: string]: string | undefined }
 ): pty.IPty | ChildProcess {
   if (options.usePty === false) {
-    const { executablePath, args, logger, startTime } = prepareSpawn(config, options, resolveExecutableAndArgs);
+    const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
     try {
       const child = spawn(executablePath, args, {
         cwd: workingDirectory || process.cwd(),
