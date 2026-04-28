@@ -10,3 +10,6 @@ windows-future = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
+
+[build-dependencies]
+semver = "1"

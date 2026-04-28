@@ -74,8 +74,25 @@ fn main() {
             })
         });
 
+    // Build a caret requirement from the major.minor of `expected_version`.
+    // This matches "compatible with X.Y" — same loose-on-patch intent as the
+    // prior `starts_with` check, but via a real semver parser so e.g. "0.6"
+    // cannot silently accept "0.62".
+    let parts: Vec<&str> = expected_version.split('.').take(2).collect();
+    let req_pattern = if parts.len() == 2 {
+        format!("^{}.{}", parts[0], parts[1])
+    } else {
+        return; // Unexpected format — skip check rather than fail loudly.
+    };
+    let Ok(req) = semver::VersionReq::parse(&req_pattern) else {
+        return;
+    };
+
     if let Some(actual) = actual_version {
-        if !actual.starts_with(&expected_version) {
+        let Ok(actual_ver) = semver::Version::parse(&actual) else {
+            return;
+        };
+        if !req.matches(&actual_ver) {
             panic!(
                 "\n\n\
                  isolation_session_bindings: generated code targets windows crate {expected},\n\
