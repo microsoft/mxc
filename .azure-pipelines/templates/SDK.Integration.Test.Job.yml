@@ -37,10 +37,10 @@ jobs:
     steps:
       - checkout: self
 
-      - task: NodeTool@0
+      - task: UseNode@1
         displayName: Use Node.js 20
         inputs:
-          versionSpec: '20.x'
+          version: '20.x'
 
       - task: DownloadPipelineArtifact@2
         displayName: Download SDK package
