@@ -149,6 +149,10 @@ export function prepareSpawn(
 
   try {
     const { executablePath, args } = resolveExecutableAndArgs(config, options);
+    // Pass the SDK log file to wxc-exec so Rust-side diagnostics go to the same file.
+    if (logFile) {
+      args.push('--log-file', logFile);
+    }
     logger?.log('info', 'mxc.binary.resolved', { resolved: !!executablePath });
     return { executablePath, args, logger, logFile, startTime };
   } catch (err) {
