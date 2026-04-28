@@ -104,6 +104,10 @@ export function resolveExecutableAndArgs(
   const configBase64 = Buffer.from(configJson, 'utf-8').toString('base64');
   args.push('--config-base64', configBase64);
 
+  if (options.dryRun) {
+    args.push('--dry-run');
+  }
+
   if (options.debug) {
     args.push('--debug');
   }
