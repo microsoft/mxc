@@ -96,7 +96,7 @@ extends:
 
     - stage: SDK_Unit_Tests
       displayName: 'SDK Unit Tests'
-      dependsOn: Build_Binaries
+      dependsOn: []
       jobs:
       - job: sdk_unit_tests_windows
         displayName: SDK Unit Tests (Windows)
