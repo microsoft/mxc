@@ -89,9 +89,6 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         const pwshDir = createFakePwshDir();
         const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' };
         const result = getAvailableToolsPolicy(env);
-        // On Linux, the temp dir containing pwsh.exe may appear in readonlyPaths
-        // (it exists on disk), but PowerShell-specific paths like the system root
-        // (C:\) and PSReadLine dir must NOT be added.
         assert.ok(
             !result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
             'System root (e.g. C:\\) should not be in readonlyPaths on Linux',
