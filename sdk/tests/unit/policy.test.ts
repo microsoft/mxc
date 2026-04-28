@@ -84,7 +84,7 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         );
     });
 
-    it('should return empty policy on non-Windows even when pwsh.exe is on PATH', () => {
+    it('should return empty policy on non-Windows even when pwsh.exe is on PATH', { skip: isLinux }, () => {
         mockLinux();
         const pwshDir = createFakePwshDir();
         const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' };
