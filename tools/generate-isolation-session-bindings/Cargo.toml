@@ -6,3 +6,4 @@ publish = false
 
 [dependencies]
 windows-bindgen = "0.62"
+clap = { version = "4", features = ["derive"] }
