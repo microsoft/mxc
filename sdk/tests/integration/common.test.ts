@@ -20,16 +20,13 @@ describe('Platform support', () => {
   });
 });
 
-const skipOsBuildTests = process.env.MXC_SKIP_OS_BUILD_DEPENDENT_TESTS === '1';
 const isLinux = os.platform() === 'linux';
 const echoCommand = isLinux ? 'echo test' : 'cmd.exe /c echo test';
 
 for (const schemaVersion of supportedVersions) {
   const dryRunExpectation = expectDryRunValidationPass(schemaVersion);
 
-  describe(`Dry-run smoke tests (schema ${schemaVersion})`, {
-    skip: skipOsBuildTests ? 'Skipped in CI (MXC_SKIP_OS_BUILD_DEPENDENT_TESTS)' : undefined,
-  }, () => {
+  describe(`Dry-run smoke tests (schema ${schemaVersion})`, () => {
     const policy = {
       version: schemaVersion.raw,
       filesystem: {
