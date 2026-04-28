@@ -42,6 +42,11 @@ git checkout master
 
 Follow the build instructions in the WSL repository README to build and install.
 
+> **Note:** Building the WSL repo installs the **WSL runtime** (the system
+> service). This is separate from `wslcsdk.dll`, which is the client SDK
+> library. The DLL is bundled in the MXC repo under `external/wslc-sdk/` and
+> is automatically extracted when you build MXC with `--with-wslc` (Step 2).
+
 ## Step 2 — Build MXC with WSLC support
 
 Build `wxc-exec.exe` with the `wslc` feature flag. This compiles the WSLC
@@ -60,7 +65,7 @@ Verify the binary starts without errors:
 
 > **Note:** `wxc-exec.exe` does **not** require `wslcsdk.dll` at startup. The
 > DLL is loaded at runtime only when the WSLC backend is invoked. All other
-> backends (AppContainer, Windows Sandbox) work without it.
+> backends (Process Container, Windows Sandbox) work without it.
 
 ## Step 3 — Verify WSLC is working
 
@@ -177,10 +182,10 @@ the container.
 
 ## Example Configs
 
-- `examples/wslc_hello_world.json` — Hello world with Alpine
-- `test_configs/wslc_network_isolated.json` — Network isolation
-- `test_configs/wslc_custom_registry_ghcr.json` — Pull from GitHub Container Registry
-- `test_configs/wslc_custom_registry_quay.json` — Pull from Quay.io
-- `test_configs/wslc_tar_import_rootfs.json` — Import rootfs tar
-- `test_configs/wslc_tar_import_docker_save.json` — Import Docker save archive
-- `test_configs/wslc_timeout.json` — Execution timeout enforcement
+- [`examples/wslc_hello_world.json`](../../examples/wslc_hello_world.json) — Hello world with Alpine
+- [`test_configs/wslc_network_isolated.json`](../../test_configs/wslc_network_isolated.json) — Network isolation
+- [`test_configs/wslc_custom_registry_ghcr.json`](../../test_configs/wslc_custom_registry_ghcr.json) — Pull from GitHub Container Registry
+- [`test_configs/wslc_custom_registry_quay.json`](../../test_configs/wslc_custom_registry_quay.json) — Pull from Quay.io
+- [`test_configs/wslc_tar_import_rootfs.json`](../../test_configs/wslc_tar_import_rootfs.json) — Import rootfs tar
+- [`test_configs/wslc_tar_import_docker_save.json`](../../test_configs/wslc_tar_import_docker_save.json) — Import Docker save archive
+- [`test_configs/wslc_timeout.json`](../../test_configs/wslc_timeout.json) — Execution timeout enforcement
