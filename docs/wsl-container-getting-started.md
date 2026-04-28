@@ -1,0 +1,186 @@
+# WSLC Getting Started — Running Linux Containers from Windows via MXC
+
+This guide walks you through setting up the WSL Container (WSLC) backend for
+MXC, which lets you run Linux containers on Windows using the WSLC SDK.
+
+> **Note:** WSLC is an **experimental** feature. It requires the `--experimental`
+> CLI flag or `{ experimental: true }` in SDK spawn options.
+
+## Prerequisites
+
+| Requirement | Details |
+|---|---|
+| **Windows 11** | Required for WSL2 and the WSLC SDK |
+| **WSL 2.8.1+** | See Step 1 below for installation |
+| **WSLC SDK** | `wslcsdk.dll` must be in the same directory as `wxc-exec.exe` |
+| **Container images** | Pre-pulled or available from a registry with network access |
+
+## Step 1 — Install WSL 2.8.1+
+
+The WSLC SDK requires WSL version 2.8.1 or later. Update WSL to the latest
+version:
+
+```powershell
+wsl --update
+```
+
+Verify your WSL version after updating:
+
+```powershell
+wsl --version
+```
+
+The WSL version should be **2.8.1.0 or later**. If `wsl --update` does not
+bring you to the required version, build WSL from the `master`
+branch:
+
+```powershell
+git clone https://github.com/microsoft/WSL.git
+cd WSL
+git checkout master
+```
+
+Follow the build instructions in the WSL repository README to build and install.
+
+## Step 2 — Build MXC with WSLC support
+
+Build `wxc-exec.exe` with the `wslc` feature flag. This compiles the WSLC
+backend and copies `wslcsdk.dll` next to the binary:
+
+```powershell
+cd <repo-root>
+.\build.bat --with-wslc
+```
+
+Verify the binary starts without errors:
+
+```powershell
+.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe --help
+```
+
+> **Note:** `wxc-exec.exe` does **not** require `wslcsdk.dll` at startup. The
+> DLL is loaded at runtime only when the WSLC backend is invoked. All other
+> backends (AppContainer, Windows Sandbox) work without it.
+
+## Step 3 — Verify WSLC is working
+
+Run the included hello world example config from the repo root:
+
+```powershell
+cd <repo-root>
+.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe --experimental --debug examples\wslc_hello_world.json
+```
+
+Expected output:
+
+```
+Hello from WSL Container!
+Linux <hostname> 6.6.x-microsoft-standard-WSL2 ... x86_64 Linux
+```
+
+## Usage
+
+### TypeScript SDK
+
+Use `createConfigFromPolicy()` to build a config, then customize WSLC-specific
+fields before spawning:
+
+```typescript
+import { createConfigFromPolicy, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+
+const policy = {
+  version: '0.5.0-alpha',
+  network: { allowOutbound: true },
+};
+
+const config = createConfigFromPolicy(policy, 'wslc');
+config.process!.commandLine = 'python3 -c "print(\'Hello from WSLC\')"';
+config.experimental!.wslc!.image = 'python:3.12-alpine';
+config.experimental!.wslc!.cpuCount = 2;
+config.experimental!.wslc!.memoryMb = 1024;
+
+// PTY mode (interactive terminal):
+const ptyProcess = spawnSandboxFromConfig(config, { experimental: true });
+
+// Non-PTY mode (reliable exit codes, separate stdout/stderr):
+const child = spawnSandboxFromConfig(config, { experimental: true, usePty: false });
+child.stdout?.on('data', (data) => console.log(data.toString()));
+child.on('close', (code) => console.log('Exit code:', code));
+```
+
+## Configuration Reference
+
+WSLC-specific settings go under `experimental.wslc` in the JSON config:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `image` | string | `"alpine:latest"` | Container image (DockerHub, GHCR, MCR, etc.) |
+| `cpuCount` | number | Host default | Number of CPU cores for the container |
+| `memoryMb` | number | Host default | Memory limit in MB |
+| `gpu` | boolean | `false` | Enable GPU passthrough |
+| `storagePath` | string | System default | Host path for container storage (VHD) |
+| `imageTarPath` | string | — | Path to a local tar file to import as the image |
+
+### Image sources
+
+**1. Pull from DockerHub (default):**
+
+```json
+"experimental": { "wslc": { "image": "alpine:latest" } }
+```
+
+**2. Pull from a custom registry (no auth):**
+
+```json
+"experimental": { "wslc": { "image": "ghcr.io/linuxserver/baseimage-alpine:3.21" } }
+```
+
+Tested registries: DockerHub, `mcr.microsoft.com`, `ghcr.io`, `quay.io`.
+
+**3. Import from a local tar file:**
+
+```json
+"experimental": {
+  "wslc": {
+    "image": "my-image:latest",
+    "imageTarPath": "C:\\path\\to\\image.tar"
+  }
+}
+```
+
+Both `docker export` (rootfs) and `docker save` (image archive) formats are
+supported — the format is auto-detected.
+
+### Network configuration
+
+| Policy | WSLC Behavior |
+|---|---|
+| `"allowOutbound": true` | Bridged networking (full access) |
+| `"allowOutbound": false` | No networking (isolated) |
+
+### Filesystem mounts
+
+Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
+into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
+the container.
+
+## Troubleshooting
+
+| Error | Cause | Fix |
+|---|---|---|
+| `WSLC backend not compiled` | Binary built without `--features wslc` | Rebuild with `build.bat --with-wslc` |
+| `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
+| `WSLC runtime not available` | WSL version too old or missing components | Update WSL with `wsl --update` or build from the [WSL repo](https://github.com/microsoft/WSL/tree/feature/wsl-for-apps) |
+| `WSLC is an experimental feature` | Missing `--experimental` flag | Add `--experimental` to CLI or `{ experimental: true }` in SDK |
+| `experimental mode` error in SDK | `SandboxSpawnOptions.experimental` not set | Pass `{ experimental: true }` to spawn functions |
+| Container exits with code -1 | Process failed or timed out | Check stderr output with `--debug` flag |
+
+## Example Configs
+
+- `examples/wslc_hello_world.json` — Hello world with Alpine
+- `test_configs/wslc_network_isolated.json` — Network isolation
+- `test_configs/wslc_custom_registry_ghcr.json` — Pull from GitHub Container Registry
+- `test_configs/wslc_custom_registry_quay.json` — Pull from Quay.io
+- `test_configs/wslc_tar_import_rootfs.json` — Import rootfs tar
+- `test_configs/wslc_tar_import_docker_save.json` — Import Docker save archive
+- `test_configs/wslc_timeout.json` — Execution timeout enforcement
