@@ -94,6 +94,28 @@ extends:
 
           ESRPInfo: ${{ parameters.ESRPInfo }}
 
+    - stage: SDK_Unit_Tests
+      displayName: 'SDK Unit Tests'
+      dependsOn: Build_Binaries
+      jobs:
+      - job: sdk_unit_tests_windows
+        displayName: SDK Unit Tests (Windows)
+        pool:
+          name: Azure-Pipelines-1ESPT-ExDShared
+          image: windows-2022
+          os: windows
+        steps:
+          - checkout: self
+          - script: npm ci
+            workingDirectory: $(Build.SourcesDirectory)/sdk
+            displayName: npm ci
+          - script: npm run build
+            workingDirectory: $(Build.SourcesDirectory)/sdk
+            displayName: npm run build
+          - script: npm test
+            workingDirectory: $(Build.SourcesDirectory)/sdk
+            displayName: npm test
+
     - stage: SDK_Integration_Tests
       displayName: 'SDK Integration Tests'
       dependsOn: Package_MXC_NPM_SDK
