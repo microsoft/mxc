@@ -76,7 +76,7 @@ const temp = getTemporaryFilesPolicy();
 
 // Define a sandbox policy
 const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
+  version: '0.5.0-alpha',
   filesystem: {
     readonlyPaths: tools.readonlyPaths,
     readwritePaths: temp.readwritePaths,
@@ -171,7 +171,7 @@ import { spawnSandbox, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft
 const tools = getAvailableToolsPolicy(process.env);
 
 const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
+  version: '0.5.0-alpha',
   filesystem: { readonlyPaths: tools.readonlyPaths },
   network: { allowOutbound: true },
 };
@@ -198,7 +198,7 @@ import { spawnSandboxAsync, SandboxPolicy, getAvailableToolsPolicy } from '@micr
 const tools = getAvailableToolsPolicy(process.env);
 
 const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
+  version: '0.5.0-alpha',
   filesystem: { readonlyPaths: tools.readonlyPaths },
 };
 
@@ -312,7 +312,7 @@ const profile = getUserProfilePolicy();
 const temp = getTemporaryFilesPolicy();
 
 const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
+  version: '0.5.0-alpha',
   filesystem: {
     readonlyPaths: [...tools.readonlyPaths, ...profile.readonlyPaths],
     readwritePaths: [...temp.readwritePaths, 'C:\\workspace\\output'],
@@ -336,7 +336,7 @@ import { spawnSandbox, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft
 const tools = getAvailableToolsPolicy(process.env);
 
 const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
+  version: '0.5.0-alpha',
   filesystem: { readonlyPaths: tools.readonlyPaths },
 };
 
@@ -354,7 +354,7 @@ import { spawnSandboxAsync, SandboxPolicy, getAvailableToolsPolicy } from '@micr
 const tools = getAvailableToolsPolicy(process.env);
 
 const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
+  version: '0.5.0-alpha',
   filesystem: { readonlyPaths: tools.readonlyPaths },
   network: { allowOutbound: true },
 };
@@ -374,7 +374,7 @@ import { spawnSandbox, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft
 const tools = getAvailableToolsPolicy(process.env);
 
 const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
+  version: '0.5.0-alpha',
   filesystem: {
     readonlyPaths: [...tools.readonlyPaths, 'C:\\projects\\myapp\\config'],
     readwritePaths: ['C:\\projects\\myapp\\data'],
@@ -399,7 +399,7 @@ const tools = getAvailableToolsPolicy(process.env);
 const temp = getTemporaryFilesPolicy();
 
 const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
+  version: '0.5.0-alpha',
   filesystem: {
     readonlyPaths: tools.readonlyPaths,
     readwritePaths: [...temp.readwritePaths, 'C:\\workspace\\output'],
