@@ -1,6 +1,9 @@
 # Test Scripts
 
-This directory contains PowerShell scripts for running MXC end-to-end tests locally on Windows.
+This directory contains PowerShell convenience scripts for running MXC end-to-end
+tests locally on Windows. The primary Rust executor E2E path is
+`cargo test -p wxc_e2e_tests`, which invokes the MXC binaries directly instead
+of shelling through these scripts.
 
 All scripts accept a `-Release` switch to use the release build (default: debug).
 
@@ -29,16 +32,39 @@ All scripts accept a `-Release` switch to use the release build (default: debug)
 | `run_appcontainer_proxy_tests.ps1` | AppContainer proxy tests | `wxc-exec.exe` |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
 
-## Running via Cargo
+These scripts are local helpers. Not every script is run by CI because several
+depend on local OS features such as Windows Sandbox, WHP, proxy setup, or stress
+test duration.
 
-All scripts can also be invoked via the `wxc_e2e_tests` Rust crate:
+CI currently runs the MicroVM Rust E2E suite when WHP is available. Other
+executor E2E tests are local/prerequisite-gated and should be run on machines
+with the required Windows features and binaries.
+
+## Test ownership
+
+Use npm for SDK tests and Cargo for Rust executor tests. Avoid routing npm tests
+through Cargo.
+
+```powershell
+cd sdk
+npm test                    # SDK unit tests
+npm run test:integration    # SDK integration tests
+```
 
 ```powershell
 cd src
-cargo test -p wxc_e2e_tests                 # All E2E tests (skips if prereqs missing)
-cargo test -p wxc_e2e_tests -- test_sdk     # SDK tests only
-cargo test -p wxc_e2e_tests -- test_cli     # CLI tests only
-cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests
+cargo test --workspace       # Rust unit tests
+```
+
+## Running executor E2E via Cargo
+
+The `wxc_e2e_tests` crate runs executor E2E tests directly against
+`wxc-exec.exe` and `wxc-test-driver.exe`:
+
+```powershell
+cd src
+cargo test -p wxc_e2e_tests              # Executor E2E tests (skips if prereqs missing)
+cargo test -p wxc_e2e_tests -- --ignored # Include stress tests
 ```
 
 ## MicroVM E2E
@@ -53,10 +79,8 @@ cargo build --features microvm --target x86_64-pc-windows-msvc
 ### Run
 
 ```powershell
-cd test_scripts
-.\run_microvm_tests.ps1                     # debug build (default)
-.\run_microvm_tests.ps1 -Release             # release build
-.\run_microvm_tests.ps1 -BinDir "C:\path"    # explicit binary directory
+cd src
+cargo test -p wxc_e2e_tests --target x86_64-pc-windows-msvc test_microvm_suite -- --nocapture
 ```
 
 The MicroVM suite runs 6 functional tests + 1 timeout behavior test.

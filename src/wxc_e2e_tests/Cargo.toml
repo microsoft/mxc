@@ -5,4 +5,7 @@ edition.workspace = true
 publish = false
 description = "End-to-end integration tests for MXC"
 
-# No dependencies needed — tests shell out to PS1 scripts and npm
+[dependencies]
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -67,11 +67,9 @@ jobs:
       - name: Run MicroVM E2E Tests
         if: steps.whp-check.outputs.whp_available == 'true'
         shell: pwsh
-        working-directory: test_scripts
+        working-directory: src
         run: |
-          $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
-          $configDir = Join-Path $env:GITHUB_WORKSPACE "test_configs"
-          .\run_microvm_tests.ps1 -BinDir $binDir -ConfigDir $configDir
+          cargo test -p wxc_e2e_tests --target x86_64-pc-windows-msvc test_microvm_suite -- --nocapture
 
       - name: Upload logs on failure
         if: failure() || cancelled()

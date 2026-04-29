@@ -62,21 +62,20 @@ cargo test --workspace
 cargo test -p wxc_common                    # Single crate
 cargo test -p wxc_common -- config_parser   # Filter by test name
 
-# SDK (from sdk/) — requires build first
-node --test dist/sandbox.test.js
+# SDK (from sdk/)
+npm test
+npm run test:integration
 
 # CLI (from cli/) — requires build first
 node --test dist/cli.test.js
 
-# Integration tests — run from repo root, requires built wxc-exec.exe
+# Local PowerShell helpers — run from repo root, require built binaries
 test_scripts\run_test_configs.ps1           # All test configs via wxc_test_driver
 test_scripts\run_basicac_test.ps1           # Single AppContainer test
 test_scripts\run_lxc_all_tests.sh           # All LXC tests (Linux)
 
-# E2E test crate — orchestrates all integration tests (from src/)
-cargo test -p wxc_e2e_tests                 # Runs all E2E tests (skips if prereqs missing)
-cargo test -p wxc_e2e_tests -- test_sdk     # SDK tests only
-cargo test -p wxc_e2e_tests -- test_cli     # CLI tests only
+# E2E test crate — Rust executor integration tests (from src/)
+cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
 cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests (run_on_repeat)
 ```
 

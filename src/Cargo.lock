@@ -1780,6 +1780,11 @@ dependencies = [
 [[package]]
 name = "wxc_e2e_tests"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "wxc_test_driver"
