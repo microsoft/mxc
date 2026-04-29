@@ -1,4 +1,4 @@
-# MXC Linux Container Support from Windows frontend — Design Document
+# MXC WSL Container Support from Windows frontend — Design Document
 
 ## Changes from Original Design
 
