@@ -3,10 +3,12 @@
 #![allow(unused_imports, non_snake_case, non_camel_case_types, clippy::all)]
 pub mod base_container_layout {
     use super::*;
+    mod integrity_level_generated;
+    pub use self::integrity_level_generated::*;
     mod sandbox_spec_generated;
     pub use self::sandbox_spec_generated::*;
     mod proxy_info_generated;
     pub use self::proxy_info_generated::*;
     mod network_policy_generated;
     pub use self::network_policy_generated::*;
-} // base_container_layout
+} // sandbox_tech_spec_layout
