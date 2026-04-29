@@ -548,12 +548,11 @@ impl Default for IsolationSessionRunner {
 }
 
 impl ScriptRunner for IsolationSessionRunner {
-    fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        // Validate unsupported policy fields.
-        if let Err(e) = validate_policy(request) {
-            return e.into();
-        }
+    fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
+        validate_policy(request).map_err(ScriptResponse::from)
+    }
 
+    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         let options = build_process_options(request);
         let _ = writeln!(
             logger,

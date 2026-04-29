@@ -124,7 +124,7 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
 - `docs/lxc-backend.md` — LXC container backend details
 - `docs/windows-sandbox.md` / `docs/windows-sandbox-reference.md` — Windows Sandbox backend
-- `docs/isolation-session-plan.md` — IsolationSession backend (experimental, isolated user account per execution via the OS-side IsoEnvBroker)
+- `docs/isolation-session/initial-bringup-plan.md` — IsolationSession backend (experimental, isolated user account per execution via the OS-side IsoEnvBroker)
 - `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
 
 ## Key Conventions

@@ -1,4 +1,4 @@
-# MXC IsolationSession Backend — Design Document
+# MXC IsolationSession Backend — Initial Bringup Plan
 
 ## Problem
 

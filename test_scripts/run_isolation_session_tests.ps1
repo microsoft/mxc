@@ -62,10 +62,14 @@ $OtherTarget = if ($HostTarget -eq 'aarch64-pc-windows-msvc') {
 if ($WxcExePath) {
     $WxcExec = $WxcExePath
 } else {
+    # Probe release first so a release build is preferred when both flavors exist.
     $CandidatePaths = @(
         (Join-Path $RepoRoot "src\target\$HostTarget\release\wxc-exec.exe"),
         (Join-Path $RepoRoot "src\target\$OtherTarget\release\wxc-exec.exe"),
-        (Join-Path $RepoRoot "src\target\release\wxc-exec.exe")
+        (Join-Path $RepoRoot "src\target\release\wxc-exec.exe"),
+        (Join-Path $RepoRoot "src\target\$HostTarget\debug\wxc-exec.exe"),
+        (Join-Path $RepoRoot "src\target\$OtherTarget\debug\wxc-exec.exe"),
+        (Join-Path $RepoRoot "src\target\debug\wxc-exec.exe")
     )
     $WxcExec = $CandidatePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
