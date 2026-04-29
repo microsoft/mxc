@@ -337,6 +337,12 @@ export interface SandboxSpawnOptions {
   ptyOptions?: pty.IPtyForkOptions;
 
   /**
+   * Dry run mode: parse and validate config without executing.
+   * The native binary validates the config then exits.
+   */
+  dryRun?: boolean;
+
+  /**
    * Directory for diagnostic log files
    */
   logDir?: string;

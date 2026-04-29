@@ -186,7 +186,7 @@ impl WindowsSandboxScriptRunner {
 }
 
 impl ScriptRunner for WindowsSandboxScriptRunner {
-    fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         self.execute_via_daemon(request, logger)
     }
 }

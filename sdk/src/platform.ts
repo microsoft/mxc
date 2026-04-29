@@ -90,13 +90,13 @@ export function getPlatformSupport(): PlatformSupport {
   }
 
   if (platform === 'linux') {
-    // Check if LXC is available
+    // LXC is the only containment backend on Linux
     if (isLxcAvailable()) {
       support.isSupported = true;
       support.availableMethods = ['lxc'];
-      return support;
+    } else {
+      support.reason = 'LXC is not installed or not available on this system';
     }
-    support.reason = 'LXC is not installed or not available on this system';
     return support;
   }
 

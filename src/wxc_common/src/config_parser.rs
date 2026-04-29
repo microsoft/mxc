@@ -640,6 +640,7 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         lxc_config,
         experimental_enabled: false,
         experimental,
+        dry_run: false,
     })
 }
 

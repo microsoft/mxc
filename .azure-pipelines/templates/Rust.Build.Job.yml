@@ -46,8 +46,8 @@ jobs:
         signPattern: |
             wxc-exec.exe
             winhttp-proxy-shim.exe
-            wxc-sandbox-daemon.exe
-            wxc-sandbox-agent.exe
+            wxc-windows-sandbox-daemon.exe
+            wxc-windows-sandbox-guest.exe
             wxc-test-proxy.exe
 
       # Linux specific variables

@@ -11,21 +11,22 @@
 //   - wslcsdk.dll in the same directory as wxc-exec.exe
 //   - alpine:latest and python:3.12-alpine images pre-pulled
 //
-// Run: node --test dist/sandbox.e2etest.js
+// Run via: npm test (from integration directory)
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'os';
-import { createConfigFromPolicy, spawnSandboxFromConfig } from './sandbox';
-import { SandboxPolicy } from './types';
 import { ChildProcess } from 'child_process';
+import { sdk } from './test-helpers';
 
-const isWslcAvailable = os.platform() === 'win32';
+// WSLC tests require a Windows machine with WSL2 and WSLC SDK installed.
+// Opt-in via MXC_ENABLE_WSLC_TESTS=1 since most CI agents lack the runtime.
+const isWslcAvailable = os.platform() === 'win32' && process.env.MXC_ENABLE_WSLC_TESTS === '1';
 
 describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
-  skip: !isWslcAvailable ? 'WSLC tests require Windows with WSL2 and WSLC SDK' : undefined,
+  skip: !isWslcAvailable ? 'WSLC tests require MXC_ENABLE_WSLC_TESTS=1 on Windows with WSL2 and WSLC SDK' : undefined,
 }, () => {
 
   it('should run with all WSLC-specific fields set', async () => {
@@ -38,12 +39,12 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
     fs.mkdirSync(mountDir);
 
     try {
-      const policy: SandboxPolicy = {
+      const policy = {
         version: '0.5.0-alpha',
         network: { allowOutbound: true },
         filesystem: { readwritePaths: [mountDir] },
       };
-      const config = createConfigFromPolicy(policy, 'wslc');
+      const config = sdk.createConfigFromPolicy(policy, 'wslc');
       config.process!.commandLine = [
         "python3 -c \"import sys; print(f'Python {sys.version_info.major}.{sys.version_info.minor}')\"",
         "nproc",
@@ -56,7 +57,7 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
       config.experimental!.wslc!.storagePath = storageDir;
 
       const { stdout, exitCode } = await new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve, reject) => {
-        const child = spawnSandboxFromConfig(config, { experimental: true, debug: true, usePty: false }) as ChildProcess;
+        const child = sdk.spawnSandboxFromConfig(config, { experimental: true, debug: true, usePty: false }) as ChildProcess;
         let stdout = '';
         let stderr = '';
         child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });

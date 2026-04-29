@@ -14,7 +14,6 @@ use wxc_common::models::{
     CodexRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, ScriptResponse,
 };
 use wxc_common::script_runner::ScriptRunner;
-use wxc_common::validator::validate_request;
 
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
@@ -226,12 +225,7 @@ impl LxcScriptRunner {
 }
 
 impl ScriptRunner for LxcScriptRunner {
-    fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        // Validate the request first
-        if let Err(e) = validate_request(request) {
-            return ScriptResponse::error(&e.to_string());
-        }
-
+    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         // Run with panic catching for safety
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.run_internal(request, logger)
