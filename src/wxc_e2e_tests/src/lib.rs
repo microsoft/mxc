@@ -247,7 +247,7 @@ fn is_base64_byte(byte: u8) -> bool {
 }
 
 fn looks_like_base64_text(line: &str) -> bool {
-    line.len() >= 16 && line.len() % 4 == 0 && line.bytes().all(is_base64_byte)
+    line.len() >= 16 && line.len().is_multiple_of(4) && line.bytes().all(is_base64_byte)
 }
 
 /// Run an executable and capture its result.
