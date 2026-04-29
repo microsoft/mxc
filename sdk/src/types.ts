@@ -35,8 +35,14 @@ export interface LifecycleConfig {
  * Containment type abstraction for createConfigFromPolicy.
  * Maps to platform-specific backends:
  * - "process": BaseProcessContainer (Windows) / LXC (Linux)
+ * - "microvm": MicroVM/Nanvix backend (Windows only, experimental)
  */
-export type ContainmentType = "process";
+export type ContainmentType = "process" | "wslc" | "microvm";
+
+/**
+ * Containment backends that require the --experimental flag.
+ */
+export const ExperimentalBackends: readonly ContainmentType[] = ['microvm', 'wslc'];
 
 /**
  * Clipboard access policy levels
@@ -131,6 +137,30 @@ export interface WslcConfig {
   image?: string;
   /** Storage path for WSLC session image store */
   storagePath?: string;
+  /** Target OS for the container (default: "linux") */
+  targetOs?: string;
+  /** Number of CPUs allocated to the WSLC session */
+  cpuCount?: number;
+  /** Memory in MB allocated to the WSLC session */
+  memoryMb?: number;
+  /** Enable GPU passthrough to the container (default: false) */
+  gpu?: boolean;
+  /** Path to a local tar file to import as the container image */
+  imageTarPath?: string;
+  /** Host↔container port mappings (TCP only) */
+  portMappings?: PortMapping[];
+}
+
+/**
+ * Port mapping for host↔container port forwarding
+ */
+export interface PortMapping {
+  /** Port on the Windows host */
+  windowsPort: number;
+  /** Port inside the Linux container */
+  containerPort: number;
+  /** Protocol: "tcp" or "udp" (default: "tcp") */
+  protocol?: string;
 }
 
 /**

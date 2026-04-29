@@ -1,0 +1,17 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "wslc-timeout-test",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "sh -c 'echo Starting long task; sleep 120; echo Should not reach here'",
+    "timeout": 5000
+  },
+  "network": {
+    "defaultPolicy": "block"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "alpine:latest"
+    }
+  }
+}

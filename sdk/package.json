@@ -1,18 +1,22 @@
 {
   "name": "@microsoft/mxc-sdk",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "TypeScript SDK for MXC (Microsoft eXecution Containers)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "bin/",
-    "dist/"
+    "dist/",
+    "LICENSE.md"
   ],
   "scripts": {
     "build": "tsc",
+    "build:test-unit": "cd tests/unit && npx tsc",
     "watch": "tsc --watch",
     "clean": "rimraf dist",
-    "test": "node --test dist/sandbox.test.js",
+    "test": "npm run test:unit",
+    "test:unit": "npm run build:test-unit && node --test dist-tests/tests/unit/sandbox.test.js dist-tests/tests/unit/policy.test.js dist-tests/tests/unit/logger.test.js",
+    "test:integration": "cd tests/integration && npm install && npm run build && npm test",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -41,8 +45,5 @@
   "os": [
     "win32",
     "linux"
-  ],
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
-  }
+  ]
 }

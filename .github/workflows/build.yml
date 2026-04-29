@@ -77,6 +77,8 @@ jobs:
             src/target/${{ matrix.target }}/release/wxc-exec.exe
             src/target/${{ matrix.target }}/release/winhttp-proxy-shim.exe
             src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
+            src/target/${{ matrix.target }}/release/wxc-windows-sandbox-daemon.exe
+            src/target/${{ matrix.target }}/release/wxc-windows-sandbox-guest.exe
 
 
   # Build and package the TypeScript SDK with bundled wxc-exec binaries
@@ -131,15 +133,15 @@ jobs:
           path: sdk/*.tgz
 
 
-  # Build and package the TypeScript Test CLI
-  mxc-typescript-test-cli:
-    name: MXC TypeScript Test CLI
+  # Build and test the SDK integration tests against the packaged SDK
+  mxc-sdk-integration-tests:
+    name: MXC SDK Integration Tests
     needs: mxc-typescript-sdk
     runs-on: windows-latest
 
     defaults:
       run:
-        working-directory: cli
+        working-directory: sdk/tests/integration
 
     steps:
       - uses: actions/checkout@v4
@@ -154,22 +156,15 @@ jobs:
           name: npm-packages
           path: sdk-pkg
 
-      - name: Install CLI dependencies using SDK artifact
+      - name: Install dependencies and SDK from artifact
         run: |
-          $sdkTgz = (Get-Item ..\sdk-pkg\*.tgz).FullName
-          npm ci
+          $sdkTgz = (Get-Item ..\..\..\sdk-pkg\*.tgz).FullName
           npm install $sdkTgz
 
-      - name: Build CLI
+      - name: Build tests
         run: npm run build
 
       - name: Run tests
         run: npm test
-
-      - name: Pack npm package
-        run: npm pack
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cli-npm-package
-          path: cli/*.tgz
+        env:
+          MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'

@@ -43,12 +43,11 @@ jobs:
         CARGO_TARGET_DIR: c:/t/target
         artifactPrefix: wxc-binaries
         workingDirectory: src
-        buildExtraArgs: '--workspace --exclude lxc --exclude lxc_common'
         signPattern: |
             wxc-exec.exe
             winhttp-proxy-shim.exe
-            wxc-sandbox-daemon.exe
-            wxc-sandbox-agent.exe
+            wxc-windows-sandbox-daemon.exe
+            wxc-windows-sandbox-guest.exe
             wxc-test-proxy.exe
 
       # Linux specific variables
@@ -56,7 +55,6 @@ jobs:
         CARGO_TARGET_DIR: /tmp/target
         artifactPrefix: lxc-binaries
         workingDirectory: $(Build.SourcesDirectory)/src/lxc
-        buildExtraArgs: ''
         signPattern: |
           lxc-exec
 
@@ -90,12 +88,10 @@ jobs:
         displayName: Install ARM64 toolchain
         condition: and(eq('${{ item.os }}','linux'), eq('${{ item.arch }}','arm64'))
 
-      - task: CopyFiles@2
+      # Append pipeline-specific Cargo settings (registry, cross-compile linker) to the workspace config
+      - powershell: |
+          Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
         displayName: Setup Cargo Config
-        inputs:
-          SourceFolder: '$(Build.SourcesDirectory)/.azure-pipelines/.cargo'
-          Contents: 'config.toml'
-          TargetFolder: '$(Build.SourcesDirectory)/.cargo'
 
       - task: 1ES.Build.Rust.Setup@1
       - task: 1ES.Build.Rust.Restore@1
@@ -128,6 +124,7 @@ jobs:
           Pattern: |
             $(signPattern)
           UseMinimatch: true
+          signConfigType: 'inlineSignParams'
           inlineOperation: >-
             [
               {
@@ -158,6 +155,14 @@ jobs:
           sourceFolder: $(targetTripleDir)
           contents: |
             $(signPattern)
+          targetFolder: $(outputDirectory)/$(targetTriple)
+
+      # Copy wslcsdk.dll
+      - task: CopyFiles@2
+        displayName: Copy wslcsdk.dll
+        inputs:
+          sourceFolder: $(targetTripleDir)
+          contents: wslcsdk.dll
           targetFolder: $(outputDirectory)/$(targetTriple)
 
       - task: 1ES.PublishPipelineArtifact@1

@@ -6,7 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 
-export function findTestProxyBinary(): string {
+function findTestProxyBinary(): string {
   const triple = os.arch() === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
   const sdkBinPath = path.join(require.resolve('@microsoft/mxc-sdk'), '..', '..', 'bin', triple, 'wxc-test-proxy.exe');
   if (fs.existsSync(sdkBinPath)) {

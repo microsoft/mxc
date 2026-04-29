@@ -3,12 +3,13 @@
 
 use std::fmt::Write;
 use std::process;
+use std::time::Instant;
 
 use clap::Parser;
 use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
-use wxc_common::script_runner::ScriptRunner;
+use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
 use lxc_common::lxc_runner::LxcScriptRunner;
 
@@ -42,6 +43,14 @@ struct Cli {
     /// Enable experimental features
     #[arg(long)]
     experimental: bool,
+
+    /// Parse and validate config then exit without executing
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+
+    /// Path to diagnostic log file (appends, creates if missing)
+    #[arg(long = "log-file")]
+    log_file: Option<String>,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
@@ -103,6 +112,12 @@ fn main() {
         Mode::Buffer
     });
 
+    if let Some(ref log_path) = cli.log_file {
+        if let Err(e) = logger.enable_file_sink(std::path::Path::new(log_path)) {
+            eprintln!("Warning: could not open log file '{}': {}", log_path, e);
+        }
+    }
+
     // Delete mode
     if cli.delete {
         let name = match cli.containername {
@@ -127,6 +142,7 @@ fn main() {
     };
 
     request.experimental_enabled = cli.experimental;
+    request.dry_run = cli.dry_run;
 
     log_request(&request, &mut logger);
 
@@ -142,7 +158,15 @@ fn main() {
         &request.container_id,
         &request.lifecycle,
     );
+    let run_start = Instant::now();
     let response = runner.run(&request, &mut logger);
+    let run_elapsed = run_start.elapsed();
+    let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
+
+    if cli.dry_run {
+        handle_dry_run_exit(&response, &mut logger);
+    }
+
     display_script_results(&response, &mut logger);
 
     print!("{}", response.standard_out);

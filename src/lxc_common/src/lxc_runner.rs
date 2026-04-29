@@ -14,7 +14,6 @@ use wxc_common::models::{
     CodexRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, ScriptResponse,
 };
 use wxc_common::script_runner::ScriptRunner;
-use wxc_common::validator::validate_request;
 
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
@@ -146,7 +145,9 @@ impl LxcScriptRunner {
         if !container.is_running() {
             let _ = writeln!(logger, "Starting LXC container...");
             if let Err(e) = container.start() {
-                let _ = container.destroy();
+                if self.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
                 return ScriptResponse::error(&format!("Failed to start container: {}", e));
             }
             let _ = writeln!(logger, "Container started successfully.");
@@ -224,12 +225,7 @@ impl LxcScriptRunner {
 }
 
 impl ScriptRunner for LxcScriptRunner {
-    fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        // Validate the request first
-        if let Err(e) = validate_request(request) {
-            return ScriptResponse::error(&e.to_string());
-        }
-
+    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         // Run with panic catching for safety
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.run_internal(request, logger)

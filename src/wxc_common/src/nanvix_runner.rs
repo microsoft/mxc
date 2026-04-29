@@ -477,11 +477,11 @@ impl NanVixScriptRunner {
 }
 
 impl ScriptRunner for NanVixScriptRunner {
-    fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        if let Err(e) = Self::validate_policies(request) {
-            return e.to_response();
-        }
+    fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
+        Self::validate_policies(request).map_err(|e| e.to_response())
+    }
 
+    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         let (nanvixd_path, bin_dir, ramfs_path, python_path) = match self.resolve_paths() {
             Ok(paths) => paths,
             Err(e) => return e.to_response(),
@@ -548,6 +548,7 @@ mod tests {
     fn policy_rejects_filesystem_paths() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
+            script_code: "echo test".to_string(),
             policy: ContainerPolicy {
                 readwrite_paths: vec!["/tmp".to_string()],
                 ..Default::default()
@@ -564,6 +565,7 @@ mod tests {
     fn policy_rejects_readonly_paths() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
+            script_code: "echo test".to_string(),
             policy: ContainerPolicy {
                 readonly_paths: vec!["/data".to_string()],
                 ..Default::default()
@@ -580,6 +582,7 @@ mod tests {
     fn policy_rejects_network_hosts() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
+            script_code: "echo test".to_string(),
             policy: ContainerPolicy {
                 allowed_hosts: vec!["example.com".to_string()],
                 ..Default::default()
@@ -596,6 +599,7 @@ mod tests {
     fn policy_rejects_blocked_network_hosts() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
+            script_code: "echo test".to_string(),
             policy: ContainerPolicy {
                 blocked_hosts: vec!["evil.com".to_string()],
                 ..Default::default()
@@ -612,6 +616,7 @@ mod tests {
     fn policy_rejects_network_block_policy() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
+            script_code: "echo test".to_string(),
             policy: ContainerPolicy {
                 default_network_policy: NetworkPolicy::Block,
                 ..Default::default()
@@ -628,6 +633,7 @@ mod tests {
     fn policy_rejects_working_directory() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
+            script_code: "echo test".to_string(),
             working_directory: "/home/user".to_string(),
             ..Default::default()
         };
@@ -642,7 +648,10 @@ mod tests {
         // A request with all-default policies should pass validation and
         // fail later on path resolution (nanvixd not found), NOT on policy.
         let mut runner = NanVixScriptRunner::new();
-        let request = CodexRequest::default();
+        let request = CodexRequest {
+            script_code: "echo test".to_string(),
+            ..Default::default()
+        };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
@@ -664,6 +673,7 @@ mod tests {
     fn policy_rejects_network_proxy() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
+            script_code: "echo test".to_string(),
             policy: ContainerPolicy {
                 network_proxy: crate::models::ProxyConfig {
                     address: Some(crate::models::ProxyAddress::new(

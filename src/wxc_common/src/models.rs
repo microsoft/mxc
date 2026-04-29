@@ -334,6 +334,9 @@ pub struct CodexRequest {
     pub experimental_enabled: bool,
     /// Experimental feature configs (only applied when experimental_enabled is true).
     pub experimental: ExperimentalConfig,
+    /// Dry-run mode: validate config and runner setup then return success
+    /// without executing the sandboxed process.
+    pub dry_run: bool,
 }
 
 impl Default for CodexRequest {
@@ -352,6 +355,7 @@ impl Default for CodexRequest {
             lxc_config: LxcConfig::default(),
             experimental_enabled: false,
             experimental: ExperimentalConfig::default(),
+            dry_run: false,
         }
     }
 }
