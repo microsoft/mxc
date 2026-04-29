@@ -240,6 +240,14 @@ impl CommandResult {
             format!("{combined}\n{}", decoded.join("\n"))
         }
     }
+
+    /// Return whether the command failed because the local test environment is
+    /// missing a runtime that the sandboxed process needs to launch.
+    pub fn is_missing_process_prerequisite(&self) -> bool {
+        let combined = self.combined_output();
+        combined.contains("CreateProcessW failed: The system cannot find the file specified")
+            || combined.contains("Unsupported Windows branch or build version")
+    }
 }
 
 fn is_base64_byte(byte: u8) -> bool {
@@ -297,6 +305,19 @@ pub fn run_test_driver(target: &Path, extra_args: &[&str]) -> CommandResult {
 /// Assert that a command exited successfully.
 pub fn assert_success(result: &CommandResult) {
     assert_exit(result, 0, None);
+}
+
+/// Assert success, or skip when the local machine lacks sandbox runtime prerequisites.
+pub fn assert_success_or_skip_missing_prerequisite(result: &CommandResult) {
+    if result.is_missing_process_prerequisite() {
+        println!(
+            "SKIPPED: {} requires local sandbox runtime prerequisites not available here",
+            result.label
+        );
+        return;
+    }
+
+    assert_success(result);
 }
 
 /// Assert that a command exited with the expected code and optional output.

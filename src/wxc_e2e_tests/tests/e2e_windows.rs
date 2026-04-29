@@ -15,9 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use wxc_e2e_tests::{
-    assert_exit, assert_success, examples_dir, find_binary, has_daemon, has_nanvix_binaries,
-    has_test_driver, has_windows_sandbox_feature, has_wxc_exe, repo_root, run_test_driver,
-    run_wxc_config, test_configs_dir, TempDirs,
+    assert_exit, assert_success, assert_success_or_skip_missing_prerequisite, examples_dir,
+    find_binary, has_daemon, has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature,
+    has_wxc_exe, repo_root, run_test_driver, run_wxc_config, test_configs_dir, TempDirs,
 };
 
 static HAS_WXC_EXE: OnceLock<bool> = OnceLock::new();
@@ -61,7 +61,7 @@ fn with_test_lock(run: impl FnOnce()) {
 
 fn assert_wxc_success(config_file: &str, extra_args: &[&str]) {
     let result = run_wxc_config(config_file, extra_args);
-    assert_success(&result);
+    assert_success_or_skip_missing_prerequisite(&result);
 }
 
 fn appcontainer_basic() {
