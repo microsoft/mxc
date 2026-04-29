@@ -1,0 +1,410 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Shared helpers for MXC end-to-end integration tests.
+//!
+//! Tests live in `tests/e2e_windows.rs` and invoke MXC executables directly so
+//! failures can be debugged from Rust test code.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::{Duration, Instant};
+
+use base64::{engine::general_purpose::STANDARD, Engine};
+
+// ---------------------------------------------------------------------------
+// Path helpers
+// ---------------------------------------------------------------------------
+
+/// Locate the repository root.
+/// `CARGO_MANIFEST_DIR` points to `src/wxc_e2e_tests/` during `cargo test`.
+pub fn repo_root() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent() // src/
+        .and_then(|p| p.parent()) // repo root
+        .expect("could not determine repo root")
+        .to_path_buf()
+}
+
+/// Return the repository `test_configs/` directory.
+pub fn test_configs_dir() -> PathBuf {
+    repo_root().join("test_configs")
+}
+
+/// Return the repository `examples/` directory.
+pub fn examples_dir() -> PathBuf {
+    repo_root().join("examples")
+}
+
+fn src_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("could not find src/")
+        .to_path_buf()
+}
+
+// ---------------------------------------------------------------------------
+// Build-mode detection
+// ---------------------------------------------------------------------------
+
+/// Whether the test binary was compiled in release mode.
+pub fn is_release_mode() -> bool {
+    !cfg!(debug_assertions)
+}
+
+/// The target triple for the current platform (used for cross-compiled paths).
+fn current_triple() -> &'static str {
+    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        "aarch64-pc-windows-msvc"
+    } else {
+        ""
+    }
+}
+
+/// Search for a binary in the target directory, checking multiple locations.
+///
+/// Search order prefers the profile matching the current build mode, then falls
+/// back to the other profile. For each profile, the triple-prefixed
+/// `target/<triple>/<profile>/` path is checked before the plain
+/// `target/<profile>/` path so explicit target builds win over stale local
+/// builds.
+pub fn find_binary(name: &str) -> Option<PathBuf> {
+    let src = src_dir();
+    let (primary, fallback) = if is_release_mode() {
+        ("release", "debug")
+    } else {
+        ("debug", "release")
+    };
+    let triple = current_triple();
+
+    let mut candidates = Vec::new();
+    if !triple.is_empty() {
+        candidates.push(src.join("target").join(triple).join(primary).join(name));
+    }
+    candidates.push(src.join("target").join(primary).join(name));
+    if !triple.is_empty() {
+        candidates.push(src.join("target").join(triple).join(fallback).join(name));
+    }
+    candidates.push(src.join("target").join(fallback).join(name));
+
+    candidates.into_iter().find(|p| p.exists())
+}
+
+// ---------------------------------------------------------------------------
+// Prerequisite checks (has_* pattern — returns true when present)
+// ---------------------------------------------------------------------------
+
+/// Return whether `wxc-exec.exe` is available for direct E2E execution.
+pub fn has_wxc_exe() -> bool {
+    match find_binary("wxc-exec.exe") {
+        Some(p) => {
+            println!("Using wxc-exec.exe at {}", p.display());
+            true
+        }
+        None => {
+            println!("SKIPPED: wxc-exec.exe not found — build first");
+            false
+        }
+    }
+}
+
+/// Return whether `wxc-test-driver.exe` is available for direct E2E execution.
+pub fn has_test_driver() -> bool {
+    match find_binary("wxc-test-driver.exe") {
+        Some(p) => {
+            println!("Using wxc-test-driver.exe at {}", p.display());
+            true
+        }
+        None => {
+            println!("SKIPPED: wxc-test-driver.exe not found — build first");
+            false
+        }
+    }
+}
+
+/// Return whether the Windows Sandbox daemon binary is available.
+pub fn has_daemon() -> bool {
+    match find_binary("wxc-windows-sandbox-daemon.exe") {
+        Some(p) => {
+            println!("Using daemon at {}", p.display());
+            true
+        }
+        None => {
+            println!("SKIPPED: wxc-windows-sandbox-daemon.exe not found — build first");
+            false
+        }
+    }
+}
+
+/// Return whether the NanVix runtime binaries are available next to wxc-exec.
+pub fn has_nanvix_binaries() -> bool {
+    let Some(exe) = find_binary("wxc-exec.exe") else {
+        return false;
+    };
+    let bin_dir = exe.parent().unwrap_or(Path::new("."));
+    let present = [
+        "nanvixd.exe",
+        "kernel.elf",
+        "python.elf",
+        "cpython-ramfs.img",
+    ]
+    .iter()
+    .all(|name| bin_dir.join(name).exists());
+    if !present {
+        println!("SKIPPED: NanVix binaries not found next to wxc-exec.exe");
+    }
+    present
+}
+
+/// Return whether the Windows Sandbox optional feature is enabled.
+pub fn has_windows_sandbox_feature() -> bool {
+    let available = Command::new("dism")
+        .args([
+            "/online",
+            "/get-featureinfo",
+            "/featurename:Containers-DisposableClientVM",
+        ])
+        .output()
+        .map(|output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            output.status.success()
+                && format!("{stdout}\n{stderr}")
+                    .lines()
+                    .any(|line| line.contains("State") && line.contains("Enabled"))
+        })
+        .unwrap_or(false);
+
+    if !available {
+        println!("SKIPPED: Windows Sandbox feature is not enabled");
+    }
+
+    available
+}
+
+// ---------------------------------------------------------------------------
+// Direct process execution
+// ---------------------------------------------------------------------------
+
+/// Captured process result with decoded text output.
+#[derive(Debug)]
+pub struct CommandResult {
+    /// Human-readable command label.
+    pub label: String,
+    /// Process exit code, or `None` if the process terminated without one.
+    pub code: Option<i32>,
+    /// Captured stdout as UTF-8 lossy text.
+    pub stdout: String,
+    /// Captured stderr as UTF-8 lossy text.
+    pub stderr: String,
+    /// Wall-clock process duration in milliseconds.
+    pub wall_time_ms: u128,
+}
+
+impl CommandResult {
+    /// Combine stdout and stderr.
+    pub fn combined_output(&self) -> String {
+        format!("{}\n{}", self.stdout, self.stderr)
+    }
+
+    /// Combine stdout, stderr, and any base64-encoded text lines found in them.
+    pub fn combined_output_with_decoded_base64(&self) -> String {
+        let combined = self.combined_output();
+        let mut decoded = Vec::new();
+
+        for line in combined
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            if !looks_like_base64_text(line) {
+                continue;
+            }
+
+            let Ok(bytes) = STANDARD.decode(line) else {
+                continue;
+            };
+            let Ok(text) = String::from_utf8(bytes) else {
+                continue;
+            };
+            decoded.push(text);
+        }
+
+        if decoded.is_empty() {
+            combined
+        } else {
+            format!("{combined}\n{}", decoded.join("\n"))
+        }
+    }
+
+    /// Return whether the command failed because the local test environment is
+    /// missing a runtime that the sandboxed process needs to launch.
+    pub fn is_missing_process_prerequisite(&self) -> bool {
+        let combined = self.combined_output();
+        combined.contains("CreateProcessW failed: The system cannot find the file specified")
+            || combined.contains("Unsupported Windows branch or build version")
+    }
+}
+
+fn is_base64_byte(byte: u8) -> bool {
+    matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'=')
+}
+
+fn looks_like_base64_text(line: &str) -> bool {
+    line.len() >= 16 && line.len().is_multiple_of(4) && line.bytes().all(is_base64_byte)
+}
+
+/// Run an executable and capture its result.
+pub fn run_executable<I, S>(label: &str, exe: &Path, args: I) -> CommandResult
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let start = Instant::now();
+    let output = Command::new(exe)
+        .args(args)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to execute {label}: {error}"));
+
+    command_result(label, output, start.elapsed().as_millis())
+}
+
+fn command_result(label: &str, output: Output, wall_time_ms: u128) -> CommandResult {
+    CommandResult {
+        label: label.to_string(),
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        wall_time_ms,
+    }
+}
+
+/// Run `wxc-exec.exe` with the supplied config file and extra arguments.
+pub fn run_wxc_config(config_file: &str, extra_args: &[&str]) -> CommandResult {
+    let exe = find_binary("wxc-exec.exe").expect("wxc-exec.exe should be available");
+    let config = test_configs_dir().join(config_file);
+    let mut args: Vec<String> = extra_args.iter().map(|arg| (*arg).to_string()).collect();
+    args.push(config.display().to_string());
+
+    run_executable(config_file, &exe, args)
+}
+
+/// Run `wxc-test-driver.exe` against a directory or a single config file.
+pub fn run_test_driver(target: &Path, extra_args: &[&str]) -> CommandResult {
+    let exe = find_binary("wxc-test-driver.exe").expect("wxc-test-driver.exe should be available");
+    let mut args = vec![target.display().to_string()];
+    args.extend(extra_args.iter().map(|arg| (*arg).to_string()));
+
+    run_executable(&format!("wxc-test-driver {}", target.display()), &exe, args)
+}
+
+/// Assert that a command exited successfully.
+pub fn assert_success(result: &CommandResult) {
+    assert_exit(result, 0, None);
+}
+
+/// Assert success, or skip when the local machine lacks sandbox runtime prerequisites.
+pub fn assert_success_or_skip_missing_prerequisite(result: &CommandResult) {
+    if result.is_missing_process_prerequisite() {
+        println!(
+            "SKIPPED: {} requires local sandbox runtime prerequisites not available here",
+            result.label
+        );
+        return;
+    }
+
+    assert_success(result);
+}
+
+/// Assert that a command exited with the expected code and optional output.
+pub fn assert_exit(result: &CommandResult, expected_exit: i32, output_contains: Option<&str>) {
+    if result.code != Some(expected_exit) {
+        panic!(
+            "{} failed: expected exit {}, got {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            result.label, expected_exit, result.code, result.stdout, result.stderr
+        );
+    }
+
+    if let Some(expected) = output_contains {
+        let combined = result.combined_output_with_decoded_base64();
+        if !combined.contains(expected) {
+            panic!(
+                "{} failed: output missing '{}'\n--- combined output ---\n{}",
+                result.label, expected, combined
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Temporary filesystem setup
+// ---------------------------------------------------------------------------
+
+/// Temporary directories removed when the guard is dropped.
+#[derive(Debug)]
+pub struct TempDirs {
+    paths: Vec<PathBuf>,
+}
+
+impl TempDirs {
+    /// Create temporary directories, removing any stale versions first.
+    pub fn create(paths: &[&str]) -> Self {
+        let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        for path in &paths {
+            remove_dir_all_if_exists(path);
+            fs::create_dir_all(path).unwrap_or_else(|error| {
+                panic!("failed to create temp dir {}: {error}", path.display())
+            });
+        }
+        Self { paths }
+    }
+
+    /// Write a UTF-8 text file to an absolute path.
+    ///
+    /// The file is cleaned up when its parent directory is one of this guard's
+    /// tracked temporary directories.
+    pub fn write_absolute_file(&self, absolute_path: &str, contents: &str) {
+        let path = PathBuf::from(absolute_path);
+        assert!(
+            path.is_absolute(),
+            "temporary test file path must be absolute: {}",
+            path.display()
+        );
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap_or_else(|error| {
+                panic!("failed to create parent dir {}: {error}", parent.display())
+            });
+        }
+        fs::write(&path, contents)
+            .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
+    }
+}
+
+impl Drop for TempDirs {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            remove_dir_all_if_exists(path);
+        }
+    }
+}
+
+fn remove_dir_all_if_exists(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+
+    if fs::remove_dir_all(path).is_ok() {
+        return;
+    }
+
+    std::thread::sleep(Duration::from_millis(100));
+    if path.exists() {
+        fs::remove_dir_all(path).unwrap_or_else(|error| {
+            panic!("failed to remove temp dir {}: {error}", path.display())
+        });
+    }
+}
