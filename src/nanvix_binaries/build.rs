@@ -156,9 +156,10 @@ fn try_curl_download(url: &str, dest: &Path) -> Result<(), String> {
         "--fail",
         "--location",
         "--retry",
-        "2",
+        "5",
         "--retry-delay",
-        "2",
+        "5",
+        "--retry-all-errors",
         "--output",
     ]);
     cmd.arg(dest);

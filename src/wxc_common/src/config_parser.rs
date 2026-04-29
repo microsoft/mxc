@@ -369,6 +369,27 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
     Ok(())
 }
 
+fn validate_filesystem_paths(
+    policy: &ContainerPolicy,
+    logger: &mut Logger,
+) -> Result<(), WxcError> {
+    validate_paths(&policy.readonly_paths, logger)?;
+    validate_paths(&policy.readwrite_paths, logger)?;
+    validate_paths(&policy.denied_paths, logger)?;
+    Ok(())
+}
+
+fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError> {
+    for path in paths {
+        if path.contains('"') {
+            let msg = format!("Filesystem path '{}' contains invalid character '\"'", path);
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+    }
+    Ok(())
+}
+
 // ---------- Conversion from raw JSON to domain model ----------
 
 fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
@@ -397,6 +418,14 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             ));
         }
     };
+
+    // Script should not have embedded null bytes
+    // Null bytes can be used to hide malicious payloads from audit logs or other inspection
+    if script_code.contains('\0') {
+        return Err(WxcError::ConfigParse(
+            "process.commandLine must not contain null bytes".to_string(),
+        ));
+    }
 
     let working_directory = process.cwd.unwrap_or_default();
     let script_timeout = process.timeout.unwrap_or(0);
@@ -494,6 +523,7 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             policy.readonly_paths = v;
         }
     }
+    validate_filesystem_paths(&policy, logger)?;
 
     // Network section
     if let Some(net) = raw.network {
@@ -689,6 +719,16 @@ mod tests {
     #[test]
     fn empty_command_line() {
         let json = r#"{"process": {"commandLine": ""}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn malicious_command_line() {
+        let json = r#"{"process": {"commandLine": "echo hello\0world"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -972,6 +1012,21 @@ mod tests {
         assert_eq!(req.policy.denied_paths.len(), 2);
         assert_eq!(req.policy.denied_paths[0], "C:\\Windows\\System32");
         assert_eq!(req.policy.denied_paths[1], "C:\\Program Files");
+    }
+
+    #[test]
+    fn block_evil_filesystem_paths() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "filesystem": {
+                "readwritePaths": ["C:\\My \"Evil\\Path"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
     }
 
     #[test]
