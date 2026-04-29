@@ -9,7 +9,7 @@ use clap::Parser;
 use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
-use wxc_common::script_runner::ScriptRunner;
+use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
 use lxc_common::lxc_runner::LxcScriptRunner;
 
@@ -43,6 +43,10 @@ struct Cli {
     /// Enable experimental features
     #[arg(long)]
     experimental: bool,
+
+    /// Parse and validate config then exit without executing
+    #[arg(long = "dry-run")]
+    dry_run: bool,
 
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
@@ -138,6 +142,7 @@ fn main() {
     };
 
     request.experimental_enabled = cli.experimental;
+    request.dry_run = cli.dry_run;
 
     log_request(&request, &mut logger);
 
@@ -157,6 +162,11 @@ fn main() {
     let response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
+
+    if cli.dry_run {
+        handle_dry_run_exit(&response, &mut logger);
+    }
+
     display_script_results(&response, &mut logger);
 
     print!("{}", response.standard_out);

@@ -16,7 +16,7 @@ use wxc_common::filesystem_bfs::FileSystemBfsManager;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::nanvix_runner::NanVixScriptRunner;
-use wxc_common::script_runner::ScriptRunner;
+use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 
 #[derive(Parser)]
@@ -49,6 +49,10 @@ struct Cli {
     /// Enable experimental features
     #[arg(long)]
     experimental: bool,
+
+    /// Parse and validate config then exit without executing
+    #[arg(long = "dry-run")]
+    dry_run: bool,
 
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
@@ -157,6 +161,7 @@ fn main() {
     };
 
     request.experimental_enabled = cli.experimental;
+    request.dry_run = cli.dry_run;
 
     // Inject learningModeLogging capability if ForceLearningMode registry key is set.
     let learning_mode_injected = if DiagnosticConfig::force_learning_mode()
@@ -239,29 +244,6 @@ fn main() {
             let use_base_container = request.experimental_enabled || version_implies_base_container;
 
             if use_base_container {
-                if let Err(e) = BaseContainerRunner::is_base_container_api_present() {
-                    if version_implies_base_container {
-                        eprintln!(
-                            "Error: Config schema version '{}' requires the BaseContainer \
-                             backend, but this OS build does not support it: {}",
-                            request.schema_version, e
-                        );
-                        eprintln!(
-                            "Hint: Use schema version '0.4.0-alpha' to fall back to AppContainer."
-                        );
-                    } else {
-                        eprintln!(
-                            "Error: --experimental requested BaseContainer, but this OS build \
-                             does not support it: {}",
-                            e
-                        );
-                        eprintln!(
-                            "Hint: Remove --experimental to use the AppContainer backend, \
-                             or use an OS build with BaseContainer support."
-                        );
-                    }
-                    process::exit(1);
-                }
                 let reason = if version_implies_base_container {
                     format!("schema version {}", request.schema_version)
                 } else {
@@ -333,6 +315,11 @@ fn main() {
     let response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
+
+    if cli.dry_run {
+        handle_dry_run_exit(&response, &mut logger);
+    }
+
     display_script_results(&response, &mut logger);
 
     // Close diagnostic pipe.

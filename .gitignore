@@ -26,6 +26,9 @@ bld/
 *.etl
 *.log
 
+# npm pack artifacts
+*.tgz
+
 # NuGet
 packages/
 nuget.exe

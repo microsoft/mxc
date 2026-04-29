@@ -1,0 +1,90 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+parameters:
+- name: sdkArtifact
+  type: string
+  default: mxc-npm-sdk-package
+- name: debug
+  type: boolean
+  default: false
+- name: targets
+  type: object
+  default:
+    - name: windows
+      os: windows
+    - name: linux
+      os: linux
+
+jobs:
+- ${{ each target in parameters.targets }}:
+  - job: 'test_mxc_sdk_integration_${{ target.name }}'
+    displayName: 'Test MXC SDK Integration (${{ target.name }})'
+
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      ${{ if eq(target.os, 'windows') }}:
+        image: windows-latest
+        os: windows
+      ${{ if eq(target.os, 'linux') }}:
+        image: ubuntu-latest
+        os: linux
+
+    variables:
+      integrationDirectory: $(Build.SourcesDirectory)/sdk/tests/integration
+      sdkPkgDirectory: $(Build.SourcesDirectory)/sdk-pkg
+
+    steps:
+      - checkout: self
+
+      - task: UseNode@1
+        displayName: Use Node.js 20
+        inputs:
+          version: '20.x'
+
+      - task: DownloadPipelineArtifact@2
+        displayName: Download SDK package
+        inputs:
+          artifact: ${{ parameters.sdkArtifact }}
+          path: $(sdkPkgDirectory)
+
+      - task: CopyFiles@2
+        displayName: Copy .npmrc to integration tests
+        inputs:
+          SourceFolder: '$(Build.SourcesDirectory)/.azure-pipelines/.npm'
+          Contents: '.npmrc'
+          TargetFolder: '$(integrationDirectory)'
+
+      - task: NpmAuthenticate@0
+        displayName: NPM Authenticate
+        inputs:
+          workingFile: '$(integrationDirectory)/.npmrc'
+
+      - pwsh: |
+          $sdkTgz = (Get-Item "$(sdkPkgDirectory)/*.tgz").FullName
+          npm ci
+          npm install $sdkTgz
+        workingDirectory: $(integrationDirectory)
+        displayName: Install dependencies and SDK from artifact
+
+      - script: npm run build
+        workingDirectory: $(integrationDirectory)
+        displayName: npm run build
+
+      - ${{ if eq(target.os, 'linux') }}:
+        - script: |
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq lxc lxc-utils dnsmasq-base iptables
+          displayName: Install LXC
+
+        - script: sudo MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
+          workingDirectory: $(integrationDirectory)
+          displayName: npm test (sudo, with LXC)
+
+      - ${{ if eq(target.os, 'windows') }}:
+        - script: npm test
+          workingDirectory: $(integrationDirectory)
+          displayName: npm test
+          env:
+            MXC_DEBUG: ${{ parameters.debug }}
+            MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'

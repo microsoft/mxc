@@ -48,6 +48,14 @@ export function resolveExecutableAndArgs(
     throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
   }
 
+  // Check experimental mode before anything else so the caller gets a clear
+  // message about the missing flag rather than a platform/binary error.
+  if (ExperimentalBackends.includes(config.containment as ContainmentType) && !options.experimental) {
+    throw new Error(
+      `'${config.containment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
+    );
+  }
+
   const platformSupport = getPlatformSupport();
   if (!platformSupport.isSupported) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
@@ -96,14 +104,12 @@ export function resolveExecutableAndArgs(
   const configBase64 = Buffer.from(configJson, 'utf-8').toString('base64');
   args.push('--config-base64', configBase64);
 
-  if (options.debug) {
-    args.push('--debug');
+  if (options.dryRun) {
+    args.push('--dry-run');
   }
 
-  if (ExperimentalBackends.includes(config.containment as ContainmentType) && !options.experimental) {
-    throw new Error(
-      `'${config.containment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
-    );
+  if (options.debug) {
+    args.push('--debug');
   }
 
   if (options.experimental) {

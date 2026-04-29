@@ -3,8 +3,8 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from './sandbox';
-import { SandboxPolicy } from './types';
+import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox';
+import { SandboxPolicy } from '../../src/types';
 
 describe('buildSandboxPayload', () => {
   const defaultPolicy: SandboxPolicy = { version: '0.4.0-alpha' };
