@@ -306,6 +306,17 @@ pub struct ExperimentalConfig {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// WSL Container (WSLC SDK) backend (experimental).
     pub wslc: Option<WslcConfig>,
+    /// Telemetry configuration (experimental).
+    pub telemetry: Option<TelemetryConfig>,
+}
+
+/// Telemetry configuration parsed from the JSON config `experimental.telemetry` section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    /// Explicit telemetry override.
+    /// `Some(true)` = force on, `Some(false)` = force off, `None` = build-type default.
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

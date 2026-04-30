@@ -10,6 +10,7 @@ pub mod models;
 #[cfg(target_os = "windows")]
 pub mod nanvix_runner;
 pub mod script_runner;
+pub mod telemetry;
 pub mod validator;
 
 // Windows-specific modules

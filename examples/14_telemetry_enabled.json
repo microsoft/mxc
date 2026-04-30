@@ -1,0 +1,16 @@
+{
+  "version": "0.4.0-alpha",
+  "containerId": "CLI-TelemetryDemo",
+  "containment": "appcontainer",
+  "process": {
+    "commandLine": "cmd /c echo Hello with telemetry enabled"
+  },
+  "appContainer": {
+    "capabilities": ["permissiveLearningMode"]
+  },
+  "experimental": {
+    "telemetry": {
+      "enabled": true
+    }
+  }
+}

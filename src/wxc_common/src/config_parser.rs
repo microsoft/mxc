@@ -143,6 +143,13 @@ struct RawExperimental {
     #[serde(rename = "windows_sandbox")]
     windows_sandbox: Option<RawSandbox>,
     wslc: Option<RawContainerConfig>,
+    telemetry: Option<RawTelemetry>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawTelemetry {
+    enabled: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -636,6 +643,9 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             test,
             windows_sandbox,
             wslc,
+            telemetry: raw_exp
+                .telemetry
+                .map(|t| crate::models::TelemetryConfig { enabled: t.enabled }),
         }
     } else {
         ExperimentalConfig::default()
@@ -1750,5 +1760,126 @@ mod tests {
         assert!(!is_base_container_version("0.4.9"));
         assert!(!is_base_container_version(""));
         assert!(!is_base_container_version("not-a-version"));
+    }
+
+    // ---- Telemetry config parsing tests ----
+
+    #[test]
+    fn telemetry_enabled_parsed_from_experimental() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "telemetry": {"enabled": true}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telemetry = req
+            .experimental
+            .telemetry
+            .expect("telemetry should be Some");
+        assert_eq!(telemetry.enabled, Some(true));
+    }
+
+    #[test]
+    fn telemetry_disabled_parsed_from_experimental() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "telemetry": {"enabled": false}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telemetry = req
+            .experimental
+            .telemetry
+            .expect("telemetry should be Some");
+        assert_eq!(telemetry.enabled, Some(false));
+    }
+
+    #[test]
+    fn telemetry_absent_defaults_to_none() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.telemetry.is_none());
+    }
+
+    #[test]
+    fn telemetry_empty_object_defaults_enabled_to_none() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "telemetry": {}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telemetry = req
+            .experimental
+            .telemetry
+            .expect("telemetry should be Some");
+        assert_eq!(telemetry.enabled, None);
+    }
+
+    #[test]
+    fn telemetry_malformed_does_not_break_config() {
+        // telemetry.enabled is a string instead of bool — serde default kicks in
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "telemetry": {"enabled": "yes"}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        // Should either parse with default or fail gracefully — not panic
+        let result = load_request(&encoded, &mut logger, true);
+        // serde will reject "yes" for bool, so this is a JSON parse error
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn telemetry_unknown_fields_ignored() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "telemetry": {"enabled": true, "unknown_field": 42}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telemetry = req
+            .experimental
+            .telemetry
+            .expect("telemetry should be Some");
+        assert_eq!(telemetry.enabled, Some(true));
+    }
+
+    #[test]
+    fn experimental_without_telemetry_has_none() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "windows_sandbox": {}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.telemetry.is_none());
     }
 }

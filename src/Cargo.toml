@@ -57,5 +57,6 @@ lxc_common = { path = "lxc_common" }
 wslc_common = { path = "wslc_common" }
 flatbuffers = "25"
 sandbox_spec = { path = "generated/base_container_specification" }
+tracelogging = { version = "1.2", features = ["etw"] }
 widestring = "1"
 url = "2"

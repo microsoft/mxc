@@ -10,6 +10,7 @@ use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use wxc_common::telemetry;
 
 use lxc_common::lxc_runner::LxcScriptRunner;
 
@@ -144,6 +145,19 @@ fn main() {
     request.experimental_enabled = cli.experimental;
     request.dry_run = cli.dry_run;
 
+    // Initialize telemetry (TraceLogging ETW — requires --experimental; no-op on Linux)
+    let telemetry_active = if request.experimental_enabled {
+        let telemetry_config = request
+            .experimental
+            .telemetry
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+        telemetry::init(&telemetry_config)
+    } else {
+        false
+    };
+
     log_request(&request, &mut logger);
 
     // Verify containment backend is LXC
@@ -168,6 +182,41 @@ fn main() {
     }
 
     display_script_results(&response, &mut logger);
+
+    // Emit telemetry events
+    if telemetry_active {
+        let outcome = if response.exit_code == 0 {
+            "success"
+        } else {
+            "failure"
+        };
+        let failure_reason = if response.exit_code != 0 {
+            Some(telemetry::FailureReason::ProcessError)
+        } else {
+            None
+        };
+
+        telemetry::log_execution(&telemetry::ExecutionEvent {
+            backend: "lxc",
+            exit_code: response.exit_code,
+            outcome,
+            duration_ms: run_elapsed.as_millis() as u64,
+            init_duration_ms: 0,
+            version: telemetry::version(),
+            failure_reason,
+        });
+
+        if response.exit_code != 0 && !response.error_message.is_empty() {
+            telemetry::log_error(
+                "lxc",
+                telemetry::FailureReason::ProcessError,
+                &response.error_message,
+                telemetry::version(),
+            );
+        }
+
+        telemetry::shutdown();
+    }
 
     print!("{}", response.standard_out);
     eprint!("{}", response.standard_err);
