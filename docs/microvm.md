@@ -44,7 +44,10 @@ The MicroVM backend supports interactive stdin input. Scripts can use `input()` 
 
 ### readwrite_paths
 
-Host directories listed in `readwritePaths` are staged into the guest VM at boot and copied back to the host on clean exit:
+Host directories or files listed in `readwritePaths` are copied into a private
+per-run staging directory before boot. NanVix mounts are snapshot-based — host
+files are **not** modified while the guest is running. No junctions or live host
+mounts are used.
 
 ```json
 {
@@ -66,11 +69,17 @@ Inside the guest, the path is accessible via the `MXC_PATH_<SLUG>` environment v
 | `C:\Users\me\work` | `MXC_PATH_WORK` | `/mnt/rw/work` |
 | `C:\data\ref-data` | `MXC_PATH_REF_DATA` | `/mnt/rw/ref_data` |
 
-**Copyback semantics:** Modified files are written back to the original host path on clean exit (exit code 0 or non-zero). On timeout or crash, copyback is skipped — no partial state is leaked.
+**Copyback semantics:** After `nanvixd` exits normally, MXC copies the modified
+snapshot back to the original host paths. Copyback runs for both exit code `0`
+and non-zero guest exit codes. It is skipped for preflight failure, spawn
+failure, watchdog timeout, and runner/runtime errors — no partial state is
+leaked to the host.
 
 ### readonly_paths
 
-Host directories listed in `readonlyPaths` are staged read-only. Writes return `EACCES`:
+Host directories listed in `readonlyPaths` are copied into the staging directory
+with read-only file attributes. Writes return `EACCES`. Read-only paths are
+never copied back to the host.
 
 ```json
 {
@@ -91,7 +100,8 @@ Not supported for MicroVM. If `deniedPaths` is specified, the config is rejected
 | Total filesystem policy content | ≤ 16 MB |
 | Single file size | < 4 GB (FAT32 limit) |
 | Guest RAM | 128 MB |
-| Symlinks in source paths | Not supported (rejected at preflight) |
+| Symlinks/reparse points in source paths | Not supported (rejected at preflight) |
+| Junctions for staging | Not used |
 | `workingDirectory` | Not supported (guest CWD is `/`) |
 | Network policy | Not supported (NanVix has no network stack) |
 
