@@ -711,6 +711,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
+name = "isolation_session_bindings"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "windows",
+ "windows-core",
+ "windows-future",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1752,6 +1762,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "isolation_session_bindings",
  "nanvix_binaries",
  "nanvix_common",
  "windows",
@@ -1765,6 +1776,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "flatbuffers",
+ "isolation_session_bindings",
  "sandbox_spec",
  "semver",
  "serde",
@@ -1775,6 +1787,7 @@ dependencies = [
  "widestring",
  "windows",
  "windows-core",
+ "windows-future",
 ]
 
 [[package]]

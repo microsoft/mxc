@@ -11,8 +11,9 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
-    LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress,
-    ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
+    PortMapping, ProxyAddress, ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
+    WslcConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -138,11 +139,20 @@ struct RawTestFeature {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawIsolationSession {
+    #[serde(rename = "configurationId")]
+    configuration_id: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawExperimental {
     test: Option<RawTestFeature>,
     #[serde(rename = "windows_sandbox")]
     windows_sandbox: Option<RawSandbox>,
     wslc: Option<RawContainerConfig>,
+    #[serde(rename = "isolation_session")]
+    isolation_session: Option<RawIsolationSession>,
 }
 
 #[derive(Deserialize, Default)]
@@ -439,9 +449,10 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         Some("lxc") => ContainmentBackend::Lxc,
         Some("vm") => ContainmentBackend::Vm,
         Some("microvm") => ContainmentBackend::MicroVm,
+        Some("isolation_session") => ContainmentBackend::IsolationSession,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'wslc', 'lxc', 'vm', or 'microvm')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', or 'microvm')",
                 other
             );
             logger.log_line(&msg);
@@ -632,10 +643,31 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             }
             config
         });
+        let isolation_session = raw_exp.isolation_session.map(|as_cfg| {
+            let mut config = IsolationSessionConfig::default();
+            if let Some(id) = as_cfg.configuration_id {
+                use crate::models::IsolationSessionConfigurationId;
+                config.configuration_id = match id.as_str() {
+                    "small" => IsolationSessionConfigurationId::Small,
+                    "medium" => IsolationSessionConfigurationId::Medium,
+                    "large" => IsolationSessionConfigurationId::Large,
+                    "commandline" => IsolationSessionConfigurationId::CommandLine,
+                    _ => {
+                        logger.log_line(&format!(
+                            "Unknown isolation_session configurationId '{}', defaulting to 'small'",
+                            id
+                        ));
+                        IsolationSessionConfigurationId::Small
+                    }
+                };
+            }
+            config
+        });
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
+            isolation_session,
         }
     } else {
         ExperimentalConfig::default()
@@ -1750,5 +1782,112 @@ mod tests {
         assert!(!is_base_container_version("0.4.9"));
         assert!(!is_base_container_version(""));
         assert!(!is_base_container_version("not-a-version"));
+    }
+
+    // ====== Isolation Session containment and config tests ======
+
+    #[test]
+    fn containment_isolation_session_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
+    }
+
+    #[test]
+    fn isolation_session_config_defaults() {
+        let json =
+            r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
+        assert_eq!(
+            cfg.configuration_id,
+            crate::models::IsolationSessionConfigurationId::Small
+        );
+    }
+
+    #[test]
+    fn isolation_session_config_small() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "small"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
+        assert_eq!(
+            cfg.configuration_id,
+            crate::models::IsolationSessionConfigurationId::Small
+        );
+    }
+
+    #[test]
+    fn isolation_session_config_medium() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
+        assert_eq!(
+            cfg.configuration_id,
+            crate::models::IsolationSessionConfigurationId::Medium
+        );
+    }
+
+    #[test]
+    fn isolation_session_config_large() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "large"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
+        assert_eq!(
+            cfg.configuration_id,
+            crate::models::IsolationSessionConfigurationId::Large
+        );
+    }
+
+    #[test]
+    fn isolation_session_config_commandline() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "commandline"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
+        assert_eq!(
+            cfg.configuration_id,
+            crate::models::IsolationSessionConfigurationId::CommandLine
+        );
+    }
+
+    #[test]
+    fn isolation_session_config_unknown_defaults_to_small() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "xlarge"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
+        assert_eq!(
+            cfg.configuration_id,
+            crate::models::IsolationSessionConfigurationId::Small
+        );
+    }
+
+    #[test]
+    fn isolation_session_absent_from_experimental() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.isolation_session.is_none());
     }
 }

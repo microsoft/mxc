@@ -11,6 +11,8 @@ use wxc_common::appcontainer_runner::AppContainerScriptRunner;
 use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::{is_base_container_version, load_request};
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
+#[cfg(feature = "isolation_session")]
+use wxc_common::isolation_session_runner::IsolationSessionRunner;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::nanvix_runner::NanVixScriptRunner;
@@ -107,6 +109,20 @@ fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
 }
 
 fn main() {
+    // Initialize COM/WinRT for backends that use WinRT APIs (Isolation Session).
+    // COINIT_MULTITHREADED is benign for backends that don't use COM.
+    //
+    // SAFETY: `CoInitializeEx` is sound to call once at process start before
+    // any WinRT or COM activation. `pvReserved` must be `None` per the API
+    // contract. The return value is intentionally ignored — repeat-init
+    // outcomes (`S_FALSE`, `RPC_E_CHANGED_MODE`) are benign here.
+    let _ = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        )
+    };
+
     let cli = Cli::parse();
 
     // Determine config input and whether it's base64
@@ -236,6 +252,25 @@ fn main() {
                 .cloned()
                 .unwrap_or_default();
             Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
+        }
+        ContainmentBackend::IsolationSession => {
+            #[cfg(feature = "isolation_session")]
+            {
+                if !request.experimental_enabled {
+                    eprintln!(
+                        "Error: Isolation Session is an experimental feature. Use --experimental flag."
+                    );
+                    process::exit(1);
+                }
+                Box::new(IsolationSessionRunner::new())
+            }
+            #[cfg(not(feature = "isolation_session"))]
+            {
+                eprintln!(
+                    "Error: IsolationSession backend not compiled. Rebuild with --features isolation_session."
+                );
+                process::exit(1);
+            }
         }
     };
     let run_start = Instant::now();

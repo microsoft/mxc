@@ -21,6 +21,9 @@ pub enum ContainmentBackend {
     MicroVm,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
     WindowsSandbox,
+    /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
+    #[serde(rename = "isolation_session")]
+    IsolationSession,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
@@ -41,6 +44,33 @@ impl Default for WindowsSandboxConfig {
             daemon_pipe_name: "wxc-windows-sandbox".to_string(),
         }
     }
+}
+
+/// Session configuration size for the Isolation Session backend.
+/// Maps to `IsolationSessionConfigurationId` in the IsoEnvBroker Session API,
+/// whose values must in turn match `ISOLATION_CONFIG_ID` in `winsta.h`.
+#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IsolationSessionConfigurationId {
+    /// `Small` (1) — smallest pre-defined configuration; the default.
+    #[default]
+    Small,
+    /// `Medium` (2) — middle pre-defined configuration.
+    Medium,
+    /// `Large` (3) — largest pre-defined configuration.
+    Large,
+    /// `CommandLine` (4) — configuration shape intended for non-interactive
+    /// command-line workloads.
+    CommandLine,
+}
+
+/// Configuration specific to the Isolation Session backend.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IsolationSessionConfig {
+    /// Session size/weight. Default: Small.
+    #[serde(rename = "configurationId")]
+    pub configuration_id: IsolationSessionConfigurationId,
 }
 
 /// Configuration specific to the LXC container backend.
@@ -306,6 +336,9 @@ pub struct ExperimentalConfig {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// WSL Container (WSLC SDK) backend (experimental).
     pub wslc: Option<WslcConfig>,
+    /// Isolation Session backend (experimental).
+    #[serde(rename = "isolation_session")]
+    pub isolation_session: Option<IsolationSessionConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
