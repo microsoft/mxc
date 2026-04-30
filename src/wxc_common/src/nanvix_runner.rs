@@ -460,6 +460,12 @@ impl NanVixScriptRunner {
             }
         }
     }
+    /// Returns `true` when filesystem copyback should run.
+    /// Copyback runs on any normal process exit (including non-zero exit codes).
+    /// It is skipped for preflight, spawn, runtime, and timeout errors.
+    fn should_copy_back(response: &ScriptResponse) -> bool {
+        response.error_message.is_empty()
+    }
 }
 
 impl ScriptRunner for NanVixScriptRunner {
@@ -513,7 +519,7 @@ impl ScriptRunner for NanVixScriptRunner {
                 Err(resp) => return resp,
             };
 
-        Self::wait_and_respond(
+        let response = Self::wait_and_respond(
             &mut child,
             watchdog,
             &cancel_pair,
@@ -521,7 +527,21 @@ impl ScriptRunner for NanVixScriptRunner {
             timeout_ms,
             request.script_timeout,
             logger,
-        )
+        );
+
+        // Copy back RW filesystem changes on normal process exit.
+        if Self::should_copy_back(&response) {
+            if let Err(e) = staging.copy_back_to_host() {
+                let err = NanVixError::Runtime(format!(
+                    "failed to copy back microvm filesystem changes: {}",
+                    e
+                ));
+                let _ = writeln!(logger, "{}", err);
+                return err.to_response();
+            }
+        }
+
+        response
         // staging is dropped here → cleanup
     }
 }
@@ -738,5 +758,35 @@ mod tests {
             "guest args should NOT use stdin exec trick, got: {}",
             args
         );
+    }
+
+    // -- Copyback decision tests ------------------------------------------------
+
+    #[test]
+    fn copyback_allowed_for_zero_exit() {
+        let response = ScriptResponse {
+            exit_code: 0,
+            ..Default::default()
+        };
+        assert!(NanVixScriptRunner::should_copy_back(&response));
+    }
+
+    #[test]
+    fn copyback_allowed_for_nonzero_normal_exit() {
+        let response = ScriptResponse {
+            exit_code: 42,
+            ..Default::default()
+        };
+        assert!(NanVixScriptRunner::should_copy_back(&response));
+    }
+
+    #[test]
+    fn copyback_skipped_for_runner_error() {
+        let response = ScriptResponse {
+            exit_code: ERROR_EXIT_CODE,
+            error_message: "NanVix execution timed out after 90000ms".to_string(),
+            ..Default::default()
+        };
+        assert!(!NanVixScriptRunner::should_copy_back(&response));
     }
 }
