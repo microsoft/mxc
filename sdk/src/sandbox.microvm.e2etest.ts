@@ -177,4 +177,74 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
     assert.notStrictEqual(exitCode, 0, `Expected non-zero exit code for denied_paths`);
     assert.ok(combined.includes('denied_paths'), `Expected denied_paths error in output:\n${combined}`);
   });
+
+  it('should copy readwritePaths changes back to the host on clean exit', async () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-microvm-copyback-'));
+    const rwDir = path.join(testDir, 'work');
+    fs.mkdirSync(rwDir);
+    fs.writeFileSync(path.join(rwDir, 'input.txt'), 'before');
+
+    try {
+      const config: ContainerConfig = {
+        version: '0.5.0-alpha',
+        containment: 'microvm',
+        process: {
+          commandLine: [
+            "import os",
+            "path = os.environ['MXC_PATH_WORK']",
+            "with open(os.path.join(path, 'input.txt'), 'w') as f:",
+            "    f.write('after')",
+            "with open(os.path.join(path, 'created.txt'), 'w') as f:",
+            "    f.write('created by guest')",
+          ].join('\n'),
+          timeout: 30000,
+        },
+        filesystem: {
+          readwritePaths: [rwDir],
+        },
+      };
+
+      const { stdout, stderr, exitCode } = await runMicrovm(config);
+      assert.strictEqual(exitCode, 0, `Expected exit code 0.\nstdout: ${stdout}\nstderr: ${stderr}`);
+      assert.strictEqual(fs.readFileSync(path.join(rwDir, 'input.txt'), 'utf8'), 'after');
+      assert.strictEqual(fs.readFileSync(path.join(rwDir, 'created.txt'), 'utf8'), 'created by guest');
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should copy readwritePaths changes back after a normal non-zero guest exit', async () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-microvm-copyback-nonzero-'));
+    const rwDir = path.join(testDir, 'work');
+    fs.mkdirSync(rwDir);
+
+    try {
+      const config: ContainerConfig = {
+        version: '0.5.0-alpha',
+        containment: 'microvm',
+        process: {
+          commandLine: [
+            "import os, sys",
+            "path = os.environ['MXC_PATH_WORK']",
+            "with open(os.path.join(path, 'nonzero.txt'), 'w') as f:",
+            "    f.write('persisted before non-zero exit')",
+            "sys.exit(7)",
+          ].join('\n'),
+          timeout: 30000,
+        },
+        filesystem: {
+          readwritePaths: [rwDir],
+        },
+      };
+
+      const { exitCode } = await runMicrovm(config);
+      assert.strictEqual(exitCode, 7, `Expected exit code 7, got ${exitCode}`);
+      assert.strictEqual(
+        fs.readFileSync(path.join(rwDir, 'nonzero.txt'), 'utf8'),
+        'persisted before non-zero exit'
+      );
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
 });
