@@ -136,6 +136,7 @@ fn appcontainer_proxy() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
 fn test_appcontainer_basic() {
     if !cached_has_wxc_exe() {
         return;
@@ -144,6 +145,7 @@ fn test_appcontainer_basic() {
 }
 
 #[test]
+#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
 fn test_appcontainer_lpac() {
     if !cached_has_wxc_exe() {
         return;
@@ -152,6 +154,7 @@ fn test_appcontainer_lpac() {
 }
 
 #[test]
+#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
 fn test_filesystem_bfs() {
     if !cached_has_wxc_exe() {
         return;
@@ -160,6 +163,7 @@ fn test_filesystem_bfs() {
 }
 
 #[test]
+#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
 fn test_filesystem_bfs_readonly() {
     if !cached_has_wxc_exe() {
         return;
@@ -168,6 +172,7 @@ fn test_filesystem_bfs_readonly() {
 }
 
 #[test]
+#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
 fn test_filesystem_bfs_spaces() {
     if !cached_has_wxc_exe() {
         return;
@@ -176,6 +181,7 @@ fn test_filesystem_bfs_spaces() {
 }
 
 #[test]
+#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
 fn test_pwsh_setlocation() {
     if !cached_has_wxc_exe() {
         return;
@@ -184,6 +190,7 @@ fn test_pwsh_setlocation() {
 }
 
 #[test]
+#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
 fn test_test_configs() {
     if !cached_has_test_driver() {
         return;
@@ -192,6 +199,7 @@ fn test_test_configs() {
 }
 
 #[test]
+#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
 fn test_examples() {
     if !cached_has_test_driver() {
         return;
@@ -236,6 +244,7 @@ fn test_microvm_suite() {
 }
 
 #[test]
+#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled and elevation
 fn test_appcontainer_proxy() {
     if !cached_has_test_driver() {
         return;

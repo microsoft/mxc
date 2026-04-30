@@ -64,8 +64,29 @@ The `wxc_e2e_tests` crate runs executor E2E tests directly against
 ```powershell
 cd src
 cargo test -p wxc_e2e_tests              # Executor E2E tests (skips if prereqs missing)
-cargo test -p wxc_e2e_tests -- --ignored # Include stress tests
+cargo test -p wxc_e2e_tests -- --ignored # Include BFS, networking, and stress tests
 ```
+
+### Ignored tests
+
+The following tests are marked `#[ignore]` because they require velocity key
+61714527 (BFS deadlock fix) enabled on the machine. AppContainer process
+isolation with brokered filesystem or networking depends on this fix.
+Run them explicitly on capable machines with
+`cargo test -p wxc_e2e_tests -- --ignored`:
+
+| Test | Reason |
+|------|--------|
+| `test_appcontainer_basic` | Requires velocity key 61714527 (BFS deadlock fix) |
+| `test_appcontainer_lpac` | Requires velocity key 61714527 (BFS deadlock fix) |
+| `test_filesystem_bfs` | Requires velocity key 61714527 (BFS deadlock fix) |
+| `test_filesystem_bfs_readonly` | Requires velocity key 61714527 (BFS deadlock fix) |
+| `test_filesystem_bfs_spaces` | Requires velocity key 61714527 (BFS deadlock fix) |
+| `test_pwsh_setlocation` | Requires velocity key 61714527 (BFS deadlock fix) |
+| `test_test_configs` | Requires velocity key 61714527 (BFS deadlock fix) |
+| `test_examples` | Requires velocity key 61714527 (BFS deadlock fix) |
+| `test_appcontainer_proxy` | Requires velocity key 61714527 (BFS deadlock fix) and elevation |
+| `test_on_repeat` | Stress test (loops BFS tests) |
 
 ## MicroVM E2E
 
