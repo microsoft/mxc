@@ -133,8 +133,7 @@ impl StagingDir {
                     let slug = allocate_slug(&host_path, &mut used_env_keys);
                     let slot_dir = path.join(RW_DIR).join(&slug);
                     let kind = stage_host_path(&host_path, &slot_dir)?;
-                    path_map
-                        .insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RW_DIR, slug));
+                    path_map.insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RW_DIR, slug));
                     rw_mappings.push(RwMapping {
                         host_path,
                         staged_path: slot_dir,
@@ -161,8 +160,7 @@ impl StagingDir {
                         fs::copy(&host_path, slot_dir.join(file_name))?;
                     }
                     set_readonly_recursive(&slot_dir)?;
-                    path_map
-                        .insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RO_DIR, slug));
+                    path_map.insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RO_DIR, slug));
                 }
 
                 let serialized = serde_json::to_string(&path_map).map_err(|e| {
@@ -303,12 +301,9 @@ fn copy_back_mapping(mapping: &RwMapping) -> Result<(), StagingError> {
     match mapping.kind {
         HostPathKind::Directory => mirror_directory(&mapping.staged_path, &mapping.host_path),
         HostPathKind::File => {
-            let file_name = mapping
-                .host_path
-                .file_name()
-                .ok_or_else(|| {
-                    StagingError::PathNotFound(mapping.host_path.display().to_string())
-                })?;
+            let file_name = mapping.host_path.file_name().ok_or_else(|| {
+                StagingError::PathNotFound(mapping.host_path.display().to_string())
+            })?;
             let staged_file = mapping.staged_path.join(file_name);
             fs::copy(staged_file, &mapping.host_path)?;
             Ok(())
@@ -627,11 +622,17 @@ mod tests {
 
         // Mutate the staged copy — original must remain unchanged.
         fs::write(&staged_file, "after").unwrap();
-        assert_eq!(fs::read_to_string(source.join("data.txt")).unwrap(), "before");
+        assert_eq!(
+            fs::read_to_string(source.join("data.txt")).unwrap(),
+            "before"
+        );
 
         // After explicit copyback, original should reflect the staged changes.
         staging.copy_back_to_host().unwrap();
-        assert_eq!(fs::read_to_string(source.join("data.txt")).unwrap(), "after");
+        assert_eq!(
+            fs::read_to_string(source.join("data.txt")).unwrap(),
+            "after"
+        );
     }
 
     #[test]
@@ -676,8 +677,14 @@ mod tests {
 
         staging.copy_back_to_host().unwrap();
 
-        assert_eq!(fs::read_to_string(source.join("kept.txt")).unwrap(), "after");
-        assert_eq!(fs::read_to_string(source.join("created.txt")).unwrap(), "new");
+        assert_eq!(
+            fs::read_to_string(source.join("kept.txt")).unwrap(),
+            "after"
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("created.txt")).unwrap(),
+            "new"
+        );
         assert!(!source.join("deleted.txt").exists());
     }
 
