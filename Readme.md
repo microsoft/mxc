@@ -186,7 +186,12 @@ Error messages are sanitized to strip file paths and usernames before emission.
 
 ### Capturing events
 
-Use standard ETW tools to capture telemetry events:
+Use standard ETW tools to capture telemetry events.
+
+> **Note**: The `Microsoft.MXC` provider GUID is pending provisioning through
+> the Windows Telemetry onboarding process. Once available, it will be
+> documented here. In the meantime, the GUID can be obtained at runtime
+> from `MXC_PROVIDER.id()` in the source code.
 
 ```bash
 tracelog -start MXCTrace -f MXCTrace.etl -guid #<PROVIDER_GUID>

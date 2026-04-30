@@ -320,6 +320,9 @@ fn main() {
         } else {
             "failure"
         };
+        // TODO: Currently all failures are classified as ProcessError. Once ScriptResponse
+        // carries a structured failure category, map to the appropriate FailureReason variant
+        // (ConfigError, PolicyError, InitError, Timeout, etc.) for more accurate telemetry.
         let failure_reason = if response.exit_code != 0 {
             Some(telemetry::FailureReason::ProcessError)
         } else {

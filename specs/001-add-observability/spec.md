@@ -133,7 +133,8 @@ omitting the `telemetry` field results in no telemetry override.
 
 - What happens when the `experimental.telemetry` section is present but malformed?
   Malformed telemetry config MUST be treated as if telemetry is disabled
-  (safe default) and a warning emitted to stderr.
+  (safe default). No warning is emitted to stderr; the malformed value is
+  silently ignored to avoid polluting captured output.
 - Can PII be accidentally emitted through error messages or event properties?
   All error messages captured in events MUST be sanitized: file paths, script content,
   and environment variable values MUST NOT appear in event fields.
