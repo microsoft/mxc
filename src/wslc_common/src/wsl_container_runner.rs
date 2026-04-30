@@ -804,12 +804,12 @@ impl WSLContainerRunner {
             return sdk_error("WslcSetProcessSettingsCmdLine failed", hr, "");
         }
 
+        let env_cstrings: Vec<Vec<u8>> = request
+            .env
+            .iter()
+            .map(|e| format!("{}\0", e).into_bytes())
+            .collect();
         if !request.env.is_empty() {
-            let env_cstrings: Vec<Vec<u8>> = request
-                .env
-                .iter()
-                .map(|e| format!("{}\0", e).into_bytes())
-                .collect();
             let env_ptrs: Vec<PCSTR> = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
             let hr = (sdk.WslcSetProcessSettingsEnvVariables)(
                 &mut process_settings,
