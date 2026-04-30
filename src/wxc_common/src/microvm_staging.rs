@@ -8,7 +8,6 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use uuid::Uuid;
 
@@ -79,11 +78,28 @@ impl From<std::io::Error> for StagingError {
     }
 }
 
+/// Whether the original host path was a file or directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostPathKind {
+    File,
+    Directory,
+}
+
+/// Tracks the relationship between a host path, its staged copy, and its type.
+#[derive(Debug)]
+struct RwMapping {
+    host_path: PathBuf,
+    staged_path: PathBuf,
+    kind: HostPathKind,
+}
+
 /// RAII wrapper over a temporary staging directory.
 #[derive(Debug)]
 pub struct StagingDir {
     path: PathBuf,
     path_map: BTreeMap<String, String>,
+    rw_mappings: Vec<RwMapping>,
+    size_bytes: u64,
 }
 
 impl StagingDir {
@@ -98,79 +114,87 @@ impl StagingDir {
         let path = root.join(format!("mxc-staging-{}", Uuid::new_v4().simple()));
         fs::create_dir_all(&path)?;
 
-        let build_result = || -> Result<BTreeMap<String, String>, StagingError> {
-            fs::write(path.join(BOOTSTRAP_FILENAME), BOOTSTRAP_SOURCE)?;
-            fs::write(path.join(SCRIPT_FILENAME), script)?;
+        let build_result =
+            || -> Result<(BTreeMap<String, String>, Vec<RwMapping>, u64), StagingError> {
+                fs::write(path.join(BOOTSTRAP_FILENAME), BOOTSTRAP_SOURCE)?;
+                fs::write(path.join(SCRIPT_FILENAME), script)?;
 
-            let mut used_slugs: Vec<String> = Vec::new();
-            let mut path_map: BTreeMap<String, String> = BTreeMap::new();
+                let mut used_env_keys: Vec<String> = Vec::new();
+                let mut path_map: BTreeMap<String, String> = BTreeMap::new();
+                let mut rw_mappings: Vec<RwMapping> = Vec::new();
 
-            if !readwrite_paths.is_empty() {
-                fs::create_dir_all(path.join(RW_DIR))?;
-            }
-            for source in readwrite_paths {
-                let host_path = PathBuf::from(source);
-                if !host_path.exists() {
-                    return Err(StagingError::PathNotFound(source.clone()));
+                if !readwrite_paths.is_empty() {
+                    fs::create_dir_all(path.join(RW_DIR))?;
                 }
-                check_no_symlinks(&host_path)?;
+                for source in readwrite_paths {
+                    let host_path = PathBuf::from(source);
+                    validate_source_path(&host_path, source)?;
 
-                let slug = allocate_slug(&host_path, &mut used_slugs);
-                let slot_dir = path.join(RW_DIR).join(&slug);
-                stage_host_path(&host_path, &slot_dir)?;
-                path_map.insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RW_DIR, slug));
-            }
-
-            if !readonly_paths.is_empty() {
-                fs::create_dir_all(path.join(RO_DIR))?;
-            }
-            for source in readonly_paths {
-                let host_path = PathBuf::from(source);
-                if !host_path.exists() {
-                    return Err(StagingError::PathNotFound(source.clone()));
+                    let slug = allocate_slug(&host_path, &mut used_env_keys);
+                    let slot_dir = path.join(RW_DIR).join(&slug);
+                    let kind = stage_host_path(&host_path, &slot_dir)?;
+                    path_map
+                        .insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RW_DIR, slug));
+                    rw_mappings.push(RwMapping {
+                        host_path,
+                        staged_path: slot_dir,
+                        kind,
+                    });
                 }
-                check_no_symlinks(&host_path)?;
 
-                let slug = allocate_slug(&host_path, &mut used_slugs);
-                let slot_dir = path.join(RO_DIR).join(&slug);
-                if host_path.is_dir() {
-                    copy_dir_recursive(&host_path, &slot_dir)?;
-                } else {
-                    fs::create_dir_all(&slot_dir)?;
-                    let file_name = host_path
-                        .file_name()
-                        .ok_or_else(|| StagingError::PathNotFound(source.clone()))?;
-                    fs::copy(&host_path, slot_dir.join(file_name))?;
+                if !readonly_paths.is_empty() {
+                    fs::create_dir_all(path.join(RO_DIR))?;
                 }
-                set_readonly_recursive(&slot_dir)?;
-                path_map.insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RO_DIR, slug));
-            }
+                for source in readonly_paths {
+                    let host_path = PathBuf::from(source);
+                    validate_source_path(&host_path, source)?;
 
-            let serialized = serde_json::to_string(&path_map).map_err(|e| {
-                StagingError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-            })?;
-            fs::write(path.join(PATHMAP_FILENAME), serialized)?;
+                    let slug = allocate_slug(&host_path, &mut used_env_keys);
+                    let slot_dir = path.join(RO_DIR).join(&slug);
+                    if host_path.is_dir() {
+                        copy_dir_recursive(&host_path, &slot_dir)?;
+                    } else {
+                        fs::create_dir_all(&slot_dir)?;
+                        let file_name = host_path
+                            .file_name()
+                            .ok_or_else(|| StagingError::PathNotFound(source.clone()))?;
+                        fs::copy(&host_path, slot_dir.join(file_name))?;
+                    }
+                    set_readonly_recursive(&slot_dir)?;
+                    path_map
+                        .insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RO_DIR, slug));
+                }
 
-            let size = dir_size(&path)?;
-            if size > MAX_STAGING_BYTES {
-                return Err(StagingError::SizeCapExceeded {
-                    actual_mb: size as f64 / (1024.0 * 1024.0),
-                    limit_mb: MAX_STAGING_BYTES as f64 / (1024.0 * 1024.0),
-                });
-            }
+                let serialized = serde_json::to_string(&path_map).map_err(|e| {
+                    StagingError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                })?;
+                fs::write(path.join(PATHMAP_FILENAME), serialized)?;
 
-            Ok(path_map)
-        }();
+                let size_bytes = dir_size(&path)?;
+                if size_bytes > MAX_STAGING_BYTES {
+                    return Err(StagingError::SizeCapExceeded {
+                        actual_mb: size_bytes as f64 / (1024.0 * 1024.0),
+                        limit_mb: MAX_STAGING_BYTES as f64 / (1024.0 * 1024.0),
+                    });
+                }
 
-        let path_map = match build_result {
-            Ok(path_map) => path_map,
+                Ok((path_map, rw_mappings, size_bytes))
+            }();
+
+        let (path_map, rw_mappings, size_bytes) = match build_result {
+            Ok(result) => result,
             Err(err) => {
-                let _ = fs::remove_dir_all(&path);
+                let _ = remove_dir_all_force(&path);
                 return Err(err);
             }
         };
 
-        Ok(Self { path, path_map })
+        Ok(Self {
+            path,
+            path_map,
+            rw_mappings,
+            size_bytes,
+        })
     }
 
     /// Returns the host path to the staging directory.
@@ -183,42 +207,68 @@ impl StagingDir {
         &self.path_map
     }
 
+    /// Copies all read-write staged paths back to their original host locations.
+    pub fn copy_back_to_host(&self) -> Result<(), StagingError> {
+        for mapping in &self.rw_mappings {
+            copy_back_mapping(mapping)?;
+        }
+        Ok(())
+    }
+
     /// Returns additional staging overhead in milliseconds.
     pub fn staging_overhead_ms(&self) -> u64 {
-        let bytes = dir_size(&self.path).unwrap_or(0);
-        let ms = ((bytes as f64 / (1024.0 * 1024.0)) * 100.0) as u64;
+        let ms = ((self.size_bytes as f64 / (1024.0 * 1024.0)) * 100.0) as u64;
         ms.min(30_000)
     }
 }
 
 impl Drop for StagingDir {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+        let _ = remove_dir_all_force(&self.path);
     }
 }
 
-/// Allocates a unique slug from a source host path.
-fn allocate_slug(host_path: &Path, used: &mut Vec<String>) -> String {
-    let base = host_path
+/// Allocates a unique guest path slug whose derived env key is also unique.
+fn allocate_slug(host_path: &Path, used_env_keys: &mut Vec<String>) -> String {
+    let raw_base = host_path
         .file_name()
         .and_then(OsStr::to_str)
         .unwrap_or("path")
         .to_ascii_lowercase()
         .replace('-', "_");
 
-    if !used.iter().any(|s| s == &base) {
-        used.push(base.clone());
-        return base;
-    }
+    let base = sanitize_slug(&raw_base);
+    let mut counter = 1_u64;
 
-    let mut counter = 2_u64;
     loop {
-        let candidate = format!("{}_{}", base, counter);
-        if !used.iter().any(|s| s == &candidate) {
-            used.push(candidate.clone());
+        let candidate = if counter == 1 {
+            base.clone()
+        } else {
+            format!("{}_{}", base, counter)
+        };
+        let env_key = slug_to_env_key(&candidate);
+        if !used_env_keys.iter().any(|key| key == &env_key) {
+            used_env_keys.push(env_key);
             return candidate;
         }
         counter += 1;
+    }
+}
+
+fn sanitize_slug(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' => ch.to_ascii_lowercase(),
+            _ => '_',
+        })
+        .collect();
+
+    let trimmed = sanitized.trim_matches('_');
+    if trimmed.is_empty() {
+        "path".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -233,13 +283,11 @@ pub fn slug_to_env_key(slug: &str) -> String {
         .collect()
 }
 
-/// Stages a single host path in a target slot directory.
-fn stage_host_path(host_path: &Path, slot_dir: &Path) -> Result<(), StagingError> {
+/// Stages a single host path in a target slot directory using a private copy.
+fn stage_host_path(host_path: &Path, slot_dir: &Path) -> Result<HostPathKind, StagingError> {
     if host_path.is_dir() {
-        if try_create_junction(host_path, slot_dir) {
-            return Ok(());
-        }
-        return copy_dir_recursive(host_path, slot_dir);
+        copy_dir_recursive(host_path, slot_dir)?;
+        return Ok(HostPathKind::Directory);
     }
 
     fs::create_dir_all(slot_dir)?;
@@ -247,21 +295,33 @@ fn stage_host_path(host_path: &Path, slot_dir: &Path) -> Result<(), StagingError
         .file_name()
         .ok_or_else(|| StagingError::PathNotFound(host_path.display().to_string()))?;
     fs::copy(host_path, slot_dir.join(file_name))?;
-    Ok(())
+    Ok(HostPathKind::File)
 }
 
-/// Attempts to create a junction from `target` to `source`.
-#[cfg(target_os = "windows")]
-fn try_create_junction(source: &Path, target: &Path) -> bool {
-    let source_text = source.display().to_string();
-    let target_text = target.display().to_string();
-    let cmdline = format!("mklink /J \"{}\" \"{}\"", target_text, source_text);
+/// Copies staged RW content back to the original host path.
+fn copy_back_mapping(mapping: &RwMapping) -> Result<(), StagingError> {
+    match mapping.kind {
+        HostPathKind::Directory => mirror_directory(&mapping.staged_path, &mapping.host_path),
+        HostPathKind::File => {
+            let file_name = mapping
+                .host_path
+                .file_name()
+                .ok_or_else(|| {
+                    StagingError::PathNotFound(mapping.host_path.display().to_string())
+                })?;
+            let staged_file = mapping.staged_path.join(file_name);
+            fs::copy(staged_file, &mapping.host_path)?;
+            Ok(())
+        }
+    }
+}
 
-    Command::new("cmd")
-        .arg("/C")
-        .arg(cmdline)
-        .status()
-        .is_ok_and(|status| status.success())
+/// Replaces the destination directory with the source directory contents.
+fn mirror_directory(src: &Path, dst: &Path) -> Result<(), StagingError> {
+    if dst.exists() {
+        remove_dir_all_force(dst)?;
+    }
+    copy_dir_recursive(src, dst)
 }
 
 /// Copies a directory recursively.
@@ -303,19 +363,77 @@ fn set_readonly_recursive(dir: &Path) -> Result<(), StagingError> {
     Ok(())
 }
 
-/// Ensures no symlink is present in `path` or descendants.
-fn check_no_symlinks(path: &Path) -> Result<(), StagingError> {
+/// Validates that a source host path exists, has a filename, and contains no reparse points.
+fn validate_source_path(path: &Path, original: &str) -> Result<(), StagingError> {
+    if !path.exists() {
+        return Err(StagingError::PathNotFound(original.to_string()));
+    }
+    if path.file_name().is_none() {
+        return Err(StagingError::PathNotFound(format!(
+            "root paths are not supported for microvm filesystem staging: {}",
+            original
+        )));
+    }
+    check_no_reparse_points(path)
+}
+
+/// Ensures no symlink or Windows reparse point is present in `path` or descendants.
+fn check_no_reparse_points(path: &Path) -> Result<(), StagingError> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
+    if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
         return Err(StagingError::SymlinkFound(path.display().to_string()));
     }
 
     if metadata.is_dir() {
         for entry in fs::read_dir(path)? {
-            check_no_symlinks(&entry?.path())?;
+            check_no_reparse_points(&entry?.path())?;
         }
     }
 
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+/// Removes a directory tree, clearing read-only attributes first.
+fn remove_dir_all_force(path: &Path) -> Result<(), StagingError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    clear_readonly_recursive(path)?;
+    fs::remove_dir_all(path)?;
+    Ok(())
+}
+
+fn clear_readonly_recursive(path: &Path) -> Result<(), StagingError> {
+    if path.is_file() {
+        let mut perms = fs::metadata(path)?.permissions();
+        if perms.readonly() {
+            perms.set_readonly(false);
+            fs::set_permissions(path, perms)?;
+        }
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(path)? {
+        clear_readonly_recursive(&entry?.path())?;
+    }
+
+    let mut perms = fs::metadata(path)?.permissions();
+    if perms.readonly() {
+        perms.set_readonly(false);
+        fs::set_permissions(path, perms)?;
+    }
     Ok(())
 }
 
@@ -478,6 +596,7 @@ mod tests {
 
         let rw = vec![source_file.display().to_string()];
         let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        // File "payload" has no extension, slug stays "payload"
         let staged_file = staging.path().join(RW_DIR).join("payload").join("payload");
         assert!(staged_file.exists());
     }
@@ -488,8 +607,8 @@ mod tests {
         let source = root.path().join("ref-data");
         fs::create_dir_all(&source).unwrap();
 
-        let mut used = Vec::new();
-        let slug = allocate_slug(&source, &mut used);
+        let mut used_keys = Vec::new();
+        let slug = allocate_slug(&source, &mut used_keys);
         assert_eq!(slug, "ref_data");
         assert_eq!(slug_to_env_key(&slug), "REF_DATA");
     }
@@ -524,10 +643,11 @@ mod tests {
 
         let rw = vec![source_file.display().to_string()];
         let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        // slug for "payload.txt" is "payload_txt" (dot sanitized to underscore)
         let staged_file = staging
             .path()
             .join(RW_DIR)
-            .join("payload.txt")
+            .join("payload_txt")
             .join("payload.txt");
 
         fs::write(&staged_file, "after").unwrap();
@@ -559,5 +679,21 @@ mod tests {
         assert_eq!(fs::read_to_string(source.join("kept.txt")).unwrap(), "after");
         assert_eq!(fs::read_to_string(source.join("created.txt")).unwrap(), "new");
         assert!(!source.join("deleted.txt").exists());
+    }
+
+    #[test]
+    fn staging_env_key_collision_is_disambiguated() {
+        let root = tempdir().unwrap();
+        let source_root = tempdir().unwrap();
+        let first = source_root.path().join("foo-bar");
+        let second = source_root.path().join("foo bar");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+
+        let rw = vec![first.display().to_string(), second.display().to_string()];
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+
+        assert!(staging.path_map().contains_key("FOO_BAR"));
+        assert!(staging.path_map().contains_key("FOO_BAR_2"));
     }
 }
