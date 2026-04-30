@@ -308,6 +308,16 @@
               "description": "Storage path for the WSLC session image store. Omit to use a temporary directory."
             }
           }
+        },
+        "telemetry": {
+          "type": "object",
+          "description": "Telemetry configuration (experimental). Emits TraceLogging ETW events for execution observability. Consent is the caller's responsibility.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Explicit telemetry override. When true, telemetry is enabled. When false or omitted, telemetry is disabled. Requires --experimental CLI flag."
+            }
+          }
         }
       }
     }

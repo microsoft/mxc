@@ -164,6 +164,14 @@ export interface PortMapping {
 }
 
 /**
+ * Telemetry configuration. Consent is the caller's responsibility.
+ */
+export interface TelemetryConfig {
+  /** Explicit telemetry override. Omit to use build-type default. */
+  enabled?: boolean;
+}
+
+/**
  * Main WXC configuration
  */
 export interface ContainerConfig {
@@ -189,6 +197,8 @@ export interface ContainerConfig {
   experimental?: {
     /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
+    /** Telemetry configuration (experimental). Consent is the caller's responsibility. */
+    telemetry?: TelemetryConfig;
   };
   /** Cross-platform UI configuration */
   ui?: UiConfig;

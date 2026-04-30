@@ -17,6 +17,7 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::nanvix_runner::NanVixScriptRunner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use wxc_common::telemetry;
 use wxc_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 
 #[derive(Parser)]
@@ -273,16 +274,79 @@ fn main() {
             }
         }
     };
+
+    // Initialize telemetry (TraceLogging ETW) after all early-exit validation.
+    // SAFETY of provider registration: shutdown() is guaranteed to run because
+    // there are no process::exit() calls between here and the shutdown below.
+    let telemetry_active = if request.experimental_enabled {
+        let telemetry_config = request
+            .experimental
+            .telemetry
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+        telemetry::init(&telemetry_config)
+    } else {
+        false
+    };
+
     let run_start = Instant::now();
     let response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
 
     if cli.dry_run {
+        if telemetry_active {
+            telemetry::shutdown();
+        }
         handle_dry_run_exit(&response, &mut logger);
     }
 
     display_script_results(&response, &mut logger);
+
+    // Emit telemetry events
+    if telemetry_active {
+        let backend_str = match request.containment {
+            ContainmentBackend::AppContainer => "appcontainer",
+            ContainmentBackend::WindowsSandbox => "sandbox",
+            ContainmentBackend::Lxc => "lxc",
+            ContainmentBackend::Wslc => "wslc",
+            ContainmentBackend::MicroVm => "microvm",
+            ContainmentBackend::Vm => "vm",
+            ContainmentBackend::IsolationSession => "isolation_session",
+        };
+        let outcome = if response.exit_code == 0 {
+            "success"
+        } else {
+            "failure"
+        };
+        let failure_reason = if response.exit_code != 0 {
+            Some(telemetry::FailureReason::ProcessError)
+        } else {
+            None
+        };
+
+        telemetry::log_execution(&telemetry::ExecutionEvent {
+            backend: backend_str,
+            exit_code: response.exit_code,
+            outcome,
+            duration_ms: run_elapsed.as_millis() as u64,
+            init_duration_ms: 0, // will be instrumented per-backend later
+            version: telemetry::version(),
+            failure_reason,
+        });
+
+        if response.exit_code != 0 && !response.error_message.is_empty() {
+            telemetry::log_error(
+                backend_str,
+                telemetry::FailureReason::ProcessError,
+                &response.error_message,
+                telemetry::version(),
+            );
+        }
+
+        telemetry::shutdown();
+    }
 
     // Output was already relayed to the console by pipe threads.
     // Only print captured output if present (e.g. from error paths).

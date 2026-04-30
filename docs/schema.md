@@ -69,6 +69,9 @@ production configs and the dev schema when working on experimental features:
             "memoryMb": 2048,              // Memory in MB for WSLC session
             "gpu": false,                  // GPU passthrough
             "storagePath": "C:\\wslc-storage"  // Image store path
+        },
+        "telemetry": {                     // Telemetry (experimental)
+            "enabled": true                // Enable TraceLogging ETW event emission
         }
     }
 }

@@ -153,6 +153,14 @@ struct RawExperimental {
     wslc: Option<RawContainerConfig>,
     #[serde(rename = "isolation_session")]
     isolation_session: Option<RawIsolationSession>,
+    telemetry: Option<RawTelemetry>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawTelemetry {
+    /// Accepts any JSON value for `enabled`; non-bool values are treated as None (disabled).
+    enabled: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -668,6 +676,9 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             windows_sandbox,
             wslc,
             isolation_session,
+            telemetry: raw_exp.telemetry.map(|t| crate::models::TelemetryConfig {
+                enabled: t.enabled.and_then(|v| v.as_bool()),
+            }),
         }
     } else {
         ExperimentalConfig::default()
@@ -1889,5 +1900,129 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.experimental.isolation_session.is_none());
+    }
+
+    // ---- Telemetry config parsing tests ----
+
+    #[test]
+    fn telemetry_enabled_parsed_from_experimental() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "telemetry": {"enabled": true}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telemetry = req
+            .experimental
+            .telemetry
+            .expect("telemetry should be Some");
+        assert_eq!(telemetry.enabled, Some(true));
+    }
+
+    #[test]
+    fn telemetry_disabled_parsed_from_experimental() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "telemetry": {"enabled": false}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telemetry = req
+            .experimental
+            .telemetry
+            .expect("telemetry should be Some");
+        assert_eq!(telemetry.enabled, Some(false));
+    }
+
+    #[test]
+    fn telemetry_absent_defaults_to_none() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.telemetry.is_none());
+    }
+
+    #[test]
+    fn telemetry_empty_object_defaults_enabled_to_none() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "telemetry": {}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telemetry = req
+            .experimental
+            .telemetry
+            .expect("telemetry should be Some");
+        assert_eq!(telemetry.enabled, None);
+    }
+
+    #[test]
+    fn telemetry_malformed_does_not_break_config() {
+        // telemetry.enabled is a string instead of bool — treated as None (disabled)
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "telemetry": {"enabled": "yes"}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        // Malformed enabled value should be treated as disabled, not error
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telemetry = req
+            .experimental
+            .telemetry
+            .expect("telemetry should be Some");
+        assert_eq!(telemetry.enabled, None);
+    }
+
+    #[test]
+    fn telemetry_unknown_fields_ignored() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "telemetry": {"enabled": true, "unknown_field": 42}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telemetry = req
+            .experimental
+            .telemetry
+            .expect("telemetry should be Some");
+        assert_eq!(telemetry.enabled, Some(true));
+    }
+
+    #[test]
+    fn experimental_without_telemetry_has_none() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "windows_sandbox": {}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.telemetry.is_none());
     }
 }

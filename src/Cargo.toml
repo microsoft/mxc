@@ -59,5 +59,6 @@ wslc_common = { path = "wslc_common" }
 isolation_session_bindings = { path = "isolation_session_bindings" }
 flatbuffers = "25"
 sandbox_spec = { path = "generated/base_container_specification" }
+tracelogging = { version = "1.2", features = ["etw"] }
 widestring = "1"
 url = "2"

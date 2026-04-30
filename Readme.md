@@ -137,6 +137,69 @@ Execute your script with AppContainer in permissive learning mode:
 }
 ```
 
+## Telemetry
+
+MXC supports optional TraceLogging ETW telemetry for execution observability and
+adoption metrics. Telemetry is an **experimental feature** and requires the
+`--experimental` CLI flag.
+
+### Enabling telemetry
+
+Add `experimental.telemetry.enabled` to your JSON config and pass `--experimental`:
+
+```json
+{
+  "process": { "commandLine": "echo hello" },
+  "experimental": {
+    "telemetry": { "enabled": true }
+  }
+}
+```
+
+```bash
+wxc-exec --experimental config.json
+```
+
+### Default behavior
+
+Telemetry is **off by default**. It requires both `--experimental` and
+`experimental.telemetry.enabled: true` in the JSON config.
+
+Without `--experimental`, telemetry is always off regardless of the config.
+
+### What is collected
+
+Events are emitted to the local ETW subsystem via the `Microsoft.MXC` TraceLogging
+provider. **No PII is collected.** The following fields are recorded:
+
+| Field | Description |
+|-------|-------------|
+| `mxc.backend` | Containment backend (appcontainer, sandbox, lxc, wslc, microvm) |
+| `mxc.outcome` | success or failure |
+| `mxc.exit_code` | Process exit code |
+| `mxc.duration_ms` | Total execution wall-clock time |
+| `mxc.init_duration_ms` | Container initialization time |
+| `mxc.version` | MXC version |
+| `mxc.failure_reason` | Bounded error category (on failure only) |
+
+Error messages are sanitized to strip file paths and usernames before emission.
+
+### Capturing events
+
+Use standard ETW tools to capture telemetry events:
+
+```bash
+tracelog -start MXCTrace -f MXCTrace.etl -guid #<PROVIDER_GUID>
+wxc-exec --experimental config.json
+tracelog -stop MXCTrace
+tracefmt -o MXCTrace.txt MXCTrace.etl
+```
+
+### Consent
+
+MXC does not implement consent prompts or persistent consent storage.
+Consent is the responsibility of the calling agent (SDK consumer).
+
 ### Stop Tracing
 
 When execution completes:
