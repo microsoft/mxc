@@ -493,4 +493,71 @@ mod tests {
         assert_eq!(slug, "ref_data");
         assert_eq!(slug_to_env_key(&slug), "REF_DATA");
     }
+
+    #[test]
+    fn staging_rw_directory_is_private_until_copyback() {
+        let root = tempdir().unwrap();
+        let source_root = tempdir().unwrap();
+        let source = source_root.path().join("work");
+        fs::create_dir_all(&source).unwrap();
+        write_file(&source.join("data.txt"), "before");
+
+        let rw = vec![source.display().to_string()];
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        let staged_file = staging.path().join(RW_DIR).join("work").join("data.txt");
+
+        // Mutate the staged copy — original must remain unchanged.
+        fs::write(&staged_file, "after").unwrap();
+        assert_eq!(fs::read_to_string(source.join("data.txt")).unwrap(), "before");
+
+        // After explicit copyback, original should reflect the staged changes.
+        staging.copy_back_to_host().unwrap();
+        assert_eq!(fs::read_to_string(source.join("data.txt")).unwrap(), "after");
+    }
+
+    #[test]
+    fn staging_rw_file_copyback_updates_original_file() {
+        let root = tempdir().unwrap();
+        let source_root = tempdir().unwrap();
+        let source_file = source_root.path().join("payload.txt");
+        write_file(&source_file, "before");
+
+        let rw = vec![source_file.display().to_string()];
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        let staged_file = staging
+            .path()
+            .join(RW_DIR)
+            .join("payload.txt")
+            .join("payload.txt");
+
+        fs::write(&staged_file, "after").unwrap();
+        assert_eq!(fs::read_to_string(&source_file).unwrap(), "before");
+
+        staging.copy_back_to_host().unwrap();
+        assert_eq!(fs::read_to_string(&source_file).unwrap(), "after");
+    }
+
+    #[test]
+    fn staging_rw_directory_copyback_mirrors_deletions() {
+        let root = tempdir().unwrap();
+        let source_root = tempdir().unwrap();
+        let source = source_root.path().join("work");
+        fs::create_dir_all(&source).unwrap();
+        write_file(&source.join("kept.txt"), "before");
+        write_file(&source.join("deleted.txt"), "remove me");
+
+        let rw = vec![source.display().to_string()];
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        let staged_dir = staging.path().join(RW_DIR).join("work");
+
+        fs::remove_file(staged_dir.join("deleted.txt")).unwrap();
+        fs::write(staged_dir.join("kept.txt"), "after").unwrap();
+        fs::write(staged_dir.join("created.txt"), "new").unwrap();
+
+        staging.copy_back_to_host().unwrap();
+
+        assert_eq!(fs::read_to_string(source.join("kept.txt")).unwrap(), "after");
+        assert_eq!(fs::read_to_string(source.join("created.txt")).unwrap(), "new");
+        assert!(!source.join("deleted.txt").exists());
+    }
 }
