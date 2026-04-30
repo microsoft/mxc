@@ -20,17 +20,17 @@ impl<'a> ::flatbuffers::Follow<'a> for SandboxSpec<'a> {
 }
 
 impl<'a> SandboxSpec<'a> {
-    pub const VT_VERSION: flatbuffers::VOffsetT = 4;
-    pub const VT_APP_CONTAINER: flatbuffers::VOffsetT = 6;
-    pub const VT_DISALLOW_WIN32K_SYSTEM_CALLS: flatbuffers::VOffsetT = 10;
-    pub const VT_UI_RESTRICTIONS: flatbuffers::VOffsetT = 12;
-    pub const VT_LEAST_PRIVILEGE: flatbuffers::VOffsetT = 14;
-    pub const VT_CAPABILITIES: flatbuffers::VOffsetT = 16;
-    pub const VT_FS_READ_WRITE: flatbuffers::VOffsetT = 18;
-    pub const VT_FS_READ_ONLY: flatbuffers::VOffsetT = 20;
-    pub const VT_NETWORK_POLICY: flatbuffers::VOffsetT = 22;
-    pub const VT_INTEGRITY: flatbuffers::VOffsetT = 24;
-    pub const VT_POLICY: flatbuffers::VOffsetT = 26;
+    pub const VT_VERSION: ::flatbuffers::VOffsetT = 4;
+    pub const VT_APP_CONTAINER: ::flatbuffers::VOffsetT = 6;
+    pub const VT_DISALLOW_WIN32K_SYSTEM_CALLS: ::flatbuffers::VOffsetT = 10;
+    pub const VT_UI_RESTRICTIONS: ::flatbuffers::VOffsetT = 12;
+    pub const VT_LEAST_PRIVILEGE: ::flatbuffers::VOffsetT = 14;
+    pub const VT_CAPABILITIES: ::flatbuffers::VOffsetT = 16;
+    pub const VT_FS_READ_WRITE: ::flatbuffers::VOffsetT = 18;
+    pub const VT_FS_READ_ONLY: ::flatbuffers::VOffsetT = 20;
+    pub const VT_NETWORK_POLICY: ::flatbuffers::VOffsetT = 22;
+    pub const VT_INTEGRITY: ::flatbuffers::VOffsetT = 24;
+    pub const VT_POLICY: ::flatbuffers::VOffsetT = 26;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -99,7 +99,7 @@ impl<'a> SandboxSpec<'a> {
             .network_policy()
             .map(|x| alloc::boxed::Box::new(x.unpack()));
         let integrity = self.integrity();
-        let policy = self.policy().map(|x| x.to_string());
+        let policy = self.policy().map(|x| alloc::string::ToString::to_string(x));
         SandboxSpecT {
             version,
             app_container,
@@ -240,7 +240,7 @@ impl<'a> SandboxSpec<'a> {
         // which contains a valid value in this slot
         unsafe {
             self._tab
-                .get::<flatbuffers::ForwardsUOffset<&str>>(SandboxSpec::VT_POLICY, None)
+                .get::<::flatbuffers::ForwardsUOffset<&str>>(SandboxSpec::VT_POLICY, None)
         }
     }
 }
@@ -278,7 +278,7 @@ impl ::flatbuffers::Verifiable for SandboxSpec<'_> {
                 false,
             )?
             .visit_field::<IntegrityLevel>("integrity", Self::VT_INTEGRITY, false)?
-            .visit_field::<flatbuffers::ForwardsUOffset<&str>>("policy", Self::VT_POLICY, false)?
+            .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("policy", Self::VT_POLICY, false)?
             .finish();
         Ok(())
     }
@@ -302,7 +302,7 @@ pub struct SandboxSpecArgs<'a> {
     >,
     pub network_policy: Option<::flatbuffers::WIPOffset<NetworkPolicy<'a>>>,
     pub integrity: IntegrityLevel,
-    pub policy: Option<flatbuffers::WIPOffset<&'a str>>,
+    pub policy: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for SandboxSpecArgs<'a> {
     #[inline]
@@ -407,12 +407,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SandboxSpecBuilder<'a, 'b, A>
         );
     }
     #[inline]
-    pub fn add_policy(&mut self, policy: flatbuffers::WIPOffset<&'b str>) {
+    pub fn add_policy(&mut self, policy: ::flatbuffers::WIPOffset<&'b str>) {
         self.fbb_
-            .push_slot_always::<flatbuffers::WIPOffset<_>>(SandboxSpec::VT_POLICY, policy);
+            .push_slot_always::<::flatbuffers::WIPOffset<_>>(SandboxSpec::VT_POLICY, policy);
     }
     #[inline]
-    pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> SandboxSpecBuilder<'a, 'b> {
+    pub fn new(
+        _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+    ) -> SandboxSpecBuilder<'a, 'b, A> {
         let start = _fbb.start_table();
         SandboxSpecBuilder {
             fbb_: _fbb,
@@ -460,7 +462,7 @@ pub struct SandboxSpecT {
     pub fs_read_only: Option<alloc::vec::Vec<alloc::string::String>>,
     pub network_policy: Option<alloc::boxed::Box<NetworkPolicyT>>,
     pub integrity: IntegrityLevel,
-    pub policy: Option<String>,
+    pub policy: Option<alloc::string::String>,
 }
 impl Default for SandboxSpecT {
     fn default() -> Self {
