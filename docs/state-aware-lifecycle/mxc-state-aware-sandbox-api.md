@@ -61,7 +61,7 @@ elaborates.
 
 | MXC layer | What's new | What's unchanged |
 |---|---|---|
-| TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId` type. Per-phase typed `*Config` types per backend. `AbortSignal` cancellation. Typed exception classes per error code. | `spawnSandbox` family preserved. `SandboxPolicy` reused as the cross-cutting policy across both surfaces. `SandboxingMethod` extension mechanism reused. Existing typed `*Config` naming convention reused. |
+| TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId` type. Per-phase typed `*Config` types per backend. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation. Typed exception classes per error code. | `spawnSandbox` family preserved. `SandboxPolicy` reused as the cross-cutting policy across both surfaces. `SandboxingMethod` extension mechanism reused. Existing typed `*Config` naming convention reused. |
 | JSON wire format (§7) | Top-level `phase` discriminator. Top-level `sandboxId`. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union over `phase`. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` fields at top level for state-aware too — backends declare per-phase honor. |
 | Rust executor (§9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (private to parser, matching `RawConfig` pattern). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
 | Error model (§8) | Closed enum of 12 error codes. `MxcError` base + per-code subclasses. `details` open object as escape hatch for backend-specific structured information. | Existing one-shot error paths preserved. |
@@ -128,10 +128,10 @@ compose into the full sandbox lifecycle that one-shot `spawnSandbox` runs end-to
 | Phase | Valid from state | Resulting state | Output | Purpose |
 |---|---|---|---|---|
 | `provision` | (not provisioned) | provisioned | `sandboxId`, optional metadata | Allocate the sandbox resource |
-| `start` | provisioned | running | (success) | Bring the sandbox to a state where it can host workloads |
+| `start` | provisioned | running | optional metadata | Bring the sandbox to a state where it can host workloads |
 | `exec` | running | running | stdout, stderr, exit code | Run a workload; may be called any number of times |
-| `stop` | running | provisioned | (success) | Take the sandbox out of running; the provisioned resource remains |
-| `deprovision` | provisioned | (not provisioned) | (success) | Release the provisioned resource; the `SandboxId` becomes invalid |
+| `stop` | running | provisioned | optional metadata | Take the sandbox out of running; the provisioned resource remains |
+| `deprovision` | provisioned | (not provisioned) | optional metadata | Release the provisioned resource; the `SandboxId` becomes invalid |
 
 The five phases form a small state machine over three states: not-provisioned,
 provisioned, and running. The `SandboxId` is valid from provision through deprovision;
@@ -263,20 +263,47 @@ type DeprovisionConfigFor<C extends StateAwareSandboxingMethod> =
     : undefined;
 
 // Per-backend metadata bundle (analogous to ExperimentalStateAwareConfigs but for
-// provision return values). Backends that return no metadata omit the entry.
+// per-phase return values). Backends omit phases that return no metadata.
 interface ExperimentalStateAwareMetadata {
-  isolation_session?: { provision?: IsolationSessionProvisionMetadata };
-  // future
+  isolation_session?: {
+    provision?: IsolationSessionProvisionMetadata;
+    // IsolationSession returns no metadata for start, stop, deprovision
+  };
+  // future state-aware-capable backends add typed entries here
 }
 
 type ProvisionMetadataFor<C extends StateAwareSandboxingMethod> =
   'provision' extends keyof NonNullable<ExperimentalStateAwareMetadata[C]>
     ? NonNullable<ExperimentalStateAwareMetadata[C]>['provision']
     : undefined;
+type StartMetadataFor<C extends StateAwareSandboxingMethod> =
+  'start' extends keyof NonNullable<ExperimentalStateAwareMetadata[C]>
+    ? NonNullable<ExperimentalStateAwareMetadata[C]>['start']
+    : undefined;
+type StopMetadataFor<C extends StateAwareSandboxingMethod> =
+  'stop' extends keyof NonNullable<ExperimentalStateAwareMetadata[C]>
+    ? NonNullable<ExperimentalStateAwareMetadata[C]>['stop']
+    : undefined;
+type DeprovisionMetadataFor<C extends StateAwareSandboxingMethod> =
+  'deprovision' extends keyof NonNullable<ExperimentalStateAwareMetadata[C]>
+    ? NonNullable<ExperimentalStateAwareMetadata[C]>['deprovision']
+    : undefined;
 
 interface ProvisionResult<C extends StateAwareSandboxingMethod> {
   sandboxId: SandboxId;
   metadata?: ProvisionMetadataFor<C>;
+}
+
+interface StartResult<C extends StateAwareSandboxingMethod> {
+  metadata?: StartMetadataFor<C>;
+}
+
+interface StopResult<C extends StateAwareSandboxingMethod> {
+  metadata?: StopMetadataFor<C>;
+}
+
+interface DeprovisionResult<C extends StateAwareSandboxingMethod> {
+  metadata?: DeprovisionMetadataFor<C>;
 }
 
 interface ExecResult {
@@ -326,7 +353,10 @@ reused unchanged. `ProcessConfig` is the existing per-process settings type
 When a backend declares no config for a particular phase, the corresponding helper type
 resolves to `undefined`. TypeScript then refuses to accept any non-`undefined` value for
 that phase's `config` field — callers can't accidentally pass start config to a backend
-that has no start config.
+that has no start config. The same machinery applies on the return side: when a backend
+declares no metadata for a phase, `<Phase>MetadataFor<C>` resolves to `undefined` and
+the corresponding `*Result<C>` is structurally empty (its `metadata` field is statically
+undefined).
 
 ### 6.2 Method signatures
 
@@ -340,7 +370,7 @@ function startSandbox<C extends StateAwareSandboxingMethod>(
   containment: C,
   sandboxId: SandboxId,
   options?: StartSandboxOptions<C>,
-): Promise<void>;
+): Promise<StartResult<C>>;
 
 function execInSandbox<C extends StateAwareSandboxingMethod>(
   containment: C,
@@ -360,13 +390,13 @@ function stopSandbox<C extends StateAwareSandboxingMethod>(
   containment: C,
   sandboxId: SandboxId,
   options?: StopSandboxOptions<C>,
-): Promise<void>;
+): Promise<StopResult<C>>;
 
 function deprovisionSandbox<C extends StateAwareSandboxingMethod>(
   containment: C,
   sandboxId: SandboxId,
   options?: DeprovisionSandboxOptions<C>,
-): Promise<void>;
+): Promise<DeprovisionResult<C>>;
 ```
 
 `execInSandbox` returns an `IPty` for live streaming (caller subscribes to `onData` /
@@ -437,7 +467,7 @@ backend that participates in both modes can be invoked through either surface; a
 that participates in only one returns `unsupported_phase` from the other (§8).
 
 State-aware-capable backends extend `SandboxingMethod` and `StateAwareSandboxingMethod`
-the same way ephemeral backends extend `SandboxingMethod` today. Cancellation via
+the same way ephemeral backends extend `SandboxingMethod`. Cancellation via
 `AbortSignal` is supported on all state-aware methods. Detached / fire-and-forget exec
 (process outliving the SDK call) is deferred to v2 (§14).
 
@@ -568,16 +598,16 @@ type NonExecResponseEnvelope<TResult> = { result: TResult } | { error: ErrorEnve
 | Phase | `TResult` shape |
 |---|---|
 | `provision` | `{ sandboxId: SandboxId; metadata?: object }` |
-| `start` | `{}` |
-| `stop` | `{}` |
-| `deprovision` | `{}` |
+| `start` | `{ metadata?: object }` |
+| `stop` | `{ metadata?: object }` |
+| `deprovision` | `{ metadata?: object }` |
 
 **Exec phase, dispatch succeeded**: the script's stdout/stderr stream live, matching
 ProcessContainer's existing behaviour. The executor's stdout/stderr inherit through to
 the SDK (PTY by default; piped via `child_process` in non-PTY mode). Process exit code is
 the script's exit code. No JSON envelope is emitted in this case — the SDK constructs
 `{ stdout, stderr, exitCode }` from PTY/process events, exactly as `spawnSandboxAsync`
-does today.
+does.
 
 **Exec phase, dispatch failed**: the executor emits a JSON envelope on stdout (same shape
 as non-exec phases) and exits non-zero. No script ever runs, so stdout otherwise is empty
@@ -657,7 +687,7 @@ await startSandbox('isolation_session', sandboxId, {
 backend.start("iso:reg-abc:prov-123", None, Some(&IsolationSessionStartConfig {
     configuration_id: IsolationSessionConfigurationId::Small,
 }))
-// returns Ok(())
+// returns Ok(StartResult { metadata: None })
 ```
 
 ```json
@@ -718,7 +748,7 @@ await stopSandbox('isolation_session', sandboxId);
 
 ```rust
 backend.stop("iso:reg-abc:prov-123", None, None)
-// returns Ok(())
+// returns Ok(StopResult { metadata: None })
 ```
 
 ```json
@@ -742,7 +772,7 @@ await deprovisionSandbox('isolation_session', sandboxId);
 
 ```rust
 backend.deprovision("iso:reg-abc:prov-123", None, None)
-// returns Ok(())
+// returns Ok(DeprovisionResult { metadata: None })
 ```
 
 ```json
@@ -758,8 +788,8 @@ one-shot. Cross-backend exec fields (`commandLine`, `cwd`, `env`, `timeout`) flo
 the top-level `process` block, not through `experimental`. For non-exec phases the
 executor emits a single JSON envelope on stdout; for exec the script's output streams
 raw and the SDK constructs the result from PTY events. Responses unwrap any `result`
-envelope at the SDK boundary so the caller sees a plain `ProvisionResult` /
-`ExecResult` / `void`.
+envelope at the SDK boundary so the caller sees a plain `ProvisionResult` / `StartResult` /
+`ExecResult` / `StopResult` / `DeprovisionResult`.
 
 ## 8. Error model
 
@@ -897,13 +927,14 @@ attempts each variant in order; the state-aware variant requires `phase`, so its
 falls through to the one-shot branch.
 
 Conversion from `Raw*` into typed domain models happens in `convert_*` helpers analogous
-to today's `convert_raw_config` → `CodexRequest`. Domain models are exposed to the
+to the existing `convert_raw_config` → `CodexRequest`. Domain models are exposed to the
 dispatch layer; the `Raw*` types stay private to the parser.
 
 ### 9.2 The trait
 
 Backends implement the trait with associated types for each phase's config and for
-provision metadata. Phases without config use `()`.
+each phase's return metadata. Use `()` for any associated type the backend does not
+need.
 
 ```rust
 pub trait StatefulSandboxBackend {
@@ -913,6 +944,9 @@ pub trait StatefulSandboxBackend {
     type StopConfig: serde::de::DeserializeOwned;
     type DeprovisionConfig: serde::de::DeserializeOwned;
     type ProvisionMetadata: serde::Serialize;
+    type StartMetadata: serde::Serialize;
+    type StopMetadata: serde::Serialize;
+    type DeprovisionMetadata: serde::Serialize;
 
     fn provision(
         &mut self,
@@ -925,7 +959,7 @@ pub trait StatefulSandboxBackend {
         sandbox_id: &str,
         policy: Option<&SandboxPolicy>,
         config: Option<&Self::StartConfig>,
-    ) -> Result<(), MxcError>;
+    ) -> Result<StartResult<Self::StartMetadata>, MxcError>;
 
     fn exec(
         &mut self,
@@ -940,18 +974,30 @@ pub trait StatefulSandboxBackend {
         sandbox_id: &str,
         policy: Option<&SandboxPolicy>,
         config: Option<&Self::StopConfig>,
-    ) -> Result<(), MxcError>;
+    ) -> Result<StopResult<Self::StopMetadata>, MxcError>;
 
     fn deprovision(
         &mut self,
         sandbox_id: &str,
         policy: Option<&SandboxPolicy>,
         config: Option<&Self::DeprovisionConfig>,
-    ) -> Result<(), MxcError>;
+    ) -> Result<DeprovisionResult<Self::DeprovisionMetadata>, MxcError>;
 }
 
 pub struct ProvisionResult<M> {
     pub sandbox_id: String,
+    pub metadata: Option<M>,
+}
+
+pub struct StartResult<M> {
+    pub metadata: Option<M>,
+}
+
+pub struct StopResult<M> {
+    pub metadata: Option<M>,
+}
+
+pub struct DeprovisionResult<M> {
     pub metadata: Option<M>,
 }
 
@@ -1022,8 +1068,8 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
         Phase::Start => {
             let id = req.require_sandbox_id()?;
             let config = req.deserialize_start_config::<B::StartConfig>()?;
-            backend.start(&id, policy, config.as_ref())?;
-            Ok(DispatchOutcome::Envelope(empty_envelope()))
+            let result = backend.start(&id, policy, config.as_ref())?;
+            Ok(DispatchOutcome::Envelope(start_envelope(result)))
         }
         Phase::Exec => {
             let id = req.require_sandbox_id()?;
@@ -1038,14 +1084,14 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
         Phase::Stop => {
             let id = req.require_sandbox_id()?;
             let config = req.deserialize_stop_config::<B::StopConfig>()?;
-            backend.stop(&id, policy, config.as_ref())?;
-            Ok(DispatchOutcome::Envelope(empty_envelope()))
+            let result = backend.stop(&id, policy, config.as_ref())?;
+            Ok(DispatchOutcome::Envelope(stop_envelope(result)))
         }
         Phase::Deprovision => {
             let id = req.require_sandbox_id()?;
             let config = req.deserialize_deprovision_config::<B::DeprovisionConfig>()?;
-            backend.deprovision(&id, policy, config.as_ref())?;
-            Ok(DispatchOutcome::Envelope(empty_envelope()))
+            let result = backend.deprovision(&id, policy, config.as_ref())?;
+            Ok(DispatchOutcome::Envelope(deprovision_envelope(result)))
         }
     }
 }
@@ -1070,9 +1116,8 @@ not runtime registry checks.
 
 Per-stage config contents are also typed at compile time — the backend's associated
 types declare exactly what JSON shape each phase accepts, and the dispatch layer
-deserialises into those types before the trait method runs. Unlike the v0 sketch with
-`serde_json::Value` at the trait boundary, there is no `Record<string, unknown>` shim
-between the wire format and the backend's typed input.
+deserialises into those types before the trait method runs. There is no
+`Record<string, unknown>` shim between the wire format and the backend's typed input.
 
 ## 10. Per-stage configs and validation
 
@@ -1151,9 +1196,10 @@ Pick one of the three modes from §4: ephemeral-only, state-aware-only, or both.
 
 ### 11.2 Implement the trait
 
-The `StatefulSandboxBackend` trait signatures are in §9.2. Define associated types
-(`ProvisionConfig`, `StartConfig`, `ExecConfig`, `StopConfig`, `DeprovisionConfig`,
-`ProvisionMetadata`). Use `()` for phases the backend does not need a config for.
+The `StatefulSandboxBackend` trait signatures are in §9.2. Define associated types: per-phase
+configs (`ProvisionConfig`, `StartConfig`, `ExecConfig`, `StopConfig`, `DeprovisionConfig`)
+and per-phase metadata (`ProvisionMetadata`, `StartMetadata`, `StopMetadata`,
+`DeprovisionMetadata`). Use `()` for any associated type the backend does not need.
 
 Identifier generation happens inside the backend's `provision` method. Choose the
 encoding (UUID, structured JSON, prefix-tagged string) and serialise the result into the
@@ -1210,6 +1256,9 @@ cover:
 
 - **Per-phase config shapes.** The fields of each `*Config` interface, with allowed
   values and defaults.
+- **Per-phase metadata shapes.** The fields of each `*Metadata` interface returned by
+  the backend (any subset of provision, start, stop, deprovision). Phases that return
+  no metadata are omitted from the bundle.
 - **Cross-cutting policy honor matrix.** For each `SandboxPolicy` field
   (`filesystem`, `network`, `ui`), which phases the backend applies, rejects, or
   ignores it at. Per §10.3.
@@ -1321,8 +1370,9 @@ state-aware-capable backends stabilise on their own timelines.
 
 **Backend's ephemeral path graduates while state-aware is still experimental.** The
 backend's ephemeral one-shot config can move from `experimental.<backend>` to top-level
-`<backend>` independently, following today's pattern. State-aware participation stays
-under `experimental.<backend>.<phase>` until the state-aware API itself graduates. The
+`<backend>` independently, following the existing one-shot graduation pattern.
+State-aware participation stays under `experimental.<backend>.<phase>` until the
+state-aware API itself graduates. The
 same backend can have a stable ephemeral path and an experimental state-aware path
 simultaneously.
 
@@ -1427,3 +1477,9 @@ in. Defaults are workable; alternatives are listed where relevant.
   no information that the open form does not. The current shape matches HTTP / gRPC
   error-envelope conventions; the typed shape would let `details` drop out of the
   contract's `Record<string, unknown>` carve-out entirely. Worth a focused review.
+- **Per-backend metadata for `exec`.** §6 and §7 define per-phase typed `*Result<C>` for
+  provision, start, stop, and deprovision. Exec is exempt: adding metadata to a
+  live-streaming response requires an out-of-band channel — a sidechannel file
+  descriptor, a sentinel-marked envelope appended after the script's stdout, or
+  switching exec to fully buffered (losing the live-streaming UX). Worth revisiting
+  when a backend has a concrete need.

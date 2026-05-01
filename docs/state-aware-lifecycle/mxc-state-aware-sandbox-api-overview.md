@@ -39,7 +39,7 @@ state-aware calls carry `sandboxId` only.
 
 | MXC layer | What's new | What's unchanged |
 |---|---|---|
-| TypeScript SDK (reference §6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId` type. Per-phase typed `*Config` types per backend. `AbortSignal` cancellation. Typed exception classes. | `spawnSandbox` family preserved. `SandboxPolicy` reused as cross-cutting policy. `SandboxingMethod` extension reused. `*Config` naming convention reused. |
+| TypeScript SDK (reference §6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId` type. Per-phase typed `*Config` types per backend. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation. Typed exception classes. | `spawnSandbox` family preserved. `SandboxPolicy` reused as cross-cutting policy. `SandboxingMethod` extension reused. `*Config` naming convention reused. |
 | JSON wire format (reference §7) | Top-level `phase` discriminator. Top-level `sandboxId`. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` at top level for state-aware too — backends declare per-phase honor. |
 | Rust executor (reference §9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (private `Raw*` parser pattern). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends unchanged. |
 | Error model (reference §8) | Closed enum of 12 codes. `MxcError` base + per-code subclasses. `details` open object. | Existing one-shot error paths preserved. |
@@ -50,10 +50,10 @@ state-aware calls carry `sandboxId` only.
 | Phase | Valid from state | Resulting state | Output |
 |---|---|---|---|
 | `provision` | (not provisioned) | provisioned | `sandboxId`, optional metadata |
-| `start` | provisioned | running | (success) |
+| `start` | provisioned | running | optional metadata |
 | `exec` | running | running | stdout, stderr, exit code |
-| `stop` | running | provisioned | (success) |
-| `deprovision` | provisioned | (not provisioned) | (success) |
+| `stop` | running | provisioned | optional metadata |
+| `deprovision` | provisioned | (not provisioned) | optional metadata |
 
 A backend that has no native equivalent for a phase implements it as a no-op. Every
 state-aware backend implements all five.
@@ -61,7 +61,7 @@ state-aware backend implements all five.
 ## TypeScript SDK
 
 Types used in the function signatures below. Per-phase `<Phase>SandboxOptions<C>` and
-`ProvisionResult<C>` are typed-generic over the chosen backend; full definitions are in
+`<Phase>Result<C>` are typed-generic over the chosen backend; full definitions are in
 [reference §6.1](./mxc-state-aware-sandbox-api.md#6-typescript-sdk).
 
 ```typescript
@@ -87,7 +87,7 @@ function startSandbox<C extends StateAwareSandboxingMethod>(
   containment: C,
   sandboxId: SandboxId,
   options?: StartSandboxOptions<C>,
-): Promise<void>;
+): Promise<StartResult<C>>;
 
 function execInSandbox<C extends StateAwareSandboxingMethod>(
   containment: C,
@@ -107,19 +107,21 @@ function stopSandbox<C extends StateAwareSandboxingMethod>(
   containment: C,
   sandboxId: SandboxId,
   options?: StopSandboxOptions<C>,
-): Promise<void>;
+): Promise<StopResult<C>>;
 
 function deprovisionSandbox<C extends StateAwareSandboxingMethod>(
   containment: C,
   sandboxId: SandboxId,
   options?: DeprovisionSandboxOptions<C>,
-): Promise<void>;
+): Promise<DeprovisionResult<C>>;
 ```
 
 Each phase's options carry `policy?: SandboxPolicy` (cross-cutting restrictions, shared
 with one-shot), `config?: <Phase>ConfigFor<C>` (per-phase backend config, typed), and
-`signal?: AbortSignal` (cancellation). `execInSandbox` returns an `IPty` for live
-streaming; `execInSandboxAsync` is a buffered convenience that resolves on exit.
+`signal?: AbortSignal` (cancellation). Each non-exec phase returns a typed
+`<Phase>Result<C>`: provision carries `sandboxId` plus optional metadata; start, stop,
+and deprovision carry optional metadata only. `execInSandbox` returns an `IPty` for
+live streaming; `execInSandboxAsync` is a buffered convenience that resolves on exit.
 Existing policy-discovery helpers (`getAvailableToolsPolicy`, etc.) compose into
 `SandboxPolicy` unchanged.
 
@@ -190,24 +192,29 @@ pub trait StatefulSandboxBackend {
     type StopConfig: serde::de::DeserializeOwned;
     type DeprovisionConfig: serde::de::DeserializeOwned;
     type ProvisionMetadata: serde::Serialize;
+    type StartMetadata: serde::Serialize;
+    type StopMetadata: serde::Serialize;
+    type DeprovisionMetadata: serde::Serialize;
 
     fn provision(&mut self, policy: Option<&SandboxPolicy>, config: Option<&Self::ProvisionConfig>)
         -> Result<ProvisionResult<Self::ProvisionMetadata>, MxcError>;
     fn start(&mut self, sandbox_id: &str, policy: Option<&SandboxPolicy>, config: Option<&Self::StartConfig>)
-        -> Result<(), MxcError>;
+        -> Result<StartResult<Self::StartMetadata>, MxcError>;
     fn exec(&mut self, sandbox_id: &str, policy: Option<&SandboxPolicy>, config: Option<&Self::ExecConfig>, process: &ProcessConfig)
         -> Result<ExecHandle, MxcError>;
     fn stop(&mut self, sandbox_id: &str, policy: Option<&SandboxPolicy>, config: Option<&Self::StopConfig>)
-        -> Result<(), MxcError>;
+        -> Result<StopResult<Self::StopMetadata>, MxcError>;
     fn deprovision(&mut self, sandbox_id: &str, policy: Option<&SandboxPolicy>, config: Option<&Self::DeprovisionConfig>)
-        -> Result<(), MxcError>;
+        -> Result<DeprovisionResult<Self::DeprovisionMetadata>, MxcError>;
 }
 ```
 
-Backends declare per-phase config types as associated types (use `()` for phases with no
-config). The dispatch layer deserialises into the typed shape before invoking the trait
-method. `SandboxPolicy` is the typed Rust mirror of the SDK type; `ProcessConfig` is
-reused from the existing one-shot wire format.
+Backends declare per-phase config and metadata as associated types (use `()` for
+phases that don't need either). The dispatch layer deserialises configs into the typed
+shape before invoking the trait method; result structs (`StartResult<M>`,
+`StopResult<M>`, `DeprovisionResult<M>`) carry an optional metadata payload, parallel
+to `ProvisionResult<M>`. `SandboxPolicy` is the typed Rust mirror of the SDK type;
+`ProcessConfig` is reused from the existing one-shot wire format.
 
 A backend's participation mode (ephemeral-only, state-aware-only, both) is declared by
 which traits it implements. Reference §4 describes the modes; reference §9 describes the
@@ -312,8 +319,8 @@ maps to a typed TS exception class (`MxcError` base + per-code subclasses).
 Reference §11 has the full guide. Operational checklist:
 
 1. Pick a participation mode (ephemeral-only, state-aware-only, both).
-2. Implement the trait. Define associated types for each phase's config; use `()` for
-   phases without config.
+2. Implement the trait. Define associated types for each phase's config and metadata;
+   use `()` for any phase that doesn't need them.
 3. Define typed `*Config` interfaces in `@microsoft/mxc-sdk` and slot into
    `ExperimentalStateAwareConfigs`. If newly SDK-exposed, extend `SandboxingMethod` and
    `StateAwareSandboxingMethod`.
@@ -337,4 +344,5 @@ Reference §11 has the full guide. Operational checklist:
   timeouts. Reference §14.
 - **Open questions for review.** Method names, trait name, error code names, `phase`
   field placement, `containment` repetition, associated-types vs. `serde_json::Value`
-  at the trait boundary, typed `ErrorEnvelope.details`. Reference §15.
+  at the trait boundary, typed `ErrorEnvelope.details`, per-backend metadata for `exec`.
+  Reference §15.
