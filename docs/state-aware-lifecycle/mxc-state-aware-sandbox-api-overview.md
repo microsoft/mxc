@@ -21,7 +21,7 @@ function signatures throughout. One-line summaries; full definitions live in
 | Type | Where | Role |
 |---|---|---|
 | `SandboxPolicy` | `sdk/src/types.ts` | Cross-platform restriction policy: filesystem, network, UI, timeout. Reused as the cross-cutting policy on state-aware. |
-| `SandboxingMethod` | `sdk/src/types.ts` | String union of MXC backend names (`'appcontainer' \| 'windows_sandbox' \| 'lxc' \| 'wslc' \| 'vm' \| 'microvm'`). |
+| `SandboxingMethod` | `sdk/src/types.ts` | String union of MXC backend names (`'appcontainer' \| 'windows_sandbox' \| 'lxc' \| 'wslc' \| 'vm' \| 'microvm' \| 'isolation_session'`). |
 | `ProcessConfig` | `sdk/src/types.ts` | Per-process settings: `commandLine`, `cwd`, `env`, `timeout`. Reused for state-aware exec. |
 | `FilesystemConfig`, `NetworkConfig`, `UiConfig` | `sdk/src/types.ts` | Wire-format restriction blocks. The `SandboxPolicy` → wire mapping is the existing `createConfigFromPolicy` logic. |
 | `pty.IPty` | `node-pty` package | Interactive PTY handle. Used as the streaming-exec return type, matching existing `spawnSandbox`. |
@@ -33,17 +33,18 @@ function signatures throughout. One-line summaries; full definitions live in
 `sandboxId` (system-generated, opaque, returned by `provisionSandbox`) is distinct from
 the existing one-shot wire envelope's `containerId` (caller-supplied human-readable
 label, used as e.g. an AppContainer profile name). Different fields, different purposes;
-state-aware calls carry `sandboxId` only.
+state-aware non-provision calls carry `sandboxId` on the request, provision returns it
+on the response, and neither shape carries `containerId`.
 
 ## What's new / What's unchanged
 
 | MXC layer | What's new | What's unchanged |
 |---|---|---|
-| TypeScript SDK (reference §6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId` type. Per-phase typed `*Config` types per backend. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation. Typed exception classes. | `spawnSandbox` family preserved. `SandboxPolicy` reused as cross-cutting policy. `SandboxingMethod` extension reused. `*Config` naming convention reused. |
-| JSON wire format (reference §7) | Top-level `phase` discriminator. Top-level `sandboxId`. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` at top level for state-aware too — backends declare per-phase honor. |
+| TypeScript SDK (reference §6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-phase typed `*Config` types per backend. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation. Typed exception classes. | `spawnSandbox` family preserved. `SandboxPolicy` reused as cross-cutting policy. `SandboxingMethod` extension reused. `*Config` naming convention reused. |
+| JSON wire format (reference §7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` at top level for state-aware too — backends declare per-phase honor. |
 | Rust executor (reference §9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (private `Raw*` parser pattern). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends unchanged. |
 | Error model (reference §8) | Closed enum of 12 codes. `MxcError` base + per-code subclasses. `details` open object. | Existing one-shot error paths preserved. |
-| Plug-in surface (reference §11) | Implement `StatefulSandboxBackend`. Define typed per-phase `*Config` interfaces. Document the cross-cutting honor matrix. | Ephemeral-only backends require no changes. |
+| Plug-in surface (reference §11) | Implement `StatefulSandboxBackend`. Define typed per-phase `*Config` interfaces. Register a backend-specific id prefix. Document the cross-cutting honor matrix. | Ephemeral-only backends require no changes. |
 
 ## Lifecycle
 
@@ -66,7 +67,8 @@ Types used in the function signatures below. Per-phase `<Phase>SandboxOptions<C>
 
 ```typescript
 type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
-type SandboxId = string & { readonly __mxcBrand: 'SandboxId' };
+type SandboxId<C extends StateAwareSandboxingMethod> =
+  string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 type StateAwareSandboxingMethod = Extract<SandboxingMethod, 'isolation_session'>;
 // extended as state-aware-capable backends are added
 
@@ -84,46 +86,42 @@ function provisionSandbox<C extends StateAwareSandboxingMethod>(
 ): Promise<ProvisionResult<C>>;
 
 function startSandbox<C extends StateAwareSandboxingMethod>(
-  containment: C,
-  sandboxId: SandboxId,
+  sandboxId: SandboxId<C>,
   options?: StartSandboxOptions<C>,
 ): Promise<StartResult<C>>;
 
 function execInSandbox<C extends StateAwareSandboxingMethod>(
-  containment: C,
-  sandboxId: SandboxId,
+  sandboxId: SandboxId<C>,
   process: ProcessConfig,
   options?: ExecInSandboxOptions<C>,
 ): pty.IPty;
 
 function execInSandboxAsync<C extends StateAwareSandboxingMethod>(
-  containment: C,
-  sandboxId: SandboxId,
+  sandboxId: SandboxId<C>,
   process: ProcessConfig,
   options?: ExecInSandboxOptions<C>,
 ): Promise<ExecResult>;
 
 function stopSandbox<C extends StateAwareSandboxingMethod>(
-  containment: C,
-  sandboxId: SandboxId,
+  sandboxId: SandboxId<C>,
   options?: StopSandboxOptions<C>,
 ): Promise<StopResult<C>>;
 
 function deprovisionSandbox<C extends StateAwareSandboxingMethod>(
-  containment: C,
-  sandboxId: SandboxId,
+  sandboxId: SandboxId<C>,
   options?: DeprovisionSandboxOptions<C>,
 ): Promise<DeprovisionResult<C>>;
 ```
 
 Each phase's options carry `policy?: SandboxPolicy` (cross-cutting restrictions, shared
 with one-shot), `config?: <Phase>ConfigFor<C>` (per-phase backend config, typed), and
-`signal?: AbortSignal` (cancellation). Each non-exec phase returns a typed
-`<Phase>Result<C>`: provision carries `sandboxId` plus optional metadata; start, stop,
-and deprovision carry optional metadata only. `execInSandbox` returns an `IPty` for
-live streaming; `execInSandboxAsync` is a buffered convenience that resolves on exit.
-Existing policy-discovery helpers (`getAvailableToolsPolicy`, etc.) compose into
-`SandboxPolicy` unchanged.
+`signal?: AbortSignal` (cancellation). `containment` is named once at `provisionSandbox`
+and inferred from the branded `SandboxId<C>` on every subsequent call. Each non-exec
+phase returns a typed `<Phase>Result<C>`: provision carries `sandboxId` plus optional
+metadata; start, stop, and deprovision carry optional metadata only. `execInSandbox`
+returns an `IPty` for live streaming; `execInSandboxAsync` is a buffered convenience
+that resolves on exit. Existing policy-discovery helpers (`getAvailableToolsPolicy`,
+etc.) compose into `SandboxPolicy` unchanged.
 
 ## Wire contract
 
@@ -145,16 +143,26 @@ interface OneShotRequest {
   // ...other one-shot fields per docs/config-schema.md
 }
 
-interface StateAwareRequest {
-  phase: Phase;
+interface ProvisionStateAwareRequest {
+  phase: 'provision';
   containment: StateAwareSandboxingMethod;
-  sandboxId?: SandboxId;             // required for non-provision phases
-  process?: ProcessConfig;            // exec only
   filesystem?: FilesystemConfig;      // backend declares per-phase honor
   network?: NetworkConfig;
   ui?: UiConfig;
   experimental?: ExperimentalStateAwareConfigs;
 }
+
+interface NonProvisionStateAwareRequest {
+  phase: 'start' | 'exec' | 'stop' | 'deprovision';
+  sandboxId: SandboxId<StateAwareSandboxingMethod>;  // backend resolved from prefix
+  process?: ProcessConfig;            // exec only
+  filesystem?: FilesystemConfig;
+  network?: NetworkConfig;
+  ui?: UiConfig;
+  experimental?: ExperimentalStateAwareConfigs;
+}
+
+type StateAwareRequest = ProvisionStateAwareRequest | NonProvisionStateAwareRequest;
 
 interface ExperimentalStateAwareConfigs {
   isolation_session?: IsolationSessionStateAwareConfigs;
@@ -217,8 +225,10 @@ to `ProvisionResult<M>`. `SandboxPolicy` is the typed Rust mirror of the SDK typ
 `ProcessConfig` is reused from the existing one-shot wire format.
 
 A backend's participation mode (ephemeral-only, state-aware-only, both) is declared by
-which traits it implements. Reference §4 describes the modes; reference §9 describes the
-Rust mirror struct and dispatch.
+which traits it implements. State-aware backends additionally register an id prefix
+alongside their `ContainmentBackend` variant; the dispatcher reads the prefix from
+`sandboxId` to route non-provision calls. Reference §4 describes the modes; reference
+§5 covers id prefixes; reference §9 describes the Rust mirror struct and dispatch.
 
 ## Worked example: IsolationSession
 
@@ -263,7 +273,8 @@ backend.provision(Some(&policy), None)
 #### Exec (buffered)
 
 ```typescript
-const r = await execInSandboxAsync('isolation_session', sandboxId, {
+// sandboxId from the provision example above.
+const r = await execInSandboxAsync(sandboxId, {
   commandLine: 'echo hello',
 });
 // r = { stdout: "hello\n", stderr: "", exitCode: 0 }
@@ -271,7 +282,6 @@ const r = await execInSandboxAsync('isolation_session', sandboxId, {
 
 ```json
 {
-  "containment": "isolation_session",
   "phase": "exec",
   "sandboxId": "iso:reg-abc:prov-123",
   "process": { "commandLine": "echo hello" }
@@ -324,7 +334,9 @@ Reference §11 has the full guide. Operational checklist:
 3. Define typed `*Config` interfaces in `@microsoft/mxc-sdk` and slot into
    `ExperimentalStateAwareConfigs`. If newly SDK-exposed, extend `SandboxingMethod` and
    `StateAwareSandboxingMethod`.
-4. Register a variant in the `ContainmentBackend` enum and add a dispatch arm.
+4. Register a variant in the `ContainmentBackend` enum, declare the backend's id prefix
+   alongside the variant (it serves as the dispatcher's routing key for non-provision
+   calls), and add a dispatch arm.
 5. Add `Raw*` intermediate structs in `config_parser.rs` for the backend's wire-format
    block.
 6. Document policy-honor matrix, idempotence, concurrency, and error mapping in
@@ -332,7 +344,7 @@ Reference §11 has the full guide. Operational checklist:
 7. Add a feature-unavailable test (CI-runnable) and an integration test.
 8. Update `.github/copilot-instructions.md`.
 
-## Graduation, scope, open questions
+## Graduation and scope
 
 - **Graduation rule.** Per-stage config stays under `experimental.<backend>.<phase>`
   while either the API or that backend's state-aware participation is experimental.
@@ -341,8 +353,5 @@ Reference §11 has the full guide. Operational checklist:
 - **Out of scope for v1.** Detached / OS-level fire-and-forget execs (JS-async
   fire-and-forget IS supported via don't-await on existing functions); additional
   lifecycle stages; cross-machine `SandboxId` portability; MXC-enforced container-wide
-  timeouts. Reference §14.
-- **Open questions for review.** Method names, trait name, error code names, `phase`
-  field placement, `containment` repetition, associated-types vs. `serde_json::Value`
-  at the trait boundary, typed `ErrorEnvelope.details`, per-backend metadata for `exec`.
-  Reference §15.
+  timeouts; per-backend metadata for `exec` (live-streaming response makes this
+  structurally hard, deferred until a concrete backend need arises). Reference §14.
