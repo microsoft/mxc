@@ -594,10 +594,13 @@ impl WSLContainerRunner {
             ));
         }
         if !ipt_exit_event.is_null() {
-            windows::Win32::System::Threading::WaitForSingleObject(
+            let wait_result = windows::Win32::System::Threading::WaitForSingleObject(
                 windows::Win32::Foundation::HANDLE(ipt_exit_event),
                 30_000,
             );
+            if wait_result == windows::Win32::Foundation::WAIT_TIMEOUT {
+                return Err(ScriptResponse::error("iptables rules timed out after 30s"));
+            }
         }
 
         let mut ipt_exit_code: i32 = -1;
@@ -629,12 +632,11 @@ impl WSLContainerRunner {
         io_ctx: &IoContext,
         request: &CodexRequest,
         logger: &mut Logger,
-    ) -> (i32, bool) {
+    ) -> Result<(i32, bool), ScriptResponse> {
         let mut exit_event: HANDLE = ptr::null_mut();
         let hr = (sdk.WslcGetProcessExitEvent)(process_guard.as_raw(), &mut exit_event);
         if hr != S_OK {
-            let _ = writeln!(logger, "[WSLC] Warning: WslcGetProcessExitEvent failed");
-            return (-1, false);
+            return Err(sdk_error("WslcGetProcessExitEvent failed", hr, ""));
         }
 
         let wait_ms = if request.script_timeout > 0 {
@@ -649,7 +651,7 @@ impl WSLContainerRunner {
                 windows::Win32::Foundation::HANDLE(exit_event),
                 wait_ms,
             );
-            if wait_result.0 == 258 {
+            if wait_result == windows::Win32::Foundation::WAIT_TIMEOUT {
                 timed_out = true;
                 let _ = writeln!(
                     logger,
@@ -697,7 +699,7 @@ impl WSLContainerRunner {
             let _ = writeln!(logger, "[WSLC] Process exited with code {}", exit_code);
         }
 
-        (exit_code, timed_out)
+        Ok((exit_code, timed_out))
     }
 
     /// Step 13-14: Collect captured I/O and build the final ScriptResponse.
@@ -802,12 +804,12 @@ impl WSLContainerRunner {
             return sdk_error("WslcSetProcessSettingsCmdLine failed", hr, "");
         }
 
-        let env_cstrings: Vec<Vec<u8>> = request
-            .env
-            .iter()
-            .map(|e| format!("{}\0", e).into_bytes())
-            .collect();
         if !request.env.is_empty() {
+            let env_cstrings: Vec<Vec<u8>> = request
+                .env
+                .iter()
+                .map(|e| format!("{}\0", e).into_bytes())
+                .collect();
             let env_ptrs: Vec<PCSTR> = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
             let hr = (sdk.WslcSetProcessSettingsEnvVariables)(
                 &mut process_settings,
@@ -980,14 +982,17 @@ impl WSLContainerRunner {
         let process_guard = WslcProcessGuard::from_raw(process, sdk.WslcReleaseProcess);
 
         // -- Wait for exit --
-        let (exit_code, timed_out) = Self::wait_for_process(
+        let (exit_code, timed_out) = match Self::wait_for_process(
             &sdk,
             &process_guard,
             &container_guard,
             &io_ctx,
             request,
             logger,
-        );
+        ) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
 
         // -- Cleanup --
         if request.lifecycle.destroy_on_exit {
