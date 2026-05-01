@@ -1,0 +1,158 @@
+{
+  // Capability Profile: macOS Seatbelt (sandbox_init / sandbox-exec)
+  //
+  // Mandatory access control framework using Scheme-based profile
+  // language (SBPL). Profiles declare permitted operations; everything
+  // else is denied. Enforced by the TrustedBSD MAC framework in the
+  // kernel.
+  //
+  // Platform: macOS 10.15+ (Catalina)
+  // Enforcement: Kernel (TrustedBSD MAC hooks)
+  //
+  // NOTE: Apple considers the SBPL language a private API. The profile
+  // format is not guaranteed stable across OS versions.
+
+  "profile_version": "1.0",
+  "primitive_id": "seatbelt",
+  "display_name": "macOS Seatbelt (App Sandbox / sandbox-exec)",
+  "platform": "macos",
+  "min_os_version": "10.15",
+  "enforcement_level": "kernel",
+
+  "capabilities": {
+
+    "filesystem": {
+      "path_rules": {
+        "supported": true,
+        "granularity": "per-file",
+        "enforcement": "kernel",
+        "mechanism": "SBPL rules: (allow file-read* (path \"/path/to/file\")), (allow file-write* (subpath \"/path/to/dir\")). Operations: file-read-data, file-read-metadata, file-write-data, file-write-create, file-write-unlink.",
+        "operations_distinguishable": [
+          "read-data", "read-metadata", "write-data", "write-create",
+          "write-unlink", "write-flags", "execute", "ioctl"
+        ],
+        "notes": "Rich operation taxonomy — finer-grained than most other sandbox systems."
+      },
+      "subtree_rules": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "(allow file-read* (subpath \"/path/to/dir\")) applies to entire subtree"
+      },
+      "masking": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Default-deny profile. Unmentioned paths return EPERM. Directory listing of denied paths may still show names but open fails.",
+        "notes": "Not true invisibility (names may appear in readdir), but access is kernel-denied."
+      },
+      "synthetic_mounts": {
+        "supported": false,
+        "notes": "Seatbelt does not manipulate mount topology. It filters operations on the existing filesystem."
+      }
+    },
+
+    "network": {
+      "outbound_filter": {
+        "supported": true,
+        "granularity": "per-host-port",
+        "enforcement": "kernel",
+        "mechanism": "(allow network-outbound (remote tcp \"*:443\")) or (allow network-outbound (remote ip \"93.184.216.34:*\"))",
+        "notes": "Can filter by protocol, host, port, and whether connection is to local or remote."
+      },
+      "inbound_block": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "(deny network-inbound) blocks bind/listen/accept"
+      },
+      "dns_filter": {
+        "supported": false,
+        "notes": "No per-domain DNS filtering. DNS is network-outbound to port 53."
+      },
+      "localhost": {
+        "supported": true,
+        "mechanism": "(allow network-outbound (local ip)) specifically for localhost connections"
+      }
+    },
+
+    "process": {
+      "spawn_control": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "(deny process-fork) or (deny process-exec*) in SBPL profile"
+      },
+      "exec_whitelist": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "(allow process-exec (path \"/usr/bin/python3\")) — whitelist specific executables"
+      },
+      "signal_isolation": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "(deny signal (target others)) — restrict signal delivery"
+      }
+    },
+
+    "resources": {
+      "memory_limit": {
+        "supported": false,
+        "notes": "Seatbelt does not provide resource limits. macOS has no direct cgroup equivalent. Use launchd resource limits or RLIMIT_AS."
+      },
+      "cpu_limit": {
+        "supported": false,
+        "notes": "No CPU limiting in Seatbelt. Use RLIMIT_CPU or QoS classes."
+      },
+      "wall_time": {
+        "supported": false,
+        "notes": "Must be implemented by host-side timer + SIGKILL."
+      },
+      "open_file_limit": {
+        "supported": false,
+        "notes": "Use setrlimit(RLIMIT_NOFILE)."
+      },
+      "process_count_limit": {
+        "supported": false,
+        "notes": "No per-sandbox PID limit. Can deny process-fork to prevent all spawning."
+      }
+    },
+
+    "ipc": {
+      "isolation": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "(deny ipc-posix*) and (deny ipc-sysv*) in SBPL profile. Can also restrict Mach IPC: (deny mach-lookup (global-name \"com.apple.service\")).",
+        "notes": "Mach IPC filtering is particularly important on macOS as many system services use Mach ports."
+      }
+    },
+
+    "credentials": {
+      "store_isolation": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Deny file-read* to keychain paths (/Users/*/Library/Keychains). Can also deny mach-lookup to Security framework services.",
+        "notes": "Two-layer protection: filesystem access denial + Mach service access denial."
+      }
+    },
+
+    "privilege": {
+      "escalation_prevention": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Sandbox profile is irrevocable once applied. (deny process-exec (with setuid)) blocks setuid execution.",
+        "notes": "Combined with macOS SIP (System Integrity Protection) for system-level protection."
+      },
+      "capability_dropping": {
+        "supported": false,
+        "notes": "macOS does not have a Linux-style capability system. Entitlements are per-binary, not runtime-adjustable."
+      }
+    }
+  },
+
+  "limitations": [
+    "SBPL profile language is Apple-private and not guaranteed stable across OS versions",
+    "No resource limits (memory, CPU, PID count) — requires external mechanisms (RLIMIT, launchd)",
+    "No synthetic mount support — cannot reshape filesystem topology",
+    "Path masking is partial: file names may appear in readdir even when access is denied",
+    "Mach IPC filtering requires knowing service names — new services may bypass filters",
+    "No DNS-level filtering",
+    "Cannot restrict already-opened file descriptors passed from parent"
+  ]
+}

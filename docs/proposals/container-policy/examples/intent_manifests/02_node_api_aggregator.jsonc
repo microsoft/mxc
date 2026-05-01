@@ -1,0 +1,76 @@
+{
+  // Node.js API client that queries multiple external services, aggregates
+  // results, and writes a consolidated JSON report. Needs network access
+  // to two named services and DNS.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "multi-api-aggregator",
+    "version": "2.1.0",
+    "description": "Queries weather and geocoding APIs, aggregates results into a report"
+  },
+
+  "requires": {
+    "runtime": {
+      "language": "node",
+      "min_version": "20.0",
+      "packages": ["axios", "zod"]
+    },
+
+    "storage": [
+      { "class": "workspace", "access": "read-write", "description": "Working directory" },
+      { "class": "output_data", "access": "write", "description": "Aggregated report (JSON)" },
+      { "class": "temp", "access": "read-write", "persistence": "ephemeral" },
+      { "class": "config", "access": "read", "description": "Query parameters and API config" }
+    ],
+
+    "network": [
+      {
+        "service": "weather-api",
+        "protocol": "https",
+        "operations": ["query"],
+        "auth": "injected-token",
+        "description": "Weather data provider"
+      },
+      {
+        "service": "geocoding-api",
+        "protocol": "https",
+        "operations": ["query"],
+        "auth": "injected-token",
+        "description": "Geocoding service for lat/lng lookup"
+      },
+      { "capability": "dns" }
+    ],
+
+    "process": {
+      "spawn": false
+    },
+
+    "ipc": "none",
+    "devices": "none",
+
+    "credentials": [
+      { "name": "WEATHER_API_KEY", "type": "api-key", "description": "Weather service API key" },
+      { "name": "GEOCODING_API_KEY", "type": "api-key", "description": "Geocoding service API key" }
+    ]
+  },
+
+  "constraints": {
+    "max_memory_mb": 256,
+    "max_cpu_cores": 1,
+    "max_wall_time_seconds": 60,
+    "max_processes": 1,
+    "max_output_bytes": 1048576,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  },
+
+  "claims": {
+    "deterministic": false,
+    "idempotent": true,
+    "no_credential_exfiltration": true,
+    "no_side_effects_beyond_output": true
+  }
+}

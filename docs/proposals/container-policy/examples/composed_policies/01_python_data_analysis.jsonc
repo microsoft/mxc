@@ -1,0 +1,67 @@
+{
+  // COMPOSED POLICY: csv-data-analyzer
+  //
+  // Composition of:
+  //   Developer: intent_manifests/01_python_data_analysis.jsonc
+  //   User:      user_intents/01_data_analysis_consent.jsonc
+  //   Admin:     admin_intents/01_corporate_standard.jsonc
+  //   System:    system_intents/* (common constraints)
+  //
+  // Key composition effects:
+  //   - max_wall_time_seconds: min(120, 90, 300) = 90 (user tightened)
+  //   - max_memory_mb: min(1024, 2048) = 1024 (author's self-imposed limit wins)
+  //   - network: [] ∩ [] ∩ [whitelisted] = [] (no network — all agree)
+  //   - No conflicts — this is a clean offline workload
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "csv-data-analyzer",
+    "version": "1.0.0",
+    "description": "Effective policy: offline CSV analysis (composed from 4 layers)"
+  },
+
+  "requires": {
+    "runtime": {
+      "language": "python",
+      "min_version": "3.10",
+      "packages": ["pandas", "numpy"]
+    },
+
+    "storage": [
+      { "class": "input_data", "access": "read" },
+      { "class": "output_data", "access": "write" },
+      { "class": "workspace", "access": "read-write" },
+      { "class": "temp", "access": "read-write", "persistence": "ephemeral" }
+    ],
+
+    "network": [],
+
+    "process": { "spawn": false },
+
+    "ipc": "none",
+    "devices": "none",
+    "credentials": []
+  },
+
+  "constraints": {
+    "max_memory_mb": 1024,
+    "max_cpu_cores": 2,
+    "max_wall_time_seconds": 90,
+    "max_processes": 1,
+    "max_output_bytes": 10485760,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "modify_system_binaries": "forbidden",
+    "kernel_memory_access": "forbidden",
+    "writable_executable_pages": "forbidden",
+    "access_credential_stores": "forbidden",
+    "inbound_network": "forbidden"
+  },
+
+  "claims": {
+    "deterministic": true,
+    "idempotent": true,
+    "no_side_effects_beyond_output": true
+  }
+}

@@ -1,0 +1,43 @@
+{
+  // User consent for the LLM research tool (scenario 04).
+  // The user approves LLM API access but restricts public-web browsing
+  // to Wikipedia and arXiv only. Wall time is halved.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "web-research-consent",
+    "version": "1.0.0",
+    "description": "User consent for LLM research — approves LLM, restricts web to Wikipedia and arXiv"
+  },
+
+  "requires": {
+    "storage": [
+      { "class": "workspace", "access": "read-write" },
+      { "class": "output_data", "access": "write" },
+      { "class": "temp", "access": "read-write" },
+      { "class": "cache", "access": "read-write" }
+    ],
+
+    "network": [
+      { "service": "llm-api", "protocol": "https" },
+      {
+        "service": "public-web",
+        "protocol": "https",
+        "scope": "*.wikipedia.org,*.arxiv.org"
+      },
+      { "capability": "dns" }
+    ],
+
+    "credentials": [
+      { "name": "LLM_API_KEY", "type": "api-key" }
+    ]
+  },
+
+  "constraints": {
+    "max_wall_time_seconds": 300,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  }
+}

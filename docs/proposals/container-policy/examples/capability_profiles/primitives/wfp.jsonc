@@ -1,0 +1,84 @@
+{
+  // Capability Profile: Windows Filtering Platform (WFP)
+  //
+  // Kernel-mode network filtering framework. Provides per-host, per-port,
+  // per-protocol network rules. Used alongside AppContainer to add
+  // fine-grained network control beyond the coarse capability-SID model.
+  //
+  // Platform: Windows 10+ (10.0.17763+)
+  // Enforcement: Kernel (tcpip.sys / netio.sys filter engine)
+
+  "profile_version": "1.0",
+  "primitive_id": "wfp",
+  "display_name": "Windows Filtering Platform (WFP)",
+  "platform": "windows",
+  "min_os_version": "10.0.17763",
+  "enforcement_level": "kernel",
+
+  "capabilities": {
+
+    "filesystem": {
+      "_note": "WFP is network-only. Filesystem capabilities require a separate primitive."
+    },
+
+    "network": {
+      "outbound_filter": {
+        "supported": true,
+        "granularity": "per-host-port",
+        "enforcement": "kernel",
+        "mechanism": "Callout filters at ALE (Application Layer Enforcement) connect layers. Rules can match on remote IP, port, protocol, and AppContainer SID.",
+        "notes": "Can scope rules to a specific AppContainer by filtering on the token's package SID. Supports both allow-list and block-list models."
+      },
+      "inbound_block": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "ALE receive/accept layers block unsolicited inbound connections"
+      },
+      "dns_filter": {
+        "supported": true,
+        "granularity": "per-domain",
+        "enforcement": "kernel",
+        "mechanism": "DNS proxy / name resolution policy table (NRPT) integration",
+        "notes": "Requires NRPT configuration or custom callout driver for full per-domain DNS filtering."
+      },
+      "localhost": {
+        "supported": true,
+        "mechanism": "Loopback traffic can be explicitly allowed or denied via ALE filters"
+      },
+      "protocol_filter": {
+        "supported": true,
+        "granularity": "per-protocol",
+        "enforcement": "kernel",
+        "mechanism": "Transport layer filters can distinguish TCP, UDP, ICMP, etc."
+      }
+    },
+
+    "process": {
+      "_note": "WFP is network-only. Process control requires a separate primitive."
+    },
+
+    "resources": {
+      "_note": "WFP is network-only. Resource limits require a separate primitive."
+    },
+
+    "ipc": {
+      "_note": "WFP is network-only."
+    },
+
+    "credentials": {
+      "_note": "WFP is network-only."
+    },
+
+    "privilege": {
+      "_note": "WFP is network-only."
+    }
+  },
+
+  "limitations": [
+    "Network-only primitive — must be combined with other primitives for full isolation",
+    "Requires BFE (Base Filtering Engine) service to be running",
+    "Per-domain DNS filtering requires NRPT or custom callout — not available out of the box",
+    "Filter rules are system-wide objects; proper scoping to a specific container requires AppContainer SID matching",
+    "Complex rule sets may impact network performance"
+  ]
+}

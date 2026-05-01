@@ -1,0 +1,40 @@
+{
+  // Linux system intent policy.
+  // Expresses platform invariants that Linux enforces unconditionally
+  // via kernel protections, seccomp defaults, and MAC policies.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "linux-system-policy",
+    "version": "6.1.0",
+    "description": "Linux platform security invariants — enforced by kernel regardless of other policy"
+  },
+
+  "requires": {
+    "storage": [
+      {
+        "class": "system_binaries",
+        "access": "read",
+        "description": "System binaries (/usr/bin, /usr/lib, /usr/sbin) are read-only"
+      },
+      {
+        "class": "system_config",
+        "access": "read",
+        "description": "System configuration (/etc) is read-only"
+      }
+    ]
+  },
+
+  "constraints": {
+    "privilege_escalation": "forbidden",
+    "modify_system_binaries": "forbidden",
+    "kernel_memory_access": "forbidden",
+    "writable_executable_pages": "forbidden",
+    "disable_aslr": "forbidden",
+    "access_credential_stores": "forbidden",
+    "raw_device_access": "forbidden",
+    "ptrace_other_processes": "forbidden",
+    "inbound_network": "forbidden"
+  }
+}

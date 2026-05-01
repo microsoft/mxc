@@ -1,0 +1,33 @@
+{
+  // User consent for offline data analysis workloads (scenarios 01, 05).
+  // The user approves file access and tightens the time limit but otherwise
+  // delegates to the code author's declared requirements.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "offline-analysis-consent",
+    "version": "1.0.0",
+    "description": "User consent for offline computation — approves file access, tightens time limit"
+  },
+
+  "requires": {
+    "storage": [
+      { "class": "input_data", "access": "read" },
+      { "class": "output_data", "access": "write" },
+      { "class": "workspace", "access": "read-write" },
+      { "class": "temp", "access": "read-write" }
+    ],
+
+    "network": [],
+    "ipc": "none",
+    "devices": "none",
+    "credentials": []
+  },
+
+  "constraints": {
+    "max_wall_time_seconds": 90,
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  }
+}

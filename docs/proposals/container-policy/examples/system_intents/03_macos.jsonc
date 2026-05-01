@@ -1,0 +1,40 @@
+{
+  // macOS system intent policy.
+  // Expresses platform invariants that macOS enforces unconditionally
+  // via SIP, code signing, and kernel protections.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "macos-system-policy",
+    "version": "14.0.0",
+    "description": "macOS platform security invariants — enforced by SIP and kernel regardless of other policy"
+  },
+
+  "requires": {
+    "storage": [
+      {
+        "class": "system_binaries",
+        "access": "read",
+        "description": "SIP-protected system volume is read-only"
+      },
+      {
+        "class": "system_config",
+        "access": "read",
+        "description": "Protected system configuration is read-only"
+      }
+    ]
+  },
+
+  "constraints": {
+    "privilege_escalation": "forbidden",
+    "modify_system_binaries": "forbidden",
+    "kernel_memory_access": "forbidden",
+    "writable_executable_pages": "forbidden",
+    "disable_aslr": "forbidden",
+    "access_credential_stores": "forbidden",
+    "modify_sip_protected_paths": "forbidden",
+    "load_unsigned_code": "forbidden",
+    "inbound_network": "forbidden"
+  }
+}

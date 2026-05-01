@@ -1,0 +1,76 @@
+{
+  // COMPOSED POLICY: image-processor
+  //
+  // Composition of:
+  //   Developer: intent_manifests/05_dotnet_image_processor.jsonc
+  //   User:      (delegated — no user intent file)
+  //   Admin:     admin_intents/01_corporate_standard.jsonc
+  //   System:    system_intents/* (common constraints)
+  //
+  // Key composition effects:
+  //   - No user narrowing — fully delegated
+  //   - network: [] (author requests none, all layers agree)
+  //   - max_memory_mb: min(2048, 2048) = 2048 (author and admin equal)
+  //   - max_wall_time_seconds: min(600, 300) = 300 (admin tightened)
+  //   - max_processes: min(12, 32) = 12 (author's limit wins)
+  //   - System constraints added
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "image-processor",
+    "version": "1.4.0",
+    "description": "Effective policy: offline image processing (composed from 3 layers, user delegated)"
+  },
+
+  "requires": {
+    "runtime": {
+      "language": "dotnet",
+      "min_version": "8.0",
+      "packages": ["SixLabors.ImageSharp"]
+    },
+
+    "storage": [
+      { "class": "app_code", "access": "read" },
+      { "class": "input_data", "access": "read" },
+      { "class": "output_data", "access": "write" },
+      { "class": "workspace", "access": "read-write" },
+      { "class": "config", "access": "read" },
+      { "class": "temp", "access": "read-write", "persistence": "ephemeral" }
+    ],
+
+    "network": [],
+
+    "process": {
+      "spawn": true,
+      "max_children": 8,
+      "signals": "self"
+    },
+
+    "ipc": "none",
+    "devices": "none",
+    "credentials": []
+  },
+
+  "constraints": {
+    "max_memory_mb": 2048,
+    "max_cpu_cores": 4,
+    "max_wall_time_seconds": 300,
+    "max_processes": 12,
+    "max_open_files": 1024,
+    "max_output_bytes": 524288000,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "modify_system_binaries": "forbidden",
+    "kernel_memory_access": "forbidden",
+    "writable_executable_pages": "forbidden",
+    "access_credential_stores": "forbidden",
+    "inbound_network": "forbidden"
+  },
+
+  "claims": {
+    "deterministic": true,
+    "idempotent": true,
+    "no_side_effects_beyond_output": true
+  }
+}

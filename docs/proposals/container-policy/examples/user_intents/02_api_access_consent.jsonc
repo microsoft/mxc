@@ -1,0 +1,44 @@
+{
+  // User consent for the API aggregator (scenario 02).
+  // The user approves both named services and DNS, but lowers the
+  // wall-time limit and denies any storage classes beyond what the
+  // code author declared.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "api-access-consent",
+    "version": "1.0.0",
+    "description": "User consent for API aggregation — approves named services, tightens time"
+  },
+
+  "requires": {
+    "storage": [
+      { "class": "workspace", "access": "read-write" },
+      { "class": "output_data", "access": "write" },
+      { "class": "temp", "access": "read-write" },
+      { "class": "config", "access": "read" }
+    ],
+
+    "network": [
+      { "service": "weather-api", "protocol": "https" },
+      { "service": "geocoding-api", "protocol": "https" },
+      { "capability": "dns" }
+    ],
+
+    "ipc": "none",
+    "devices": "none",
+
+    "credentials": [
+      { "name": "WEATHER_API_KEY", "type": "api-key" },
+      { "name": "GEOCODING_API_KEY", "type": "api-key" }
+    ]
+  },
+
+  "constraints": {
+    "max_wall_time_seconds": 45,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  }
+}

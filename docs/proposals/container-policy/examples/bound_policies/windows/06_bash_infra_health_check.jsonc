@@ -1,0 +1,91 @@
+{
+  "version": "1.0",
+  "name": "infra-health-check",
+  "description": "Bound policy for infra-health-check on Windows x64 (from composed policy 06)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "C:\\Program Files\\Git\\usr\\bin\\bash.exe",    "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Program Files\\Git\\usr\\bin\\curl.exe",    "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Program Files\\Git\\usr\\bin\\openssl.exe", "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Program Files\\Git\\usr\\bin\\jq.exe",      "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Program Files\\Git\\usr\\bin",              "scope": "subtree",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Program Files\\Git\\usr\\lib",              "scope": "subtree",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Program Files\\Git\\usr\\ssl",              "scope": "subtree",
+        "allow": ["read"] },
+      { "path": "C:\\Program Files\\PostgreSQL\\16\\bin\\psql.exe", "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Program Files\\PostgreSQL\\16\\lib",           "scope": "subtree",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Windows\\System32\\vcruntime140.dll",  "scope": "exact",
+        "allow": ["read", "execute"] },
+      { "path": "C:\\Windows\\System32\\ucrtbase.dll",      "scope": "exact",
+        "allow": ["read", "execute"] },
+
+      { "path": "C:\\Sandbox\\Output",       "scope": "subtree", "allow": ["write", "create"],
+                                                                  "ephemeral": true },
+      { "path": "C:\\Sandbox\\Workspace",    "scope": "subtree", "allow": ["read", "write", "create"],
+                                                                  "ephemeral": true },
+      { "path": "C:\\Sandbox\\Config",       "scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Sandbox\\Temp",         "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                                  "ephemeral": true },
+      { "path": "C:\\Sandbox\\Secrets\\DB_CONNECTION_STRING", "scope": "exact",
+        "allow": ["read"], "ephemeral": true }
+    ],
+    "mask": [
+      "C:\\Users",
+      "%USERPROFILE%\\.ssh",
+      "%USERPROFILE%\\.aws"
+    ]
+  },
+
+  "network": {
+    "mode": "rules",
+    "rules": [
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "api-gateway.internal.example.com", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "auth.internal.example.com", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "db-primary.internal.example.com", "port": 5432 }
+    ],
+    "allow_dns": true,
+    "allow_localhost": false
+  },
+
+  "resources": {
+    "max_memory_mb": 256,
+    "max_processes": 16,
+    "max_wall_time_seconds": 90,
+    "max_open_files": 256
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "C:\\Program Files\\Git\\usr\\bin;C:\\Program Files\\PostgreSQL\\16\\bin;C:\\Windows\\System32",
+      "TEMP": "C:\\Sandbox\\Temp",
+      "TMP": "C:\\Sandbox\\Temp",
+      "USERPROFILE": "C:\\Sandbox\\Workspace",
+      "DB_CONNECTION_STRING_FILE": "C:\\Sandbox\\Secrets\\DB_CONNECTION_STRING"
+    }
+  },
+
+  "platform": {
+    "windows": {
+      "appcontainer": {
+        "capabilities": ["internetClient"]
+      },
+      "bfs": {
+        "enabled": true,
+        "policy_broker": true
+      }
+    }
+  }
+}

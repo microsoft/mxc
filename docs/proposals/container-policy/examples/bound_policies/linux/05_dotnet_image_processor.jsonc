@@ -1,0 +1,62 @@
+{
+  "version": "1.0",
+  "name": "image-processor",
+  "description": "Bound policy for image-processor on Linux x86_64 (from composed policy 05)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "/usr/bin/dotnet",                    "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/share/dotnet",                  "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/usr/lib/x86_64-linux-gnu",          "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/lib/x86_64-linux-gnu",              "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/etc/ssl/certs",                     "scope": "subtree", "allow": ["read"] },
+
+      { "path": "/app",                "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/input",              "scope": "subtree", "allow": ["read"] },
+      { "path": "/output",             "scope": "subtree", "allow": ["write", "create"],
+                                                            "ephemeral": true },
+      { "path": "/workspace",          "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                            "ephemeral": true },
+      { "path": "/config",             "scope": "subtree", "allow": ["read"] },
+      { "path": "/tmp",                "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                            "ephemeral": true }
+    ],
+    "synthetic": {
+      "/dev": "minimal",
+      "/proc": "sandboxed",
+      "/tmp": "ephemeral"
+    }
+  },
+
+  "network": {
+    "mode": "none"
+  },
+
+  "resources": {
+    "max_memory_mb": 2048,
+    "max_cpu_percent": 400,
+    "max_processes": 12,
+    "max_wall_time_seconds": 300,
+    "max_open_files": 1024
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "/usr/bin:/usr/share/dotnet",
+      "HOME": "/workspace",
+      "DOTNET_ROOT": "/usr/share/dotnet",
+      "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+      "DOTNET_NOLOGO": "1"
+    }
+  },
+
+  "platform": {
+    "linux": {
+      "namespaces": {
+        "user": true, "mount": true, "pid": true,
+        "net": true, "ipc": true, "uts": true, "cgroup": true
+      }
+    }
+  }
+}

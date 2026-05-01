@@ -1,0 +1,48 @@
+{
+  // Production operations policy for sandboxed workloads.
+  // Applies to infrastructure management workloads (scenario 06).
+  //
+  // Strict but allows internal services:
+  // - Only internal corporate endpoints permitted
+  // - Database access approved for monitoring
+  // - Tight resource limits (these are health checks, not heavy compute)
+  // - Short wall time — health checks should be fast
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "production-ops-sandbox-policy",
+    "version": "1.0.0",
+    "description": "Production ops: internal services only, database access, tight resource limits"
+  },
+
+  "requires": {
+    "network": [
+      {
+        "service": "internal-api-gateway",
+        "description": "Internal API gateway — health monitoring approved"
+      },
+      {
+        "service": "internal-auth-service",
+        "description": "Internal auth service — health monitoring approved"
+      },
+      {
+        "service": "primary-database",
+        "protocol": "tcp",
+        "description": "PostgreSQL primary — read-only monitoring queries approved"
+      },
+      { "capability": "dns" }
+    ]
+  },
+
+  "constraints": {
+    "max_memory_mb": 512,
+    "max_cpu_cores": 2,
+    "max_wall_time_seconds": 180,
+    "max_processes": 16,
+    "max_open_files": 512,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  }
+}

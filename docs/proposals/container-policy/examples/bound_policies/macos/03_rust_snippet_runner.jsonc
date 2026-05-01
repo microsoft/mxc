@@ -1,0 +1,83 @@
+{
+  // Bound policy for rust-snippet-runner on macOS arm64
+  // Derived from: composed_policies/03_rust_snippet_runner.jsonc
+
+  "version": "1.0",
+  "name": "rust-snippet-runner",
+  "description": "Bound policy for rust-snippet-runner on macOS arm64 (from composed policy 03)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "/opt/homebrew/bin/cargo",                "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/opt/homebrew/bin/rustc",                "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/bin/cc",                            "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/bin/ld",                            "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/opt/homebrew/Cellar/rust",              "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/usr/lib",                               "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/Library/Developer/CommandLineTools",    "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/etc/ssl/certs",                         "scope": "subtree", "allow": ["read"] },
+      { "path": "/private/etc/ssl",                       "scope": "subtree", "allow": ["read"] },
+
+      { "path": "/input",             "scope": "subtree", "allow": ["read"] },
+      { "path": "/output",            "scope": "subtree", "allow": ["write", "create"],
+                                                           "ephemeral": true },
+      { "path": "/workspace",         "scope": "subtree", "allow": ["read", "write", "create"],
+                                                           "ephemeral": true },
+      { "path": "/cache/cargo-registry", "scope": "subtree", "allow": ["read", "write", "create"] },
+      { "path": "/cache/cargo-target",   "scope": "subtree", "allow": ["read", "write", "create"] },
+      { "path": "/tmp",               "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                           "ephemeral": true }
+    ],
+    "mask": [
+      "/Users/*/.ssh",
+      "/Users/*/.aws",
+      "/Users/*/Library/Keychains"
+    ]
+  },
+
+  "network": {
+    "mode": "rules",
+    "rules": [
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "crates.io", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "static.crates.io", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "index.crates.io", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "github.com", "port": 443 }
+    ],
+    "allow_dns": true,
+    "allow_localhost": false
+  },
+
+  "resources": {
+    "max_memory_mb": 4096,
+    "max_cpu_percent": 400,
+    "max_processes": 32,
+    "max_wall_time_seconds": 300,
+    "max_open_files": 4096
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "/opt/homebrew/bin:/usr/bin:/usr/local/bin",
+      "HOME": "/workspace",
+      "CARGO_HOME": "/cache/cargo-registry",
+      "CARGO_TARGET_DIR": "/cache/cargo-target",
+      "RUSTUP_HOME": "/opt/homebrew/Cellar/rust"
+    }
+  },
+
+  "platform": {
+    "macos": {
+      "seatbelt": {
+        "profile": "deny-default",
+        "allow_dyld_cache": true,
+        "allow_network_outbound": true,
+        "allow_process_exec": true
+      }
+    }
+  }
+}

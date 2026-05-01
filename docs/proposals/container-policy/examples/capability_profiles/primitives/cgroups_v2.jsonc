@@ -1,0 +1,100 @@
+{
+  // Capability Profile: Linux cgroups v2
+  //
+  // Resource accounting and limiting via the unified cgroup hierarchy.
+  // Provides hard limits on memory, CPU, PIDs, and I/O for a group
+  // of processes. Used alongside namespaces and seccomp/Landlock for
+  // resource dimension of sandboxing.
+  //
+  // Platform: Linux kernel 5.2+ (unified hierarchy with all controllers)
+  // Enforcement: Kernel (scheduler, memory manager, PID allocator)
+
+  "profile_version": "1.0",
+  "primitive_id": "cgroups_v2",
+  "display_name": "cgroups v2 (unified hierarchy)",
+  "platform": "linux",
+  "min_kernel_version": "5.2",
+  "enforcement_level": "kernel",
+
+  "capabilities": {
+
+    "filesystem": {
+      "_note": "cgroups v2 does not provide filesystem isolation. Use Landlock or mount namespaces."
+    },
+
+    "network": {
+      "_note": "cgroups v2 does not provide network filtering. Use Landlock v4, netfilter, or network namespaces."
+    },
+
+    "process": {
+      "spawn_control": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "pids.max controller limits total number of processes in the cgroup",
+        "notes": "Does not prevent fork() — instead, fork() fails with EAGAIN when the limit is reached."
+      },
+      "exec_whitelist": {
+        "supported": false
+      },
+      "signal_isolation": {
+        "supported": false,
+        "notes": "cgroups does not filter signals. Use PID namespaces."
+      }
+    },
+
+    "resources": {
+      "memory_limit": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "memory.max sets hard limit. OOM killer invoked when exceeded. memory.high sets soft limit (throttling).",
+        "notes": "memory.swap.max controls swap independently. memory.oom.group can trigger group-wide OOM kill."
+      },
+      "cpu_limit": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "cpu.max sets bandwidth limit (quota/period). cpu.weight sets relative share.",
+        "notes": "cpu.max 100000 100000 = 1 CPU core equivalent. Can also set cpuset for core pinning."
+      },
+      "wall_time": {
+        "supported": false,
+        "notes": "cgroups does not have a wall-time limit. Must be implemented by the host (e.g., timer + SIGKILL)."
+      },
+      "open_file_limit": {
+        "supported": false,
+        "notes": "Per-process file descriptor limits are managed by setrlimit(RLIMIT_NOFILE), not cgroups."
+      },
+      "process_count_limit": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "pids.max in the pids controller"
+      },
+      "io_limit": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "io.max sets per-device BPS/IOPS limits. io.weight sets relative I/O share.",
+        "notes": "Only applies to direct I/O on block devices. Buffered writes go through page cache and may not be throttled immediately."
+      }
+    },
+
+    "ipc": {
+      "_note": "cgroups does not manage IPC. Use IPC namespaces."
+    },
+
+    "credentials": {
+      "_note": "cgroups does not manage credentials."
+    },
+
+    "privilege": {
+      "_note": "cgroups does not manage privilege. Processes in a cgroup run with their existing credentials."
+    }
+  },
+
+  "limitations": [
+    "Resource-only primitive — must be combined with Landlock/seccomp/namespaces for access control",
+    "No wall-time limit — host must implement externally",
+    "No file descriptor limits — use setrlimit(RLIMIT_NOFILE) separately",
+    "Memory OOM kills the process rather than gracefully denying allocation",
+    "I/O throttling for buffered I/O is deferred (writeback may bypass limits temporarily)",
+    "Requires root or delegated cgroup subtree to create new cgroups"
+  ]
+}

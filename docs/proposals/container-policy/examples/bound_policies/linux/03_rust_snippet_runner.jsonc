@@ -1,0 +1,81 @@
+{
+  "version": "1.0",
+  "name": "rust-snippet-runner",
+  "description": "Bound policy for rust-snippet-runner on Linux x86_64 (from composed policy 03)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "/usr/bin/cargo",                     "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/bin/rustc",                     "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/bin/cc",                        "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/bin/ld",                        "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/lib/rustlib",                   "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/usr/lib/x86_64-linux-gnu",          "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/lib/x86_64-linux-gnu",              "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/usr/include",                       "scope": "subtree", "allow": ["read"] },
+      { "path": "/etc/ssl/certs",                     "scope": "subtree", "allow": ["read"] },
+      { "path": "/etc/resolv.conf",                   "scope": "exact",   "allow": ["read"] },
+
+      { "path": "/input",              "scope": "subtree", "allow": ["read"] },
+      { "path": "/output",             "scope": "subtree", "allow": ["write", "create"],
+                                                            "ephemeral": true },
+      { "path": "/workspace",          "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                            "ephemeral": true },
+      { "path": "/cache/cargo-registry","scope": "subtree", "allow": ["read", "write", "create", "delete"] },
+      { "path": "/cache/cargo-target",  "scope": "subtree", "allow": ["read", "write", "create", "delete"] },
+      { "path": "/tmp",                "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                            "ephemeral": true }
+    ],
+    "synthetic": {
+      "/dev": "minimal",
+      "/proc": "sandboxed",
+      "/tmp": "ephemeral"
+    }
+  },
+
+  "network": {
+    "mode": "rules",
+    "rules": [
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "crates.io", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "static.crates.io", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "index.crates.io", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "github.com", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "objects.githubusercontent.com", "port": 443 }
+    ],
+    "allow_dns": true,
+    "allow_localhost": false
+  },
+
+  "resources": {
+    "max_memory_mb": 4096,
+    "max_cpu_percent": 400,
+    "max_processes": 32,
+    "max_wall_time_seconds": 300,
+    "max_open_files": 4096
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "/usr/bin:/usr/local/bin",
+      "HOME": "/workspace",
+      "CARGO_HOME": "/cache/cargo-registry",
+      "CARGO_TARGET_DIR": "/cache/cargo-target",
+      "RUSTUP_HOME": "/usr/lib/rustlib"
+    }
+  },
+
+  "platform": {
+    "linux": {
+      "namespaces": {
+        "user": true, "mount": true, "pid": true,
+        "net": true, "ipc": true, "uts": true, "cgroup": true
+      }
+    }
+  }
+}

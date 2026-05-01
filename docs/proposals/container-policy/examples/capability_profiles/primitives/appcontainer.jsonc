@@ -1,0 +1,163 @@
+{
+  // Capability Profile: Windows AppContainer
+  //
+  // Token-based isolation primitive. Processes run under a low-integrity
+  // AppContainer token with a unique package SID. Access to resources is
+  // denied by default unless the resource's DACL explicitly grants the
+  // package SID (or a named capability SID).
+  //
+  // Platform: Windows 10+ (10.0.17763+)
+  // Enforcement: Kernel (NT object manager, token checks)
+
+  "profile_version": "1.0",
+  "primitive_id": "appcontainer",
+  "display_name": "Windows AppContainer",
+  "platform": "windows",
+  "min_os_version": "10.0.17763",
+  "enforcement_level": "kernel",
+
+  "capabilities": {
+
+    "filesystem": {
+      "path_rules": {
+        "supported": true,
+        "granularity": "per-file",
+        "enforcement": "kernel",
+        "mechanism": "DACL on NTFS objects; package SID must be in ACE",
+        "operations_distinguishable": ["read", "write", "execute", "delete"],
+        "notes": "Rules are expressed as ACEs on the target object, not as a policy file. Requires pre-configuring DACLs on paths the sandbox should access."
+      },
+      "subtree_rules": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Inheritable ACEs on directory objects",
+        "notes": "Inheritance propagates to new children but existing files may need explicit ACE addition."
+      },
+      "masking": {
+        "supported": false,
+        "notes": "AppContainer alone cannot hide paths — the object is visible but access is denied. See BFS primitive for true path masking."
+      },
+      "synthetic_mounts": {
+        "supported": false
+      }
+    },
+
+    "network": {
+      "outbound_filter": {
+        "supported": true,
+        "granularity": "per-capability",
+        "enforcement": "kernel",
+        "mechanism": "Network capability SIDs (internetClient, internetClientServer, privateNetworkClientServer) checked by WinSock and kernel",
+        "notes": "AppContainer alone provides coarse-grained network control (internet yes/no, private network yes/no). Per-host filtering requires WFP rules."
+      },
+      "inbound_block": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Denied unless internetClientServer capability is granted"
+      },
+      "dns_filter": {
+        "supported": false,
+        "notes": "DNS resolution follows network capability; no per-domain filtering at this layer."
+      },
+      "localhost": {
+        "supported": true,
+        "mechanism": "Loopback allowed only with explicit loopback exemption via CheckNetIsolation"
+      }
+    },
+
+    "process": {
+      "spawn_control": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Child processes inherit the AppContainer token",
+        "notes": "Cannot prevent spawning entirely at this layer, but children are equally constrained."
+      },
+      "exec_whitelist": {
+        "supported": false,
+        "notes": "Any executable accessible to the package SID can be launched. Use Win32 App Isolation or BFS for exec restrictions."
+      },
+      "signal_isolation": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Process in AppContainer cannot open handles to processes outside the container"
+      }
+    },
+
+    "resources": {
+      "memory_limit": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Job object memory limits applied to the container's job",
+        "notes": "Requires wrapping the process in a Win32 Job Object."
+      },
+      "cpu_limit": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Job object CPU rate control"
+      },
+      "wall_time": {
+        "supported": true,
+        "enforcement": "user-space",
+        "mechanism": "Host-side timer terminates process; not kernel-enforced inside the container",
+        "notes": "Process itself is unaware of the time limit."
+      },
+      "open_file_limit": {
+        "supported": false,
+        "notes": "No per-process handle limit beyond system-wide defaults."
+      },
+      "process_count_limit": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Job object active process limit"
+      }
+    },
+
+    "ipc": {
+      "isolation": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Named objects (mutexes, events, sections) are created in a per-package object namespace. Cross-container access denied by default."
+      },
+      "named_pipes": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Pipe DACLs; AppContainer can only connect to pipes whose DACL includes the package SID"
+      }
+    },
+
+    "credentials": {
+      "injection": {
+        "supported": true,
+        "enforcement": "user-space",
+        "mechanism": "Environment variables or file-based secret injection by the host before process start"
+      },
+      "store_isolation": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Windows Credential Manager / DPAPI scoped to user SID; AppContainer token cannot access user's credential stores without explicit capability"
+      }
+    },
+
+    "privilege": {
+      "escalation_prevention": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Low integrity level + AppContainer token. UAC prompts suppressed; no elevation possible."
+      },
+      "capability_dropping": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Only capabilities (SIDs) explicitly granted at container creation are available"
+      }
+    }
+  },
+
+  "limitations": [
+    "Filesystem rules require per-object DACL configuration; no centralized policy file",
+    "No exec whitelist — any accessible executable can be launched",
+    "No path masking — denied paths are visible (access denied, not hidden)",
+    "Network filtering is coarse (internet/private/none) without WFP",
+    "No open file handle limit",
+    "Wall time enforcement is user-space only"
+  ]
+}

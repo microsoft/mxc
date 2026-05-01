@@ -1,0 +1,43 @@
+{
+  // Corporate standard policy for sandboxed workloads.
+  // Applies to general-purpose business workloads (scenarios 01, 02, 05).
+  //
+  // Key restrictions:
+  // - No external internet except explicitly whitelisted services
+  // - Memory capped at 2 GB
+  // - No persistent storage
+  // - All sandbox executions are time-limited
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "corp-standard-sandbox-policy",
+    "version": "2.0.0",
+    "description": "Corporate standard: whitelisted services only, 2 GB memory ceiling, no persistence"
+  },
+
+  "requires": {
+    "network": [
+      {
+        "service": "weather-api",
+        "description": "Approved external data provider"
+      },
+      {
+        "service": "geocoding-api",
+        "description": "Approved external data provider"
+      },
+      { "capability": "dns" }
+    ]
+  },
+
+  "constraints": {
+    "max_memory_mb": 2048,
+    "max_cpu_cores": 4,
+    "max_wall_time_seconds": 300,
+    "max_processes": 32,
+    "max_open_files": 2048,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  }
+}

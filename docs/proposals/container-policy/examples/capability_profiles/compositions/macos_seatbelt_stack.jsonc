@@ -1,0 +1,202 @@
+{
+  // Blessed Composition: macOS Seatbelt Stack
+  //
+  // The standard macOS sandbox stack for MXC. Combines Seatbelt (App
+  // Sandbox / sandbox-exec) for mandatory access control with POSIX
+  // resource limits (setrlimit) and host-side process management for
+  // resource bounding. Seatbelt is unusually comprehensive for a single
+  // primitive — covering filesystem, network, process, IPC, and
+  // credentials — so the composition is simpler than Windows or Linux.
+  //
+  // Platform: macOS 10.15+ (Catalina)
+
+  "profile_version": "1.0",
+  "composition_id": "macos_seatbelt_stack",
+  "display_name": "macOS Seatbelt + POSIX Resource Limits",
+  "platform": "macos",
+  "min_os_version": "10.15",
+
+  "primitives": [
+    {
+      "primitive_id": "seatbelt",
+      "role": "Primary isolation layer. Provides MAC-enforced filesystem rules (per-path, per-operation), network filtering (per-host-port), process control (fork/exec whitelist, signal isolation), IPC filtering (POSIX, SysV, Mach), and credential store isolation. Default-deny model via SBPL profiles.",
+      "required": true
+    },
+    {
+      "primitive_id": "posix_rlimits",
+      "role": "Resource bounding via setrlimit(). Provides per-process memory (RLIMIT_AS/RLIMIT_DATA), CPU time (RLIMIT_CPU), open file (RLIMIT_NOFILE), file size (RLIMIT_FSIZE), and core dump (RLIMIT_CORE) limits. Set before exec, inherited by children.",
+      "required": true,
+      "notes": "Not a separate profile file — POSIX rlimits are a standard OS facility, not a standalone isolation primitive. Included here because macOS lacks cgroups."
+    },
+    {
+      "primitive_id": "host_timer",
+      "role": "Wall-time enforcement. Host-side timer sends SIGKILL to the sandbox process group when the deadline expires.",
+      "required": true,
+      "notes": "Standard user-space enforcement pattern shared with Windows and Linux stacks."
+    }
+  ],
+
+  "effective_capabilities": {
+
+    "filesystem": {
+      "path_rules":       { "supported": true,  "granularity": "per-file",   "enforcement": "kernel", "via": ["seatbelt"],
+                            "notes": "SBPL distinguishes read-data, read-metadata, write-data, write-create, write-unlink, execute, ioctl — finer-grained than other platforms." },
+      "subtree_rules":    { "supported": true,                                "enforcement": "kernel", "via": ["seatbelt"],
+                            "mechanism": "(allow file-read* (subpath \"/path\"))" },
+      "masking":          { "supported": true,                                "enforcement": "kernel", "via": ["seatbelt"],
+                            "notes": "Default-deny means unmentioned paths are inaccessible. Names may still appear in readdir but open fails with EPERM." },
+      "exec_whitelist":   { "supported": true,                                "enforcement": "kernel", "via": ["seatbelt"],
+                            "mechanism": "(allow process-exec (path \"/usr/bin/python3\"))" },
+      "synthetic_mounts": { "supported": false,
+                            "notes": "Seatbelt filters operations on existing topology; it cannot reshape mount points." }
+    },
+
+    "network": {
+      "outbound_filter": { "supported": true, "granularity": "per-host-port", "enforcement": "kernel", "via": ["seatbelt"],
+                           "mechanism": "(allow network-outbound (remote tcp \"api.example.com:443\"))" },
+      "inbound_block":   { "supported": true,                                  "enforcement": "kernel", "via": ["seatbelt"] },
+      "dns_filter":      { "supported": false,
+                           "notes": "No per-domain DNS filtering. DNS is just network-outbound to port 53." },
+      "localhost":       { "supported": true,                                  "enforcement": "kernel", "via": ["seatbelt"] }
+    },
+
+    "process": {
+      "spawn_control":    { "supported": true, "enforcement": "kernel", "via": ["seatbelt"],
+                            "mechanism": "(deny process-fork) or pids limit is not available — fork can be blocked entirely but not capped." },
+      "exec_whitelist":   { "supported": true, "enforcement": "kernel", "via": ["seatbelt"] },
+      "signal_isolation": { "supported": true, "enforcement": "kernel", "via": ["seatbelt"],
+                            "mechanism": "(deny signal (target others))" }
+    },
+
+    "resources": {
+      "memory_limit":        { "supported": true,  "enforcement": "kernel",     "via": ["posix_rlimits"],
+                               "mechanism": "RLIMIT_AS (virtual address space) and RLIMIT_DATA (heap)",
+                               "notes": "Less precise than cgroups — RLIMIT_AS includes all mappings (shared libs, mmap). May need generous headroom." },
+      "cpu_limit":           { "supported": true,  "enforcement": "kernel",     "via": ["posix_rlimits"],
+                               "mechanism": "RLIMIT_CPU (cumulative CPU seconds). Sends SIGXCPU then SIGKILL.",
+                               "notes": "CPU time limit, not CPU rate/bandwidth. Cannot express '1 core equivalent' like cgroups cpu.max." },
+      "wall_time":           { "supported": true,  "enforcement": "user-space", "via": ["host_timer"] },
+      "process_count_limit": { "supported": false,
+                               "notes": "macOS has no per-sandbox PID limit. Seatbelt can deny process-fork entirely (all-or-nothing) but cannot cap at N children." },
+      "open_file_limit":     { "supported": true,  "enforcement": "kernel",     "via": ["posix_rlimits"],
+                               "mechanism": "RLIMIT_NOFILE" },
+      "io_limit":            { "supported": false,
+                               "notes": "No I/O bandwidth limiting on macOS. No cgroups equivalent." }
+    },
+
+    "ipc": {
+      "isolation": { "supported": true, "enforcement": "kernel", "via": ["seatbelt"],
+                     "notes": "Seatbelt can deny ipc-posix*, ipc-sysv*, and mach-lookup (Mach IPC). Mach port filtering is critical on macOS." }
+    },
+
+    "credentials": {
+      "injection":       { "supported": true,  "enforcement": "user-space", "via": ["host-setup"],
+                           "notes": "File-based injection or environment variables set before exec." },
+      "store_isolation": { "supported": true,  "enforcement": "kernel",     "via": ["seatbelt"],
+                           "notes": "Deny file-read* to ~/Library/Keychains + deny mach-lookup to Security framework services. Two-layer protection." }
+    },
+
+    "privilege": {
+      "escalation_prevention": { "supported": true, "enforcement": "kernel", "via": ["seatbelt"],
+                                  "notes": "Sandbox profile is irrevocable. (deny process-exec (with setuid)) blocks setuid. SIP provides additional system-level protection." },
+      "capability_dropping":   { "supported": false,
+                                  "notes": "macOS uses entitlements (per-binary, compile-time) not runtime capabilities. Cannot drop entitlements at sandbox creation." }
+    }
+  },
+
+  "guarantees": [
+    {
+      "id": "no-filesystem-escape",
+      "description": "Sandboxed process cannot access files outside the SBPL-allowed set. Default-deny profile ensures all access is explicitly granted. Kernel-enforced via TrustedBSD MAC hooks.",
+      "enforcement": "kernel",
+      "caveats": [
+        "File names may appear in readdir even when access is denied (partial masking)",
+        "Already-opened file descriptors inherited from the host bypass Seatbelt rules"
+      ]
+    },
+    {
+      "id": "no-network-escape",
+      "description": "Sandboxed process cannot make network connections outside the SBPL-allowed set. Outbound filtering is per-host-port, kernel-enforced.",
+      "enforcement": "kernel",
+      "caveats": [
+        "DNS resolution may leak queried domain names (no per-domain DNS filtering)",
+        "If network-outbound to port 53 is allowed, process can query arbitrary DNS servers"
+      ]
+    },
+    {
+      "id": "no-privilege-escalation",
+      "description": "Sandboxed process cannot elevate privileges. Sandbox profile is irrevocable. Setuid execution blocked. SIP protects system files independently.",
+      "enforcement": "kernel",
+      "caveats": [
+        "Kernel vulnerabilities could bypass TrustedBSD MAC framework"
+      ]
+    },
+    {
+      "id": "no-credential-access",
+      "description": "Sandboxed process cannot access Keychain or Security framework credentials. Dual protection: filesystem access denied to Keychain paths + Mach IPC denied to Security services.",
+      "enforcement": "kernel",
+      "caveats": [
+        "Credentials explicitly injected via environment or file are accessible by design"
+      ]
+    },
+    {
+      "id": "exec-restricted",
+      "description": "Only explicitly whitelisted executables can be exec'd via SBPL process-exec rules.",
+      "enforcement": "kernel",
+      "caveats": [
+        "Interpreted code only needs execute on the interpreter binary"
+      ]
+    },
+    {
+      "id": "ipc-isolated",
+      "description": "POSIX IPC, SysV IPC, and Mach IPC are all filtered by Seatbelt. Mach port lookups restricted to explicitly allowed services.",
+      "enforcement": "kernel",
+      "caveats": [
+        "New system services with unknown Mach port names may bypass filters if not denied by wildcard rules"
+      ]
+    }
+  ],
+
+  "known_gaps": [
+    {
+      "capability": "resources.process_count_limit",
+      "description": "Cannot cap child process count at N. Seatbelt can only deny fork entirely (all-or-nothing).",
+      "workaround": "Allow fork and rely on memory/CPU limits to bound total resource consumption indirectly"
+    },
+    {
+      "capability": "resources.io_limit",
+      "description": "No I/O bandwidth limiting on macOS",
+      "workaround": "None available at the kernel level"
+    },
+    {
+      "capability": "resources.memory_limit",
+      "enforcement_note": "RLIMIT_AS is coarser than cgroups memory.max — includes all virtual mappings, not just resident memory",
+      "workaround": "Set generous headroom (e.g., 2x intended limit) to account for shared library mappings"
+    },
+    {
+      "capability": "resources.cpu_limit",
+      "enforcement_note": "RLIMIT_CPU measures cumulative CPU seconds, not bandwidth. Cannot express '2 cores max' or rate limiting.",
+      "workaround": "Combine RLIMIT_CPU with wall-time limit. For rate limiting, use macOS QoS classes (advisory only)."
+    },
+    {
+      "capability": "resources.wall_time",
+      "enforcement_note": "user-space only — host-side timer + SIGKILL",
+      "workaround": "Standard pattern across all platforms"
+    },
+    {
+      "capability": "filesystem.synthetic_mounts",
+      "description": "Cannot reshape filesystem topology — Seatbelt filters but does not virtualize",
+      "workaround": "Use SBPL deny rules to hide paths; accept that file names may leak in directory listings"
+    },
+    {
+      "capability": "privilege.capability_dropping",
+      "description": "macOS entitlements are per-binary at compile time, not runtime-adjustable",
+      "workaround": "Ensure sandbox helper binary has minimal entitlements"
+    },
+    {
+      "capability": "network.dns_filter",
+      "description": "No per-domain DNS filtering at the Seatbelt level",
+      "workaround": "Block network-outbound to port 53 except to a designated filtering DNS proxy (requires known proxy IP)"
+    }
+  ]
+}

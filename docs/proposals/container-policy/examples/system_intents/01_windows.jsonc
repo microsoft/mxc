@@ -1,0 +1,39 @@
+{
+  // Windows system intent policy.
+  // Expresses platform invariants that Windows enforces unconditionally.
+  // These constraints cannot be weakened by any other policy layer.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "windows-system-policy",
+    "version": "10.0.0",
+    "description": "Windows platform security invariants — enforced by OS regardless of other policy"
+  },
+
+  "requires": {
+    "storage": [
+      {
+        "class": "system_binaries",
+        "access": "read",
+        "description": "Windows system binaries (System32, SysWOW64) are read-only"
+      },
+      {
+        "class": "system_config",
+        "access": "read",
+        "description": "System registry hives and configuration are read-only"
+      }
+    ]
+  },
+
+  "constraints": {
+    "privilege_escalation": "forbidden",
+    "modify_system_binaries": "forbidden",
+    "kernel_memory_access": "forbidden",
+    "writable_executable_pages": "forbidden",
+    "disable_aslr": "forbidden",
+    "access_credential_stores": "forbidden",
+    "load_unsigned_kernel_code": "forbidden",
+    "inbound_network": "forbidden"
+  }
+}

@@ -1,0 +1,131 @@
+{
+  // Capability Profile: Linux Namespaces
+  //
+  // Kernel-level virtualization of global system resources. Each namespace
+  // type provides an isolated view of a specific resource class. Namespaces
+  // are stackable and composable.
+  //
+  // Platform: Linux kernel 5.6+ (all namespace types including time)
+  // Enforcement: Kernel (per-namespace resource tables)
+
+  "profile_version": "1.0",
+  "primitive_id": "linux_namespaces",
+  "display_name": "Linux Namespaces (mount, net, pid, user, ipc, uts, time)",
+  "platform": "linux",
+  "min_kernel_version": "5.6",
+  "enforcement_level": "kernel",
+
+  "capabilities": {
+
+    "filesystem": {
+      "path_rules": {
+        "supported": false,
+        "notes": "Mount namespaces provide filesystem topology isolation (what's visible) but not per-path access control. Use Landlock for fine-grained path rules."
+      },
+      "subtree_rules": {
+        "supported": false,
+        "notes": "Same as path_rules — mount ns controls visibility, not access rights."
+      },
+      "masking": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Mount namespace with bind mounts, tmpfs overlays, or inaccessible mounts (mount --make-private, mount -t tmpfs over sensitive paths)",
+        "notes": "True path masking — the path literally does not exist in the namespace."
+      },
+      "synthetic_mounts": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Mount namespace allows mounting tmpfs, procfs, sysfs, devpts with custom options",
+        "notes": "Can create a minimal /dev, restricted /proc, etc."
+      }
+    },
+
+    "network": {
+      "outbound_filter": {
+        "supported": true,
+        "granularity": "per-host-port",
+        "enforcement": "kernel",
+        "mechanism": "Network namespace with veth pair + nftables/iptables rules on the host side",
+        "notes": "Process gets its own network stack. Host-side firewall rules control what traffic is forwarded."
+      },
+      "inbound_block": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Network namespace — no ports are reachable unless explicitly forwarded from host"
+      },
+      "dns_filter": {
+        "supported": true,
+        "granularity": "per-domain",
+        "enforcement": "user-space",
+        "mechanism": "Custom /etc/resolv.conf in mount namespace pointing to a filtering DNS proxy",
+        "notes": "DNS filtering is user-space enforced at the resolver level."
+      },
+      "localhost": {
+        "supported": true,
+        "mechanism": "Separate loopback in network namespace; host loopback not accessible"
+      }
+    },
+
+    "process": {
+      "spawn_control": {
+        "supported": false,
+        "notes": "Namespaces do not limit process creation. Use cgroups pids controller."
+      },
+      "exec_whitelist": {
+        "supported": false,
+        "notes": "Use Landlock EXECUTE permission for exec whitelisting."
+      },
+      "signal_isolation": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "PID namespace — process can only signal PIDs visible in its namespace"
+      }
+    },
+
+    "resources": {
+      "_note": "Namespaces do not impose resource limits. Use cgroups v2."
+    },
+
+    "ipc": {
+      "isolation": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "IPC namespace provides isolated System V IPC (shared memory, semaphores, message queues)",
+        "notes": "POSIX shared memory (shm_open) is on a per-mount tmpfs; isolated if /dev/shm is a per-namespace mount."
+      }
+    },
+
+    "credentials": {
+      "store_isolation": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Mount namespace hides host credential files (bind-mount /dev/null or tmpfs over ~/.ssh, etc.)",
+        "notes": "True hiding — paths do not exist or are replaced with empty mounts."
+      }
+    },
+
+    "privilege": {
+      "escalation_prevention": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "User namespace maps container root to unprivileged host UID. Capabilities apply only within the namespace.",
+        "notes": "Even 'root' inside a user namespace has no host privileges."
+      },
+      "capability_dropping": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "User namespace starts with full capability set mapped to unprivileged host user. Capabilities can be further dropped inside the namespace."
+      }
+    }
+  },
+
+  "limitations": [
+    "Namespaces provide isolation (separate views) not access control (per-path rules)",
+    "Filesystem masking requires mount namespace setup (bind mounts, overlayfs)",
+    "Network filtering via netns requires host-side firewall rule management",
+    "DNS filtering is user-space (resolver-based), not kernel-enforced",
+    "No resource limits — requires cgroups v2",
+    "Creating user namespaces may be restricted by sysctl (unprivileged_userns_clone)",
+    "Time namespace (clock offsets) available only on kernel 5.6+"
+  ]
+}

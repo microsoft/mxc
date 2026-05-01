@@ -1,0 +1,105 @@
+{
+  // Capability Profile: Linux seccomp-bpf
+  //
+  // System call filtering via BPF programs attached to a process.
+  // Filters are inherited by children and cannot be removed.
+  // Operates at the syscall boundary — can allow, deny, trap, or log
+  // individual system calls based on syscall number and arguments.
+  //
+  // Platform: Linux kernel 3.17+ (seccomp-bpf with TSYNC)
+  // Enforcement: Kernel (syscall entry point)
+
+  "profile_version": "1.0",
+  "primitive_id": "seccomp_bpf",
+  "display_name": "seccomp-bpf",
+  "platform": "linux",
+  "min_kernel_version": "3.17",
+  "enforcement_level": "kernel",
+
+  "capabilities": {
+
+    "filesystem": {
+      "_note": "seccomp can block filesystem-related syscalls (open, openat, mkdir, etc.) but cannot make path-based decisions. Use Landlock for path-level filesystem rules."
+    },
+
+    "network": {
+      "outbound_filter": {
+        "supported": true,
+        "granularity": "all-or-nothing",
+        "enforcement": "kernel",
+        "mechanism": "Block connect() / sendto() / sendmsg() syscalls entirely",
+        "notes": "Cannot distinguish destination host/port at the seccomp layer. For per-host filtering, use network namespaces + nftables."
+      },
+      "inbound_block": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Block bind() / listen() / accept() syscalls"
+      },
+      "dns_filter": {
+        "supported": false
+      },
+      "localhost": {
+        "supported": false,
+        "notes": "Cannot distinguish localhost from remote at syscall level."
+      }
+    },
+
+    "process": {
+      "spawn_control": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Block fork() / clone() / clone3() syscalls",
+        "notes": "Can also use SECCOMP_RET_ERRNO to return EPERM on spawn attempts."
+      },
+      "exec_whitelist": {
+        "supported": false,
+        "notes": "seccomp can block execve()/execveat() entirely but cannot filter by path argument (pointer arguments are not dereferenceable in BPF). Use Landlock for exec whitelisting."
+      },
+      "signal_isolation": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Block kill() / tkill() / tgkill() or filter by signal number argument"
+      }
+    },
+
+    "resources": {
+      "_note": "seccomp does not manage resource limits. Use cgroups v2."
+    },
+
+    "ipc": {
+      "isolation": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Block shmget() / shmat() / msgget() / msgsnd() / semget() etc.",
+        "notes": "All-or-nothing IPC blocking at the syscall level."
+      }
+    },
+
+    "credentials": {
+      "_note": "seccomp cannot manage credentials but can block credential-related syscalls (keyctl, etc.)."
+    },
+
+    "privilege": {
+      "escalation_prevention": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Block setuid() / setgid() / setresuid() / setresgid() / prctl(PR_SET_NO_NEW_PRIVS). Combined with no_new_privs bit.",
+        "notes": "Filters are irremovable once installed; children inherit the filter."
+      },
+      "capability_dropping": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Block capset() or prctl(PR_CAP_AMBIENT) to prevent capability manipulation"
+      }
+    }
+  },
+
+  "limitations": [
+    "Cannot make path-based decisions — syscall arguments that are pointers cannot be dereferenced in BPF",
+    "Network filtering is all-or-nothing at the syscall level (block connect or not)",
+    "No resource limits — requires cgroups v2",
+    "Filter programs have complexity limits (BPF instruction count)",
+    "Argument inspection limited to register values (integers, not strings/paths)",
+    "SECCOMP_RET_USER_NOTIF allows user-space policy decisions but adds latency"
+  ]
+}

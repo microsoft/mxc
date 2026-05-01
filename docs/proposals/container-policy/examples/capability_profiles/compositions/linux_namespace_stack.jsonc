@@ -1,0 +1,179 @@
+{
+  // Blessed Composition: Linux LXC/Namespace Stack
+  //
+  // The standard Linux sandbox stack for MXC. Combines Linux namespaces
+  // (mount, net, pid, user, ipc, uts) with Landlock v4 for filesystem
+  // and network access control, seccomp-bpf for syscall filtering, and
+  // cgroups v2 for resource limits. This composition has been validated
+  // to provide specific security guarantees when all four primitives
+  // are active.
+  //
+  // Platform: Linux kernel 6.7+
+
+  "profile_version": "1.0",
+  "composition_id": "linux_namespace_stack",
+  "display_name": "Linux Namespaces + Landlock v4 + seccomp-bpf + cgroups v2",
+  "platform": "linux",
+  "min_kernel_version": "6.7",
+
+  "primitives": [
+    {
+      "primitive_id": "linux_namespaces",
+      "role": "Provides isolated views of filesystem (mount ns), network (net ns), process tree (pid ns), user/group IDs (user ns), IPC (ipc ns), and hostname (uts ns). Foundation layer that reshapes what the sandboxed process can see.",
+      "required": true
+    },
+    {
+      "primitive_id": "landlock_v4",
+      "role": "Fine-grained path-based filesystem access control and per-port network filtering. Provides the access-control layer on top of namespace visibility isolation.",
+      "required": true
+    },
+    {
+      "primitive_id": "seccomp_bpf",
+      "role": "Syscall filtering. Blocks dangerous syscalls (ptrace, mount, reboot, kexec_load, etc.) and provides all-or-nothing IPC and spawn control where Landlock cannot.",
+      "required": true
+    },
+    {
+      "primitive_id": "cgroups_v2",
+      "role": "Resource limits — memory, CPU, PID count, and I/O bandwidth. Provides the resource dimension that other primitives lack.",
+      "required": true
+    }
+  ],
+
+  "effective_capabilities": {
+
+    "filesystem": {
+      "path_rules":       { "supported": true,  "granularity": "per-file",   "enforcement": "kernel", "via": ["landlock_v4"] },
+      "subtree_rules":    { "supported": true,                                "enforcement": "kernel", "via": ["landlock_v4"] },
+      "masking":          { "supported": true,                                "enforcement": "kernel", "via": ["linux_namespaces"],
+                            "notes": "Mount namespace provides true path hiding via bind mounts and tmpfs overlays." },
+      "exec_whitelist":   { "supported": true,                                "enforcement": "kernel", "via": ["landlock_v4"],
+                            "notes": "LANDLOCK_ACCESS_FS_EXECUTE granted only on whitelisted paths." },
+      "synthetic_mounts": { "supported": true,                                "enforcement": "kernel", "via": ["linux_namespaces"],
+                            "notes": "Mount namespace allows tmpfs, procfs, devpts with custom options." }
+    },
+
+    "network": {
+      "outbound_filter": { "supported": true, "granularity": "per-host-port", "enforcement": "kernel",
+                           "via": ["linux_namespaces", "landlock_v4"],
+                           "notes": "Network namespace provides host-level filtering (via nftables on veth bridge). Landlock v4 provides per-port filtering. Combined: per-host-port." },
+      "inbound_block":   { "supported": true,                                  "enforcement": "kernel",
+                           "via": ["linux_namespaces", "landlock_v4"],
+                           "notes": "Network namespace blocks all inbound by default. Landlock v4 BIND_TCP restricts bind ports." },
+      "dns_filter":      { "supported": true, "granularity": "per-domain",     "enforcement": "user-space",
+                           "via": ["linux_namespaces"],
+                           "notes": "Custom /etc/resolv.conf in mount namespace points to a filtering DNS proxy." },
+      "localhost":       { "supported": true,                                  "enforcement": "kernel",
+                           "via": ["linux_namespaces"],
+                           "notes": "Network namespace has separate loopback; host loopback not accessible." }
+    },
+
+    "process": {
+      "spawn_control":    { "supported": true, "enforcement": "kernel", "via": ["seccomp_bpf", "cgroups_v2"],
+                            "notes": "seccomp can block fork/clone entirely. cgroups pids.max provides a limit. Choose based on intent." },
+      "exec_whitelist":   { "supported": true, "enforcement": "kernel", "via": ["landlock_v4"] },
+      "signal_isolation": { "supported": true, "enforcement": "kernel", "via": ["linux_namespaces"],
+                            "notes": "PID namespace limits signal delivery to processes visible in the namespace." }
+    },
+
+    "resources": {
+      "memory_limit":        { "supported": true,  "enforcement": "kernel", "via": ["cgroups_v2"],  "mechanism": "memory.max" },
+      "cpu_limit":           { "supported": true,  "enforcement": "kernel", "via": ["cgroups_v2"],  "mechanism": "cpu.max (bandwidth) + cpuset (pinning)" },
+      "wall_time":           { "supported": true,  "enforcement": "user-space", "via": ["host-timer"], "mechanism": "Host-side timer + SIGKILL" },
+      "process_count_limit": { "supported": true,  "enforcement": "kernel", "via": ["cgroups_v2"],  "mechanism": "pids.max" },
+      "open_file_limit":     { "supported": true,  "enforcement": "kernel", "via": ["setrlimit"],   "mechanism": "RLIMIT_NOFILE (not cgroups — set before exec)" },
+      "io_limit":            { "supported": true,  "enforcement": "kernel", "via": ["cgroups_v2"],  "mechanism": "io.max (BPS/IOPS per device)" }
+    },
+
+    "ipc": {
+      "isolation":   { "supported": true, "enforcement": "kernel", "via": ["linux_namespaces", "seccomp_bpf"],
+                       "notes": "IPC namespace isolates SysV IPC. seccomp blocks IPC syscalls as needed. Mount namespace isolates POSIX shm." }
+    },
+
+    "credentials": {
+      "injection":       { "supported": true, "enforcement": "user-space", "via": ["host-setup"],
+                           "notes": "File-based injection into mount namespace (e.g., /run/secrets/) or environment variables." },
+      "store_isolation": { "supported": true, "enforcement": "kernel",     "via": ["linux_namespaces", "landlock_v4"],
+                           "notes": "Mount namespace hides credential paths. Landlock denies read to any that remain visible." }
+    },
+
+    "privilege": {
+      "escalation_prevention": { "supported": true, "enforcement": "kernel", "via": ["linux_namespaces", "seccomp_bpf", "landlock_v4"],
+                                  "notes": "User namespace maps root to unprivileged UID. no_new_privs bit set. seccomp blocks privilege syscalls." },
+      "capability_dropping":   { "supported": true, "enforcement": "kernel", "via": ["linux_namespaces"],
+                                  "notes": "User namespace capabilities don't map to host capabilities." }
+    }
+  },
+
+  "guarantees": [
+    {
+      "id": "no-filesystem-escape",
+      "description": "Sandboxed process cannot read or write files outside the explicitly granted set. Landlock enforces per-path access rules at the LSM layer; mount namespace controls filesystem topology; seccomp blocks mount/pivot_root/chroot to prevent namespace manipulation.",
+      "enforcement": "kernel",
+      "caveats": [
+        "Already-opened file descriptors inherited from the host bypass Landlock rules",
+        "Landlock rules cannot be relaxed once applied (security feature, not a bug)"
+      ]
+    },
+    {
+      "id": "no-network-escape",
+      "description": "Sandboxed process cannot make network connections outside the explicitly allowed set. Network namespace provides full stack isolation; host-side nftables rules control forwarding; Landlock v4 restricts TCP port binding and connection.",
+      "enforcement": "kernel",
+      "caveats": [
+        "DNS filtering is user-space enforced (resolver-based) — a process that hardcodes DNS server IPs could bypass",
+        "Host-side nftables rules must be correctly configured for the network namespace"
+      ]
+    },
+    {
+      "id": "no-privilege-escalation",
+      "description": "Sandboxed process cannot gain host-level privileges. User namespace maps container UIDs to unprivileged host UIDs. no_new_privs prevents setuid escalation. seccomp blocks privilege-related syscalls.",
+      "enforcement": "kernel",
+      "caveats": [
+        "Kernel vulnerabilities could bypass namespace/seccomp boundaries"
+      ]
+    },
+    {
+      "id": "no-credential-access",
+      "description": "Sandboxed process cannot access the host's credential stores. Mount namespace hides credential directories (overlay with empty tmpfs). Landlock denies read access as a second layer.",
+      "enforcement": "kernel",
+      "caveats": [
+        "Credentials explicitly injected via /run/secrets/ or environment are accessible by design"
+      ]
+    },
+    {
+      "id": "process-containment",
+      "description": "All child processes are fully contained. PID namespace limits visibility. cgroups pids.max limits total process count. seccomp filters are inherited and irremovable. Landlock rulesets are inherited.",
+      "enforcement": "kernel",
+      "caveats": []
+    },
+    {
+      "id": "resource-bounded",
+      "description": "Resource consumption is bounded by cgroups limits. Memory, CPU, PID count, and I/O are all kernel-enforced. OOM kills contained to the cgroup.",
+      "enforcement": "kernel",
+      "caveats": [
+        "Wall time is user-space enforced (host timer + SIGKILL)",
+        "Buffered I/O may temporarily exceed io.max due to page cache writeback"
+      ]
+    },
+    {
+      "id": "exec-restricted",
+      "description": "Only explicitly whitelisted executables can be exec'd. Landlock EXECUTE permission is granted only on specific paths.",
+      "enforcement": "kernel",
+      "caveats": [
+        "Interpreted code (e.g., Python scripts) only needs execute on the interpreter binary, not the script file"
+      ]
+    }
+  ],
+
+  "known_gaps": [
+    {
+      "capability": "network.dns_filter",
+      "description": "DNS filtering is user-space only (custom resolv.conf + proxy). A process that bypasses the resolver can query arbitrary DNS servers if UDP/53 outbound is permitted.",
+      "workaround": "Block UDP/53 and TCP/53 outbound via nftables except to the designated DNS proxy"
+    },
+    {
+      "capability": "resources.wall_time",
+      "enforcement_note": "user-space only — host-side timer + SIGKILL",
+      "workaround": "Acceptable for most workloads; combine with cgroups memory limits to prevent resource exhaustion before timeout"
+    }
+  ]
+}

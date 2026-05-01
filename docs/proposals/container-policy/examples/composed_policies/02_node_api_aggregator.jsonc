@@ -1,0 +1,79 @@
+{
+  // COMPOSED POLICY: multi-api-aggregator
+  //
+  // Composition of:
+  //   Developer: intent_manifests/02_node_api_aggregator.jsonc
+  //   User:      user_intents/02_api_access_consent.jsonc
+  //   Admin:     admin_intents/01_corporate_standard.jsonc
+  //   System:    system_intents/* (common constraints)
+  //
+  // Key composition effects:
+  //   - max_wall_time_seconds: min(60, 45, 300) = 45 (user tightened)
+  //   - network: [weather-api, geocoding-api, dns] ∩ [same] ∩ [same + whitelisted] = [weather-api, geocoding-api, dns]
+  //     (all three layers approve these services)
+  //   - credentials: [WEATHER_API_KEY, GEOCODING_API_KEY] approved by user and admin
+  //   - max_memory_mb: min(256, 2048) = 256 (author's limit wins)
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "multi-api-aggregator",
+    "version": "2.1.0",
+    "description": "Effective policy: API aggregation with two services (composed from 4 layers)"
+  },
+
+  "requires": {
+    "runtime": {
+      "language": "node",
+      "min_version": "20.0",
+      "packages": ["axios", "zod"]
+    },
+
+    "storage": [
+      { "class": "workspace", "access": "read-write" },
+      { "class": "output_data", "access": "write" },
+      { "class": "temp", "access": "read-write", "persistence": "ephemeral" },
+      { "class": "config", "access": "read" }
+    ],
+
+    "network": [
+      { "service": "weather-api", "protocol": "https",
+        "operations": ["query"], "auth": "injected-token" },
+      { "service": "geocoding-api", "protocol": "https",
+        "operations": ["query"], "auth": "injected-token" },
+      { "capability": "dns" }
+    ],
+
+    "process": { "spawn": false },
+
+    "ipc": "none",
+    "devices": "none",
+
+    "credentials": [
+      { "name": "WEATHER_API_KEY", "type": "api-key" },
+      { "name": "GEOCODING_API_KEY", "type": "api-key" }
+    ]
+  },
+
+  "constraints": {
+    "max_memory_mb": 256,
+    "max_cpu_cores": 1,
+    "max_wall_time_seconds": 45,
+    "max_processes": 1,
+    "max_output_bytes": 1048576,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "modify_system_binaries": "forbidden",
+    "kernel_memory_access": "forbidden",
+    "writable_executable_pages": "forbidden",
+    "access_credential_stores": "forbidden",
+    "inbound_network": "forbidden"
+  },
+
+  "claims": {
+    "deterministic": false,
+    "idempotent": true,
+    "no_credential_exfiltration": true,
+    "no_side_effects_beyond_output": true
+  }
+}

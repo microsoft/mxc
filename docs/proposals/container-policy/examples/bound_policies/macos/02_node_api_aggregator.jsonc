@@ -1,0 +1,78 @@
+{
+  // Bound policy for multi-api-aggregator on macOS arm64
+  // Derived from: composed_policies/02_node_api_aggregator.jsonc
+
+  "version": "1.0",
+  "name": "multi-api-aggregator",
+  "description": "Bound policy for multi-api-aggregator on macOS arm64 (from composed policy 02)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "/opt/homebrew/bin/node",                    "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/opt/homebrew/Cellar/node@20",              "scope": "subtree", "allow": ["read"] },
+      { "path": "/opt/homebrew/lib/node_modules",            "scope": "subtree", "allow": ["read"] },
+      { "path": "/usr/lib",                                  "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/etc/ssl/certs",                            "scope": "subtree", "allow": ["read"] },
+      { "path": "/private/etc/ssl",                          "scope": "subtree", "allow": ["read"] },
+      { "path": "/private/etc/resolv.conf",                  "scope": "exact",   "allow": ["read"] },
+
+      { "path": "/workspace",              "scope": "subtree", "allow": ["read", "write", "create"],
+                                                                "ephemeral": true },
+      { "path": "/workspace/node_modules", "scope": "subtree", "allow": ["read"] },
+      { "path": "/output",                 "scope": "subtree", "allow": ["write", "create"],
+                                                                "ephemeral": true },
+      { "path": "/config",                 "scope": "subtree", "allow": ["read"] },
+      { "path": "/tmp",                    "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                                "ephemeral": true },
+      { "path": "/run/secrets/WEATHER_API_KEY",   "scope": "exact", "allow": ["read"],
+                                                                     "ephemeral": true },
+      { "path": "/run/secrets/GEOCODING_API_KEY", "scope": "exact", "allow": ["read"],
+                                                                     "ephemeral": true }
+    ],
+    "mask": [
+      "/Users/*/.ssh",
+      "/Users/*/.aws",
+      "/Users/*/Library/Keychains"
+    ]
+  },
+
+  "network": {
+    "mode": "rules",
+    "rules": [
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "api.weatherapi.com", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "api.opencagedata.com", "port": 443 }
+    ],
+    "allow_dns": true,
+    "allow_localhost": false
+  },
+
+  "resources": {
+    "max_memory_mb": 256,
+    "max_processes": 1,
+    "max_wall_time_seconds": 45,
+    "max_open_files": 256
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "/opt/homebrew/bin:/usr/bin:/usr/local/bin",
+      "HOME": "/workspace",
+      "NODE_ENV": "production",
+      "WEATHER_API_KEY_FILE": "/run/secrets/WEATHER_API_KEY",
+      "GEOCODING_API_KEY_FILE": "/run/secrets/GEOCODING_API_KEY"
+    }
+  },
+
+  "platform": {
+    "macos": {
+      "seatbelt": {
+        "profile": "deny-default",
+        "allow_dyld_cache": true,
+        "allow_network_outbound": true
+      }
+    }
+  }
+}

@@ -1,0 +1,154 @@
+{
+  // Blessed Composition: Windows AppContainer Stack
+  //
+  // The standard Windows sandbox stack for MXC. Combines AppContainer
+  // token-based isolation with BFS for filesystem brokering and WFP
+  // for network filtering. This composition has been validated to
+  // provide specific security guarantees when all three primitives
+  // are active.
+  //
+  // Platform: Windows 10 22H2+ (10.0.22621+)
+
+  "profile_version": "1.0",
+  "composition_id": "windows_appcontainer_stack",
+  "display_name": "Windows AppContainer + BFS + WFP",
+  "platform": "windows",
+  "min_os_version": "10.0.22621",
+
+  "primitives": [
+    {
+      "primitive_id": "appcontainer",
+      "role": "Primary isolation container. Provides token-based access control, job object resource limits, IPC namespace isolation, and privilege escalation prevention.",
+      "required": true
+    },
+    {
+      "primitive_id": "bfs",
+      "role": "Filesystem brokering layer. Adds fine-grained per-path rules, path masking, and optional consent prompting on top of AppContainer's coarse DACL model.",
+      "required": true
+    },
+    {
+      "primitive_id": "wfp",
+      "role": "Network filtering layer. Adds per-host-port outbound rules scoped to the AppContainer SID, beyond AppContainer's coarse internet/private capability model.",
+      "required": true
+    }
+  ],
+
+  // Combined capabilities — what the stack can enforce when all
+  // primitives are active. This is the union of individual capabilities,
+  // resolved for overlaps.
+  "effective_capabilities": {
+
+    "filesystem": {
+      "path_rules":       { "supported": true, "granularity": "per-file",    "enforcement": "kernel", "via": ["appcontainer", "bfs"] },
+      "subtree_rules":    { "supported": true,                                "enforcement": "kernel", "via": ["appcontainer", "bfs"] },
+      "masking":          { "supported": true,                                "enforcement": "kernel", "via": ["bfs"] },
+      "exec_whitelist":   { "supported": false, "notes": "Neither AppContainer nor BFS can restrict which executables are launched. Planned for future Win32 App Isolation integration." },
+      "synthetic_mounts": { "supported": false }
+    },
+
+    "network": {
+      "outbound_filter": { "supported": true, "granularity": "per-host-port", "enforcement": "kernel", "via": ["wfp"] },
+      "inbound_block":   { "supported": true,                                  "enforcement": "kernel", "via": ["appcontainer", "wfp"] },
+      "dns_filter":      { "supported": true, "granularity": "per-domain",     "enforcement": "kernel", "via": ["wfp"],
+                           "notes": "Requires NRPT configuration; not available out of the box." },
+      "localhost":       { "supported": true,                                  "via": ["appcontainer", "wfp"] }
+    },
+
+    "process": {
+      "spawn_control":   { "supported": true,  "enforcement": "kernel",   "via": ["appcontainer"],
+                           "notes": "Children inherit container token — equally constrained, not prevented." },
+      "exec_whitelist":  { "supported": false },
+      "signal_isolation": { "supported": true,  "enforcement": "kernel",   "via": ["appcontainer"] }
+    },
+
+    "resources": {
+      "memory_limit":        { "supported": true,  "enforcement": "kernel",     "via": ["appcontainer"], "mechanism": "Job object" },
+      "cpu_limit":           { "supported": true,  "enforcement": "kernel",     "via": ["appcontainer"], "mechanism": "Job object CPU rate" },
+      "wall_time":           { "supported": true,  "enforcement": "user-space", "via": ["host-timer"],   "mechanism": "Host-side timer + TerminateProcess" },
+      "process_count_limit": { "supported": true,  "enforcement": "kernel",     "via": ["appcontainer"], "mechanism": "Job object" },
+      "open_file_limit":     { "supported": false }
+    },
+
+    "ipc": {
+      "isolation":    { "supported": true, "enforcement": "kernel", "via": ["appcontainer"] },
+      "named_pipes":  { "supported": true, "enforcement": "kernel", "via": ["appcontainer", "bfs"] }
+    },
+
+    "credentials": {
+      "injection":       { "supported": true,  "enforcement": "user-space", "via": ["host-setup"] },
+      "store_isolation": { "supported": true,  "enforcement": "kernel",     "via": ["appcontainer", "bfs"] }
+    },
+
+    "privilege": {
+      "escalation_prevention": { "supported": true, "enforcement": "kernel", "via": ["appcontainer"] },
+      "capability_dropping":   { "supported": true, "enforcement": "kernel", "via": ["appcontainer"] }
+    }
+  },
+
+  // Security guarantees this composition provides when correctly configured.
+  // The binder can match intent policy claims against these guarantees.
+  "guarantees": [
+    {
+      "id": "no-filesystem-escape",
+      "description": "Sandboxed process cannot read or write files outside the explicitly granted set. BFS enforces per-path rules at the kernel mini-filter level; AppContainer token ensures default-deny.",
+      "enforcement": "kernel",
+      "caveats": [
+        "Already-opened file descriptors inherited from the host bypass BFS rules",
+        "DACLs on target files must not grant the package SID broader access than intended"
+      ]
+    },
+    {
+      "id": "no-network-escape",
+      "description": "Sandboxed process cannot make network connections outside the explicitly allowed host:port set. WFP enforces per-connection rules scoped to the AppContainer SID.",
+      "enforcement": "kernel",
+      "caveats": [
+        "Requires BFE (Base Filtering Engine) service to be running",
+        "DNS resolution may leak queried domain names even if the connection is blocked"
+      ]
+    },
+    {
+      "id": "no-privilege-escalation",
+      "description": "Sandboxed process cannot elevate privileges. AppContainer token runs at low integrity level with UAC prompts suppressed.",
+      "enforcement": "kernel",
+      "caveats": [
+        "Kernel vulnerabilities could bypass token-based isolation"
+      ]
+    },
+    {
+      "id": "no-credential-access",
+      "description": "Sandboxed process cannot access the user's credential stores (Windows Credential Manager, DPAPI, SSH keys). BFS masks credential paths; AppContainer token lacks credential store capabilities.",
+      "enforcement": "kernel",
+      "caveats": [
+        "Credentials explicitly injected via environment or file are accessible by design"
+      ]
+    },
+    {
+      "id": "process-containment",
+      "description": "All child processes inherit the same AppContainer token and are equally constrained. No child can escape the sandbox.",
+      "enforcement": "kernel",
+      "caveats": [
+        "No exec whitelist — any accessible executable can be launched within the sandbox"
+      ]
+    }
+  ],
+
+  // Gaps — things this composition CANNOT enforce. The binder must
+  // check intent requirements against these and fail/warn accordingly.
+  "known_gaps": [
+    {
+      "capability": "filesystem.exec_whitelist",
+      "description": "Cannot restrict which executables are launched within the sandbox",
+      "workaround": "Use Win32 App Isolation (future integration) for exec whitelisting"
+    },
+    {
+      "capability": "resources.open_file_limit",
+      "description": "No per-process handle limit beyond system-wide defaults",
+      "workaround": "None available at the kernel level on Windows"
+    },
+    {
+      "capability": "resources.wall_time",
+      "enforcement_note": "user-space only — host-side timer, not kernel-enforced deadline",
+      "workaround": "Acceptable for most workloads; not suitable if kernel-level enforcement is required"
+    }
+  ]
+}

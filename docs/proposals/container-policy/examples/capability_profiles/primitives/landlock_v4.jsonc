@@ -1,0 +1,131 @@
+{
+  // Capability Profile: Linux Landlock v4
+  //
+  // Unprivileged security sandboxing mechanism. Processes create a ruleset
+  // defining permitted filesystem and network operations, then enforce it
+  // via prctl(). Rules are stackable — nested sandboxes only restrict further.
+  //
+  // Platform: Linux kernel 6.7+
+  // Enforcement: Kernel (LSM hooks)
+  //
+  // Version history:
+  //   v1 (5.13): Filesystem read/write/execute/make-dir/etc.
+  //   v2 (5.19): LANDLOCK_ACCESS_FS_REFER (cross-directory rename/link)
+  //   v3 (6.2):  LANDLOCK_ACCESS_FS_TRUNCATE
+  //   v4 (6.7):  Network TCP bind/connect filtering
+
+  "profile_version": "1.0",
+  "primitive_id": "landlock_v4",
+  "display_name": "Landlock v4",
+  "platform": "linux",
+  "min_kernel_version": "6.7",
+  "enforcement_level": "kernel",
+
+  "capabilities": {
+
+    "filesystem": {
+      "path_rules": {
+        "supported": true,
+        "granularity": "per-file",
+        "enforcement": "kernel",
+        "mechanism": "LSM hooks on path-based operations. Rules specify (path, access_rights) pairs where access_rights are bitmask of LANDLOCK_ACCESS_FS_* flags.",
+        "operations_distinguishable": [
+          "read_file", "read_dir", "write_file", "truncate",
+          "execute", "make_char", "make_dir", "make_reg",
+          "make_sock", "make_fifo", "make_block", "make_sym",
+          "remove_dir", "remove_file", "refer"
+        ]
+      },
+      "subtree_rules": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Rules on a directory fd apply to the entire subtree. Access rights propagate to all descendants.",
+        "notes": "Cannot grant more access to a child than its parent allows."
+      },
+      "masking": {
+        "supported": false,
+        "notes": "Landlock denies access but does not hide paths. Directory listings still show denied entries (opendir succeeds, access to contents fails). Use mount namespace for true hiding."
+      },
+      "synthetic_mounts": {
+        "supported": false,
+        "notes": "Landlock operates on the existing filesystem topology. Mount manipulation requires mount namespaces."
+      }
+    },
+
+    "network": {
+      "outbound_filter": {
+        "supported": true,
+        "granularity": "per-port",
+        "enforcement": "kernel",
+        "mechanism": "LANDLOCK_ACCESS_NET_CONNECT_TCP rules on port numbers",
+        "notes": "Filters by TCP port only — no host/IP filtering at this layer. Host-level filtering requires network namespaces + iptables/nftables."
+      },
+      "inbound_block": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "LANDLOCK_ACCESS_NET_BIND_TCP controls which ports the process can bind"
+      },
+      "dns_filter": {
+        "supported": false,
+        "notes": "No DNS-level filtering. DNS is just TCP/UDP to port 53."
+      },
+      "localhost": {
+        "supported": false,
+        "notes": "Cannot distinguish localhost from remote at this layer."
+      }
+    },
+
+    "process": {
+      "spawn_control": {
+        "supported": false,
+        "notes": "Landlock does not restrict fork/clone. Use seccomp for spawn prevention."
+      },
+      "exec_whitelist": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "LANDLOCK_ACCESS_FS_EXECUTE on specific paths restricts which files can be exec'd",
+        "notes": "Indirect: achieved by granting execute only on whitelisted paths."
+      },
+      "signal_isolation": {
+        "supported": false,
+        "notes": "Landlock does not filter signals. Use PID namespaces or seccomp."
+      }
+    },
+
+    "resources": {
+      "_note": "Landlock does not manage resource limits. Use cgroups v2 for memory, CPU, process count, etc."
+    },
+
+    "ipc": {
+      "_note": "Landlock does not filter IPC. Use IPC namespaces or seccomp for IPC isolation."
+    },
+
+    "credentials": {
+      "store_isolation": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Deny read access to credential file paths (e.g., ~/.ssh, ~/.aws)",
+        "notes": "Indirect: achieved by not granting filesystem read access to credential directories."
+      }
+    },
+
+    "privilege": {
+      "escalation_prevention": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Landlock rulesets are inherited across exec and cannot be removed. no_new_privs is required before enforcing.",
+        "notes": "The no_new_privs bit prevents setuid escalation."
+      }
+    }
+  },
+
+  "limitations": [
+    "Network filtering is port-only — no IP/host filtering (need netfilter for that)",
+    "No path masking — denied paths are still visible in directory listings",
+    "No resource limits — requires cgroups v2",
+    "No process spawn prevention — requires seccomp",
+    "No signal or IPC filtering — requires namespaces or seccomp",
+    "Rules cannot be relaxed once applied; only further restricted",
+    "Already-opened file descriptors are not affected by new rules"
+  ]
+}

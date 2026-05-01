@@ -1,0 +1,66 @@
+{
+  // Bound policy for csv-data-analyzer on macOS arm64
+  // Derived from: composed_policies/01_python_data_analysis.jsonc
+
+  "version": "1.0",
+  "name": "csv-data-analyzer",
+  "description": "Bound policy for csv-data-analyzer on macOS arm64 (from composed policy 01)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "/opt/homebrew/bin/python3.10",                   "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/opt/homebrew/bin/python3",                      "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/opt/homebrew/Cellar/python@3.10",               "scope": "subtree", "allow": ["read"] },
+      { "path": "/opt/homebrew/Frameworks/Python.framework",      "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/opt/homebrew/lib/python3.10/site-packages",     "scope": "subtree", "allow": ["read"] },
+      { "path": "/usr/lib",                                       "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/etc/ssl/certs",                                 "scope": "subtree", "allow": ["read"] },
+      { "path": "/private/etc/ssl",                               "scope": "subtree", "allow": ["read"] },
+
+      { "path": "/workspace",   "scope": "subtree", "allow": ["read", "write", "create"],
+                                                     "ephemeral": true },
+      { "path": "/input",       "scope": "subtree", "allow": ["read"] },
+      { "path": "/output",      "scope": "subtree", "allow": ["write", "create"],
+                                                     "ephemeral": true },
+      { "path": "/tmp",         "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                     "ephemeral": true }
+    ],
+    "mask": [
+      "/Users/*/.ssh",
+      "/Users/*/.aws",
+      "/Users/*/.gnupg",
+      "/Users/*/Library/Keychains"
+    ]
+  },
+
+  "network": {
+    "mode": "none"
+  },
+
+  "resources": {
+    "max_memory_mb": 1024,
+    "max_cpu_percent": 200,
+    "max_processes": 1,
+    "max_wall_time_seconds": 90,
+    "max_open_files": 256
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "/opt/homebrew/bin:/usr/bin:/usr/local/bin",
+      "HOME": "/workspace",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONUNBUFFERED": "1"
+    }
+  },
+
+  "platform": {
+    "macos": {
+      "seatbelt": {
+        "profile": "deny-default",
+        "allow_dyld_cache": true
+      }
+    }
+  }
+}

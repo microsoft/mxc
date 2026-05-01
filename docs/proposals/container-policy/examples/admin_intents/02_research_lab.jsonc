@@ -1,0 +1,53 @@
+{
+  // Research lab policy for sandboxed workloads.
+  // Applies to research and development workloads (scenarios 03, 04).
+  //
+  // More permissive than corporate standard:
+  // - Allows LLM API access
+  // - Allows public-web access (researchers need to browse)
+  // - Allows crate/package registry access for compilation
+  // - Higher memory ceiling (4 GB) for compilation and LLM response handling
+  // - Longer wall time for complex builds and research tasks
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "research-lab-sandbox-policy",
+    "version": "1.0.0",
+    "description": "Research lab: allows LLM, web, package registries; 4 GB memory; longer time limits"
+  },
+
+  "requires": {
+    "network": [
+      {
+        "service": "llm-api",
+        "description": "LLM provider approved for research use"
+      },
+      {
+        "service": "public-web",
+        "protocol": "https",
+        "description": "Web access for research — may be narrowed by user consent"
+      },
+      {
+        "service": "crates-io",
+        "description": "Rust crate registry"
+      },
+      {
+        "service": "github-crate-sources",
+        "description": "GitHub-hosted crate source archives"
+      },
+      { "capability": "dns" }
+    ]
+  },
+
+  "constraints": {
+    "max_memory_mb": 4096,
+    "max_cpu_cores": 8,
+    "max_wall_time_seconds": 600,
+    "max_processes": 64,
+    "max_open_files": 8192,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  }
+}

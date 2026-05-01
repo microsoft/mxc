@@ -1,0 +1,40 @@
+{
+  // User consent for infrastructure health checks (scenario 06).
+  // The user approves all three internal services and the database
+  // credential. Network is restricted to the declared services only.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "internal-services-consent",
+    "version": "1.0.0",
+    "description": "User consent for infra health check — approves internal services and DB access"
+  },
+
+  "requires": {
+    "storage": [
+      { "class": "output_data", "access": "write" },
+      { "class": "workspace", "access": "read-write" },
+      { "class": "config", "access": "read" },
+      { "class": "temp", "access": "read-write" }
+    ],
+
+    "network": [
+      { "service": "internal-api-gateway", "protocol": "https" },
+      { "service": "internal-auth-service", "protocol": "https" },
+      { "service": "primary-database", "protocol": "tcp" },
+      { "capability": "dns" }
+    ],
+
+    "credentials": [
+      { "name": "DB_CONNECTION_STRING", "type": "connection-string" }
+    ]
+  },
+
+  "constraints": {
+    "max_wall_time_seconds": 90,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  }
+}

@@ -1,0 +1,64 @@
+{
+  // Bound policy for image-processor on macOS arm64
+  // Derived from: composed_policies/05_dotnet_image_processor.jsonc
+
+  "version": "1.0",
+  "name": "image-processor",
+  "description": "Bound policy for image-processor on macOS arm64 (from composed policy 05)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "/usr/local/share/dotnet/dotnet",          "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/local/share/dotnet/shared",          "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/usr/local/share/dotnet/packs",           "scope": "subtree", "allow": ["read"] },
+      { "path": "/usr/lib",                                "scope": "subtree", "allow": ["read", "execute"] },
+
+      { "path": "/app",         "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/input",       "scope": "subtree", "allow": ["read"] },
+      { "path": "/output",      "scope": "subtree", "allow": ["write", "create"],
+                                                     "ephemeral": true },
+      { "path": "/workspace",   "scope": "subtree", "allow": ["read", "write", "create"],
+                                                     "ephemeral": true },
+      { "path": "/config",      "scope": "subtree", "allow": ["read"] },
+      { "path": "/tmp",         "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                     "ephemeral": true }
+    ],
+    "mask": [
+      "/Users/*/.ssh",
+      "/Users/*/.aws",
+      "/Users/*/Library/Keychains"
+    ]
+  },
+
+  "network": {
+    "mode": "none"
+  },
+
+  "resources": {
+    "max_memory_mb": 2048,
+    "max_cpu_percent": 400,
+    "max_processes": 12,
+    "max_wall_time_seconds": 300,
+    "max_open_files": 1024
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "/usr/local/share/dotnet:/usr/bin:/usr/local/bin",
+      "HOME": "/workspace",
+      "DOTNET_CLI_HOME": "/workspace/.dotnet",
+      "DOTNET_NOLOGO": "1"
+    }
+  },
+
+  "platform": {
+    "macos": {
+      "seatbelt": {
+        "profile": "deny-default",
+        "allow_dyld_cache": true,
+        "allow_process_exec": true
+      }
+    }
+  }
+}

@@ -1,0 +1,97 @@
+{
+  // Capability Profile: Brokered File System (BFS)
+  //
+  // Kernel mini-filter driver (altitude 150,000) that intercepts filesystem
+  // operations for AppContainer / App Silo processes. Provides fine-grained
+  // per-path brokering with consent prompting, path masking, and named pipe
+  // redirection. Policies keyed by {UserSID, PackageSID}.
+  //
+  // Platform: Windows 10 22H2+ (10.0.22621+)
+  // Enforcement: Kernel (mini-filter in IO manager stack)
+  //
+  // NOTE: BFS is a filesystem-only primitive. It augments AppContainer's
+  // filesystem capabilities but does not cover network, process, or resources.
+
+  "profile_version": "1.0",
+  "primitive_id": "bfs",
+  "display_name": "Brokered File System (BFS)",
+  "platform": "windows",
+  "min_os_version": "10.0.22621",
+  "enforcement_level": "kernel",
+
+  "capabilities": {
+
+    "filesystem": {
+      "path_rules": {
+        "supported": true,
+        "granularity": "per-file",
+        "enforcement": "kernel",
+        "mechanism": "Mini-filter pre-operation callbacks intercept IRP_MJ_CREATE and subsequent operations. Policy evaluated per-path against {UserSID, PackageSID} rule table.",
+        "operations_distinguishable": ["read", "write", "execute", "create", "delete"],
+        "notes": "Four policy levels: AsSelf (full access as calling user), AsUser (user-level access), AsUserQueryOnly (read-only), AsSelfNoPrompt (silent full access)."
+      },
+      "subtree_rules": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Wildcard path matching in policy rules with subtree semantics"
+      },
+      "masking": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "Pre-operation callback returns STATUS_ACCESS_DENIED before the underlying filesystem sees the request. Directory enumeration filtering hides masked entries.",
+        "notes": "Unlike bare AppContainer (where denied paths are visible), BFS can make paths invisible to the sandboxed process."
+      },
+      "consent_prompting": {
+        "supported": true,
+        "enforcement": "user-space",
+        "mechanism": "RPC call to user-mode BFS broker service which presents a consent dialog. Grants are cached in the policy table with configurable TTL.",
+        "notes": "Requires an interactive session. Non-interactive scenarios use AsSelfNoPrompt or pre-configured grants."
+      },
+      "named_pipe_redirection": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "STATUS_REPARSE returned for pipe opens, redirecting to broker-controlled pipe endpoints"
+      },
+      "synthetic_mounts": {
+        "supported": false
+      }
+    },
+
+    "network": {
+      "_note": "BFS is filesystem-only. Network capabilities require a separate primitive (e.g., WFP, AppContainer network capabilities)."
+    },
+
+    "process": {
+      "_note": "BFS is filesystem-only. Process control requires a separate primitive."
+    },
+
+    "resources": {
+      "_note": "BFS is filesystem-only. Resource limits require a separate primitive (e.g., Job Objects)."
+    },
+
+    "ipc": {
+      "named_pipes": {
+        "supported": true,
+        "enforcement": "kernel",
+        "mechanism": "BFS intercepts named pipe opens and can redirect via STATUS_REPARSE to broker-controlled endpoints",
+        "notes": "This is filesystem-layer IPC control specifically for named pipes."
+      }
+    },
+
+    "credentials": {
+      "_note": "BFS does not manage credentials directly. It can mask paths to credential stores (e.g., hide .ssh directories)."
+    },
+
+    "privilege": {
+      "_note": "BFS does not manage privilege. It operates within the existing token's integrity level."
+    }
+  },
+
+  "limitations": [
+    "Filesystem-only primitive — must be combined with other primitives for full isolation",
+    "Policy storage uses custom block-based filesystem (16KB blocks) under %SystemRoot%\\System32\\config\\BFS\\",
+    "Consent prompting requires interactive session — headless scenarios need pre-configured policy",
+    "Policy lookup uses LRU cache with 5-minute idle eviction — cold starts may have latency",
+    "Only applies to AppContainer / App Silo processes (not arbitrary processes)"
+  ]
+}

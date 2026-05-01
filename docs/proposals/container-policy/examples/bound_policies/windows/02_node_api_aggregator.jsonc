@@ -1,0 +1,76 @@
+{
+  "version": "1.0",
+  "name": "multi-api-aggregator",
+  "description": "Bound policy for multi-api-aggregator on Windows x64 (from composed policy 02)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "C:\\Program Files\\nodejs\\node.exe",   "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "C:\\Program Files\\nodejs",             "scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Windows\\System32\\vcruntime140.dll","scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "C:\\Windows\\System32\\ucrtbase.dll",   "scope": "exact",   "allow": ["read", "execute"] },
+
+      { "path": "C:\\Sandbox\\Workspace",       "scope": "subtree", "allow": ["read", "write", "create"],
+                                                                     "ephemeral": true },
+      { "path": "C:\\Sandbox\\Workspace\\node_modules", "scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Sandbox\\Output",          "scope": "subtree", "allow": ["write", "create"],
+                                                                     "ephemeral": true },
+      { "path": "C:\\Sandbox\\Config",          "scope": "subtree", "allow": ["read"] },
+      { "path": "C:\\Sandbox\\Temp",            "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                                     "ephemeral": true },
+      { "path": "C:\\Sandbox\\Secrets\\WEATHER_API_KEY",   "scope": "exact", "allow": ["read"],
+                                                                              "ephemeral": true },
+      { "path": "C:\\Sandbox\\Secrets\\GEOCODING_API_KEY", "scope": "exact", "allow": ["read"],
+                                                                              "ephemeral": true }
+    ],
+    "mask": [
+      "C:\\Users",
+      "%USERPROFILE%\\.ssh",
+      "%USERPROFILE%\\.aws"
+    ]
+  },
+
+  "network": {
+    "mode": "rules",
+    "rules": [
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "api.weatherapi.com", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "api.opencagedata.com", "port": 443 }
+    ],
+    "allow_dns": true,
+    "allow_localhost": false
+  },
+
+  "resources": {
+    "max_memory_mb": 256,
+    "max_processes": 1,
+    "max_wall_time_seconds": 45,
+    "max_open_files": 256
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "C:\\Program Files\\nodejs;C:\\Windows\\System32",
+      "TEMP": "C:\\Sandbox\\Temp",
+      "TMP": "C:\\Sandbox\\Temp",
+      "USERPROFILE": "C:\\Sandbox\\Workspace",
+      "NODE_ENV": "production",
+      "WEATHER_API_KEY_FILE": "C:\\Sandbox\\Secrets\\WEATHER_API_KEY",
+      "GEOCODING_API_KEY_FILE": "C:\\Sandbox\\Secrets\\GEOCODING_API_KEY"
+    }
+  },
+
+  "platform": {
+    "windows": {
+      "appcontainer": {
+        "capabilities": ["internetClient"]
+      },
+      "bfs": {
+        "enabled": true,
+        "policy_broker": true
+      }
+    }
+  }
+}

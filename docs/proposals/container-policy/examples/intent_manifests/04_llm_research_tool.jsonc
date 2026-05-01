@@ -1,0 +1,82 @@
+{
+  // LLM-powered research agent tool. Receives a query, calls an LLM
+  // for reasoning, searches the web for supporting evidence, and
+  // produces a structured research report. Needs two external services,
+  // credentials for both, and moderate resources for LLM response
+  // handling.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "research-agent-tool",
+    "version": "3.0.0",
+    "description": "Agent tool: searches the web and synthesizes findings via LLM"
+  },
+
+  "requires": {
+    "runtime": {
+      "language": "python",
+      "min_version": "3.11",
+      "packages": ["httpx", "beautifulsoup4", "tiktoken"]
+    },
+
+    "storage": [
+      { "class": "workspace", "access": "read-write", "description": "Scratch space for downloaded pages and intermediate analysis" },
+      { "class": "output_data", "access": "write", "description": "Structured research report (JSON)" },
+      { "class": "temp", "access": "read-write", "persistence": "ephemeral" },
+      {
+        "class": "cache",
+        "access": "read-write",
+        "persistence": "discardable",
+        "description": "HTTP response cache — avoids re-fetching pages across invocations"
+      }
+    ],
+
+    "network": [
+      {
+        "service": "llm-api",
+        "protocol": "https",
+        "operations": ["completions"],
+        "auth": "injected-token",
+        "description": "LLM provider for reasoning and synthesis"
+      },
+      {
+        "service": "public-web",
+        "protocol": "https",
+        "description": "Fetch arbitrary web pages for research"
+      },
+      { "capability": "dns" }
+    ],
+
+    "process": {
+      "spawn": true,
+      "max_children": 4,
+      "signals": "self"
+    },
+
+    "ipc": "none",
+    "devices": "none",
+
+    "credentials": [
+      { "name": "LLM_API_KEY", "type": "api-key", "description": "LLM provider API key" }
+    ]
+  },
+
+  "constraints": {
+    "max_memory_mb": 1024,
+    "max_cpu_cores": 2,
+    "max_wall_time_seconds": 600,
+    "max_processes": 8,
+    "max_output_bytes": 5242880,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "inbound_network": "forbidden"
+  },
+
+  "claims": {
+    "deterministic": false,
+    "idempotent": false,
+    "no_credential_exfiltration": true,
+    "no_side_effects_beyond_output": true
+  }
+}

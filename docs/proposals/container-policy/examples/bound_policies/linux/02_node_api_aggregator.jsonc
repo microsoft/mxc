@@ -1,0 +1,74 @@
+{
+  "version": "1.0",
+  "name": "multi-api-aggregator",
+  "description": "Bound policy for multi-api-aggregator on Linux x86_64 (from composed policy 02)",
+
+  "filesystem": {
+    "rules": [
+      { "path": "/usr/bin/node",                      "scope": "exact",   "allow": ["read", "execute"] },
+      { "path": "/usr/lib/nodejs",                    "scope": "subtree", "allow": ["read"] },
+      { "path": "/usr/share/nodejs",                  "scope": "subtree", "allow": ["read"] },
+      { "path": "/usr/lib/x86_64-linux-gnu",          "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/lib/x86_64-linux-gnu",              "scope": "subtree", "allow": ["read", "execute"] },
+      { "path": "/etc/ssl/certs",                     "scope": "subtree", "allow": ["read"] },
+      { "path": "/etc/resolv.conf",                   "scope": "exact",   "allow": ["read"] },
+
+      { "path": "/workspace",           "scope": "subtree", "allow": ["read", "write", "create"],
+                                                             "ephemeral": true },
+      { "path": "/workspace/node_modules", "scope": "subtree", "allow": ["read"] },
+      { "path": "/output",              "scope": "subtree", "allow": ["write", "create"],
+                                                             "ephemeral": true },
+      { "path": "/config",              "scope": "subtree", "allow": ["read"] },
+      { "path": "/tmp",                 "scope": "subtree", "allow": ["read", "write", "create", "delete"],
+                                                             "ephemeral": true },
+      { "path": "/run/secrets/WEATHER_API_KEY",   "scope": "exact", "allow": ["read"],
+                                                                     "ephemeral": true },
+      { "path": "/run/secrets/GEOCODING_API_KEY", "scope": "exact", "allow": ["read"],
+                                                                     "ephemeral": true }
+    ],
+    "synthetic": {
+      "/dev": "minimal",
+      "/proc": "sandboxed",
+      "/tmp": "ephemeral"
+    }
+  },
+
+  "network": {
+    "mode": "rules",
+    "rules": [
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "api.weatherapi.com", "port": 443 },
+      { "direction": "outbound", "action": "connect", "protocol": "tcp",
+        "host": "api.opencagedata.com", "port": 443 }
+    ],
+    "allow_dns": true,
+    "allow_localhost": false
+  },
+
+  "resources": {
+    "max_memory_mb": 256,
+    "max_processes": 1,
+    "max_wall_time_seconds": 45,
+    "max_open_files": 256
+  },
+
+  "environment": {
+    "mode": "clean",
+    "set": {
+      "PATH": "/usr/bin:/usr/local/bin",
+      "HOME": "/workspace",
+      "NODE_ENV": "production",
+      "WEATHER_API_KEY_FILE": "/run/secrets/WEATHER_API_KEY",
+      "GEOCODING_API_KEY_FILE": "/run/secrets/GEOCODING_API_KEY"
+    }
+  },
+
+  "platform": {
+    "linux": {
+      "namespaces": {
+        "user": true, "mount": true, "pid": true,
+        "net": true, "ipc": true, "uts": true, "cgroup": true
+      }
+    }
+  }
+}

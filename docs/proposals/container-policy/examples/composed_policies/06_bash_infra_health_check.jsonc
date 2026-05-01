@@ -1,0 +1,92 @@
+{
+  // COMPOSED POLICY: infra-health-check
+  //
+  // Composition of:
+  //   Developer: intent_manifests/06_bash_infra_health_check.jsonc
+  //   User:      user_intents/04_internal_services_consent.jsonc
+  //   Admin:     admin_intents/03_production_ops.jsonc
+  //   System:    system_intents/* (common constraints)
+  //
+  // Key composition effects:
+  //   - network: All three internal services approved by all layers
+  //   - max_wall_time_seconds: min(120, 90, 180) = 90 (user tightened)
+  //   - max_memory_mb: min(256, 512) = 256 (author's limit wins)
+  //   - max_processes: min(16, 16) = 16 (author and admin agree)
+  //   - credentials: DB_CONNECTION_STRING approved by user and admin
+  //   - System constraints added
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "infra-health-check",
+    "version": "2.0.0",
+    "description": "Effective policy: infra health checks with internal services (composed from 4 layers)"
+  },
+
+  "requires": {
+    "runtime": {
+      "language": "bash",
+      "min_version": "5.0"
+    },
+
+    "tools": [
+      { "name": "curl", "access": "execute" },
+      { "name": "openssl", "access": "execute" },
+      { "name": "psql", "access": "execute" },
+      { "name": "jq", "access": "execute" }
+    ],
+
+    "storage": [
+      { "class": "output_data", "access": "write" },
+      { "class": "workspace", "access": "read-write" },
+      { "class": "config", "access": "read" },
+      { "class": "temp", "access": "read-write", "persistence": "ephemeral" }
+    ],
+
+    "network": [
+      { "service": "internal-api-gateway", "protocol": "https",
+        "operations": ["health-check"] },
+      { "service": "internal-auth-service", "protocol": "https",
+        "operations": ["health-check"] },
+      { "service": "primary-database", "protocol": "tcp",
+        "operations": ["query"], "auth": "injected-token" },
+      { "capability": "dns" }
+    ],
+
+    "process": {
+      "spawn": true,
+      "max_children": 8,
+      "exec": ["curl", "openssl", "psql", "jq", "bash"],
+      "signals": "self"
+    },
+
+    "ipc": "none",
+    "devices": "none",
+
+    "credentials": [
+      { "name": "DB_CONNECTION_STRING", "type": "connection-string" }
+    ]
+  },
+
+  "constraints": {
+    "max_memory_mb": 256,
+    "max_cpu_cores": 1,
+    "max_wall_time_seconds": 90,
+    "max_processes": 16,
+    "max_output_bytes": 1048576,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "modify_system_binaries": "forbidden",
+    "kernel_memory_access": "forbidden",
+    "writable_executable_pages": "forbidden",
+    "access_credential_stores": "forbidden",
+    "inbound_network": "forbidden"
+  },
+
+  "claims": {
+    "deterministic": false,
+    "idempotent": true,
+    "no_credential_exfiltration": true,
+    "no_side_effects_beyond_output": true
+  }
+}

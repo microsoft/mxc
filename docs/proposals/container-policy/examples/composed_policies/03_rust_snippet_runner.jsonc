@@ -1,0 +1,83 @@
+{
+  // COMPOSED POLICY: rust-snippet-runner
+  //
+  // Composition of:
+  //   Developer: intent_manifests/03_rust_snippet_runner.jsonc
+  //   User:      (delegated — no user intent file)
+  //   Admin:     admin_intents/02_research_lab.jsonc
+  //   System:    system_intents/* (common constraints)
+  //
+  // Key composition effects:
+  //   - No user narrowing — fully delegated
+  //   - network: [crates-io, github-crate-sources, dns] ∩ [same in admin] = approved
+  //   - max_memory_mb: min(4096, 4096) = 4096 (author and admin agree)
+  //   - max_wall_time_seconds: min(300, 600) = 300 (author's limit wins)
+  //   - max_processes: min(32, 64) = 32 (author's limit wins)
+  //   - System constraints added: no writable+executable pages, no privilege escalation, etc.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "rust-snippet-runner",
+    "version": "1.0.0",
+    "description": "Effective policy: Rust compilation and execution (composed from 3 layers, user delegated)"
+  },
+
+  "requires": {
+    "runtime": {
+      "language": "rust",
+      "min_version": "1.75"
+    },
+
+    "tools": [
+      { "name": "cargo", "access": "execute" },
+      { "name": "rustc", "access": "execute" }
+    ],
+
+    "storage": [
+      { "class": "input_data", "access": "read" },
+      { "class": "output_data", "access": "write" },
+      { "class": "workspace", "access": "read-write" },
+      { "class": "temp", "access": "read-write", "persistence": "ephemeral" },
+      { "class": "cache", "access": "read-write", "persistence": "discardable" }
+    ],
+
+    "network": [
+      { "service": "crates-io", "protocol": "https", "operations": ["download"] },
+      { "service": "github-crate-sources", "protocol": "https", "operations": ["download"] },
+      { "capability": "dns" }
+    ],
+
+    "process": {
+      "spawn": true,
+      "max_children": 16,
+      "exec": ["cargo", "rustc", "cc", "ld"],
+      "signals": "self"
+    },
+
+    "ipc": "none",
+    "devices": "none",
+    "credentials": []
+  },
+
+  "constraints": {
+    "max_memory_mb": 4096,
+    "max_cpu_cores": 4,
+    "max_wall_time_seconds": 300,
+    "max_processes": 32,
+    "max_open_files": 4096,
+    "max_output_bytes": 52428800,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "modify_system_binaries": "forbidden",
+    "kernel_memory_access": "forbidden",
+    "writable_executable_pages": "forbidden",
+    "access_credential_stores": "forbidden",
+    "inbound_network": "forbidden"
+  },
+
+  "claims": {
+    "deterministic": false,
+    "idempotent": false
+  }
+}

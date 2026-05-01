@@ -1,0 +1,84 @@
+{
+  // COMPOSED POLICY: research-agent-tool (LLM research)
+  //
+  // Composition of:
+  //   Developer: intent_manifests/04_llm_research_tool.jsonc
+  //   User:      user_intents/03_web_research_consent.jsonc
+  //   Admin:     admin_intents/02_research_lab.jsonc
+  //   System:    system_intents/* (common constraints)
+  //
+  // Key composition effects:
+  //   - network: Developer requests [llm-api, public-web, dns]
+  //     User restricts public-web to *.wikipedia.org,*.arxiv.org
+  //     Admin allows [llm-api, public-web, dns]
+  //     Effective: [llm-api, public-web (*.wikipedia.org,*.arxiv.org only), dns]
+  //   - max_wall_time_seconds: min(600, 300, 600) = 300 (user tightened)
+  //   - max_memory_mb: min(1024, 4096) = 1024 (author's limit wins)
+  //   - NOTE: public-web is narrowed by user, not removed. Admin permits it for research.
+
+  "manifest_version": "1.0",
+
+  "metadata": {
+    "name": "research-agent-tool",
+    "version": "3.0.0",
+    "description": "Effective policy: LLM research with restricted web (composed from 4 layers)"
+  },
+
+  "requires": {
+    "runtime": {
+      "language": "python",
+      "min_version": "3.11",
+      "packages": ["httpx", "beautifulsoup4", "tiktoken"]
+    },
+
+    "storage": [
+      { "class": "workspace", "access": "read-write" },
+      { "class": "output_data", "access": "write" },
+      { "class": "temp", "access": "read-write", "persistence": "ephemeral" },
+      { "class": "cache", "access": "read-write", "persistence": "discardable" }
+    ],
+
+    "network": [
+      { "service": "llm-api", "protocol": "https",
+        "operations": ["completions"], "auth": "injected-token" },
+      { "service": "public-web", "protocol": "https",
+        "scope": "*.wikipedia.org,*.arxiv.org" },
+      { "capability": "dns" }
+    ],
+
+    "process": {
+      "spawn": true,
+      "max_children": 4,
+      "signals": "self"
+    },
+
+    "ipc": "none",
+    "devices": "none",
+
+    "credentials": [
+      { "name": "LLM_API_KEY", "type": "api-key" }
+    ]
+  },
+
+  "constraints": {
+    "max_memory_mb": 1024,
+    "max_cpu_cores": 2,
+    "max_wall_time_seconds": 300,
+    "max_processes": 8,
+    "max_output_bytes": 5242880,
+    "persistent_storage": "forbidden",
+    "privilege_escalation": "forbidden",
+    "modify_system_binaries": "forbidden",
+    "kernel_memory_access": "forbidden",
+    "writable_executable_pages": "forbidden",
+    "access_credential_stores": "forbidden",
+    "inbound_network": "forbidden"
+  },
+
+  "claims": {
+    "deterministic": false,
+    "idempotent": false,
+    "no_credential_exfiltration": true,
+    "no_side_effects_beyond_output": true
+  }
+}
