@@ -481,7 +481,7 @@ impl ScriptRunner for NanVixScriptRunner {
 
         // Build staging directory with script and filesystem policy paths.
         let staging_root = std::env::temp_dir().join("mxc-microvm");
-        let staging = match crate::microvm_staging::StagingDir::new(
+        let mut staging = match crate::microvm_staging::StagingDir::new(
             staging_root,
             &request.script_code,
             &request.policy.readwrite_paths,
@@ -532,9 +532,14 @@ impl ScriptRunner for NanVixScriptRunner {
         // Copy back RW filesystem changes on normal process exit.
         if Self::should_copy_back(&response) {
             if let Err(e) = staging.copy_back_to_host() {
+                let preserved = staging
+                    .preserved_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
                 let err = NanVixError::Runtime(format!(
-                    "failed to copy back microvm filesystem changes: {}",
-                    e
+                    "failed to copy back microvm filesystem changes: {}. \
+                     Staged files preserved at: {}",
+                    e, preserved
                 ));
                 let _ = writeln!(logger, "{}", err);
                 return err.to_response();

@@ -100,6 +100,8 @@ pub struct StagingDir {
     path_map: BTreeMap<String, String>,
     rw_mappings: Vec<RwMapping>,
     size_bytes: u64,
+    /// When true, `Drop` skips cleanup so the staging dir can be recovered.
+    preserve: bool,
 }
 
 impl StagingDir {
@@ -192,6 +194,7 @@ impl StagingDir {
             path_map,
             rw_mappings,
             size_bytes,
+            preserve: false,
         })
     }
 
@@ -206,11 +209,24 @@ impl StagingDir {
     }
 
     /// Copies all read-write staged paths back to their original host locations.
-    pub fn copy_back_to_host(&self) -> Result<(), StagingError> {
+    /// On failure, marks the staging dir as preserved so `Drop` won't delete it.
+    pub fn copy_back_to_host(&mut self) -> Result<(), StagingError> {
         for mapping in &self.rw_mappings {
-            copy_back_mapping(mapping)?;
+            if let Err(e) = copy_back_mapping(mapping) {
+                self.preserve = true;
+                return Err(e);
+            }
         }
         Ok(())
+    }
+
+    /// Returns the staging directory path (useful for recovery messages).
+    pub fn preserved_path(&self) -> Option<&Path> {
+        if self.preserve {
+            Some(&self.path)
+        } else {
+            None
+        }
     }
 
     /// Returns additional staging overhead in milliseconds.
@@ -222,6 +238,9 @@ impl StagingDir {
 
 impl Drop for StagingDir {
     fn drop(&mut self) {
+        if self.preserve {
+            return;
+        }
         let _ = remove_dir_all_force(&self.path);
     }
 }
@@ -617,7 +636,7 @@ mod tests {
         write_file(&source.join("data.txt"), "before");
 
         let rw = vec![source.display().to_string()];
-        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
         let staged_file = staging.path().join(RW_DIR).join("work").join("data.txt");
 
         // Mutate the staged copy — original must remain unchanged.
@@ -643,7 +662,7 @@ mod tests {
         write_file(&source_file, "before");
 
         let rw = vec![source_file.display().to_string()];
-        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
         // slug for "payload.txt" is "payload_txt" (dot sanitized to underscore)
         let staged_file = staging
             .path()
@@ -668,7 +687,7 @@ mod tests {
         write_file(&source.join("deleted.txt"), "remove me");
 
         let rw = vec![source.display().to_string()];
-        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
         let staged_dir = staging.path().join(RW_DIR).join("work");
 
         fs::remove_file(staged_dir.join("deleted.txt")).unwrap();
