@@ -445,7 +445,11 @@ impl WSLContainerRunner {
         }
         let _ = writeln!(logger, "[WSLC] Session created");
 
-        Ok(WslcSessionGuard::from_raw(session, sdk.WslcReleaseSession))
+        Ok(WslcSessionGuard::from_raw(
+            session,
+            sdk.WslcTerminateSession,
+            sdk.WslcReleaseSession,
+        ))
     }
 
     /// Step 4: Check if image exists, import from tar, or pull from registry.
@@ -1025,7 +1029,7 @@ impl WSLContainerRunner {
             drop(err_msg);
         }
 
-        let _ = (sdk.WslcTerminateSession)(session_guard.as_raw());
+        // Session termination is handled by WslcSessionGuard's Drop impl.
         let _ = writeln!(logger, "[WSLC] Cleanup complete");
 
         let wait_ms = if request.script_timeout > 0 {
