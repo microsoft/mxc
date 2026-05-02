@@ -33,7 +33,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $TestConfigs = Join-Path $RepoRoot "test_configs"
 
-# Find binary — prefer explicit path, then probe target-specific and default dirs.
+# Find binary -- prefer explicit path, then probe target-specific and default dirs.
 $Target = "x86_64-pc-windows-msvc"
 $Profile = if ($Debug) { "debug" } else { "release" }
 
@@ -99,7 +99,7 @@ function Run-WslcTest {
     $isCrash = ($exitCode -lt -1000000000) -or ($exitCode -eq -2147483645)
     if ($isCrash) {
         Write-Host "" # newline before recovery message
-        Write-Host "    [recovery] Process crashed (exit $exitCode) — restarting WSL..." -ForegroundColor Yellow
+        Write-Host "    [recovery] Process crashed (exit $exitCode) -- restarting WSL..." -ForegroundColor Yellow
         $null = wsl --shutdown 2>&1
         Start-Sleep 15
     }
@@ -127,6 +127,10 @@ function Run-WslcTest {
             Write-Host "    > $($line.TrimEnd())" -ForegroundColor Gray
         }
     }
+
+    # Brief delay between tests to let the WSLC runtime fully release
+    # session resources (mounts, networking) before the next test starts.
+    Start-Sleep 2
 
     return @{ Name = $ConfigFile; Pass = $pass; Skipped = $false; Reason = $reason }
 }
