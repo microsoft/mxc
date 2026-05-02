@@ -542,7 +542,9 @@ impl Drop for WslcSessionGuard {
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe {
-                eprintln!("[WSLC][debug] WslcSessionGuard dropped -- terminating and releasing session");
+                eprintln!(
+                    "[WSLC][debug] WslcSessionGuard dropped -- terminating and releasing session"
+                );
                 let _ = (self.terminate_fn)(self.handle);
                 (self.release_fn)(self.handle);
             }

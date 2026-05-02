@@ -93,6 +93,17 @@ function Run-WslcTest {
     $exitCode = $LASTEXITCODE
     $ErrorActionPreference = $prevPref
 
+    # Access violation (0xC0000005) or other hard crashes corrupt WSL runtime
+    # state, causing subsequent WslcCreateSession calls to fail with
+    # ERROR_SHARING_VIOLATION. Recover by restarting WSL.
+    $isCrash = ($exitCode -lt -1000000000) -or ($exitCode -eq -2147483645)
+    if ($isCrash) {
+        Write-Host "" # newline before recovery message
+        Write-Host "    [recovery] Process crashed (exit $exitCode) — restarting WSL..." -ForegroundColor Yellow
+        $null = wsl --shutdown 2>&1
+        Start-Sleep 15
+    }
+
     $pass = $true
     $reason = ""
 
@@ -154,9 +165,9 @@ Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -OutputContains "Starting long task"))
 
 # Summary
-$passed = ($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count
-$failed = ($results | Where-Object { -not $_.Pass -and -not $_.Skipped }).Count
-$skipped = ($results | Where-Object { $_.Skipped }).Count
+$passed = @($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count
+$failed = @($results | Where-Object { -not $_.Pass -and -not $_.Skipped }).Count
+$skipped = @($results | Where-Object { $_.Skipped }).Count
 $total = $results.Count
 $executed = $passed + $failed
 
