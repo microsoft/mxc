@@ -323,14 +323,9 @@ impl ScriptRunner for WSLContainerRunner {
     }
 }
 
-/// Result of the init phase: COM initialized and SDK loaded.
-struct InitResult {
-    sdk: WslcSdk,
-}
-
 impl WSLContainerRunner {
     /// Step 0: Initialize COM and load the WSLC SDK at runtime.
-    unsafe fn init_and_load_sdk(logger: &mut Logger) -> Result<InitResult, ScriptResponse> {
+    unsafe fn init_and_load_sdk(logger: &mut Logger) -> Result<WslcSdk, ScriptResponse> {
         let com_hr = windows::Win32::System::Com::CoInitializeEx(
             None,
             windows::Win32::System::Com::COINIT_MULTITHREADED,
@@ -364,7 +359,7 @@ impl WSLContainerRunner {
         }
         let _ = writeln!(logger, "[WSLC] Runtime check passed");
 
-        Ok(InitResult { sdk })
+        Ok(sdk)
     }
 
     /// Step 2-3: Configure session settings and create the session.
@@ -501,6 +496,11 @@ impl WSLContainerRunner {
         } else if let Some(tar_path) = &self.config.image_tar_path {
             Self::import_image_from_tar(sdk, session, image_name, tar_path, logger)?;
         } else {
+            // Pull from registry
+            // TODO: Move image pulling to a setup script (scripts/setup-wslc.ps1) as
+            // described in docs/wsl-container-support-plan.md Phase 5. MXC is an execution
+            // layer — image management should be handled externally. For now, auto-pull is
+            // used during development/testing.
             let _ = writeln!(
                 logger,
                 "[WSLC] Image '{}' not found locally, attempting pull...",
@@ -691,7 +691,7 @@ impl WSLContainerRunner {
         let mut exit_code: i32 = -1;
         let hr = (sdk.WslcGetProcessExitCode)(process_guard.as_raw(), &mut exit_code);
         if hr != S_OK && !timed_out {
-            let _ = writeln!(logger, "[WSLC] Warning: WslcGetProcessExitCode failed");
+            return Err(sdk_error("WslcGetProcessExitCode failed", hr, ""));
         }
         if timed_out {
             let _ = writeln!(logger, "[WSLC] Process killed after timeout");
@@ -744,7 +744,7 @@ impl WSLContainerRunner {
         let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
 
         // -- Init: COM + SDK + preflight --
-        let InitResult { sdk } = match Self::init_and_load_sdk(logger) {
+        let sdk = match Self::init_and_load_sdk(logger) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -769,11 +769,19 @@ impl WSLContainerRunner {
             return sdk_error("WslcInitProcessSettings failed", hr, "");
         }
 
+        // Register I/O callbacks to capture stdout/stderr.
+        // We use Arc so the callback context stays alive even if the function
+        // returns early (e.g., container creation fails after callbacks are
+        // registered). The SDK may still invoke callbacks on its internal
+        // threads; Arc ensures the memory isn't freed until all references
+        // (including the one held by the SDK via raw pointer) are dropped.
         let io_ctx = Arc::new(IoContext {
             stdout: Arc::new(Mutex::new(Vec::new())),
             stderr: Arc::new(Mutex::new(Vec::new())),
             exited: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
         });
+        // Give the SDK an Arc reference via raw pointer. We must reconstruct
+        // the Arc later to avoid leaking the reference count.
         let io_ctx_for_sdk = Arc::clone(&io_ctx);
         let io_ctx_raw = Arc::into_raw(io_ctx_for_sdk) as *mut c_void;
         let _io_ctx_guard = IoCtxRawGuard::new(io_ctx_raw);
@@ -850,6 +858,9 @@ impl WSLContainerRunner {
             return sdk_error("WslcInitContainerSettings failed", hr, "");
         }
 
+        // TODO: Port mappings (WslcConfig.port_mappings) are parsed but not yet applied.
+        // Requires adding WslcSetContainerSettingsPortMappings and WslcContainerPortMapping
+        // bindings. See wslcsdk.h lines 120-128, 183-186.
         let (mounts, warnings) = policy_mapping::build_volume_mounts(
             &request.policy.readwrite_paths,
             &request.policy.readonly_paths,
