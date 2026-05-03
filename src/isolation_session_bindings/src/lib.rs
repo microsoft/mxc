@@ -4,14 +4,14 @@
 //! Generated WinRT bindings for the IsoEnvBroker Session API.
 //!
 //! This crate contains Rust projections generated from the
-//! `Windows.AI.IsolationEnvironment.Session` WinMD using `windows-bindgen`.
+//! `Windows.AI.IsolationSession` WinMD using `windows-bindgen`.
 //!
 //! To regenerate:
 //! ```sh
 //! cargo run --manifest-path tools/generate-isolation-session-bindings/Cargo.toml -- <winmd-path>
 //! ```
 //!
-//! See `external/windows-sdk/isolation-environment-session/GENERATION_INFO.toml`
+//! See `external/windows-sdk/isolation-session/GENERATION_INFO.toml`
 //! for provenance details.
 
 #[allow(

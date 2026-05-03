@@ -7,8 +7,8 @@ This directory tracks provenance for the generated Rust bindings in
 
 The WinMD file is built from the OS repo (`os.2020`):
 
-- **IDL source**: `src/onecoreuap/windows/core/isoenvbroker/src/published/Windows.AI.IsolationEnvironment.idl`
-- **Build output**: `obj/<flavor>/onecoreuap/windows/core/isoenvbroker/src/published/objchk/amd64/windows.ai.isolationenvironment.winmd`
+- **IDL source**: `src/onecoreuap/windows/core/isoenvbroker/src/client/Windows.AI.IsolationSession.idl`
+- **Build output**: `obj/amd64chk/onecoreuap/windows/core/isoenvbroker/src/client/objchk/amd64/windows.ai.isolationsession.winmd`
 
 ## Regenerating Bindings
 
