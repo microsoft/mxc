@@ -11,8 +11,8 @@
 
 .DESCRIPTION
     - Locates wxc-exec.exe (built with --features isolation_session)
-    - Runs each test config via wxc-exec, validates exit codes and stdout
-      content
+    - Runs each automated test config via wxc-exec, validates exit codes
+      and stdout content
     - Reports pass/fail summary
 
     This script must run INTERACTIVELY on the test host. The IsoEnvBroker
@@ -20,6 +20,25 @@
     invocations fail with Access Denied. Copy wxc-exec.exe, the test
     configs, and this script to the host, then run it directly in
     cmd.exe or PowerShell on that host.
+
+    Automated configs (asserted by this script):
+      - isolation_session_hello.json — env vars + working dir + agent name
+      - isolation_session_exit42.json — exit code propagation
+      - isolation_session_stderr.json — separate stderr in non-ConPTY mode
+      - isolation_session_stdout_stderr_interleaved.json — interleaved streams
+      - isolation_session_timeout.json — broker terminates with exit code 1
+
+    Manual smoke configs (NOT asserted — observe the output yourself):
+      - isolation_session_streaming_smoke.json — output appears with delays
+        rather than a burst at exit; verifies Commit 1 streaming.
+        Run from cmd.exe directly (not redirected) so wxc-exec sees a TTY:
+            wxc-exec.exe --experimental isolation_session_streaming_smoke.json
+      - isolation_session_powershell_interactive.json — launches
+        powershell.exe in the isolation session; type commands at the prompt
+        (e.g. `Get-Date`, `whoami`, `exit 7`) and verify input forwarding +
+        ConPTY rendering + exit-code propagation. Requires a real cmd.exe
+        console (interactive on the VM desktop):
+            wxc-exec.exe --experimental isolation_session_powershell_interactive.json
 
 .PARAMETER WxcExePath
     Path to wxc-exec.exe. Default probes target-specific then default
@@ -151,6 +170,19 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
     -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test", "-IEB-")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
+# stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
+# Both reach this script's captured output via wxc-exec's `2>&1` merge above; the assertion
+# proves stderr is being relayed (not dropped) on the non-ConPTY plain-pipes path.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_stderr.json" `
+    -OutputContains @("MARKER_STDOUT", "MARKER_STDERR")))
+# Interleaved streams: agent writes alternating stdout/stderr lines. All five markers
+# must appear in the captured output (proves streams aren't crossed or dropped mid-run).
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_interleaved.json" `
+    -OutputContains @("OUT_A", "ERR_A", "OUT_B", "ERR_B", "OUT_C")))
+# Timeout: ping runs ~30s; broker timer set to 1500ms forces TerminateProcess(handle, 1)
+# (verified at IsolationSessionWorkerProcess.cpp:153-170 in the OS repo). Exit code = 1.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
+    -ExpectedExit 1))
 
 # Summary
 $passed = ($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count
