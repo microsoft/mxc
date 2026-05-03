@@ -716,6 +716,7 @@ version = "0.1.0"
 dependencies = [
  "semver",
  "windows",
+ "windows-collections",
  "windows-core",
  "windows-future",
 ]

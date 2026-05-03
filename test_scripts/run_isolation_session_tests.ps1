@@ -4,9 +4,10 @@
 <#
 .SYNOPSIS
     Runs IsolationSession E2E tests. Requires a Windows host with the
-    IsoEnvBroker service exposing the
-    Windows.AI.IsolationEnvironment.Session API
-    (Feature_IsoBrokerSessionApis must be enabled).
+    in-proc Windows.AI.IsolationSession IsoSessionOps APIs available
+    (IsoSessionApp.dll registered, Feature_IsoBrokerSessionApis enabled,
+    and Feature_IsoBrokerCommandLineSessions enabled for the Composable
+    config-id path).
 
 .DESCRIPTION
     - Locates wxc-exec.exe (built with --features isolation_session)

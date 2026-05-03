@@ -12,7 +12,7 @@ fn main() {
         .join("..")
         .join("external")
         .join("windows-sdk")
-        .join("isolation-environment-session")
+        .join("isolation-session")
         .join("GENERATION_INFO.toml");
 
     // If the provenance file doesn't exist yet (e.g., first-time setup before

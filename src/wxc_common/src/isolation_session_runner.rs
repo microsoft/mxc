@@ -3,14 +3,15 @@
 
 //! `IsolationSessionRunner` — executes scripts in an IsoEnvBroker Isolation Session.
 //!
-//! Uses the `Windows.AI.IsolationEnvironment.Session` WinRT API to create an
-//! isolated Windows session with a dedicated agent user account and run
-//! processes within it.
+//! Uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API to
+//! create an isolated Windows session with a dedicated agent user account
+//! and run processes within it.
 //!
 //! This module has two layers:
-//! - `IsolationSessionManager`: reusable core, methods map 1:1 to the Session API lifecycle.
-//! - `IsolationSessionRunner`: thin `ScriptRunner` impl for v0.1 that calls all lifecycle
-//!   steps per invocation.
+//! - `IsolationSessionManager`: reusable core, methods map 1:1 to the
+//!   `IsoSessionOps` granular lifecycle.
+//! - `IsolationSessionRunner`: thin `ScriptRunner` impl for v0.1 that runs
+//!   the full lifecycle per invocation.
 
 use std::fmt::Write;
 
@@ -18,24 +19,38 @@ use crate::logger::Logger;
 use crate::models::{CodexRequest, IsolationSessionConfigurationId, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 use isolation_session_bindings::bindings::{
-    IsolationSessionClient, IsolationSessionConfigurationId as BindingsConfigurationId,
-    IsolationSessionOperationStatus, IsolationSessionProvisionLifetimePolicy,
-    IsolationSessionProvisionOptions, IsolationSessionProvisionStatus,
-    IsolationSessionRegistrationStatus, IsolationSessionWorkerProcessCreateOptions,
-    IsolationSessionWorkerProcessOperationStatus, IsolationSessionWorkerProcessRedirectFlags,
+    IsoSessionConfigId, IsoSessionError, IsoSessionOps, IsoSessionProcess,
+    IsoSessionProcessOptions, IsoSessionProcessResult, IsoSessionResult, IsoSessionUserResult,
 };
-use windows::Win32::Foundation::{
-    CloseHandle, CLASS_E_CLASSNOTAVAILABLE, HANDLE, REGDB_E_CLASSNOTREG,
-};
+use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, HANDLE, REGDB_E_CLASSNOTREG};
 use windows::Win32::Storage::FileSystem::ReadFile;
+use windows_core::HSTRING;
 
-impl From<IsolationSessionConfigurationId> for BindingsConfigurationId {
+// -- Identifiers -------------------------------------------------------------
+
+/// Cohort registration ID used with the `IsoSessionOps` wrapper.
+///
+/// The wrapper hardcodes `L"regid"` internally for every agent-name-keyed op
+/// (`ApiIsoSessionOps.cpp` lines 80, 90, 106, 115, 132, 187 in the OS repo),
+/// so callers must register with the literal `"regid"` or subsequent calls
+/// hit the wrong cohort.
+const REGISTRATION_ID: &str = "regid";
+
+/// Provision identifier scoping the agent user across the lifecycle.
+///
+/// Reused as the `agentName` parameter on every subsequent op — the wrapper
+/// aliases agentName to provisionId at the COM layer (per the comment in
+/// `CommandSession.cpp:64` in the OS repo, `IsoSessionOps` callers pass
+/// `provisionId` where the IDL says `agentName`).
+const PROVISION_ID: &str = "wxc-provid";
+
+impl From<IsolationSessionConfigurationId> for IsoSessionConfigId {
     fn from(value: IsolationSessionConfigurationId) -> Self {
         match value {
-            IsolationSessionConfigurationId::Small => BindingsConfigurationId::Small,
-            IsolationSessionConfigurationId::Medium => BindingsConfigurationId::Medium,
-            IsolationSessionConfigurationId::Large => BindingsConfigurationId::Large,
-            IsolationSessionConfigurationId::CommandLine => BindingsConfigurationId::CommandLine,
+            IsolationSessionConfigurationId::Small => IsoSessionConfigId::Small,
+            IsolationSessionConfigurationId::Medium => IsoSessionConfigId::Medium,
+            IsolationSessionConfigurationId::Large => IsoSessionConfigId::Large,
+            IsolationSessionConfigurationId::Composable => IsoSessionConfigId::Composable,
         }
     }
 }
@@ -48,8 +63,9 @@ pub enum IsolationSessionError {
     /// The caller-supplied container policy contains a field this backend
     /// does not support (filesystem rules, network rules, proxy).
     Policy(String),
-    /// The IsoEnvBroker Session API is not available on this host
-    /// (`Feature_IsoBrokerSessionApis` disabled or service not present).
+    /// The in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API is
+    /// not available on this host (DLL not registered or
+    /// `Feature_IsoBrokerSessionApis` disabled).
     ServiceUnavailable(String),
     /// A broker-side lifecycle step (register / provision / start / exec /
     /// stop / deprovision / unregister) returned a failure.
@@ -114,9 +130,12 @@ pub(crate) fn validate_policy(request: &CodexRequest) -> Result<(), IsolationSes
     Ok(())
 }
 
-// -- Process options (intermediate struct for testability) --------------------
+// -- Process options (intermediate struct for testability) -------------------
 
-/// Redirect flags for worker process I/O.
+/// Redirect flags for worker process I/O. The bitfield is internal to MXC;
+/// the conversion to per-stream booleans on `IsoSessionProcessOptions`
+/// happens inside `build_iso_process_options`.
+pub(crate) const REDIRECT_STDIN: u32 = 0x1;
 pub(crate) const REDIRECT_STDOUT: u32 = 0x2;
 pub(crate) const REDIRECT_STDERR: u32 = 0x4;
 
@@ -135,7 +154,7 @@ pub(crate) struct ProcessOptions {
     pub working_directory: String,
     /// Environment variables as (name, value) pairs.
     pub env_vars: Vec<(String, String)>,
-    /// Bitfield of I/O redirect flags.
+    /// Bitfield of I/O redirect flags (`REDIRECT_STDIN | REDIRECT_STDOUT | REDIRECT_STDERR`).
     pub redirect_flags: u32,
 }
 
@@ -179,147 +198,154 @@ pub(crate) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
 
 // -- Service availability check ----------------------------------------------
 
-/// Activates the IsoEnvBroker Session API factory and verifies the service
-/// is available on this OS build.
+/// Activates the in-proc `IsoSessionOps` factory and returns the instance.
 ///
-/// Returns `Ok(())` if the service is available, or a `ServiceUnavailable`
-/// variant if not. This is called once from `IsolationSessionManager::new()`.
-pub(crate) fn check_service_available() -> Result<(), IsolationSessionError> {
-    // Try the lightest possible call: RegisterClient with an empty registration id.
-    // If the WinRT activation factory is not registered (feature disabled),
-    // this fails with CLASS_E_CLASSNOTAVAILABLE or similar.
-    match IsolationSessionClient::RegisterClient(&windows_core::HSTRING::new()) {
-        Ok(_) => Ok(()),
+/// Returns the activated `IsoSessionOps` on success, or a
+/// `ServiceUnavailable` variant if not. This is called once from
+/// `IsolationSessionManager::new()`.
+pub(crate) fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError>
+{
+    match IsoSessionOps::new() {
+        Ok(ops) => Ok(ops),
         Err(e) => {
             let code = e.code();
-            // CLASS_E_CLASSNOTAVAILABLE / REGDB_E_CLASSNOTREG indicate the
-            // service/feature is not present on this OS build.
             if code == CLASS_E_CLASSNOTAVAILABLE || code == REGDB_E_CLASSNOTREG {
                 Err(IsolationSessionError::ServiceUnavailable(format!(
-                    "IsoEnvBroker Session API is not available on this OS build (HRESULT: {:#010x}). \
-                     Ensure Feature_IsoBrokerSessionApis is enabled.",
+                    "in-proc Windows.AI.IsolationSession IsoSessionOps API is not available \
+                     on this OS build (HRESULT: {:#010x}). Ensure IsoSessionApp.dll is \
+                     registered and Feature_IsoBrokerSessionApis is enabled.",
                     code.0 as u32
                 )))
             } else {
-                // Other errors (permission denied, cohort check failure, etc.)
-                // mean the service IS present but the call failed for another reason.
-                // That's fine — the service is available.
-                Ok(())
+                Err(IsolationSessionError::ServiceUnavailable(format!(
+                    "IsoSessionOps activation failed (HRESULT: {:#010x}): {}",
+                    code.0 as u32, e
+                )))
             }
         }
     }
 }
 
+// -- Helper: structured error checks -----------------------------------------
+
+/// Formats an `IsoSessionError` (the WinRT result type) into a lifecycle
+/// error string with HRESULT, message, and remediation hint where present.
+fn format_iso_error(op: &str, err: &IsoSessionError) -> IsolationSessionError {
+    let msg = err.Message().map(|h| h.to_string()).unwrap_or_default();
+    let code = err.Code().map(|h| h.0 as u32).unwrap_or(0);
+    let remediation = err.Remediation().map(|h| h.to_string()).unwrap_or_default();
+    let suffix = if remediation.is_empty() {
+        String::new()
+    } else {
+        format!(" — remediation: {}", remediation)
+    };
+    lifecycle_err(format!(
+        "{} failed: {} (HRESULT: {:#010x}){}",
+        op, msg, code, suffix
+    ))
+}
+
+/// Checks the `Error` property of an `IsoSessionResult` and returns
+/// `Ok(())` when there's no error, or a lifecycle error with the formatted
+/// details otherwise.
+fn check_result(result: &IsoSessionResult, op: &str) -> Result<(), IsolationSessionError> {
+    let err = result
+        .Error()
+        .map_err(|e| lifecycle_err(format!("{}: get Error failed: {}", op, e)))?;
+    let is_error = err
+        .IsError()
+        .map_err(|e| lifecycle_err(format!("{}: get IsError failed: {}", op, e)))?;
+    if is_error {
+        Err(format_iso_error(op, &err))
+    } else {
+        Ok(())
+    }
+}
+
 // -- IsolationSessionManager (lifecycle core) --------------------------------
 
-/// Manages the IsoEnvBroker Session API lifecycle. Methods map 1:1 to the
-/// Session API steps.
+/// Manages the `IsoSessionOps` lifecycle. Methods map 1:1 to the granular
+/// API steps.
 pub struct IsolationSessionManager {
-    /// Cohort/registration identifier passed to every Session API call.
-    /// The broker accepts an empty `HSTRING` as the default cohort, which
-    /// is what the v0.1 one-shot runner uses.
-    registration_id: windows_core::HSTRING,
-    /// Provision identifier scoping the agent user across the lifecycle
-    /// steps. An empty `HSTRING` selects the broker's single default slot
-    /// per registration — sufficient for the v0.1 single-session-per-process
-    /// lifecycle.
-    provision_id: windows_core::HSTRING,
+    /// Cohort/registration identifier used in `RegisterApp` / `AddUserAsync`
+    /// / `UnregisterAppAsync`. Pegged to the literal `"regid"` per the
+    /// wrapper's internal hardcode.
+    registration_id: HSTRING,
+    /// Provision identifier. Used as the `provisionId` argument to
+    /// `AddUserAsync` and as the `agentName` argument to every subsequent
+    /// op (the wrapper aliases them at the COM layer).
+    provision_id: HSTRING,
+    /// The activated `IsoSessionOps` instance. Held for the lifetime of the
+    /// manager so the WinRT factory is reused across calls.
+    ops: IsoSessionOps,
 }
 
 impl IsolationSessionManager {
-    /// Activate the WinRT factory and verify the service is available.
+    /// Activates the `IsoSessionOps` factory and verifies the service is
+    /// available.
     pub fn new() -> Result<Self, IsolationSessionError> {
-        check_service_available()?;
+        let ops = check_service_available_and_activate()?;
         Ok(Self {
-            registration_id: windows_core::HSTRING::new(),
-            provision_id: windows_core::HSTRING::new(),
+            registration_id: HSTRING::from(REGISTRATION_ID),
+            provision_id: HSTRING::from(PROVISION_ID),
+            ops,
         })
     }
 
-    /// Step 0: Register as a client with the IsoEnvBroker service.
+    /// Step 0: Register the app with the broker.
     pub fn register_client(&self) -> Result<(), IsolationSessionError> {
-        let status = IsolationSessionClient::RegisterClient(&self.registration_id)
-            .map_err(|e| lifecycle_err(format!("RegisterClient failed: {}", e)))?;
-
-        match status {
-            IsolationSessionRegistrationStatus::New
-            | IsolationSessionRegistrationStatus::AlreadyRegistered
-            | IsolationSessionRegistrationStatus::Updated => Ok(()),
-            _ => Err(lifecycle_err(format!(
-                "RegisterClient returned unexpected status: {}",
-                status.0
-            ))),
-        }
+        let result = self
+            .ops
+            .RegisterApp(&self.registration_id)
+            .map_err(|e| lifecycle_err(format!("RegisterApp call failed: {}", e)))?;
+        check_result(&result, "RegisterApp")
     }
 
-    /// Step 1: Provision an agent user account.
-    pub fn provision_agent_user(
-        &mut self,
-        destroy_on_exit: bool,
-    ) -> Result<String, IsolationSessionError> {
-        let lifetime = if destroy_on_exit {
-            IsolationSessionProvisionLifetimePolicy::CallerProcess
-        } else {
-            IsolationSessionProvisionLifetimePolicy::Indefinite
-        };
-
-        let options = IsolationSessionProvisionOptions {
-            LifetimePolicy: lifetime,
-        };
-
-        let async_op = IsolationSessionClient::ProvisionAgentUserAsync(
-            &self.registration_id,
-            &self.provision_id,
-            options,
-        )
-        .map_err(|e| lifecycle_err(format!("ProvisionAgentUserAsync failed: {}", e)))?;
-
-        let result = async_op
+    /// Step 1: Provision an agent user. Returns the OS-assigned agent
+    /// account name (e.g., `Adib-IEB-000`) for logging only — addressing
+    /// for subsequent ops continues to use the configured `provision_id`.
+    ///
+    /// Note: `lifecycle.destroyOnExit` is silently ignored on this backend.
+    /// The in-proc API hardcodes `Indefinite` lifetime in `AddUserAsync`
+    /// (`IsoSessionServerClient.cpp:147` in the OS repo) and the wrapper's
+    /// `RemoveUserAsync` papers over the Indefinite-deprovision bug.
+    pub fn provision_agent_user(&self) -> Result<String, IsolationSessionError> {
+        let async_op = self
+            .ops
+            .AddUserAsync(&self.registration_id, &self.provision_id)
+            .map_err(|e| lifecycle_err(format!("AddUserAsync call failed: {}", e)))?;
+        let user_result: IsoSessionUserResult = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("ProvisionAgentUserAsync: {}", e)))?;
+            .map_err(|e| lifecycle_err(format!("AddUserAsync wait failed: {}", e)))?;
 
-        let status = result
-            .Status()
-            .map_err(|e| lifecycle_err(format!("get Status failed: {}", e)))?;
-        if status != IsolationSessionProvisionStatus::Succeeded {
-            let ext = result.ExtendedError().unwrap_or_default();
-            return Err(lifecycle_err(format!(
-                "ProvisionAgentUserAsync status: {} (extended: {:#010x})",
-                status.0, ext.0
-            )));
+        let err = user_result
+            .Error()
+            .map_err(|e| lifecycle_err(format!("AddUserAsync: get Error failed: {}", e)))?;
+        let is_error = err.IsError().unwrap_or(false);
+        if is_error {
+            return Err(format_iso_error("AddUserAsync", &err));
         }
 
-        let name = result
+        let name = user_result
             .AgentUserName()
-            .map_err(|e| lifecycle_err(format!("get AgentUserName failed: {}", e)))?;
+            .map_err(|e| lifecycle_err(format!("AddUserAsync: get AgentUserName failed: {}", e)))?;
         Ok(name.to_string())
     }
 
-    /// Step 2: Start the isolation session (log the agent user into a Windows session).
+    /// Step 2: Start the isolation session.
     pub fn start_session(
         &self,
         config_id: IsolationSessionConfigurationId,
     ) -> Result<(), IsolationSessionError> {
-        let config_id_com: BindingsConfigurationId = config_id.into();
-        let async_op = IsolationSessionClient::StartSessionAsync(
-            &self.registration_id,
-            &self.provision_id,
-            config_id_com,
-        )
-        .map_err(|e| lifecycle_err(format!("StartSessionAsync failed: {}", e)))?;
-
-        let status = async_op
+        let cfg: IsoSessionConfigId = config_id.into();
+        let async_op = self
+            .ops
+            .StartSessionAsync(&self.provision_id, cfg)
+            .map_err(|e| lifecycle_err(format!("StartSessionAsync call failed: {}", e)))?;
+        let result = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("StartSessionAsync: {}", e)))?;
-
-        match status {
-            IsolationSessionOperationStatus::Succeeded
-            | IsolationSessionOperationStatus::SessionAlreadyStarted => Ok(()),
-            _ => Err(lifecycle_err(format!(
-                "StartSessionAsync returned status: {}",
-                status.0
-            ))),
-        }
+            .map_err(|e| lifecycle_err(format!("StartSessionAsync wait failed: {}", e)))?;
+        check_result(&result, "StartSessionAsync")
     }
 
     /// Step 3: Create a process inside the started isolation session and
@@ -328,111 +354,59 @@ impl IsolationSessionManager {
         &self,
         options: &ProcessOptions,
     ) -> Result<ProcessResult, IsolationSessionError> {
-        // Build the WinRT create options.
-        let create_opts = IsolationSessionWorkerProcessCreateOptions::new().map_err(|e| {
+        let proc_options = build_iso_process_options(options)?;
+
+        let async_op = self
+            .ops
+            .RunProcessWithOptionsAsync(
+                &self.provision_id,
+                &HSTRING::from(&options.process_path),
+                &HSTRING::from(&options.arguments),
+                &proc_options,
+            )
+            .map_err(|e| lifecycle_err(format!("RunProcessWithOptionsAsync call failed: {}", e)))?;
+        let result: IsoSessionProcessResult = async_op
+            .join()
+            .map_err(|e| lifecycle_err(format!("RunProcessWithOptionsAsync wait failed: {}", e)))?;
+
+        let err = result.Error().map_err(|e| {
             lifecycle_err(format!(
-                "Failed to create WorkerProcessCreateOptions: {}",
+                "RunProcessWithOptionsAsync: get Error failed: {}",
+                e
+            ))
+        })?;
+        let is_error = err.IsError().unwrap_or(false);
+        if is_error {
+            return Err(format_iso_error("RunProcessWithOptionsAsync", &err));
+        }
+
+        let process: IsoSessionProcess = result.Process().map_err(|e| {
+            lifecycle_err(format!(
+                "RunProcessWithOptionsAsync: get Process failed: {}",
                 e
             ))
         })?;
 
-        create_opts
-            .SetRedirectFlags(IsolationSessionWorkerProcessRedirectFlags(
-                options.redirect_flags,
-            ))
-            .map_err(|e| lifecycle_err(format!("SetRedirectFlags: {}", e)))?;
+        // Read stdout/stderr via the pipe handles owned by `IsoSessionProcess`.
+        // We do NOT close these handles here — `process.Close()` (or drop)
+        // does (`ApiProcess.cpp:131` in the OS repo).
+        let stdout_handle = process.OutputHandle().unwrap_or(0);
+        let stderr_handle = process.ErrorHandle().unwrap_or(0);
+        let stdout = read_pipe_to_string(stdout_handle);
+        let stderr = read_pipe_to_string(stderr_handle);
 
-        if options.timeout_ms > 0 {
-            create_opts
-                .SetTimeoutMilliseconds(options.timeout_ms)
-                .map_err(|e| lifecycle_err(format!("SetTimeoutMilliseconds: {}", e)))?;
-        }
-
-        if !options.working_directory.is_empty() {
-            create_opts
-                .SetWorkingDirectory(&windows_core::HSTRING::from(&options.working_directory))
-                .map_err(|e| lifecycle_err(format!("SetWorkingDirectory: {}", e)))?;
-        }
-
-        if !options.env_vars.is_empty() {
-            let names: Vec<windows_core::HSTRING> = options
-                .env_vars
-                .iter()
-                .map(|(k, _)| windows_core::HSTRING::from(k.as_str()))
-                .collect();
-            let values: Vec<windows_core::HSTRING> = options
-                .env_vars
-                .iter()
-                .map(|(_, v)| windows_core::HSTRING::from(v.as_str()))
-                .collect();
-            create_opts
-                .SetEnvironmentVariables(&names, &values)
-                .map_err(|e| lifecycle_err(format!("SetEnvironmentVariables: {}", e)))?;
-        }
-
-        // Launch the process.
-        let async_op = IsolationSessionClient::CreateIsolatedProcessAsync2(
-            &self.registration_id,
-            &self.provision_id,
-            &windows_core::HSTRING::from(&options.process_path),
-            &windows_core::HSTRING::from(&options.arguments),
-            &create_opts,
-        )
-        .map_err(|e| lifecycle_err(format!("CreateIsolatedProcessAsync2 failed: {}", e)))?;
-
-        let result = async_op
-            .join()
-            .map_err(|e| lifecycle_err(format!("CreateIsolatedProcessAsync2: {}", e)))?;
-
-        let status = result
-            .Status()
-            .map_err(|e| lifecycle_err(format!("get process Status failed: {}", e)))?;
-        if status != IsolationSessionWorkerProcessOperationStatus::Succeeded {
-            let ext = result.ExtendedError().unwrap_or_default();
-            return Err(lifecycle_err(format!(
-                "CreateIsolatedProcessAsync2 status: {} (extended: {:#010x})",
-                status.0, ext.0
-            )));
-        }
-
-        let worker = result
-            .Process()
-            .map_err(|e| lifecycle_err(format!("get Process failed: {}", e)))?;
-
-        // Read stdout/stderr via pipe handles.
-        let stdout = {
-            let out_handle = worker
-                .CreateStandardOutputHandle()
-                .map_err(|e| lifecycle_err(format!("CreateStandardOutputHandle: {}", e)))?;
-            if out_handle != 0 {
-                read_pipe_and_close(out_handle)
-            } else {
-                String::new()
-            }
-        };
-
-        let stderr = {
-            let err_handle = worker
-                .CreateStandardErrorHandle()
-                .map_err(|e| lifecycle_err(format!("CreateStandardErrorHandle: {}", e)))?;
-            if err_handle != 0 {
-                read_pipe_and_close(err_handle)
-            } else {
-                String::new()
-            }
-        };
-
-        // Wait for exit and get exit code.
-        let wait_op = worker
-            .WaitForExitAsync()
-            .map_err(|e| lifecycle_err(format!("WaitForExitAsync: {}", e)))?;
-        wait_op
-            .join()
-            .map_err(|e| lifecycle_err(format!("WaitForExitAsync: {}", e)))?;
-
-        let exit_code = worker
+        // Wait for exit. `WaitForExit` is a Win32 `WaitForSingleObject` on
+        // a kernel handle owned by the in-proc DLL — no COM round-trip
+        // (`ApiProcess.cpp:76` in the OS repo).
+        let _ = process
+            .WaitForExit(options.timeout_ms)
+            .map_err(|e| lifecycle_err(format!("WaitForExit failed: {}", e)))?;
+        let exit_code = process
             .ExitCode()
-            .map_err(|e| lifecycle_err(format!("get ExitCode: {}", e)))?;
+            .map_err(|e| lifecycle_err(format!("get ExitCode failed: {}", e)))?;
+
+        // Release the handles owned by the process object.
+        let _ = process.Close();
 
         Ok(ProcessResult {
             exit_code,
@@ -443,80 +417,116 @@ impl IsolationSessionManager {
 
     /// Step 4: Stop the isolation session.
     pub fn stop_session(&self) -> Result<(), IsolationSessionError> {
-        let async_op =
-            IsolationSessionClient::StopSessionAsync(&self.registration_id, &self.provision_id)
-                .map_err(|e| lifecycle_err(format!("StopSessionAsync failed: {}", e)))?;
-
-        let status = async_op
+        let async_op = self
+            .ops
+            .StopSessionAsync(&self.provision_id)
+            .map_err(|e| lifecycle_err(format!("StopSessionAsync call failed: {}", e)))?;
+        let result = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("StopSessionAsync: {}", e)))?;
-
-        match status {
-            IsolationSessionOperationStatus::Succeeded
-            | IsolationSessionOperationStatus::SessionNotStarted => Ok(()),
-            _ => Err(lifecycle_err(format!(
-                "StopSessionAsync returned status: {}",
-                status.0
-            ))),
-        }
+            .map_err(|e| lifecycle_err(format!("StopSessionAsync wait failed: {}", e)))?;
+        check_result(&result, "StopSessionAsync")
     }
 
-    /// Step 5: Deprovision the agent user account.
+    /// Step 5: Deprovision the agent user.
+    ///
+    /// The wrapper's `RemoveUserAsync` internally re-provisions as
+    /// `CallerProcess` first then deprovisions, papering over the
+    /// Indefinite-deprovision broker bug
+    /// (`IsoSessionServerClient.cpp:184` in the OS repo).
     pub fn deprovision_agent_user(&self) -> Result<(), IsolationSessionError> {
-        let async_op = IsolationSessionClient::DeprovisionAgentUserAsync(
-            &self.registration_id,
-            &self.provision_id,
-        )
-        .map_err(|e| lifecycle_err(format!("DeprovisionAgentUserAsync failed: {}", e)))?;
-
-        let status = async_op
+        let async_op = self
+            .ops
+            .RemoveUserAsync(&self.provision_id)
+            .map_err(|e| lifecycle_err(format!("RemoveUserAsync call failed: {}", e)))?;
+        let result = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("DeprovisionAgentUserAsync: {}", e)))?;
-
-        match status {
-            IsolationSessionProvisionStatus::Succeeded => Ok(()),
-            _ => Err(lifecycle_err(format!(
-                "DeprovisionAgentUserAsync returned status: {}",
-                status.0
-            ))),
-        }
+            .map_err(|e| lifecycle_err(format!("RemoveUserAsync wait failed: {}", e)))?;
+        check_result(&result, "RemoveUserAsync")
     }
 
     /// Step 6: Unregister the client.
     pub fn unregister_client(&self) -> Result<(), IsolationSessionError> {
-        let async_op = IsolationSessionClient::UnregisterClientAsync(&self.registration_id)
-            .map_err(|e| lifecycle_err(format!("UnregisterClientAsync failed: {}", e)))?;
-
-        let _status = async_op
+        let async_op = self
+            .ops
+            .UnregisterAppAsync(&self.registration_id)
+            .map_err(|e| lifecycle_err(format!("UnregisterAppAsync call failed: {}", e)))?;
+        let result = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("UnregisterClientAsync: {}", e)))?;
-
-        Ok(())
+            .map_err(|e| lifecycle_err(format!("UnregisterAppAsync wait failed: {}", e)))?;
+        check_result(&result, "UnregisterAppAsync")
     }
 }
 
-/// Reads all data from a pipe handle and closes it.
-fn read_pipe_and_close(handle_value: u64) -> String {
+// -- Build IsoSessionProcessOptions from MXC ProcessOptions ------------------
+
+/// Translates the MXC-internal `ProcessOptions` into a fresh
+/// `IsoSessionProcessOptions` instance ready for `RunProcessWithOptionsAsync`.
+fn build_iso_process_options(
+    options: &ProcessOptions,
+) -> Result<IsoSessionProcessOptions, IsolationSessionError> {
+    let proc_options = IsoSessionProcessOptions::new()
+        .map_err(|e| lifecycle_err(format!("IsoSessionProcessOptions::new failed: {}", e)))?;
+
+    proc_options
+        .SetTimeoutMilliseconds(options.timeout_ms)
+        .map_err(|e| lifecycle_err(format!("SetTimeoutMilliseconds: {}", e)))?;
+
+    if !options.working_directory.is_empty() {
+        proc_options
+            .SetWorkingDirectory(&HSTRING::from(&options.working_directory))
+            .map_err(|e| lifecycle_err(format!("SetWorkingDirectory: {}", e)))?;
+    }
+
+    proc_options
+        .SetInteractiveConsole(false)
+        .map_err(|e| lifecycle_err(format!("SetInteractiveConsole: {}", e)))?;
+
+    proc_options
+        .SetRedirectStandardInput(options.redirect_flags & REDIRECT_STDIN != 0)
+        .map_err(|e| lifecycle_err(format!("SetRedirectStandardInput: {}", e)))?;
+    proc_options
+        .SetRedirectStandardOutput(options.redirect_flags & REDIRECT_STDOUT != 0)
+        .map_err(|e| lifecycle_err(format!("SetRedirectStandardOutput: {}", e)))?;
+    proc_options
+        .SetRedirectStandardError(options.redirect_flags & REDIRECT_STDERR != 0)
+        .map_err(|e| lifecycle_err(format!("SetRedirectStandardError: {}", e)))?;
+
+    if !options.env_vars.is_empty() {
+        let env = proc_options
+            .Environment()
+            .map_err(|e| lifecycle_err(format!("get Environment IMap: {}", e)))?;
+        for (name, value) in &options.env_vars {
+            env.Insert(&HSTRING::from(name), &HSTRING::from(value))
+                .map_err(|e| lifecycle_err(format!("Environment.Insert({}): {}", name, e)))?;
+        }
+    }
+
+    Ok(proc_options)
+}
+
+// -- Pipe handle reading -----------------------------------------------------
+
+/// Reads all data from a pipe handle into a UTF-8-lossy string. Does NOT
+/// close the handle — ownership stays with the parent `IsoSessionProcess`,
+/// which closes it via `Close()` (or drop).
+fn read_pipe_to_string(handle_value: u64) -> String {
+    if handle_value == 0 {
+        return String::new();
+    }
     let handle = HANDLE(handle_value as *mut core::ffi::c_void);
     let mut output = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
         let mut bytes_read = 0u32;
-        // SAFETY: `handle` is a kernel handle returned to this function by
-        // the IsoEnvBroker (`CreateStandardOutputHandle` /
-        // `CreateStandardErrorHandle`); we own it for the duration of this
-        // call. `buffer` and `bytes_read` are stack-allocated and live for
-        // the entire `ReadFile` call.
+        // SAFETY: `handle` is a kernel handle owned by the in-proc DLL's
+        // `IsoSessionProcess`. We only read; the DLL closes it on
+        // `IsoSessionProcess::Close()`. `buffer` and `bytes_read` are
+        // stack-allocated and live for the entire `ReadFile` call.
         let ok = unsafe { ReadFile(handle, Some(&mut buffer), Some(&mut bytes_read), None) };
         if ok.is_err() || bytes_read == 0 {
             break;
         }
         output.extend_from_slice(&buffer[..bytes_read as usize]);
-    }
-    // SAFETY: `handle` was used in `ReadFile` above and is closed exactly
-    // once here at end-of-scope, matching the kernel-handle teardown contract.
-    unsafe {
-        let _ = CloseHandle(handle);
     }
     String::from_utf8_lossy(&output).to_string()
 }
@@ -530,8 +540,8 @@ pub struct ProcessResult {
 
 // -- IsolationSessionRunner (ScriptRunner impl) ------------------------------
 
-/// Thin `ScriptRunner` wrapper that performs the full isolation session lifecycle
-/// per invocation. For v0.1, each `run()` call does:
+/// Thin `ScriptRunner` wrapper that performs the full isolation session
+/// lifecycle per invocation. For v0.1, each `run()` call does:
 /// register → provision → start → execute → stop → deprovision → unregister.
 pub struct IsolationSessionRunner;
 
@@ -567,8 +577,8 @@ impl ScriptRunner for IsolationSessionRunner {
             .map(|cfg| cfg.configuration_id)
             .unwrap_or_default();
 
-        // Create the session manager (activates the WinRT factory).
-        let mut manager = match IsolationSessionManager::new() {
+        // Activate the in-proc IsoSessionOps factory.
+        let manager = match IsolationSessionManager::new() {
             Ok(m) => m,
             Err(e) => return e.into(),
         };
@@ -578,16 +588,16 @@ impl ScriptRunner for IsolationSessionRunner {
             return e.into();
         }
 
-        let destroy_on_exit = request.lifecycle.destroy_on_exit;
-        match manager.provision_agent_user(destroy_on_exit) {
+        match manager.provision_agent_user() {
             Ok(agent_name) => {
                 let _ = writeln!(logger, "Isolation Session: agent user = {}", agent_name);
             }
             Err(e) => {
-                // provision_agent_user may return Err *after* a successful broker-side
-                // provision (e.g., the AgentUserName fetch fails on a Succeeded result).
-                // Defensively deprovision so an Indefinite-lifetime agent user does not
-                // leak. The broker no-ops these calls on absent state.
+                // provision_agent_user may return Err *after* a successful
+                // broker-side provision (e.g., the AgentUserName fetch
+                // fails on a non-error result). Defensively deprovision so
+                // an Indefinite-lifetime agent user does not leak. The
+                // wrapper no-ops these on absent state.
                 let _ = manager.deprovision_agent_user();
                 let _ = manager.unregister_client();
                 return e.into();
@@ -595,8 +605,8 @@ impl ScriptRunner for IsolationSessionRunner {
         }
 
         if let Err(e) = manager.start_session(config_id) {
-            // Provision succeeded; start did not. Clean up the provisioned agent
-            // user. stop_session is a no-op on an unstarted session.
+            // Provision succeeded; start did not. Clean up the provisioned
+            // agent user. stop_session is a no-op on an unstarted session.
             let _ = manager.stop_session();
             let _ = manager.deprovision_agent_user();
             let _ = manager.unregister_client();
@@ -606,7 +616,6 @@ impl ScriptRunner for IsolationSessionRunner {
         let result = match manager.create_process(&options) {
             Ok(r) => r,
             Err(e) => {
-                // Attempt cleanup even on failure.
                 let _ = manager.stop_session();
                 let _ = manager.deprovision_agent_user();
                 let _ = manager.unregister_client();
@@ -846,16 +855,17 @@ mod tests {
             )
         };
 
-        match check_service_available() {
-            Ok(()) => {
-                // Service IS available on this machine (e.g., a test VM with
-                // the feature enabled). The test is not applicable — skip.
+        match check_service_available_and_activate() {
+            Ok(_ops) => {
+                // Service IS available on this machine (e.g., a test VM
+                // with the feature enabled). The test is not applicable
+                // — skip.
             }
             Err(IsolationSessionError::ServiceUnavailable(msg)) => {
                 // Service is NOT available. Verify the error is clean and
                 // descriptive (not a panic or cryptic COM error).
                 assert!(
-                    msg.contains("not available"),
+                    msg.contains("not available") || msg.contains("activation failed"),
                     "Expected descriptive error message, got: {}",
                     msg
                 );
