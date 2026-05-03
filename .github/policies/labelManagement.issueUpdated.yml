@@ -46,6 +46,9 @@ configuration:
           - hasLabel:
               label: Needs-Author-Feedback
           - not:
+              hasLabel:
+                label: Needs-Attention
+          - not:
               isAction:
                 action: Synchronize
         then:
@@ -63,6 +66,9 @@ configuration:
               action: Submitted
           - isReviewState:
               reviewState: Changes_requested
+          - not:
+              hasLabel:
+                label: Needs-Author-Feedback
         then:
           - assignTo:
               author: True
