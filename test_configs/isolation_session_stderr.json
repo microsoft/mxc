@@ -1,0 +1,9 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "isolation-session-stderr",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "echo MARKER_STDOUT & echo MARKER_STDERR 1>&2",
+    "timeout": 30000
+  }
+}

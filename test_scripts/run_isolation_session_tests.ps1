@@ -151,6 +151,11 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
     -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test", "-IEB-")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
+# stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
+# Both reach this script's captured output via wxc-exec's `2>&1` merge above; the assertion
+# proves stderr is being relayed (not dropped) on the non-ConPTY plain-pipes path.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_stderr.json" `
+    -OutputContains @("MARKER_STDOUT", "MARKER_STDERR")))
 
 # Summary
 $passed = ($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count

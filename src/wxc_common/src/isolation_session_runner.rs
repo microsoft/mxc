@@ -17,13 +17,15 @@ use std::fmt::Write;
 
 use crate::logger::Logger;
 use crate::models::{CodexRequest, IsolationSessionConfigurationId, NetworkPolicy, ScriptResponse};
+use crate::process_util::{create_relay_thread, OwnedHandle, PipeRelayParams};
 use crate::script_runner::ScriptRunner;
 use isolation_session_bindings::bindings::{
     IsoSessionConfigId, IsoSessionError, IsoSessionOps, IsoSessionProcess,
     IsoSessionProcessOptions, IsoSessionProcessResult, IsoSessionResult, IsoSessionUserResult,
 };
 use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, HANDLE, REGDB_E_CLASSNOTREG};
-use windows::Win32::Storage::FileSystem::ReadFile;
+use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+use windows::Win32::System::Threading::WaitForSingleObject;
 use windows_core::HSTRING;
 
 // -- Identifiers -------------------------------------------------------------
@@ -387,17 +389,62 @@ impl IsolationSessionManager {
             ))
         })?;
 
-        // Read stdout/stderr via the pipe handles owned by `IsoSessionProcess`.
-        // We do NOT close these handles here — `process.Close()` (or drop)
-        // does (`ApiProcess.cpp:131` in the OS repo).
-        let stdout_handle = process.OutputHandle().unwrap_or(0);
-        let stderr_handle = process.ErrorHandle().unwrap_or(0);
-        let stdout = read_pipe_to_string(stdout_handle);
-        let stderr = read_pipe_to_string(stderr_handle);
+        // Streaming I/O via pipe relay threads. Output flows live to wxc-exec's stdio
+        // while the agent runs (replacing the prior batch-capture model).
+        //
+        // Handle ownership across three sources:
+        //   - Broker pipe handles (`OutputHandle()` / `ErrorHandle()`, returned as u64):
+        //     owned by `IsoSessionProcess`. Released by `process.Close()`
+        //     (`ApiProcess.cpp:131` in the OS repo). We do NOT close them.
+        //   - wxc-exec's std handles (`GetStdHandle(STD_*_HANDLE)`): owned by the OS
+        //     for the process lifetime. We do NOT close them.
+        //   - Relay thread handles (`OwnedHandle` from `create_relay_thread`): RAII-
+        //     closed when dropped, after `WaitForSingleObject` confirms thread exit.
+        //
+        // `PipeRelayParams` lifetime: stack-allocated. The relay thread holds a raw
+        // pointer to the params struct, so the struct must outlive the thread. We
+        // `WaitForSingleObject` on every spawned thread before this function returns,
+        // ensuring lifetime correctness.
+        let stdout_handle_val = process.OutputHandle().unwrap_or(0);
+        let stderr_handle_val = process.ErrorHandle().unwrap_or(0);
 
-        // Wait for exit. `WaitForExit` is a Win32 `WaitForSingleObject` on
-        // a kernel handle owned by the in-proc DLL — no COM round-trip
-        // (`ApiProcess.cpp:76` in the OS repo).
+        let wxc_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
+            .map_err(|e| lifecycle_err(format!("GetStdHandle(stdout) failed: {}", e)))?;
+        let wxc_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
+            .map_err(|e| lifecycle_err(format!("GetStdHandle(stderr) failed: {}", e)))?;
+
+        let mut stdout_params = PipeRelayParams {
+            h_read: HANDLE(stdout_handle_val as *mut core::ffi::c_void),
+            h_write: wxc_stdout,
+        };
+        let mut stderr_params = PipeRelayParams {
+            h_read: HANDLE(stderr_handle_val as *mut core::ffi::c_void),
+            h_write: wxc_stderr,
+        };
+
+        let stdout_relay: Option<OwnedHandle> = if stdout_handle_val != 0 {
+            Some(
+                unsafe { create_relay_thread(&mut stdout_params) }
+                    .map_err(|e| lifecycle_err(format!("create stdout relay: {}", e)))?,
+            )
+        } else {
+            None
+        };
+        let stderr_relay: Option<OwnedHandle> = if stderr_handle_val != 0 {
+            Some(
+                unsafe { create_relay_thread(&mut stderr_params) }
+                    .map_err(|e| lifecycle_err(format!("create stderr relay: {}", e)))?,
+            )
+        } else {
+            None
+        };
+
+        // Reordering vs. previous batch-capture code: previously, `read_pipe_to_string`
+        // was the implicit wait — it blocked until EOF on the broker pipes, which only
+        // happens after the agent exits. With streaming relays, we wait explicitly here.
+        //
+        // `WaitForExit` is a Win32 `WaitForSingleObject` on a kernel handle owned by the
+        // in-proc DLL — no COM round-trip (`ApiProcess.cpp:76` in the OS repo).
         let _ = process
             .WaitForExit(options.timeout_ms)
             .map_err(|e| lifecycle_err(format!("WaitForExit failed: {}", e)))?;
@@ -405,13 +452,25 @@ impl IsolationSessionManager {
             .ExitCode()
             .map_err(|e| lifecycle_err(format!("get ExitCode failed: {}", e)))?;
 
-        // Release the handles owned by the process object.
+        // Drain relay threads. They exit on broker-pipe EOF, which happens shortly
+        // after agent exit (the agent's write ends close on OS-level handle cleanup).
+        // INFINITE matches prior behaviour — `read_pipe_to_string` also blocked
+        // indefinitely on EOF, so the broker's own timeout is the safety net for a
+        // stuck agent (`IsolationSessionWorkerProcess.cpp:153-170` in the OS repo).
+        if let Some(t) = stdout_relay {
+            unsafe { WaitForSingleObject(t.get(), u32::MAX) };
+        }
+        if let Some(t) = stderr_relay {
+            unsafe { WaitForSingleObject(t.get(), u32::MAX) };
+        }
+
+        // Now safe to release the broker handles.
         let _ = process.Close();
 
         Ok(ProcessResult {
             exit_code,
-            stdout,
-            stderr,
+            stdout: String::new(),
+            stderr: String::new(),
         })
     }
 
@@ -502,33 +561,6 @@ fn build_iso_process_options(
     }
 
     Ok(proc_options)
-}
-
-// -- Pipe handle reading -----------------------------------------------------
-
-/// Reads all data from a pipe handle into a UTF-8-lossy string. Does NOT
-/// close the handle — ownership stays with the parent `IsoSessionProcess`,
-/// which closes it via `Close()` (or drop).
-fn read_pipe_to_string(handle_value: u64) -> String {
-    if handle_value == 0 {
-        return String::new();
-    }
-    let handle = HANDLE(handle_value as *mut core::ffi::c_void);
-    let mut output = Vec::new();
-    let mut buffer = [0u8; 4096];
-    loop {
-        let mut bytes_read = 0u32;
-        // SAFETY: `handle` is a kernel handle owned by the in-proc DLL's
-        // `IsoSessionProcess`. We only read; the DLL closes it on
-        // `IsoSessionProcess::Close()`. `buffer` and `bytes_read` are
-        // stack-allocated and live for the entire `ReadFile` call.
-        let ok = unsafe { ReadFile(handle, Some(&mut buffer), Some(&mut bytes_read), None) };
-        if ok.is_err() || bytes_read == 0 {
-            break;
-        }
-        output.extend_from_slice(&buffer[..bytes_read as usize]);
-    }
-    String::from_utf8_lossy(&output).to_string()
 }
 
 /// Result of a process execution in the isolation session.
@@ -634,11 +666,14 @@ impl ScriptRunner for IsolationSessionRunner {
             let _ = writeln!(logger, "Warning: unregister_client failed: {}", e);
         }
 
+        // Output already streamed live to wxc-exec's stdio via relay threads in
+        // `IsolationSessionManager::create_process` — captured fields are intentionally
+        // empty (matching the AppContainer pattern at `appcontainer_runner.rs:455-456`).
         ScriptResponse {
             exit_code: result.exit_code,
-            standard_out: result.stdout,
-            standard_err: result.stderr.clone(),
-            error_message: result.stderr,
+            standard_out: String::new(),
+            standard_err: String::new(),
+            error_message: String::new(),
         }
     }
 }
@@ -874,5 +909,35 @@ mod tests {
                 panic!("expected ServiceUnavailable variant, got: {:?}", other);
             }
         }
+    }
+
+    // ====== IsoSessionConfigId conversion tests ======
+    //
+    // The `From<IsolationSessionConfigurationId> for IsoSessionConfigId` impl is the
+    // sole bridge between MXC's internal enum and the WinRT enum. If a new variant is
+    // added to either side without updating the impl, these tests catch the drift.
+
+    #[test]
+    fn config_id_conversion_small() {
+        let iso_id: IsoSessionConfigId = IsolationSessionConfigurationId::Small.into();
+        assert_eq!(iso_id, IsoSessionConfigId::Small);
+    }
+
+    #[test]
+    fn config_id_conversion_medium() {
+        let iso_id: IsoSessionConfigId = IsolationSessionConfigurationId::Medium.into();
+        assert_eq!(iso_id, IsoSessionConfigId::Medium);
+    }
+
+    #[test]
+    fn config_id_conversion_large() {
+        let iso_id: IsoSessionConfigId = IsolationSessionConfigurationId::Large.into();
+        assert_eq!(iso_id, IsoSessionConfigId::Large);
+    }
+
+    #[test]
+    fn config_id_conversion_composable() {
+        let iso_id: IsoSessionConfigId = IsolationSessionConfigurationId::Composable.into();
+        assert_eq!(iso_id, IsoSessionConfigId::Composable);
     }
 }
