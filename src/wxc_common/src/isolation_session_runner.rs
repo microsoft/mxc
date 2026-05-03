@@ -14,19 +14,25 @@
 //!   the full lifecycle per invocation.
 
 use std::fmt::Write;
+use std::io::IsTerminal;
 
 use crate::logger::Logger;
 use crate::models::{CodexRequest, IsolationSessionConfigurationId, NetworkPolicy, ScriptResponse};
-use crate::process_util::{create_relay_thread, OwnedHandle, PipeRelayParams};
+use crate::process_util::{
+    create_relay_thread, create_relay_thread_with_stop, ConsoleModeRestorer, OwnedHandle,
+    PipeRelayParams, PipeRelayWithStopParams,
+};
 use crate::script_runner::ScriptRunner;
 use isolation_session_bindings::bindings::{
     IsoSessionConfigId, IsoSessionError, IsoSessionOps, IsoSessionProcess,
     IsoSessionProcessOptions, IsoSessionProcessResult, IsoSessionResult, IsoSessionUserResult,
 };
 use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, HANDLE, REGDB_E_CLASSNOTREG};
-use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
-use windows::Win32::System::Threading::WaitForSingleObject;
-use windows_core::HSTRING;
+use windows::Win32::System::Console::{
+    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows_core::{HSTRING, PCWSTR};
 
 // -- Identifiers -------------------------------------------------------------
 
@@ -141,6 +147,28 @@ pub(crate) const REDIRECT_STDIN: u32 = 0x1;
 pub(crate) const REDIRECT_STDOUT: u32 = 0x2;
 pub(crate) const REDIRECT_STDERR: u32 = 0x4;
 
+/// Compute the canonical redirect-flags bitfield for the agent process I/O,
+/// given whether wxc-exec is running in interactive (ConPTY) mode.
+///
+/// Policy (Commit 2 — TTY support):
+/// - Stdin is always redirected. The runner spawns a relay so the parent's
+///   input reaches the agent (interactive shells need this; batch stdin works
+///   the same way).
+/// - Stdout is always redirected.
+/// - Stderr is redirected ONLY in non-interactive mode. In ConPTY mode the
+///   broker merges stderr into stdout and refuses to populate the stderr
+///   handle (predicate at `IsolationSessionWorkerProcess.cpp:309-310` in the
+///   OS repo: `optStderrHandleResult && !m_pseudoConsole && m_stderrPipeRead`).
+///   Setting `RedirectStandardError(true)` in ConPTY mode is benign but the
+///   handle returns 0 — so we just don't ask for it.
+pub(crate) fn compute_redirect_flags(interactive: bool) -> u32 {
+    let mut flags = REDIRECT_STDIN | REDIRECT_STDOUT;
+    if !interactive {
+        flags |= REDIRECT_STDERR;
+    }
+    flags
+}
+
 /// Intermediate representation of process creation options, decoupled from
 /// both `CodexRequest` (MXC-specific) and WinRT types (OS-specific).
 /// Built from `CodexRequest`, later converted to WinRT options.
@@ -158,6 +186,12 @@ pub(crate) struct ProcessOptions {
     pub env_vars: Vec<(String, String)>,
     /// Bitfield of I/O redirect flags (`REDIRECT_STDIN | REDIRECT_STDOUT | REDIRECT_STDERR`).
     pub redirect_flags: u32,
+    /// Whether to ask the broker to set up a ConPTY in the isolation session
+    /// (`InteractiveConsole = true`). Decided at runtime by the runner based
+    /// on `std::io::stdout().is_terminal()`. `build_process_options` returns
+    /// `false` as a safe default; the runner overwrites before passing to
+    /// `create_process`.
+    pub interactive: bool,
 }
 
 /// Builds `ProcessOptions` from a `CodexRequest`.
@@ -195,6 +229,7 @@ pub(crate) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
         working_directory: request.working_directory.clone(),
         env_vars,
         redirect_flags: REDIRECT_STDOUT | REDIRECT_STDERR,
+        interactive: false,
     }
 }
 
@@ -389,29 +424,61 @@ impl IsolationSessionManager {
             ))
         })?;
 
-        // Streaming I/O via pipe relay threads. Output flows live to wxc-exec's stdio
-        // while the agent runs (replacing the prior batch-capture model).
+        // Streaming + interactive I/O via three pipe relay threads bridging
+        // wxc-exec's stdio with the broker's pipe handles. The relays cross
+        // the desktop-session boundary that kernel console-handle inheritance
+        // cannot (see `appcontainer_runner.rs:358-392` for the AppContainer
+        // comparison).
         //
-        // Handle ownership across three sources:
-        //   - Broker pipe handles (`OutputHandle()` / `ErrorHandle()`, returned as u64):
-        //     owned by `IsoSessionProcess`. Released by `process.Close()`
-        //     (`ApiProcess.cpp:131` in the OS repo). We do NOT close them.
-        //   - wxc-exec's std handles (`GetStdHandle(STD_*_HANDLE)`): owned by the OS
-        //     for the process lifetime. We do NOT close them.
-        //   - Relay thread handles (`OwnedHandle` from `create_relay_thread`): RAII-
-        //     closed when dropped, after `WaitForSingleObject` confirms thread exit.
+        // Handle ownership across four sources:
+        //   - Broker pipe handles (`OutputHandle()` / `ErrorHandle()` /
+        //     `InputHandle()`, returned as u64): owned by `IsoSessionProcess`.
+        //     Released by `process.Close()` (`ApiProcess.cpp:131` in the OS
+        //     repo). We do NOT close them.
+        //   - wxc-exec's std handles (`GetStdHandle(STD_*_HANDLE)`): owned by
+        //     the OS for the process lifetime. We do NOT close them.
+        //   - Stop event for stdin relay (`CreateEventW`): RAII-closed via
+        //     `OwnedHandle`.
+        //   - Relay thread handles: RAII-closed via `OwnedHandle` after we
+        //     `WaitForSingleObject` on each.
         //
-        // `PipeRelayParams` lifetime: stack-allocated. The relay thread holds a raw
-        // pointer to the params struct, so the struct must outlive the thread. We
-        // `WaitForSingleObject` on every spawned thread before this function returns,
-        // ensuring lifetime correctness.
+        // Lifetime: relay-param structs are stack-allocated; we wait on every
+        // spawned thread (INFINITE for stdout/stderr, bounded for stdin)
+        // before this function returns.
         let stdout_handle_val = process.OutputHandle().unwrap_or(0);
         let stderr_handle_val = process.ErrorHandle().unwrap_or(0);
+        let stdin_handle_val = process.InputHandle().unwrap_or(0);
 
         let wxc_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
             .map_err(|e| lifecycle_err(format!("GetStdHandle(stdout) failed: {}", e)))?;
         let wxc_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
             .map_err(|e| lifecycle_err(format!("GetStdHandle(stderr) failed: {}", e)))?;
+        let wxc_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
+            .map_err(|e| lifecycle_err(format!("GetStdHandle(stdin) failed: {}", e)))?;
+
+        // In interactive mode, switch wxc-exec's local console to raw VT mode
+        // so the agent's ConPTY does all the input echoing and rendering —
+        // otherwise both consoles render the same input twice (duplicate
+        // echos, doubled prompts, broken `\r\n` handling). RAII-restored on
+        // scope exit. No-op when stdio is not a console (the guard records
+        // itself as inactive).
+        let _console_guard = if options.interactive {
+            Some(ConsoleModeRestorer::install_raw_vt())
+        } else {
+            None
+        };
+
+        // Manual-reset stop event for the stdin relay. Effective for waitable
+        // `h_read` (console = TTY mode); for pipe handles (non-TTY) it has no
+        // effect on a blocked `ReadFile`, so we use a bounded
+        // `WaitForSingleObject` after process exit and rely on
+        // `process.Close()` invalidating the broker handle (next WriteFile
+        // fails) plus OS cleanup on wxc-exec exit.
+        let stdin_stop_event = unsafe {
+            CreateEventW(None, true, false, PCWSTR::null())
+                .map_err(|e| lifecycle_err(format!("CreateEventW(stdin stop): {}", e)))?
+        };
+        let stdin_stop_owned = OwnedHandle::new(stdin_stop_event);
 
         let mut stdout_params = PipeRelayParams {
             h_read: HANDLE(stdout_handle_val as *mut core::ffi::c_void),
@@ -420,6 +487,11 @@ impl IsolationSessionManager {
         let mut stderr_params = PipeRelayParams {
             h_read: HANDLE(stderr_handle_val as *mut core::ffi::c_void),
             h_write: wxc_stderr,
+        };
+        let mut stdin_params = PipeRelayWithStopParams {
+            h_read: wxc_stdin,
+            h_write: HANDLE(stdin_handle_val as *mut core::ffi::c_void),
+            h_stop_event: stdin_stop_owned.get(),
         };
 
         let stdout_relay: Option<OwnedHandle> = if stdout_handle_val != 0 {
@@ -438,30 +510,79 @@ impl IsolationSessionManager {
         } else {
             None
         };
+        let stdin_relay: Option<OwnedHandle> = if stdin_handle_val != 0 {
+            Some(
+                unsafe { create_relay_thread_with_stop(&mut stdin_params) }
+                    .map_err(|e| lifecycle_err(format!("create stdin relay: {}", e)))?,
+            )
+        } else {
+            None
+        };
 
-        // Reordering vs. previous batch-capture code: previously, `read_pipe_to_string`
-        // was the implicit wait — it blocked until EOF on the broker pipes, which only
-        // happens after the agent exits. With streaming relays, we wait explicitly here.
-        //
-        // `WaitForExit` is a Win32 `WaitForSingleObject` on a kernel handle owned by the
-        // in-proc DLL — no COM round-trip (`ApiProcess.cpp:76` in the OS repo).
+        // Wait for the agent process to exit. `WaitForExit` is a Win32
+        // `WaitForSingleObject` on a kernel handle (`ApiProcess.cpp:76` — no
+        // COM round-trip). On timeout it returns -1; otherwise the exit code.
         let _ = process
             .WaitForExit(options.timeout_ms)
             .map_err(|e| lifecycle_err(format!("WaitForExit failed: {}", e)))?;
-        let exit_code = process
+
+        // Detect timeout via `ExitCode()` returning `STILL_ACTIVE` (the agent
+        // is still running). Trigger the 3-tier graceful shutdown pattern from
+        // `CommandTty.cpp:226-263` in the OS repo. In the natural-exit path,
+        // none of the tiers fire.
+        const STILL_ACTIVE: i32 = 0x103;
+        let mut exit_code = process
             .ExitCode()
             .map_err(|e| lifecycle_err(format!("get ExitCode failed: {}", e)))?;
 
-        // Drain relay threads. They exit on broker-pipe EOF, which happens shortly
-        // after agent exit (the agent's write ends close on OS-level handle cleanup).
-        // INFINITE matches prior behaviour — `read_pipe_to_string` also blocked
-        // indefinitely on EOF, so the broker's own timeout is the safety net for a
-        // stuck agent (`IsolationSessionWorkerProcess.cpp:153-170` in the OS repo).
+        if exit_code == STILL_ACTIVE {
+            // Tier 1: close stdin — many REPLs (powershell, cmd, bash) exit
+            // on EOF alone.
+            let _ = process.CloseStandardInput();
+            let _ = process.WaitForExit(5000);
+            exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
+
+            // Tier 2: `SendCtrlClose` is ConPTY-only (`E_NOTIMPL` otherwise
+            // per `IsolationSessionWorkerProcess.cpp:414-416`); benign call
+            // in non-ConPTY mode, just skips ahead.
+            if exit_code == STILL_ACTIVE {
+                let _ = process.SendCtrlClose();
+                let _ = process.WaitForExit(3000);
+                exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
+            }
+
+            // Tier 3: force-terminate. Wait infinitely for the kill to land
+            // (timeout 0 == INFINITE per `ApiProcess.cpp:85`).
+            if exit_code == STILL_ACTIVE {
+                let _ = process.Terminate();
+                let _ = process.WaitForExit(0);
+                exit_code = process.ExitCode().unwrap_or(-1);
+            }
+        }
+
+        // Signal the stdin relay to exit. Effective for waitable (console)
+        // handles; for pipe handles the bounded wait below expires and we
+        // proceed.
+        unsafe {
+            let _ = SetEvent(stdin_stop_owned.get());
+        }
+
+        // Drain stdout / stderr relays (INFINITE — they exit on broker-pipe
+        // EOF once the agent's write ends close at OS-level handle cleanup;
+        // the broker's own timeout at
+        // `IsolationSessionWorkerProcess.cpp:153-170` is the safety net).
         if let Some(t) = stdout_relay {
             unsafe { WaitForSingleObject(t.get(), u32::MAX) };
         }
         if let Some(t) = stderr_relay {
             unsafe { WaitForSingleObject(t.get(), u32::MAX) };
+        }
+
+        // Drain stdin relay with a 1s bound. TTY mode exits via the stop
+        // event; non-TTY may still be in `ReadFile` — that's fine, the
+        // thread exits when wxc-exec exits and the OS cleans it up.
+        if let Some(t) = stdin_relay {
+            unsafe { WaitForSingleObject(t.get(), 1000) };
         }
 
         // Now safe to release the broker handles.
@@ -537,7 +658,7 @@ fn build_iso_process_options(
     }
 
     proc_options
-        .SetInteractiveConsole(false)
+        .SetInteractiveConsole(options.interactive)
         .map_err(|e| lifecycle_err(format!("SetInteractiveConsole: {}", e)))?;
 
     proc_options
@@ -595,13 +716,27 @@ impl ScriptRunner for IsolationSessionRunner {
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let options = build_process_options(request);
+        let mut options = build_process_options(request);
+
+        // Detect at runtime whether wxc-exec's stdout is a TTY. This flips the
+        // backend into ConPTY mode (`InteractiveConsole = true`) and adjusts
+        // the redirect flags (no separate stderr in ConPTY mode — the broker
+        // merges it into stdout). The check sees the handle wxc-exec was
+        // given by its immediate parent: ConPTY when launched by node-pty
+        // (`spawnSandbox`), pipe when launched by `child_process.spawn`
+        // (`spawnSandboxFromConfig({usePty: false})`), console when launched
+        // directly from a shell.
+        let interactive = std::io::stdout().is_terminal();
+        options.interactive = interactive;
+        options.redirect_flags = compute_redirect_flags(interactive);
+
         let _ = writeln!(
             logger,
             "Isolation Session: process={}",
             options.process_path
         );
         let _ = writeln!(logger, "Isolation Session: arguments={}", options.arguments);
+        let _ = writeln!(logger, "Isolation Session: interactive={}", interactive);
 
         // Read isolation_session config (configuration id).
         let session_cfg = request.experimental.isolation_session.as_ref();
@@ -876,6 +1011,32 @@ mod tests {
         };
         let opts = build_process_options(&request);
         assert_eq!(opts.redirect_flags, REDIRECT_STDOUT | REDIRECT_STDERR);
+    }
+
+    #[test]
+    fn compute_redirect_flags_interactive_omits_stderr() {
+        let flags = compute_redirect_flags(true);
+        assert!(
+            flags & REDIRECT_STDIN != 0,
+            "stdin should be redirected even in interactive mode"
+        );
+        assert!(flags & REDIRECT_STDOUT != 0, "stdout should be redirected");
+        assert!(
+            flags & REDIRECT_STDERR == 0,
+            "stderr should NOT be redirected in interactive (ConPTY) mode \
+             — broker won't populate ErrorHandle"
+        );
+    }
+
+    #[test]
+    fn compute_redirect_flags_noninteractive_includes_stderr() {
+        let flags = compute_redirect_flags(false);
+        assert!(flags & REDIRECT_STDIN != 0, "stdin should be redirected");
+        assert!(flags & REDIRECT_STDOUT != 0, "stdout should be redirected");
+        assert!(
+            flags & REDIRECT_STDERR != 0,
+            "stderr should be redirected in non-interactive (plain pipes) mode"
+        );
     }
 
     // ====== Service availability test ======

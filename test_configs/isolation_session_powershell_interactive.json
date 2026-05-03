@@ -1,0 +1,9 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "isolation-session-powershell-interactive",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "powershell.exe -NoLogo",
+    "timeout": 0
+  }
+}
