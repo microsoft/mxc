@@ -5,10 +5,5 @@
   "process": {
     "commandLine": "exit 42",
     "timeout": 30000
-  },
-  "experimental": {
-    "isolation_session": {
-      "configurationId": "small"
-    }
   }
 }

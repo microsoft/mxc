@@ -651,13 +651,13 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
                     "small" => IsolationSessionConfigurationId::Small,
                     "medium" => IsolationSessionConfigurationId::Medium,
                     "large" => IsolationSessionConfigurationId::Large,
-                    "commandline" => IsolationSessionConfigurationId::CommandLine,
+                    "composable" => IsolationSessionConfigurationId::Composable,
                     _ => {
                         logger.log_line(&format!(
-                            "Unknown isolation_session configurationId '{}', defaulting to 'small'",
+                            "Unknown isolation_session configurationId '{}', defaulting to 'composable'",
                             id
                         ));
-                        IsolationSessionConfigurationId::Small
+                        IsolationSessionConfigurationId::Composable
                     }
                 };
             }
@@ -1807,7 +1807,7 @@ mod tests {
         let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Small
+            crate::models::IsolationSessionConfigurationId::Composable
         );
     }
 
@@ -1854,8 +1854,8 @@ mod tests {
     }
 
     #[test]
-    fn isolation_session_config_commandline() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "commandline"}}}"#;
+    fn isolation_session_config_composable() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "composable"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1863,12 +1863,12 @@ mod tests {
         let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::CommandLine
+            crate::models::IsolationSessionConfigurationId::Composable
         );
     }
 
     #[test]
-    fn isolation_session_config_unknown_defaults_to_small() {
+    fn isolation_session_config_unknown_defaults_to_composable() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "xlarge"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -1877,7 +1877,7 @@ mod tests {
         let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Small
+            crate::models::IsolationSessionConfigurationId::Composable
         );
     }
 
