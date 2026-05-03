@@ -26,7 +26,7 @@
       - isolation_session_exit42.json — exit code propagation
       - isolation_session_stderr.json — separate stderr in non-ConPTY mode
       - isolation_session_stdout_stderr_interleaved.json — interleaved streams
-      - isolation_session_timeout.json — broker terminates with exit code 1
+      - isolation_session_timeout.json — OS-side timeout terminates with exit code 1
 
     Manual smoke configs (NOT asserted — observe the output yourself):
       - isolation_session_streaming_smoke.json — output appears with delays
@@ -179,8 +179,8 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stderr.json" `
 # must appear in the captured output (proves streams aren't crossed or dropped mid-run).
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_interleaved.json" `
     -OutputContains @("OUT_A", "ERR_A", "OUT_B", "ERR_B", "OUT_C")))
-# Timeout: ping runs ~30s; broker timer set to 1500ms forces TerminateProcess(handle, 1)
-# (verified at IsolationSessionWorkerProcess.cpp:153-170 in the OS repo). Exit code = 1.
+# Timeout: ping runs ~30s; OS-side per-process timer set to 1500ms forces
+# the agent to exit with code 1.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
     -ExpectedExit 1))
 

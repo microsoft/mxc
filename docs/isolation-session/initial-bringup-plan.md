@@ -9,7 +9,7 @@ cases that need this — per the broader claw-on-MXC scenario — call for:
 
 - **per-execution OS-isolated identity** so the workload's actions cannot
   pollute the calling user's NTFS / registry / token state,
-- **OS-managed session lifecycle** that the broker tears down cleanly when
+- **OS-managed session lifecycle** that the OS-side service tears down cleanly when
   the calling process exits, and
 - a **path toward stateful execution** where one provisioned user and session
   can host multiple sequential exec calls without re-paying the registration /
@@ -44,7 +44,7 @@ User: wxc-exec.exe --experimental config.json
 wxc-exec.exe (Rust — single binary, multiple backends)
    ├── Parses JSON config → sees containment = "isolation_session"
    ├── Checks --experimental flag → instantiates IsolationSessionRunner
-   ├── Calls IsolationSessionManager methods 1:1 with the broker:
+   ├── Calls IsolationSessionManager methods 1:1 with the OS-side service:
    │     register_client(regId)              → Step 0
    │     provision_agent_user(...)           → Step 1 — creates agent user
    │     start_session(..., configId)        → Step 2 — boots session
@@ -57,7 +57,7 @@ wxc-exec.exe (Rust — single binary, multiple backends)
    └── Returns ScriptResponse with stdout, stderr, exit_code
 ```
 
-The broker does the heavy lifting: it provisions a Windows agent user account
+The OS-side service does the heavy lifting: it provisions a Windows agent user account
 (named `<CallingUser>-IEB-<NNN>`), launches an `IsolationProxy.exe` per
 session, and exposes the running script as an `IIsolationSessionWorkerProcess`
 from which the runner reads pipe handles for I/O.
@@ -84,7 +84,7 @@ let mut runner: Box<dyn ScriptRunner> = match request.containment {
 The runner is split into two layers:
 
 - **`IsolationSessionManager`** — reusable, lifecycle methods that map 1:1
-  to the broker API. Methods: `new`, `register_client`,
+  to the OS-side API. Methods: `new`, `register_client`,
   `provision_agent_user`, `start_session`, `create_process`, `stop_session`,
   `deprovision_agent_user`, `unregister_client`.
 - **`IsolationSessionRunner`** — thin one-shot `ScriptRunner` impl that
@@ -146,7 +146,7 @@ interface.
 ```
 
 The only `experimental.isolation_session` knob is `configurationId`, which
-selects the broker-side session size: `"small"` (1, default), `"medium"` (2),
+selects the OS-side session size: `"small"` (1, default), `"medium"` (2),
 `"large"` (3), or `"commandline"` (4). Other process options (`cwd`, `env`,
 `timeout`) read from the existing top-level `process` section, matching the
 contract every other backend honors.
@@ -223,11 +223,11 @@ matching `windows` crate version").
 - `process.cwd` (working directory inside the session).
 - `process.env` (environment variables forwarded via
   `IIsolationSessionWorkerProcessCreateOptions::SetEnvironmentVariables`).
-- `process.timeout` (forwarded to the broker's per-process timeout
+- `process.timeout` (forwarded to the OS-side per-process timeout
   enforcement).
 - `experimental.isolation_session.configurationId`
   (Small / Medium / Large / CommandLine).
-- `lifecycle.destroyOnExit` (mapped to broker `LifetimePolicy`: `true` →
+- `lifecycle.destroyOnExit` (mapped to the OS-side `LifetimePolicy`: `true` →
   `CallerProcess`, `false` → `Indefinite`; matches how other backends
   interpret this field).
 - Stdout / stderr capture and exit code propagation into `ScriptResponse`.
@@ -241,7 +241,7 @@ matching `windows` crate version").
 - **TypeScript SDK exposure.** Lifting `experimental.isolation_session`
   into `SandboxSpawnOptions` so the SDK can spawn isolation-session
   workloads programmatically. Today the backend works only via JSON.
-- **Interactive ConPTY** (no plans currently). The broker-side
+- **Interactive ConPTY** (no plans currently). The OS-side
   `InteractiveConsole` flag, console resize, and control signals
   (CtrlC / CtrlBreak / CtrlClose) are not used by fire-and-forget script
   execution.
@@ -303,7 +303,7 @@ The following were observed during VM testing and are accepted for v0.1.
   `ScriptResponse` ahead of teardown.
 - **`DeprovisionAgentUserAsync` returning status 1.** Initially observed as
   a stderr warning on an earlier OS build. No longer surfacing on the
-  current OS build. Cleanup proceeds via the broker's process-exit callback
+  current OS build. Cleanup proceeds via the OS-side process-exit callback
   when `LifetimePolicy: CallerProcess` is used, so the warning was
   non-functional even when present.
 - **Intermittent `IdentityNotFound` (status 4) immediately after VM boot.**
@@ -318,18 +318,18 @@ The following were observed during VM testing and are accepted for v0.1.
 | Bindings tied to a specific OS API version | `GENERATION_INFO.toml` records the OS branch + commit; `build.rs` version-checks the `windows` crate; regeneration is one command |
 | OS API not present on older Windows builds | `Feature_IsoBrokerSessionApis` is OS-side; runner reports a clean error when the activation factory fails. Feature-unavailable test exercises this on CI |
 | New Cargo feature increases coupling | The `isolation_session` feature is off by default in the workspace; default builds and existing CI are unaffected |
-| Manual VM testing required | The OS-side service has the same constraint for any consumer (broker rejects network-logon tokens). Automated suite covers what it can without the broker |
+| Manual VM testing required | The OS-side service has the same constraint for any consumer (it rejects network-logon tokens). Automated suite covers what it can without the OS-side service |
 | One-shot lifecycle is heavy (full register → provision → start per call) | Accepted for v0.1; experimental flag indicates rough edges. Stateful API is the planned mitigation |
 | `ProvisionAgentUserAsync` re-provision hang under `Indefinite` lifetime | Manager calls `GetAgentUser` first and skips a redundant provision when the user already exists |
-| `DeprovisionAgentUserAsync` failure under `Indefinite` lifetime | Manager re-provisions with `CallerProcess` lifetime as part of teardown so the broker's process-exit callback handles cleanup naturally |
+| `DeprovisionAgentUserAsync` failure under `Indefinite` lifetime | Manager re-provisions with `CallerProcess` lifetime as part of teardown so the OS-side process-exit callback handles cleanup naturally |
 
 ## Prerequisites
 
 **For end users:**
 
 - A Windows build with `Feature_IsoBrokerSessionApis` enabled.
-- `IsolationProxy.exe` present in `%SystemRoot%\System32\` (ships with the
-  broker).
+- `IsolationProxy.exe` present in `%SystemRoot%\System32\` (ships with
+  Windows as part of the OS-side service).
 - WinRT initialized as MTA (handled by `wxc-exec`).
 
 **For developers:**

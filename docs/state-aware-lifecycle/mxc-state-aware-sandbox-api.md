@@ -821,7 +821,7 @@ caller error-handling code is portable across backends.
 | `malformed_request` | Envelope-level error: missing required field, unknown phase, malformed JSON |
 | `unsupported_containment` | The backend named by `containment` (provision) or implied by the `sandboxId` prefix (non-provision) is not a recognised backend in this build |
 | `unsupported_phase` | The backend does not support the requested call mode (state-aware call against an ephemeral-only backend, or one-shot call against a state-aware-only backend) |
-| `backend_unavailable` | The backend's runtime dependency is missing or unreachable (broker not running, daemon stopped) |
+| `backend_unavailable` | The backend's runtime dependency is missing or unreachable (service not running, daemon stopped) |
 | `malformed_id` | The `sandboxId` does not have a recognised backend prefix, or has a recognised prefix but does not deserialise into the backend's native form |
 | `stale_id` | The `sandboxId` deserialised but refers to a resource the backend no longer recognises |
 | `not_provisioned` | Phase requires a provisioned sandbox; none provided, or the id is in a pre-provision state |
@@ -1044,7 +1044,7 @@ awaits exit via `waiter`, and calls `terminator` on cancellation signals.
 
 Methods take `&mut self`, matching the existing `ScriptRunner::run` signature. Backends
 do not need to accumulate state between calls within a backend instance — within a
-single call a backend may use mutability to hold open broker connections, but no state
+single call a backend may use mutability to hold open service connections, but no state
 needs to survive across phase calls.
 
 ### 9.3 Dispatch
@@ -1312,7 +1312,7 @@ cover:
 Two categories:
 
 - **Feature-unavailable test (CI-runnable).** The backend is exercised on a machine
-  without its runtime dependency (no broker, no daemon, no kernel feature). The
+  without its runtime dependency (no service, no daemon, no kernel feature). The
   expected result is a clean `backend_unavailable` error rather than a panic or hang.
 - **Integration test on real infrastructure.** The full lifecycle (provision, start,
   exec, stop, deprovision) plus a few exec variants. May be runner-script-driven and
@@ -1460,7 +1460,7 @@ path forward.
   fire-and-forget `create-process`). The JS-async fire-and-forget pattern (don't `await`
   `execInSandboxAsync`) IS supported via the existing functions — the spawned process
   is tethered to the SDK consumer's lifetime, but the caller can move on without
-  awaiting. True OS-level detachment (process owned by the broker, independent of any
+  awaiting. True OS-level detachment (process owned by the OS service, independent of any
   caller) needs a different SDK contract (e.g., a future `execInSandboxDetached`
   returning a process id, no waiting for exit). Deferred to a later version with that
   dedicated function.
