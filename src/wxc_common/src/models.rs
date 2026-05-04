@@ -272,7 +272,7 @@ impl Default for BaseProcessUiConfig {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContainerPolicy {
     pub least_privilege_mode: bool,
@@ -280,6 +280,12 @@ pub struct ContainerPolicy {
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
     pub denied_paths: Vec<String>,
+    /// When the BaseContainer API is absent and `bfscfg.exe` is unavailable,
+    /// allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). This
+    /// modifies host filesystem security descriptors; original DACLs are
+    /// restored on exit. Defaults to `true`. Set to `false` to refuse the
+    /// fallback (the run will fail on machines that require Tier 3).
+    pub allow_dacl_fallback: bool,
     pub default_network_policy: NetworkPolicy,
     pub network_enforcement_mode: NetworkEnforcementMode,
     pub allowed_hosts: Vec<String>,
@@ -290,6 +296,26 @@ pub struct ContainerPolicy {
     pub ui: UiPolicy,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
+}
+
+impl Default for ContainerPolicy {
+    fn default() -> Self {
+        Self {
+            least_privilege_mode: false,
+            capabilities: Vec::new(),
+            readwrite_paths: Vec::new(),
+            readonly_paths: Vec::new(),
+            denied_paths: Vec::new(),
+            allow_dacl_fallback: true,
+            default_network_policy: NetworkPolicy::default(),
+            network_enforcement_mode: NetworkEnforcementMode::default(),
+            allowed_hosts: Vec::new(),
+            blocked_hosts: Vec::new(),
+            network_proxy: ProxyConfig::default(),
+            ui: UiPolicy::default(),
+            base_process_ui: BaseProcessUiConfig::default(),
+        }
+    }
 }
 
 /// Port mapping for host↔container port forwarding.

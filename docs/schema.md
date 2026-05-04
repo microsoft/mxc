@@ -42,7 +42,8 @@ production configs and the dev schema when working on experimental features:
     "filesystem": {
         "readwritePaths": ["C:\\temp"],     // Read-write access
         "readonlyPaths": ["C:\\data"],      // Read-only access
-        "deniedPaths": ["C:\\Windows"]      // Blocked paths
+        "deniedPaths": ["C:\\Windows"],     // Blocked paths
+        "allowDaclFallback": true           // Allow Tier 3 DACL fallback (default true)
     },
 
     "network": {
@@ -76,6 +77,17 @@ production configs and the dev schema when working on experimental features:
     }
 }
 ```
+
+### Filesystem Policy
+
+The `filesystem` section defines path access policy shared across backends:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `readwritePaths` | string[] | `[]` | Paths the process can read and write. |
+| `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
+| `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
+| `allowDaclFallback` | boolean | `true` | When the BaseContainer API is absent and `bfscfg.exe` is unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). **⚠️ This modifies host filesystem security descriptors**; original DACLs are restored on exit. Set to `false` to refuse this fallback — the run will then fail on machines that require Tier 3 (e.g., pre-GE Windows 11 builds without the BaseContainer API). |
 
 ### Containment Backends
 

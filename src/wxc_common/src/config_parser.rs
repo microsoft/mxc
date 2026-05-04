@@ -67,6 +67,8 @@ struct RawFilesystem {
     readonly_paths: Option<Vec<String>>,
     #[serde(rename = "deniedPaths")]
     denied_paths: Option<Vec<String>>,
+    #[serde(rename = "allowDaclFallback")]
+    allow_dacl_fallback: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -723,6 +725,9 @@ fn convert_raw_config_inner(
         }
         if let Some(v) = fscfg.readonly_paths {
             policy.readonly_paths = v;
+        }
+        if let Some(v) = fscfg.allow_dacl_fallback {
+            policy.allow_dacl_fallback = v;
         }
     }
     validate_filesystem_paths(&policy, logger)?;
@@ -1516,6 +1521,39 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_timeout, 0);
+    }
+
+    #[test]
+    fn allow_dacl_fallback_default_true() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.allow_dacl_fallback);
+    }
+
+    #[test]
+    fn allow_dacl_fallback_explicit_false() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "filesystem": {"allowDaclFallback": false}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.allow_dacl_fallback);
+    }
+
+    #[test]
+    fn allow_dacl_fallback_explicit_true() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "filesystem": {"allowDaclFallback": true}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.allow_dacl_fallback);
     }
 
     // ====== Containment backend selection tests ======
