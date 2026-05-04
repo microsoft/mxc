@@ -57,7 +57,7 @@ export function resolveExecutableAndArgs(
   }
 
   const platformSupport = getPlatformSupport();
-  const isExperimental = config.containment &&
+  const isExperimental = !!config.containment &&
     (ExperimentalBackends as readonly string[]).includes(config.containment);
   if (!platformSupport.isSupported && !isExperimental) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);

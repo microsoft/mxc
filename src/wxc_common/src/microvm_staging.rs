@@ -492,11 +492,12 @@ fn dir_size(path: &Path) -> Result<u64, StagingError> {
 }
 
 /// Estimates the total on-disk size of a list of host paths without copying them.
-fn estimate_source_size(paths: &[String]) -> u64 {
-    paths
-        .iter()
-        .filter_map(|s| dir_size(Path::new(s)).ok())
-        .fold(0_u64, u64::saturating_add)
+fn estimate_source_size(paths: &[String]) -> Result<u64, StagingError> {
+    let mut total = 0_u64;
+    for path in paths {
+        total = total.saturating_add(dir_size(Path::new(path))?);
+    }
+    Ok(total)
 }
 
 /// Removes orphaned `mxc-staging-*` directories under `root` that are older than `max_age`.

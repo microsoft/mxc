@@ -53,9 +53,11 @@ const RAMFS_IMAGE: &str = "cpython-ramfs.img";
 const BOOT_TIMEOUT_MS: u64 = 60_000;
 /// Generic error exit code returned to host callers.
 const ERROR_EXIT_CODE: i32 = -1;
-const ERR_DENIED_PATHS: &str = "denied_paths is not meaningful for the microvm backend \
-     -- the guest has no host filesystem visibility. \
-     Only readwrite_paths and readonly_paths are supported";
+const ERR_DENIED_PATHS: &str = concat!(
+    "denied_paths is not meaningful for the microvm backend ",
+    "-- the guest has no host filesystem visibility. ",
+    "Only readwrite_paths and readonly_paths are supported"
+);
 const ERR_NETWORK_POLICY: &str =
     "network policy is not supported by the NanVix backend -- NanVix has no network stack";
 const ERR_PROXY_POLICY: &str =
