@@ -24,6 +24,37 @@ pub enum ContainmentBackend {
     /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
     #[serde(rename = "isolation_session")]
     IsolationSession,
+    /// Seatbelt — macOS sandbox via the OS Seatbelt facility. First-class
+    /// backend on macOS (analogous to `Lxc` on Linux).
+    Seatbelt,
+}
+
+/// Mode used by the Seatbelt backend to apply the sandbox profile.
+///
+/// `Exec` (default) spawns `/usr/bin/sandbox-exec` and is always available.
+/// `Inproc` calls the private `sandbox_init_with_parameters` API in the
+/// child after fork and before exec — lower latency but relies on a
+/// non-public macOS interface.
+#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SeatbeltMode {
+    #[default]
+    Exec,
+    Inproc,
+}
+
+/// Configuration specific to the Seatbelt (macOS) backend. Used when
+/// `containment == Seatbelt`.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SeatbeltConfig {
+    /// Which Seatbelt entry point to use. Default: `Exec` (sandbox-exec).
+    pub mode: SeatbeltMode,
+    /// Optional override of the generated TinyScheme profile. When set, the
+    /// generated policy-derived profile is ignored and this string is passed
+    /// to Seatbelt verbatim. Intended for advanced/testing use.
+    #[serde(rename = "profileOverride", skip_serializing_if = "Option::is_none")]
+    pub profile_override: Option<String>,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
@@ -364,6 +395,8 @@ pub struct CodexRequest {
     pub policy: ContainerPolicy,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
+    /// Seatbelt-specific configuration (used when containment == Seatbelt).
+    pub seatbelt_config: SeatbeltConfig,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
     /// Experimental feature configs (only applied when experimental_enabled is true).
@@ -387,6 +420,7 @@ impl Default for CodexRequest {
             lifecycle: LifecycleConfig::default(),
             policy: ContainerPolicy::default(),
             lxc_config: LxcConfig::default(),
+            seatbelt_config: SeatbeltConfig::default(),
             experimental_enabled: false,
             experimental: ExperimentalConfig::default(),
             dry_run: false,

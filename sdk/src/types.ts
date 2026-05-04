@@ -34,7 +34,7 @@ export interface LifecycleConfig {
 /**
  * Containment type abstraction for createConfigFromPolicy.
  * Maps to platform-specific backends:
- * - "process": BaseProcessContainer (Windows) / LXC (Linux)
+ * - "process": BaseProcessContainer (Windows) / LXC (Linux) / Seatbelt (macOS)
  * - "microvm": MicroVM/Nanvix backend (Windows only, experimental)
  */
 export type ContainmentType = "process" | "wslc" | "microvm";
@@ -172,7 +172,7 @@ export interface ContainerConfig {
   /** Externally assigned container identifier */
   containerId?: string;
   /** Containment backend */
-  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm';
+  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'seatbelt';
   /** Container lifecycle settings */
   lifecycle?: LifecycleConfig;
   /** Process execution settings (required) */
@@ -181,6 +181,8 @@ export interface ContainerConfig {
   appContainer?: AppContainerConfig;
   /** LXC container configuration (Linux only) */
   lxc?: LxcConfig;
+  /** Seatbelt sandbox configuration (macOS only) */
+  seatbelt?: SeatbeltConfig;
   /** Filesystem access configuration */
   filesystem?: FilesystemConfig;
   /** Network access configuration */
@@ -259,9 +261,28 @@ export interface LxcConfig {
 }
 
 /**
+ * Seatbelt (macOS) sandbox configuration. Used when containment is 'seatbelt'.
+ */
+export interface SeatbeltConfig {
+  /**
+   * Which Seatbelt entry point to use:
+   * - "exec" (default): spawn /usr/bin/sandbox-exec.
+   * - "inproc": call sandbox_init_with_parameters in the child after fork
+   *   (lower latency; relies on a private macOS API).
+   */
+  mode?: 'exec' | 'inproc';
+  /**
+   * Optional override of the generated TinyScheme profile. When set the
+   * generated policy-derived profile is ignored and this string is passed
+   * to Seatbelt verbatim. Intended for advanced/testing use.
+   */
+  profileOverride?: string;
+}
+
+/**
  * Sandboxing methods available on the platform
  */
-export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm';
+export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'seatbelt';
 
 /**
  * Platform support information
