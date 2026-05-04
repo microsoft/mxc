@@ -28,6 +28,8 @@ pub mod appcontainer_runner;
 #[cfg(target_os = "windows")]
 pub mod filesystem_bfs;
 #[cfg(target_os = "windows")]
+pub mod job_object;
+#[cfg(target_os = "windows")]
 pub mod network_manager;
 #[cfg(target_os = "windows")]
 pub mod process_mitigation;
