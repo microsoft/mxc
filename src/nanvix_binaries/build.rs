@@ -188,10 +188,11 @@ fn try_tar_extract(zip_path: &Path, dest_dir: &Path, files: &[&str]) -> Result<(
     //   nanvix_rootfs.img                                 → strip 1 component
     // We run two passes to handle both depths.
 
-    let prefix = "microvm-standalone-256mb";
-    let (bin_files, root_files): (Vec<&&str>, Vec<&&str>) = files
-        .iter()
-        .partition(|f| matches!(**f, "nanvixd.exe" | "kernel.elf" | "python3.12"));
+    const ARCHIVE_PREFIX: &str = "microvm-standalone-256mb";
+    const BIN_DIR_FILES: &[&str] = &["nanvixd.exe", "kernel.elf", "python3.12"];
+
+    let (bin_files, root_files): (Vec<&&str>, Vec<&&str>) =
+        files.iter().partition(|f| BIN_DIR_FILES.contains(f));
 
     // Pass 1: files under <prefix>/bin/ — strip 2 path components.
     if !bin_files.is_empty() {
@@ -199,7 +200,7 @@ fn try_tar_extract(zip_path: &Path, dest_dir: &Path, files: &[&str]) -> Result<(
         cmd.arg("-xf").arg(zip_path).arg("-C").arg(dest_dir);
         cmd.args(["--strip-components", "2"]);
         for f in &bin_files {
-            cmd.arg(format!("{}/bin/{}", prefix, f));
+            cmd.arg(format!("{}/bin/{}", ARCHIVE_PREFIX, f));
         }
         let output = cmd.output().map_err(|e| {
             format!(
@@ -223,7 +224,7 @@ fn try_tar_extract(zip_path: &Path, dest_dir: &Path, files: &[&str]) -> Result<(
         cmd.arg("-xf").arg(zip_path).arg("-C").arg(dest_dir);
         cmd.args(["--strip-components", "1"]);
         for f in &root_files {
-            cmd.arg(format!("{}/{}", prefix, f));
+            cmd.arg(format!("{}/{}", ARCHIVE_PREFIX, f));
         }
         let output = cmd.output().map_err(|e| {
             format!(

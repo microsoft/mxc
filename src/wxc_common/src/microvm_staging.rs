@@ -3,7 +3,6 @@
 
 //! MicroVM staging directory builder for mount-based script delivery.
 
-use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,19 +17,16 @@ pub const MAX_STAGING_BYTES: u64 = 16 * 1024 * 1024;
 pub const BOOTSTRAP_FILENAME: &str = ".mxc-bootstrap.py";
 /// User script filename in staging.
 pub const SCRIPT_FILENAME: &str = ".mxc-script.py";
-/// Path map JSON filename in staging.
-pub const PATHMAP_FILENAME: &str = ".mxc-pathmap.json";
 /// Subdirectory for read-write staged host paths.
 pub const RW_DIR: &str = "rw";
 /// Subdirectory for read-only staged host paths.
 pub const RO_DIR: &str = "ro";
-/// Maximum slug length in characters to avoid exceeding MAX_PATH in the staging hierarchy.
-const MAX_SLUG_CHARS: usize = 80;
+/// Maximum mount name length in characters to avoid exceeding MAX_PATH in the staging hierarchy.
+const MAX_MOUNT_NAME_CHARS: usize = 80;
 /// Bootstrap Python source used by the guest runtime.
-pub(crate) const BOOTSTRAP_SOURCE: &str = "import json, os, sys
-with open('/mnt/.mxc-pathmap.json') as f:
-    for slug, guest_path in json.load(f).items():
-        os.environ[f'MXC_PATH_{slug}'] = guest_path
+/// Minimal — just runs the user script. Path translation is done at staging
+/// time by rewriting host paths in the script source before writing it.
+pub(crate) const BOOTSTRAP_SOURCE: &str = "import sys
 sys.argv = ['/mnt/.mxc-script.py']
 with open(sys.argv[0]) as _f:
     exec(compile(_f.read(), sys.argv[0], 'exec'), {'__name__': '__main__', '__file__': sys.argv[0]})
@@ -54,7 +50,7 @@ pub enum StagingError {
 }
 
 /// Return type of the staging build closure.
-type StagingBuildResult = Result<(BTreeMap<String, String>, Vec<RwMapping>, u64), StagingError>;
+type StagingBuildResult = Result<(Vec<(String, String)>, Vec<RwMapping>, u64), StagingError>;
 
 /// Whether the original host path was a file or directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +71,6 @@ struct RwMapping {
 #[derive(Debug)]
 pub struct StagingDir {
     path: PathBuf,
-    path_map: BTreeMap<String, String>,
     rw_mappings: Vec<RwMapping>,
     size_bytes: u64,
     /// When true, `Drop` skips cleanup so the staging dir can be recovered.
@@ -106,10 +101,10 @@ impl StagingDir {
 
         let build_result = || -> StagingBuildResult {
             fs::write(path.join(BOOTSTRAP_FILENAME), BOOTSTRAP_SOURCE)?;
-            fs::write(path.join(SCRIPT_FILENAME), script)?;
 
-            let mut used_env_keys: Vec<String> = Vec::new();
-            let mut path_map: BTreeMap<String, String> = BTreeMap::new();
+            let mut used_names: Vec<String> = Vec::new();
+            // Collect host→guest path mappings for script rewriting.
+            let mut rewrite_map: Vec<(String, String)> = Vec::new();
             let mut rw_mappings: Vec<RwMapping> = Vec::new();
 
             if !readwrite_paths.is_empty() {
@@ -119,10 +114,11 @@ impl StagingDir {
                 let host_path = PathBuf::from(source);
                 validate_source_path(&host_path, source)?;
 
-                let slug = allocate_slug(&host_path, &mut used_env_keys);
-                let slot_dir = path.join(RW_DIR).join(&slug);
+                let name = allocate_mount_name(&host_path, &mut used_names);
+                let slot_dir = path.join(RW_DIR).join(&name);
                 let kind = stage_host_path(&host_path, &slot_dir)?;
-                path_map.insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RW_DIR, slug));
+                let guest_path = format!("/mnt/{}/{}", RW_DIR, name);
+                rewrite_map.push((source.clone(), guest_path));
                 rw_mappings.push(RwMapping {
                     host_path,
                     staged_path: slot_dir,
@@ -137,8 +133,8 @@ impl StagingDir {
                 let host_path = PathBuf::from(source);
                 validate_source_path(&host_path, source)?;
 
-                let slug = allocate_slug(&host_path, &mut used_env_keys);
-                let slot_dir = path.join(RO_DIR).join(&slug);
+                let name = allocate_mount_name(&host_path, &mut used_names);
+                let slot_dir = path.join(RO_DIR).join(&name);
                 if host_path.is_dir() {
                     copy_dir_recursive(&host_path, &slot_dir)?;
                 } else {
@@ -149,13 +145,15 @@ impl StagingDir {
                     fs::copy(&host_path, slot_dir.join(file_name))?;
                 }
                 set_readonly_recursive(&slot_dir)?;
-                path_map.insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RO_DIR, slug));
+                let guest_path = format!("/mnt/{}/{}", RO_DIR, name);
+                rewrite_map.push((source.clone(), guest_path));
             }
 
-            let serialized = serde_json::to_string(&path_map).map_err(|e| {
-                StagingError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-            })?;
-            fs::write(path.join(PATHMAP_FILENAME), serialized)?;
+            // Rewrite host paths in the user script so callers don't need to
+            // know about the guest mount layout. Both backslash and forward-slash
+            // variants of each host path are replaced.
+            let rewritten_script = rewrite_paths_in_script(script, &rewrite_map);
+            fs::write(path.join(SCRIPT_FILENAME), &rewritten_script)?;
 
             let size_bytes = dir_size(&path)?;
             if size_bytes > MAX_STAGING_BYTES {
@@ -165,10 +163,10 @@ impl StagingDir {
                 });
             }
 
-            Ok((path_map, rw_mappings, size_bytes))
+            Ok((rewrite_map, rw_mappings, size_bytes))
         }();
 
-        let (path_map, rw_mappings, size_bytes) = match build_result {
+        let (_rewrite_map, rw_mappings, size_bytes) = match build_result {
             Ok(result) => result,
             Err(err) => {
                 let _ = remove_dir_all_force(&path);
@@ -178,7 +176,6 @@ impl StagingDir {
 
         Ok(Self {
             path,
-            path_map,
             rw_mappings,
             size_bytes,
             preserve: false,
@@ -188,11 +185,6 @@ impl StagingDir {
     /// Returns the host path to the staging directory.
     pub fn path(&self) -> &Path {
         &self.path
-    }
-
-    /// Returns the host-path slug to guest-path map.
-    pub fn path_map(&self) -> &BTreeMap<String, String> {
-        &self.path_map
     }
 
     /// Copies all read-write staged paths back to their original host locations.
@@ -241,8 +233,8 @@ impl Drop for StagingDir {
     }
 }
 
-/// Allocates a unique guest path slug whose derived env key is also unique.
-fn allocate_slug(host_path: &Path, used_env_keys: &mut Vec<String>) -> String {
+/// Allocates a unique mount directory name, avoiding collisions with previously used names.
+fn allocate_mount_name(host_path: &Path, used_names: &mut Vec<String>) -> String {
     let raw_base = host_path
         .file_name()
         .and_then(OsStr::to_str)
@@ -250,7 +242,7 @@ fn allocate_slug(host_path: &Path, used_env_keys: &mut Vec<String>) -> String {
         .to_ascii_lowercase()
         .replace('-', "_");
 
-    let base = sanitize_slug(&raw_base);
+    let base = sanitize_mount_name(&raw_base);
     let mut counter = 1_u64;
 
     loop {
@@ -259,16 +251,15 @@ fn allocate_slug(host_path: &Path, used_env_keys: &mut Vec<String>) -> String {
         } else {
             format!("{}_{}", base, counter)
         };
-        let env_key = slug_to_env_key(&candidate);
-        if !used_env_keys.iter().any(|key| key == &env_key) {
-            used_env_keys.push(env_key);
+        if !used_names.iter().any(|s| s == &candidate) {
+            used_names.push(candidate.clone());
             return candidate;
         }
         counter += 1;
     }
 }
 
-fn sanitize_slug(value: &str) -> String {
+fn sanitize_mount_name(value: &str) -> String {
     let sanitized: String = value
         .chars()
         .map(|ch| match ch {
@@ -278,29 +269,38 @@ fn sanitize_slug(value: &str) -> String {
         .collect();
 
     let trimmed = sanitized.trim_matches('_');
-    let capped = if trimmed.len() > MAX_SLUG_CHARS {
-        &trimmed[..MAX_SLUG_CHARS]
+    let capped = if trimmed.len() > MAX_MOUNT_NAME_CHARS {
+        &trimmed[..MAX_MOUNT_NAME_CHARS]
     } else {
         trimmed
     };
     // Re-trim in case the cap landed on a trailing underscore.
-    let final_slug = capped.trim_end_matches('_');
-    if final_slug.is_empty() {
+    let final_name = capped.trim_end_matches('_');
+    if final_name.is_empty() {
         "path".to_string()
     } else {
-        final_slug.to_string()
+        final_name.to_string()
     }
 }
 
-/// Converts a slug to an upper snake case environment key suffix.
-pub(crate) fn slug_to_env_key(slug: &str) -> String {
-    slug.chars()
-        .map(|ch| match ch {
-            'a'..='z' => ch.to_ascii_uppercase(),
-            'A'..='Z' | '0'..='9' => ch,
-            _ => '_',
-        })
-        .collect()
+/// Replaces host paths in the script source with their guest mount equivalents.
+/// Both backslash (`C:\Users\work`) and forward-slash (`C:/Users/work`) variants
+/// are replaced. Longer paths are replaced first to avoid partial prefix matches.
+fn rewrite_paths_in_script(script: &str, mappings: &[(String, String)]) -> String {
+    let mut result = script.to_string();
+    // Sort by host path length descending so longer prefixes match first.
+    let mut sorted: Vec<_> = mappings.to_vec();
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
+    for (host_path, guest_path) in &sorted {
+        // Replace backslash variant (Windows-native).
+        result = result.replace(host_path, guest_path);
+        // Replace forward-slash variant (Python cross-platform style).
+        let forward = host_path.replace('\\', "/");
+        if forward != *host_path {
+            result = result.replace(&forward, guest_path);
+        }
+    }
+    result
 }
 
 /// Stages a single host path in a target slot directory using a private copy.
@@ -578,7 +578,6 @@ mod tests {
         let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &[]).unwrap();
         assert!(!staging.path().join(RW_DIR).exists());
         assert!(!staging.path().join(RO_DIR).exists());
-        assert!(staging.path_map().is_empty());
     }
 
     #[test]
@@ -589,12 +588,18 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         write_file(&source.join("data.txt"), "abc");
 
-        let rw = vec![source.display().to_string()];
-        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        let host_path = source.display().to_string();
+        // Script references the host path as-is (backslashes on Windows).
+        let script = format!("open('{}')", host_path);
+        let rw = vec![host_path];
+        let staging = StagingDir::new(root.path().to_path_buf(), &script, &rw, &[]).unwrap();
         assert!(staging.path().join(RW_DIR).join("sample").exists());
-        assert_eq!(
-            staging.path_map().get("SAMPLE").map(String::as_str),
-            Some("/mnt/rw/sample")
+        // Verify the script was rewritten with the guest path.
+        let rewritten = fs::read_to_string(staging.path().join(SCRIPT_FILENAME)).unwrap();
+        assert!(
+            rewritten.contains("/mnt/rw/sample"),
+            "expected guest path in rewritten script, got: {}",
+            rewritten
         );
     }
 
@@ -618,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn staging_slug_collision() {
+    fn staging_name_collision() {
         let root = tempdir().unwrap();
         let source_root = tempdir().unwrap();
         let first = source_root.path().join("input");
@@ -629,24 +634,35 @@ mod tests {
 
         let rw = vec![first.display().to_string(), second.display().to_string()];
         let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
-        assert!(staging.path_map().contains_key("INPUT"));
-        assert!(staging.path_map().contains_key("INPUT_2"));
+        // Both names should exist, second gets a suffix to avoid collision.
+        assert!(staging.path().join(RW_DIR).join("input").exists());
+        assert!(staging.path().join(RW_DIR).join("input_2").exists());
     }
 
     #[test]
-    fn staging_pathmap_json_shape() {
+    fn staging_script_rewrite_replaces_host_paths() {
         let root = tempdir().unwrap();
         let source_root = tempdir().unwrap();
         let source = source_root.path().join("sample");
         fs::create_dir_all(&source).unwrap();
 
-        let rw = vec![source.display().to_string()];
-        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        let host_path = source.display().to_string();
+        let forward_path = host_path.replace('\\', "/");
+        // Script references both backslash and forward-slash variants.
+        let script = format!("a = '{}'\nb = '{}'", host_path, forward_path);
+        let rw = vec![host_path];
+        let staging = StagingDir::new(root.path().to_path_buf(), &script, &rw, &[]).unwrap();
 
-        let json = fs::read_to_string(staging.path().join(PATHMAP_FILENAME)).unwrap();
-        let parsed: BTreeMap<String, String> = serde_json::from_str(&json).unwrap();
-        assert!(parsed.contains_key("SAMPLE"));
-        assert_eq!(parsed, *staging.path_map());
+        let rewritten = fs::read_to_string(staging.path().join(SCRIPT_FILENAME)).unwrap();
+        assert!(
+            rewritten.contains("/mnt/rw/sample"),
+            "expected guest path in rewritten script, got: {}",
+            rewritten
+        );
+        assert!(
+            !rewritten.contains(&forward_path),
+            "forward-slash host path should have been replaced"
+        );
     }
 
     #[test]
@@ -690,21 +706,20 @@ mod tests {
 
         let rw = vec![source_file.display().to_string()];
         let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
-        // File "payload" has no extension, slug stays "payload"
+        // File "payload" has no extension, name stays "payload"
         let staged_file = staging.path().join(RW_DIR).join("payload").join("payload");
         assert!(staged_file.exists());
     }
 
     #[test]
-    fn slug_generation_dash_to_underscore() {
+    fn mount_name_dash_to_underscore() {
         let root = tempdir().unwrap();
         let source = root.path().join("ref-data");
         fs::create_dir_all(&source).unwrap();
 
         let mut used_keys = Vec::new();
-        let slug = allocate_slug(&source, &mut used_keys);
-        assert_eq!(slug, "ref_data");
-        assert_eq!(slug_to_env_key(&slug), "REF_DATA");
+        let name = allocate_mount_name(&source, &mut used_keys);
+        assert_eq!(name, "ref_data");
     }
 
     #[test]
@@ -743,7 +758,7 @@ mod tests {
 
         let rw = vec![source_file.display().to_string()];
         let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
-        // slug for "payload.txt" is "payload_txt" (dot sanitized to underscore)
+        // mount name for "payload.txt" is "payload_txt" (dot sanitized to underscore)
         let staged_file = staging
             .path()
             .join(RW_DIR)
@@ -788,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn staging_env_key_collision_is_disambiguated() {
+    fn staging_name_collision_is_disambiguated() {
         let root = tempdir().unwrap();
         let source_root = tempdir().unwrap();
         let first = source_root.path().join("foo-bar");
@@ -799,8 +814,8 @@ mod tests {
         let rw = vec![first.display().to_string(), second.display().to_string()];
         let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
 
-        assert!(staging.path_map().contains_key("FOO_BAR"));
-        assert!(staging.path_map().contains_key("FOO_BAR_2"));
+        assert!(staging.path().join(RW_DIR).join("foo_bar").exists());
+        assert!(staging.path().join(RW_DIR).join("foo_bar_2").exists());
     }
 
     #[test]
@@ -889,14 +904,14 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_slug_caps_at_max_slug_chars() {
-        let long_name = "a".repeat(MAX_SLUG_CHARS + 20);
-        let slug = sanitize_slug(&long_name);
+    fn sanitize_mount_name_caps_at_max_chars() {
+        let long_name = "a".repeat(MAX_MOUNT_NAME_CHARS + 20);
+        let name = sanitize_mount_name(&long_name);
         assert!(
-            slug.len() <= MAX_SLUG_CHARS,
-            "slug length {} exceeds MAX_SLUG_CHARS {}",
-            slug.len(),
-            MAX_SLUG_CHARS
+            name.len() <= MAX_MOUNT_NAME_CHARS,
+            "mount name length {} exceeds MAX_MOUNT_NAME_CHARS {}",
+            name.len(),
+            MAX_MOUNT_NAME_CHARS
         );
     }
 

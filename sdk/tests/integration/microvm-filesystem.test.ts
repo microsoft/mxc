@@ -18,25 +18,29 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'os';
-import { spawnSandboxFromConfig } from '../../src/sandbox';
-import { ContainerConfig } from '../../src/types';
 import { ChildProcess } from 'child_process';
+import { sdk } from './test-helpers';
 
 const isMicrovmAvailable = os.platform() === 'win32';
+
+/** Escape backslashes for embedding a Windows path in a Python string literal. */
+function pyEscape(p: string): string {
+  return p.replace(/\\/g, '\\\\');
+}
 
 /**
  * Spawn a microvm sandbox using spawnSandboxFromConfig with usePty:false.
  * Returns stdout, stderr, and exit code.
  */
 function runMicrovm(
-  config: ContainerConfig,
+  config: Record<string, unknown>,
   options: { timeoutMs?: number } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve, reject) => {
     const timeout = options.timeoutMs ?? 120_000;
 
     try {
-      const child: ChildProcess = spawnSandboxFromConfig(config, {
+      const child: ChildProcess = sdk.spawnSandboxFromConfig(config, {
         experimental: true,
         debug: true,
         usePty: false,
@@ -73,7 +77,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
 }, () => {
 
   it('should run a simple Python script and capture output', async () => {
-    const config: ContainerConfig = {
+    const config = {
       version: '0.5.0-alpha',
       containment: 'microvm',
       process: {
@@ -89,7 +93,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
   });
 
   it('should propagate non-zero exit codes', async () => {
-    const config: ContainerConfig = {
+    const config = {
       version: '0.5.0-alpha',
       containment: 'microvm',
       process: {
@@ -103,7 +107,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
   });
 
   it('should run multiline scripts with imports', async () => {
-    const config: ContainerConfig = {
+    const config = {
       version: '0.5.0-alpha',
       containment: 'microvm',
       process: {
@@ -123,20 +127,22 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
     assert.ok(combined.includes('"platform": "nanvix"'), `Expected nanvix platform in output:\n${combined}`);
   });
 
-  it('should support readwritePaths and expose MXC_PATH_* env vars', async () => {
+  it('should support readwritePaths with transparent path translation', async () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-microvm-e2e-'));
     const rwDir = path.join(testDir, 'work');
     fs.mkdirSync(rwDir);
     fs.writeFileSync(path.join(rwDir, 'input.txt'), 'data from host');
 
     try {
-      const config: ContainerConfig = {
+      // Use the host path directly in the script — the staging layer rewrites
+      // it to the guest mount path before the script reaches the VM.
+      const config = {
         version: '0.5.0-alpha',
         containment: 'microvm',
         process: {
           commandLine: [
             "import os",
-            "path = os.environ['MXC_PATH_WORK']",
+            `path = '${pyEscape(rwDir)}'`,
             "print(f'Guest path: {path}')",
             "with open(os.path.join(path, 'input.txt')) as f:",
             "    print(f'Read: {f.read().strip()}')",
@@ -159,7 +165,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
   });
 
   it('should reject denied_paths with an error', async () => {
-    const config: ContainerConfig = {
+    const config = {
       version: '0.5.0-alpha',
       containment: 'microvm',
       process: {
@@ -184,13 +190,13 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
     fs.writeFileSync(path.join(rwDir, 'input.txt'), 'before');
 
     try {
-      const config: ContainerConfig = {
+      const config = {
         version: '0.5.0-alpha',
         containment: 'microvm',
         process: {
           commandLine: [
             "import os",
-            "path = os.environ['MXC_PATH_WORK']",
+            `path = '${pyEscape(rwDir)}'`,
             "with open(os.path.join(path, 'input.txt'), 'w') as f:",
             "    f.write('after')",
             "with open(os.path.join(path, 'created.txt'), 'w') as f:",
@@ -218,13 +224,13 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
     fs.mkdirSync(rwDir);
 
     try {
-      const config: ContainerConfig = {
+      const config = {
         version: '0.5.0-alpha',
         containment: 'microvm',
         process: {
           commandLine: [
             "import os, sys",
-            "path = os.environ['MXC_PATH_WORK']",
+            `path = '${pyEscape(rwDir)}'`,
             "with open(os.path.join(path, 'nonzero.txt'), 'w') as f:",
             "    f.write('persisted before non-zero exit')",
             "sys.exit(7)",

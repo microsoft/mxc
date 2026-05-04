@@ -53,6 +53,8 @@ const RAMFS_IMAGE: &str = "nanvix_rootfs.img";
 const BOOT_TIMEOUT_MS: u64 = 60_000;
 /// Generic error exit code returned to host callers.
 const ERROR_EXIT_CODE: i32 = -1;
+/// Maximum age of orphaned staging dirs before cleanup (1 hour).
+const ORPHAN_SWEEP_MAX_AGE_SECS: u64 = 3600;
 const ERR_DENIED_PATHS: &str = concat!(
     "denied_paths is not meaningful for the microvm backend ",
     "-- the guest has no host filesystem visibility. ",
@@ -480,7 +482,7 @@ impl ScriptRunner for NanVixScriptRunner {
         // Sweep orphaned staging dirs from previous crashed runs (older than 1 hour).
         crate::microvm_staging::sweep_orphaned_staging_dirs(
             &staging_root,
-            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs(ORPHAN_SWEEP_MAX_AGE_SECS),
         );
         let mut staging = match crate::microvm_staging::StagingDir::new(
             staging_root,

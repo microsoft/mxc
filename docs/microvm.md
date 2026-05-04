@@ -5,7 +5,7 @@ The MicroVM backend runs Python code inside a NanVix microkernel VM with hardwar
 ## Requirements
 
 - Windows with WHP enabled (`bcdedit /set hypervisorlaunchtype auto`)
-- NanVix runtime binaries (`nanvixd.exe`, `kernel.elf`, `python.elf`, `cpython-ramfs.img`) placed next to `wxc-exec.exe`
+- NanVix runtime binaries (`nanvixd.exe`, `kernel.elf`, `python3.12`, `nanvix_rootfs.img`) placed next to `wxc-exec.exe`
 - `--experimental` flag (MicroVM is an experimental feature)
 
 ## Quick Start
@@ -98,7 +98,7 @@ Not supported for MicroVM. If `deniedPaths` is specified, the config is rejected
 | ----------------------------------------- | --------------------------------------------- |
 | Total filesystem policy content         | ≤ 16 MB                                    |
 | Single file size                        | < 4 GB (FAT32 limit)                        |
-| Guest RAM                               | 128 MB                                      |
+| Guest RAM                               | 256 MB                                      |
 | Symlinks/reparse points in source paths | Not supported (rejected at preflight)       |
 | Junctions for staging                   | Not used                                    |
 | `workingDirectory`                      | Not supported (guest CWD is `/`)            |
@@ -112,4 +112,3 @@ Not supported for MicroVM. If `deniedPaths` is specified, the config is rejected
 | -------------------------------- | ------------------------------------- |
 | Network I/O                    | `OSError: Function not implemented` |
 | File writing outside `/mnt/rw/` | `OSError: Read-only file system`    |
-|                                |                                     |
