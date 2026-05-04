@@ -5,6 +5,7 @@
 pub mod config_parser;
 pub mod encoding;
 pub mod error;
+pub mod id;
 pub mod logger;
 pub mod models;
 pub mod mxc_error;
