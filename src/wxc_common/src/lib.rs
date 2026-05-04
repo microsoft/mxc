@@ -12,6 +12,7 @@ pub mod mxc_error;
 #[cfg(target_os = "windows")]
 pub mod nanvix_runner;
 pub mod script_runner;
+pub mod state_aware_backend;
 pub mod validator;
 
 // Windows-specific modules
