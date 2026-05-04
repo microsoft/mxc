@@ -7,7 +7,7 @@
 //!   cargo run --manifest-path tools/generate-isolation-session-bindings/Cargo.toml -- <winmd-path>
 //!
 //! The WinMD file is built from the OS repo (amd64chk flavor):
-//!   obj/<flavor>/onecoreuap/windows/core/isoenvbroker/src/published/objchk/amd64/windows.ai.isolationenvironment.winmd
+//!   obj/amd64chk/onecoreuap/windows/core/isoenvbroker/src/client/objchk/amd64/windows.ai.isolationsession.winmd
 
 use std::path::{Path, PathBuf};
 use std::process;
@@ -61,7 +61,7 @@ fn main() {
         "--out",
         output_path.to_str().expect("output path is valid UTF-8"),
         "--filter",
-        "Windows.AI.IsolationEnvironment.Session",
+        "Windows.AI.IsolationSession",
         "--flat",
         "--implement",
     ]);
@@ -75,6 +75,6 @@ fn main() {
     println!();
     println!("Next steps:");
     println!("  1. Review the generated bindings.rs");
-    println!("  2. Update external/windows-sdk/isolation-environment-session/GENERATION_INFO.toml");
+    println!("  2. Update external/windows-sdk/isolation-session/GENERATION_INFO.toml");
     println!("  3. Build: cd src && cargo build --workspace");
 }

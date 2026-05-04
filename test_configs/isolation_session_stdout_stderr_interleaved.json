@@ -1,0 +1,9 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "isolation-session-interleaved",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "echo OUT_A & echo ERR_A 1>&2 & echo OUT_B & echo ERR_B 1>&2 & echo OUT_C",
+    "timeout": 30000
+  }
+}

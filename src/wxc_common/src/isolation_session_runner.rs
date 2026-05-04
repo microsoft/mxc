@@ -3,39 +3,62 @@
 
 //! `IsolationSessionRunner` — executes scripts in an IsoEnvBroker Isolation Session.
 //!
-//! Uses the `Windows.AI.IsolationEnvironment.Session` WinRT API to create an
-//! isolated Windows session with a dedicated agent user account and run
-//! processes within it.
+//! Uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API to
+//! create an isolated Windows session with a dedicated agent user account
+//! and run processes within it.
 //!
 //! This module has two layers:
-//! - `IsolationSessionManager`: reusable core, methods map 1:1 to the Session API lifecycle.
-//! - `IsolationSessionRunner`: thin `ScriptRunner` impl for v0.1 that calls all lifecycle
-//!   steps per invocation.
+//! - `IsolationSessionManager`: reusable core, methods map 1:1 to the
+//!   `IsoSessionOps` granular lifecycle.
+//! - `IsolationSessionRunner`: thin `ScriptRunner` impl for v0.1 that runs
+//!   the full lifecycle per invocation.
 
 use std::fmt::Write;
+use std::io::IsTerminal;
 
 use crate::logger::Logger;
 use crate::models::{CodexRequest, IsolationSessionConfigurationId, NetworkPolicy, ScriptResponse};
+use crate::process_util::{
+    create_relay_thread, create_relay_thread_with_stop, ConsoleModeRestorer, OwnedHandle,
+    PipeRelayParams, PipeRelayWithStopParams,
+};
 use crate::script_runner::ScriptRunner;
 use isolation_session_bindings::bindings::{
-    IsolationSessionClient, IsolationSessionConfigurationId as BindingsConfigurationId,
-    IsolationSessionOperationStatus, IsolationSessionProvisionLifetimePolicy,
-    IsolationSessionProvisionOptions, IsolationSessionProvisionStatus,
-    IsolationSessionRegistrationStatus, IsolationSessionWorkerProcessCreateOptions,
-    IsolationSessionWorkerProcessOperationStatus, IsolationSessionWorkerProcessRedirectFlags,
+    IsoSessionConfigId, IsoSessionError, IsoSessionOps, IsoSessionProcess,
+    IsoSessionProcessOptions, IsoSessionProcessResult, IsoSessionResult, IsoSessionUserResult,
 };
-use windows::Win32::Foundation::{
-    CloseHandle, CLASS_E_CLASSNOTAVAILABLE, HANDLE, REGDB_E_CLASSNOTREG,
+use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, HANDLE, REGDB_E_CLASSNOTREG};
+use windows::Win32::System::Console::{
+    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
-use windows::Win32::Storage::FileSystem::ReadFile;
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows_core::{HSTRING, PCWSTR};
 
-impl From<IsolationSessionConfigurationId> for BindingsConfigurationId {
+// -- Identifiers -------------------------------------------------------------
+
+/// Cohort registration ID used with the `IsoSessionOps` wrapper.
+///
+/// The wrapper hardcodes `L"regid"` internally for every agent-name-keyed op
+/// (`ApiIsoSessionOps.cpp` lines 80, 90, 106, 115, 132, 187 in the OS repo),
+/// so callers must register with the literal `"regid"` or subsequent calls
+/// hit the wrong cohort.
+const REGISTRATION_ID: &str = "regid";
+
+/// Provision identifier scoping the agent user across the lifecycle.
+///
+/// Reused as the `agentName` parameter on every subsequent op — the wrapper
+/// aliases agentName to provisionId at the COM layer (per the comment in
+/// `CommandSession.cpp:64` in the OS repo, `IsoSessionOps` callers pass
+/// `provisionId` where the IDL says `agentName`).
+const PROVISION_ID: &str = "wxc-provid";
+
+impl From<IsolationSessionConfigurationId> for IsoSessionConfigId {
     fn from(value: IsolationSessionConfigurationId) -> Self {
         match value {
-            IsolationSessionConfigurationId::Small => BindingsConfigurationId::Small,
-            IsolationSessionConfigurationId::Medium => BindingsConfigurationId::Medium,
-            IsolationSessionConfigurationId::Large => BindingsConfigurationId::Large,
-            IsolationSessionConfigurationId::CommandLine => BindingsConfigurationId::CommandLine,
+            IsolationSessionConfigurationId::Small => IsoSessionConfigId::Small,
+            IsolationSessionConfigurationId::Medium => IsoSessionConfigId::Medium,
+            IsolationSessionConfigurationId::Large => IsoSessionConfigId::Large,
+            IsolationSessionConfigurationId::Composable => IsoSessionConfigId::Composable,
         }
     }
 }
@@ -48,8 +71,9 @@ pub enum IsolationSessionError {
     /// The caller-supplied container policy contains a field this backend
     /// does not support (filesystem rules, network rules, proxy).
     Policy(String),
-    /// The IsoEnvBroker Session API is not available on this host
-    /// (`Feature_IsoBrokerSessionApis` disabled or service not present).
+    /// The in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API is
+    /// not available on this host (DLL not registered or
+    /// `Feature_IsoBrokerSessionApis` disabled).
     ServiceUnavailable(String),
     /// A broker-side lifecycle step (register / provision / start / exec /
     /// stop / deprovision / unregister) returned a failure.
@@ -114,11 +138,36 @@ pub(crate) fn validate_policy(request: &CodexRequest) -> Result<(), IsolationSes
     Ok(())
 }
 
-// -- Process options (intermediate struct for testability) --------------------
+// -- Process options (intermediate struct for testability) -------------------
 
-/// Redirect flags for worker process I/O.
+/// Redirect flags for worker process I/O. The bitfield is internal to MXC;
+/// the conversion to per-stream booleans on `IsoSessionProcessOptions`
+/// happens inside `build_iso_process_options`.
+pub(crate) const REDIRECT_STDIN: u32 = 0x1;
 pub(crate) const REDIRECT_STDOUT: u32 = 0x2;
 pub(crate) const REDIRECT_STDERR: u32 = 0x4;
+
+/// Compute the canonical redirect-flags bitfield for the agent process I/O,
+/// given whether wxc-exec is running in interactive (ConPTY) mode.
+///
+/// Policy (Commit 2 — TTY support):
+/// - Stdin is always redirected. The runner spawns a relay so the parent's
+///   input reaches the agent (interactive shells need this; batch stdin works
+///   the same way).
+/// - Stdout is always redirected.
+/// - Stderr is redirected ONLY in non-interactive mode. In ConPTY mode the
+///   broker merges stderr into stdout and refuses to populate the stderr
+///   handle (predicate at `IsolationSessionWorkerProcess.cpp:309-310` in the
+///   OS repo: `optStderrHandleResult && !m_pseudoConsole && m_stderrPipeRead`).
+///   Setting `RedirectStandardError(true)` in ConPTY mode is benign but the
+///   handle returns 0 — so we just don't ask for it.
+pub(crate) fn compute_redirect_flags(interactive: bool) -> u32 {
+    let mut flags = REDIRECT_STDIN | REDIRECT_STDOUT;
+    if !interactive {
+        flags |= REDIRECT_STDERR;
+    }
+    flags
+}
 
 /// Intermediate representation of process creation options, decoupled from
 /// both `CodexRequest` (MXC-specific) and WinRT types (OS-specific).
@@ -135,8 +184,14 @@ pub(crate) struct ProcessOptions {
     pub working_directory: String,
     /// Environment variables as (name, value) pairs.
     pub env_vars: Vec<(String, String)>,
-    /// Bitfield of I/O redirect flags.
+    /// Bitfield of I/O redirect flags (`REDIRECT_STDIN | REDIRECT_STDOUT | REDIRECT_STDERR`).
     pub redirect_flags: u32,
+    /// Whether to ask the broker to set up a ConPTY in the isolation session
+    /// (`InteractiveConsole = true`). Decided at runtime by the runner based
+    /// on `std::io::stdout().is_terminal()`. `build_process_options` returns
+    /// `false` as a safe default; the runner overwrites before passing to
+    /// `create_process`.
+    pub interactive: bool,
 }
 
 /// Builds `ProcessOptions` from a `CodexRequest`.
@@ -174,152 +229,160 @@ pub(crate) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
         working_directory: request.working_directory.clone(),
         env_vars,
         redirect_flags: REDIRECT_STDOUT | REDIRECT_STDERR,
+        interactive: false,
     }
 }
 
 // -- Service availability check ----------------------------------------------
 
-/// Activates the IsoEnvBroker Session API factory and verifies the service
-/// is available on this OS build.
+/// Activates the in-proc `IsoSessionOps` factory and returns the instance.
 ///
-/// Returns `Ok(())` if the service is available, or a `ServiceUnavailable`
-/// variant if not. This is called once from `IsolationSessionManager::new()`.
-pub(crate) fn check_service_available() -> Result<(), IsolationSessionError> {
-    // Try the lightest possible call: RegisterClient with an empty registration id.
-    // If the WinRT activation factory is not registered (feature disabled),
-    // this fails with CLASS_E_CLASSNOTAVAILABLE or similar.
-    match IsolationSessionClient::RegisterClient(&windows_core::HSTRING::new()) {
-        Ok(_) => Ok(()),
+/// Returns the activated `IsoSessionOps` on success, or a
+/// `ServiceUnavailable` variant if not. This is called once from
+/// `IsolationSessionManager::new()`.
+pub(crate) fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError>
+{
+    match IsoSessionOps::new() {
+        Ok(ops) => Ok(ops),
         Err(e) => {
             let code = e.code();
-            // CLASS_E_CLASSNOTAVAILABLE / REGDB_E_CLASSNOTREG indicate the
-            // service/feature is not present on this OS build.
             if code == CLASS_E_CLASSNOTAVAILABLE || code == REGDB_E_CLASSNOTREG {
                 Err(IsolationSessionError::ServiceUnavailable(format!(
-                    "IsoEnvBroker Session API is not available on this OS build (HRESULT: {:#010x}). \
-                     Ensure Feature_IsoBrokerSessionApis is enabled.",
+                    "in-proc Windows.AI.IsolationSession IsoSessionOps API is not available \
+                     on this OS build (HRESULT: {:#010x}). Ensure IsoSessionApp.dll is \
+                     registered and Feature_IsoBrokerSessionApis is enabled.",
                     code.0 as u32
                 )))
             } else {
-                // Other errors (permission denied, cohort check failure, etc.)
-                // mean the service IS present but the call failed for another reason.
-                // That's fine — the service is available.
-                Ok(())
+                Err(IsolationSessionError::ServiceUnavailable(format!(
+                    "IsoSessionOps activation failed (HRESULT: {:#010x}): {}",
+                    code.0 as u32, e
+                )))
             }
         }
     }
 }
 
+// -- Helper: structured error checks -----------------------------------------
+
+/// Formats an `IsoSessionError` (the WinRT result type) into a lifecycle
+/// error string with HRESULT, message, and remediation hint where present.
+fn format_iso_error(op: &str, err: &IsoSessionError) -> IsolationSessionError {
+    let msg = err.Message().map(|h| h.to_string()).unwrap_or_default();
+    let code = err.Code().map(|h| h.0 as u32).unwrap_or(0);
+    let remediation = err.Remediation().map(|h| h.to_string()).unwrap_or_default();
+    let suffix = if remediation.is_empty() {
+        String::new()
+    } else {
+        format!(" — remediation: {}", remediation)
+    };
+    lifecycle_err(format!(
+        "{} failed: {} (HRESULT: {:#010x}){}",
+        op, msg, code, suffix
+    ))
+}
+
+/// Checks the `Error` property of an `IsoSessionResult` and returns
+/// `Ok(())` when there's no error, or a lifecycle error with the formatted
+/// details otherwise.
+fn check_result(result: &IsoSessionResult, op: &str) -> Result<(), IsolationSessionError> {
+    let err = result
+        .Error()
+        .map_err(|e| lifecycle_err(format!("{}: get Error failed: {}", op, e)))?;
+    let is_error = err
+        .IsError()
+        .map_err(|e| lifecycle_err(format!("{}: get IsError failed: {}", op, e)))?;
+    if is_error {
+        Err(format_iso_error(op, &err))
+    } else {
+        Ok(())
+    }
+}
+
 // -- IsolationSessionManager (lifecycle core) --------------------------------
 
-/// Manages the IsoEnvBroker Session API lifecycle. Methods map 1:1 to the
-/// Session API steps.
+/// Manages the `IsoSessionOps` lifecycle. Methods map 1:1 to the granular
+/// API steps.
 pub struct IsolationSessionManager {
-    /// Cohort/registration identifier passed to every Session API call.
-    /// The broker accepts an empty `HSTRING` as the default cohort, which
-    /// is what the v0.1 one-shot runner uses.
-    registration_id: windows_core::HSTRING,
-    /// Provision identifier scoping the agent user across the lifecycle
-    /// steps. An empty `HSTRING` selects the broker's single default slot
-    /// per registration — sufficient for the v0.1 single-session-per-process
-    /// lifecycle.
-    provision_id: windows_core::HSTRING,
+    /// Cohort/registration identifier used in `RegisterApp` / `AddUserAsync`
+    /// / `UnregisterAppAsync`. Pegged to the literal `"regid"` per the
+    /// wrapper's internal hardcode.
+    registration_id: HSTRING,
+    /// Provision identifier. Used as the `provisionId` argument to
+    /// `AddUserAsync` and as the `agentName` argument to every subsequent
+    /// op (the wrapper aliases them at the COM layer).
+    provision_id: HSTRING,
+    /// The activated `IsoSessionOps` instance. Held for the lifetime of the
+    /// manager so the WinRT factory is reused across calls.
+    ops: IsoSessionOps,
 }
 
 impl IsolationSessionManager {
-    /// Activate the WinRT factory and verify the service is available.
+    /// Activates the `IsoSessionOps` factory and verifies the service is
+    /// available.
     pub fn new() -> Result<Self, IsolationSessionError> {
-        check_service_available()?;
+        let ops = check_service_available_and_activate()?;
         Ok(Self {
-            registration_id: windows_core::HSTRING::new(),
-            provision_id: windows_core::HSTRING::new(),
+            registration_id: HSTRING::from(REGISTRATION_ID),
+            provision_id: HSTRING::from(PROVISION_ID),
+            ops,
         })
     }
 
-    /// Step 0: Register as a client with the IsoEnvBroker service.
+    /// Step 0: Register the app with the broker.
     pub fn register_client(&self) -> Result<(), IsolationSessionError> {
-        let status = IsolationSessionClient::RegisterClient(&self.registration_id)
-            .map_err(|e| lifecycle_err(format!("RegisterClient failed: {}", e)))?;
-
-        match status {
-            IsolationSessionRegistrationStatus::New
-            | IsolationSessionRegistrationStatus::AlreadyRegistered
-            | IsolationSessionRegistrationStatus::Updated => Ok(()),
-            _ => Err(lifecycle_err(format!(
-                "RegisterClient returned unexpected status: {}",
-                status.0
-            ))),
-        }
+        let result = self
+            .ops
+            .RegisterApp(&self.registration_id)
+            .map_err(|e| lifecycle_err(format!("RegisterApp call failed: {}", e)))?;
+        check_result(&result, "RegisterApp")
     }
 
-    /// Step 1: Provision an agent user account.
-    pub fn provision_agent_user(
-        &mut self,
-        destroy_on_exit: bool,
-    ) -> Result<String, IsolationSessionError> {
-        let lifetime = if destroy_on_exit {
-            IsolationSessionProvisionLifetimePolicy::CallerProcess
-        } else {
-            IsolationSessionProvisionLifetimePolicy::Indefinite
-        };
-
-        let options = IsolationSessionProvisionOptions {
-            LifetimePolicy: lifetime,
-        };
-
-        let async_op = IsolationSessionClient::ProvisionAgentUserAsync(
-            &self.registration_id,
-            &self.provision_id,
-            options,
-        )
-        .map_err(|e| lifecycle_err(format!("ProvisionAgentUserAsync failed: {}", e)))?;
-
-        let result = async_op
+    /// Step 1: Provision an agent user. Returns the OS-assigned agent
+    /// account name (e.g., `Adib-IEB-000`) for logging only — addressing
+    /// for subsequent ops continues to use the configured `provision_id`.
+    ///
+    /// Note: `lifecycle.destroyOnExit` is silently ignored on this backend.
+    /// The in-proc API hardcodes `Indefinite` lifetime in `AddUserAsync`
+    /// (`IsoSessionServerClient.cpp:147` in the OS repo) and the wrapper's
+    /// `RemoveUserAsync` papers over the Indefinite-deprovision bug.
+    pub fn provision_agent_user(&self) -> Result<String, IsolationSessionError> {
+        let async_op = self
+            .ops
+            .AddUserAsync(&self.registration_id, &self.provision_id)
+            .map_err(|e| lifecycle_err(format!("AddUserAsync call failed: {}", e)))?;
+        let user_result: IsoSessionUserResult = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("ProvisionAgentUserAsync: {}", e)))?;
+            .map_err(|e| lifecycle_err(format!("AddUserAsync wait failed: {}", e)))?;
 
-        let status = result
-            .Status()
-            .map_err(|e| lifecycle_err(format!("get Status failed: {}", e)))?;
-        if status != IsolationSessionProvisionStatus::Succeeded {
-            let ext = result.ExtendedError().unwrap_or_default();
-            return Err(lifecycle_err(format!(
-                "ProvisionAgentUserAsync status: {} (extended: {:#010x})",
-                status.0, ext.0
-            )));
+        let err = user_result
+            .Error()
+            .map_err(|e| lifecycle_err(format!("AddUserAsync: get Error failed: {}", e)))?;
+        let is_error = err.IsError().unwrap_or(false);
+        if is_error {
+            return Err(format_iso_error("AddUserAsync", &err));
         }
 
-        let name = result
+        let name = user_result
             .AgentUserName()
-            .map_err(|e| lifecycle_err(format!("get AgentUserName failed: {}", e)))?;
+            .map_err(|e| lifecycle_err(format!("AddUserAsync: get AgentUserName failed: {}", e)))?;
         Ok(name.to_string())
     }
 
-    /// Step 2: Start the isolation session (log the agent user into a Windows session).
+    /// Step 2: Start the isolation session.
     pub fn start_session(
         &self,
         config_id: IsolationSessionConfigurationId,
     ) -> Result<(), IsolationSessionError> {
-        let config_id_com: BindingsConfigurationId = config_id.into();
-        let async_op = IsolationSessionClient::StartSessionAsync(
-            &self.registration_id,
-            &self.provision_id,
-            config_id_com,
-        )
-        .map_err(|e| lifecycle_err(format!("StartSessionAsync failed: {}", e)))?;
-
-        let status = async_op
+        let cfg: IsoSessionConfigId = config_id.into();
+        let async_op = self
+            .ops
+            .StartSessionAsync(&self.provision_id, cfg)
+            .map_err(|e| lifecycle_err(format!("StartSessionAsync call failed: {}", e)))?;
+        let result = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("StartSessionAsync: {}", e)))?;
-
-        match status {
-            IsolationSessionOperationStatus::Succeeded
-            | IsolationSessionOperationStatus::SessionAlreadyStarted => Ok(()),
-            _ => Err(lifecycle_err(format!(
-                "StartSessionAsync returned status: {}",
-                status.0
-            ))),
-        }
+            .map_err(|e| lifecycle_err(format!("StartSessionAsync wait failed: {}", e)))?;
+        check_result(&result, "StartSessionAsync")
     }
 
     /// Step 3: Create a process inside the started isolation session and
@@ -328,197 +391,297 @@ impl IsolationSessionManager {
         &self,
         options: &ProcessOptions,
     ) -> Result<ProcessResult, IsolationSessionError> {
-        // Build the WinRT create options.
-        let create_opts = IsolationSessionWorkerProcessCreateOptions::new().map_err(|e| {
+        let proc_options = build_iso_process_options(options)?;
+
+        let async_op = self
+            .ops
+            .RunProcessWithOptionsAsync(
+                &self.provision_id,
+                &HSTRING::from(&options.process_path),
+                &HSTRING::from(&options.arguments),
+                &proc_options,
+            )
+            .map_err(|e| lifecycle_err(format!("RunProcessWithOptionsAsync call failed: {}", e)))?;
+        let result: IsoSessionProcessResult = async_op
+            .join()
+            .map_err(|e| lifecycle_err(format!("RunProcessWithOptionsAsync wait failed: {}", e)))?;
+
+        let err = result.Error().map_err(|e| {
             lifecycle_err(format!(
-                "Failed to create WorkerProcessCreateOptions: {}",
+                "RunProcessWithOptionsAsync: get Error failed: {}",
+                e
+            ))
+        })?;
+        let is_error = err.IsError().unwrap_or(false);
+        if is_error {
+            return Err(format_iso_error("RunProcessWithOptionsAsync", &err));
+        }
+
+        let process: IsoSessionProcess = result.Process().map_err(|e| {
+            lifecycle_err(format!(
+                "RunProcessWithOptionsAsync: get Process failed: {}",
                 e
             ))
         })?;
 
-        create_opts
-            .SetRedirectFlags(IsolationSessionWorkerProcessRedirectFlags(
-                options.redirect_flags,
-            ))
-            .map_err(|e| lifecycle_err(format!("SetRedirectFlags: {}", e)))?;
+        // Streaming + interactive I/O via three pipe relay threads bridging
+        // wxc-exec's stdio with the broker's pipe handles. The relays cross
+        // the desktop-session boundary that kernel console-handle inheritance
+        // cannot (see `appcontainer_runner.rs:358-392` for the AppContainer
+        // comparison).
+        //
+        // Handle ownership across four sources:
+        //   - Broker pipe handles (`OutputHandle()` / `ErrorHandle()` /
+        //     `InputHandle()`, returned as u64): owned by `IsoSessionProcess`.
+        //     Released by `process.Close()` (`ApiProcess.cpp:131` in the OS
+        //     repo). We do NOT close them.
+        //   - wxc-exec's std handles (`GetStdHandle(STD_*_HANDLE)`): owned by
+        //     the OS for the process lifetime. We do NOT close them.
+        //   - Stop event for stdin relay (`CreateEventW`): RAII-closed via
+        //     `OwnedHandle`.
+        //   - Relay thread handles: RAII-closed via `OwnedHandle` after we
+        //     `WaitForSingleObject` on each.
+        //
+        // Lifetime: relay-param structs are stack-allocated; we wait on every
+        // spawned thread (INFINITE for stdout/stderr, bounded for stdin)
+        // before this function returns.
+        let stdout_handle_val = process.OutputHandle().unwrap_or(0);
+        let stderr_handle_val = process.ErrorHandle().unwrap_or(0);
+        let stdin_handle_val = process.InputHandle().unwrap_or(0);
 
-        if options.timeout_ms > 0 {
-            create_opts
-                .SetTimeoutMilliseconds(options.timeout_ms)
-                .map_err(|e| lifecycle_err(format!("SetTimeoutMilliseconds: {}", e)))?;
-        }
+        let wxc_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
+            .map_err(|e| lifecycle_err(format!("GetStdHandle(stdout) failed: {}", e)))?;
+        let wxc_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
+            .map_err(|e| lifecycle_err(format!("GetStdHandle(stderr) failed: {}", e)))?;
+        let wxc_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
+            .map_err(|e| lifecycle_err(format!("GetStdHandle(stdin) failed: {}", e)))?;
 
-        if !options.working_directory.is_empty() {
-            create_opts
-                .SetWorkingDirectory(&windows_core::HSTRING::from(&options.working_directory))
-                .map_err(|e| lifecycle_err(format!("SetWorkingDirectory: {}", e)))?;
-        }
-
-        if !options.env_vars.is_empty() {
-            let names: Vec<windows_core::HSTRING> = options
-                .env_vars
-                .iter()
-                .map(|(k, _)| windows_core::HSTRING::from(k.as_str()))
-                .collect();
-            let values: Vec<windows_core::HSTRING> = options
-                .env_vars
-                .iter()
-                .map(|(_, v)| windows_core::HSTRING::from(v.as_str()))
-                .collect();
-            create_opts
-                .SetEnvironmentVariables(&names, &values)
-                .map_err(|e| lifecycle_err(format!("SetEnvironmentVariables: {}", e)))?;
-        }
-
-        // Launch the process.
-        let async_op = IsolationSessionClient::CreateIsolatedProcessAsync2(
-            &self.registration_id,
-            &self.provision_id,
-            &windows_core::HSTRING::from(&options.process_path),
-            &windows_core::HSTRING::from(&options.arguments),
-            &create_opts,
-        )
-        .map_err(|e| lifecycle_err(format!("CreateIsolatedProcessAsync2 failed: {}", e)))?;
-
-        let result = async_op
-            .join()
-            .map_err(|e| lifecycle_err(format!("CreateIsolatedProcessAsync2: {}", e)))?;
-
-        let status = result
-            .Status()
-            .map_err(|e| lifecycle_err(format!("get process Status failed: {}", e)))?;
-        if status != IsolationSessionWorkerProcessOperationStatus::Succeeded {
-            let ext = result.ExtendedError().unwrap_or_default();
-            return Err(lifecycle_err(format!(
-                "CreateIsolatedProcessAsync2 status: {} (extended: {:#010x})",
-                status.0, ext.0
-            )));
-        }
-
-        let worker = result
-            .Process()
-            .map_err(|e| lifecycle_err(format!("get Process failed: {}", e)))?;
-
-        // Read stdout/stderr via pipe handles.
-        let stdout = {
-            let out_handle = worker
-                .CreateStandardOutputHandle()
-                .map_err(|e| lifecycle_err(format!("CreateStandardOutputHandle: {}", e)))?;
-            if out_handle != 0 {
-                read_pipe_and_close(out_handle)
-            } else {
-                String::new()
-            }
+        // In interactive mode, switch wxc-exec's local console to raw VT mode
+        // so the agent's ConPTY does all the input echoing and rendering —
+        // otherwise both consoles render the same input twice (duplicate
+        // echos, doubled prompts, broken `\r\n` handling). RAII-restored on
+        // scope exit. No-op when stdio is not a console (the guard records
+        // itself as inactive).
+        let _console_guard = if options.interactive {
+            Some(ConsoleModeRestorer::install_raw_vt())
+        } else {
+            None
         };
 
-        let stderr = {
-            let err_handle = worker
-                .CreateStandardErrorHandle()
-                .map_err(|e| lifecycle_err(format!("CreateStandardErrorHandle: {}", e)))?;
-            if err_handle != 0 {
-                read_pipe_and_close(err_handle)
-            } else {
-                String::new()
-            }
+        // Manual-reset stop event for the stdin relay. Effective for waitable
+        // `h_read` (console = TTY mode); for pipe handles (non-TTY) it has no
+        // effect on a blocked `ReadFile`, so we use a bounded
+        // `WaitForSingleObject` after process exit and rely on
+        // `process.Close()` invalidating the broker handle (next WriteFile
+        // fails) plus OS cleanup on wxc-exec exit.
+        let stdin_stop_event = unsafe {
+            CreateEventW(None, true, false, PCWSTR::null())
+                .map_err(|e| lifecycle_err(format!("CreateEventW(stdin stop): {}", e)))?
+        };
+        let stdin_stop_owned = OwnedHandle::new(stdin_stop_event);
+
+        let mut stdout_params = PipeRelayParams {
+            h_read: HANDLE(stdout_handle_val as *mut core::ffi::c_void),
+            h_write: wxc_stdout,
+        };
+        let mut stderr_params = PipeRelayParams {
+            h_read: HANDLE(stderr_handle_val as *mut core::ffi::c_void),
+            h_write: wxc_stderr,
+        };
+        let mut stdin_params = PipeRelayWithStopParams {
+            h_read: wxc_stdin,
+            h_write: HANDLE(stdin_handle_val as *mut core::ffi::c_void),
+            h_stop_event: stdin_stop_owned.get(),
         };
 
-        // Wait for exit and get exit code.
-        let wait_op = worker
-            .WaitForExitAsync()
-            .map_err(|e| lifecycle_err(format!("WaitForExitAsync: {}", e)))?;
-        wait_op
-            .join()
-            .map_err(|e| lifecycle_err(format!("WaitForExitAsync: {}", e)))?;
+        let stdout_relay: Option<OwnedHandle> = if stdout_handle_val != 0 {
+            Some(
+                unsafe { create_relay_thread(&mut stdout_params) }
+                    .map_err(|e| lifecycle_err(format!("create stdout relay: {}", e)))?,
+            )
+        } else {
+            None
+        };
+        let stderr_relay: Option<OwnedHandle> = if stderr_handle_val != 0 {
+            Some(
+                unsafe { create_relay_thread(&mut stderr_params) }
+                    .map_err(|e| lifecycle_err(format!("create stderr relay: {}", e)))?,
+            )
+        } else {
+            None
+        };
+        let stdin_relay: Option<OwnedHandle> = if stdin_handle_val != 0 {
+            Some(
+                unsafe { create_relay_thread_with_stop(&mut stdin_params) }
+                    .map_err(|e| lifecycle_err(format!("create stdin relay: {}", e)))?,
+            )
+        } else {
+            None
+        };
 
-        let exit_code = worker
+        // Wait for the agent process to exit. `WaitForExit` is a Win32
+        // `WaitForSingleObject` on a kernel handle (`ApiProcess.cpp:76` — no
+        // COM round-trip). On timeout it returns -1; otherwise the exit code.
+        let _ = process
+            .WaitForExit(options.timeout_ms)
+            .map_err(|e| lifecycle_err(format!("WaitForExit failed: {}", e)))?;
+
+        // Detect timeout via `ExitCode()` returning `STILL_ACTIVE` (the agent
+        // is still running). Trigger the 3-tier graceful shutdown pattern from
+        // `CommandTty.cpp:226-263` in the OS repo. In the natural-exit path,
+        // none of the tiers fire.
+        const STILL_ACTIVE: i32 = 0x103;
+        let mut exit_code = process
             .ExitCode()
-            .map_err(|e| lifecycle_err(format!("get ExitCode: {}", e)))?;
+            .map_err(|e| lifecycle_err(format!("get ExitCode failed: {}", e)))?;
+
+        if exit_code == STILL_ACTIVE {
+            // Tier 1: close stdin — many REPLs (powershell, cmd, bash) exit
+            // on EOF alone.
+            let _ = process.CloseStandardInput();
+            let _ = process.WaitForExit(5000);
+            exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
+
+            // Tier 2: `SendCtrlClose` is ConPTY-only (`E_NOTIMPL` otherwise
+            // per `IsolationSessionWorkerProcess.cpp:414-416`); benign call
+            // in non-ConPTY mode, just skips ahead.
+            if exit_code == STILL_ACTIVE {
+                let _ = process.SendCtrlClose();
+                let _ = process.WaitForExit(3000);
+                exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
+            }
+
+            // Tier 3: force-terminate. Wait infinitely for the kill to land
+            // (timeout 0 == INFINITE per `ApiProcess.cpp:85`).
+            if exit_code == STILL_ACTIVE {
+                let _ = process.Terminate();
+                let _ = process.WaitForExit(0);
+                exit_code = process.ExitCode().unwrap_or(-1);
+            }
+        }
+
+        // Signal the stdin relay to exit. Effective for waitable (console)
+        // handles; for pipe handles the bounded wait below expires and we
+        // proceed.
+        unsafe {
+            let _ = SetEvent(stdin_stop_owned.get());
+        }
+
+        // Drain stdout / stderr relays (INFINITE — they exit on broker-pipe
+        // EOF once the agent's write ends close at OS-level handle cleanup;
+        // the broker's own timeout at
+        // `IsolationSessionWorkerProcess.cpp:153-170` is the safety net).
+        if let Some(t) = stdout_relay {
+            unsafe { WaitForSingleObject(t.get(), u32::MAX) };
+        }
+        if let Some(t) = stderr_relay {
+            unsafe { WaitForSingleObject(t.get(), u32::MAX) };
+        }
+
+        // Drain stdin relay with a 1s bound. TTY mode exits via the stop
+        // event; non-TTY may still be in `ReadFile` — that's fine, the
+        // thread exits when wxc-exec exits and the OS cleans it up.
+        if let Some(t) = stdin_relay {
+            unsafe { WaitForSingleObject(t.get(), 1000) };
+        }
+
+        // Now safe to release the broker handles.
+        let _ = process.Close();
 
         Ok(ProcessResult {
             exit_code,
-            stdout,
-            stderr,
+            stdout: String::new(),
+            stderr: String::new(),
         })
     }
 
     /// Step 4: Stop the isolation session.
     pub fn stop_session(&self) -> Result<(), IsolationSessionError> {
-        let async_op =
-            IsolationSessionClient::StopSessionAsync(&self.registration_id, &self.provision_id)
-                .map_err(|e| lifecycle_err(format!("StopSessionAsync failed: {}", e)))?;
-
-        let status = async_op
+        let async_op = self
+            .ops
+            .StopSessionAsync(&self.provision_id)
+            .map_err(|e| lifecycle_err(format!("StopSessionAsync call failed: {}", e)))?;
+        let result = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("StopSessionAsync: {}", e)))?;
-
-        match status {
-            IsolationSessionOperationStatus::Succeeded
-            | IsolationSessionOperationStatus::SessionNotStarted => Ok(()),
-            _ => Err(lifecycle_err(format!(
-                "StopSessionAsync returned status: {}",
-                status.0
-            ))),
-        }
+            .map_err(|e| lifecycle_err(format!("StopSessionAsync wait failed: {}", e)))?;
+        check_result(&result, "StopSessionAsync")
     }
 
-    /// Step 5: Deprovision the agent user account.
+    /// Step 5: Deprovision the agent user.
+    ///
+    /// The wrapper's `RemoveUserAsync` internally re-provisions as
+    /// `CallerProcess` first then deprovisions, papering over the
+    /// Indefinite-deprovision broker bug
+    /// (`IsoSessionServerClient.cpp:184` in the OS repo).
     pub fn deprovision_agent_user(&self) -> Result<(), IsolationSessionError> {
-        let async_op = IsolationSessionClient::DeprovisionAgentUserAsync(
-            &self.registration_id,
-            &self.provision_id,
-        )
-        .map_err(|e| lifecycle_err(format!("DeprovisionAgentUserAsync failed: {}", e)))?;
-
-        let status = async_op
+        let async_op = self
+            .ops
+            .RemoveUserAsync(&self.provision_id)
+            .map_err(|e| lifecycle_err(format!("RemoveUserAsync call failed: {}", e)))?;
+        let result = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("DeprovisionAgentUserAsync: {}", e)))?;
-
-        match status {
-            IsolationSessionProvisionStatus::Succeeded => Ok(()),
-            _ => Err(lifecycle_err(format!(
-                "DeprovisionAgentUserAsync returned status: {}",
-                status.0
-            ))),
-        }
+            .map_err(|e| lifecycle_err(format!("RemoveUserAsync wait failed: {}", e)))?;
+        check_result(&result, "RemoveUserAsync")
     }
 
     /// Step 6: Unregister the client.
     pub fn unregister_client(&self) -> Result<(), IsolationSessionError> {
-        let async_op = IsolationSessionClient::UnregisterClientAsync(&self.registration_id)
-            .map_err(|e| lifecycle_err(format!("UnregisterClientAsync failed: {}", e)))?;
-
-        let _status = async_op
+        let async_op = self
+            .ops
+            .UnregisterAppAsync(&self.registration_id)
+            .map_err(|e| lifecycle_err(format!("UnregisterAppAsync call failed: {}", e)))?;
+        let result = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("UnregisterClientAsync: {}", e)))?;
-
-        Ok(())
+            .map_err(|e| lifecycle_err(format!("UnregisterAppAsync wait failed: {}", e)))?;
+        check_result(&result, "UnregisterAppAsync")
     }
 }
 
-/// Reads all data from a pipe handle and closes it.
-fn read_pipe_and_close(handle_value: u64) -> String {
-    let handle = HANDLE(handle_value as *mut core::ffi::c_void);
-    let mut output = Vec::new();
-    let mut buffer = [0u8; 4096];
-    loop {
-        let mut bytes_read = 0u32;
-        // SAFETY: `handle` is a kernel handle returned to this function by
-        // the IsoEnvBroker (`CreateStandardOutputHandle` /
-        // `CreateStandardErrorHandle`); we own it for the duration of this
-        // call. `buffer` and `bytes_read` are stack-allocated and live for
-        // the entire `ReadFile` call.
-        let ok = unsafe { ReadFile(handle, Some(&mut buffer), Some(&mut bytes_read), None) };
-        if ok.is_err() || bytes_read == 0 {
-            break;
+// -- Build IsoSessionProcessOptions from MXC ProcessOptions ------------------
+
+/// Translates the MXC-internal `ProcessOptions` into a fresh
+/// `IsoSessionProcessOptions` instance ready for `RunProcessWithOptionsAsync`.
+fn build_iso_process_options(
+    options: &ProcessOptions,
+) -> Result<IsoSessionProcessOptions, IsolationSessionError> {
+    let proc_options = IsoSessionProcessOptions::new()
+        .map_err(|e| lifecycle_err(format!("IsoSessionProcessOptions::new failed: {}", e)))?;
+
+    proc_options
+        .SetTimeoutMilliseconds(options.timeout_ms)
+        .map_err(|e| lifecycle_err(format!("SetTimeoutMilliseconds: {}", e)))?;
+
+    if !options.working_directory.is_empty() {
+        proc_options
+            .SetWorkingDirectory(&HSTRING::from(&options.working_directory))
+            .map_err(|e| lifecycle_err(format!("SetWorkingDirectory: {}", e)))?;
+    }
+
+    proc_options
+        .SetInteractiveConsole(options.interactive)
+        .map_err(|e| lifecycle_err(format!("SetInteractiveConsole: {}", e)))?;
+
+    proc_options
+        .SetRedirectStandardInput(options.redirect_flags & REDIRECT_STDIN != 0)
+        .map_err(|e| lifecycle_err(format!("SetRedirectStandardInput: {}", e)))?;
+    proc_options
+        .SetRedirectStandardOutput(options.redirect_flags & REDIRECT_STDOUT != 0)
+        .map_err(|e| lifecycle_err(format!("SetRedirectStandardOutput: {}", e)))?;
+    proc_options
+        .SetRedirectStandardError(options.redirect_flags & REDIRECT_STDERR != 0)
+        .map_err(|e| lifecycle_err(format!("SetRedirectStandardError: {}", e)))?;
+
+    if !options.env_vars.is_empty() {
+        let env = proc_options
+            .Environment()
+            .map_err(|e| lifecycle_err(format!("get Environment IMap: {}", e)))?;
+        for (name, value) in &options.env_vars {
+            env.Insert(&HSTRING::from(name), &HSTRING::from(value))
+                .map_err(|e| lifecycle_err(format!("Environment.Insert({}): {}", name, e)))?;
         }
-        output.extend_from_slice(&buffer[..bytes_read as usize]);
     }
-    // SAFETY: `handle` was used in `ReadFile` above and is closed exactly
-    // once here at end-of-scope, matching the kernel-handle teardown contract.
-    unsafe {
-        let _ = CloseHandle(handle);
-    }
-    String::from_utf8_lossy(&output).to_string()
+
+    Ok(proc_options)
 }
 
 /// Result of a process execution in the isolation session.
@@ -530,8 +693,8 @@ pub struct ProcessResult {
 
 // -- IsolationSessionRunner (ScriptRunner impl) ------------------------------
 
-/// Thin `ScriptRunner` wrapper that performs the full isolation session lifecycle
-/// per invocation. For v0.1, each `run()` call does:
+/// Thin `ScriptRunner` wrapper that performs the full isolation session
+/// lifecycle per invocation. For v0.1, each `run()` call does:
 /// register → provision → start → execute → stop → deprovision → unregister.
 pub struct IsolationSessionRunner;
 
@@ -553,13 +716,27 @@ impl ScriptRunner for IsolationSessionRunner {
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let options = build_process_options(request);
+        let mut options = build_process_options(request);
+
+        // Detect at runtime whether wxc-exec's stdout is a TTY. This flips the
+        // backend into ConPTY mode (`InteractiveConsole = true`) and adjusts
+        // the redirect flags (no separate stderr in ConPTY mode — the broker
+        // merges it into stdout). The check sees the handle wxc-exec was
+        // given by its immediate parent: ConPTY when launched by node-pty
+        // (`spawnSandbox`), pipe when launched by `child_process.spawn`
+        // (`spawnSandboxFromConfig({usePty: false})`), console when launched
+        // directly from a shell.
+        let interactive = std::io::stdout().is_terminal();
+        options.interactive = interactive;
+        options.redirect_flags = compute_redirect_flags(interactive);
+
         let _ = writeln!(
             logger,
             "Isolation Session: process={}",
             options.process_path
         );
         let _ = writeln!(logger, "Isolation Session: arguments={}", options.arguments);
+        let _ = writeln!(logger, "Isolation Session: interactive={}", interactive);
 
         // Read isolation_session config (configuration id).
         let session_cfg = request.experimental.isolation_session.as_ref();
@@ -567,8 +744,8 @@ impl ScriptRunner for IsolationSessionRunner {
             .map(|cfg| cfg.configuration_id)
             .unwrap_or_default();
 
-        // Create the session manager (activates the WinRT factory).
-        let mut manager = match IsolationSessionManager::new() {
+        // Activate the in-proc IsoSessionOps factory.
+        let manager = match IsolationSessionManager::new() {
             Ok(m) => m,
             Err(e) => return e.into(),
         };
@@ -578,16 +755,16 @@ impl ScriptRunner for IsolationSessionRunner {
             return e.into();
         }
 
-        let destroy_on_exit = request.lifecycle.destroy_on_exit;
-        match manager.provision_agent_user(destroy_on_exit) {
+        match manager.provision_agent_user() {
             Ok(agent_name) => {
                 let _ = writeln!(logger, "Isolation Session: agent user = {}", agent_name);
             }
             Err(e) => {
-                // provision_agent_user may return Err *after* a successful broker-side
-                // provision (e.g., the AgentUserName fetch fails on a Succeeded result).
-                // Defensively deprovision so an Indefinite-lifetime agent user does not
-                // leak. The broker no-ops these calls on absent state.
+                // provision_agent_user may return Err *after* a successful
+                // broker-side provision (e.g., the AgentUserName fetch
+                // fails on a non-error result). Defensively deprovision so
+                // an Indefinite-lifetime agent user does not leak. The
+                // wrapper no-ops these on absent state.
                 let _ = manager.deprovision_agent_user();
                 let _ = manager.unregister_client();
                 return e.into();
@@ -595,8 +772,8 @@ impl ScriptRunner for IsolationSessionRunner {
         }
 
         if let Err(e) = manager.start_session(config_id) {
-            // Provision succeeded; start did not. Clean up the provisioned agent
-            // user. stop_session is a no-op on an unstarted session.
+            // Provision succeeded; start did not. Clean up the provisioned
+            // agent user. stop_session is a no-op on an unstarted session.
             let _ = manager.stop_session();
             let _ = manager.deprovision_agent_user();
             let _ = manager.unregister_client();
@@ -606,7 +783,6 @@ impl ScriptRunner for IsolationSessionRunner {
         let result = match manager.create_process(&options) {
             Ok(r) => r,
             Err(e) => {
-                // Attempt cleanup even on failure.
                 let _ = manager.stop_session();
                 let _ = manager.deprovision_agent_user();
                 let _ = manager.unregister_client();
@@ -625,11 +801,14 @@ impl ScriptRunner for IsolationSessionRunner {
             let _ = writeln!(logger, "Warning: unregister_client failed: {}", e);
         }
 
+        // Output already streamed live to wxc-exec's stdio via relay threads in
+        // `IsolationSessionManager::create_process` — captured fields are intentionally
+        // empty (matching the AppContainer pattern at `appcontainer_runner.rs:455-456`).
         ScriptResponse {
             exit_code: result.exit_code,
-            standard_out: result.stdout,
-            standard_err: result.stderr.clone(),
-            error_message: result.stderr,
+            standard_out: String::new(),
+            standard_err: String::new(),
+            error_message: String::new(),
         }
     }
 }
@@ -834,6 +1013,32 @@ mod tests {
         assert_eq!(opts.redirect_flags, REDIRECT_STDOUT | REDIRECT_STDERR);
     }
 
+    #[test]
+    fn compute_redirect_flags_interactive_omits_stderr() {
+        let flags = compute_redirect_flags(true);
+        assert!(
+            flags & REDIRECT_STDIN != 0,
+            "stdin should be redirected even in interactive mode"
+        );
+        assert!(flags & REDIRECT_STDOUT != 0, "stdout should be redirected");
+        assert!(
+            flags & REDIRECT_STDERR == 0,
+            "stderr should NOT be redirected in interactive (ConPTY) mode \
+             — broker won't populate ErrorHandle"
+        );
+    }
+
+    #[test]
+    fn compute_redirect_flags_noninteractive_includes_stderr() {
+        let flags = compute_redirect_flags(false);
+        assert!(flags & REDIRECT_STDIN != 0, "stdin should be redirected");
+        assert!(flags & REDIRECT_STDOUT != 0, "stdout should be redirected");
+        assert!(
+            flags & REDIRECT_STDERR != 0,
+            "stderr should be redirected in non-interactive (plain pipes) mode"
+        );
+    }
+
     // ====== Service availability test ======
 
     #[test]
@@ -846,16 +1051,17 @@ mod tests {
             )
         };
 
-        match check_service_available() {
-            Ok(()) => {
-                // Service IS available on this machine (e.g., a test VM with
-                // the feature enabled). The test is not applicable — skip.
+        match check_service_available_and_activate() {
+            Ok(_ops) => {
+                // Service IS available on this machine (e.g., a test VM
+                // with the feature enabled). The test is not applicable
+                // — skip.
             }
             Err(IsolationSessionError::ServiceUnavailable(msg)) => {
                 // Service is NOT available. Verify the error is clean and
                 // descriptive (not a panic or cryptic COM error).
                 assert!(
-                    msg.contains("not available"),
+                    msg.contains("not available") || msg.contains("activation failed"),
                     "Expected descriptive error message, got: {}",
                     msg
                 );
@@ -864,5 +1070,35 @@ mod tests {
                 panic!("expected ServiceUnavailable variant, got: {:?}", other);
             }
         }
+    }
+
+    // ====== IsoSessionConfigId conversion tests ======
+    //
+    // The `From<IsolationSessionConfigurationId> for IsoSessionConfigId` impl is the
+    // sole bridge between MXC's internal enum and the WinRT enum. If a new variant is
+    // added to either side without updating the impl, these tests catch the drift.
+
+    #[test]
+    fn config_id_conversion_small() {
+        let iso_id: IsoSessionConfigId = IsolationSessionConfigurationId::Small.into();
+        assert_eq!(iso_id, IsoSessionConfigId::Small);
+    }
+
+    #[test]
+    fn config_id_conversion_medium() {
+        let iso_id: IsoSessionConfigId = IsolationSessionConfigurationId::Medium.into();
+        assert_eq!(iso_id, IsoSessionConfigId::Medium);
+    }
+
+    #[test]
+    fn config_id_conversion_large() {
+        let iso_id: IsoSessionConfigId = IsolationSessionConfigurationId::Large.into();
+        assert_eq!(iso_id, IsoSessionConfigId::Large);
+    }
+
+    #[test]
+    fn config_id_conversion_composable() {
+        let iso_id: IsoSessionConfigId = IsolationSessionConfigurationId::Composable.into();
+        assert_eq!(iso_id, IsoSessionConfigId::Composable);
     }
 }

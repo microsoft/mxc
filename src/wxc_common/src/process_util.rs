@@ -12,8 +12,15 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Security::{DeriveCapabilitySidsFromName, PSID, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile};
+use windows::Win32::System::Console::{
+    GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE, DISABLE_NEWLINE_AUTO_RETURN,
+    ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WINDOW_INPUT, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
 use windows::Win32::System::Pipes::CreatePipe;
-use windows::Win32::System::Threading::{CreateThread, WaitForSingleObject, THREAD_CREATION_FLAGS};
+use windows::Win32::System::Threading::{
+    CreateThread, WaitForMultipleObjects, WaitForSingleObject, THREAD_CREATION_FLAGS,
+};
 use windows_core::BOOL;
 use windows_core::PCWSTR;
 
@@ -92,6 +99,126 @@ pub unsafe fn create_relay_thread(params: *mut PipeRelayParams) -> Result<OwnedH
         None,
     )
     .map_err(|e| WxcError::Process(format!("CreateThread for pipe relay failed: {}", e)))?;
+
+    Ok(OwnedHandle::new(handle))
+}
+
+// ── Stop-event-aware pipe relay ────────────────────────────────────────────
+//
+// Used for the IsolationSession stdin relay in TTY (ConPTY) mode, where the
+// agent process can exit naturally while wxc-exec's stdin remains open (held
+// by the parent: node-pty, shell, etc.). Without an external signal the relay
+// sits in `ReadFile` forever.
+//
+// Pattern adopted from IsoSessionCLI's `ConsoleTtyRelay::WriteThread`
+// (`onecoreuap/windows/core/isoenvbroker/src/cli/ConsoleTtyRelay.cpp:188-263`
+// in the OS repo). `CancelSynchronousIo` was rejected because it has
+// documented edge cases on console handles, and wxc-exec's stdin is a console
+// handle in the dominant `spawnSandbox` (node-pty) and direct-cmd cases.
+//
+// `h_read` MUST be a waitable handle whose signal state correctly reflects
+// "input available" (a console input handle is the canonical case; events
+// also work). Anonymous pipe handles are NOT supported: they appear "always
+// signalled when open", so the wait returns immediately, the relay enters
+// `ReadFile`, and from there the stop event cannot interrupt it. For
+// pipe-backed stdin (the non-TTY case), use the simpler EOF-driven
+// `create_relay_thread` and rely on natural EOF or process exit for cleanup.
+
+/// Parameters for a stop-event-aware relay thread. The thread loops
+/// `WaitForMultipleObjects({h_stop_event, h_read})`; copies a chunk when
+/// `h_read` is ready; exits when `h_stop_event` is signalled, on read EOF,
+/// on read error, on write error, or on `WaitForMultipleObjects` failure.
+///
+/// `h_stop_event` should be a manual-reset event so the relay observes it
+/// even if signalled before the next loop iteration.
+///
+/// `h_read` must be a waitable handle (console input, event). Anonymous
+/// pipes are not supported — see module-level comment above.
+///
+/// # Safety
+/// All three handles must remain valid until the relay thread exits. The
+/// struct must outlive the thread (caller waits on the thread before dropping
+/// `params`).
+#[repr(C)]
+pub struct PipeRelayWithStopParams {
+    pub h_read: HANDLE,
+    pub h_write: HANDLE,
+    pub h_stop_event: HANDLE,
+}
+
+/// Thread procedure for a stop-event-aware relay.
+///
+/// # Safety
+/// `param` must point to a valid `PipeRelayWithStopParams` that outlives the
+/// thread.
+unsafe extern "system" fn pipe_relay_with_stop_thread_proc(param: *mut core::ffi::c_void) -> u32 {
+    let params = &*(param as *const PipeRelayWithStopParams);
+    let mut buffer = [0u8; BUFFER_SIZE as usize];
+    let wait_handles = [params.h_stop_event, params.h_read];
+
+    loop {
+        let wait_result = WaitForMultipleObjects(&wait_handles, false, u32::MAX);
+        // `WAIT_OBJECT_0 + 1` means `h_read` signalled (data available or EOF).
+        // Anything else (stop event = `WAIT_OBJECT_0`, `WAIT_FAILED`, etc.) → exit.
+        if wait_result.0 != WAIT_OBJECT_0.0 + 1 {
+            break;
+        }
+
+        let mut bytes_read = 0u32;
+        if ReadFile(
+            params.h_read,
+            Some(&mut buffer),
+            Some(&mut bytes_read),
+            None,
+        )
+        .is_err()
+            || bytes_read == 0
+        {
+            break;
+        }
+
+        let mut bytes_written = 0u32;
+        if WriteFile(
+            params.h_write,
+            Some(&buffer[..bytes_read as usize]),
+            Some(&mut bytes_written),
+            None,
+        )
+        .is_err()
+            || bytes_written != bytes_read
+        {
+            break;
+        }
+
+        let _ = FlushFileBuffers(params.h_write);
+    }
+
+    0
+}
+
+/// Create a stop-event-aware relay thread via `CreateThread`. Returns the
+/// thread HANDLE wrapped in `OwnedHandle`.
+///
+/// # Safety
+/// `params` must remain valid until the thread exits. The caller is
+/// responsible for joining (waiting on) the thread before `params` is dropped.
+pub unsafe fn create_relay_thread_with_stop(
+    params: *mut PipeRelayWithStopParams,
+) -> Result<OwnedHandle, WxcError> {
+    let handle = CreateThread(
+        None,
+        0,
+        Some(pipe_relay_with_stop_thread_proc),
+        Some(params as *const core::ffi::c_void),
+        THREAD_CREATION_FLAGS(0),
+        None,
+    )
+    .map_err(|e| {
+        WxcError::Process(format!(
+            "CreateThread for stop-aware pipe relay failed: {}",
+            e
+        ))
+    })?;
 
     Ok(OwnedHandle::new(handle))
 }
@@ -335,6 +462,128 @@ pub fn run_process_with_captured_output(
         stderr: stderr_output,
         exit_code: exit_code as i32,
     })
+}
+
+// ── Local console raw-VT-mode RAII guard ──────────────────────────────────
+//
+// When wxc-exec relays into an isolation session in interactive mode, there
+// are TWO consoles in series: wxc-exec's local console (where the user types)
+// and the agent's ConPTY in the isolation session. By default the local
+// console is in cooked-line mode with `ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT |
+// ENABLE_PROCESSED_INPUT` — it line-buffers, echoes keystrokes, and processes
+// Ctrl-C locally. The agent's ConPTY *also* echoes (because it's a real PTY).
+// The two consoles render the same input twice, producing visible artifacts
+// (partial echos, doubled prompts, `\r\n` confusion).
+//
+// The fix mirrors IsoSessionCLI's `ConsoleRestorer::SetRawVtMode`
+// (`onecoreuap/windows/core/isoenvbroker/src/cli/ConsoleTtyRelay.cpp:69-93`
+// in the OS repo): switch the local console to raw VT mode for the relay
+// duration. Only the agent's ConPTY does input echo and command processing;
+// the local console is a transparent forwarder. On scope exit the original
+// modes are restored.
+
+/// RAII guard that switches the local console to raw VT mode. Only meaningful
+/// in interactive mode (`InteractiveConsole = true`). When wxc-exec's stdio
+/// is not a real console (redirected, piped), `GetConsoleMode` fails and the
+/// guard records itself as inactive — both `install` and `Drop` become
+/// no-ops, which is the right behavior for the non-TTY case.
+pub struct ConsoleModeRestorer {
+    h_stdin: HANDLE,
+    h_stdout: HANDLE,
+    original_stdin_mode: CONSOLE_MODE,
+    original_stdout_mode: CONSOLE_MODE,
+    active: bool,
+}
+
+impl ConsoleModeRestorer {
+    /// Save current console modes (for stdin and stdout) and switch to raw
+    /// VT mode. Returns the guard; original modes restored on drop.
+    ///
+    /// Stdin: enable VT input + window-resize events; disable line-input,
+    /// echo, and processed-input.
+    /// Stdout: enable VT processing; disable auto-newline-translation.
+    ///
+    /// On any failure (handles aren't real consoles, `SetConsoleMode` fails
+    /// because the handles are not console-mode handles, etc.), the guard
+    /// is constructed inactive — no mode is changed, no restore on drop.
+    pub fn install_raw_vt() -> Self {
+        let h_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.unwrap_or_default();
+        let h_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }.unwrap_or_default();
+
+        let mut original_stdin_mode = CONSOLE_MODE(0);
+        let mut original_stdout_mode = CONSOLE_MODE(0);
+
+        let stdin_ok = unsafe { GetConsoleMode(h_stdin, &mut original_stdin_mode) }.is_ok();
+        let stdout_ok = unsafe { GetConsoleMode(h_stdout, &mut original_stdout_mode) }.is_ok();
+
+        if !stdin_ok || !stdout_ok {
+            return Self {
+                h_stdin,
+                h_stdout,
+                original_stdin_mode,
+                original_stdout_mode,
+                active: false,
+            };
+        }
+
+        let raw_in = CONSOLE_MODE(
+            (original_stdin_mode.0 | ENABLE_VIRTUAL_TERMINAL_INPUT.0 | ENABLE_WINDOW_INPUT.0)
+                & !(ENABLE_PROCESSED_INPUT.0 | ENABLE_LINE_INPUT.0 | ENABLE_ECHO_INPUT.0),
+        );
+        let raw_out = CONSOLE_MODE(
+            original_stdout_mode.0
+                | ENABLE_VIRTUAL_TERMINAL_PROCESSING.0
+                | DISABLE_NEWLINE_AUTO_RETURN.0,
+        );
+
+        let in_set = unsafe { SetConsoleMode(h_stdin, raw_in) }.is_ok();
+        if !in_set {
+            return Self {
+                h_stdin,
+                h_stdout,
+                original_stdin_mode,
+                original_stdout_mode,
+                active: false,
+            };
+        }
+        let out_set = unsafe { SetConsoleMode(h_stdout, raw_out) }.is_ok();
+        if !out_set {
+            // Stdin succeeded; restore it so we don't leave a half-mutated state.
+            let _ = unsafe { SetConsoleMode(h_stdin, original_stdin_mode) };
+            return Self {
+                h_stdin,
+                h_stdout,
+                original_stdin_mode,
+                original_stdout_mode,
+                active: false,
+            };
+        }
+
+        Self {
+            h_stdin,
+            h_stdout,
+            original_stdin_mode,
+            original_stdout_mode,
+            active: true,
+        }
+    }
+
+    /// Whether the guard actually switched modes (true iff stdio is a real
+    /// console and both `SetConsoleMode` calls succeeded).
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+}
+
+impl Drop for ConsoleModeRestorer {
+    fn drop(&mut self) {
+        if self.active {
+            unsafe {
+                let _ = SetConsoleMode(self.h_stdin, self.original_stdin_mode);
+                let _ = SetConsoleMode(self.h_stdout, self.original_stdout_mode);
+            }
+        }
+    }
 }
 
 // ── Capability SID helpers ────────────────────────────────────────────────
@@ -817,6 +1066,171 @@ mod tests {
             output.contains("relayed to child"),
             "Expected relayed input in child output, got: {:?}",
             output
+        );
+    }
+
+    // ── Tests for `create_relay_thread_with_stop` ──────────────────────────
+    //
+    // These exercise the stop-event-aware relay variant. Cancellation (test #1)
+    // is the load-bearing case: it's the reason this primitive exists and
+    // distinguishes it from the EOF-driven `create_relay_thread`.
+
+    use windows::Win32::System::Threading::{CreateEventW, SetEvent};
+
+    /// Helper: create a manual-reset, initially-unsignalled event for tests.
+    fn create_test_stop_event() -> OwnedHandle {
+        unsafe {
+            let h = CreateEventW(None, true, false, PCWSTR::null()).unwrap();
+            OwnedHandle::new(h)
+        }
+    }
+
+    #[test]
+    fn test_pipe_relay_with_stop_exits_on_stop_event() {
+        // Core cancellation case: relay is blocked in WaitForMultipleObjects
+        // (no data on h_read, h_read not closed). Signal the stop event;
+        // verify the relay exits within a short timeout.
+        let (source_read, _source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+        let stop_event = create_test_stop_event();
+
+        let mut params = PipeRelayWithStopParams {
+            h_read: source_read.get(),
+            h_write: dest_write.get(),
+            h_stop_event: stop_event.get(),
+        };
+        let relay_thread = unsafe { create_relay_thread_with_stop(&mut params).unwrap() };
+
+        // Source has no data and is not closed → relay sits in
+        // WaitForMultipleObjects. Without the stop event it would hang.
+        unsafe {
+            SetEvent(stop_event.get()).unwrap();
+        }
+
+        let wait_result = unsafe { WaitForSingleObject(relay_thread.get(), 5000) };
+        assert_eq!(
+            wait_result, WAIT_OBJECT_0,
+            "Relay did not exit within 5s of stop event"
+        );
+
+        // Drain the dest pipe so its handles can drop cleanly.
+        drop(dest_write);
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let _ = std::thread::spawn(move || read_from_pipe(dest_send.get())).join();
+    }
+
+    #[test]
+    fn test_pipe_relay_with_stop_exits_on_read_eof() {
+        // Stop event never signalled; source closed → read EOF → relay exits.
+        let (source_read, source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+        let stop_event = create_test_stop_event();
+
+        let mut params = PipeRelayWithStopParams {
+            h_read: source_read.get(),
+            h_write: dest_write.get(),
+            h_stop_event: stop_event.get(),
+        };
+        let relay_thread = unsafe { create_relay_thread_with_stop(&mut params).unwrap() };
+
+        // Concurrent reader (no-op here, but defensive in case data flows on
+        // any FlushFileBuffers iteration; avoids any pipe-buffer deadlock).
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+
+        // Close source write end → relay's read returns EOF → break.
+        drop(source_write);
+
+        let wait_result = unsafe { WaitForSingleObject(relay_thread.get(), 5000) };
+        assert_eq!(wait_result, WAIT_OBJECT_0, "Relay did not exit on read EOF");
+
+        drop(dest_write);
+        let _ = reader.join();
+    }
+
+    #[test]
+    fn test_pipe_relay_with_stop_copies_data_before_exit() {
+        // Stop event never signalled; data is written; verify it is copied.
+        let (source_read, source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+        let stop_event = create_test_stop_event();
+
+        let mut params = PipeRelayWithStopParams {
+            h_read: source_read.get(),
+            h_write: dest_write.get(),
+            h_stop_event: stop_event.get(),
+        };
+        let relay_thread = unsafe { create_relay_thread_with_stop(&mut params).unwrap() };
+
+        // Concurrent reader to avoid FlushFileBuffers deadlock.
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+
+        let test_data = b"hello via stop-aware relay";
+        let mut bytes_written = 0u32;
+        unsafe {
+            WriteFile(
+                source_write.get(),
+                Some(test_data),
+                Some(&mut bytes_written),
+                None,
+            )
+            .unwrap();
+        }
+        drop(source_write); // EOF → relay exits.
+
+        let wait_result = unsafe { WaitForSingleObject(relay_thread.get(), 5000) };
+        assert_eq!(wait_result, WAIT_OBJECT_0);
+
+        drop(dest_write);
+        let output = reader.join().unwrap();
+        assert_eq!(output, "hello via stop-aware relay");
+    }
+
+    // Note: a "signal-stop-mid-data" test using anonymous pipes is not viable —
+    // anonymous pipe handles appear always-signalled to WaitForMultipleObjects,
+    // so once the relay returns from the wait into ReadFile, the stop event
+    // cannot interrupt the blocked read. The intended production usage is with
+    // a console input handle (or other waitable handle) where signal state
+    // accurately reflects data-available. The "stop-event-only" path
+    // (test_pipe_relay_with_stop_exits_on_stop_event) and the "EOF-after-data"
+    // path (test_pipe_relay_with_stop_copies_data_before_exit) together cover
+    // the invariants that matter for the production case.
+
+    #[test]
+    fn test_console_mode_restorer_handles_non_console() {
+        // `cargo test` typically runs with stdio as pipes, not a real console.
+        // Verify the restorer constructs and drops without panicking, and
+        // reports `active == false` since `GetConsoleMode` fails on pipes.
+        // The `active == true` path is exercised by manual smoke testing on a
+        // real console — covered by the `isolation_session_powershell_interactive`
+        // smoke config.
+        let restorer = ConsoleModeRestorer::install_raw_vt();
+        // Either active or inactive is acceptable here — what matters is no
+        // panic and clean drop. On CI / cargo test, `active` should be false.
+        let _ = restorer.is_active();
+        // Drop happens at end of scope.
+    }
+
+    #[test]
+    fn test_pipe_relay_with_stop_exits_on_invalid_handle() {
+        // Defensive path: pass a default (invalid) HANDLE for h_read.
+        // WaitForMultipleObjects returns WAIT_FAILED → relay loop breaks →
+        // thread exits cleanly. No panic, no hang.
+        let (_, dest_write) = create_test_pipes();
+        let stop_event = create_test_stop_event();
+
+        let mut params = PipeRelayWithStopParams {
+            h_read: HANDLE::default(), // invalid — not a kernel handle
+            h_write: dest_write.get(),
+            h_stop_event: stop_event.get(),
+        };
+        let relay_thread = unsafe { create_relay_thread_with_stop(&mut params).unwrap() };
+
+        let wait_result = unsafe { WaitForSingleObject(relay_thread.get(), 5000) };
+        assert_eq!(
+            wait_result, WAIT_OBJECT_0,
+            "Relay did not exit on invalid h_read"
         );
     }
 }

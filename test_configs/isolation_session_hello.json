@@ -7,10 +7,5 @@
     "cwd": "C:\\mxc_workdir_test",
     "env": ["MYVAR=IsolationSessionTest"],
     "timeout": 30000
-  },
-  "experimental": {
-    "isolation_session": {
-      "configurationId": "small"
-    }
   }
 }

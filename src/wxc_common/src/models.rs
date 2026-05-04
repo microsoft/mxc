@@ -47,28 +47,29 @@ impl Default for WindowsSandboxConfig {
 }
 
 /// Session configuration size for the Isolation Session backend.
-/// Maps to `IsolationSessionConfigurationId` in the IsoEnvBroker Session API,
-/// whose values must in turn match `ISOLATION_CONFIG_ID` in `winsta.h`.
+/// Maps to `IsoSessionConfigId` in the in-proc `Windows.AI.IsolationSession`
+/// `IsoSessionOps` APIs, whose values must in turn match `ISOLATION_CONFIG_ID`
+/// in `winsta.h`.
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum IsolationSessionConfigurationId {
-    /// `Small` (1) — smallest pre-defined configuration; the default.
-    #[default]
+    /// `Small` (1) — smallest pre-defined configuration.
     Small,
     /// `Medium` (2) — middle pre-defined configuration.
     Medium,
     /// `Large` (3) — largest pre-defined configuration.
     Large,
-    /// `CommandLine` (4) — configuration shape intended for non-interactive
-    /// command-line workloads.
-    CommandLine,
+    /// `Composable` (4) — lightweight configuration with UI subsystems
+    /// stripped, intended for command-line workloads. The default.
+    #[default]
+    Composable,
 }
 
 /// Configuration specific to the Isolation Session backend.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IsolationSessionConfig {
-    /// Session size/weight. Default: Small.
+    /// Session size/weight. Default: Composable.
     #[serde(rename = "configurationId")]
     pub configuration_id: IsolationSessionConfigurationId,
 }
