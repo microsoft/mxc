@@ -2,7 +2,11 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
-import { PlatformSupport } from './types';
+import { fileURLToPath } from 'node:url';
+import { PlatformSupport } from './types.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /**
  * Resolves the SDK package root directory.

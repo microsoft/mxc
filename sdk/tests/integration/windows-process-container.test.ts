@@ -8,6 +8,7 @@ import { EventEmitter } from 'events';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import type { SandboxPolicy } from '@microsoft/mxc-sdk';
 import {
   sdk,
   supportedVersions,
@@ -18,7 +19,7 @@ import {
   debugSpawnOptions,
   pythonCommand,
   pythonSkipReason,
-} from './test-helpers';
+} from './test-helpers.js';
 
 for (const schemaVersion of supportedVersions) {
 describe(`Windows Process Container (schema ${schemaVersion})`, {
@@ -58,7 +59,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
   });
 
   it('should execute python in process container', { skip: sandboxSkipReason ?? pythonSkipReason }, async () => {
-    const policy = withToolPaths({ version: schemaVersion.raw, ui: { allowWindows: true } });
+    const policy = withToolPaths({ version: schemaVersion.raw, ui: { allowWindows: true } }) as SandboxPolicy;
     const result = await sdk.spawnSandboxAsync(
       `${pythonCommand} -c "print('Python test successful')"`,
       policy,
@@ -79,7 +80,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
       version: schemaVersion.raw,
       ui: { allowWindows: true },
       filesystem: { readwritePaths: [tempDir] },
-    });
+    }) as SandboxPolicy;
     const result = await sdk.spawnSandboxAsync(
       `${pythonCommand} ${scriptFile}`,
       policy,
@@ -99,7 +100,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const policy = withToolPaths({
       version: schemaVersion.raw,
       filesystem: { readonlyPaths: [tempDir] },
-    });
+    }) as SandboxPolicy;
     const result = await sdk.spawnSandboxAsync(
       `cmd.exe /c type ${inputFile}`,
       policy,
@@ -150,7 +151,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         version: schemaVersion.raw,
         network: { allowOutbound: true, proxy: { builtinTestServer: true } },
         ui: { allowWindows: true },
-      });
+      }) as SandboxPolicy;
       const script =
         `powershell.exe -NoProfile -Command "` +
         `$h = New-Object -ComObject WinHttp.WinHttpRequest.5.1; ` +
@@ -175,7 +176,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         version: schemaVersion.raw,
         network: { allowOutbound: true, proxy: { localhost: port } },
         ui: { allowWindows: true },
-      });
+      }) as SandboxPolicy;
       const script =
         `powershell.exe -NoProfile -Command "` +
         `$h = New-Object -ComObject WinHttp.WinHttpRequest.5.1; ` +

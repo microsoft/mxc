@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'os';
 import { ChildProcess } from 'child_process';
-import { sdk } from './test-helpers';
+import { sdk } from './test-helpers.js';
 
 // WSLC tests require a Windows machine with WSL2 and WSLC SDK installed.
 // Opt-in via MXC_ENABLE_WSLC_TESTS=1 since most CI agents lack the runtime.
