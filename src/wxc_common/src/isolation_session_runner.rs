@@ -16,13 +16,21 @@
 use std::fmt::Write;
 use std::io::IsTerminal;
 
+use serde::Serialize;
+
+use crate::id::mint_random_token;
 use crate::logger::Logger;
-use crate::models::{CodexRequest, IsolationSessionConfigurationId, NetworkPolicy, ScriptResponse};
+use crate::models::{
+    CodexRequest, IsolationSessionConfig, IsolationSessionConfigurationId, NetworkPolicy,
+    ScriptResponse,
+};
+use crate::mxc_error::MxcError;
 use crate::process_util::{
     create_relay_thread, create_relay_thread_with_stop, ConsoleModeRestorer, OwnedHandle,
     PipeRelayParams, PipeRelayWithStopParams,
 };
 use crate::script_runner::ScriptRunner;
+use crate::state_aware_backend::{ExecHandle, ProvisionResult, StatefulSandboxBackend};
 use isolation_session_bindings::bindings::{
     IsoSessionConfigId, IsoSessionError, IsoSessionOps, IsoSessionProcess,
     IsoSessionProcessOptions, IsoSessionProcessResult, IsoSessionResult, IsoSessionUserResult,
@@ -43,13 +51,14 @@ use windows_core::{HSTRING, PCWSTR};
 /// or subsequent calls hit the wrong cohort.
 const REGISTRATION_ID: &str = "regid";
 
-/// Provision identifier scoping the agent user across the lifecycle.
+/// Default provisionId used by the one-shot backend path. State-aware
+/// callers mint their own dynamic ids (e.g. `wxc-<8-hex>`) instead.
 ///
-/// Reused as the `agentName` parameter on every subsequent op — the
-/// `IsoSessionOps` wrapper aliases `agentName` to this `provisionId` at
-/// the COM layer, so callers pass `provisionId` where the IDL says
-/// `agentName`.
-const PROVISION_ID: &str = "wxc-provid";
+/// `provisionId` scopes the agent user across the lifecycle and is reused as
+/// the `agentName` parameter on every subsequent op — the `IsoSessionOps`
+/// wrapper aliases `agentName` to this `provisionId` at the COM layer, so
+/// callers pass `provisionId` where the IDL says `agentName`.
+pub const DEFAULT_PROVISION_ID: &str = "wxc-provid";
 
 impl From<IsolationSessionConfigurationId> for IsoSessionConfigId {
     fn from(value: IsolationSessionConfigurationId) -> Self {
@@ -315,13 +324,15 @@ pub struct IsolationSessionManager {
 }
 
 impl IsolationSessionManager {
-    /// Activates the `IsoSessionOps` factory and verifies the service is
-    /// available.
-    pub fn new() -> Result<Self, IsolationSessionError> {
+    /// Activates the `IsoSessionOps` factory, verifies the service is
+    /// available, and pegs the manager to the supplied `provisionId`.
+    /// One-shot callers pass `DEFAULT_PROVISION_ID`; state-aware callers
+    /// mint a dynamic id per provision (e.g. `wxc-<8-hex>`).
+    pub fn new(provision_id: &str) -> Result<Self, IsolationSessionError> {
         let ops = check_service_available_and_activate()?;
         Ok(Self {
             registration_id: HSTRING::from(REGISTRATION_ID),
-            provision_id: HSTRING::from(PROVISION_ID),
+            provision_id: HSTRING::from(provision_id),
             ops,
         })
     }
@@ -736,8 +747,9 @@ impl ScriptRunner for IsolationSessionRunner {
             .map(|cfg| cfg.configuration_id)
             .unwrap_or_default();
 
-        // Activate the in-proc IsoSessionOps factory.
-        let manager = match IsolationSessionManager::new() {
+        // Activate the in-proc IsoSessionOps factory. One-shot uses the
+        // hardcoded default provisionId; state-aware mints a dynamic one.
+        let manager = match IsolationSessionManager::new(DEFAULT_PROVISION_ID) {
             Ok(m) => m,
             Err(e) => return e.into(),
         };
@@ -805,6 +817,84 @@ impl ScriptRunner for IsolationSessionRunner {
     }
 }
 
+// -- StatefulSandboxBackend impl --------------------------------------------
+
+/// Provision-phase metadata. Carries the OS-assigned agent account name
+/// (e.g. `<CallingUser>-IEB-NNN`) for diagnostics; the SID is omitted (can
+/// be added later when a caller needs it).
+#[derive(Debug, Clone, Serialize)]
+pub struct IsolationSessionProvisionMetadata {
+    #[serde(rename = "agentUserName")]
+    pub agent_user_name: String,
+}
+
+impl StatefulSandboxBackend for IsolationSessionRunner {
+    const ID_PREFIX: &'static str = "iso";
+    const BACKEND_KEY: &'static str = "isolation_session";
+
+    type ProvisionConfig = ();
+    /// `experimental.isolation_session.start` mirrors the one-shot
+    /// `experimental.isolation_session` shape — same `IsolationSessionConfig`
+    /// type, same wire keys.
+    type StartConfig = IsolationSessionConfig;
+    type ExecConfig = ();
+    type StopConfig = ();
+    type DeprovisionConfig = ();
+    type ProvisionMetadata = IsolationSessionProvisionMetadata;
+    type StartMetadata = ();
+    type StopMetadata = ();
+    type DeprovisionMetadata = ();
+
+    fn provision(
+        &mut self,
+        _request: &CodexRequest,
+        _config: Option<()>,
+    ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
+        let provision_id = format!("wxc-{}", mint_random_token());
+        let manager = IsolationSessionManager::new(&provision_id).map_err(map_lifecycle_error)?;
+        manager.register_client().map_err(map_lifecycle_error)?;
+        let agent_user_name = match manager.provision_agent_user() {
+            Ok(name) => name,
+            Err(e) => {
+                // Defensive cleanup mirrors the one-shot path: provision_agent_user
+                // can fail after the OS-side provision succeeded, leaving an
+                // Indefinite-lifetime agent user. Calls no-op on absent state.
+                let _ = manager.deprovision_agent_user();
+                let _ = manager.unregister_client();
+                return Err(map_lifecycle_error(e));
+            }
+        };
+
+        Ok(ProvisionResult {
+            sandbox_id: format!("{}:{}", Self::ID_PREFIX, provision_id),
+            metadata: Some(IsolationSessionProvisionMetadata { agent_user_name }),
+        })
+    }
+
+    /// `exec` lands in a follow-up commit. Returning a typed error rather
+    /// than panicking keeps a misrouted dispatcher path observable in tests
+    /// instead of aborting the test binary.
+    fn exec(
+        &mut self,
+        _sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<()>,
+    ) -> Result<ExecHandle, MxcError> {
+        Err(MxcError::backend_error(
+            "IsolationSession state-aware exec not yet implemented",
+        ))
+    }
+}
+
+fn map_lifecycle_error(err: IsolationSessionError) -> MxcError {
+    let message = err.to_string();
+    match err {
+        IsolationSessionError::Policy(_) => MxcError::policy_validation(message),
+        IsolationSessionError::ServiceUnavailable(_) => MxcError::backend_unavailable(message),
+        IsolationSessionError::Lifecycle(_) => MxcError::backend_error(message),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,6 +907,23 @@ mod tests {
             }
             other => panic!("expected Policy variant, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn map_lifecycle_error_categorises_each_variant() {
+        use crate::mxc_error::MxcErrorCode;
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::Policy("x".into())).code,
+            MxcErrorCode::PolicyValidation,
+        );
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::ServiceUnavailable("x".into())).code,
+            MxcErrorCode::BackendUnavailable,
+        );
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::Lifecycle("x".into())).code,
+            MxcErrorCode::BackendError,
+        );
     }
 
     #[test]

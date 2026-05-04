@@ -41,20 +41,31 @@ pub enum DispatchOutcome {
 }
 
 /// Maps a parsed state-aware request to its target backend's state-aware
-/// dispatch arm, or surfaces a typed error.
-///
-/// At this stage no backend implements `StatefulSandboxBackend` yet, so every
-/// recognised backend yields `unsupported_phase`. Subsequent commits add an
-/// arm per participating backend.
+/// dispatch arm, or surfaces a typed error. Subsequent commits add an arm
+/// per participating backend; backends without a state-aware impl (or
+/// compiled out via feature flag) fall through to `unsupported_phase`.
 pub fn run_state_aware(
     parsed: ParsedStateAwareRequest,
-    _dry_run: bool,
+    dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
+    // `dry_run` is consumed by per-backend arms below. When no state-aware
+    // arms are compiled in (no participating backends behind active feature
+    // flags), the value is unused — silence the warning rather than
+    // shape-shifting the parameter list per build configuration.
+    let _ = dry_run;
+
     let backend = resolve_backend(&parsed)?;
-    Err(MxcError::unsupported_phase(format!(
-        "backend {:?} does not implement state-aware lifecycle",
-        backend
-    )))
+    match backend {
+        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
+        ContainmentBackend::IsolationSession => {
+            let mut runner = crate::isolation_session_runner::IsolationSessionRunner::new();
+            dispatch_state_aware(&mut runner, parsed, dry_run)
+        }
+        other => Err(MxcError::unsupported_phase(format!(
+            "backend {:?} does not implement state-aware lifecycle",
+            other
+        ))),
+    }
 }
 
 /// Per-backend phase router. The `run_state_aware` arm for a participating
