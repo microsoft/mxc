@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use wxc_common::logger::Logger;
 use wxc_common::models::{CodexRequest, NetworkPolicy, ScriptResponse, WslcConfig};
 use wxc_common::script_runner::ScriptRunner;
-use wxc_common::string_util::CoTaskMemPWSTR;
+use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
 use crate::policy_mapping;
 use crate::wslc_bindings::*;
@@ -212,7 +212,7 @@ impl WSLContainerRunner {
                 )));
             }
         };
-        let wide_path: Vec<u16> = tar_path.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide_path: Vec<u16> = to_wide(&tar_path);
 
         match tar_format {
             TarFormat::DockerSave => {
@@ -324,7 +324,12 @@ impl ScriptRunner for WSLContainerRunner {
 }
 
 impl WSLContainerRunner {
-    /// Step 0: Initialize COM and load the WSLC SDK at runtime.
+    /// Initialize COM and load the WSLC SDK at runtime.
+    ///
+    /// # Safety
+    /// Must be called once per process before any other WSLC SDK functions.
+    /// The returned `WslcSdk` holds raw function pointers loaded from `wslcsdk.dll`;
+    /// callers must keep it alive for the duration of all SDK use.
     unsafe fn init_and_load_sdk(logger: &mut Logger) -> Result<WslcSdk, ScriptResponse> {
         let com_hr = windows::Win32::System::Com::CoInitializeEx(
             None,
@@ -362,26 +367,27 @@ impl WSLContainerRunner {
         Ok(sdk)
     }
 
-    /// Step 2-3: Configure session settings and create the session.
+    /// Configure session settings and create the session.
     /// Returns the session guard (RAII).
     /// Keeps owned string data alive through session creation.
+    ///
+    /// # Safety
+    /// `sdk` must contain valid, currently-loaded function pointers.
+    /// COM must already be initialized on this thread.
     unsafe fn create_session(
         &self,
         sdk: &WslcSdk,
         request: &CodexRequest,
         logger: &mut Logger,
     ) -> Result<WslcSessionGuard, ScriptResponse> {
-        let session_name: Vec<u16> = format!("{}\0", request.container_id)
-            .encode_utf16()
-            .collect();
+        let session_name: Vec<u16> = to_wide(&request.container_id);
         let storage_path_str = self.config.storage_path.clone().unwrap_or_else(|| {
             std::env::temp_dir()
                 .join("mxc-wslc-sessions")
                 .to_string_lossy()
                 .to_string()
         });
-        let storage_path_wide: Vec<u16> =
-            format!("{}\0", storage_path_str).encode_utf16().collect();
+        let storage_path_wide: Vec<u16> = to_wide(&storage_path_str);
 
         let mut settings = std::mem::zeroed::<WslcSessionSettings>();
         let hr = (sdk.WslcInitSessionSettings)(
@@ -452,7 +458,11 @@ impl WSLContainerRunner {
         ))
     }
 
-    /// Step 4: Check if image exists, import from tar, or pull from registry.
+    /// Check if image exists, import from tar, or pull from registry.
+    ///
+    /// # Safety
+    /// `sdk` must contain valid function pointers and `session` must be a
+    /// live session handle obtained from `WslcCreateSession`.
     unsafe fn resolve_image(
         &self,
         sdk: &WslcSdk,
@@ -533,7 +543,11 @@ impl WSLContainerRunner {
         Ok(())
     }
 
-    /// Step 10b: Apply iptables rules inside a running container for host filtering.
+    /// Apply iptables rules inside a running container for host filtering.
+    ///
+    /// # Safety
+    /// `sdk` must contain valid function pointers and `container` must be a
+    /// live container handle for a started container.
     unsafe fn apply_iptables_rules(
         sdk: &WslcSdk,
         container: WslcContainer,
@@ -627,8 +641,12 @@ impl WSLContainerRunner {
         Ok(())
     }
 
-    /// Step 12: Wait for process exit with timeout enforcement.
+    /// Wait for process exit with timeout enforcement.
     /// Returns (exit_code, timed_out).
+    ///
+    /// # Safety
+    /// `sdk` must contain valid function pointers. `process_guard` and
+    /// `container_guard` must hold live handles from this session.
     unsafe fn wait_for_process(
         sdk: &WslcSdk,
         process_guard: &WslcProcessGuard,
@@ -706,7 +724,7 @@ impl WSLContainerRunner {
         Ok((exit_code, timed_out))
     }
 
-    /// Step 13-14: Collect captured I/O and build the final ScriptResponse.
+    /// Collect captured I/O and build the final ScriptResponse.
     fn collect_output(
         io_ctx: &IoContext,
         exit_code: i32,
@@ -744,6 +762,14 @@ impl WSLContainerRunner {
     /// Helpers handle phases that don't involve dangling-pointer risks;
     /// pointer-heavy SDK configuration stays inline to keep owned string
     /// data alive for the duration needed.
+    ///
+    /// # Safety
+    /// Calls into the WSLC SDK via raw FFI. Owned buffers backing pointers
+    /// passed to the SDK (cmdline, env, mounts, etc.) must remain alive
+    /// until the SDK call that consumes them returns. RAII guards
+    /// (`WslcSessionGuard`, `WslcContainerGuard`, `WslcProcessGuard`,
+    /// `IoCtxRawGuard`) ensure handles and reference counts are released
+    /// on every exit path.
     unsafe fn run_internal(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
 
@@ -816,12 +842,12 @@ impl WSLContainerRunner {
             return sdk_error("WslcSetProcessSettingsCmdLine failed", hr, "");
         }
 
-        let env_cstrings: Vec<Vec<u8>> = request
-            .env
-            .iter()
-            .map(|e| format!("{}\0", e).into_bytes())
-            .collect();
         if !request.env.is_empty() {
+            let env_cstrings: Vec<Vec<u8>> = request
+                .env
+                .iter()
+                .map(|e| format!("{}\0", e).into_bytes())
+                .collect();
             let env_ptrs: Vec<PCSTR> = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
             let hr = (sdk.WslcSetProcessSettingsEnvVariables)(
                 &mut process_settings,
@@ -877,7 +903,7 @@ impl WSLContainerRunner {
         let wide_paths: Vec<(Vec<u16>, Vec<u8>)> = mounts
             .iter()
             .map(|m| {
-                let win: Vec<u16> = format!("{}\0", m.windows_path).encode_utf16().collect();
+                let win: Vec<u16> = to_wide(&m.windows_path);
                 let ctr: Vec<u8> = format!("{}\0", m.container_path).into_bytes();
                 (win, ctr)
             })
