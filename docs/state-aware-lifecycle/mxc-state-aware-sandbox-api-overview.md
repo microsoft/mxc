@@ -207,22 +207,41 @@ pub trait StatefulSandboxBackend {
     type DeprovisionMetadata: serde::Serialize;
 
     // Default body mints `<ID_PREFIX>:<random-token>`; override for native provision.
-    fn provision(&mut self, request: &ProvisionRequest<Self::ProvisionConfig>)
-        -> Result<ProvisionResult<Self::ProvisionMetadata>, MxcError> { /* ... */ }
+    fn provision(
+        &mut self,
+        request: &CodexRequest,
+        config: Option<Self::ProvisionConfig>,
+    ) -> Result<ProvisionResult<Self::ProvisionMetadata>, MxcError> { /* ... */ }
 
     // Default body returns Ok with no metadata.
-    fn start(&mut self, request: &StartRequest<Self::StartConfig>)
-        -> Result<StartResult<Self::StartMetadata>, MxcError> { /* ... */ }
+    fn start(
+        &mut self,
+        sandbox_id: &str,
+        request: &CodexRequest,
+        config: Option<Self::StartConfig>,
+    ) -> Result<StartResult<Self::StartMetadata>, MxcError> { /* ... */ }
 
     // Required.
-    fn exec(&mut self, request: &ExecRequest<Self::ExecConfig>)
-        -> Result<ExecHandle, MxcError>;
+    fn exec(
+        &mut self,
+        sandbox_id: &str,
+        request: &CodexRequest,
+        config: Option<Self::ExecConfig>,
+    ) -> Result<ExecHandle, MxcError>;
 
-    fn stop(&mut self, request: &StopRequest<Self::StopConfig>)
-        -> Result<StopResult<Self::StopMetadata>, MxcError> { /* ... */ }
+    fn stop(
+        &mut self,
+        sandbox_id: &str,
+        request: &CodexRequest,
+        config: Option<Self::StopConfig>,
+    ) -> Result<StopResult<Self::StopMetadata>, MxcError> { /* ... */ }
 
-    fn deprovision(&mut self, request: &DeprovisionRequest<Self::DeprovisionConfig>)
-        -> Result<DeprovisionResult<Self::DeprovisionMetadata>, MxcError> { /* ... */ }
+    fn deprovision(
+        &mut self,
+        sandbox_id: &str,
+        request: &CodexRequest,
+        config: Option<Self::DeprovisionConfig>,
+    ) -> Result<DeprovisionResult<Self::DeprovisionMetadata>, MxcError> { /* ... */ }
 
     // Per-phase validate_<phase> hooks (default Ok). See main doc §9.2.
 }
@@ -230,10 +249,15 @@ pub trait StatefulSandboxBackend {
 
 Backends declare a const id prefix, per-phase config and metadata as associated types
 (use `()` for phases that don't need either), and override only the methods they care
-about — `exec` is the only required method. Per-phase `<Phase>Request<C>` structs bundle
-the cross-cutting wire-shape configs (`FilesystemConfig`, `NetworkConfig`, `UiConfig`)
-with the backend-specific typed per-phase config; there is no unified Rust "policy"
-type. `ProcessConfig` is reused from the existing one-shot wire format.
+about — `exec` is the only required method. Trait methods take `&CodexRequest` (the
+existing one-shot domain model from `wxc_common::models`) plus `sandbox_id` for
+non-provision phases and an optional backend-specific typed config; cross-cutting
+policy fields flow through `request.policy` (a `ContainerPolicy`) and per-exec process
+info flows through `request.script_code` / `request.working_directory` /
+`request.script_timeout` / `request.env`. There is no unified Rust "policy" type and
+no Rust `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` wrapper
+struct — those names exist as TypeScript SDK interfaces only. See "Why the trait
+reuses `CodexRequest`" in main doc §9.2 for the rationale.
 
 A backend's participation mode (ephemeral-only, state-aware-only, both) is declared by
 which traits it implements. State-aware backends additionally register an id prefix
@@ -268,12 +292,12 @@ const { sandboxId } = await provisionSandbox('isolation_session', { policy });
 ```
 
 ```rust
-// Dispatcher converts the JSON above into ProvisionRequest<()> {
-//   filesystem: Some(FilesystemConfig { readwrite_paths: ["C:\\workspace"] }),
-//   network: Some(NetworkConfig { default_policy: Allow, allowed_hosts: ["api.anthropic.com"] }),
-//   ui: None, config: None,
-// } and calls:
-backend.provision(&prov_req)
+// Parser deserializes the JSON above into a CodexRequest with
+//   request.policy.readwrite_paths = ["C:\\workspace"]
+//   request.policy.default_network_policy = NetworkPolicy::Allow
+//   request.policy.allowed_hosts = ["api.anthropic.com"]
+// (the same one-shot path the parser already uses). The dispatcher then calls:
+backend.provision(&request, /* config */ None)
 // returns Ok(ProvisionResult {
 //     sandbox_id: "iso:reg-abc:prov-123".into(),
 //     metadata: Some(IsolationSessionProvisionMetadata {
@@ -305,12 +329,9 @@ const r = await execInSandboxAsync(sandboxId, {
 ```
 
 ```rust
-// Dispatcher constructs ExecRequest<()> {
-//   sandbox_id: "iso:reg-abc:prov-123".into(),
-//   filesystem: None, network: None, ui: None, config: None,
-//   process: ProcessConfig { command_line: "echo hello".into(), ..Default::default() },
-// }
-backend.exec(&exec_req)
+// Parser populates request.script_code = "echo hello" from the wire-format `process`
+// block (same path as one-shot). The dispatcher then calls:
+backend.exec("iso:reg-abc:prov-123", &request, /* config */ None)
 // returns Ok(ExecHandle { stdout, stderr, stdin, waiter, terminator })
 ```
 

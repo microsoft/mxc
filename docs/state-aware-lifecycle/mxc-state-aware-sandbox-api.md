@@ -720,12 +720,13 @@ const { sandboxId } = await provisionSandbox('isolation_session', { policy });
 ```
 
 ```rust
-// Dispatcher converts the JSON above into ProvisionRequest<()> {
-//   filesystem: Some(FilesystemConfig { readwrite_paths: ["C:\\workspace"] }),
-//   network: Some(NetworkConfig { default_policy: Allow, allowed_hosts: ["api.anthropic.com"] }),
-//   ui: None, config: None,
-// } and calls:
-backend.provision(&prov_req)
+// Parser deserializes the JSON above into a CodexRequest with
+//   request.policy.readwrite_paths = ["C:\\workspace"]
+//   request.policy.default_network_policy = NetworkPolicy::Allow
+//   request.policy.allowed_hosts = ["api.anthropic.com"]
+// (and the other top-level wire fields populated as today's one-shot path
+// already populates them). The dispatcher then calls:
+backend.provision(&request, /* config */ None)
 // returns Ok(ProvisionResult {
 //     sandbox_id: "iso:reg-abc:prov-123".into(),
 //     metadata: Some(IsolationSessionProvisionMetadata {
@@ -756,12 +757,13 @@ await startSandbox(sandboxId, {
 ```
 
 ```rust
-// Dispatcher constructs StartRequest<IsolationSessionStartConfig> {
-//   sandbox_id: "iso:reg-abc:prov-123".into(),
-//   filesystem: None, network: None, ui: None,
-//   config: Some(IsolationSessionStartConfig { configuration_id: Small }),
-// }
-backend.start(&start_req)
+// Dispatcher deserializes `experimental.isolation_session.start` into
+// IsolationSessionStartConfig { configuration_id: Small }, then calls:
+backend.start(
+    "iso:reg-abc:prov-123",
+    &request,
+    Some(IsolationSessionStartConfig { configuration_id: Small }),
+)
 // returns Ok(StartResult { metadata: None })
 ```
 
@@ -789,12 +791,10 @@ const r = await execInSandboxAsync(sandboxId, {
 ```
 
 ```rust
-// Dispatcher constructs ExecRequest<()> {
-//   sandbox_id: "iso:reg-abc:prov-123".into(),
-//   filesystem: None, network: None, ui: None, config: None,
-//   process: ProcessConfig { command_line: "echo hello".into(), timeout: Some(5000), ..Default::default() },
-// }
-backend.exec(&exec_req)
+// Parser populates request.script_code = "echo hello", request.script_timeout =
+// 5000 from the wire-format `process` block (same path as one-shot). The
+// dispatcher then calls:
+backend.exec("iso:reg-abc:prov-123", &request, /* config */ None)
 // returns Ok(ExecHandle { ... pipe handles + waiter ... })
 ```
 
@@ -821,11 +821,7 @@ await stopSandbox(sandboxId);
 ```
 
 ```rust
-// Dispatcher constructs StopRequest<()> {
-//   sandbox_id: "iso:reg-abc:prov-123".into(),
-//   filesystem: None, network: None, ui: None, config: None,
-// }
-backend.stop(&stop_req)
+backend.stop("iso:reg-abc:prov-123", &request, /* config */ None)
 // returns Ok(StopResult { metadata: None })
 ```
 
@@ -848,11 +844,7 @@ await deprovisionSandbox(sandboxId);
 ```
 
 ```rust
-// Dispatcher constructs DeprovisionRequest<()> {
-//   sandbox_id: "iso:reg-abc:prov-123".into(),
-//   filesystem: None, network: None, ui: None, config: None,
-// }
-backend.deprovision(&deprov_req)
+backend.deprovision("iso:reg-abc:prov-123", &request, /* config */ None)
 // returns Ok(DeprovisionResult { metadata: None })
 ```
 
@@ -1009,13 +1001,20 @@ falls through to the one-shot branch. Per-phase requirements (`containment` for
 `provision`, `sandboxId` for the others) are enforced in the conversion step rather
 than at the deserialiser; the `Raw*` struct accepts both fields as optional.
 
-Conversion from `Raw*` into typed domain models happens in `convert_*` helpers analogous
-to the existing `convert_raw_config` → `CodexRequest`. The cross-cutting wire fields
-(`filesystem`, `network`, `ui`) are converted into typed wire-shape configs
-(`FilesystemConfig`, `NetworkConfig`, `UiConfig`) and bundled into the per-phase request
-struct passed to the trait method (§9.2). There is no unified Rust "policy" type —
-`SandboxPolicy` is an SDK-only abstraction (§6.6). Domain models are exposed to the
-dispatch layer; the `Raw*` types stay private to the parser.
+Conversion from `Raw*` into the typed domain model is the existing
+`convert_raw_config` → `CodexRequest` path, used for both one-shot and state-aware
+requests. The cross-cutting wire fields (`filesystem`, `network`, `ui`) populate
+`CodexRequest.policy` (a `ContainerPolicy`) exactly as the one-shot path does today,
+and `process` populates `CodexRequest`'s flat `script_code` / `working_directory` /
+`script_timeout` / `env` fields via the existing `RawProcess` intermediate. The
+state-aware-only fields (`phase`, `sandboxId`, `experimental.<backend>.<phase>`) are
+extracted alongside the `CodexRequest` and bundled into a `ParsedStateAwareRequest`
+domain model — `{ request: CodexRequest, phase: Phase, containment:
+Option<ContainmentBackend>, sandbox_id: Option<String>, experimental_raw: ... }` —
+that the dispatcher consumes (§9.3). The bundling does not modify `CodexRequest`'s
+shape. There is no unified Rust "policy" type — `SandboxPolicy` is an SDK-only
+abstraction (§6.6). Domain models are exposed to the dispatch layer; the `Raw*` types
+stay private to the parser.
 
 ### 9.2 The trait
 
@@ -1046,7 +1045,8 @@ pub trait StatefulSandboxBackend {
     /// (e.g., allocating a session, registering with the underlying service).
     fn provision(
         &mut self,
-        _request: &ProvisionRequest<Self::ProvisionConfig>,
+        _request: &CodexRequest,
+        _config: Option<Self::ProvisionConfig>,
     ) -> Result<ProvisionResult<Self::ProvisionMetadata>, MxcError> {
         Ok(ProvisionResult {
             sandbox_id: format!("{}:{}", Self::ID_PREFIX, mint_random_token()),
@@ -1058,7 +1058,9 @@ pub trait StatefulSandboxBackend {
     /// backend has substantive work to do at start.
     fn start(
         &mut self,
-        _request: &StartRequest<Self::StartConfig>,
+        _sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<Self::StartConfig>,
     ) -> Result<StartResult<Self::StartMetadata>, MxcError> {
         Ok(StartResult { metadata: None })
     }
@@ -1066,13 +1068,17 @@ pub trait StatefulSandboxBackend {
     /// Required. Must execute the workload and return a handle.
     fn exec(
         &mut self,
-        request: &ExecRequest<Self::ExecConfig>,
+        sandbox_id: &str,
+        request: &CodexRequest,
+        config: Option<Self::ExecConfig>,
     ) -> Result<ExecHandle, MxcError>;
 
     /// Optional. Default returns success with no metadata.
     fn stop(
         &mut self,
-        _request: &StopRequest<Self::StopConfig>,
+        _sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<Self::StopConfig>,
     ) -> Result<StopResult<Self::StopMetadata>, MxcError> {
         Ok(StopResult { metadata: None })
     }
@@ -1080,7 +1086,9 @@ pub trait StatefulSandboxBackend {
     /// Optional. Default returns success with no metadata.
     fn deprovision(
         &mut self,
-        _request: &DeprovisionRequest<Self::DeprovisionConfig>,
+        _sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<Self::DeprovisionConfig>,
     ) -> Result<DeprovisionResult<Self::DeprovisionMetadata>, MxcError> {
         Ok(DeprovisionResult { metadata: None })
     }
@@ -1092,78 +1100,47 @@ pub trait StatefulSandboxBackend {
     /// the chosen `MxcError` code.
     fn validate_provision(
         &self,
-        _request: &ProvisionRequest<Self::ProvisionConfig>,
+        _request: &CodexRequest,
+        _config: Option<&Self::ProvisionConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
     }
 
     fn validate_start(
         &self,
-        _request: &StartRequest<Self::StartConfig>,
+        _sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<&Self::StartConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
     }
 
     fn validate_exec(
         &self,
-        _request: &ExecRequest<Self::ExecConfig>,
+        _sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<&Self::ExecConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
     }
 
     fn validate_stop(
         &self,
-        _request: &StopRequest<Self::StopConfig>,
+        _sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<&Self::StopConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
     }
 
     fn validate_deprovision(
         &self,
-        _request: &DeprovisionRequest<Self::DeprovisionConfig>,
+        _sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<&Self::DeprovisionConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
     }
-}
-
-pub struct ProvisionRequest<C> {
-    pub filesystem: Option<FilesystemConfig>,
-    pub network: Option<NetworkConfig>,
-    pub ui: Option<UiConfig>,
-    pub config: Option<C>,
-}
-
-pub struct StartRequest<C> {
-    pub sandbox_id: String,
-    pub filesystem: Option<FilesystemConfig>,
-    pub network: Option<NetworkConfig>,
-    pub ui: Option<UiConfig>,
-    pub config: Option<C>,
-}
-
-pub struct ExecRequest<C> {
-    pub sandbox_id: String,
-    pub filesystem: Option<FilesystemConfig>,
-    pub network: Option<NetworkConfig>,
-    pub ui: Option<UiConfig>,
-    pub config: Option<C>,
-    pub process: ProcessConfig,
-}
-
-pub struct StopRequest<C> {
-    pub sandbox_id: String,
-    pub filesystem: Option<FilesystemConfig>,
-    pub network: Option<NetworkConfig>,
-    pub ui: Option<UiConfig>,
-    pub config: Option<C>,
-}
-
-pub struct DeprovisionRequest<C> {
-    pub sandbox_id: String,
-    pub filesystem: Option<FilesystemConfig>,
-    pub network: Option<NetworkConfig>,
-    pub ui: Option<UiConfig>,
-    pub config: Option<C>,
 }
 
 pub struct ProvisionResult<M> {
@@ -1197,17 +1174,23 @@ pub struct ExecHandle {
 }
 ```
 
-Per-phase `<Phase>Request<C>` structs bundle the cross-cutting wire-shape configs
-(`FilesystemConfig`, `NetworkConfig`, `UiConfig` — typed Rust mirrors of the wire
-format's `filesystem`, `network`, `ui` fields) with the backend-specific typed per-phase
-config. There is no unified Rust "policy" type — `SandboxPolicy` is an SDK-only
-abstraction (§6.6). The SDK serialises both `policy` and `config` into the wire format,
-and the trait sees only the resulting wire-shape values. `ProcessConfig` and `MxcError`
-are the typed Rust equivalents of their SDK counterparts. `PipeHandle` is a
+Trait methods take `&CodexRequest` (the existing one-shot domain model from
+`wxc_common::models`, populated by the same `convert_raw_config` parser path that
+serves one-shot calls), plus `sandbox_id` for non-provision phases and an optional
+backend-specific typed config (`Self::<Phase>Config`). Cross-cutting policy fields
+flow through `request.policy` (a `ContainerPolicy`); per-exec process info flows
+through `request.script_code` / `request.working_directory` / `request.script_timeout`
+/ `request.env`; backend-specific per-phase typed config is deserialised by the
+dispatcher from `experimental.<backend>.<phase>` and passed as the `config` parameter
+(§9.3). Per-phase result types (`ProvisionResult<M>`, `StartResult<M>`,
+`StopResult<M>`, `DeprovisionResult<M>`) carry the typed metadata return value;
+`ExecHandle` exposes the running process's pipe handles for relay. There is no
+unified Rust "policy" type — `SandboxPolicy` is an SDK-only abstraction (§6.6).
+`MxcError` is the typed Rust equivalent of its SDK counterpart. `PipeHandle` is a
 platform-abstracted pipe-handle wrapper — a kernel `HANDLE` on Windows, a file
-descriptor on Linux. `ExecHandle` exposes the running process's pipe handles for relay;
-the executor's outer driver reads from `stdout` / `stderr` and writes to `stdin`,
-awaits exit via `waiter`, and calls `terminator` on cancellation signals.
+descriptor on Linux. The executor's outer driver reads from `ExecHandle.stdout` /
+`stderr` and writes to `stdin`, awaits exit via `waiter`, and calls `terminator` on
+cancellation signals.
 
 `mint_random_token()` is a small helper in `wxc_common` that produces a short hex string
 (mirroring the SDK's `randomBytes`-based id minting in `sandbox.ts`); it is used by the
@@ -1217,6 +1200,68 @@ Methods take `&mut self`, matching the existing `ScriptRunner::run` signature. B
 do not need to accumulate state between calls within a backend instance — within a
 single call a backend may use mutability to hold open service connections, but no state
 needs to survive across phase calls.
+
+#### Why the trait reuses `CodexRequest`
+
+The trait could plausibly require its own per-phase request types (e.g., an
+`ExecRequest<C>` containing typed `ProcessConfig`, `FilesystemConfig`, `NetworkConfig`,
+and `UiConfig` fields) instead of taking `&CodexRequest` directly. The design rejects
+that shape and reuses `CodexRequest` for five concrete reasons:
+
+1. **The field-ignore precedent is established across every existing backend.** Every
+   `ScriptRunner` impl in the workspace today (`AppContainer`, `BaseContainer`,
+   `NanVix`, `WindowsSandbox`, `IsolationSession`, `Lxc`, `Wslc`) takes
+   `&CodexRequest` and reads only the fields it needs. `NanVix` and
+   `IsolationSession` go further and actively reject fields they cannot honor (e.g.,
+   `NanVixScriptRunner::validate_runner` rejects filesystem paths, network rules,
+   network proxy, and a non-empty working directory). State-aware follows the same
+   pattern, so the trait ergonomic stays consistent across one-shot and state-aware
+   surfaces.
+
+2. **Process info is already typed on `CodexRequest`.** The wire-format `process`
+   block (`commandLine`, `cwd`, `env`, `timeout`) deserialises into `CodexRequest`'s
+   flat fields (`script_code`, `working_directory`, `script_timeout`, `env`) via the
+   existing `RawProcess` intermediate in `config_parser.rs`. Wrapping these four
+   typed fields into a Rust `ProcessConfig` struct adds no type safety the compiler
+   does not already provide on the flat fields. The TypeScript-side `ProcessConfig`
+   in `sdk/src/types.ts` is unchanged regardless.
+
+3. **Cross-cutting policy is already typed on `CodexRequest`.** Existing backends read
+   `request.policy.readwrite_paths`, `request.policy.allowed_hosts`,
+   `request.policy.network_proxy`, `request.policy.ui`, etc. directly today.
+   State-aware `provision` and `validate_<phase>` hooks read the same fields.
+   Splitting `ContainerPolicy` into separate `FilesystemConfig` / `NetworkConfig` /
+   `UiConfig` Rust types would force a mechanical refactor across every backend
+   without changing what any of them does.
+
+4. **The existing extraction helpers already work for state-aware exec.** The
+   `IsolationSessionRunner::build_process_options(&CodexRequest)` function in
+   `wxc_common::isolation_session_runner` extracts process info into the runner's
+   internal `ProcessOptions` struct used to populate `IsoSessionProcessOptions` for
+   `RunProcessWithOptionsAsync`. State-aware `exec` calls the same function with the
+   same `&CodexRequest` argument; no new public Rust type closes a semantic gap that
+   does not exist.
+
+5. **No SDK or wire-format change is required.** The TypeScript `ProcessConfig`,
+   `FilesystemConfig`, `NetworkConfig`, and `UiConfig` interfaces in
+   `sdk/src/types.ts` are public consumer-facing types and remain unchanged. The
+   wire JSON shape is unchanged. The Rust trait reading `request.script_code`,
+   `request.policy.allowed_hosts`, etc. is an internal implementation choice
+   invisible above the Rust layer.
+
+What would justify deviating from `CodexRequest` reuse — none of which apply to the v1
+surface in this proposal:
+
+- A fundamentally new state-aware-only field that does not fit any existing
+  `CodexRequest` shape (e.g., a snapshot id for a hypothetical `restore` phase).
+- A type-system invariant only expressible via a wrapper struct (e.g., enforcing at
+  compile time that exec requests always carry a non-empty command line —
+  `validate_exec_common` checks this at runtime instead per §10.1).
+- An SDK-API evolution that introduces a new typed shape the Rust trait must mirror
+  across the SDK-Rust boundary.
+
+If any of these emerges, the trait gains the necessary type at that point. The v1
+surface introduces none, so the trait stays minimal and reuses `CodexRequest`.
 
 ### 9.3 Dispatch
 
@@ -1233,10 +1278,10 @@ fn run(req: MxcRequest, dry_run: bool) -> Result<DispatchOutcome, MxcError> {
     match req {
         MxcRequest::OneShot(r) => Ok(DispatchOutcome::Envelope(run_one_shot(r))),
 
-        MxcRequest::StateAware(r) => match resolve_backend(&r)? {
+        MxcRequest::StateAware(parsed) => match resolve_backend(&parsed)? {
             ContainmentBackend::IsolationSession => {
                 let mut backend = IsolationSessionRunner::new();
-                dispatch_state_aware::<IsolationSessionRunner>(&mut backend, r, dry_run)
+                dispatch_state_aware::<IsolationSessionRunner>(&mut backend, parsed, dry_run)
             }
             // additional state-aware backends added here
             _ => Err(MxcError::UnsupportedPhase),
@@ -1246,66 +1291,76 @@ fn run(req: MxcRequest, dry_run: bool) -> Result<DispatchOutcome, MxcError> {
 
 fn dispatch_state_aware<B: StatefulSandboxBackend>(
     backend: &mut B,
-    req: StateAwareRequest,
+    parsed: ParsedStateAwareRequest,
     dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
-    match req.phase {
+    // `parsed` carries the typed `CodexRequest`, the parsed `Phase`, the optional
+    // `sandbox_id`, and the raw JSON value for `experimental.<backend>.<phase>` (if
+    // present). The dispatcher deserialises that raw JSON into the backend's
+    // `Self::<Phase>Config` associated type before calling the trait method.
+    let request = &parsed.request;
+    match parsed.phase {
         Phase::Provision => {
-            let prov_req = req.into_provision_request::<B::ProvisionConfig>()?;
-            backend.validate_provision(&prov_req)?;
+            let config = parsed.deserialize_config::<B::ProvisionConfig>("provision")?;
+            backend.validate_provision(request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
-            let result = backend.provision(&prov_req)?;
+            let result = backend.provision(request, config)?;
             Ok(DispatchOutcome::Envelope(provision_envelope(result)))
         }
         Phase::Start => {
-            let start_req = req.into_start_request::<B::StartConfig>()?;
-            backend.validate_start(&start_req)?;
+            let sandbox_id = parsed.sandbox_id_required()?;
+            let config = parsed.deserialize_config::<B::StartConfig>("start")?;
+            backend.validate_start(sandbox_id, request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
-            let result = backend.start(&start_req)?;
+            let result = backend.start(sandbox_id, request, config)?;
             Ok(DispatchOutcome::Envelope(start_envelope(result)))
         }
         Phase::Exec => {
-            let exec_req = req.into_exec_request::<B::ExecConfig>()?;
-            validate_exec_common(&exec_req)?;
-            backend.validate_exec(&exec_req)?;
+            let sandbox_id = parsed.sandbox_id_required()?;
+            let config = parsed.deserialize_config::<B::ExecConfig>("exec")?;
+            validate_exec_common(request)?;
+            backend.validate_exec(sandbox_id, request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
-            let handle = backend.exec(&exec_req)?;
+            let handle = backend.exec(sandbox_id, request, config)?;
             // relay_exec_to_stdio streams the script's pipes to the executor's
             // stdout/stderr/stdin live, awaits exit, and returns the script's exit code.
             let exit_code = relay_exec_to_stdio(handle)?;
             Ok(DispatchOutcome::ExecCompleted { exit_code })
         }
         Phase::Stop => {
-            let stop_req = req.into_stop_request::<B::StopConfig>()?;
-            backend.validate_stop(&stop_req)?;
+            let sandbox_id = parsed.sandbox_id_required()?;
+            let config = parsed.deserialize_config::<B::StopConfig>("stop")?;
+            backend.validate_stop(sandbox_id, request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
-            let result = backend.stop(&stop_req)?;
+            let result = backend.stop(sandbox_id, request, config)?;
             Ok(DispatchOutcome::Envelope(stop_envelope(result)))
         }
         Phase::Deprovision => {
-            let deprov_req = req.into_deprovision_request::<B::DeprovisionConfig>()?;
-            backend.validate_deprovision(&deprov_req)?;
+            let sandbox_id = parsed.sandbox_id_required()?;
+            let config = parsed.deserialize_config::<B::DeprovisionConfig>("deprovision")?;
+            backend.validate_deprovision(sandbox_id, request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
-            let result = backend.deprovision(&deprov_req)?;
+            let result = backend.deprovision(sandbox_id, request, config)?;
             Ok(DispatchOutcome::Envelope(deprovision_envelope(result)))
         }
     }
 }
 ```
 
-`resolve_backend(&r)` reads `r.containment` when `phase == Provision`; for the other
-phases it reads the prefix from `r.sandbox_id` and looks it up in the registered prefix
-table. Mismatches surface as `unsupported_containment` (unrecognised prefix) or
-`malformed_id` (no prefix structure) per §8.
+`resolve_backend(&parsed)` reads `parsed.containment` when `phase == Provision`; for the
+other phases it reads the prefix from `parsed.sandbox_id` and looks it up in the
+registered prefix table. Mismatches surface as `unsupported_containment` (unrecognised
+prefix) or `malformed_id` (no prefix structure) per §8.
 
-The `into_<phase>_request` helpers convert the parsed `StateAwareRequest` into the
-typed per-phase request struct (§9.2), enforcing envelope-shape invariants —
-`sandbox_id` required for non-provision phases, `process` required for exec — and
-deserialising the backend-specific typed config from JSON. Failures surface as
-`malformed_request`. `validate_exec_common` is a free function in `validator.rs` that
-checks cross-backend per-phase invariants (e.g., `process.commandLine` non-empty); other
-phases have no cross-backend common checks today and skip directly to the backend's
-`validate_<phase>` hook.
+`ParsedStateAwareRequest::deserialize_config::<C>(phase_name)` returns
+`Result<Option<C>, MxcError>`: it deserialises the
+`experimental.<backend>.<phase>` JSON value into `C` when present, returns `Ok(None)`
+when absent, and surfaces malformed JSON as `malformed_request`.
+`sandbox_id_required()` enforces that non-provision phases carry a `sandboxId`,
+returning `&str` on success or `malformed_request` on absence. `validate_exec_common`
+is a free function in `validator.rs` that checks cross-backend per-phase invariants
+(e.g., `request.script_code` non-empty); other phases have no cross-backend common
+checks today and skip directly to the backend's `validate_<phase>` hook.
 
 Helper functions for handle-validation, config deserialisation, envelope wrapping, and
 empty-envelope construction are mechanical and elided. The executor's outer driver
