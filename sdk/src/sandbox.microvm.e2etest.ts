@@ -6,7 +6,7 @@
 // Requirements:
 //   - Windows with WHP enabled (bcdedit /set hypervisorlaunchtype auto)
 //   - wxc-exec.exe built (in src/target/debug/ or src/target/x86_64-pc-windows-msvc/debug/)
-//   - NanVix binaries next to wxc-exec.exe: nanvixd.exe, kernel.elf, python.elf, cpython-ramfs.img
+//   - NanVix binaries next to wxc-exec.exe: nanvixd.exe, kernel.elf, python3.12, nanvix_rootfs.img
 //
 // Run: npx tsc && node --test dist/sandbox.microvm.e2etest.js
 //

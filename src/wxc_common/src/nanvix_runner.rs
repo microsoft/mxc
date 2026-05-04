@@ -21,9 +21,9 @@
 //!
 //! `nanvixd` propagates the guest process exit code directly.
 //!
-//! ## Auto-discovery
+//! Auto-discovery
 //!
-//! All required binaries (`nanvixd.exe`, `python.elf`, `cpython-ramfs.img`)
+//! All required binaries (`nanvixd.exe`, `python3.12`, `nanvix_rootfs.img`)
 //! are discovered next to the running executable. No configuration is needed.
 
 use std::fmt::Write;
@@ -39,16 +39,16 @@ use crate::logger::Logger;
 use crate::models::{CodexRequest, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 
-/// CPython guest binary loaded by NanVix.
-const PYTHON_BINARY: &str = "python.elf";
+/// Python guest binary loaded by NanVix (embedded in the rootfs, also provided as a sidecar).
+const PYTHON_BINARY: &str = "python3.12";
 /// Guest PYTHONHOME value used by CPython inside NanVix.
 /// Must NOT contain ';' or spaces — these are NanVix argument delimiters
 /// that would corrupt the guest cmdline string.
 const PYTHON_HOME: &str = "/sysroot";
 /// NanVix daemon binary launched by the host runner.
 const NANVIXD_BINARY: &str = "nanvixd.exe";
-/// CPython stdlib ramfs image mounted by NanVix.
-const RAMFS_IMAGE: &str = "cpython-ramfs.img";
+/// Combined rootfs image (NanVix kernel userspace + CPython stdlib).
+const RAMFS_IMAGE: &str = "nanvix_rootfs.img";
 /// Boot grace period that is always enforced.
 const BOOT_TIMEOUT_MS: u64 = 60_000;
 /// Generic error exit code returned to host callers.
@@ -56,7 +56,7 @@ const ERROR_EXIT_CODE: i32 = -1;
 const ERR_DENIED_PATHS: &str = concat!(
     "denied_paths is not meaningful for the microvm backend ",
     "-- the guest has no host filesystem visibility. ",
-    "Only readwrite_paths and readonly_paths are supported"
+    "Only readwrite_paths and readonly_paths are supported",
 );
 const ERR_NETWORK_POLICY: &str =
     "network policy is not supported by the NanVix backend -- NanVix has no network stack";
@@ -202,11 +202,11 @@ impl NanVixScriptRunner {
     }
 
     /// Resolve and validate all required paths next to the running executable.
-    fn resolve_paths(&self) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), NanVixError> {
+    fn resolve_paths(&self) -> Result<(PathBuf, PathBuf, PathBuf), NanVixError> {
         let dir = exe_dir()?;
-        // NanVix runtime artifacts (nanvixd.exe, kernel.elf, python.elf, cpython-ramfs.img)
-        // are distributed via GitHub releases from nanvix/nanvix and nanvix/cpython.
-        // They are placed next to wxc-exec.exe by setup scripts.
+        // NanVix runtime artifacts (nanvixd.exe, kernel.elf, python3.12, nanvix_rootfs.img)
+        // are distributed via GitHub releases from nanvix/nanvix-python.
+        // They are placed next to wxc-exec.exe by the build system.
 
         let nanvixd = dir.join(NANVIXD_BINARY);
         if !nanvixd.exists() {
@@ -232,7 +232,7 @@ impl NanVixScriptRunner {
             )));
         }
 
-        Ok((nanvixd, dir, ramfs, python))
+        Ok((nanvixd, ramfs, python))
     }
 
     /// Compute total timeout: boot grace + staging overhead + script timeout.
@@ -284,11 +284,14 @@ impl NanVixScriptRunner {
     }
 
     fn spawn_nanvixd(
-        paths: (&Path, &Path, &Path, &Path),
+        paths: (&Path, &Path, &Path),
         guest_args: &str,
         staging_dir: &Path,
     ) -> Result<std::process::Child, NanVixError> {
-        let (nanvixd_path, bin_dir, ramfs_path, python_path) = paths;
+        let (nanvixd_path, ramfs_path, python_path) = paths;
+        let bin_dir = nanvixd_path
+            .parent()
+            .expect("nanvixd path must have a parent directory");
         Command::new(nanvixd_path)
             .arg("-bin-dir")
             .arg(bin_dir)
@@ -299,7 +302,7 @@ impl NanVixScriptRunner {
             .arg("--")
             .arg(python_path)
             .arg(guest_args)
-            .stdin(Stdio::inherit())
+            .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
@@ -400,12 +403,10 @@ impl NanVixScriptRunner {
     fn log_resolved_paths(
         logger: &mut Logger,
         nanvixd: &Path,
-        bin_dir: &Path,
         ramfs: &Path,
         python: &Path,
     ) {
         let _ = writeln!(logger, "NanVix: nanvixd={:?}", nanvixd);
-        let _ = writeln!(logger, "NanVix: bin_dir={:?}", bin_dir);
         let _ = writeln!(logger, "NanVix: ramfs={:?}", ramfs);
         let _ = writeln!(logger, "NanVix: python={:?}", python);
     }
@@ -474,7 +475,7 @@ impl ScriptRunner for NanVixScriptRunner {
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let (nanvixd_path, bin_dir, ramfs_path, python_path) = match self.resolve_paths() {
+        let (nanvixd_path, ramfs_path, python_path) = match self.resolve_paths() {
             Ok(paths) => paths,
             Err(e) => return e.to_response(),
         };
@@ -500,12 +501,12 @@ impl ScriptRunner for NanVixScriptRunner {
             }
         };
 
-        Self::log_resolved_paths(logger, &nanvixd_path, &bin_dir, &ramfs_path, &python_path);
+        Self::log_resolved_paths(logger, &nanvixd_path, &ramfs_path, &python_path);
         let _ = writeln!(logger, "NanVix: staging_dir={:?}", staging.path());
         let guest_args = Self::build_guest_args();
 
         let mut child = match Self::spawn_nanvixd(
-            (&nanvixd_path, &bin_dir, &ramfs_path, &python_path),
+            (&nanvixd_path, &ramfs_path, &python_path),
             &guest_args,
             staging.path(),
         ) {

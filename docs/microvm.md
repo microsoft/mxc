@@ -101,7 +101,7 @@ Not supported for MicroVM. If `deniedPaths` is specified, the config is rejected
 | Guest RAM                               | 128 MB                                      |
 | Symlinks/reparse points in source paths | Not supported (rejected at preflight)       |
 | Junctions for staging                   | Not used                                    |
-| `workingDirectory`                      | Not supported (guest CWD is`/`)             |
+| `workingDirectory`                      | Not supported (guest CWD is `/`)            |
 | Network policy                          | Not supported (NanVix has no network stack) |
 
 
@@ -111,5 +111,5 @@ Not supported for MicroVM. If `deniedPaths` is specified, the config is rejected
 | Workload                       | Error                               |
 | -------------------------------- | ------------------------------------- |
 | Network I/O                    | `OSError: Function not implemented` |
-| File writing outside`/mnt/rw/` | `OSError: Read-only file system`    |
+| File writing outside `/mnt/rw/` | `OSError: Read-only file system`    |
 |                                |                                     |

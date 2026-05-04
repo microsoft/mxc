@@ -1,12 +1,7 @@
 {
-    "nanvix": {
-        "tag": "v0.12.291",
-        "asset": "nanvix-windows-microvm-standalone-release-128mb-6a3dc4b891be5134f512c71ed734da3173d7ce80.zip",
-        "binaries": ["nanvixd.exe", "kernel.elf"]
-    },
-    "cpython": {
-        "tag": "3.12.3-nanvix-0.12.291",
-        "asset": "cpython-windows-microvm-standalone-128mb-4f1d239.zip",
-        "binaries": ["python.elf", "cpython-ramfs.img"]
+    "nanvix_python": {
+        "tag": "3.12.3-nanvix-0.12.506-aca41ca",
+        "asset": "microvm-standalone-256mb.zip",
+        "binaries": ["nanvixd.exe", "kernel.elf", "python3.12", "nanvix_rootfs.img"]
     }
 }

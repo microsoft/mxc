@@ -27,12 +27,17 @@ pub const RO_DIR: &str = "ro";
 /// Maximum slug length in characters to avoid exceeding MAX_PATH in the staging hierarchy.
 const MAX_SLUG_CHARS: usize = 80;
 /// Bootstrap Python source used by the guest runtime.
-pub(crate) const BOOTSTRAP_SOURCE: &str = "import json, os, runpy, sys
+///
+/// Uses `exec(compile(...))` instead of `runpy.run_path` because `runpy` holds
+/// internal state that can prevent a clean process exit on NanVix CPython 3.12
+/// when the guest script exits naturally (without an explicit `sys.exit()`).
+pub(crate) const BOOTSTRAP_SOURCE: &str = "import json, os, sys
 with open('/mnt/.mxc-pathmap.json') as f:
     for slug, guest_path in json.load(f).items():
         os.environ[f'MXC_PATH_{slug}'] = guest_path
 sys.argv = ['/mnt/.mxc-script.py']
-runpy.run_path(sys.argv[0], run_name='__main__')
+with open(sys.argv[0]) as _f:
+    exec(compile(_f.read(), sys.argv[0], 'exec'), {'__name__': '__main__', '__file__': sys.argv[0]})
 ";
 
 /// Errors produced while creating or validating a staging directory.
@@ -51,6 +56,9 @@ pub enum StagingError {
     #[error("staging I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+/// Return type of the staging build closure.
+type StagingBuildResult = Result<(BTreeMap<String, String>, Vec<RwMapping>, u64), StagingError>;
 
 /// Whether the original host path was a file or directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,8 +95,8 @@ impl StagingDir {
         readonly_paths: &[String],
     ) -> Result<Self, StagingError> {
         // Pre-flight size estimate — fail fast before writing anything.
-        let estimated = estimate_source_size(readwrite_paths)
-            .saturating_add(estimate_source_size(readonly_paths));
+        let estimated = estimate_source_size(readwrite_paths)?
+            .saturating_add(estimate_source_size(readonly_paths)?);
         if estimated > MAX_STAGING_BYTES {
             return Err(StagingError::SizeCapExceeded {
                 actual_mb: estimated as f64 / (1024.0 * 1024.0),
@@ -100,8 +108,7 @@ impl StagingDir {
         let path = root.join(format!("mxc-staging-{}", Uuid::new_v4().simple()));
         fs::create_dir_all(&path)?;
 
-        let build_result =
-            || -> Result<(BTreeMap<String, String>, Vec<RwMapping>, u64), StagingError> {
+        let build_result = || -> StagingBuildResult {
                 fs::write(path.join(BOOTSTRAP_FILENAME), BOOTSTRAP_SOURCE)?;
                 fs::write(path.join(SCRIPT_FILENAME), script)?;
 
@@ -334,7 +341,13 @@ fn copy_back_mapping(mapping: &RwMapping) -> Result<(), StagingError> {
 /// Uses a rename-based backup to avoid permanent data loss if the copy fails mid-way.
 fn mirror_directory(src: &Path, dst: &Path) -> Result<(), StagingError> {
     // Build a sibling backup path on the same volume as dst — rename is atomic.
-    let backup = dst.with_extension("__mxc_bak");
+    // Include the PID to avoid collision with stale backups from prior interrupted runs.
+    let backup = dst.with_extension(format!("__mxc_bak_{}", std::process::id()));
+    // Clean up any pre-existing backup with the same name (e.g. from a previous run
+    // of this process that was interrupted between the rename and cleanup).
+    if backup.exists() {
+        let _ = remove_dir_all_force(&backup);
+    }
     if dst.exists() {
         fs::rename(dst, &backup)?;
     }
@@ -360,16 +373,23 @@ fn mirror_directory(src: &Path, dst: &Path) -> Result<(), StagingError> {
 }
 
 /// Copies a directory recursively.
+/// Uses `symlink_metadata` per entry to reject symlinks/reparse points during
+/// traversal, closing the TOCTOU window between upfront validation and the actual copy.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), StagingError> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
-        let source = entry.path();
+        let ft = entry.metadata()?.file_type();
+        if ft.is_symlink() {
+            return Err(StagingError::SymlinkFound(
+                entry.path().display().to_string(),
+            ));
+        }
         let target = dst.join(entry.file_name());
-        if source.is_dir() {
-            copy_dir_recursive(&source, &target)?;
+        if ft.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
         } else {
-            fs::copy(source, target)?;
+            fs::copy(entry.path(), target)?;
         }
     }
     Ok(())
@@ -441,6 +461,7 @@ fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
 }
 
 /// Removes a directory tree, clearing read-only attributes first.
+#[allow(clippy::permissions_set_readonly_false)]
 fn remove_dir_all_force(path: &Path) -> Result<(), StagingError> {
     if !path.exists() {
         return Ok(());
@@ -450,6 +471,7 @@ fn remove_dir_all_force(path: &Path) -> Result<(), StagingError> {
     Ok(())
 }
 
+#[allow(clippy::permissions_set_readonly_false)]
 fn clear_readonly_recursive(path: &Path) -> Result<(), StagingError> {
     if path.is_file() {
         let mut perms = fs::metadata(path)?.permissions();
@@ -492,10 +514,16 @@ fn dir_size(path: &Path) -> Result<u64, StagingError> {
 }
 
 /// Estimates the total on-disk size of a list of host paths without copying them.
+/// Returns an error on the first path that cannot be sized, ensuring the preflight
+/// check is deterministic and does not silently under-estimate.
 fn estimate_source_size(paths: &[String]) -> Result<u64, StagingError> {
     let mut total = 0_u64;
-    for path in paths {
-        total = total.saturating_add(dir_size(Path::new(path))?);
+    for s in paths {
+        let p = Path::new(s);
+        if !p.exists() {
+            return Err(StagingError::PathNotFound(s.clone()));
+        }
+        total = total.saturating_add(dir_size(p)?);
     }
     Ok(total)
 }
@@ -829,6 +857,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::permissions_set_readonly_false)]
     fn staging_readonly_paths_not_copied_back() {
         let root = tempdir().unwrap();
         let source_root = tempdir().unwrap();
