@@ -41,13 +41,13 @@ Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\MXC\Diagnostics" -Name "Console
 - Input JSON config and parsed `CodexRequest` (env values redacted, script truncated)
 - Sandbox spec details (size, UI flags, capabilities, filesystem/network policy)
 - Process lifecycle (command line, identity, child PID, exit code, elapsed time)
-- Phase markers for key execution stages
+- Section markers for key execution stages
 
 ## Diagnostic Console
 
 `mxc-diagnostic-console.exe` is a long-lived process that receives messages from
 multiple `wxc-exec` instances over `\\.\pipe\mxc-diagnostics`. Output is color-coded
-per PID, with special highlighting for `WARNING:`, `ERROR:`, and `PHASE:` messages.
+per PID, with special highlighting for `WARNING:`, `ERROR:`, and `SECTION:` messages.
 
 ### Display Modes
 
