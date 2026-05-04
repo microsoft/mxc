@@ -27,10 +27,6 @@ pub const RO_DIR: &str = "ro";
 /// Maximum slug length in characters to avoid exceeding MAX_PATH in the staging hierarchy.
 const MAX_SLUG_CHARS: usize = 80;
 /// Bootstrap Python source used by the guest runtime.
-///
-/// Uses `exec(compile(...))` instead of `runpy.run_path` because `runpy` holds
-/// internal state that can prevent a clean process exit on NanVix CPython 3.12
-/// when the guest script exits naturally (without an explicit `sys.exit()`).
 pub(crate) const BOOTSTRAP_SOURCE: &str = "import json, os, sys
 with open('/mnt/.mxc-pathmap.json') as f:
     for slug, guest_path in json.load(f).items():
@@ -109,68 +105,68 @@ impl StagingDir {
         fs::create_dir_all(&path)?;
 
         let build_result = || -> StagingBuildResult {
-                fs::write(path.join(BOOTSTRAP_FILENAME), BOOTSTRAP_SOURCE)?;
-                fs::write(path.join(SCRIPT_FILENAME), script)?;
+            fs::write(path.join(BOOTSTRAP_FILENAME), BOOTSTRAP_SOURCE)?;
+            fs::write(path.join(SCRIPT_FILENAME), script)?;
 
-                let mut used_env_keys: Vec<String> = Vec::new();
-                let mut path_map: BTreeMap<String, String> = BTreeMap::new();
-                let mut rw_mappings: Vec<RwMapping> = Vec::new();
+            let mut used_env_keys: Vec<String> = Vec::new();
+            let mut path_map: BTreeMap<String, String> = BTreeMap::new();
+            let mut rw_mappings: Vec<RwMapping> = Vec::new();
 
-                if !readwrite_paths.is_empty() {
-                    fs::create_dir_all(path.join(RW_DIR))?;
+            if !readwrite_paths.is_empty() {
+                fs::create_dir_all(path.join(RW_DIR))?;
+            }
+            for source in readwrite_paths {
+                let host_path = PathBuf::from(source);
+                validate_source_path(&host_path, source)?;
+
+                let slug = allocate_slug(&host_path, &mut used_env_keys);
+                let slot_dir = path.join(RW_DIR).join(&slug);
+                let kind = stage_host_path(&host_path, &slot_dir)?;
+                path_map.insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RW_DIR, slug));
+                rw_mappings.push(RwMapping {
+                    host_path,
+                    staged_path: slot_dir,
+                    kind,
+                });
+            }
+
+            if !readonly_paths.is_empty() {
+                fs::create_dir_all(path.join(RO_DIR))?;
+            }
+            for source in readonly_paths {
+                let host_path = PathBuf::from(source);
+                validate_source_path(&host_path, source)?;
+
+                let slug = allocate_slug(&host_path, &mut used_env_keys);
+                let slot_dir = path.join(RO_DIR).join(&slug);
+                if host_path.is_dir() {
+                    copy_dir_recursive(&host_path, &slot_dir)?;
+                } else {
+                    fs::create_dir_all(&slot_dir)?;
+                    let file_name = host_path
+                        .file_name()
+                        .ok_or_else(|| StagingError::PathNotFound(source.clone()))?;
+                    fs::copy(&host_path, slot_dir.join(file_name))?;
                 }
-                for source in readwrite_paths {
-                    let host_path = PathBuf::from(source);
-                    validate_source_path(&host_path, source)?;
+                set_readonly_recursive(&slot_dir)?;
+                path_map.insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RO_DIR, slug));
+            }
 
-                    let slug = allocate_slug(&host_path, &mut used_env_keys);
-                    let slot_dir = path.join(RW_DIR).join(&slug);
-                    let kind = stage_host_path(&host_path, &slot_dir)?;
-                    path_map.insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RW_DIR, slug));
-                    rw_mappings.push(RwMapping {
-                        host_path,
-                        staged_path: slot_dir,
-                        kind,
-                    });
-                }
+            let serialized = serde_json::to_string(&path_map).map_err(|e| {
+                StagingError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            })?;
+            fs::write(path.join(PATHMAP_FILENAME), serialized)?;
 
-                if !readonly_paths.is_empty() {
-                    fs::create_dir_all(path.join(RO_DIR))?;
-                }
-                for source in readonly_paths {
-                    let host_path = PathBuf::from(source);
-                    validate_source_path(&host_path, source)?;
+            let size_bytes = dir_size(&path)?;
+            if size_bytes > MAX_STAGING_BYTES {
+                return Err(StagingError::SizeCapExceeded {
+                    actual_mb: size_bytes as f64 / (1024.0 * 1024.0),
+                    limit_mb: MAX_STAGING_BYTES as f64 / (1024.0 * 1024.0),
+                });
+            }
 
-                    let slug = allocate_slug(&host_path, &mut used_env_keys);
-                    let slot_dir = path.join(RO_DIR).join(&slug);
-                    if host_path.is_dir() {
-                        copy_dir_recursive(&host_path, &slot_dir)?;
-                    } else {
-                        fs::create_dir_all(&slot_dir)?;
-                        let file_name = host_path
-                            .file_name()
-                            .ok_or_else(|| StagingError::PathNotFound(source.clone()))?;
-                        fs::copy(&host_path, slot_dir.join(file_name))?;
-                    }
-                    set_readonly_recursive(&slot_dir)?;
-                    path_map.insert(slug_to_env_key(&slug), format!("/mnt/{}/{}", RO_DIR, slug));
-                }
-
-                let serialized = serde_json::to_string(&path_map).map_err(|e| {
-                    StagingError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-                })?;
-                fs::write(path.join(PATHMAP_FILENAME), serialized)?;
-
-                let size_bytes = dir_size(&path)?;
-                if size_bytes > MAX_STAGING_BYTES {
-                    return Err(StagingError::SizeCapExceeded {
-                        actual_mb: size_bytes as f64 / (1024.0 * 1024.0),
-                        limit_mb: MAX_STAGING_BYTES as f64 / (1024.0 * 1024.0),
-                    });
-                }
-
-                Ok((path_map, rw_mappings, size_bytes))
-            }();
+            Ok((path_map, rw_mappings, size_bytes))
+        }();
 
         let (path_map, rw_mappings, size_bytes) = match build_result {
             Ok(result) => result,
@@ -826,7 +822,10 @@ mod tests {
         assert!(result.is_err(), "expected copyback error");
 
         // The staging dir must still exist (preserve=true) so the user can inspect it.
-        assert!(staging_path.exists(), "staging dir must be preserved on copyback failure");
+        assert!(
+            staging_path.exists(),
+            "staging dir must be preserved on copyback failure"
+        );
 
         // The original host directory is unchanged.
         assert_eq!(
@@ -869,7 +868,11 @@ mod tests {
         let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &ro).unwrap();
 
         // Mutate the staged read-only copy.
-        let staged_file = staging.path().join(RO_DIR).join("reference").join("data.txt");
+        let staged_file = staging
+            .path()
+            .join(RO_DIR)
+            .join("reference")
+            .join("data.txt");
         // Clear read-only flag so we can write to the staged copy.
         let mut perms = fs::metadata(&staged_file).unwrap().permissions();
         perms.set_readonly(false);

@@ -400,12 +400,7 @@ impl NanVixScriptRunner {
         Ok((watchdog, cancel_pair, timed_out))
     }
 
-    fn log_resolved_paths(
-        logger: &mut Logger,
-        nanvixd: &Path,
-        ramfs: &Path,
-        python: &Path,
-    ) {
+    fn log_resolved_paths(logger: &mut Logger, nanvixd: &Path, ramfs: &Path, python: &Path) {
         let _ = writeln!(logger, "NanVix: nanvixd={:?}", nanvixd);
         let _ = writeln!(logger, "NanVix: ramfs={:?}", ramfs);
         let _ = writeln!(logger, "NanVix: python={:?}", python);
