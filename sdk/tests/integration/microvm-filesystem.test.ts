@@ -18,8 +18,8 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'os';
-import { spawnSandboxFromConfig } from './sandbox';
-import { ContainerConfig } from './types';
+import { spawnSandboxFromConfig } from '../../src/sandbox';
+import { ContainerConfig } from '../../src/types';
 import { ChildProcess } from 'child_process';
 
 const isMicrovmAvailable = os.platform() === 'win32';

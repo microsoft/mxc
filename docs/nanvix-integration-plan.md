@@ -276,8 +276,6 @@ Setup scripts (PowerShell & Bash) will download matching pre-release binaries an
 | Hash computation | `hashlib.sha256(b'data')` | hashlib |
 | Data structures | `dict`, `list`, `set`, `heapq` | All built-in data structures |
 | Multi-line scripts | Functions, classes, loops | Full Python syntax |
-| Interactive input (`input()`) | PTY relay via ConPTY | stdin flows through mount-based delivery |
-| Filesystem policy (rw/ro) | `readwritePaths`/`readonlyPaths` | Staged via `-mount`, copyback on exit |
 
 ### Not Supported
 
@@ -289,7 +287,7 @@ Setup scripts (PowerShell & Bash) will download matching pre-release binaries an
 | SSL/TLS (`import ssl`) | `_ssl` module not built | `ModuleNotFoundError: No module named '_ssl'` |
 | ctypes (`import ctypes`) | `_ctypes` module not built | `ModuleNotFoundError: No module named '_ctypes'` |
 | GUI (`tkinter`, `turtle`) | No display server | Module removed from ramfs |
-| Interactive input (`input()`) | stdin relayed via ConPTY when using mount-based delivery | Works — use `input()` normally |
+| Interactive input (`input()`) | stdin consumed for script delivery | `EOFError: EOF when reading a line` |
 | Large memory (>128MB) | Default VM memory limit | Process killed by kernel OOM |
 
 ## End-User Experience
