@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use std::fmt::Write;
+use std::io::{self, Write as _};
 use std::process;
 
 use clap::Parser;
@@ -263,13 +264,32 @@ fn main() {
     let response = runner.run(&request, &mut logger);
     display_script_results(&response, &mut logger);
 
-    // Output was already relayed to the console by pipe threads.
-    // Only print captured output if present (e.g. from error paths).
+    // Output was already relayed to the console by pipe threads for
+    // streaming backends (AppContainer/BaseContainer/LXC). Backends that
+    // capture output instead — e.g. Lithium, which receives stdout/stderr in
+    // the command-runner JSON response — surface it here.
     if !response.standard_out.is_empty() {
         print!("{}", response.standard_out);
     }
     if !response.standard_err.is_empty() {
         eprint!("{}", response.standard_err);
     }
+    // On failure, surface the buffered logger so backend diagnostics aren't
+    // silently dropped when the user didn't pass --debug. Each line is
+    // prefixed with "[debug]" to mark it as backend tracing rather than the
+    // command's own output.
+    if response.exit_code != 0 {
+        let buf = logger.get_buffer();
+        if !buf.is_empty() {
+            eprintln!("--- backend trace (run with --debug for live output) ---");
+            for line in buf.lines() {
+                eprintln!("[debug] {}", line);
+            }
+        }
+    }
+    // process::exit skips stdio flushing; force it so output isn't lost when
+    // stdout is piped or redirected.
+    let _ = io::stdout().flush();
+    let _ = io::stderr().flush();
     process::exit(response.exit_code);
 }

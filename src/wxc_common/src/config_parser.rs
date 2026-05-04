@@ -11,8 +11,9 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
-    LifecycleConfig, LithiumConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping,
-    ProxyAddress, ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    LifecycleConfig, LithiumConfig, LithiumPortMapping, LxcConfig, NetworkEnforcementMode,
+    NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, TestFeatureConfig, UiPolicy,
+    WindowsSandboxConfig, WslcConfig,
 };
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
@@ -155,10 +156,24 @@ struct RawLithium {
     max_lifetime_in_seconds: Option<u32>,
     #[serde(rename = "apiVersion")]
     api_version: Option<String>,
-    #[serde(rename = "tokenEnvVar")]
-    token_env_var: Option<String>,
+    #[serde(rename = "managementTokenEnvVar")]
+    management_token_env_var: Option<String>,
+    #[serde(rename = "proxyTokenEnvVar")]
+    proxy_token_env_var: Option<String>,
     #[serde(rename = "requestTimeoutMs")]
     request_timeout_ms: Option<u32>,
+    #[serde(rename = "commandRunnerPath")]
+    command_runner_path: Option<String>,
+    #[serde(rename = "commandRunnerTimeoutMs")]
+    command_runner_timeout_ms: Option<u32>,
+    ports: Option<Vec<RawLithiumPort>>,
+}
+
+#[derive(Deserialize)]
+struct RawLithiumPort {
+    port: u16,
+    policy: String,
+    protocol: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -574,6 +589,33 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         }
     }
 
+    // The Lithium backend is a thin client to a remote sandbox service and does
+    // not forward per-request network policy fields. Fail loud rather than let
+    // a user assume their policy is being honored.
+    if containment == ContainmentBackend::Lithium {
+        let mut unsupported: Vec<&str> = Vec::new();
+        if policy.default_network_policy == NetworkPolicy::Block {
+            unsupported.push("network.defaultPolicy=block");
+        }
+        if policy.network_enforcement_mode != NetworkEnforcementMode::Capabilities {
+            unsupported.push("network.enforcementMode");
+        }
+        if !policy.allowed_hosts.is_empty() {
+            unsupported.push("network.allowedHosts");
+        }
+        if !policy.blocked_hosts.is_empty() {
+            unsupported.push("network.blockedHosts");
+        }
+        if !unsupported.is_empty() {
+            let msg = format!(
+                "The 'lithium' containment backend does not support these network policy fields: {}. Network isolation is managed by the Lithium service and cannot be configured per-request.",
+                unsupported.join(", ")
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+    }
+
     // Lifecycle section
     let lifecycle = {
         let lc = raw.lifecycle.unwrap_or_default();
@@ -655,11 +697,30 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             if let Some(v) = li.api_version {
                 config.api_version = v;
             }
-            if let Some(v) = li.token_env_var {
-                config.token_env_var = v;
+            if let Some(v) = li.management_token_env_var {
+                config.management_token_env_var = v;
+            }
+            if let Some(v) = li.proxy_token_env_var {
+                config.proxy_token_env_var = v;
             }
             if let Some(v) = li.request_timeout_ms {
                 config.request_timeout_ms = v;
+            }
+            if let Some(v) = li.command_runner_path {
+                config.command_runner_path = v;
+            }
+            if let Some(v) = li.command_runner_timeout_ms {
+                config.command_runner_timeout_ms = v;
+            }
+            if let Some(ps) = li.ports {
+                config.ports = ps
+                    .into_iter()
+                    .map(|p| LithiumPortMapping {
+                        port: p.port,
+                        policy: p.policy,
+                        protocol: p.protocol,
+                    })
+                    .collect();
             }
             config
         });
@@ -1354,6 +1415,76 @@ mod tests {
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn lithium_rejects_default_policy_block() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lithium","network":{"defaultPolicy":"block"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        let err = result.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("lithium"), "unexpected error: {}", msg);
+        assert!(
+            msg.contains("network.defaultPolicy=block"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn lithium_rejects_enforcement_mode_firewall() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lithium","network":{"enforcementMode":"firewall"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        let err = result.unwrap_err();
+        assert!(format!("{}", err).contains("network.enforcementMode"));
+    }
+
+    #[test]
+    fn lithium_rejects_allowed_hosts() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lithium","network":{"allowedHosts":["example.com"]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        let err = result.unwrap_err();
+        assert!(format!("{}", err).contains("network.allowedHosts"));
+    }
+
+    #[test]
+    fn lithium_rejects_blocked_hosts() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lithium","network":{"blockedHosts":["evil.com"]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        let err = result.unwrap_err();
+        assert!(format!("{}", err).contains("network.blockedHosts"));
+    }
+
+    #[test]
+    fn lithium_accepts_default_network_policy() {
+        // No network section at all should parse cleanly.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lithium"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        load_request(&encoded, &mut logger, true).unwrap();
+    }
+
+    #[test]
+    fn lithium_accepts_explicit_defaults() {
+        // Explicit `allow` + `capabilities` matches schema defaults and is a no-op.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lithium","network":{"defaultPolicy":"allow","enforcementMode":"capabilities"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        load_request(&encoded, &mut logger, true).unwrap();
     }
 
     #[test]

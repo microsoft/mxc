@@ -15,7 +15,7 @@
       "shapeName": "2c4g",
       "maxIdleInSeconds": 300,
       "maxLifetimeInSeconds": 600,
-      "tokenEnvVar": "MXC_LITHIUM_TOKEN"
+      "managementTokenEnvVar": "MXC_LITHIUM_MANAGEMENT_TOKEN"
     }
   }
 }

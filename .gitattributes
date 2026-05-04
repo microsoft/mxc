@@ -1,2 +1,4 @@
-# Force LF line endings for shell scripts (prevents CRLF issues in WSL/Linux)
-*.sh text eol=lf
+# Force LF line endings for shell and PowerShell scripts (avoids CRLF issues
+# in WSL/Linux and stops safecrlf aborts when LF-writing editors touch them).
+*.sh  text eol=lf
+*.ps1 text eol=lf

@@ -105,7 +105,8 @@ management service. Configuration lives under `experimental.lithium`:
     "maxIdleInSeconds": 300,
     "maxLifetimeInSeconds": 3600,
     "apiVersion": "1.0",
-    "tokenEnvVar": "MXC_LITHIUM_TOKEN",
+    "managementTokenEnvVar": "MXC_LITHIUM_MANAGEMENT_TOKEN",
+    "proxyTokenEnvVar": "MXC_LITHIUM_PROXY_TOKEN",
     "requestTimeoutMs": 30000
   }
 }
@@ -113,9 +114,15 @@ management service. Configuration lives under `experimental.lithium`:
 
 `apiEndpoint`, `partnerId`, `poolId`, `imageId`, and `shapeName` are required.
 
-The bearer token required for authentication is read from the environment
-variable named by `tokenEnvVar` (default `MXC_LITHIUM_TOKEN`) at run time — it
-is never stored in the config file.
+Two bearer tokens are read from environment variables at run time (never
+stored in the config file):
+
+- `managementTokenEnvVar` (default `MXC_LITHIUM_MANAGEMENT_TOKEN`) — used for
+  the SandboxManagement API (checkout, terminate).
+- `proxyTokenEnvVar` (default `MXC_LITHIUM_PROXY_TOKEN`) — used for the
+  in-sandbox command-runner POST through the NodeProxy host. The runner falls
+  back to the management token when the proxy var is unset (works only in
+  environments where both share an AAD audience, e.g. `int`).
 
 The runner currently drives the checkout/teardown lifecycle only: it `POST`s
 to `/partners/{partnerId}/pools/{poolId}/sandboxes`, logs the resulting

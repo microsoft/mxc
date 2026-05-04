@@ -1,0 +1,27 @@
+{
+  "$schema": "../schemas/dev/mxc-config.schema.0.5.0-dev.json",
+  "version": "0.5.0-alpha",
+  "containment": "lithium",
+  "process": {
+    "commandLine": "echo \"start ip=$(hostname -I | awk '{print $1}') boot=$(cat /proc/sys/kernel/random/boot_id) at=$(date -Iseconds)\" && echo \"end ip=$(hostname -I | awk '{print $1}') at=$(date -Iseconds)\""
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "experimental": {
+    "lithium": {
+      "apiEndpoint": "https://sandboxmanagement.us.test.w365lith.azure-test.net",
+      "partnerId": "InternalTest",
+      "poolId": "default",
+      "imageId": "azlinuxnginxcmd",
+      "shapeName": "4c8g",
+      "maxIdleInSeconds": 3600,
+      "maxLifetimeInSeconds": 86400,
+      "managementTokenEnvVar": "MXC_LITHIUM_MANAGEMENT_TOKEN",
+      "proxyTokenEnvVar": "MXC_LITHIUM_PROXY_TOKEN",
+      "ports": [
+        { "port": 8443, "policy": "Owner", "protocol": "Https" }
+      ]
+    }
+  }
+}

@@ -311,7 +311,7 @@
         },
         "lithium": {
           "type": "object",
-          "description": "Lithium remote backend (experimental). Delegates sandbox lifecycle to the Lithium HTTP management service. The runner currently checks out and tears down a sandbox; in-sandbox workload execution (via the tool API) is not yet implemented.",
+          "description": "Lithium remote backend (experimental). Delegates sandbox lifecycle to the Lithium HTTP management service. After checkout, the runner POSTs process.commandLine to an in-sandbox HTTP command-runner endpoint (default '/8003/run', as published by examples/install_nginx_sandbox.sh) and surfaces its stdout/stderr/exit code.",
           "required": ["apiEndpoint", "partnerId", "poolId", "imageId", "shapeName"],
           "properties": {
             "apiEndpoint": {
@@ -356,16 +356,60 @@
               "default": "1.0",
               "description": "Value of the 'api-version' request header."
             },
-            "tokenEnvVar": {
+            "managementTokenEnvVar": {
               "type": "string",
-              "default": "MXC_LITHIUM_TOKEN",
-              "description": "Name of the environment variable the runner reads the bearer token from. The token itself is never stored in this config."
+              "default": "MXC_LITHIUM_MANAGEMENT_TOKEN",
+              "description": "Name of the environment variable holding the SandboxManagement API bearer token (used for checkout/terminate). Never stored in this config."
+            },
+            "proxyTokenEnvVar": {
+              "type": "string",
+              "default": "MXC_LITHIUM_PROXY_TOKEN",
+              "description": "Name of the environment variable holding the NodeProxy bearer token (used for the in-sandbox command-runner POST). When unset, the runner falls back to managementTokenEnvVar — that works only when the management API and proxy share an AAD audience (e.g. 'int'). For 'test' the proxy needs a separate token (api://w365a-svc-nodeproxy-test/.default)."
             },
             "requestTimeoutMs": {
               "type": "integer",
               "minimum": 1,
               "default": 30000,
               "description": "Per-request HTTP timeout in milliseconds."
+            },
+            "commandRunnerPath": {
+              "type": "string",
+              "default": "/8003/run",
+              "description": "Path appended to the sandbox toolUri to reach the in-sandbox command-runner endpoint. The runner POSTs '{command, timeout, cwd?}' JSON here and expects '{returncode, stdout, stderr}' back. Default targets the test image from examples/install_nginx_sandbox.sh."
+            },
+            "commandRunnerTimeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 600000,
+              "description": "Read timeout in milliseconds for the command-runner call. Should exceed the longest expected command duration; the call blocks until the remote command completes."
+            },
+            "ports": {
+              "type": "array",
+              "maxItems": 10,
+              "description": "Port reservations forwarded to Lithium in the checkout body (PortConfiguration[]). The runner POSTs the in-sandbox command to the server-set proxyUri returned for the first reserved port, so at least one entry is required for workload execution.",
+              "items": {
+                "type": "object",
+                "required": ["port", "policy", "protocol"],
+                "additionalProperties": false,
+                "properties": {
+                  "port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535,
+                    "description": "Container port to publish."
+                  },
+                  "policy": {
+                    "type": "string",
+                    "enum": ["Owner", "Custom"],
+                    "description": "Authentication policy. 'Owner' restricts access to the sandbox owner identity; 'Custom' requires a separate allow list (not yet supported in this config)."
+                  },
+                  "protocol": {
+                    "type": "string",
+                    "enum": ["Http", "Http2", "Https"],
+                    "description": "HTTP protocol variant for the published port."
+                  }
+                }
+              }
             }
           }
         }

@@ -297,6 +297,18 @@ impl TestFeatureConfig {
     }
 }
 
+/// One entry in `CheckoutRequest.ports[]`. Matches the
+/// `PortConfiguration` schema in `docs/lithium-api.yaml`:
+/// `{ "port": 8443, "policy": "Owner", "protocol": "Https" }`.
+/// `policy` is the auth policy (`Owner` or `Custom`); `protocol` selects the
+/// HTTP variant (`Http`, `Http2`, `Https`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LithiumPortMapping {
+    pub port: u16,
+    pub policy: String,
+    pub protocol: String,
+}
+
 /// Configuration specific to the Lithium remote backend.
 ///
 /// Lithium is a remote sandbox management service (see the OpenAPI spec at
@@ -305,7 +317,7 @@ impl TestFeatureConfig {
 ///
 /// The bearer token for authentication is **not** stored in this struct — at
 /// runtime the runner reads it from the environment variable named by
-/// `token_env_var` (default `MXC_LITHIUM_TOKEN`).
+/// `management_token_env_var` (default `MXC_LITHIUM_MANAGEMENT_TOKEN`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LithiumConfig {
@@ -325,10 +337,32 @@ pub struct LithiumConfig {
     pub max_lifetime_in_seconds: u32,
     /// API version sent in the `api-version` request header.
     pub api_version: String,
-    /// Environment variable the runner reads the bearer token from.
-    pub token_env_var: String,
+    /// Environment variable the runner reads the management API bearer token
+    /// from (used for checkout / terminate against the SandboxManagement
+    /// service).
+    pub management_token_env_var: String,
+    /// Environment variable the runner reads the proxy bearer token from
+    /// (used for the in-sandbox command-runner POST through the NodeProxy
+    /// host). When unset, the runner falls back to `management_token_env_var`
+    /// — that works in environments where both services share an AAD audience
+    /// (e.g. `int`) but fails with `ProxyAuthenticationFailed` in `test`
+    /// where they are separate.
+    pub proxy_token_env_var: String,
     /// HTTP request timeout in milliseconds for each call.
     pub request_timeout_ms: u32,
+    /// Path appended to the sandbox `toolUri` to reach the in-sandbox
+    /// command-runner endpoint. The runner POSTs `{command, timeout}` JSON
+    /// here and expects a `{returncode, stdout, stderr}` response. Defaults to
+    /// `/8003/run`, matching the install_nginx_sandbox.sh test image (nginx
+    /// dynamic-port proxy → command-runner on port 8003).
+    pub command_runner_path: String,
+    /// HTTP timeout in milliseconds for the command-runner call. Should be
+    /// larger than `request_timeout_ms` because the call blocks until the
+    /// remote command finishes.
+    pub command_runner_timeout_ms: u32,
+    /// Port reservations forwarded to Lithium in the checkout body. Empty
+    /// means no `ports` field is sent (service falls back to image defaults).
+    pub ports: Vec<LithiumPortMapping>,
 }
 
 impl Default for LithiumConfig {
@@ -342,8 +376,12 @@ impl Default for LithiumConfig {
             max_idle_in_seconds: 300,
             max_lifetime_in_seconds: 3600,
             api_version: "1.0".to_string(),
-            token_env_var: "MXC_LITHIUM_TOKEN".to_string(),
+            management_token_env_var: "MXC_LITHIUM_MANAGEMENT_TOKEN".to_string(),
+            proxy_token_env_var: "MXC_LITHIUM_PROXY_TOKEN".to_string(),
             request_timeout_ms: 30_000,
+            command_runner_path: "/8003/run".to_string(),
+            command_runner_timeout_ms: 600_000,
+            ports: Vec::new(),
         }
     }
 }
