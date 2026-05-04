@@ -49,11 +49,11 @@ The mental model: `spawnSandbox` is the composition of the five phases into one 
 State-aware exposes them individually so callers can hold a sandbox between calls, run
 multiple workloads inside it, and tear it down explicitly.
 
-Sandbox state is owned by the backend (e.g., IsoEnvBroker for IsolationSession). The
-`SandboxId` is the only handle the caller gets; persisting it between calls is the
-caller's responsibility. MXC retains no state between calls and does not become a sandbox
-orchestrator. Backends with no meaningful state continue to expose only the one-shot
-surface; state-aware participation is fully opt-in.
+Sandbox state is owned by the backend's underlying service. The `SandboxId` is the only
+handle the caller gets; persisting it between calls is the caller's responsibility. MXC
+retains no state between calls and does not become a sandbox orchestrator. Backends with
+no meaningful state continue to expose only the one-shot surface; state-aware
+participation is fully opt-in.
 
 The proposal adds artefacts at five layers of MXC. Each row points into the section that
 elaborates.
@@ -88,8 +88,8 @@ first-class concept. IsolationSession is the first such backend.
 The design holds three constraints throughout:
 
 - MXC does not take on responsibility for any persistent storage. The durable identifier
-  of a stateful sandbox belongs to the backend's API surface (IsoEnvBroker, in the
-  IsolationSession case); persisting it across calls is the caller's responsibility.
+  of a stateful sandbox belongs to the backend's underlying service; persisting it
+  across calls is the caller's responsibility.
 - The contract supports easy plug-in by backend developers. Per-phase configuration is
   typed per-backend in a way that backends with different native lifecycle models can map
   cleanly.
@@ -136,11 +136,14 @@ The five phases form a small state machine over three states: not-provisioned,
 provisioned, and running. The `SandboxId` is valid from provision through deprovision;
 once deprovision returns, the id is assumed to no longer route to any backend resource.
 
-Every stateful backend implements all five phases. A backend whose underlying API has
-no meaningful equivalent for a particular phase implements that phase as a no-op (returns
-success without side effects). The backend's documentation states which phases are
-no-ops. The MXC dispatch layer treats substantive and no-op implementations identically;
-SDK signatures do not differentiate them.
+A backend whose underlying API has no meaningful equivalent for `provision`, `start`,
+`stop`, or `deprovision` can omit the implementation entirely; the trait provides
+default no-op bodies for those four (§9.2). The default `provision` mints a synthetic
+`sandbox_id` of the form `<ID_PREFIX>:<random-token>` that subsequent calls echo back.
+`exec` is always required — every state-aware backend must execute the workload to be
+useful. The backend's documentation states which phases are no-ops. The MXC dispatch
+layer treats substantive and no-op implementations identically; SDK signatures do not
+differentiate them.
 
 Each backend declares one of three participation modes:
 
@@ -163,10 +166,10 @@ the provisioned sandbox in later calls. It is an opaque string at every observab
 (TS SDK, JSON wire format, CLI output).
 
 The backend generates the `SandboxId` during `provision`. A backend whose underlying API
-requires caller-supplied identifiers (e.g., IsoEnvBroker, which uses registration and
-provisioning IDs) mints them inside the backend implementation and encodes them into the
-id string. A backend whose underlying API generates identifiers itself (Docker, future
-Hyper-V) captures the generated value and encodes it. The first segment is a
+requires caller-supplied identifiers (e.g., one that uses registration and provisioning
+IDs) mints them inside the backend implementation and encodes them into the id string.
+A backend whose underlying API generates identifiers itself (Docker, future Hyper-V)
+captures the generated value and encodes it. The first segment is a
 backend-specific prefix (e.g., `iso:`, `docker:`); past the prefix, the encoding is
 opaque to MXC.
 
@@ -174,7 +177,10 @@ The prefix is required: backend authors register their tag alongside the backend
 `ContainmentBackend` variant, and the dispatcher uses it to route non-provision calls
 without a separate `containment` field on the wire (§7.1). An unrecognised prefix
 surfaces as `unsupported_containment`; a recognised prefix with a malformed body surfaces
-as `malformed_id` (§8).
+as `malformed_id` (§8). The same prefix is exposed on the `StatefulSandboxBackend` trait
+as `const ID_PREFIX: &'static str` (§9.2) so the default `provision` body can mint
+synthetic ids with the right prefix; the trait const and the dispatcher's routing table
+read from the same source, eliminating drift.
 
 The SDK exposes the id as a branded TypeScript string parameterised by backend:
 
@@ -194,6 +200,12 @@ storage mechanism. MXC neither tracks the id after `provision` returns nor verif
 validity until the caller passes it back. If an id refers to a resource that no longer
 exists, the next call returns `error.code: "stale_id"` (§8); the caller decides whether
 to re-provision or treat the failure terminally.
+
+MXC detects `stale_id` by translating the backend's native lookup-failure error —
+returned when the underlying service no longer recognises the resource — into the typed
+MXC error code. MXC itself retains no caller-side state and performs no validity check
+before the call reaches the backend. Each backend's plan doc (§11.6) documents which
+native errors map to `stale_id`.
 
 **Disambiguation: `sandboxId` vs `containerId`.** Two different identifiers exist on the
 wire format and have different roles:
@@ -481,6 +493,23 @@ The existing policy-discovery helpers (`getAvailableToolsPolicy`,
 unchanged. They produce `FilesystemPolicyResult` fragments that callers merge into
 `SandboxPolicy.filesystem` (as in the §6.3 example), then pass via the `policy` field.
 
+### 6.6 Why `SandboxPolicy` is retained at the SDK layer
+
+The SDK's existing `spawnSandbox(script, policy, ...)` entry point takes `SandboxPolicy`,
+and the three policy-discovery helpers (`getAvailableToolsPolicy`,
+`getUserProfilePolicy`, `getTemporaryFilesPolicy`) produce `FilesystemPolicyResult`
+fragments designed to merge into `SandboxPolicy.filesystem`. Keeping
+`policy?: SandboxPolicy` on every state-aware options interface preserves both ergonomic
+compositions and a consistent SDK surface across one-shot and state-aware lifecycle
+modes.
+
+The Rust trait remains policy-agnostic regardless: the SDK serialises both `policy` and
+`config` into the wire format (top-level `filesystem` / `network` / `ui` plus
+`experimental.<backend>.<phase>`), and the Rust trait sees only wire-shape configs
+(§9.2). No "policy" abstraction crosses the SDK-Rust boundary. Future SDK-level
+evolution of the policy concept will be contained to the SDK and will not propagate
+into backend trait implementations.
+
 ## 7. Wire contract
 
 The wire contract is a typed envelope, JSON-serialised, that flows from the SDK to the
@@ -599,10 +628,30 @@ one-shot config object (e.g., `experimental.wslc?: WslcConfig`), as documented i
 
 ### 7.3 Response convention
 
-The response convention is phase-aware.
+The response convention is phase-aware and uses the executor process's stdout and
+stderr streams distinctly.
 
-**Non-exec phases** (provision / start / stop / deprovision): the executor emits a single
-JSON envelope on stdout, then exits with 0 on success or non-zero on failure.
+**Stream usage (state-aware):**
+
+| Phase / outcome | stdout | stderr |
+|---|---|---|
+| Non-exec (provision, start, stop, deprovision), success or failure | Single JSON envelope (`{result}` or `{error}`) | MXC diagnostic output (when `--debug`); empty otherwise |
+| Exec, dispatch succeeded | Script's stdout (via PTY or pipe) | Script's stderr (pipe mode) or merged with stdout (PTY mode); MXC diagnostic also lands here when `--debug` is passed |
+| Exec, dispatch failed | Single JSON envelope (`{error}`) | MXC diagnostic output (when `--debug`); empty otherwise |
+
+`stdout` is authoritative: for non-exec phases it carries exactly one envelope; for exec
+it carries either the script's output (success) or exactly one envelope (failure).
+`stderr` is informational. MXC routes its diagnostic logger output to `stderr` in
+state-aware mode so `stdout` remains parseable without sentinels. (One-shot dispatch
+keeps its existing `stdout` logger behaviour — the stricter routing applies to
+state-aware only.)
+
+For exec specifically, MXC diagnostic output mixes with the script's own stderr when
+`--debug` is passed. This is a small amount of pre- and post-dispatch noise; consumers
+wanting clean separation should use `--log-file <path>` instead, which routes diagnostic
+output to a file and leaves stderr as pure script content.
+
+**Envelope shape:**
 
 ```typescript
 interface ErrorEnvelope {
@@ -621,26 +670,26 @@ type NonExecResponseEnvelope<TResult> = { result: TResult } | { error: ErrorEnve
 | `stop` | `{ metadata?: object }` |
 | `deprovision` | `{ metadata?: object }` |
 
-**Exec phase, dispatch succeeded**: the script's stdout/stderr stream live, matching
-ProcessContainer's existing behaviour. The executor's stdout/stderr inherit through to
-the SDK (PTY by default; piped via `child_process` in non-PTY mode). Process exit code is
-the script's exit code. No JSON envelope is emitted in this case — the SDK constructs
-`{ stdout, stderr, exitCode }` from PTY/process events, exactly as `spawnSandboxAsync`
-does.
+**Distinguishing exec dispatch-failure from script execution:**
 
-**Exec phase, dispatch failed**: the executor emits a JSON envelope on stdout (same shape
-as non-exec phases) and exits non-zero. No script ever runs, so stdout otherwise is empty
-and the envelope is unambiguous.
+The SDK uses exit code plus stdout content:
 
-The SDK distinguishes for exec by inspecting stdout: if exit is non-zero AND stdout's
-entire content parses as a complete `{ error: { ... } }` envelope, treat it as a typed
-dispatch error; otherwise it's a script failure and the SDK reports `exitCode` directly.
+- `exitCode == 0`: the script ran and exited successfully. SDK constructs
+  `{stdout, stderr, exitCode}` from PTY / pipe events.
+- `exitCode != 0` AND stdout's entire content parses as a complete `{error: {...}}`
+  envelope: dispatch failed before the script ran; SDK surfaces the typed error.
+- `exitCode != 0` AND stdout does NOT parse as an envelope: the script ran and exited
+  non-zero. SDK constructs `{stdout, stderr, exitCode}`.
+
+Because MXC diagnostic output is routed to `stderr` in state-aware mode, this
+stdout-based discrimination has no false positives or negatives — the content is always
+either pure envelope or pure script output.
 
 `ErrorEnvelope.details` is the only `Record<string, unknown>` in the contract. It's the
 escape hatch backends use to convey structured failure information that's
-genuinely-per-error-code (a backend's native HRESULT, partial output captured before a
-timeout, etc.). Each backend's plan doc (§11) specifies what `details` contains for which
-error codes.
+per-error-code (a backend's native HRESULT, partial output captured before a timeout,
+etc.). Each backend's plan doc (§11) specifies what `details` contains for which error
+codes.
 
 ### 7.4 Worked example: IsolationSession end-to-end
 
@@ -671,7 +720,12 @@ const { sandboxId } = await provisionSandbox('isolation_session', { policy });
 ```
 
 ```rust
-backend.provision(Some(&policy), None)
+// Dispatcher converts the JSON above into ProvisionRequest<()> {
+//   filesystem: Some(FilesystemConfig { readwrite_paths: ["C:\\workspace"] }),
+//   network: Some(NetworkConfig { default_policy: Allow, allowed_hosts: ["api.anthropic.com"] }),
+//   ui: None, config: None,
+// } and calls:
+backend.provision(&prov_req)
 // returns Ok(ProvisionResult {
 //     sandbox_id: "iso:reg-abc:prov-123".into(),
 //     metadata: Some(IsolationSessionProvisionMetadata {
@@ -702,9 +756,12 @@ await startSandbox(sandboxId, {
 ```
 
 ```rust
-backend.start("iso:reg-abc:prov-123", None, Some(&IsolationSessionStartConfig {
-    configuration_id: IsolationSessionConfigurationId::Small,
-}))
+// Dispatcher constructs StartRequest<IsolationSessionStartConfig> {
+//   sandbox_id: "iso:reg-abc:prov-123".into(),
+//   filesystem: None, network: None, ui: None,
+//   config: Some(IsolationSessionStartConfig { configuration_id: Small }),
+// }
+backend.start(&start_req)
 // returns Ok(StartResult { metadata: None })
 ```
 
@@ -732,11 +789,12 @@ const r = await execInSandboxAsync(sandboxId, {
 ```
 
 ```rust
-backend.exec("iso:reg-abc:prov-123", None, None, &ProcessConfig {
-    command_line: "echo hello".into(),
-    timeout: Some(5000),
-    ..Default::default()
-})
+// Dispatcher constructs ExecRequest<()> {
+//   sandbox_id: "iso:reg-abc:prov-123".into(),
+//   filesystem: None, network: None, ui: None, config: None,
+//   process: ProcessConfig { command_line: "echo hello".into(), timeout: Some(5000), ..Default::default() },
+// }
+backend.exec(&exec_req)
 // returns Ok(ExecHandle { ... pipe handles + waiter ... })
 ```
 
@@ -763,7 +821,11 @@ await stopSandbox(sandboxId);
 ```
 
 ```rust
-backend.stop("iso:reg-abc:prov-123", None, None)
+// Dispatcher constructs StopRequest<()> {
+//   sandbox_id: "iso:reg-abc:prov-123".into(),
+//   filesystem: None, network: None, ui: None, config: None,
+// }
+backend.stop(&stop_req)
 // returns Ok(StopResult { metadata: None })
 ```
 
@@ -786,7 +848,11 @@ await deprovisionSandbox(sandboxId);
 ```
 
 ```rust
-backend.deprovision("iso:reg-abc:prov-123", None, None)
+// Dispatcher constructs DeprovisionRequest<()> {
+//   sandbox_id: "iso:reg-abc:prov-123".into(),
+//   filesystem: None, network: None, ui: None, config: None,
+// }
+backend.deprovision(&deprov_req)
 // returns Ok(DeprovisionResult { metadata: None })
 ```
 
@@ -945,19 +1011,26 @@ than at the deserialiser; the `Raw*` struct accepts both fields as optional.
 
 Conversion from `Raw*` into typed domain models happens in `convert_*` helpers analogous
 to the existing `convert_raw_config` → `CodexRequest`. The cross-cutting wire fields
-(`filesystem`, `network`, `ui`) are folded into a single `SandboxPolicy` on the typed
-domain model, so the dispatch layer (§9.3) and trait methods receive the policy as one
-value. Domain models are exposed to the dispatch layer; the `Raw*` types stay private
-to the parser.
+(`filesystem`, `network`, `ui`) are converted into typed wire-shape configs
+(`FilesystemConfig`, `NetworkConfig`, `UiConfig`) and bundled into the per-phase request
+struct passed to the trait method (§9.2). There is no unified Rust "policy" type —
+`SandboxPolicy` is an SDK-only abstraction (§6.6). Domain models are exposed to the
+dispatch layer; the `Raw*` types stay private to the parser.
 
 ### 9.2 The trait
 
-Backends implement the trait with associated types for each phase's config and for
-each phase's return metadata. Use `()` for any associated type the backend does not
-need.
+Backends implement the trait with a const for the id prefix, associated types for each
+phase's config and metadata, and method overrides where they have substantive work.
+Most methods have default no-op bodies; only `exec` is strictly required. Use `()` for
+any associated type the backend does not need.
 
 ```rust
 pub trait StatefulSandboxBackend {
+    /// Backend identifier prefix. Used as the leading `<tag>:` segment of every
+    /// `sandbox_id` minted by the default `provision` body, and read by the
+    /// dispatcher to route non-provision calls to this backend (§5).
+    const ID_PREFIX: &'static str;
+
     type ProvisionConfig: serde::de::DeserializeOwned;
     type StartConfig: serde::de::DeserializeOwned;
     type ExecConfig: serde::de::DeserializeOwned;
@@ -968,40 +1041,129 @@ pub trait StatefulSandboxBackend {
     type StopMetadata: serde::Serialize;
     type DeprovisionMetadata: serde::Serialize;
 
+    /// Optional. Default mints `<ID_PREFIX>:<random-token>` for a stateless-
+    /// underneath backend; override when the backend has native provision work
+    /// (e.g., allocating a session, registering with the underlying service).
     fn provision(
         &mut self,
-        policy: Option<&SandboxPolicy>,
-        config: Option<&Self::ProvisionConfig>,
-    ) -> Result<ProvisionResult<Self::ProvisionMetadata>, MxcError>;
+        _request: &ProvisionRequest<Self::ProvisionConfig>,
+    ) -> Result<ProvisionResult<Self::ProvisionMetadata>, MxcError> {
+        Ok(ProvisionResult {
+            sandbox_id: format!("{}:{}", Self::ID_PREFIX, mint_random_token()),
+            metadata: None,
+        })
+    }
 
+    /// Optional. Default returns success with no metadata. Override when the
+    /// backend has substantive work to do at start.
     fn start(
         &mut self,
-        sandbox_id: &str,
-        policy: Option<&SandboxPolicy>,
-        config: Option<&Self::StartConfig>,
-    ) -> Result<StartResult<Self::StartMetadata>, MxcError>;
+        _request: &StartRequest<Self::StartConfig>,
+    ) -> Result<StartResult<Self::StartMetadata>, MxcError> {
+        Ok(StartResult { metadata: None })
+    }
 
+    /// Required. Must execute the workload and return a handle.
     fn exec(
         &mut self,
-        sandbox_id: &str,
-        policy: Option<&SandboxPolicy>,
-        config: Option<&Self::ExecConfig>,
-        process: &ProcessConfig,
+        request: &ExecRequest<Self::ExecConfig>,
     ) -> Result<ExecHandle, MxcError>;
 
+    /// Optional. Default returns success with no metadata.
     fn stop(
         &mut self,
-        sandbox_id: &str,
-        policy: Option<&SandboxPolicy>,
-        config: Option<&Self::StopConfig>,
-    ) -> Result<StopResult<Self::StopMetadata>, MxcError>;
+        _request: &StopRequest<Self::StopConfig>,
+    ) -> Result<StopResult<Self::StopMetadata>, MxcError> {
+        Ok(StopResult { metadata: None })
+    }
 
+    /// Optional. Default returns success with no metadata.
     fn deprovision(
         &mut self,
-        sandbox_id: &str,
-        policy: Option<&SandboxPolicy>,
-        config: Option<&Self::DeprovisionConfig>,
-    ) -> Result<DeprovisionResult<Self::DeprovisionMetadata>, MxcError>;
+        _request: &DeprovisionRequest<Self::DeprovisionConfig>,
+    ) -> Result<DeprovisionResult<Self::DeprovisionMetadata>, MxcError> {
+        Ok(DeprovisionResult { metadata: None })
+    }
+
+    /// Per-phase validation hooks. Called by the dispatch layer before the
+    /// corresponding phase method. Default: accept all requests. Override to
+    /// add backend-specific checks (config field semantics, policy honor
+    /// enforcement, id format checks beyond the prefix). Failures surface as
+    /// the chosen `MxcError` code.
+    fn validate_provision(
+        &self,
+        _request: &ProvisionRequest<Self::ProvisionConfig>,
+    ) -> Result<(), MxcError> {
+        Ok(())
+    }
+
+    fn validate_start(
+        &self,
+        _request: &StartRequest<Self::StartConfig>,
+    ) -> Result<(), MxcError> {
+        Ok(())
+    }
+
+    fn validate_exec(
+        &self,
+        _request: &ExecRequest<Self::ExecConfig>,
+    ) -> Result<(), MxcError> {
+        Ok(())
+    }
+
+    fn validate_stop(
+        &self,
+        _request: &StopRequest<Self::StopConfig>,
+    ) -> Result<(), MxcError> {
+        Ok(())
+    }
+
+    fn validate_deprovision(
+        &self,
+        _request: &DeprovisionRequest<Self::DeprovisionConfig>,
+    ) -> Result<(), MxcError> {
+        Ok(())
+    }
+}
+
+pub struct ProvisionRequest<C> {
+    pub filesystem: Option<FilesystemConfig>,
+    pub network: Option<NetworkConfig>,
+    pub ui: Option<UiConfig>,
+    pub config: Option<C>,
+}
+
+pub struct StartRequest<C> {
+    pub sandbox_id: String,
+    pub filesystem: Option<FilesystemConfig>,
+    pub network: Option<NetworkConfig>,
+    pub ui: Option<UiConfig>,
+    pub config: Option<C>,
+}
+
+pub struct ExecRequest<C> {
+    pub sandbox_id: String,
+    pub filesystem: Option<FilesystemConfig>,
+    pub network: Option<NetworkConfig>,
+    pub ui: Option<UiConfig>,
+    pub config: Option<C>,
+    pub process: ProcessConfig,
+}
+
+pub struct StopRequest<C> {
+    pub sandbox_id: String,
+    pub filesystem: Option<FilesystemConfig>,
+    pub network: Option<NetworkConfig>,
+    pub ui: Option<UiConfig>,
+    pub config: Option<C>,
+}
+
+pub struct DeprovisionRequest<C> {
+    pub sandbox_id: String,
+    pub filesystem: Option<FilesystemConfig>,
+    pub network: Option<NetworkConfig>,
+    pub ui: Option<UiConfig>,
+    pub config: Option<C>,
 }
 
 pub struct ProvisionResult<M> {
@@ -1035,12 +1197,21 @@ pub struct ExecHandle {
 }
 ```
 
-`SandboxPolicy` is the typed Rust equivalent of the SDK type from `sdk/src/types.ts`,
-with serde renames to camelCase. `ProcessConfig` and `MxcError` are similarly typed.
-`PipeHandle` is a platform-abstracted pipe-handle wrapper — a kernel `HANDLE` on Windows,
-a file descriptor on Linux. `ExecHandle` exposes the running process's pipe handles for
-relay; the executor's outer driver reads from `stdout`/`stderr` and writes to `stdin`,
+Per-phase `<Phase>Request<C>` structs bundle the cross-cutting wire-shape configs
+(`FilesystemConfig`, `NetworkConfig`, `UiConfig` — typed Rust mirrors of the wire
+format's `filesystem`, `network`, `ui` fields) with the backend-specific typed per-phase
+config. There is no unified Rust "policy" type — `SandboxPolicy` is an SDK-only
+abstraction (§6.6). The SDK serialises both `policy` and `config` into the wire format,
+and the trait sees only the resulting wire-shape values. `ProcessConfig` and `MxcError`
+are the typed Rust equivalents of their SDK counterparts. `PipeHandle` is a
+platform-abstracted pipe-handle wrapper — a kernel `HANDLE` on Windows, a file
+descriptor on Linux. `ExecHandle` exposes the running process's pipe handles for relay;
+the executor's outer driver reads from `stdout` / `stderr` and writes to `stdin`,
 awaits exit via `waiter`, and calls `terminator` on cancellation signals.
+
+`mint_random_token()` is a small helper in `wxc_common` that produces a short hex string
+(mirroring the SDK's `randomBytes`-based id minting in `sandbox.ts`); it is used by the
+default `provision` body to construct synthetic ids for stateless-underneath backends.
 
 Methods take `&mut self`, matching the existing `ScriptRunner::run` signature. Backends
 do not need to accumulate state between calls within a backend instance — within a
@@ -1058,14 +1229,14 @@ enum DispatchOutcome {
     ExecCompleted { exit_code: i32 },
 }
 
-fn run(req: MxcRequest) -> Result<DispatchOutcome, MxcError> {
+fn run(req: MxcRequest, dry_run: bool) -> Result<DispatchOutcome, MxcError> {
     match req {
         MxcRequest::OneShot(r) => Ok(DispatchOutcome::Envelope(run_one_shot(r))),
 
         MxcRequest::StateAware(r) => match resolve_backend(&r)? {
             ContainmentBackend::IsolationSession => {
                 let mut backend = IsolationSessionRunner::new();
-                dispatch_state_aware::<IsolationSessionRunner>(&mut backend, r)
+                dispatch_state_aware::<IsolationSessionRunner>(&mut backend, r, dry_run)
             }
             // additional state-aware backends added here
             _ => Err(MxcError::UnsupportedPhase),
@@ -1076,41 +1247,46 @@ fn run(req: MxcRequest) -> Result<DispatchOutcome, MxcError> {
 fn dispatch_state_aware<B: StatefulSandboxBackend>(
     backend: &mut B,
     req: StateAwareRequest,
+    dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
-    let policy = req.policy.as_ref();
-
     match req.phase {
         Phase::Provision => {
-            let config = req.deserialize_provision_config::<B::ProvisionConfig>()?;
-            let result = backend.provision(policy, config.as_ref())?;
+            let prov_req = req.into_provision_request::<B::ProvisionConfig>()?;
+            backend.validate_provision(&prov_req)?;
+            if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
+            let result = backend.provision(&prov_req)?;
             Ok(DispatchOutcome::Envelope(provision_envelope(result)))
         }
         Phase::Start => {
-            let id = req.require_sandbox_id()?;
-            let config = req.deserialize_start_config::<B::StartConfig>()?;
-            let result = backend.start(&id, policy, config.as_ref())?;
+            let start_req = req.into_start_request::<B::StartConfig>()?;
+            backend.validate_start(&start_req)?;
+            if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
+            let result = backend.start(&start_req)?;
             Ok(DispatchOutcome::Envelope(start_envelope(result)))
         }
         Phase::Exec => {
-            let id = req.require_sandbox_id()?;
-            let process = req.require_process()?;
-            let config = req.deserialize_exec_config::<B::ExecConfig>()?;
-            let handle = backend.exec(&id, policy, config.as_ref(), &process)?;
+            let exec_req = req.into_exec_request::<B::ExecConfig>()?;
+            validate_exec_common(&exec_req)?;
+            backend.validate_exec(&exec_req)?;
+            if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
+            let handle = backend.exec(&exec_req)?;
             // relay_exec_to_stdio streams the script's pipes to the executor's
             // stdout/stderr/stdin live, awaits exit, and returns the script's exit code.
             let exit_code = relay_exec_to_stdio(handle)?;
             Ok(DispatchOutcome::ExecCompleted { exit_code })
         }
         Phase::Stop => {
-            let id = req.require_sandbox_id()?;
-            let config = req.deserialize_stop_config::<B::StopConfig>()?;
-            let result = backend.stop(&id, policy, config.as_ref())?;
+            let stop_req = req.into_stop_request::<B::StopConfig>()?;
+            backend.validate_stop(&stop_req)?;
+            if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
+            let result = backend.stop(&stop_req)?;
             Ok(DispatchOutcome::Envelope(stop_envelope(result)))
         }
         Phase::Deprovision => {
-            let id = req.require_sandbox_id()?;
-            let config = req.deserialize_deprovision_config::<B::DeprovisionConfig>()?;
-            let result = backend.deprovision(&id, policy, config.as_ref())?;
+            let deprov_req = req.into_deprovision_request::<B::DeprovisionConfig>()?;
+            backend.validate_deprovision(&deprov_req)?;
+            if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
+            let result = backend.deprovision(&deprov_req)?;
             Ok(DispatchOutcome::Envelope(deprovision_envelope(result)))
         }
     }
@@ -1122,9 +1298,18 @@ phases it reads the prefix from `r.sandbox_id` and looks it up in the registered
 table. Mismatches surface as `unsupported_containment` (unrecognised prefix) or
 `malformed_id` (no prefix structure) per §8.
 
-Helper functions for handle-validation, config deserialisation, and envelope wrapping
-are mechanical and elided. The executor's outer driver invokes `run` and handles each
-outcome:
+The `into_<phase>_request` helpers convert the parsed `StateAwareRequest` into the
+typed per-phase request struct (§9.2), enforcing envelope-shape invariants —
+`sandbox_id` required for non-provision phases, `process` required for exec — and
+deserialising the backend-specific typed config from JSON. Failures surface as
+`malformed_request`. `validate_exec_common` is a free function in `validator.rs` that
+checks cross-backend per-phase invariants (e.g., `process.commandLine` non-empty); other
+phases have no cross-backend common checks today and skip directly to the backend's
+`validate_<phase>` hook.
+
+Helper functions for handle-validation, config deserialisation, envelope wrapping, and
+empty-envelope construction are mechanical and elided. The executor's outer driver
+invokes `run` and handles each outcome:
 
 - `Ok(DispatchOutcome::Envelope(env))` — write the envelope's JSON to stdout, exit 0.
 - `Ok(DispatchOutcome::ExecCompleted { exit_code })` — exec already streamed live; the
@@ -1159,8 +1344,9 @@ shapes.
 | Layer | Validates | Failure surfaces as |
 |---|---|---|
 | SDK (TypeScript) | Recognised `containment` (provision); branded `SandboxId<C>` (other phases); required cross-backend fields (`process.commandLine` for exec); typed config shape (autocompletion + compile-time check) | Thrown at the call site, before any subprocess runs |
-| MXC dispatch (Rust, in the executor) | Re-validates envelope; verifies the backend supports the requested phase; deserialises typed configs from JSON | `error.code: malformed_request`, `unsupported_phase`, `unsupported_containment`, `backend_unavailable`, `policy_validation` (config shape) |
-| Backend implementation | Validates config field values against backend-specific rules; deserialises `sandboxId` into the backend's native form; honors cross-cutting policy per backend's matrix (§10.3) | `error.code: policy_validation` (semantic), `malformed_id`, `stale_id`, `backend_error` |
+| MXC parser (Rust) | Envelope shape: `phase` present; `sandbox_id` present for non-provision; `process` present for exec; typed config deserialisation from JSON | `error.code: malformed_request`, `unsupported_phase`, `unsupported_containment` |
+| MXC dispatch common (Rust) | Cross-backend per-phase invariants (e.g., `validate_exec_common` checks `process.commandLine` non-empty) | `error.code: malformed_request`, `policy_validation` |
+| Backend `validate_<phase>` hooks (Rust) | Per-backend per-phase invariants: config field values, cross-cutting policy honor (per the matrix in §10.3), id format checks beyond prefix matching | `error.code: policy_validation`, `malformed_id`, `stale_id`, `backend_error`, `backend_unavailable` |
 
 Each layer validates only what it cheaply can. The SDK's typed config catches structural
 errors at compile time. The dispatch layer catches structural errors that escaped the
@@ -1213,6 +1399,26 @@ documented in the backend's plan doc):
 fields evolve, all backends inherit them automatically). Per-phase honor is the
 backend's choice and must be documented.
 
+**Why runtime rejection rather than compile-time type narrowing.** A plausible
+alternative is to narrow each backend's per-phase options at the TypeScript type level,
+removing unsupported cross-cutting fields from the type entirely. Runtime rejection via
+this matrix was chosen instead:
+
+- Existing one-shot dispatch already validates unsupported combinations at runtime
+  (e.g., `network.proxy` is AppContainer-only and rejected by the parser for other
+  backends). State-aware matches that pattern.
+- Cross-cutting fields are intentionally shared across backends; splitting them into
+  per-backend typed bundles fragments the abstraction and breaks generic code that
+  targets "any state-aware backend".
+- Compile-time narrowing requires conditional types parameterised by `(backend, phase)`,
+  which are slow to type-check and brittle to extend.
+
+If a specific backend's policy-honor mismatch becomes a real usability problem, narrowing
+that backend's options for that phase is a localised future fix that does not require
+changing the framework. The closed `ErrorCode` enum and typed `MxcPolicyValidationError`
+exception class give callers the same caught-at-the-call-site experience as compile-time
+errors, just at runtime.
+
 ## 11. Plug-in guide for new backends
 
 A backend author adding a new state-aware backend (or extending an existing ephemeral
@@ -1225,15 +1431,26 @@ Pick one of the three modes from §4: ephemeral-only, state-aware-only, or both.
 
 ### 11.2 Implement the trait
 
-The `StatefulSandboxBackend` trait signatures are in §9.2. Define associated types: per-phase
-configs (`ProvisionConfig`, `StartConfig`, `ExecConfig`, `StopConfig`, `DeprovisionConfig`)
-and per-phase metadata (`ProvisionMetadata`, `StartMetadata`, `StopMetadata`,
-`DeprovisionMetadata`). Use `()` for any associated type the backend does not need.
+The `StatefulSandboxBackend` trait signatures are in §9.2. Declare:
 
-Identifier generation happens inside the backend's `provision` method. Use the
-registered prefix from §11.4 as the leading `<tag>:` segment; encoding past the prefix
-(UUID, structured payload, etc.) is the backend's choice. Serialise the result into the
-`sandbox_id: String` field of `ProvisionResult`.
+- `const ID_PREFIX: &'static str` — the leading `<tag>:` segment for this backend's
+  `sandbox_id` values; also used by the dispatcher for non-provision routing (§5).
+- Per-phase config associated types (`ProvisionConfig`, ..., `DeprovisionConfig`).
+- Per-phase metadata associated types (`ProvisionMetadata`, ..., `DeprovisionMetadata`).
+  Use `()` for any associated type the backend does not need.
+
+Implement `exec` — the only required method. Override `provision`, `start`, `stop`, or
+`deprovision` only when the backend has substantive work to do in that phase; the trait
+provides default no-op bodies otherwise. The default `provision` mints a synthetic
+`sandbox_id` of the form `<ID_PREFIX>:<random-token>`; backends with native provision
+(allocating a session, registering with the underlying service) override and produce
+their own structured id.
+
+Override `validate_<phase>` hooks for backend-specific pre-execution checks (config
+field semantics, policy honor enforcement, id format verification beyond prefix
+matching). Defaults are no-ops; only override the phases the backend has checks for.
+Validation runs before the phase method; failures short-circuit and surface as typed
+`MxcError` codes without invoking the backend.
 
 ### 11.3 Define typed `*Config` interfaces in the SDK
 
@@ -1282,8 +1499,9 @@ dispatch layer consumes.
 
 ### 11.6 Document the backend
 
-A per-backend document at `docs/<backend>-plan.md` (or equivalent) is required. It must
-cover:
+A per-backend document at `docs/<backend-or-feature>/<plan-name>.md` is required (e.g.,
+`docs/isolation-session/state-aware-plan.md` for IsolationSession's state-aware support
+— mirroring the directory pattern used elsewhere in MXC docs). It must cover:
 
 - **Per-phase config shapes.** The fields of each `*Config` interface, with allowed
   values and defaults.
@@ -1456,8 +1674,8 @@ The following items are explicitly deferred. Each has a brief rationale and a li
 path forward.
 
 - **Detached or long-running execs.** A model where `exec` returns a process id and
-  the spawned process outlives the SDK call (analogous to `IsoSessionCli`'s
-  fire-and-forget `create-process`). The JS-async fire-and-forget pattern (don't `await`
+  the spawned process outlives the SDK call. The JS-async fire-and-forget pattern
+  (don't `await`
   `execInSandboxAsync`) IS supported via the existing functions — the spawned process
   is tethered to the SDK consumer's lifetime, but the caller can move on without
   awaiting. True OS-level detachment (process owned by the OS service, independent of any

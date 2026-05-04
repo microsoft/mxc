@@ -56,8 +56,8 @@ on the response, and neither shape carries `containerId`.
 | `stop` | running | provisioned | optional metadata |
 | `deprovision` | provisioned | (not provisioned) | optional metadata |
 
-A backend that has no native equivalent for a phase implements it as a no-op. Every
-state-aware backend implements all five.
+Phases without native equivalents fall through to the trait's default no-op bodies; only
+`exec` is required. Reference §4 has the per-phase rule.
 
 ## TypeScript SDK
 
@@ -183,17 +183,19 @@ type MxcRequest = OneShotRequest | StateAwareRequest;
 
 The two shapes do not coexist in a single call — `phase` fully discriminates.
 
-**Response convention** is phase-aware. Non-exec phases (provision/start/stop/deprovision):
-single JSON envelope on stdout — `{ result: ... }` or `{ error: ... }` — exit 0 / non-zero.
-Exec phase, dispatch succeeded: raw stdout/stderr stream live (matching ProcessContainer);
-the script's exit code is the executor's exit code; SDK constructs `{stdout, stderr,
-exitCode}` from PTY events. Exec phase, dispatch failed: `{ error: ... }` envelope on
-stdout, exit non-zero.
+**Response convention** is phase-aware. `stdout` is reserved for the structured
+response: a single JSON envelope (`{result}` or `{error}`) for non-exec phases, the
+script's raw stream for exec succeeded, or one `{error}` envelope for exec
+dispatch-failure. `stderr` carries MXC diagnostic output (when `--debug` is passed) and,
+in exec, the script's stderr. See main doc §7.3 for the full stream-usage table and
+SDK parsing rules.
 
 ## Rust trait
 
 ```rust
 pub trait StatefulSandboxBackend {
+    const ID_PREFIX: &'static str;
+
     type ProvisionConfig: serde::de::DeserializeOwned;
     type StartConfig: serde::de::DeserializeOwned;
     type ExecConfig: serde::de::DeserializeOwned;
@@ -204,25 +206,34 @@ pub trait StatefulSandboxBackend {
     type StopMetadata: serde::Serialize;
     type DeprovisionMetadata: serde::Serialize;
 
-    fn provision(&mut self, policy: Option<&SandboxPolicy>, config: Option<&Self::ProvisionConfig>)
-        -> Result<ProvisionResult<Self::ProvisionMetadata>, MxcError>;
-    fn start(&mut self, sandbox_id: &str, policy: Option<&SandboxPolicy>, config: Option<&Self::StartConfig>)
-        -> Result<StartResult<Self::StartMetadata>, MxcError>;
-    fn exec(&mut self, sandbox_id: &str, policy: Option<&SandboxPolicy>, config: Option<&Self::ExecConfig>, process: &ProcessConfig)
+    // Default body mints `<ID_PREFIX>:<random-token>`; override for native provision.
+    fn provision(&mut self, request: &ProvisionRequest<Self::ProvisionConfig>)
+        -> Result<ProvisionResult<Self::ProvisionMetadata>, MxcError> { /* ... */ }
+
+    // Default body returns Ok with no metadata.
+    fn start(&mut self, request: &StartRequest<Self::StartConfig>)
+        -> Result<StartResult<Self::StartMetadata>, MxcError> { /* ... */ }
+
+    // Required.
+    fn exec(&mut self, request: &ExecRequest<Self::ExecConfig>)
         -> Result<ExecHandle, MxcError>;
-    fn stop(&mut self, sandbox_id: &str, policy: Option<&SandboxPolicy>, config: Option<&Self::StopConfig>)
-        -> Result<StopResult<Self::StopMetadata>, MxcError>;
-    fn deprovision(&mut self, sandbox_id: &str, policy: Option<&SandboxPolicy>, config: Option<&Self::DeprovisionConfig>)
-        -> Result<DeprovisionResult<Self::DeprovisionMetadata>, MxcError>;
+
+    fn stop(&mut self, request: &StopRequest<Self::StopConfig>)
+        -> Result<StopResult<Self::StopMetadata>, MxcError> { /* ... */ }
+
+    fn deprovision(&mut self, request: &DeprovisionRequest<Self::DeprovisionConfig>)
+        -> Result<DeprovisionResult<Self::DeprovisionMetadata>, MxcError> { /* ... */ }
+
+    // Per-phase validate_<phase> hooks (default Ok). See main doc §9.2.
 }
 ```
 
-Backends declare per-phase config and metadata as associated types (use `()` for
-phases that don't need either). The dispatch layer deserialises configs into the typed
-shape before invoking the trait method; result structs (`StartResult<M>`,
-`StopResult<M>`, `DeprovisionResult<M>`) carry an optional metadata payload, parallel
-to `ProvisionResult<M>`. `SandboxPolicy` is the typed Rust mirror of the SDK type;
-`ProcessConfig` is reused from the existing one-shot wire format.
+Backends declare a const id prefix, per-phase config and metadata as associated types
+(use `()` for phases that don't need either), and override only the methods they care
+about — `exec` is the only required method. Per-phase `<Phase>Request<C>` structs bundle
+the cross-cutting wire-shape configs (`FilesystemConfig`, `NetworkConfig`, `UiConfig`)
+with the backend-specific typed per-phase config; there is no unified Rust "policy"
+type. `ProcessConfig` is reused from the existing one-shot wire format.
 
 A backend's participation mode (ephemeral-only, state-aware-only, both) is declared by
 which traits it implements. State-aware backends additionally register an id prefix
@@ -257,7 +268,12 @@ const { sandboxId } = await provisionSandbox('isolation_session', { policy });
 ```
 
 ```rust
-backend.provision(Some(&policy), None)
+// Dispatcher converts the JSON above into ProvisionRequest<()> {
+//   filesystem: Some(FilesystemConfig { readwrite_paths: ["C:\\workspace"] }),
+//   network: Some(NetworkConfig { default_policy: Allow, allowed_hosts: ["api.anthropic.com"] }),
+//   ui: None, config: None,
+// } and calls:
+backend.provision(&prov_req)
 // returns Ok(ProvisionResult {
 //     sandbox_id: "iso:reg-abc:prov-123".into(),
 //     metadata: Some(IsolationSessionProvisionMetadata {
@@ -289,7 +305,12 @@ const r = await execInSandboxAsync(sandboxId, {
 ```
 
 ```rust
-backend.exec("iso:reg-abc:prov-123", None, None, &ProcessConfig { command_line: "echo hello".into(), ..Default::default() })
+// Dispatcher constructs ExecRequest<()> {
+//   sandbox_id: "iso:reg-abc:prov-123".into(),
+//   filesystem: None, network: None, ui: None, config: None,
+//   process: ProcessConfig { command_line: "echo hello".into(), ..Default::default() },
+// }
+backend.exec(&exec_req)
 // returns Ok(ExecHandle { stdout, stderr, stdin, waiter, terminator })
 ```
 
@@ -340,7 +361,8 @@ Reference §11 has the full guide. Operational checklist:
 5. Add `Raw*` intermediate structs in `config_parser.rs` for the backend's wire-format
    block.
 6. Document policy-honor matrix, idempotence, concurrency, and error mapping in
-   `docs/<backend>-plan.md`.
+   `docs/<backend-or-feature>/<plan-name>.md` (e.g.,
+   `docs/isolation-session/state-aware-plan.md`).
 7. Add a feature-unavailable test (CI-runnable) and an integration test.
 8. Update `.github/copilot-instructions.md`.
 
