@@ -13,6 +13,7 @@ pub mod mxc_error;
 pub mod nanvix_runner;
 pub mod script_runner;
 pub mod state_aware_backend;
+pub mod state_aware_dispatch;
 pub mod state_aware_request;
 pub mod validator;
 

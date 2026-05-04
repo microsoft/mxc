@@ -95,6 +95,13 @@ pub trait StatefulSandboxBackend {
     /// key the dispatcher uses to resolve non-provision calls to this backend.
     const ID_PREFIX: &'static str;
 
+    /// Wire-format `containment` value for this backend, matching the SDK's
+    /// `StateAwareSandboxingMethod` member name (e.g. `"isolation_session"`).
+    /// Used by the dispatcher to navigate
+    /// `experimental.<BACKEND_KEY>.<phase>` in the request envelope and to
+    /// resolve provision-phase requests to the right backend implementation.
+    const BACKEND_KEY: &'static str;
+
     type ProvisionConfig: DeserializeOwned;
     type StartConfig: DeserializeOwned;
     type ExecConfig: DeserializeOwned;
@@ -218,6 +225,7 @@ mod tests {
 
     impl StatefulSandboxBackend for StubBackend {
         const ID_PREFIX: &'static str = "stub";
+        const BACKEND_KEY: &'static str = "stub_backend";
         type ProvisionConfig = ();
         type StartConfig = ();
         type ExecConfig = ();

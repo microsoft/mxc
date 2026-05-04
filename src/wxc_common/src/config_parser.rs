@@ -15,7 +15,24 @@ use crate::models::{
     PortMapping, ProxyAddress, ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
     WslcConfig,
 };
+use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+
+/// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
+/// variant to choose the failure-output convention: state-aware failures
+/// emit a JSON `{"error": ...}` envelope on stdout, while one-shot and
+/// pre-discrimination failures keep the existing diagnostic-on-stderr path.
+#[derive(Debug)]
+pub enum ParseError {
+    /// I/O, base64-decode, or top-level JSON parse failure — the input could
+    /// not be discriminated as state-aware vs one-shot.
+    Decode(WxcError),
+    /// Discriminated as one-shot; conversion to `CodexRequest` failed.
+    OneShot(WxcError),
+    /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
+    /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
+    StateAware(MxcError),
+}
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
 
@@ -316,31 +333,7 @@ pub fn load_request(
     logger: &mut Logger,
     is_base64: bool,
 ) -> Result<CodexRequest, WxcError> {
-    let json_str = if is_base64 {
-        let bytes = base64_decode(input).map_err(|_| {
-            let msg = "Failed to decode base64 configuration";
-            logger.log_line(msg);
-            WxcError::ConfigParse(msg.to_string())
-        })?;
-        String::from_utf8(bytes).map_err(|_| {
-            let msg = "Base64 decoded content is not valid UTF-8";
-            logger.log_line(msg);
-            WxcError::ConfigParse(msg.to_string())
-        })?
-    } else {
-        // Treat input as a file path
-        if !std::path::Path::new(input).exists() {
-            let _ = write!(logger, "Configuration file not found: {}", input);
-            return Err(WxcError::ConfigParse(format!(
-                "Configuration file not found: {}",
-                input
-            )));
-        }
-        fs::read_to_string(input).map_err(|e| {
-            let _ = write!(logger, "Failed to open configuration file: {}", input);
-            WxcError::ConfigParse(format!("Failed to read configuration file: {}", e))
-        })?
-    };
+    let json_str = decode_request_input(input, logger, is_base64)?;
 
     let raw: RawConfig = serde_json::from_str(&json_str).map_err(|e| {
         logger.log_line("Error parsing JSON");
@@ -351,14 +344,41 @@ pub fn load_request(
 }
 
 /// Loads a request and routes to the one-shot or state-aware path based on
-/// presence of the wire-format `phase` field. The dispatcher consumes the
-/// returned `MxcRequest` directly.
+/// presence of the wire-format `phase` field. Errors are categorised so the
+/// driver can pick the right output convention per path (envelope on stdout
+/// for state-aware, diagnostic on stderr for one-shot and pre-discrimination
+/// failures).
 pub fn load_mxc_request(
     input: &str,
     logger: &mut Logger,
     is_base64: bool,
-) -> Result<MxcRequest, WxcError> {
-    let json_str = if is_base64 {
+) -> Result<MxcRequest, ParseError> {
+    let json_str = decode_request_input(input, logger, is_base64).map_err(ParseError::Decode)?;
+
+    let raw: RawMxcRequest = serde_json::from_str(&json_str).map_err(|e| {
+        logger.log_line("Error parsing JSON");
+        ParseError::Decode(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
+    })?;
+
+    match raw {
+        RawMxcRequest::StateAware(state_aware) => convert_raw_state_aware(*state_aware, logger)
+            .map(MxcRequest::StateAware)
+            .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string()))),
+        RawMxcRequest::OneShot(one_shot) => convert_raw_config(*one_shot, logger)
+            .map(MxcRequest::OneShot)
+            .map_err(ParseError::OneShot),
+    }
+}
+
+/// Reads a request from disk or decodes it from base64. Public so the driver
+/// can decode once and reuse the JSON across multiple parse attempts; the
+/// internal `load_request` and `load_mxc_request` use it too.
+pub fn decode_request_input(
+    input: &str,
+    logger: &mut Logger,
+    is_base64: bool,
+) -> Result<String, WxcError> {
+    if is_base64 {
         let bytes = base64_decode(input).map_err(|_| {
             let msg = "Failed to decode base64 configuration";
             logger.log_line(msg);
@@ -368,7 +388,7 @@ pub fn load_mxc_request(
             let msg = "Base64 decoded content is not valid UTF-8";
             logger.log_line(msg);
             WxcError::ConfigParse(msg.to_string())
-        })?
+        })
     } else {
         if !std::path::Path::new(input).exists() {
             let _ = write!(logger, "Configuration file not found: {}", input);
@@ -380,21 +400,7 @@ pub fn load_mxc_request(
         fs::read_to_string(input).map_err(|e| {
             let _ = write!(logger, "Failed to open configuration file: {}", input);
             WxcError::ConfigParse(format!("Failed to read configuration file: {}", e))
-        })?
-    };
-
-    let raw: RawMxcRequest = serde_json::from_str(&json_str).map_err(|e| {
-        logger.log_line("Error parsing JSON");
-        WxcError::ConfigParse(format!("JSON parse error: {}", e))
-    })?;
-
-    match raw {
-        RawMxcRequest::StateAware(state_aware) => {
-            convert_raw_state_aware(*state_aware, logger).map(MxcRequest::StateAware)
-        }
-        RawMxcRequest::OneShot(one_shot) => {
-            convert_raw_config(*one_shot, logger).map(MxcRequest::OneShot)
-        }
+        })
     }
 }
 
@@ -892,7 +898,7 @@ mod tests {
         Logger::new(Mode::Buffer)
     }
 
-    fn load_mxc(json: &str) -> Result<MxcRequest, WxcError> {
+    fn load_mxc(json: &str) -> Result<MxcRequest, ParseError> {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         load_mxc_request(&encoded, &mut logger, true)
@@ -968,21 +974,21 @@ mod tests {
         // Exec phase still requires the process.commandLine wire field.
         let json = r#"{ "phase": "exec", "sandboxId": "iso:abcd1234" }"#;
         let r = load_mxc(json);
-        assert!(matches!(r, Err(WxcError::ConfigParse(_))), "got {:?}", r);
+        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
     }
 
     #[test]
     fn state_aware_unknown_phase_is_rejected() {
         let json = r#"{"phase": "teleport"}"#;
         let r = load_mxc(json);
-        assert!(matches!(r, Err(WxcError::ConfigParse(_))), "got {:?}", r);
+        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
     }
 
     #[test]
     fn state_aware_unknown_containment_is_rejected() {
         let json = r#"{"phase": "provision", "containment": "totally_made_up"}"#;
         let r = load_mxc(json);
-        assert!(matches!(r, Err(WxcError::ConfigParse(_))), "got {:?}", r);
+        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
     }
 
     #[test]

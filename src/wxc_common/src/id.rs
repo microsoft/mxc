@@ -10,6 +10,8 @@
 //! stateless-underneath backends. Future helpers (e.g. prefix parsing) live in
 //! this module too.
 
+use crate::mxc_error::MxcError;
+
 /// Returns a fresh 8-character lowercase-hex token derived from 4 bytes of
 /// OS randomness.
 ///
@@ -21,9 +23,25 @@ pub fn mint_random_token() -> String {
     format!("{:08x}", u32::from_be_bytes(buf))
 }
 
+/// Returns the prefix portion of a state-aware `sandbox_id` — the substring
+/// before the first `:`. Used by the dispatcher to resolve a non-provision
+/// request to the backend that minted the id.
+///
+/// Surfaces a missing `:` or empty prefix as `MxcError::MalformedId`.
+pub fn parse_sandbox_id_prefix(sandbox_id: &str) -> Result<&str, MxcError> {
+    match sandbox_id.split_once(':') {
+        Some((prefix, _)) if !prefix.is_empty() => Ok(prefix),
+        _ => Err(MxcError::malformed_id(format!(
+            "sandbox_id {:?} is missing the `<prefix>:...` form",
+            sandbox_id
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mxc_error::MxcErrorCode;
     use std::collections::HashSet;
 
     #[test]
@@ -53,6 +71,30 @@ mod tests {
             let t = mint_random_token();
             u32::from_str_radix(&t, 16).expect("token must be valid hex");
         }
+    }
+
+    #[test]
+    fn parse_prefix_returns_segment_before_colon() {
+        assert_eq!(parse_sandbox_id_prefix("iso:wxc-abcd1234").unwrap(), "iso");
+        assert_eq!(parse_sandbox_id_prefix("wsb:abc:def").unwrap(), "wsb");
+    }
+
+    #[test]
+    fn parse_prefix_rejects_missing_colon() {
+        let err = parse_sandbox_id_prefix("no-colon-here").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn parse_prefix_rejects_empty_prefix() {
+        let err = parse_sandbox_id_prefix(":no-prefix").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn parse_prefix_rejects_empty_string() {
+        let err = parse_sandbox_id_prefix("").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
 
     #[test]

@@ -1777,6 +1777,7 @@ dependencies = [
  "isolation_session_bindings",
  "nanvix_binaries",
  "nanvix_common",
+ "serde_json",
  "windows",
  "wslc_common",
  "wxc_common",
