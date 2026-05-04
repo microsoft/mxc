@@ -507,9 +507,10 @@ impl WslcSdk {
 // RAII Guard types
 // ---------------------------------------------------------------------------
 
-/// RAII guard for a WSLC session handle. Calls the release function on drop.
+/// RAII guard for a WSLC session handle. Terminates and releases the session on drop.
 pub struct WslcSessionGuard {
     handle: WslcSession,
+    terminate_fn: ffi_types::WslcTerminateSessionFn,
     release_fn: ffi_types::WslcReleaseSessionFn,
 }
 
@@ -520,10 +521,15 @@ impl WslcSessionGuard {
     /// The handle must be a valid, non-null session returned by `WslcCreateSession`.
     pub unsafe fn from_raw(
         handle: WslcSession,
+        terminate_fn: ffi_types::WslcTerminateSessionFn,
         release_fn: ffi_types::WslcReleaseSessionFn,
     ) -> Self {
         debug_assert!(!handle.is_null());
-        Self { handle, release_fn }
+        Self {
+            handle,
+            terminate_fn,
+            release_fn,
+        }
     }
 
     /// Get the raw handle for passing to SDK functions.
@@ -536,7 +542,10 @@ impl Drop for WslcSessionGuard {
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe {
-                eprintln!("[WSLC][debug] WslcSessionGuard dropped -- releasing session");
+                eprintln!(
+                    "[WSLC][debug] WslcSessionGuard dropped -- terminating and releasing session"
+                );
+                let _ = (self.terminate_fn)(self.handle);
                 (self.release_fn)(self.handle);
             }
         }
