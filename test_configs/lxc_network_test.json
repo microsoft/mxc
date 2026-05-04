@@ -1,6 +1,6 @@
 {
   "version": "0.4.0-alpha",
-  "containerId": "CLI-LXC-Filesystem-Test",
+  "containerId": "CLI-LXC-Network-Test",
   "containment": "lxc",
   "platform": "linux",
   "process": {
@@ -11,7 +11,7 @@
   },
   "lxc": {
     "distribution": "alpine",
-    "release": "3.20"
+    "release": "3.23"
   },
   "network": {
     "defaultPolicy": "block",

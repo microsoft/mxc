@@ -10,7 +10,7 @@
   },
   "lxc": {
     "distribution": "alpine",
-    "release": "3.20"
+    "release": "3.23"
   },
   "experimental": {
     "test": {

@@ -92,7 +92,7 @@ impl LxcScriptRunner {
         if self.config.distribution.is_empty() || self.config.release.is_empty() {
             return ScriptResponse::error(
                 "LXC distribution and release are required \
-                 (e.g., \"distribution\": \"alpine\", \"release\": \"3.20\")",
+                 (e.g., \"distribution\": \"alpine\", \"release\": \"3.23\")",
             );
         }
 
