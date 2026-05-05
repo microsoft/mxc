@@ -17,7 +17,30 @@ import { execSync } from 'child_process';
 import * as net from 'net';
 import * as os from 'os';
 
-const PIPE_NAME = '\\\\.\\pipe\\mxc-diagnostics';
+/**
+ * Compute the per-user pipe name (includes current user's SID).
+ * Falls back to the base name if the SID cannot be determined.
+ */
+function getDiagnosticPipeName(): string {
+    const baseName = '\\\\.\\pipe\\mxc-diagnostics';
+    try {
+        const output = execSync('whoami /user /fo csv /nh', {
+            encoding: 'utf8',
+            timeout: 3000,
+            windowsHide: true,
+        }).trim();
+        // Output is like: "DOMAIN\\user","S-1-5-21-..."
+        const match = output.match(/"(S-[\d-]+)"/);
+        if (match) {
+            return `${baseName}-${match[1]}`;
+        }
+    } catch {
+        // Best-effort: fall back to base name without SID.
+    }
+    return baseName;
+}
+
+const PIPE_NAME = getDiagnosticPipeName();
 const REGISTRY_KEY = 'HKLM\\SOFTWARE\\Microsoft\\MXC\\Diagnostics';
 const REGISTRY_VALUE = 'ConsoleEnabled';
 

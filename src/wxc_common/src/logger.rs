@@ -97,12 +97,12 @@ impl Logger {
             OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
         };
 
-        let pipe_path = crate::diagnostic::DIAGNOSTIC_PIPE_NAME;
+        let pipe_path = crate::diagnostic::diagnostic_pipe_name();
 
         match std::fs::OpenOptions::new()
             .write(true)
             .custom_flags(FILE_FLAG_WRITE_THROUGH.0)
-            .open(pipe_path)
+            .open(&pipe_path)
         {
             Ok(file) => {
                 // Verify the pipe server is running at High IL or above.

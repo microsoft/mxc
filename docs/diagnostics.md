@@ -46,7 +46,9 @@ Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\MXC\Diagnostics" -Name "Console
 ## Diagnostic Console
 
 `mxc-diagnostic-console.exe` is a long-lived process that receives messages from
-multiple `wxc-exec` instances over `\\.\pipe\mxc-diagnostics`. Output is color-coded
+multiple `wxc-exec` instances over `\\.\pipe\mxc-diagnostics-{SID}` (where `{SID}` is
+the current user's security identifier). This per-user pipe name ensures sessions from
+different users do not collide. Output is color-coded
 per PID, with special highlighting for `WARNING:`, `ERROR:`, and `SECTION:` messages.
 
 ### Display Modes

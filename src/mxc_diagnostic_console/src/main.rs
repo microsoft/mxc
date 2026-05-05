@@ -37,9 +37,6 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
-/// Well-known pipe name shared between console and wxc-exec clients.
-const PIPE_NAME: &str = r"\\.\pipe\mxc-diagnostics";
-
 /// Maximum message size in bytes (256 KB -- enough for large redacted JSON).
 const BUFFER_SIZE: u32 = 256 * 1024;
 
@@ -157,6 +154,9 @@ fn main() {
         DISPLAY_MODE.store(DisplayMode::Minified as u8, Ordering::Relaxed);
     }
 
+    // Compute the per-user pipe name (includes current user's SID).
+    let pipe_name = wxc_common::diagnostic::diagnostic_pipe_name();
+
     // Enable ANSI escape codes on Windows console.
     enable_virtual_terminal();
 
@@ -165,7 +165,7 @@ fn main() {
         DisplayMode::Minified => "minified",
     };
     println!("\x1b[1;36m=== MXC Diagnostic Console ===\x1b[0m");
-    println!("{DIM}Listening on {PIPE_NAME}{RESET}");
+    println!("{DIM}Listening on {pipe_name}{RESET}");
     println!("{DIM}Display mode: {mode_label}{RESET}");
     println!("{DIM}Press Ctrl+C to exit{RESET}");
     println!();
@@ -307,7 +307,7 @@ fn main() {
     // Accept loop: create pipe instances and wait for clients.
     let mut is_first = true;
     loop {
-        let pipe = match create_pipe_instance(is_first) {
+        let pipe = match create_pipe_instance(&pipe_name, is_first) {
             Ok(h) => h,
             Err(e) => {
                 eprintln!("[error] Failed to create pipe instance: {e}");
@@ -369,8 +369,8 @@ fn main() {
 }
 
 /// Create a named pipe instance for the server.
-fn create_pipe_instance(first: bool) -> Result<HANDLE, String> {
-    let name_wide: Vec<u16> = PIPE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+fn create_pipe_instance(pipe_name: &str, first: bool) -> Result<HANDLE, String> {
+    let name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
     use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 
     // Create a security descriptor with a NULL DACL (allows all access).

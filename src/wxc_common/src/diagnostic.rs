@@ -19,11 +19,68 @@ use crate::models::CodexRequest;
 use winreg::enums::HKEY_LOCAL_MACHINE;
 use winreg::RegKey;
 
+use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::Security::{
+    GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
 const REGISTRY_SUBKEY: &str = r"SOFTWARE\Microsoft\MXC\Diagnostics";
 const ENV_CONSOLE: &str = "MXC_DIAG_CONSOLE";
+const PIPE_NAME_PREFIX: &str = r"\\.\pipe\mxc-diagnostics";
 
-/// Well-known named pipe for the shared diagnostic console.
-pub const DIAGNOSTIC_PIPE_NAME: &str = r"\\.\pipe\mxc-diagnostics";
+/// Build the diagnostic pipe name for the current user: `\\.\pipe\mxc-diagnostics-{SID}`.
+///
+/// Falls back to the bare prefix if the SID cannot be determined.
+pub fn diagnostic_pipe_name() -> String {
+    match get_current_user_sid() {
+        Some(sid) => format!("{PIPE_NAME_PREFIX}-{sid}"),
+        None => PIPE_NAME_PREFIX.to_string(),
+    }
+}
+
+/// Retrieve the SID string for the current process token's user.
+fn get_current_user_sid() -> Option<String> {
+    use crate::string_util::sid_to_string;
+    use windows::Win32::Foundation::HANDLE;
+
+    let mut token = HANDLE::default();
+    // SAFETY: GetCurrentProcess returns a pseudo-handle always valid.
+    // OpenProcessToken with TOKEN_QUERY is safe on a valid process handle.
+    unsafe {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+    }
+
+    let mut buf = vec![0u8; 256];
+    let mut returned: u32 = 0;
+    // SAFETY: token is valid (from OpenProcessToken above); buf is large enough for TOKEN_USER.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr().cast()),
+            buf.len() as u32,
+            &mut returned,
+        )
+    };
+
+    if ok.is_err() {
+        unsafe { let _ = CloseHandle(token); }
+        return None;
+    }
+
+    // SAFETY: GetTokenInformation succeeded with TokenUser, so buf contains a valid TOKEN_USER.
+    let token_user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
+    let sid_str = unsafe { sid_to_string(token_user.User.Sid.0, "") };
+
+    unsafe { let _ = CloseHandle(token); }
+
+    if sid_str.is_empty() {
+        None
+    } else {
+        Some(sid_str)
+    }
+}
 
 /// Maximum number of characters to include from `script_code` in diagnostic output.
 const SCRIPT_CODE_TRUNCATE_LEN: usize = 200;

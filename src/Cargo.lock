@@ -886,6 +886,7 @@ dependencies = [
  "windows",
  "windows-core",
  "winreg",
+ "wxc_common",
 ]
 
 [[package]]
