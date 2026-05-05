@@ -11,8 +11,19 @@ import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './plat
 import { SandboxSpawnOptions } from './sandbox';
 import { diagLog } from './diagnostic';
 
-/** SDK version constant. Must match package.json; validated by CI. */
-export const SDK_VERSION = '0.1.7';
+/** SDK version read from package.json at module load time. */
+export const SDK_VERSION: string = (() => {
+    try {
+        const pkgPath = require.resolve('@microsoft/mxc-sdk/package.json');
+        return require(pkgPath).version as string;
+    } catch {
+        try {
+            return require(path.resolve(__dirname, '..', 'package.json')).version as string;
+        } catch {
+            return 'unknown';
+        }
+    }
+})();
 
 let sdkVersionLogged = false;
 
