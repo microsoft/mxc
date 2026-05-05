@@ -163,7 +163,7 @@ fn main() {
     request.experimental_enabled = cli.experimental;
     request.dry_run = cli.dry_run;
 
-    // Inject learningModeLogging capability if ForceLearningMode registry key is set.
+    // Inject learningModeLogging capability when diagnostic console is enabled.
     let learning_mode_injected = if DiagnosticConfig::force_learning_mode()
         && !request
             .policy

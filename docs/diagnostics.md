@@ -26,7 +26,7 @@ wxc-exec.exe --experimental my-config.json
 
 | Method | Setting | Description |
 |--------|---------|-------------|
-| Env var | `MXC_DIAG_CONSOLE=1` | Per-session, set before launching wxc-exec |
+| Env var | `MXC_DIAG_CONSOLE=1` | Enable diagnostic pipe output and auto-inject `learningModeLogging` capability |
 
 ## What Gets Logged
 

@@ -10,14 +10,10 @@ use std::env;
 
 use crate::models::CodexRequest;
 
-use winreg::enums::HKEY_LOCAL_MACHINE;
-use winreg::RegKey;
-
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-const REGISTRY_SUBKEY: &str = r"SOFTWARE\Microsoft\MXC\Diagnostics";
 const ENV_CONSOLE: &str = "MXC_DIAG_CONSOLE";
 const PIPE_NAME_PREFIX: &str = r"\\.\pipe\mxc-diagnostics";
 
@@ -101,17 +97,13 @@ impl DiagnosticConfig {
         Self { console_enabled }
     }
 
-    /// Check whether `ForceLearningMode` is enabled via registry.
+    /// Check whether learning mode should be force-injected.
     ///
-    /// When `HKLM\SOFTWARE\Microsoft\MXC\Diagnostics\ForceLearningMode` is set
-    /// to DWORD 1, the `learningModeLogging` capability is injected into the
-    /// container policy regardless of what the config specifies.
+    /// When the diagnostic console is enabled (`MXC_DIAG_CONSOLE=1`), the
+    /// `learningModeLogging` capability is automatically injected into the
+    /// container policy so that access-check ETW events are captured.
     pub fn force_learning_mode() -> bool {
-        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-        let Ok(key) = hklm.open_subkey_with_flags(REGISTRY_SUBKEY, winreg::enums::KEY_READ) else {
-            return false;
-        };
-        key.get_value::<u32, _>("ForceLearningMode").unwrap_or(0) == 1
+        env_bool(ENV_CONSOLE).unwrap_or(false)
     }
 }
 

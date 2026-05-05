@@ -109,21 +109,9 @@ fn is_elevated() -> bool {
     }
 }
 
-/// Registry path used by wxc-exec for diagnostic settings.
-const DIAG_REGISTRY_SUBKEY: &str = r"SOFTWARE\Microsoft\MXC\Diagnostics";
-
 /// Check whether wxc-exec diagnostic console output is enabled (env var).
 fn is_diagnostic_console_enabled() -> bool {
     std::env::var("MXC_DIAG_CONSOLE").ok().as_deref() == Some("1")
-}
-
-/// Check whether ForceLearningMode is enabled in the registry.
-fn is_force_learning_mode_enabled() -> bool {
-    let hklm = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
-    let Ok(key) = hklm.open_subkey_with_flags(DIAG_REGISTRY_SUBKEY, winreg::enums::KEY_READ) else {
-        return false;
-    };
-    key.get_value::<u32, _>("ForceLearningMode").unwrap_or(0) == 1
 }
 
 #[derive(Parser)]
@@ -218,39 +206,6 @@ fn main() {
         println!("{blank}");
         line("  ETW event capture (Tessera + learning mode events) requires administrator privileges.");
         line("  Pipe-based log messages from wxc-exec will still work without elevation.");
-        println!("{blank}");
-        println!("{y}╚{bar}╝{r}");
-        println!();
-    }
-
-    // Warn if ForceLearningMode registry key is not set.
-    if !is_force_learning_mode_enabled() {
-        const W: usize = 118;
-        let bar = "═".repeat(W);
-        let y = "\x1b[1;33m"; // bold yellow
-        let c = "\x1b[36m"; // cyan
-        let r = "\x1b[0m";
-
-        let blank = format!("{y}║{r}{:W$}{y}║{r}", "");
-        let line = |text: &str| {
-            let visible_len = text.replace("\x1b[36m", "").replace("\x1b[0m", "").len();
-            let pad = W.saturating_sub(visible_len);
-            println!("{y}║{r}{text}{:pad$}{y}║{r}", "");
-        };
-
-        println!("{y}╔{bar}╗{r}");
-        println!(
-            "{y}║  WARNING: ForceLearningMode is not enabled{:>w$}║{r}",
-            "",
-            w = W - 44
-        );
-        println!("{blank}");
-        line("  Without this registry key, wxc-exec will not inject the 'learningModeLogging' capability.");
-        line("  Learning mode ETW events from Kernel-General will not appear in this console.");
-        println!("{blank}");
-        line("  To enable (run as admin):");
-        println!("{blank}");
-        line(&format!("    {c}Set-ItemProperty -Path \"HKLM:\\SOFTWARE\\Microsoft\\MXC\\Diagnostics\" -Name \"ForceLearningMode\" -Value 1 -Type DWord{r}"));
         println!("{blank}");
         println!("{y}╚{bar}╝{r}");
         println!();
