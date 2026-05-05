@@ -200,14 +200,14 @@ impl Logger {
             let _ = unsafe { CloseHandle(token) };
             let _ = unsafe { CloseHandle(process) };
 
-            // Matches windows::Win32::System::SystemServices::SECURITY_MANDATORY_HIGH_RID.
-            const SECURITY_MANDATORY_HIGH_RID: u32 = 0x3000;
-            if integrity_rid >= SECURITY_MANDATORY_HIGH_RID {
+            use windows::Win32::System::SystemServices::SECURITY_MANDATORY_HIGH_RID;
+            let high_rid = SECURITY_MANDATORY_HIGH_RID as u32;
+            if integrity_rid >= high_rid {
                 Ok(())
             } else {
                 Err(format!(
                     "server PID {server_pid} integrity level 0x{integrity_rid:04X} \
-                     is below High (0x{SECURITY_MANDATORY_HIGH_RID:04X})"
+                     is below High (0x{high_rid:04X})"
                 ))
             }
         }
