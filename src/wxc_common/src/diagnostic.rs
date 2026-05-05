@@ -138,6 +138,8 @@ pub fn get_parent_process_info() -> String {
     let my_pid = std::process::id();
 
     // Take a snapshot to find our parent PID.
+    // SAFETY: CreateToolhelp32Snapshot with TH32CS_SNAPPROCESS and pid 0
+    // takes a snapshot of all processes. No invalid memory access is possible.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     let snapshot = match snapshot {
         Ok(h) => h,
@@ -150,6 +152,8 @@ pub fn get_parent_process_info() -> String {
     };
 
     let mut parent_pid = None;
+    // SAFETY: `entry` is initialized with correct `dwSize` and `snapshot` is a valid handle
+    // returned by CreateToolhelp32Snapshot above. CloseHandle is called on the valid snapshot.
     unsafe {
         if Process32FirstW(snapshot, &mut entry).is_ok() {
             loop {
@@ -171,6 +175,9 @@ pub fn get_parent_process_info() -> String {
     };
 
     // Resolve the parent's full image path.
+    // SAFETY: OpenProcess returns a valid handle or an error (checked via match).
+    // QueryFullProcessImageNameW writes into a stack-allocated buffer with bounded length.
+    // CloseHandle is called on the valid process handle before returning.
     let exe_name = unsafe {
         let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, ppid);
         match proc {

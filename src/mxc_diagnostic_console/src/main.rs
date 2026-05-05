@@ -19,6 +19,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::SystemTime;
 
+use clap::Parser;
+
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Security::{
     InitializeSecurityDescriptor, SetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
@@ -192,18 +194,18 @@ fn is_force_learning_mode_enabled() -> bool {
     enabled
 }
 
+#[derive(Parser)]
+#[command(name = "mxc-diagnostic-console", about = "Shared diagnostic console for MXC")]
+struct Cli {
+    /// Show all ETW event properties (default: minified)
+    #[arg(long)]
+    verbose: bool,
+}
+
 fn main() {
-    // Parse CLI args.
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Usage: mxc-diagnostic-console [--verbose | --minified]");
-        println!();
-        println!("Options:");
-        println!("  --verbose    Show all ETW event properties");
-        println!("  --minified   Show reduced properties for common events (default)");
-        return;
-    }
-    if args.iter().any(|a| a == "--verbose") {
+    let cli = Cli::parse();
+
+    if cli.verbose {
         DISPLAY_MODE.store(DisplayMode::Full as u8, Ordering::Relaxed);
     } else {
         DISPLAY_MODE.store(DisplayMode::Minified as u8, Ordering::Relaxed);

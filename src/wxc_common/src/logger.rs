@@ -138,27 +138,32 @@ impl Logger {
 
         /// Verify the pipe server process is running at High integrity level or above.
         fn verify_server_integrity(pipe_file: &std::fs::File) -> Result<(), String> {
-            unsafe {
-                // 1. Get the server PID from the pipe handle.
-                let pipe_handle = HANDLE(pipe_file.as_raw_handle());
-                let mut server_pid: u32 = 0;
-                GetNamedPipeServerProcessId(pipe_handle, &mut server_pid)
-                    .map_err(|e| format!("GetNamedPipeServerProcessId failed: {e}"))?;
+            // 1. Get the server PID from the pipe handle.
+            let pipe_handle = HANDLE(pipe_file.as_raw_handle());
+            let mut server_pid: u32 = 0;
+            // SAFETY: pipe_handle is valid (from an open File); server_pid is a valid out pointer.
+            unsafe { GetNamedPipeServerProcessId(pipe_handle, &mut server_pid) }
+                .map_err(|e| format!("GetNamedPipeServerProcessId failed: {e}"))?;
 
-                // 2. Open the server process.
-                let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, server_pid)
+            // 2. Open the server process.
+            // SAFETY: server_pid was returned by the OS above; flags request limited info only.
+            let process =
+                unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, server_pid) }
                     .map_err(|e| format!("OpenProcess({server_pid}) failed: {e}"))?;
 
-                // 3. Open the process token.
-                let mut token = HANDLE::default();
-                OpenProcessToken(process, TOKEN_QUERY, &mut token).map_err(|e| {
-                    let _ = CloseHandle(process);
-                    format!("OpenProcessToken failed: {e}")
-                })?;
+            // 3. Open the process token.
+            let mut token = HANDLE::default();
+            // SAFETY: `process` is a valid handle from OpenProcess above; token is a valid out ptr.
+            unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.map_err(|e| {
+                let _ = unsafe { CloseHandle(process) };
+                format!("OpenProcessToken failed: {e}")
+            })?;
 
-                // 4. Query TokenIntegrityLevel.
-                let mut buf = vec![0u8; 256];
-                let mut returned: u32 = 0;
+            // 4. Query TokenIntegrityLevel.
+            let mut buf = vec![0u8; 256];
+            let mut returned: u32 = 0;
+            // SAFETY: `token` is a valid handle; buf is large enough for TOKEN_MANDATORY_LABEL.
+            unsafe {
                 GetTokenInformation(
                     token,
                     TokenIntegrityLevel,
@@ -166,41 +171,47 @@ impl Logger {
                     buf.len() as u32,
                     &mut returned,
                 )
-                .map_err(|e| {
-                    let _ = CloseHandle(token);
-                    let _ = CloseHandle(process);
-                    format!("GetTokenInformation failed: {e}")
-                })?;
+            }
+            .map_err(|e| {
+                let _ = unsafe { CloseHandle(token) };
+                let _ = unsafe { CloseHandle(process) };
+                format!("GetTokenInformation failed: {e}")
+            })?;
 
-                // 5. Extract the integrity level RID from the SID.
-                let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
-                let sid = label.Label.Sid;
+            // 5. Extract the integrity level RID from the SID.
+            // SAFETY: GetTokenInformation succeeded, so buf contains a valid TOKEN_MANDATORY_LABEL.
+            let label = unsafe { &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL) };
+            let sid = label.Label.Sid;
 
-                // The integrity level is the last sub-authority of the SID.
-                let sub_authority_count = *windows::Win32::Security::GetSidSubAuthorityCount(sid);
-                if sub_authority_count == 0 {
-                    let _ = CloseHandle(token);
-                    let _ = CloseHandle(process);
-                    return Err("SID has no sub-authorities".to_string());
-                }
-                let integrity_rid = *windows::Win32::Security::GetSidSubAuthority(
+            // The integrity level is the last sub-authority of the SID.
+            // SAFETY: sid is valid (from the token information query above).
+            let sub_authority_count =
+                unsafe { *windows::Win32::Security::GetSidSubAuthorityCount(sid) };
+            if sub_authority_count == 0 {
+                let _ = unsafe { CloseHandle(token) };
+                let _ = unsafe { CloseHandle(process) };
+                return Err("SID has no sub-authorities".to_string());
+            }
+            // SAFETY: sid is valid and sub_authority_count > 0, so (count - 1) is a valid index.
+            let integrity_rid = unsafe {
+                *windows::Win32::Security::GetSidSubAuthority(
                     sid,
                     (sub_authority_count - 1) as u32,
-                );
+                )
+            };
 
-                let _ = CloseHandle(token);
-                let _ = CloseHandle(process);
+            let _ = unsafe { CloseHandle(token) };
+            let _ = unsafe { CloseHandle(process) };
 
-                // SECURITY_MANDATORY_HIGH_RID = 0x3000
-                const SECURITY_MANDATORY_HIGH_RID: u32 = 0x3000;
-                if integrity_rid >= SECURITY_MANDATORY_HIGH_RID {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "server PID {server_pid} integrity level 0x{integrity_rid:04X} \
-                         is below High (0x{SECURITY_MANDATORY_HIGH_RID:04X})"
-                    ))
-                }
+            // Matches windows::Win32::System::SystemServices::SECURITY_MANDATORY_HIGH_RID.
+            const SECURITY_MANDATORY_HIGH_RID: u32 = 0x3000;
+            if integrity_rid >= SECURITY_MANDATORY_HIGH_RID {
+                Ok(())
+            } else {
+                Err(format!(
+                    "server PID {server_pid} integrity level 0x{integrity_rid:04X} \
+                     is below High (0x{SECURITY_MANDATORY_HIGH_RID:04X})"
+                ))
             }
         }
     }
