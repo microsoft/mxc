@@ -58,14 +58,3 @@ export {
   FilesystemPolicyResult,
   ToolsPolicyOptions,
 } from './policy';
-
-// Export diagnostic logging
-export {
-  FileLogger,
-} from './logger';
-
-// Export diagnostic logging
-export {
-  diagLog,
-  diagClose,
-} from './diagnostic';
