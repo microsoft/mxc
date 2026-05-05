@@ -453,6 +453,22 @@ try {
         if ($deprovPassed) { $deprovisionedOk = $true }
     }
 
+    # Test 11: stale_id detection. The just-deprovisioned $sandboxId is now
+    # unknown to the OS-side service. Calling stop against it must surface
+    # `MxcError::StaleId` (wire `error.code = "stale_id"`), proving the
+    # Rust-layer ERROR_NOT_FOUND HRESULT detection is wired through the
+    # backend impl all the way to the wire envelope.
+    if ($deprovisionedOk) {
+        Run-StateAwareTest "stale_id (stop on previously-deprovisioned sandbox)" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:sandboxId -Experimental
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (stop on stale sandbox failed as expected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'stale_id') "error.code is 'stale_id' (got '$code')"
+        } | Out-Null
+    }
+
 } finally {
     # Best-effort cleanup. If the suite reached the deprovision test and it
     # succeeded, the agent user is already torn down -- nothing to do. If

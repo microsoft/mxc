@@ -88,6 +88,11 @@ pub enum IsolationSessionError {
     /// An OS-side lifecycle step (register / provision / start / exec /
     /// stop / deprovision / unregister) returned a failure.
     Lifecycle(String),
+    /// The OS-side service could not find the provisionId — the sandbox
+    /// has been deprovisioned (or never provisioned in this user's
+    /// session) and any further state-aware op against it is a stale-id
+    /// reference. Surfaces as `MxcError::StaleId` at the dispatch boundary.
+    Stale(String),
 }
 
 impl std::fmt::Display for IsolationSessionError {
@@ -98,6 +103,7 @@ impl std::fmt::Display for IsolationSessionError {
                 write!(f, "Isolation Session service unavailable: {}", msg)
             }
             Self::Lifecycle(msg) => write!(f, "Isolation Session lifecycle error: {}", msg),
+            Self::Stale(msg) => write!(f, "Isolation Session stale id: {}", msg),
         }
     }
 }
@@ -273,8 +279,18 @@ pub(crate) fn check_service_available_and_activate() -> Result<IsoSessionOps, Is
 
 // -- Helper: structured error checks -----------------------------------------
 
-/// Formats an `IsoSessionError` (the WinRT result type) into a lifecycle
-/// error string with HRESULT, message, and remediation hint where present.
+/// `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` — returned by the OS-side service's
+/// `AgentManager::FindActiveAgentUserByProvisionId` when the provisionId is
+/// missing from both the in-memory cache and the persisted registry. Every
+/// non-provision lifecycle op (start / exec / stop / deprovision) goes
+/// through this lookup, so a `0x80070490` from any of them means the
+/// sandbox_id is stale.
+const ERROR_NOT_FOUND_HRESULT: u32 = 0x80070490;
+
+/// Formats an `IsoSessionError` (the WinRT result type) into a typed
+/// `IsolationSessionError`. Detects the ERROR_NOT_FOUND HRESULT and
+/// promotes it to `Stale` so callers (and ultimately the wire envelope)
+/// can return `MxcError::StaleId` for a deprovisioned sandbox_id.
 fn format_iso_error(op: &str, err: &IsoSessionError) -> IsolationSessionError {
     let msg = err.Message().map(|h| h.to_string()).unwrap_or_default();
     let code = err.Code().map(|h| h.0 as u32).unwrap_or(0);
@@ -282,12 +298,14 @@ fn format_iso_error(op: &str, err: &IsoSessionError) -> IsolationSessionError {
     let suffix = if remediation.is_empty() {
         String::new()
     } else {
-        format!(" — remediation: {}", remediation)
+        format!(" -- remediation: {}", remediation)
     };
-    lifecycle_err(format!(
-        "{} failed: {} (HRESULT: {:#010x}){}",
-        op, msg, code, suffix
-    ))
+    let formatted = format!("{} failed: {} (HRESULT: {:#010x}){}", op, msg, code, suffix);
+    if code == ERROR_NOT_FOUND_HRESULT {
+        IsolationSessionError::Stale(formatted)
+    } else {
+        IsolationSessionError::Lifecycle(formatted)
+    }
 }
 
 /// Checks the `Error` property of an `IsoSessionResult` and returns
@@ -988,6 +1006,7 @@ fn map_lifecycle_error(err: IsolationSessionError) -> MxcError {
         IsolationSessionError::Policy(_) => MxcError::policy_validation(message),
         IsolationSessionError::ServiceUnavailable(_) => MxcError::backend_unavailable(message),
         IsolationSessionError::Lifecycle(_) => MxcError::backend_error(message),
+        IsolationSessionError::Stale(_) => MxcError::stale_id(message),
     }
 }
 
@@ -1046,6 +1065,23 @@ mod tests {
             map_lifecycle_error(IsolationSessionError::Lifecycle("x".into())).code,
             MxcErrorCode::BackendError,
         );
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::Stale("x".into())).code,
+            MxcErrorCode::StaleId,
+        );
+    }
+
+    #[test]
+    fn error_not_found_hresult_constant_matches_win32() {
+        // Sanity check: HRESULT_FROM_WIN32(ERROR_NOT_FOUND) =
+        //   0x80070000 | (1168 & 0xFFFF) = 0x80070490.
+        // The OS-side AgentManager::FindActiveAgentUserByProvisionId returns
+        // exactly this when the provisionId is gone, so a regression in the
+        // constant would silently downgrade stale-id detection to backend_error.
+        const ERROR_NOT_FOUND: u32 = 1168;
+        let expected = 0x8007_0000u32 | (ERROR_NOT_FOUND & 0xFFFF);
+        assert_eq!(ERROR_NOT_FOUND_HRESULT, expected);
+        assert_eq!(ERROR_NOT_FOUND_HRESULT, 0x80070490);
     }
 
     #[test]
