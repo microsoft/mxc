@@ -13,10 +13,13 @@
  * key `HKLM\SOFTWARE\Microsoft\MXC\Diagnostics\ConsoleEnabled` = 1.
  */
 
+import { execSync } from 'child_process';
 import * as net from 'net';
 import * as os from 'os';
 
 const PIPE_NAME = '\\\\.\\pipe\\mxc-diagnostics';
+const REGISTRY_KEY = 'HKLM\\SOFTWARE\\Microsoft\\MXC\\Diagnostics';
+const REGISTRY_VALUE = 'ConsoleEnabled';
 
 /** Cached pipe connection (lazy, best-effort). */
 let pipeSocket: net.Socket | null = null;
@@ -43,20 +46,22 @@ function isDiagnosticEnabled(): boolean {
         return false;
     }
 
-    // On Windows, check registry (best-effort).
+    // On Windows, check registry (best-effort, shell-based).
+    // Note: @vscode/windows-registry would be cleaner but requires native compilation.
     if (os.platform() === 'win32') {
         try {
-            const { execSync } = require('child_process');
             const result = execSync(
-                'reg query "HKLM\\SOFTWARE\\Microsoft\\MXC\\Diagnostics" /v ConsoleEnabled 2>nul',
+                `reg query "${REGISTRY_KEY}" /v ${REGISTRY_VALUE} 2>nul`,
                 { encoding: 'utf-8', timeout: 1000 },
             );
-            if (result.includes('0x1')) {
+            const match = result.match(/REG_DWORD\s+(0x[0-9a-fA-F]+)/);
+            if (match && parseInt(match[1], 16) === 1) {
                 diagnosticEnabled = true;
                 return true;
             }
-        } catch {
-            // Registry key doesn't exist or access denied.
+        } catch (e) {
+            // Registry key doesn't exist or access denied -- not actionable.
+            console.debug('MXC diagnostics: registry check failed:', e);
         }
     }
 
