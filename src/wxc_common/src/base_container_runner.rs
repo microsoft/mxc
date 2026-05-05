@@ -63,6 +63,9 @@ pub struct BaseContainerRunner {
 /// (e.g., disabled via feature-enablement mechanisms).
 const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 
+/// SandboxSpec FlatBuffer schema version embedded in every spec payload.
+const SANDBOX_SPEC_VERSION: &str = "0.1.0";
+
 impl BaseContainerRunner {
     pub fn new() -> Self {
         Self::default()
@@ -184,7 +187,7 @@ impl BaseContainerRunner {
     fn build_sandbox_spec(request: &CodexRequest) -> Vec<u8> {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
 
-        let version = builder.create_string("0.1.0");
+        let version = builder.create_string(SANDBOX_SPEC_VERSION);
 
         // Match legacy AppContainer behaviour: when network enforcement uses
         // capabilities and the default policy is Allow, ensure internetClient
@@ -391,7 +394,7 @@ impl ScriptRunner for BaseContainerRunner {
 
         let ui_restrictions =
             Self::ui_restrictions_bitmask(&request.policy.ui, &request.policy.base_process_ui);
-        let _ = writeln!(logger, "sandbox spec built ({} bytes)", spec_bytes.len());
+        let _ = writeln!(logger, "sandbox spec built (version={}, {} bytes)", SANDBOX_SPEC_VERSION, spec_bytes.len());
 
         // Print flags in debug mode
         let _ = writeln!(
