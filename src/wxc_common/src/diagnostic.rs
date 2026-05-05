@@ -251,7 +251,7 @@ pub fn get_parent_process_info() -> String {
                 )
                 .is_ok()
                 {
-                    let full = String::from_utf16_lossy(&buf[..len as usize]);
+                    let full = crate::string_util::from_wide(&buf[..len as usize]);
                     full.rsplit('\\').next().unwrap_or(&full).to_string()
                 } else {
                     "?".to_string()
