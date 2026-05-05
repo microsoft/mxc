@@ -138,7 +138,10 @@ fn is_force_learning_mode_enabled() -> bool {
 }
 
 #[derive(Parser)]
-#[command(name = "mxc-diagnostic-console", about = "Shared diagnostic console for MXC")]
+#[command(
+    name = "mxc-diagnostic-console",
+    about = "Shared diagnostic console for MXC"
+)]
 struct Cli {
     /// Show all ETW event properties (default: minified)
     #[arg(long)]
@@ -528,7 +531,11 @@ fn display_loop(rx: mpsc::Receiver<DisplayEvent>) {
             DisplayEvent::Connected { pid } => {
                 let color_idx = next_color % PID_COLORS.len();
                 let exe = process_exe_name(pid);
-                pid_info_map.push(PidInfo { pid, color_idx, exe_name: exe.clone() });
+                pid_info_map.push(PidInfo {
+                    pid,
+                    color_idx,
+                    exe_name: exe.clone(),
+                });
                 next_color += 1;
                 let color = PID_COLORS[color_idx];
                 println!(

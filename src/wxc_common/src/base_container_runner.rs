@@ -394,7 +394,12 @@ impl ScriptRunner for BaseContainerRunner {
 
         let ui_restrictions =
             Self::ui_restrictions_bitmask(&request.policy.ui, &request.policy.base_process_ui);
-        let _ = writeln!(logger, "sandbox spec built (version={}, {} bytes)", SANDBOX_SPEC_VERSION, spec_bytes.len());
+        let _ = writeln!(
+            logger,
+            "sandbox spec built (version={}, {} bytes)",
+            SANDBOX_SPEC_VERSION,
+            spec_bytes.len()
+        );
 
         // Print flags in debug mode
         let _ = writeln!(

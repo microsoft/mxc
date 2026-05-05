@@ -20,9 +20,7 @@ use winreg::enums::HKEY_LOCAL_MACHINE;
 use winreg::RegKey;
 
 use windows::Win32::Foundation::CloseHandle;
-use windows::Win32::Security::{
-    GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
-};
+use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 const REGISTRY_SUBKEY: &str = r"SOFTWARE\Microsoft\MXC\Diagnostics";
@@ -65,7 +63,9 @@ fn get_current_user_sid() -> Option<String> {
     };
 
     if ok.is_err() {
-        unsafe { let _ = CloseHandle(token); }
+        unsafe {
+            let _ = CloseHandle(token);
+        }
         return None;
     }
 
@@ -73,7 +73,9 @@ fn get_current_user_sid() -> Option<String> {
     let token_user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
     let sid_str = unsafe { sid_to_string(token_user.User.Sid.0, "") };
 
-    unsafe { let _ = CloseHandle(token); }
+    unsafe {
+        let _ = CloseHandle(token);
+    }
 
     if sid_str.is_empty() {
         None

@@ -194,10 +194,7 @@ impl Logger {
             }
             // SAFETY: sid is valid and sub_authority_count > 0, so (count - 1) is a valid index.
             let integrity_rid = unsafe {
-                *windows::Win32::Security::GetSidSubAuthority(
-                    sid,
-                    (sub_authority_count - 1) as u32,
-                )
+                *windows::Win32::Security::GetSidSubAuthority(sid, (sub_authority_count - 1) as u32)
             };
 
             let _ = unsafe { CloseHandle(token) };
