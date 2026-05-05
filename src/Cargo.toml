@@ -12,6 +12,8 @@ members = [
     "lxc_common",
     "wslc_common",
     "isolation_session_bindings",
+    "seatbelt_common",
+    "mxc_darwin",
     "generated/base_container_specification",
     "mxc_diagnostic_console",
 ]

@@ -1,0 +1,13 @@
+[package]
+name = "mxc_darwin"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mxc-exec-darwin"
+path = "src/main.rs"
+
+[dependencies]
+wxc_common = { workspace = true }
+seatbelt_common = { path = "../seatbelt_common" }
+clap = { workspace = true }

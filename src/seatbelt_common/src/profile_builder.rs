@@ -1,0 +1,398 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Pure builder that converts a [`CodexRequest`] into a TinyScheme sandbox
+//! profile string suitable for `/usr/bin/sandbox-exec -p <profile>` or for
+//! the in-process `sandbox_init_with_parameters` API.
+//!
+//! This module is platform-agnostic — it is just string generation — so it
+//! is unit-tested on every host (Windows / Linux / macOS) in CI.
+//!
+//! # Profile shape
+//!
+//! The generated profile follows a deny-by-default baseline with explicit
+//! allow rules layered on top, then explicit deny rules at the end so that
+//! `deniedPaths` overrides any broader `readonly`/`readwrite` allow:
+//!
+//! ```text
+//! (version 1)
+//! (deny default)
+//! ;; baseline allow rules required for any process to start ...
+//! ;; policy-derived allow rules (filesystem readonly/readwrite, network) ...
+//! ;; policy-derived deny rules (deniedPaths) ...
+//! ```
+//!
+//! Seatbelt evaluates rules with last-match-wins semantics (within a given
+//! operation), so trailing deny rules take precedence over earlier allow
+//! rules — the behavior callers expect from MXC's `denied_paths`.
+
+use std::fmt::Write as _;
+
+use wxc_common::models::{ClipboardPolicy, CodexRequest, NetworkPolicy};
+
+/// Build a complete sandbox profile string from the given request.
+///
+/// If `request.seatbelt_config.profile_override` is set, that string is
+/// returned verbatim (after a no-op clone) and policy fields are ignored.
+/// This is the escape hatch for advanced/testing scenarios that need to
+/// hand-author a profile.
+pub fn build_profile(request: &CodexRequest) -> String {
+    if let Some(ref override_profile) = request.seatbelt_config.profile_override {
+        return override_profile.clone();
+    }
+
+    let mut out = String::with_capacity(2048);
+
+    // Header — Seatbelt requires `(version 1)` and we baseline with deny-default.
+    out.push_str("(version 1)\n");
+    out.push_str("(deny default)\n");
+
+    // Minimum allow rules so a child process can actually run. These are
+    // the same things Apple's own built-in profiles (e.g. no-internet)
+    // include: dyld + system libraries, mach-lookup of the basic agents,
+    // sysctl reads, and signaling self.
+    out.push_str(BASELINE_ALLOW);
+
+    // Filesystem — read-only system paths every process needs.
+    out.push_str(SYSTEM_READ_ALLOW);
+
+    // Policy-derived allow rules.
+    write_filesystem_allow(&mut out, request);
+    write_network_rules(&mut out, request);
+    write_ui_rules(&mut out, request);
+
+    // Policy-derived deny rules go LAST so they win on conflict.
+    write_filesystem_deny(&mut out, request);
+
+    out
+}
+
+/// Baseline allow rules required for any sandboxed process to start.
+const BASELINE_ALLOW: &str = "\
+;; --- baseline (required for any process to start) ---
+(allow process-fork)
+(allow process-exec)
+(allow signal (target self))
+(allow sysctl-read)
+(allow file-read-metadata)
+(allow mach-lookup
+    (global-name \"com.apple.system.notification_center\")
+    (global-name \"com.apple.system.logger\")
+    (global-name \"com.apple.distributed_notifications@Uv3\")
+    (global-name \"com.apple.CoreServices.coreservicesd\"))
+";
+
+/// Read-only access to system paths required by virtually every binary
+/// (dynamic linker, system libraries, time-zone data, etc.).
+const SYSTEM_READ_ALLOW: &str = "\
+;; --- read-only access to system locations ---
+(allow file-read*
+    (subpath \"/usr/lib\")
+    (subpath \"/usr/libexec\")
+    (subpath \"/usr/share\")
+    (subpath \"/System\")
+    (subpath \"/Library\")
+    (subpath \"/private/var/db/timezone\")
+    (subpath \"/private/var/db/dyld\")
+    (subpath \"/private/etc\")
+    (literal \"/dev/null\")
+    (literal \"/dev/zero\")
+    (literal \"/dev/random\")
+    (literal \"/dev/urandom\"))
+";
+
+fn write_filesystem_allow(out: &mut String, request: &CodexRequest) {
+    let policy = &request.policy;
+
+    if !policy.readonly_paths.is_empty() {
+        out.push_str(";; --- policy.readonlyPaths ---\n");
+        out.push_str("(allow file-read*\n");
+        for p in &policy.readonly_paths {
+            let _ = writeln!(out, "    (subpath {})", quote_scheme(p));
+        }
+        out.push_str(")\n");
+    }
+
+    if !policy.readwrite_paths.is_empty() {
+        out.push_str(";; --- policy.readwritePaths ---\n");
+        out.push_str("(allow file-read* file-write*\n");
+        for p in &policy.readwrite_paths {
+            let _ = writeln!(out, "    (subpath {})", quote_scheme(p));
+        }
+        out.push_str(")\n");
+    }
+}
+
+fn write_filesystem_deny(out: &mut String, request: &CodexRequest) {
+    let policy = &request.policy;
+
+    if !policy.denied_paths.is_empty() {
+        out.push_str(";; --- policy.deniedPaths (override broader allow rules) ---\n");
+        out.push_str("(deny file-read* file-write*\n");
+        for p in &policy.denied_paths {
+            let _ = writeln!(out, "    (subpath {})", quote_scheme(p));
+        }
+        out.push_str(")\n");
+    }
+}
+
+fn write_network_rules(out: &mut String, request: &CodexRequest) {
+    let policy = &request.policy;
+    let allow_outbound = matches!(policy.default_network_policy, NetworkPolicy::Allow);
+
+    if !allow_outbound {
+        // Default-deny network is implicit from `(deny default)` but we emit
+        // a comment so reviewing a generated profile is clearer.
+        out.push_str(";; --- network: default-deny (no allow-network rules emitted) ---\n");
+        return;
+    }
+
+    if policy.allowed_hosts.is_empty() {
+        out.push_str(";; --- network: outbound allowed (any host) ---\n");
+        out.push_str("(allow network-outbound)\n");
+        out.push_str("(allow network-bind (local ip))\n");
+        out.push_str("(allow system-socket)\n");
+    } else {
+        out.push_str(";; --- network: outbound restricted to allowedHosts ---\n");
+        out.push_str("(allow network-outbound\n");
+        for host in &policy.allowed_hosts {
+            // Seatbelt doesn't do DNS — host-based filtering is best-effort.
+            // We emit a literal remote-host match; resolution is the kernel's
+            // problem at connect() time.
+            let _ = writeln!(out, "    (remote tcp \"{}:*\")", escape_for_quotes(host));
+            let _ = writeln!(out, "    (remote udp \"{}:*\")", escape_for_quotes(host));
+        }
+        out.push_str(")\n");
+    }
+
+    if !policy.blocked_hosts.is_empty() {
+        out.push_str(";; --- network: blockedHosts (override allow) ---\n");
+        out.push_str("(deny network-outbound\n");
+        for host in &policy.blocked_hosts {
+            let _ = writeln!(out, "    (remote tcp \"{}:*\")", escape_for_quotes(host));
+            let _ = writeln!(out, "    (remote udp \"{}:*\")", escape_for_quotes(host));
+        }
+        out.push_str(")\n");
+    }
+}
+
+fn write_ui_rules(out: &mut String, request: &CodexRequest) {
+    let ui = &request.policy.ui;
+
+    // When UI is disabled, deny the well-known mach services that gate
+    // window creation, pasteboard access, and HID injection. When UI is
+    // enabled we still want to keep clipboard / injection independently
+    // controllable.
+    if ui.disable {
+        out.push_str(";; --- ui.disable: deny WindowServer + related ---\n");
+        out.push_str("(deny mach-lookup\n");
+        out.push_str("    (global-name \"com.apple.windowserver.active\")\n");
+        out.push_str("    (global-name \"com.apple.windowserver.session\")\n");
+        out.push_str("    (global-name \"com.apple.coreservices.launchservicesd\"))\n");
+    }
+
+    let clipboard_blocked = matches!(ui.clipboard, ClipboardPolicy::None);
+    if clipboard_blocked {
+        out.push_str(";; --- ui.clipboard=none: deny pasteboard ---\n");
+        out.push_str("(deny mach-lookup (global-name \"com.apple.pasteboard.1\"))\n");
+    }
+
+    if !ui.injection {
+        out.push_str(";; --- ui.injection=false: deny HID iokit access ---\n");
+        out.push_str("(deny iokit-open (iokit-user-client-class \"IOHIDLibUserClient\"))\n");
+    }
+}
+
+/// Quote a string for use as a TinyScheme string literal, escaping
+/// embedded backslashes and double-quotes.
+fn quote_scheme(s: &str) -> String {
+    let mut q = String::with_capacity(s.len() + 2);
+    q.push('"');
+    q.push_str(&escape_for_quotes(s));
+    q.push('"');
+    q
+}
+
+fn escape_for_quotes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wxc_common::models::{SeatbeltConfig, UiPolicy};
+
+    fn req() -> CodexRequest {
+        CodexRequest {
+            script_code: "echo hi".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn baseline_profile_has_deny_default_and_baseline_allows() {
+        let p = build_profile(&req());
+        assert!(p.contains("(version 1)"));
+        assert!(p.contains("(deny default)"));
+        assert!(p.contains("(allow process-fork)"));
+        assert!(p.contains("(allow process-exec)"));
+        assert!(p.contains("/usr/lib"));
+        assert!(p.contains("/System"));
+    }
+
+    #[test]
+    fn readonly_paths_emit_subpath_allows() {
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/opt/tools".into(), "/var/data".into()];
+        let p = build_profile(&r);
+        assert!(p.contains("policy.readonlyPaths"));
+        assert!(p.contains("(allow file-read*"));
+        assert!(p.contains("(subpath \"/opt/tools\")"));
+        assert!(p.contains("(subpath \"/var/data\")"));
+        assert!(!p.contains("file-write* (subpath \"/opt/tools\")"));
+    }
+
+    #[test]
+    fn readwrite_paths_emit_read_and_write_allows() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp/output".into()];
+        let p = build_profile(&r);
+        assert!(p.contains("(allow file-read* file-write*"));
+        assert!(p.contains("(subpath \"/tmp/output\")"));
+    }
+
+    #[test]
+    fn denied_paths_appear_after_allows_to_override() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.denied_paths = vec!["/tmp/secret".into()];
+        let p = build_profile(&r);
+        let allow_idx = p.find("(allow file-read* file-write*").unwrap();
+        let deny_idx = p.find("(deny file-read* file-write*").unwrap();
+        assert!(
+            deny_idx > allow_idx,
+            "deny rules must come after allow rules so they win on last-match"
+        );
+        assert!(p.contains("(subpath \"/tmp/secret\")"));
+    }
+
+    #[test]
+    fn default_deny_network_emits_no_allow_network() {
+        let mut r = req();
+        // Default policy is Allow per NetworkPolicy::default(); flip it.
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        let p = build_profile(&r);
+        assert!(!p.contains("(allow network-outbound"));
+        assert!(p.contains("network: default-deny"));
+    }
+
+    #[test]
+    fn allow_outbound_no_hosts_emits_open_network_outbound() {
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        let p = build_profile(&r);
+        assert!(p.contains("(allow network-outbound)"));
+    }
+
+    #[test]
+    fn allow_outbound_with_hosts_emits_per_host_remote_rules() {
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.allowed_hosts = vec!["api.github.com".into(), "1.2.3.4".into()];
+        let p = build_profile(&r);
+        assert!(p.contains("network: outbound restricted to allowedHosts"));
+        assert!(p.contains("(remote tcp \"api.github.com:*\")"));
+        assert!(p.contains("(remote tcp \"1.2.3.4:*\")"));
+        assert!(!p.contains("(allow network-outbound)\n"));
+    }
+
+    #[test]
+    fn blocked_hosts_emit_explicit_deny_network() {
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.blocked_hosts = vec!["evil.example.com".into()];
+        let p = build_profile(&r);
+        assert!(p.contains("(deny network-outbound"));
+        assert!(p.contains("(remote tcp \"evil.example.com:*\")"));
+    }
+
+    #[test]
+    fn ui_disabled_blocks_windowserver() {
+        let r = req();
+        // Default UiPolicy has disable=true.
+        assert!(r.policy.ui.disable);
+        let p = build_profile(&r);
+        assert!(p.contains("(deny mach-lookup"));
+        assert!(p.contains("com.apple.windowserver.active"));
+    }
+
+    #[test]
+    fn ui_enabled_does_not_block_windowserver() {
+        let mut r = req();
+        r.policy.ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::All,
+            injection: true,
+        };
+        let p = build_profile(&r);
+        assert!(!p.contains("com.apple.windowserver.active"));
+        assert!(!p.contains("com.apple.pasteboard.1"));
+        assert!(!p.contains("IOHIDLibUserClient"));
+    }
+
+    #[test]
+    fn clipboard_none_blocks_pasteboard() {
+        let r = req();
+        // Default clipboard is None.
+        let p = build_profile(&r);
+        assert!(p.contains("com.apple.pasteboard.1"));
+    }
+
+    #[test]
+    fn injection_false_blocks_hid_iokit() {
+        let r = req();
+        let p = build_profile(&r);
+        assert!(p.contains("IOHIDLibUserClient"));
+    }
+
+    #[test]
+    fn profile_override_takes_precedence() {
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/should/be/ignored".into()];
+        r.seatbelt_config = SeatbeltConfig {
+            profile_override: Some("(version 1)(allow default)".into()),
+            ..Default::default()
+        };
+        let p = build_profile(&r);
+        assert_eq!(p, "(version 1)(allow default)");
+    }
+
+    #[test]
+    fn paths_with_quotes_and_backslashes_are_escaped() {
+        let mut r = req();
+        // Hypothetical adversarial input — we never want a path to break out
+        // of the quoted string and inject Scheme.
+        r.policy.readonly_paths = vec!["/tmp/a\"b\\c".into()];
+        let p = build_profile(&r);
+        assert!(p.contains("(subpath \"/tmp/a\\\"b\\\\c\")"));
+    }
+
+    #[test]
+    fn empty_policy_still_compiles_to_valid_profile() {
+        let r = req();
+        let p = build_profile(&r);
+        // Profile must always start with `(version 1)` and contain `(deny default)`.
+        assert!(p.starts_with("(version 1)"));
+        assert!(p.contains("(deny default)"));
+        // No empty `(allow file-read*\n)` block — that would be invalid Scheme.
+        assert!(!p.contains("(allow file-read*\n)\n"));
+    }
+}

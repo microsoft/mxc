@@ -104,6 +104,26 @@ function buildLinuxProcessConfig(
 }
 
 /**
+ * Builds the macOS process container (Seatbelt) portion of a ContainerConfig.
+ *
+ * Seatbelt's `sandbox-exec` reads a TinyScheme profile generated server-side
+ * by `seatbelt_common::profile_builder`, so the SDK only needs to set the
+ * containment type and the mode selector — the policy fields on
+ * `ContainerConfig` (filesystem / network / ui) drive the actual rules.
+ */
+function buildDarwinProcessConfig(
+    config: ContainerConfig,
+): ContainerConfig {
+    config.containment = 'seatbelt';
+    config.seatbelt = {
+        // 'exec' = spawn /usr/bin/sandbox-exec (Phase A, default).
+        // 'inproc' will switch to sandbox_init_with_parameters in Phase B.
+        mode: 'exec',
+    };
+    return config;
+}
+
+/**
  * Builds the Windows process container portion of a ContainerConfig.
  */
 function buildProcessBaseContainerConfig(
@@ -251,6 +271,9 @@ export function createConfigFromPolicy(
         if (policy.network.proxy && platform === 'linux') {
             throw new Error('Proxy configuration is not supported on Linux');
         }
+        if (policy.network.proxy && platform === 'darwin') {
+            throw new Error('Proxy configuration is not supported on macOS');
+        }
 
         // WSLC supports block + allowedHosts via iptables (Bridged networking
         // with per-host filtering). Other backends require allowOutbound for
@@ -282,6 +305,11 @@ export function createConfigFromPolicy(
         if (platform === 'linux') {
             diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
             return buildLinuxProcessConfig(config, containerId);
+        }
+        if (platform === 'darwin') {
+            // Seatbelt has no container abstraction (per-process fork+exec
+            // sandbox), so containerId is intentionally not threaded through.
+            return buildDarwinProcessConfig(config);
         }
         diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
         return buildProcessBaseContainerConfig(config, policy, containerId);

@@ -7,7 +7,7 @@ import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { FileLogger } from './logger.js';
 import { ContainerConfig, ContainmentType, ExperimentalBackends, SandboxingMethod } from './types.js';
-import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform.js';
+import { findWxcExecutable, findLxcExecutable, findDarwinExecutable, getPlatformSupport } from './platform.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { diagLog } from './diagnostic.js';
 
@@ -113,6 +113,13 @@ export function resolveExecutableAndArgs(
     if (!executablePath) {
       throw new Error(
         'lxc-exec not found. Ensure it is built and available in a standard location.'
+      );
+    }
+  } else if (platform === 'darwin') {
+    executablePath = findDarwinExecutable();
+    if (!executablePath) {
+      throw new Error(
+        'mxc-exec-darwin not found. Set options.executablePath or ensure it exists in a standard location.'
       );
     }
   } else {
