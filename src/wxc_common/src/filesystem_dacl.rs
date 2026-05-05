@@ -1747,57 +1747,12 @@ mod tests {
     // `cargo test --workspace` suite — and to avoid interference with
     // a concurrent real `wxc-exec` on the same host — each test scopes
     // `MXC_DACL_STATE_DIR` to a fresh tempdir for its lifetime via
-    // [`ScopedStateDir`], serialized within a process by a static
-    // mutex around the env-var mutation.
-
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    /// Process-global mutex serializing all tests that depend on the
-    /// `MXC_DACL_STATE_DIR` override. `std::env::set_var` is not
-    /// thread-safe in the presence of concurrent C `getenv` callers,
-    /// so we hold this for the entire duration of any test that
-    /// touches the override.
-    fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// RAII helper that points `MXC_DACL_STATE_DIR` at a freshly
-    /// created tempdir for the duration of a test, then restores the
-    /// previous value on drop. Holds [`env_lock`] for its lifetime,
-    /// which serializes integration tests within the process while
-    /// still allowing parallel `cargo test` invocations in distinct
-    /// processes to each use their own tempdir.
-    struct ScopedStateDir {
-        _lock: MutexGuard<'static, ()>,
-        _td: tempfile::TempDir,
-        prev: Option<std::ffi::OsString>,
-    }
-
-    impl ScopedStateDir {
-        fn new() -> Self {
-            let lock = env_lock();
-            let td = tempfile::tempdir().expect("create tempdir");
-            let prev = std::env::var_os("MXC_DACL_STATE_DIR");
-            std::env::set_var("MXC_DACL_STATE_DIR", td.path());
-            Self {
-                _lock: lock,
-                _td: td,
-                prev,
-            }
-        }
-    }
-
-    impl Drop for ScopedStateDir {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var("MXC_DACL_STATE_DIR", v),
-                None => std::env::remove_var("MXC_DACL_STATE_DIR"),
-            }
-        }
-    }
+    // [`crate::test_env::ScopedStateDir`]. That helper acquires the
+    // shared crate-wide `ENV_LOCK`, which also serializes against
+    // `dispatcher::tests` and `fallback_detector::tests` so concurrent
+    // tests don't race on `MXC_DACL_STATE_DIR` / `MXC_FORCE_TIER` /
+    // `MXC_BFSCFG_PATH`.
+    use crate::test_env::ScopedStateDir;
 
     #[test]
     fn state_dir_honors_env_override() {

@@ -8,7 +8,6 @@ use std::time::Instant;
 
 use clap::Parser;
 use wxc_common::appcontainer_runner::{delete_app_container_profile, AppContainerScriptRunner};
-use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::{is_base_container_version, load_mxc_request, ParseError};
 use wxc_common::diagnostic::DiagnosticConfig;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
@@ -501,13 +500,55 @@ fn main() {
         wxc_common::diagnostic::redacted_request_json(&request)
     );
 
+    // Drop-order contract — DO NOT REORDER, AND DO NOT ADD `process::exit`
+    // BETWEEN THIS DECLARATION AND THE EXPLICIT `drop(_dacl_guard)` LATER
+    // IN main() WITHOUT FIRST GOING THROUGH THAT DROP:
+    //
+    //   `_dacl_guard` is declared BEFORE `runner` so that, by Rust's
+    //   reverse-declaration destructor order, `runner` drops first (its
+    //   internal handles release the child) and the `DaclManager` Drop
+    //   runs afterwards, removing the host filesystem ACEs we applied.
+    //   Inverting the order would yank the ACEs while the child is still
+    //   running. The explicit `drop(runner); drop(_dacl_guard);` later
+    //   in main() is the `process::exit`-safe equivalent — `process::exit`
+    //   skips destructors, so any new exit added between dispatch and
+    //   that explicit drop must run `drop(_dacl_guard)` first or it will
+    //   leak ACEs permanently on the host filesystem.
+    //
+    //   Audit of exit sites at this commit: every `process::exit` after
+    //   `_dacl_guard = dispatched.dacl_manager;` is either (a) on the
+    //   dispatcher's `Err` arm where `_dacl_guard` is still `None`, or
+    //   (b) reached only after the explicit drops. Panic strategy is
+    //   `unwind` (default; no `panic = "abort"` in any `[profile.*]`),
+    //   so panics during `runner.run()` unwind through Drop and restore
+    //   ACEs naturally. If you change either invariant, this comment is
+    //   the place to update.
+    let mut _dacl_guard: Option<wxc_common::filesystem_dacl::DaclManager> = None;
+
     // Run script in selected containment backend.
     // BaseContainer is used when --experimental is passed or schema version >= 0.5.
     // Sandbox and MicroVM require --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::ProcessContainer => {
+            // Compute fallback eligibility on the ProcessContainer arm
+            // only — every other `ContainmentBackend` variant is
+            // unaffected by `use_base_container` and does not need to
+            // pay the (trivial) semver parse cost.
             let version_implies_base_container = is_base_container_version(&request.schema_version);
             let use_base_container = request.experimental_enabled || version_implies_base_container;
+
+            // Validation warning: deniedPaths is only honored on the
+            // BaseContainer-fallback path. Surface once at parse time
+            // through the buffered logger so it lands in `--dry-run`
+            // output and any tooling scraping the diagnostic pipe.
+            if !use_base_container && !request.policy.denied_paths.is_empty() {
+                let _ = writeln!(
+                    logger,
+                    "warning: filesystem.deniedPaths is set but containment is ProcessContainer \
+                     (no BaseContainer fallback in effect). deniedPaths will not be honored. \
+                     Use --experimental or schema 0.5+ to enable fallback with deny enforcement."
+                );
+            }
 
             if use_base_container {
                 let reason = if version_implies_base_container {
@@ -516,7 +557,27 @@ fn main() {
                     "--experimental".to_string()
                 };
                 let _ = writeln!(logger, "Using BaseContainer runner ({reason})");
-                Box::new(BaseContainerRunner::new())
+
+                match wxc_common::dispatcher::dispatch_with_fallback(&request) {
+                    Ok(dispatched) => {
+                        for w in &dispatched.warnings {
+                            let _ = writeln!(logger, "warning: {w}");
+                        }
+                        let _ = writeln!(
+                            logger,
+                            "selected isolation tier: {}",
+                            dispatched.tier.as_str()
+                        );
+
+                        _dacl_guard = dispatched.dacl_manager;
+                        dispatched.runner
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        eprint!("{}", logger.get_buffer());
+                        process::exit(1);
+                    }
+                }
             } else {
                 Box::new(AppContainerScriptRunner::new())
             }
@@ -636,6 +697,14 @@ fn main() {
     let response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
+
+    // Explicitly drop the runner before the DACL guard so any
+    // runner-internal resources holding child handles release first, then
+    // the DaclManager's Drop restores the host filesystem ACEs we applied.
+    // (process::exit below skips destructors, so we must do this manually
+    // for prompt cleanup on the normal path.)
+    drop(runner);
+    drop(_dacl_guard);
 
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);
