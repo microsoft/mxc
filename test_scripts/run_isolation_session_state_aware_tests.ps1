@@ -453,7 +453,22 @@ try {
         if ($deprovPassed) { $deprovisionedOk = $true }
     }
 
-    # Test 11: stale_id detection. The just-deprovisioned $sandboxId is now
+    # Test 11: policy_validation rejects unsupported cross-cutting fields.
+    # IsolationSession does not honour filesystem / network / ui / proxy at
+    # any phase (per the plan-doc honor matrix). validate_<phase> hooks must
+    # surface a `policy_validation` error envelope for any request that
+    # carries these fields. Runs as its own provision attempt -- no sandbox
+    # is created, so no cleanup is required.
+    Run-StateAwareTest "policy_validation (unsupported filesystem field rejected)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_filesystem.json' -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    } | Out-Null
+
+    # Test 12: stale_id detection. The just-deprovisioned $sandboxId is now
     # unknown to the OS-side service. Calling stop against it must surface
     # `MxcError::StaleId` (wire `error.code = "stale_id"`), proving the
     # Rust-layer ERROR_NOT_FOUND HRESULT detection is wired through the

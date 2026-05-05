@@ -960,6 +960,60 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         Ok(DeprovisionResult { metadata: None })
     }
 
+    // -- Validation hooks ----------------------------------------------------
+    //
+    // Cross-cutting policy fields (filesystem, network, ui, network proxy)
+    // are not honoured by IsolationSession at any phase: the OS-side service
+    // does not expose these knobs. Mirroring the one-shot path's
+    // `validate_runner` rejection, every state-aware phase rejects these
+    // fields up-front rather than silently ignoring them. This produces
+    // `policy_validation` per design 10.3 instead of letting unsupported
+    // fields slip through unnoticed.
+
+    fn validate_provision(
+        &self,
+        request: &CodexRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_start(
+        &self,
+        _sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<&IsolationSessionConfig>,
+    ) -> Result<(), MxcError> {
+        validate_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_exec(
+        &self,
+        _sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_stop(
+        &self,
+        _sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_deprovision(
+        &self,
+        _sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_policy(request).map_err(map_lifecycle_error)
+    }
+
     /// Reuses `IsolationSessionManager::create_process` — the same path the
     /// one-shot runner uses. Output streams to wxc-exec's stdout/stderr via
     /// internal relay threads while the call is in flight; the call returns
@@ -1069,6 +1123,52 @@ mod tests {
             map_lifecycle_error(IsolationSessionError::Stale("x".into())).code,
             MxcErrorCode::StaleId,
         );
+    }
+
+    fn request_with_filesystem_policy() -> CodexRequest {
+        CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\workspace".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_phase_hooks_reject_unsupported_filesystem_policy() {
+        use crate::mxc_error::MxcErrorCode;
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_filesystem_policy();
+
+        let p = runner.validate_provision(&req, None).unwrap_err();
+        assert_eq!(p.code, MxcErrorCode::PolicyValidation);
+
+        let s = runner.validate_start("iso:abc", &req, None).unwrap_err();
+        assert_eq!(s.code, MxcErrorCode::PolicyValidation);
+
+        let e = runner.validate_exec("iso:abc", &req, None).unwrap_err();
+        assert_eq!(e.code, MxcErrorCode::PolicyValidation);
+
+        let st = runner.validate_stop("iso:abc", &req, None).unwrap_err();
+        assert_eq!(st.code, MxcErrorCode::PolicyValidation);
+
+        let d = runner
+            .validate_deprovision("iso:abc", &req, None)
+            .unwrap_err();
+        assert_eq!(d.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_phase_hooks_accept_clean_request() {
+        let runner = IsolationSessionRunner::new();
+        let req = CodexRequest::default();
+
+        runner.validate_provision(&req, None).unwrap();
+        runner.validate_start("iso:abc", &req, None).unwrap();
+        runner.validate_exec("iso:abc", &req, None).unwrap();
+        runner.validate_stop("iso:abc", &req, None).unwrap();
+        runner.validate_deprovision("iso:abc", &req, None).unwrap();
     }
 
     #[test]
