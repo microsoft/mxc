@@ -579,7 +579,7 @@ fn display_loop(rx: mpsc::Receiver<DisplayEvent>) {
 }
 
 /// Get the ANSI color code and exe name for a PID.
-fn get_pid_info<'a>(map: &'a [PidInfo], pid: u32) -> (&'static str, &'a str) {
+fn get_pid_info(map: &[PidInfo], pid: u32) -> (&'static str, &str) {
     map.iter()
         .find(|info| info.pid == pid)
         .map(|info| (PID_COLORS[info.color_idx], info.exe_name.as_str()))
