@@ -31,13 +31,19 @@
     Path to wxc-exec.exe. Default probes the host-arch target dir, then
     other-arch target dir, then the default release/debug dirs.
 
+.PARAMETER ConfigDir
+    Directory holding the state-aware request fixture JSON files. Defaults
+    to <repo>/test_configs. Override on the VM where the deployed layout
+    differs from the repo layout.
+
 .EXAMPLE
     .\run_isolation_session_state_aware_tests.ps1
-    .\run_isolation_session_state_aware_tests.ps1 -WxcExePath C:\test\wxc-exec.exe
+    .\run_isolation_session_state_aware_tests.ps1 -WxcExePath C:\test\wxc-exec.exe -ConfigDir C:\test\test_configs
 #>
 
 param(
-    [string]$WxcExePath
+    [string]$WxcExePath,
+    [string]$ConfigDir
 )
 
 $ErrorActionPreference = "Stop"
@@ -96,14 +102,46 @@ if (-not (Test-Path $IsoSessionOpsKey)) {
 
 # ---------------- Helpers ----------------
 
-# Encode a state-aware request envelope and run wxc-exec against it. Returns
-# a hashtable with stdout / stderr / exitCode for the caller to assert on.
+# Resolve the directory holding state-aware request fixtures. The -ConfigDir
+# CLI parameter wins when supplied; otherwise default to <repo>/test_configs
+# computed from $RepoRoot.
+if (-not $ConfigDir) {
+    $ConfigDir = Join-Path $RepoRoot "test_configs"
+}
+
+# Encode a state-aware request envelope and run wxc-exec against it. The
+# request comes either from an in-line hashtable or from a static JSON
+# fixture file under test_configs/ (for the project-wide "test scenarios are
+# version-controlled JSON" pattern). When the fixture contains the
+# placeholder `{{SANDBOX_ID}}`, the caller must supply -SandboxId so it can
+# be substituted before the request is base64-encoded. Returns a hashtable
+# with stdout / stderr / exitCode for the caller to assert on.
 function Invoke-StateAware {
     param(
-        [Parameter(Mandatory = $true)] [hashtable]$Request,
+        [hashtable]$Request,
+        [string]$ConfigFile,
+        [string]$SandboxId,
         [switch]$Experimental
     )
-    $json = $Request | ConvertTo-Json -Compress -Depth 12
+
+    if ($ConfigFile) {
+        $path = Join-Path $ConfigDir $ConfigFile
+        if (-not (Test-Path $path)) {
+            throw "Config fixture not found: $path"
+        }
+        $json = Get-Content $path -Raw
+        if ($json -match '\{\{SANDBOX_ID\}\}') {
+            if (-not $SandboxId) {
+                throw "Fixture $ConfigFile contains {{SANDBOX_ID}} but -SandboxId was not supplied"
+            }
+            $json = $json -replace '\{\{SANDBOX_ID\}\}', $SandboxId
+        }
+    } elseif ($Request) {
+        $json = $Request | ConvertTo-Json -Compress -Depth 12
+    } else {
+        throw "Invoke-StateAware requires either -Request or -ConfigFile"
+    }
+
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
 
     $argList = @()
@@ -152,11 +190,7 @@ function Envelope-Arm {
 # Sends a state-aware provision request and surfaces a `backend_unavailable`
 # envelope as a SKIP. This catches feature-flag-off builds without raising
 # false test failures.
-$probeRequest = @{
-    phase       = 'provision'
-    containment = 'isolation_session'
-}
-$probe = Invoke-StateAware -Request $probeRequest -Experimental
+$probe = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
 $probeEnv = Parse-Envelope -Stdout $probe.Stdout
 if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
     Write-Host "SKIPPED: wxc-exec reports backend_unavailable (likely built without --features isolation_session)" -ForegroundColor Yellow
@@ -165,170 +199,270 @@ if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
 
 # ---------------- Tests ----------------
 
-$TestsRun = 0
-$TestsFailed = 0
+$script:TestResults = @()
+$script:currentTestPassed = $true
+$script:currentTestFirstFailReason = $null
 
+# Records assertion outcomes for the active Run-StateAwareTest. Per-assertion
+# detail is still printed inline so failures show exactly which dimension
+# broke; the test as a whole passes iff every assertion in its body passed.
 function Assert-True {
     param([bool]$Condition, [string]$Message)
-    $script:TestsRun++
     if ($Condition) {
         Write-Host "  PASS: $Message" -ForegroundColor Green
     } else {
         Write-Host "  FAIL: $Message" -ForegroundColor Red
-        $script:TestsFailed++
+        if ($script:currentTestPassed) {
+            $script:currentTestFirstFailReason = $Message
+        }
+        $script:currentTestPassed = $false
     }
+}
+
+# Wraps a logical test (one phase, one phase-pair, or one multi-exec
+# scenario). Prints the test name as a section header, runs the body
+# (which uses Assert-True for per-dimension checks), and records one
+# pass/fail entry in TestResults so the final summary can match the
+# project's other PowerShell runners. Returns the overall pass state so
+# callers can gate subsequent tests.
+function Run-StateAwareTest {
+    param(
+        [string]$Name,
+        [scriptblock]$Body
+    )
+    Write-Host ""
+    Write-Host "[$Name]" -ForegroundColor Cyan
+    $script:currentTestPassed = $true
+    $script:currentTestFirstFailReason = $null
+    & $Body
+    $script:TestResults += [pscustomobject]@{
+        Name   = $Name
+        Passed = $script:currentTestPassed
+        Reason = $script:currentTestFirstFailReason
+    }
+    return $script:currentTestPassed
 }
 
 # try-finally wraps the lifecycle so any mid-flow failure still triggers a
 # best-effort deprovision. Mirrors the defensive cleanup in
 # IsolationSessionRunner::execute -- failed runs do not leak Indefinite-
 # lifetime agent users across test runs.
-$sandboxId = $null
+$script:sandboxId = $null
+$deprovisionedOk = $false
 try {
 
-# Test 1: provision returns iso:wxc-<8-hex> and a backend_unavailable-free
-# envelope.
-Write-Host "[provision] sandbox_id format" -ForegroundColor Cyan
-$provisionResult = Invoke-StateAware -Request $probeRequest -Experimental
-$provisionEnv = Parse-Envelope -Stdout $provisionResult.Stdout
-$arm = Envelope-Arm $provisionEnv
+    # Test 1: provision returns iso:wxc-<8-hex> and a backend_unavailable-free
+    # envelope.
+    Run-StateAwareTest "provision (sandbox_id format)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $arm = Envelope-Arm $envObj
+        if ($arm -ne 'result') {
+            Write-Host "  Envelope arm: $arm" -ForegroundColor Red
+            Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+            Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+            Assert-True $false "provision returned a result envelope"
+        } else {
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+            $script:sandboxId = $envObj.result.sandboxId
+            $agentUserName = $envObj.result.metadata.agentUserName
+            Assert-True ($script:sandboxId -match '^iso:wxc-[0-9a-f]{8}$') "sandbox_id matches iso:wxc-<8-hex> ($script:sandboxId)"
+            Assert-True ($null -ne $agentUserName) "metadata.agentUserName is present ($agentUserName)"
+        }
+    } | Out-Null
 
-if ($arm -ne 'result') {
-    Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-    Write-Host "  Stdout: $($provisionResult.Stdout)" -ForegroundColor Gray
-    Write-Host "  Stderr: $($provisionResult.Stderr)" -ForegroundColor Gray
-    Assert-True $false "provision returned a result envelope"
-} else {
-    Assert-True ($provisionResult.ExitCode -eq 0) "exit code = 0 on success"
-    $sandboxId = $provisionEnv.result.sandboxId
-    $agentUserName = $provisionEnv.result.metadata.agentUserName
-    Assert-True ($sandboxId -match '^iso:wxc-[0-9a-f]{8}$') "sandbox_id matches iso:wxc-<8-hex> ($sandboxId)"
-    Assert-True ($null -ne $agentUserName) "metadata.agentUserName is present ($agentUserName)"
-}
-
-# Test 2: start succeeds against the provisioned sandbox. Exercises the
-# multi-invocation pattern --provision was a separate wxc-exec process; this
-# is a fresh wxc-exec process consuming the same sandbox_id. Skipped if
-# provision did not return a usable id.
-$startedOk = $false
-if ($null -ne $sandboxId) {
-    Write-Host "[start] provision + start sequence" -ForegroundColor Cyan
-    $startRequest = @{
-        phase     = 'start'
-        sandboxId = $sandboxId
-    }
-    $startResult = Invoke-StateAware -Request $startRequest -Experimental
-    $startEnv = Parse-Envelope -Stdout $startResult.Stdout
-    $startArm = Envelope-Arm $startEnv
-
-    if ($startArm -ne 'result') {
-        Write-Host "  Envelope arm: $startArm" -ForegroundColor Red
-        Write-Host "  Stdout: $($startResult.Stdout)" -ForegroundColor Gray
-        Write-Host "  Stderr: $($startResult.Stderr)" -ForegroundColor Gray
-        Assert-True $false "start returned a result envelope"
-    } else {
-        Assert-True ($startResult.ExitCode -eq 0) "exit code = 0 on success"
-        # Start has no metadata in v1 --`result` should be an empty object.
-        Assert-True ($null -eq $startEnv.result.metadata) "result.metadata is absent (no start metadata in v1)"
-        $startedOk = ($startResult.ExitCode -eq 0)
-    }
-}
-
-# Test 3: exec runs a command in the started session. Output streams live
-# (the backend reuses the one-shot relay path) so stdout from this
-# wxc-exec invocation is the script's output rather than a JSON envelope.
-# Skipped unless start succeeded.
-$execedOk = $false
-if ($startedOk) {
-    Write-Host "[exec] provision + start + exec sequence" -ForegroundColor Cyan
-    $execRequest = @{
-        phase     = 'exec'
-        sandboxId = $sandboxId
-        process   = @{
-            commandLine = 'echo state-aware-exec-marker'
-            timeout     = 30000
+    # Test 2: start succeeds against the provisioned sandbox. Exercises the
+    # multi-invocation pattern -- provision was a separate wxc-exec process;
+    # this is a fresh wxc-exec process consuming the same sandbox_id.
+    $startedOk = $false
+    if ($null -ne $script:sandboxId) {
+        $startedOk = Run-StateAwareTest "start (provision + start sequence)" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:sandboxId -Experimental
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $arm = Envelope-Arm $envObj
+            if ($arm -ne 'result') {
+                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
+                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+                Assert-True $false "start returned a result envelope"
+            } else {
+                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+                # Start has no metadata in v1 -- `result` should be an empty object.
+                Assert-True ($null -eq $envObj.result.metadata) "result.metadata is absent (no start metadata in v1)"
+            }
         }
     }
-    $execResult = Invoke-StateAware -Request $execRequest -Experimental
 
-    Assert-True ($execResult.ExitCode -eq 0) "exit code = 0 on success"
-    Assert-True ($execResult.Stdout -match 'state-aware-exec-marker') `
-        "stdout contains the script's output (streamed live, not enveloped)"
-    # Exec on success does not emit a JSON envelope on stdout --the SDK
-    # discriminates between exec success (raw stdout) and dispatch failure
-    # (JSON envelope) using exit code + envelope-parseability.
-    $maybeEnv = Parse-Envelope -Stdout $execResult.Stdout
-    Assert-True ($null -eq $maybeEnv -or $null -eq $maybeEnv.error) `
-        "stdout is not a state-aware error envelope on success"
-    $execedOk = ($execResult.ExitCode -eq 0)
-}
-
-# Test 4: stop closes the started session. Asserts a clean result envelope
-# with no metadata. Skipped unless exec succeeded (so we know we have a
-# truly running session to stop, not a half-set-up one).
-$stoppedOk = $false
-if ($execedOk) {
-    Write-Host "[stop] full lifecycle through stop" -ForegroundColor Cyan
-    $stopRequest = @{
-        phase     = 'stop'
-        sandboxId = $sandboxId
+    # Test 3: exec runs a command in the started session. Output streams live
+    # (the backend reuses the one-shot relay path) so stdout from this
+    # wxc-exec invocation is the script's output rather than a JSON envelope.
+    $execedOk = $false
+    if ($startedOk) {
+        $execedOk = Run-StateAwareTest "exec (basic)" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_basic.json' -SandboxId $script:sandboxId -Experimental
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+            Assert-True ($r.Stdout -match 'state-aware-exec-marker') `
+                "stdout contains the script's output (streamed live, not enveloped)"
+            # Exec on success does not emit a JSON envelope on stdout -- the
+            # SDK discriminates between exec success (raw stdout) and dispatch
+            # failure (JSON envelope) using exit code + envelope-parseability.
+            $maybeEnv = Parse-Envelope -Stdout $r.Stdout
+            Assert-True ($null -eq $maybeEnv -or $null -eq $maybeEnv.error) `
+                "stdout is not a state-aware error envelope on success"
+        }
     }
-    $stopResult = Invoke-StateAware -Request $stopRequest -Experimental
-    $stopEnv = Parse-Envelope -Stdout $stopResult.Stdout
-    $stopArm = Envelope-Arm $stopEnv
 
-    if ($stopArm -ne 'result') {
-        Write-Host "  Envelope arm: $stopArm" -ForegroundColor Red
-        Write-Host "  Stdout: $($stopResult.Stdout)" -ForegroundColor Gray
-        Write-Host "  Stderr: $($stopResult.Stderr)" -ForegroundColor Gray
-        Assert-True $false "stop returned a result envelope"
-    } else {
-        Assert-True ($stopResult.ExitCode -eq 0) "exit code = 0 on success"
-        Assert-True ($null -eq $stopEnv.result.metadata) "result.metadata is absent (no stop metadata in v1)"
-        $stoppedOk = ($stopResult.ExitCode -eq 0)
+    # Test 4: filesystem state continuity across separate wxc-exec invocations
+    # against the same sandbox_id. exec #1 writes a marker file to the agent
+    # user's TEMP, exec #2 reads it back. Each exec is a fresh wxc-exec
+    # process consuming the same sandbox_id, exercising the cross-process
+    # state-aware path.
+    if ($execedOk) {
+        Run-StateAwareTest "multi-exec (filesystem state continuity)" {
+            $w = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_write_marker.json' -SandboxId $script:sandboxId -Experimental
+            Assert-True ($w.ExitCode -eq 0) "exec #1 (write) exit code = 0"
+            $rd = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_read_marker.json' -SandboxId $script:sandboxId -Experimental
+            Assert-True ($rd.ExitCode -eq 0) "exec #2 (read) exit code = 0"
+            Assert-True ($rd.Stdout -match 'multi-exec-marker-content') `
+                "exec #2 stdout contains the marker exec #1 wrote (state preserved across wxc-exec processes)"
+        } | Out-Null
     }
-}
 
-# Test 5: deprovision tears down the agent user and unregisters the client.
-# After this test, $sandboxId is no longer addressable -- the finally block
-# below skips its cleanup pass when this test ran.
-$deprovisionedOk = $false
-if ($stoppedOk) {
-    Write-Host "[deprovision] full lifecycle through deprovision" -ForegroundColor Cyan
-    $deprovRequest = @{
-        phase     = 'deprovision'
-        sandboxId = $sandboxId
+    # Test 5: exit code propagation across multiple exec invocations. Three
+    # invocations exit with 1, 2, 0 in sequence. Each invocation must report
+    # its own exit code (catches stale exit code leaking between calls), and
+    # the third exec succeeding after two non-zero exits proves a non-zero
+    # exit doesn't leave the session in a broken state.
+    if ($execedOk) {
+        Run-StateAwareTest "multi-exec (exit code propagation)" {
+            foreach ($pair in @(
+                    @{ file = 'isolation_session_state_aware_exec_exit_1.json'; code = 1 },
+                    @{ file = 'isolation_session_state_aware_exec_exit_2.json'; code = 2 },
+                    @{ file = 'isolation_session_state_aware_exec_exit_0.json'; code = 0 }
+                )) {
+                $r = Invoke-StateAware -ConfigFile $pair.file -SandboxId $script:sandboxId -Experimental
+                Assert-True ($r.ExitCode -eq $pair.code) `
+                    "exec 'exit $($pair.code)' propagates exit code $($pair.code) (got $($r.ExitCode))"
+            }
+        } | Out-Null
     }
-    $deprovResult = Invoke-StateAware -Request $deprovRequest -Experimental
-    $deprovEnv = Parse-Envelope -Stdout $deprovResult.Stdout
-    $deprovArm = Envelope-Arm $deprovEnv
 
-    if ($deprovArm -ne 'result') {
-        Write-Host "  Envelope arm: $deprovArm" -ForegroundColor Red
-        Write-Host "  Stdout: $($deprovResult.Stdout)" -ForegroundColor Gray
-        Write-Host "  Stderr: $($deprovResult.Stderr)" -ForegroundColor Gray
-        Assert-True $false "deprovision returned a result envelope"
-    } else {
-        Assert-True ($deprovResult.ExitCode -eq 0) "exit code = 0 on success"
-        Assert-True ($null -eq $deprovEnv.result.metadata) "result.metadata is absent (no deprovision metadata in v1)"
-        $deprovisionedOk = $true
+    # Test 6: working_directory wire-field plumbing. Sets cwd via the wire
+    # request, runs `cd` (cmd built-in: prints current dir), asserts stdout
+    # starts with the requested path.
+    if ($execedOk) {
+        Run-StateAwareTest "multi-exec (cwd plumbing)" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_cwd.json' -SandboxId $script:sandboxId -Experimental
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
+            Assert-True ($r.Stdout -match '^C:\\Windows') `
+                "stdout starts with C:\Windows (cwd wire field honored on state-aware path)"
+        } | Out-Null
     }
-}
+
+    # Test 7: wire-format env per-invocation. Three invocations: initial,
+    # modified, absent. Verifies (a) each invocation receives its own env
+    # block, (b) the second wire request actually overrides the first (no
+    # cached env block), (c) the third invocation does NOT see leakage from
+    # prior calls.
+    if ($execedOk) {
+        Run-StateAwareTest "multi-exec (wire-format env per-invocation)" {
+            $rInit = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_env_initial.json' -SandboxId $script:sandboxId -Experimental
+            Assert-True ($rInit.ExitCode -eq 0) "initial exit code = 0"
+            Assert-True ($rInit.Stdout -match 'initial-value') "initial value reaches the agent"
+
+            $rMod = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_env_modified.json' -SandboxId $script:sandboxId -Experimental
+            Assert-True ($rMod.ExitCode -eq 0) "modified exit code = 0"
+            Assert-True ($rMod.Stdout -match 'modified-value') "second wire request overrides the first"
+            Assert-True ($rMod.Stdout -notmatch 'initial-value') "no cached env block from prior call"
+
+            # No env block -- the agent inherits its profile env only. echo of
+            # an unset variable in cmd.exe prints `%MY_SA_ENV%` literally; the
+            # checks below catch leakage from the prior call.
+            $rAbsent = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_env_absent.json' -SandboxId $script:sandboxId -Experimental
+            Assert-True ($rAbsent.ExitCode -eq 0) "absent exit code = 0"
+            Assert-True ($rAbsent.Stdout -match '%MY_SA_ENV%') `
+                "literal %MY_SA_ENV% in stdout (var unset, no leak from prior call)"
+            Assert-True ($rAbsent.Stdout -notmatch 'modified-value') `
+                "no leak of modified-value into env-absent invocation"
+        } | Out-Null
+    }
+
+    # Test 8: HKCU env var persistence and modification. Tests a different
+    # persistence layer from filesystem (Test 4): the agent user's HKCU
+    # registry. setx writes to HKCU\Environment; a fresh cmd.exe started in a
+    # subsequent invocation reads its env block from the registry at startup,
+    # so the persisted value should appear. Then we modify it and verify the
+    # modification carries forward.
+    if ($execedOk) {
+        Run-StateAwareTest "multi-exec (HKCU env persistence + modification)" {
+            foreach ($step in @(
+                    @{ file = 'isolation_session_state_aware_exec_setx_initial.json';  expect = $null;              label = 'setx initial' },
+                    @{ file = 'isolation_session_state_aware_exec_read_persist.json';  expect = 'initial-persist';  label = 'fresh cmd reads HKCU' },
+                    @{ file = 'isolation_session_state_aware_exec_setx_modified.json'; expect = $null;              label = 'setx modified' },
+                    @{ file = 'isolation_session_state_aware_exec_read_persist.json';  expect = 'modified-persist'; label = 'fresh cmd reads modified HKCU' }
+                )) {
+                $r = Invoke-StateAware -ConfigFile $step.file -SandboxId $script:sandboxId -Experimental
+                Assert-True ($r.ExitCode -eq 0) "$($step.label): exit code = 0"
+                if ($null -ne $step.expect) {
+                    Assert-True ($r.Stdout -match [regex]::Escape($step.expect)) `
+                        "$($step.label): stdout contains '$($step.expect)'"
+                }
+            }
+        } | Out-Null
+    }
+
+    # Test 9: stop closes the started session. Skipped unless exec succeeded
+    # (so we know we have a truly running session to stop, not a half-set-up
+    # one).
+    $stoppedOk = $false
+    if ($execedOk) {
+        $stoppedOk = Run-StateAwareTest "stop (full lifecycle through stop)" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:sandboxId -Experimental
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $arm = Envelope-Arm $envObj
+            if ($arm -ne 'result') {
+                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
+                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+                Assert-True $false "stop returned a result envelope"
+            } else {
+                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+                Assert-True ($null -eq $envObj.result.metadata) "result.metadata is absent (no stop metadata in v1)"
+            }
+        }
+    }
+
+    # Test 10: deprovision tears down the agent user and unregisters the
+    # client. After this test, $sandboxId is no longer addressable -- the
+    # finally block below skips its cleanup pass when this test ran.
+    if ($stoppedOk) {
+        $deprovPassed = Run-StateAwareTest "deprovision (full lifecycle through deprovision)" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:sandboxId -Experimental
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $arm = Envelope-Arm $envObj
+            if ($arm -ne 'result') {
+                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
+                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+                Assert-True $false "deprovision returned a result envelope"
+            } else {
+                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+                Assert-True ($null -eq $envObj.result.metadata) "result.metadata is absent (no deprovision metadata in v1)"
+            }
+        }
+        if ($deprovPassed) { $deprovisionedOk = $true }
+    }
 
 } finally {
     # Best-effort cleanup. If the suite reached the deprovision test and it
     # succeeded, the agent user is already torn down -- nothing to do. If
     # the suite failed mid-flow, this still runs so a leaked Indefinite-
     # lifetime agent user does not survive across test runs.
-    if ($null -ne $sandboxId -and -not $deprovisionedOk) {
-        Write-Host "" -ForegroundColor Gray
-        Write-Host "[cleanup] best-effort deprovision of $sandboxId" -ForegroundColor DarkGray
-        $cleanupRequest = @{
-            phase     = 'deprovision'
-            sandboxId = $sandboxId
-        }
+    if ($null -ne $script:sandboxId -and -not $deprovisionedOk) {
+        Write-Host ""
+        Write-Host "[cleanup] best-effort deprovision of $script:sandboxId" -ForegroundColor DarkGray
         try {
-            $cleanupResult = Invoke-StateAware -Request $cleanupRequest -Experimental
+            $cleanupResult = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:sandboxId -Experimental
             if ($cleanupResult.ExitCode -eq 0) {
                 Write-Host "  cleanup deprovision succeeded" -ForegroundColor DarkGray
             } else {
@@ -342,11 +476,20 @@ if ($stoppedOk) {
 
 # ---------------- Summary ----------------
 
+$total  = $script:TestResults.Count
+$failed = ($script:TestResults | Where-Object { -not $_.Passed }).Count
+$passed = $total - $failed
+
 Write-Host ""
-if ($TestsFailed -eq 0) {
-    Write-Host "ALL $TestsRun TESTS PASSED" -ForegroundColor Green
+Write-Host "==========================" -ForegroundColor Cyan
+if ($failed -eq 0) {
+    Write-Host "$passed/$total passed" -ForegroundColor Green
     exit 0
 } else {
-    Write-Host "$TestsFailed of $TestsRun TESTS FAILED" -ForegroundColor Red
+    Write-Host "$passed/$total passed, $failed FAILED:" -ForegroundColor Red
+    $script:TestResults | Where-Object { -not $_.Passed } | ForEach-Object {
+        $line = if ($_.Reason) { "  FAIL: $($_.Name) - $($_.Reason)" } else { "  FAIL: $($_.Name)" }
+        Write-Host $line -ForegroundColor Red
+    }
     exit 1
 }

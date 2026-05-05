@@ -1,0 +1,8 @@
+{
+    "phase": "exec",
+    "sandboxId": "{{SANDBOX_ID}}",
+    "process": {
+        "commandLine": "setx MY_SA_PERSIST initial-persist",
+        "timeout": 30000
+    }
+}
