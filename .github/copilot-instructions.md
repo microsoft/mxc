@@ -268,3 +268,37 @@ This section is **required**.
 - For feature requests, explain the *why* (user problem) before the *how* (implementation)
 - Reference relevant source files, config fields, or docs when applicable
 - If any required field is unknown, **ask for the information rather than fabricating content**
+
+## Creating Pull Requests
+
+Pull requests must follow the template in `.github/PULL_REQUEST_TEMPLATE.md`. Complete all checklist items and add content below the separator (`-----`).
+
+### Required structure
+
+Every PR body should include:
+
+1. **Template checklist** — check the boxes that apply (CLA, related issue, copilot-instructions update).
+2. **Summary** — a brief description of what the PR does and why.
+3. **Issue references** — if the PR is intended to close an issue, use GitHub closing keywords (`Closes #NNN`, `Fixes #NNN`, or `Resolves #NNN`). If the PR is related but does not close an issue, use an unordered list under a "Related Issues" heading (`- #NNN`).
+
+### Example
+
+```markdown
+- [x] I have signed the [Contributor License Agreement](https://opensource.microsoft.com/cla/).
+- [x] This pull request is related to an issue.
+- [ ] If this PR changes build commands, project architecture, or key conventions, I have updated [`.github/copilot-instructions.md`](.github/copilot-instructions.md).
+
+-----
+
+## Summary
+
+Brief description of the change.
+
+Closes #42
+```
+
+### Guidelines
+
+- One PR should address one issue or concern. Avoid bundling unrelated changes.
+- If the PR updates build commands, project architecture, or key conventions, update `.github/copilot-instructions.md` in the same PR.
+- Draft PRs are appropriate for work-in-progress that needs early feedback.
