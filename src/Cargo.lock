@@ -885,6 +885,7 @@ dependencies = [
  "serde_json",
  "windows",
  "windows-core",
+ "winreg",
 ]
 
 [[package]]

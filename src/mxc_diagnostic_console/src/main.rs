@@ -32,9 +32,6 @@ use windows::Win32::System::Pipes::{
     PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_DWORD,
-};
 use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -93,6 +90,9 @@ enum DisplayEvent {
 
 /// Check whether the current process is running elevated (as admin).
 fn is_elevated() -> bool {
+    // SAFETY: GetCurrentProcess returns a pseudo-handle that is always valid.
+    // OpenProcessToken/GetTokenInformation operate on valid handles with proper buffer sizes.
+    // CloseHandle is called on the token handle before returning.
     unsafe {
         let mut token = HANDLE::default();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
@@ -124,74 +124,20 @@ fn is_diagnostic_console_enabled() -> bool {
     }
 
     // Check registry.
-    let subkey: Vec<u16> = DIAG_REGISTRY_SUBKEY
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut hkey = HKEY::default();
-    let status = unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            PCWSTR(subkey.as_ptr()),
-            Some(0),
-            KEY_READ,
-            &mut hkey,
-        )
-    };
-    if status.is_err() {
+    let hklm = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
+    let Ok(key) = hklm.open_subkey_with_flags(DIAG_REGISTRY_SUBKEY, winreg::enums::KEY_READ) else {
         return false;
-    }
-
-    let enabled = read_reg_dword(hkey, DIAG_CONSOLE_VALUE);
-    unsafe {
-        let _ = RegCloseKey(hkey);
-    }
-    enabled
-}
-
-/// Read a DWORD registry value; returns true if the value is 1.
-fn read_reg_dword(hkey: HKEY, name: &str) -> bool {
-    let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut data: u32 = 0;
-    let mut size = std::mem::size_of::<u32>() as u32;
-    let status = unsafe {
-        RegGetValueW(
-            hkey,
-            PCWSTR::null(),
-            PCWSTR(name_wide.as_ptr()),
-            RRF_RT_DWORD,
-            None,
-            Some(std::ptr::from_mut(&mut data).cast()),
-            Some(&mut size),
-        )
     };
-    status.is_ok() && data == 1
+    key.get_value::<u32, _>(DIAG_CONSOLE_VALUE).unwrap_or(0) == 1
 }
 
 /// Check whether ForceLearningMode is enabled in the registry.
 fn is_force_learning_mode_enabled() -> bool {
-    let subkey: Vec<u16> = DIAG_REGISTRY_SUBKEY
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut hkey = HKEY::default();
-    let status = unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            PCWSTR(subkey.as_ptr()),
-            Some(0),
-            KEY_READ,
-            &mut hkey,
-        )
-    };
-    if status.is_err() {
+    let hklm = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
+    let Ok(key) = hklm.open_subkey_with_flags(DIAG_REGISTRY_SUBKEY, winreg::enums::KEY_READ) else {
         return false;
-    }
-    let enabled = read_reg_dword(hkey, "ForceLearningMode");
-    unsafe {
-        let _ = RegCloseKey(hkey);
-    }
-    enabled
+    };
+    key.get_value::<u32, _>("ForceLearningMode").unwrap_or(0) == 1
 }
 
 #[derive(Parser)]
@@ -377,12 +323,14 @@ fn main() {
         is_first = false;
 
         // Block until a client connects.
+        // SAFETY: `pipe` is a valid handle returned by create_pipe_instance.
         let connected = unsafe { ConnectNamedPipe(pipe, None) };
         if connected.is_err() {
             let err = std::io::Error::last_os_error();
             // ERROR_PIPE_CONNECTED (535) means client connected between Create and Connect.
             if err.raw_os_error() != Some(535) {
                 eprintln!("[error] ConnectNamedPipe failed: {err}");
+                // SAFETY: `pipe` is a valid handle from create_pipe_instance.
                 unsafe {
                     let _ = CloseHandle(pipe);
                 }
@@ -395,6 +343,7 @@ fn main() {
             Some(p) => p,
             None => {
                 eprintln!("[warn] Could not determine client PID");
+                // SAFETY: `pipe` is a valid handle from create_pipe_instance.
                 unsafe {
                     let _ = DisconnectNamedPipe(pipe);
                     let _ = CloseHandle(pipe);
@@ -427,6 +376,9 @@ fn create_pipe_instance(first: bool) -> Result<HANDLE, String> {
     // Create a security descriptor with a NULL DACL (allows all access).
     let mut sd = SECURITY_DESCRIPTOR::default();
     let psd = PSECURITY_DESCRIPTOR(std::ptr::addr_of_mut!(sd).cast());
+    // SAFETY: `psd` points to a valid stack-allocated SECURITY_DESCRIPTOR;
+    // revision 1 is the only valid value. SetSecurityDescriptorDacl with None
+    // sets a NULL DACL (allow all).
     unsafe {
         InitializeSecurityDescriptor(psd, 1)
             .map_err(|e| format!("InitializeSecurityDescriptor: {e}"))?;
@@ -446,6 +398,8 @@ fn create_pipe_instance(first: bool) -> Result<HANDLE, String> {
         open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
     }
 
+    // SAFETY: `name_wide` is a valid null-terminated UTF-16 string that outlives the call.
+    // `sa` references a valid security descriptor on the stack. All parameters are valid.
     let handle = unsafe {
         CreateNamedPipeW(
             PCWSTR(name_wide.as_ptr()),
@@ -472,6 +426,7 @@ fn create_pipe_instance(first: bool) -> Result<HANDLE, String> {
 /// Get the client process ID from a connected pipe handle.
 fn get_client_pid(pipe: HANDLE) -> Option<u32> {
     let mut pid: u32 = 0;
+    // SAFETY: `pipe` is a valid connected pipe handle; `pid` is a valid out pointer.
     let ok = unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) };
     if ok.is_ok() && pid != 0 {
         Some(pid)
@@ -536,6 +491,8 @@ fn client_reader(pipe: HANDLE, pid: u32, tx: mpsc::Sender<DisplayEvent>) {
     // Extract the raw handle so we can call DisconnectNamedPipe before File::drop closes it.
     use std::os::windows::io::IntoRawHandle;
     let raw = file.into_raw_handle();
+    // SAFETY: `raw` is a valid pipe handle extracted from the File (which no longer owns it).
+    // DisconnectNamedPipe and CloseHandle are both safe to call on a valid pipe handle.
     unsafe {
         let h = HANDLE(raw);
         let _ = DisconnectNamedPipe(h);
@@ -616,6 +573,9 @@ fn get_pid_info(map: &[(u32, usize, String)], pid: u32) -> (&'static str, &str) 
 
 /// Look up the executable name for a process ID. Returns just the filename.
 fn process_exe_name(pid: u32) -> String {
+    // SAFETY: OpenProcess returns a valid handle or error (checked via match).
+    // GetModuleFileNameExW writes into a stack buffer with bounded length.
+    // CloseHandle is called on the valid process handle.
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
         let handle = match handle {
@@ -653,6 +613,8 @@ fn enable_virtual_terminal() {
         GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
         STD_OUTPUT_HANDLE,
     };
+    // SAFETY: GetStdHandle returns the stdout handle (or error, checked with is_ok).
+    // GetConsoleMode/SetConsoleMode operate on the valid stdout handle.
     unsafe {
         if let Ok(handle) = GetStdHandle(STD_OUTPUT_HANDLE) {
             let mut mode = Default::default();
@@ -675,6 +637,8 @@ fn register_ctrl_handler() {
         windows_core::BOOL(0)
     }
 
+    // SAFETY: SetConsoleCtrlHandler with a valid function pointer is safe.
+    // The handler function has the correct `unsafe extern "system"` signature.
     unsafe {
         let _ = SetConsoleCtrlHandler(Some(handler), true);
     }
