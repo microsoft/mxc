@@ -227,6 +227,10 @@ fn main() {
             eprintln!("Error: LXC backend not available on Windows");
             process::exit(1);
         }
+        ContainmentBackend::Seatbelt => {
+            eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-darwin)");
+            process::exit(1);
+        }
         ContainmentBackend::Vm => {
             eprintln!("Error: VM backend not yet implemented");
             process::exit(1);
