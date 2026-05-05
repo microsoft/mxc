@@ -181,7 +181,7 @@ impl BaseContainerRunner {
     /// - `capabilities` from `policy.capabilities` (comma-joined)
     /// - `fs_read_write` from `policy.readwrite_paths`
     /// - `fs_read_only` from `policy.readonly_paths`
-    /// - `disallowWin32kSystemCalls` from `ui.disable`
+    /// - `disallow_win32k_system_calls` from `ui.disable`
     /// - `ui_restrictions` bitmask from `ui.to_ui_restrictions_bitmask()`
     /// - `network_policy.proxy.url` from proxy config
     fn build_sandbox_spec(request: &CodexRequest) -> Vec<u8> {
@@ -272,14 +272,14 @@ impl BaseContainerRunner {
             &SandboxSpecArgs {
                 version: Some(version),
                 app_container: true,
-                integrity_level: 0,
-                disallowWin32kSystemCalls: request.policy.ui.disable,
+                disallow_win32k_system_calls: request.policy.ui.disable,
                 ui_restrictions,
                 least_privilege: request.policy.least_privilege_mode,
                 capabilities,
                 fs_read_write,
                 fs_read_only,
                 network_policy,
+                ..Default::default()
             },
         );
 
@@ -404,7 +404,7 @@ impl ScriptRunner for BaseContainerRunner {
         // Print flags in debug mode
         let _ = writeln!(
             logger,
-            "disallowWin32kSystemCalls={}, ui_restrictions=0x{:04X}",
+            "BaseContainer: disallow_win32k_system_calls={}, ui_restrictions=0x{:04X}",
             request.policy.ui.disable, ui_restrictions
         );
         let _ = writeln!(
@@ -499,6 +499,15 @@ impl ScriptRunner for BaseContainerRunner {
         };
 
         if success == 0 {
+            // Clean up any partially-populated handles from the failed API call.
+            unsafe {
+                if !pi.hProcess.is_invalid() {
+                    let _ = CloseHandle(pi.hProcess);
+                }
+                if !pi.hThread.is_invalid() {
+                    let _ = CloseHandle(pi.hThread);
+                }
+            }
             let err = unsafe { GetLastError() };
             if err.0 == ERROR_CALL_NOT_IMPLEMENTED {
                 return ScriptResponse::error(
@@ -588,8 +597,7 @@ mod tests {
         assert!(spec.app_container());
         assert!(spec.least_privilege());
         assert_eq!(spec.capabilities(), Some("internetClient,registryRead"));
-        assert_eq!(spec.integrity_level(), 0);
-        assert!(spec.disallowWin32kSystemCalls());
+        assert!(spec.disallow_win32k_system_calls());
         assert_eq!(
             spec.ui_restrictions(),
             BaseContainerRunner::UILIMIT_GLOBALATOMS
@@ -624,7 +632,7 @@ mod tests {
         assert_eq!(spec.capabilities(), Some("internetClient"));
         assert!(spec.fs_read_write().is_none());
         assert!(spec.fs_read_only().is_none());
-        assert!(spec.disallowWin32kSystemCalls());
+        assert!(spec.disallow_win32k_system_calls());
         assert!(spec.network_policy().is_none());
     }
 
@@ -651,7 +659,7 @@ mod tests {
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
 
-        assert!(spec.disallowWin32kSystemCalls());
+        assert!(spec.disallow_win32k_system_calls());
         // disable=true → only GLOBALATOMS (Win32k disable handles the rest)
         assert_eq!(
             spec.ui_restrictions(),
@@ -671,7 +679,7 @@ mod tests {
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
 
-        assert!(!spec.disallowWin32kSystemCalls());
+        assert!(!spec.disallow_win32k_system_calls());
         // WRITECLIPBOARD + backend defaults (isolation=container: HANDLES+GLOBALATOMS,
         // desktopSystemControl=false: DESKTOP+EXITWINDOWS, systemSettings=none: SYSTEMPARAMETERS+DISPLAYSETTINGS, ime=false: IME)
         let expected = BaseContainerRunner::UILIMIT_WRITECLIPBOARD
@@ -697,7 +705,7 @@ mod tests {
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
 
-        assert!(!spec.disallowWin32kSystemCalls());
+        assert!(!spec.disallow_win32k_system_calls());
         // INJECTION + backend defaults
         let expected = BaseContainerRunner::UILIMIT_INJECTION
             | BaseContainerRunner::UILIMIT_HANDLES

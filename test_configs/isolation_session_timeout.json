@@ -1,0 +1,9 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "isolation-session-timeout",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "ping -n 30 127.0.0.1 >nul",
+    "timeout": 1500
+  }
+}

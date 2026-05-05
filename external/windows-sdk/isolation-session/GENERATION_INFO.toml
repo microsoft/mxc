@@ -1,0 +1,16 @@
+# Provenance information for the generated isolation_session_bindings crate.
+# Updated manually after running the generation tool; verified by the bindings crate's build.rs.
+
+[source]
+# OS repo branches and commit that produced the WinMD.
+# - os_build_branch: labelled build snapshot (immutable — matches VM build number).
+# - os_official_branch: rolling development lineage (moves over time).
+os_build_branch = "build/ge_current_directwinpd_uxip/26611.260501-1700"
+os_official_branch = "official/ge_current_directwinpd_uxip"
+os_commit = "c506035bee176f03a5a46a87a49f3c8c178d3c3c"
+winmd_sha256 = "7bfd438b60b9bf01017aa8574a294649700d38024929effe24fb146d6b9bc309"
+
+[tool]
+windows_bindgen_version = "0.62.1"
+target_windows_crate = "0.62"
+generated_date = "2026-05-02"

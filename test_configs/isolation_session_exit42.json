@@ -1,0 +1,9 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "isolation-session-exit42",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "exit 42",
+    "timeout": 30000
+  }
+}

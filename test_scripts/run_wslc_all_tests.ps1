@@ -33,7 +33,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $TestConfigs = Join-Path $RepoRoot "test_configs"
 
-# Find binary — prefer explicit path, then probe target-specific and default dirs.
+# Find binary -- prefer explicit path, then probe target-specific and default dirs.
 $Target = "x86_64-pc-windows-msvc"
 $Profile = if ($Debug) { "debug" } else { "release" }
 
@@ -93,6 +93,17 @@ function Run-WslcTest {
     $exitCode = $LASTEXITCODE
     $ErrorActionPreference = $prevPref
 
+    # Access violation (0xC0000005) or other hard crashes corrupt WSL runtime
+    # state, causing subsequent WslcCreateSession calls to fail with
+    # ERROR_SHARING_VIOLATION. Recover by restarting WSL.
+    $isCrash = ($exitCode -lt -1000000000) -or ($exitCode -eq -2147483645)
+    if ($isCrash) {
+        Write-Host "" # newline before recovery message
+        Write-Host "    [recovery] Process crashed (exit $exitCode) -- restarting WSL..." -ForegroundColor Yellow
+        $null = wsl --shutdown 2>&1
+        Start-Sleep 15
+    }
+
     $pass = $true
     $reason = ""
 
@@ -116,6 +127,10 @@ function Run-WslcTest {
             Write-Host "    > $($line.TrimEnd())" -ForegroundColor Gray
         }
     }
+
+    # Brief delay between tests to let the WSLC runtime fully release
+    # session resources (mounts, networking) before the next test starts.
+    Start-Sleep 2
 
     return @{ Name = $ConfigFile; Pass = $pass; Skipped = $false; Reason = $reason }
 }
@@ -154,9 +169,9 @@ Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -OutputContains "Starting long task"))
 
 # Summary
-$passed = ($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count
-$failed = ($results | Where-Object { -not $_.Pass -and -not $_.Skipped }).Count
-$skipped = ($results | Where-Object { $_.Skipped }).Count
+$passed = @($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count
+$failed = @($results | Where-Object { -not $_.Pass -and -not $_.Skipped }).Count
+$skipped = @($results | Where-Object { $_.Skipped }).Count
 $total = $results.Count
 $executed = $passed + $failed
 

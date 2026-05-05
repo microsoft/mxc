@@ -1,1 +1,88 @@
-// Copy BaseContainerSpecification.fbs from Windows SDK
+// Copyright (c) Microsoft Corporation. All rights reserved.
+//
+// FlatBuffers schema for the BaseContainer sandbox specification.
+//
+// ---- FlatBuffers Schema Evolution Rules ----
+//
+// Compatible (non-breaking) changes:
+//   - Add new fields to the END of a table (they get the next vtable slot).
+//   - Add new tables, enums, or union members.
+//   - Deprecate a field with (deprecated) -- the slot is preserved, readers skip it.
+//   - Rename a field or table (wire format uses slot indices, not names).
+//
+// BREAKING changes (will corrupt existing buffers):
+//   - Remove or reorder fields in a table.
+//   - Change a field's type (e.g. uint32 -> int32, or scalar -> string).
+//   - Change a field's default value.
+//   - Add/remove/reorder values in an enum that is already serialized.
+//   - Change the file_identifier or root_type.
+//   - Change a field from scalar to non-scalar (or vice versa).
+//
+// To machine-check for breaking changes, keep a copy of the last shipped schema
+// (e.g. SandboxSpec.previous.fbs) and run:
+//
+//   flatc --conform SandboxSpec.previous.fbs SandboxSpec.fbs
+//
+// --conform verifies that every field/enum/table in the old schema still exists
+// at the same vtable slot, type, and default in the new schema. Any incompatible
+// change produces an error. Add this as a build step or PR gate to catch regressions.
+//
+//  Steps:
+//      cp SandboxSpec.fbs SandboxSpec.previous.fbs
+//      <make changes>
+//      & "$($env:OBJECT_ROOT)\onecore\base\appmodel\execmodel\vcpkg\$($env:_BuildAlt)\vcpkg_packages\flatbuffers_x64-host-windows\tools\flatbuffers\flatc.exe" --conform SandboxSpec.previous.fbs SandboxSpec.fbs
+//
+
+namespace SandboxTechSpecLayout;
+
+// Integrity level
+//  Note: With "system_default", the system chooses an expected secure default (`low` IL for processes with appcontainer),
+//  while "inherit" will apply classic win32 CreateProcess IL inheritance from parent process.
+enum IntegrityLevel : byte { system_default, inherit, untrusted, low, medium, high }
+
+table SandboxSpec {
+    // Schema version — consumers must reject unknown versions.
+    version:string (required);
+
+    // Enable AppContainer isolation for the sandboxed process.
+    app_container:bool = false;
+
+    // Integrity level RID (e.g., SECURITY_MANDATORY_LOW_RID = 0x1000).
+    // 0 means "don't change" (inherit caller's IL).
+    integrity_level:uint32 = 0 (deprecated);
+
+    // Completely disables access to the GUI subsystem
+    // via DisallowWin32kSystemCalls mitigation
+    disallow_win32k_system_calls:bool = false;
+
+    // JOB_OBJECT_UILIMIT_* bitmask for UI restrictions.
+    ui_restrictions:uint64 = 0;
+
+    // Strip privileges from the token (WIN://NOALLAPPPKG).
+    least_privilege:bool = false;
+
+    // Comma-delimited capability names (e.g., "internetClient,registryRead").
+    capabilities:string;
+
+    // Directory paths with read/write access.
+    fs_read_write:[string];
+
+    // Directory paths with read-only access.
+    fs_read_only:[string];
+
+    network_policy: NetworkPolicy;
+
+    // Integrity behavior
+    integrity:IntegrityLevel = system_default;
+}
+
+table proxy_info {
+    url:string;
+}
+
+table NetworkPolicy {
+    proxy:proxy_info;
+}
+
+root_type SandboxSpec;
+file_identifier "SBOX";

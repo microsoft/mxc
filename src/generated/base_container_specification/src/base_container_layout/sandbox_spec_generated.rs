@@ -22,14 +22,14 @@ impl<'a> ::flatbuffers::Follow<'a> for SandboxSpec<'a> {
 impl<'a> SandboxSpec<'a> {
     pub const VT_VERSION: ::flatbuffers::VOffsetT = 4;
     pub const VT_APP_CONTAINER: ::flatbuffers::VOffsetT = 6;
-    pub const VT_INTEGRITY_LEVEL: ::flatbuffers::VOffsetT = 8;
-    pub const VT_DISALLOWWIN32KSYSTEMCALLS: ::flatbuffers::VOffsetT = 10;
+    pub const VT_DISALLOW_WIN32K_SYSTEM_CALLS: ::flatbuffers::VOffsetT = 10;
     pub const VT_UI_RESTRICTIONS: ::flatbuffers::VOffsetT = 12;
     pub const VT_LEAST_PRIVILEGE: ::flatbuffers::VOffsetT = 14;
     pub const VT_CAPABILITIES: ::flatbuffers::VOffsetT = 16;
     pub const VT_FS_READ_WRITE: ::flatbuffers::VOffsetT = 18;
     pub const VT_FS_READ_ONLY: ::flatbuffers::VOffsetT = 20;
     pub const VT_NETWORK_POLICY: ::flatbuffers::VOffsetT = 22;
+    pub const VT_INTEGRITY: ::flatbuffers::VOffsetT = 24;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -59,12 +59,12 @@ impl<'a> SandboxSpec<'a> {
         if let Some(x) = args.capabilities {
             builder.add_capabilities(x);
         }
-        builder.add_integrity_level(args.integrity_level);
         if let Some(x) = args.version {
             builder.add_version(x);
         }
+        builder.add_integrity(args.integrity);
         builder.add_least_privilege(args.least_privilege);
-        builder.add_disallowWin32kSystemCalls(args.disallowWin32kSystemCalls);
+        builder.add_disallow_win32k_system_calls(args.disallow_win32k_system_calls);
         builder.add_app_container(args.app_container);
         builder.finish()
     }
@@ -75,8 +75,7 @@ impl<'a> SandboxSpec<'a> {
             alloc::string::ToString::to_string(x)
         };
         let app_container = self.app_container();
-        let integrity_level = self.integrity_level();
-        let disallowWin32kSystemCalls = self.disallowWin32kSystemCalls();
+        let disallow_win32k_system_calls = self.disallow_win32k_system_calls();
         let ui_restrictions = self.ui_restrictions();
         let least_privilege = self.least_privilege();
         let capabilities = self
@@ -95,17 +94,18 @@ impl<'a> SandboxSpec<'a> {
         let network_policy = self
             .network_policy()
             .map(|x| alloc::boxed::Box::new(x.unpack()));
+        let integrity = self.integrity();
         SandboxSpecT {
             version,
             app_container,
-            integrity_level,
-            disallowWin32kSystemCalls,
+            disallow_win32k_system_calls,
             ui_restrictions,
             least_privilege,
             capabilities,
             fs_read_write,
             fs_read_only,
             network_policy,
+            integrity,
         }
     }
 
@@ -132,24 +132,13 @@ impl<'a> SandboxSpec<'a> {
         }
     }
     #[inline]
-    pub fn integrity_level(&self) -> u32 {
+    pub fn disallow_win32k_system_calls(&self) -> bool {
         // Safety:
         // Created from valid Table for this object
         // which contains a valid value in this slot
         unsafe {
             self._tab
-                .get::<u32>(SandboxSpec::VT_INTEGRITY_LEVEL, Some(0))
-                .unwrap()
-        }
-    }
-    #[inline]
-    pub fn disallowWin32kSystemCalls(&self) -> bool {
-        // Safety:
-        // Created from valid Table for this object
-        // which contains a valid value in this slot
-        unsafe {
-            self._tab
-                .get::<bool>(SandboxSpec::VT_DISALLOWWIN32KSYSTEMCALLS, Some(false))
+                .get::<bool>(SandboxSpec::VT_DISALLOW_WIN32K_SYSTEM_CALLS, Some(false))
                 .unwrap()
         }
     }
@@ -224,6 +213,20 @@ impl<'a> SandboxSpec<'a> {
                 )
         }
     }
+    #[inline]
+    pub fn integrity(&self) -> IntegrityLevel {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<IntegrityLevel>(
+                    SandboxSpec::VT_INTEGRITY,
+                    Some(IntegrityLevel::system_default),
+                )
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for SandboxSpec<'_> {
@@ -235,10 +238,9 @@ impl ::flatbuffers::Verifiable for SandboxSpec<'_> {
         v.visit_table(pos)?
             .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("version", Self::VT_VERSION, true)?
             .visit_field::<bool>("app_container", Self::VT_APP_CONTAINER, false)?
-            .visit_field::<u32>("integrity_level", Self::VT_INTEGRITY_LEVEL, false)?
             .visit_field::<bool>(
-                "disallowWin32kSystemCalls",
-                Self::VT_DISALLOWWIN32KSYSTEMCALLS,
+                "disallow_win32k_system_calls",
+                Self::VT_DISALLOW_WIN32K_SYSTEM_CALLS,
                 false,
             )?
             .visit_field::<u64>("ui_restrictions", Self::VT_UI_RESTRICTIONS, false)?
@@ -259,6 +261,7 @@ impl ::flatbuffers::Verifiable for SandboxSpec<'_> {
                 Self::VT_NETWORK_POLICY,
                 false,
             )?
+            .visit_field::<IntegrityLevel>("integrity", Self::VT_INTEGRITY, false)?
             .finish();
         Ok(())
     }
@@ -266,8 +269,7 @@ impl ::flatbuffers::Verifiable for SandboxSpec<'_> {
 pub struct SandboxSpecArgs<'a> {
     pub version: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub app_container: bool,
-    pub integrity_level: u32,
-    pub disallowWin32kSystemCalls: bool,
+    pub disallow_win32k_system_calls: bool,
     pub ui_restrictions: u64,
     pub least_privilege: bool,
     pub capabilities: Option<::flatbuffers::WIPOffset<&'a str>>,
@@ -282,6 +284,7 @@ pub struct SandboxSpecArgs<'a> {
         >,
     >,
     pub network_policy: Option<::flatbuffers::WIPOffset<NetworkPolicy<'a>>>,
+    pub integrity: IntegrityLevel,
 }
 impl<'a> Default for SandboxSpecArgs<'a> {
     #[inline]
@@ -289,14 +292,14 @@ impl<'a> Default for SandboxSpecArgs<'a> {
         SandboxSpecArgs {
             version: None, // required field
             app_container: false,
-            integrity_level: 0,
-            disallowWin32kSystemCalls: false,
+            disallow_win32k_system_calls: false,
             ui_restrictions: 0,
             least_privilege: false,
             capabilities: None,
             fs_read_write: None,
             fs_read_only: None,
             network_policy: None,
+            integrity: IntegrityLevel::system_default,
         }
     }
 }
@@ -317,15 +320,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SandboxSpecBuilder<'a, 'b, A>
             .push_slot::<bool>(SandboxSpec::VT_APP_CONTAINER, app_container, false);
     }
     #[inline]
-    pub fn add_integrity_level(&mut self, integrity_level: u32) {
-        self.fbb_
-            .push_slot::<u32>(SandboxSpec::VT_INTEGRITY_LEVEL, integrity_level, 0);
-    }
-    #[inline]
-    pub fn add_disallowWin32kSystemCalls(&mut self, disallowWin32kSystemCalls: bool) {
+    pub fn add_disallow_win32k_system_calls(&mut self, disallow_win32k_system_calls: bool) {
         self.fbb_.push_slot::<bool>(
-            SandboxSpec::VT_DISALLOWWIN32KSYSTEMCALLS,
-            disallowWin32kSystemCalls,
+            SandboxSpec::VT_DISALLOW_WIN32K_SYSTEM_CALLS,
+            disallow_win32k_system_calls,
             false,
         );
     }
@@ -382,6 +380,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SandboxSpecBuilder<'a, 'b, A>
             );
     }
     #[inline]
+    pub fn add_integrity(&mut self, integrity: IntegrityLevel) {
+        self.fbb_.push_slot::<IntegrityLevel>(
+            SandboxSpec::VT_INTEGRITY,
+            integrity,
+            IntegrityLevel::system_default,
+        );
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> SandboxSpecBuilder<'a, 'b, A> {
@@ -404,10 +410,9 @@ impl ::core::fmt::Debug for SandboxSpec<'_> {
         let mut ds = f.debug_struct("SandboxSpec");
         ds.field("version", &self.version());
         ds.field("app_container", &self.app_container());
-        ds.field("integrity_level", &self.integrity_level());
         ds.field(
-            "disallowWin32kSystemCalls",
-            &self.disallowWin32kSystemCalls(),
+            "disallow_win32k_system_calls",
+            &self.disallow_win32k_system_calls(),
         );
         ds.field("ui_restrictions", &self.ui_restrictions());
         ds.field("least_privilege", &self.least_privilege());
@@ -415,6 +420,7 @@ impl ::core::fmt::Debug for SandboxSpec<'_> {
         ds.field("fs_read_write", &self.fs_read_write());
         ds.field("fs_read_only", &self.fs_read_only());
         ds.field("network_policy", &self.network_policy());
+        ds.field("integrity", &self.integrity());
         ds.finish()
     }
 }
@@ -423,28 +429,28 @@ impl ::core::fmt::Debug for SandboxSpec<'_> {
 pub struct SandboxSpecT {
     pub version: alloc::string::String,
     pub app_container: bool,
-    pub integrity_level: u32,
-    pub disallowWin32kSystemCalls: bool,
+    pub disallow_win32k_system_calls: bool,
     pub ui_restrictions: u64,
     pub least_privilege: bool,
     pub capabilities: Option<alloc::string::String>,
     pub fs_read_write: Option<alloc::vec::Vec<alloc::string::String>>,
     pub fs_read_only: Option<alloc::vec::Vec<alloc::string::String>>,
     pub network_policy: Option<alloc::boxed::Box<NetworkPolicyT>>,
+    pub integrity: IntegrityLevel,
 }
 impl Default for SandboxSpecT {
     fn default() -> Self {
         Self {
             version: alloc::string::ToString::to_string(""),
             app_container: false,
-            integrity_level: 0,
-            disallowWin32kSystemCalls: false,
+            disallow_win32k_system_calls: false,
             ui_restrictions: 0,
             least_privilege: false,
             capabilities: None,
             fs_read_write: None,
             fs_read_only: None,
             network_policy: None,
+            integrity: IntegrityLevel::system_default,
         }
     }
 }
@@ -458,8 +464,7 @@ impl SandboxSpecT {
             _fbb.create_string(x)
         });
         let app_container = self.app_container;
-        let integrity_level = self.integrity_level;
-        let disallowWin32kSystemCalls = self.disallowWin32kSystemCalls;
+        let disallow_win32k_system_calls = self.disallow_win32k_system_calls;
         let ui_restrictions = self.ui_restrictions;
         let least_privilege = self.least_privilege;
         let capabilities = self.capabilities.as_ref().map(|x| _fbb.create_string(x));
@@ -472,19 +477,20 @@ impl SandboxSpecT {
             _fbb.create_vector(&w)
         });
         let network_policy = self.network_policy.as_ref().map(|x| x.pack(_fbb));
+        let integrity = self.integrity;
         SandboxSpec::create(
             _fbb,
             &SandboxSpecArgs {
                 version,
                 app_container,
-                integrity_level,
-                disallowWin32kSystemCalls,
+                disallow_win32k_system_calls,
                 ui_restrictions,
                 least_privilege,
                 capabilities,
                 fs_read_write,
                 fs_read_only,
                 network_policy,
+                integrity,
             },
         )
     }

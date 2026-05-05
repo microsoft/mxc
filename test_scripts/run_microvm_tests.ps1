@@ -12,23 +12,43 @@
     - Reports pass/fail summary with per-test performance timing
     - Writes microvm-perf-results.json for CI artifact consumption
 
-.PARAMETER WxcExePath
-    Path to wxc-exec.exe. Defaults to ..\src\target\debug\wxc-exec.exe
+.PARAMETER Release
+    Use release build (default: debug)
+
+.PARAMETER BinDir
+    Explicit binary directory. Overrides -Release logic when provided.
 
 .PARAMETER ConfigDir
-    Path to test configs directory. Defaults to ..\test_configs
+    Path to test configs directory. Defaults to <repo-root>\test_configs
 
 .EXAMPLE
     .\run_microvm_tests.ps1
-    .\run_microvm_tests.ps1 -WxcExePath C:\build\wxc-exec.exe
+    .\run_microvm_tests.ps1 -Release
+    .\run_microvm_tests.ps1 -BinDir C:\build\output
 #>
 
 param(
-    [string]$WxcExePath = "..\src\target\debug\wxc-exec.exe",
-    [string]$ConfigDir = "..\test_configs"
+    [switch]$Release,
+    [string]$BinDir,
+    [string]$ConfigDir
 )
 
 $ErrorActionPreference = "Stop"
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+
+if (-not $BinDir) {
+    if ($Release) {
+        $BinDir = Join-Path $RepoRoot "src\target\release"
+    } else {
+        $BinDir = Join-Path $RepoRoot "src\target\debug"
+    }
+}
+
+if (-not $ConfigDir) {
+    $ConfigDir = Join-Path $RepoRoot "test_configs"
+}
+
+$WxcExePath = Join-Path $BinDir "wxc-exec.exe"
 
 # -- WHP check (local runs only) ---------------------------------------------
 # In CI, the workflow checks WHP and fails before reaching this script.

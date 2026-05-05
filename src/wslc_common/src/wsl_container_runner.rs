@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use wxc_common::logger::Logger;
 use wxc_common::models::{CodexRequest, NetworkPolicy, ScriptResponse, WslcConfig};
 use wxc_common::script_runner::ScriptRunner;
-use wxc_common::string_util::CoTaskMemPWSTR;
+use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
 use crate::policy_mapping;
 use crate::wslc_bindings::*;
@@ -212,7 +212,7 @@ impl WSLContainerRunner {
                 )));
             }
         };
-        let wide_path: Vec<u16> = tar_path.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide_path: Vec<u16> = to_wide(&tar_path);
 
         match tar_format {
             TarFormat::DockerSave => {
@@ -324,120 +324,156 @@ impl ScriptRunner for WSLContainerRunner {
 }
 
 impl WSLContainerRunner {
-    unsafe fn run_internal(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
-
-        // -- Step 0: COM initialization --
+    /// Initialize COM and load the WSLC SDK at runtime.
+    ///
+    /// # Safety
+    /// Must be called once per process before any other WSLC SDK functions.
+    /// The returned `WslcSdk` holds raw function pointers loaded from `wslcsdk.dll`;
+    /// callers must keep it alive for the duration of all SDK use.
+    unsafe fn init_and_load_sdk(logger: &mut Logger) -> Result<WslcSdk, ScriptResponse> {
         let com_hr = windows::Win32::System::Com::CoInitializeEx(
             None,
             windows::Win32::System::Com::COINIT_MULTITHREADED,
         );
         if com_hr.is_err() {
-            return ScriptResponse::error(&format!("COM initialization failed: {:?}", com_hr));
+            return Err(ScriptResponse::error(&format!(
+                "COM initialization failed: {:?}",
+                com_hr
+            )));
         }
         let _ = writeln!(logger, "[WSLC] COM initialized");
 
-        // -- Step 0b: Load WSLC SDK at runtime --
         let sdk = match WslcSdk::load() {
             Ok(s) => s,
-            Err(e) => return ScriptResponse::error(&e),
+            Err(e) => return Err(ScriptResponse::error(&e)),
         };
 
-        // -- Step 1: Prerequisites check --
+        // Prerequisites check
         let mut can_run: BOOL = 0;
         let mut missing = WslcComponentFlags::None;
         let hr = (sdk.WslcCanRun)(&mut can_run, &mut missing);
         if hr != S_OK {
-            return sdk_error("WslcCanRun failed", hr, "");
+            return Err(sdk_error("WslcCanRun failed", hr, ""));
         }
         if can_run == 0 {
-            return ScriptResponse::error(&format!(
+            return Err(ScriptResponse::error(&format!(
                 "WSLC runtime not available. Missing components: {:?}. \
                  Ensure WSL2 and the WSLC SDK are installed.",
                 missing
-            ));
+            )));
         }
         let _ = writeln!(logger, "[WSLC] Runtime check passed");
 
-        // -- Step 2: Session settings --
-        let session_name: Vec<u16> = format!("{}\0", request.container_id)
-            .encode_utf16()
-            .collect();
+        Ok(sdk)
+    }
+
+    /// Configure session settings and create the session.
+    /// Returns the session guard (RAII).
+    /// Keeps owned string data alive through session creation.
+    ///
+    /// # Safety
+    /// `sdk` must contain valid, currently-loaded function pointers.
+    /// COM must already be initialized on this thread.
+    unsafe fn create_session(
+        &self,
+        sdk: &WslcSdk,
+        request: &CodexRequest,
+        logger: &mut Logger,
+    ) -> Result<WslcSessionGuard, ScriptResponse> {
+        let session_name: Vec<u16> = to_wide(&request.container_id);
         let storage_path_str = self.config.storage_path.clone().unwrap_or_else(|| {
             std::env::temp_dir()
                 .join("mxc-wslc-sessions")
                 .to_string_lossy()
                 .to_string()
         });
-        let storage_path_wide: Vec<u16> =
-            format!("{}\0", storage_path_str).encode_utf16().collect();
+        let storage_path_wide: Vec<u16> = to_wide(&storage_path_str);
 
-        let mut session_settings = std::mem::zeroed::<WslcSessionSettings>();
+        let mut settings = std::mem::zeroed::<WslcSessionSettings>();
         let hr = (sdk.WslcInitSessionSettings)(
             session_name.as_ptr(),
             storage_path_wide.as_ptr(),
-            &mut session_settings,
+            &mut settings,
         );
         if hr != S_OK {
-            return sdk_error("WslcInitSessionSettings failed", hr, "");
+            return Err(sdk_error("WslcInitSessionSettings failed", hr, ""));
         }
 
         if let Some(cpu) = self.config.cpu_count {
-            let hr = (sdk.WslcSetSessionSettingsCpuCount)(&mut session_settings, cpu);
+            let hr = (sdk.WslcSetSessionSettingsCpuCount)(&mut settings, cpu);
             if hr != S_OK {
-                return sdk_error("WslcSetSessionSettingsCpuCount failed", hr, "");
+                return Err(sdk_error("WslcSetSessionSettingsCpuCount failed", hr, ""));
             }
         }
         if let Some(mem_mb) = self.config.memory_mb {
             let mem_mb = match u32::try_from(mem_mb) {
                 Ok(v) => v,
                 Err(_) => {
-                    return ScriptResponse::error(&format!(
+                    return Err(ScriptResponse::error(&format!(
                         "Invalid config: memory_mb value {} exceeds maximum {} MB",
                         mem_mb,
                         u32::MAX
-                    ));
+                    )));
                 }
             };
-            let hr = (sdk.WslcSetSessionSettingsMemory)(&mut session_settings, mem_mb);
+            let hr = (sdk.WslcSetSessionSettingsMemory)(&mut settings, mem_mb);
             if hr != S_OK {
-                return sdk_error("WslcSetSessionSettingsMemory failed", hr, "");
+                return Err(sdk_error("WslcSetSessionSettingsMemory failed", hr, ""));
             }
         }
         if request.script_timeout > 0 {
-            let hr =
-                (sdk.WslcSetSessionSettingsTimeout)(&mut session_settings, request.script_timeout);
+            let hr = (sdk.WslcSetSessionSettingsTimeout)(&mut settings, request.script_timeout);
             if hr != S_OK {
-                return sdk_error("WslcSetSessionSettingsTimeout failed", hr, "");
+                return Err(sdk_error("WslcSetSessionSettingsTimeout failed", hr, ""));
             }
         }
         if self.config.gpu {
             let hr = (sdk.WslcSetSessionSettingsFeatureFlags)(
-                &mut session_settings,
+                &mut settings,
                 WslcSessionFeatureFlags::EnableGpu,
             );
             if hr != S_OK {
-                return sdk_error("WslcSetSessionSettingsFeatureFlags failed", hr, "");
+                return Err(sdk_error(
+                    "WslcSetSessionSettingsFeatureFlags failed",
+                    hr,
+                    "",
+                ));
             }
         }
 
-        // -- Step 3: Create session --
+        // Create session while string data is still alive
         let mut session: WslcSession = ptr::null_mut();
         let mut err_msg = CoTaskMemPWSTR::null();
-        let hr = (sdk.WslcCreateSession)(&mut session_settings, &mut session, err_msg.as_mut_ptr());
+        let hr = (sdk.WslcCreateSession)(&mut settings, &mut session, err_msg.as_mut_ptr());
         if hr != S_OK {
             let msg = err_msg.to_string_lossy();
-            return sdk_error("WslcCreateSession failed", hr, &msg);
+            return Err(sdk_error("WslcCreateSession failed", hr, &msg));
         }
-        let session_guard = WslcSessionGuard::from_raw(session, sdk.WslcReleaseSession);
         let _ = writeln!(logger, "[WSLC] Session created");
 
-        // -- Step 4: Image check --
+        Ok(WslcSessionGuard::from_raw(
+            session,
+            sdk.WslcTerminateSession,
+            sdk.WslcReleaseSession,
+        ))
+    }
+
+    /// Check if image exists, import from tar, or pull from registry.
+    ///
+    /// # Safety
+    /// `sdk` must contain valid function pointers and `session` must be a
+    /// live session handle obtained from `WslcCreateSession`.
+    unsafe fn resolve_image(
+        &self,
+        sdk: &WslcSdk,
+        session: WslcSession,
+        logger: &mut Logger,
+    ) -> Result<(), ScriptResponse> {
         let mut images: *mut WslcImageInfo = ptr::null_mut();
         let mut image_count: u32 = 0;
-        let hr = (sdk.WslcListSessionImages)(session_guard.as_raw(), &mut images, &mut image_count);
+        let hr = (sdk.WslcListSessionImages)(session, &mut images, &mut image_count);
         if hr != S_OK {
-            return sdk_error("WslcListSessionImages failed", hr, "");
+            return Err(sdk_error("WslcListSessionImages failed", hr, ""));
         }
 
         let image_name = &self.config.image;
@@ -472,15 +508,7 @@ impl WSLContainerRunner {
                 let _ = writeln!(logger, "[WSLC] Image '{}' found", image_name);
             }
         } else if let Some(tar_path) = &self.config.image_tar_path {
-            if let Err(resp) = Self::import_image_from_tar(
-                &sdk,
-                session_guard.as_raw(),
-                image_name,
-                tar_path,
-                logger,
-            ) {
-                return resp;
-            }
+            Self::import_image_from_tar(sdk, session, image_name, tar_path, logger)?;
         } else {
             // Pull from registry
             // TODO: Move image pulling to a setup script (scripts/setup-wslc.ps1) as
@@ -499,20 +527,272 @@ impl WSLContainerRunner {
                 progress_callback_context: ptr::null_mut(),
                 auth_info: ptr::null(),
             };
-            err_msg = CoTaskMemPWSTR::null();
-            let hr = (sdk.WslcPullSessionImage)(
-                session_guard.as_raw(),
-                &pull_opts,
-                err_msg.as_mut_ptr(),
-            );
+            let mut err_msg = CoTaskMemPWSTR::null();
+            let hr = (sdk.WslcPullSessionImage)(session, &pull_opts, err_msg.as_mut_ptr());
             if hr != S_OK {
                 let msg = err_msg.to_string_lossy();
-                return sdk_error(&format!("Failed to pull image '{}'", image_name), hr, &msg);
+                return Err(sdk_error(
+                    &format!("Failed to pull image '{}'", image_name),
+                    hr,
+                    &msg,
+                ));
             }
             let _ = writeln!(logger, "[WSLC] Image '{}' pulled successfully", image_name);
         }
 
-        // -- Step 5: Process settings --
+        Ok(())
+    }
+
+    /// Apply iptables rules inside a running container for host filtering.
+    ///
+    /// # Safety
+    /// `sdk` must contain valid function pointers and `container` must be a
+    /// live container handle for a started container.
+    unsafe fn apply_iptables_rules(
+        sdk: &WslcSdk,
+        container: WslcContainer,
+        ipt_cmd: &str,
+        logger: &mut Logger,
+    ) -> Result<(), ScriptResponse> {
+        let _ = writeln!(logger, "[WSLC] Applying iptables rules for host filtering");
+        let mut ipt_settings = std::mem::zeroed::<WslcProcessSettings>();
+        let hr = (sdk.WslcInitProcessSettings)(&mut ipt_settings);
+        if hr != S_OK {
+            return Err(sdk_error(
+                "WslcInitProcessSettings (iptables) failed",
+                hr,
+                "",
+            ));
+        }
+
+        let ipt_sh = b"/bin/sh\0";
+        let ipt_c = b"-c\0";
+        let ipt_script = format!("{}\0", ipt_cmd);
+        let ipt_script_bytes = ipt_script.as_bytes();
+        let ipt_argv: [PCSTR; 3] = [
+            ipt_sh.as_ptr() as PCSTR,
+            ipt_c.as_ptr() as PCSTR,
+            ipt_script_bytes.as_ptr() as PCSTR,
+        ];
+        let hr = (sdk.WslcSetProcessSettingsCmdLine)(
+            &mut ipt_settings,
+            ipt_argv.as_ptr(),
+            ipt_argv.len(),
+        );
+        if hr != S_OK {
+            return Err(sdk_error(
+                "WslcSetProcessSettingsCmdLine (iptables) failed",
+                hr,
+                "",
+            ));
+        }
+
+        let mut ipt_process: WslcProcess = ptr::null_mut();
+        let mut err_msg = CoTaskMemPWSTR::null();
+        let hr = (sdk.WslcCreateContainerProcess)(
+            container,
+            &mut ipt_settings,
+            &mut ipt_process,
+            err_msg.as_mut_ptr(),
+        );
+        if hr != S_OK {
+            let msg = err_msg.to_string_lossy();
+            return Err(sdk_error("Failed to exec iptables rules", hr, &msg));
+        }
+        let ipt_guard = WslcProcessGuard::from_raw(ipt_process, sdk.WslcReleaseProcess);
+
+        // Wait for iptables to complete
+        let mut ipt_exit_event: HANDLE = ptr::null_mut();
+        let hr = (sdk.WslcGetProcessExitEvent)(ipt_guard.as_raw(), &mut ipt_exit_event);
+        if hr != S_OK {
+            return Err(sdk_error(
+                "WslcGetProcessExitEvent (iptables) failed",
+                hr,
+                "",
+            ));
+        }
+        if !ipt_exit_event.is_null() {
+            let wait_result = windows::Win32::System::Threading::WaitForSingleObject(
+                windows::Win32::Foundation::HANDLE(ipt_exit_event),
+                30_000,
+            );
+            if wait_result == windows::Win32::Foundation::WAIT_TIMEOUT {
+                return Err(ScriptResponse::error("iptables rules timed out after 30s"));
+            }
+        }
+
+        let mut ipt_exit_code: i32 = -1;
+        let hr = (sdk.WslcGetProcessExitCode)(ipt_guard.as_raw(), &mut ipt_exit_code);
+        if hr != S_OK {
+            return Err(sdk_error(
+                "WslcGetProcessExitCode (iptables) failed",
+                hr,
+                "",
+            ));
+        }
+        if ipt_exit_code != 0 {
+            return Err(ScriptResponse::error(&format!(
+                "iptables rules failed with exit code {} \
+                 (image may not have iptables installed)",
+                ipt_exit_code
+            )));
+        }
+        let _ = writeln!(logger, "[WSLC] iptables rules applied successfully");
+        Ok(())
+    }
+
+    /// Wait for process exit with timeout enforcement.
+    /// Returns (exit_code, timed_out).
+    ///
+    /// # Safety
+    /// `sdk` must contain valid function pointers. `process_guard` and
+    /// `container_guard` must hold live handles from this session.
+    unsafe fn wait_for_process(
+        sdk: &WslcSdk,
+        process_guard: &WslcProcessGuard,
+        container_guard: &WslcContainerGuard,
+        io_ctx: &IoContext,
+        request: &CodexRequest,
+        logger: &mut Logger,
+    ) -> Result<(i32, bool), ScriptResponse> {
+        let mut exit_event: HANDLE = ptr::null_mut();
+        let hr = (sdk.WslcGetProcessExitEvent)(process_guard.as_raw(), &mut exit_event);
+        if hr != S_OK {
+            return Err(sdk_error("WslcGetProcessExitEvent failed", hr, ""));
+        }
+
+        let wait_ms = if request.script_timeout > 0 {
+            request.script_timeout
+        } else {
+            u32::MAX
+        };
+
+        let mut timed_out = false;
+        if !exit_event.is_null() {
+            let wait_result = windows::Win32::System::Threading::WaitForSingleObject(
+                windows::Win32::Foundation::HANDLE(exit_event),
+                wait_ms,
+            );
+            if wait_result == windows::Win32::Foundation::WAIT_TIMEOUT {
+                timed_out = true;
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Execution timeout ({}ms) reached — stopping container",
+                    wait_ms
+                );
+                let mut err_msg = CoTaskMemPWSTR::null();
+                let _ = (sdk.WslcStopContainer)(
+                    container_guard.as_raw(),
+                    WslcSignal::SigTerm,
+                    2,
+                    err_msg.as_mut_ptr(),
+                );
+                drop(err_msg);
+            }
+        }
+
+        // Wait for exit callback to fire — guarantees all I/O is flushed.
+        {
+            let (lock, cvar) = &*io_ctx.exited;
+            let mut exited = lock.lock().unwrap_or_else(|e| e.into_inner());
+            if !*exited {
+                let result = cvar
+                    .wait_timeout(exited, std::time::Duration::from_secs(30))
+                    .unwrap_or_else(|e| e.into_inner());
+                exited = result.0;
+                if !*exited {
+                    let _ = writeln!(
+                        logger,
+                        "[WSLC] Warning: exit callback did not fire within 30s"
+                    );
+                }
+            }
+            drop(exited);
+        }
+
+        let mut exit_code: i32 = -1;
+        let hr = (sdk.WslcGetProcessExitCode)(process_guard.as_raw(), &mut exit_code);
+        if hr != S_OK && !timed_out {
+            return Err(sdk_error("WslcGetProcessExitCode failed", hr, ""));
+        }
+        if timed_out {
+            let _ = writeln!(logger, "[WSLC] Process killed after timeout");
+        } else {
+            let _ = writeln!(logger, "[WSLC] Process exited with code {}", exit_code);
+        }
+
+        Ok((exit_code, timed_out))
+    }
+
+    /// Collect captured I/O and build the final ScriptResponse.
+    fn collect_output(
+        io_ctx: &IoContext,
+        exit_code: i32,
+        timed_out: bool,
+        wait_ms: u32,
+        logger: &mut Logger,
+    ) -> ScriptResponse {
+        let stdout =
+            String::from_utf8_lossy(&io_ctx.stdout.lock().unwrap_or_else(|e| e.into_inner()))
+                .to_string();
+        let stderr =
+            String::from_utf8_lossy(&io_ctx.stderr.lock().unwrap_or_else(|e| e.into_inner()))
+                .to_string();
+
+        if !stdout.is_empty() {
+            let _ = writeln!(logger, "[WSLC] Captured {} bytes stdout", stdout.len());
+        }
+        if !stderr.is_empty() {
+            let _ = writeln!(logger, "[WSLC] Captured {} bytes stderr", stderr.len());
+        }
+
+        ScriptResponse {
+            exit_code: if timed_out { -1 } else { exit_code },
+            standard_out: stdout,
+            standard_err: stderr,
+            error_message: if timed_out {
+                format!("Process timed out after {}ms and was terminated", wait_ms)
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    /// Orchestrates the full WSLC lifecycle.
+    /// Helpers handle phases that don't involve dangling-pointer risks;
+    /// pointer-heavy SDK configuration stays inline to keep owned string
+    /// data alive for the duration needed.
+    ///
+    /// # Safety
+    /// Calls into the WSLC SDK via raw FFI. Owned buffers backing pointers
+    /// passed to the SDK (cmdline, env, mounts, etc.) must remain alive
+    /// until the SDK call that consumes them returns. RAII guards
+    /// (`WslcSessionGuard`, `WslcContainerGuard`, `WslcProcessGuard`,
+    /// `IoCtxRawGuard`) ensure handles and reference counts are released
+    /// on every exit path.
+    unsafe fn run_internal(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+        let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
+
+        // -- Init: COM + SDK + preflight --
+        let sdk = match Self::init_and_load_sdk(logger) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        // -- Session (configure + create in one step to keep string data alive) --
+        let session_guard = match self.create_session(&sdk, request, logger) {
+            Ok(g) => g,
+            Err(e) => return e,
+        };
+
+        // -- Image resolution --
+        if let Err(e) = self.resolve_image(&sdk, session_guard.as_raw(), logger) {
+            return e;
+        }
+
+        // -- Process settings --
+        // String data (script_cstr, env_cstrings, _cwd_cstr) must stay alive
+        // until after WslcCreateContainer, so this stays inline.
         let mut process_settings = std::mem::zeroed::<WslcProcessSettings>();
         let hr = (sdk.WslcInitProcessSettings)(&mut process_settings);
         if hr != S_OK {
@@ -530,10 +810,6 @@ impl WSLContainerRunner {
             stderr: Arc::new(Mutex::new(Vec::new())),
             exited: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
         });
-        let io_ctx_stdout = Arc::clone(&io_ctx.stdout);
-        let io_ctx_stderr = Arc::clone(&io_ctx.stderr);
-        let io_ctx_exited = Arc::clone(&io_ctx.exited);
-
         // Give the SDK an Arc reference via raw pointer. We must reconstruct
         // the Arc later to avoid leaking the reference count.
         let io_ctx_for_sdk = Arc::clone(&io_ctx);
@@ -551,7 +827,6 @@ impl WSLContainerRunner {
             return sdk_error("WslcSetProcessSettingsCallbacks failed", hr, "");
         }
 
-        // Build command line: /bin/sh -c "<script_code>"
         let sh = b"/bin/sh\0";
         let dash_c = b"-c\0";
         let script_cstr = format!("{}\0", request.script_code);
@@ -567,7 +842,6 @@ impl WSLContainerRunner {
             return sdk_error("WslcSetProcessSettingsCmdLine failed", hr, "");
         }
 
-        // Set environment variables
         if !request.env.is_empty() {
             let env_cstrings: Vec<Vec<u8>> = request
                 .env
@@ -585,8 +859,7 @@ impl WSLContainerRunner {
             }
         }
 
-        // Set working directory
-        let _cwd_cstr; // kept alive for SDK pointer
+        let _cwd_cstr;
         if !request.working_directory.is_empty() {
             if let Some(container_cwd) =
                 policy_mapping::windows_path_to_container_path(&request.working_directory)
@@ -602,7 +875,9 @@ impl WSLContainerRunner {
             }
         }
 
-        // -- Step 6: Container settings --
+        // -- Container settings --
+        // Volume and image string data must stay alive until WslcCreateContainer.
+        let image_name = &self.config.image;
         let image_cstr = format!("{}\0", image_name);
         let mut container_settings = std::mem::zeroed::<WslcContainerSettings>();
         let hr = (sdk.WslcInitContainerSettings)(
@@ -613,7 +888,6 @@ impl WSLContainerRunner {
             return sdk_error("WslcInitContainerSettings failed", hr, "");
         }
 
-        // -- Step 7: Apply policy mapping --
         // TODO: Port mappings (WslcConfig.port_mappings) are parsed but not yet applied.
         // Requires adding WslcSetContainerSettingsPortMappings and WslcContainerPortMapping
         // bindings. See wslcsdk.h lines 120-128, 183-186.
@@ -625,17 +899,17 @@ impl WSLContainerRunner {
             let _ = writeln!(logger, "[WSLC] Warning: {}", w);
         }
 
-        if !mounts.is_empty() {
-            // Build WslcContainerVolume array — keep owned data alive.
-            let wide_paths: Vec<(Vec<u16>, Vec<u8>)> = mounts
-                .iter()
-                .map(|m| {
-                    let win: Vec<u16> = format!("{}\0", m.windows_path).encode_utf16().collect();
-                    let ctr: Vec<u8> = format!("{}\0", m.container_path).into_bytes();
-                    (win, ctr)
-                })
-                .collect();
+        // Keep owned data alive for volume pointers
+        let wide_paths: Vec<(Vec<u16>, Vec<u8>)> = mounts
+            .iter()
+            .map(|m| {
+                let win: Vec<u16> = to_wide(&m.windows_path);
+                let ctr: Vec<u8> = format!("{}\0", m.container_path).into_bytes();
+                (win, ctr)
+            })
+            .collect();
 
+        if !mounts.is_empty() {
             let volumes: Vec<WslcContainerVolume> = wide_paths
                 .iter()
                 .zip(mounts.iter())
@@ -661,7 +935,6 @@ impl WSLContainerRunner {
             );
         }
 
-        // Network policy
         let is_default_block = request.policy.default_network_policy == NetworkPolicy::Block;
         let has_host_rules = policy_mapping::needs_host_filtering(
             is_default_block,
@@ -675,14 +948,12 @@ impl WSLContainerRunner {
         }
         let _ = writeln!(logger, "[WSLC] Networking mode: {:?}", net_mode);
 
-        // Build iptables rules (if per-host filtering is needed)
         let iptables_cmd = policy_mapping::build_iptables_rules(
             &request.policy.allowed_hosts,
             &request.policy.blocked_hosts,
             is_default_block,
         );
 
-        // Container flags
         let mut flags = WslcContainerFlags::None;
         if request.lifecycle.destroy_on_exit {
             flags = flags | WslcContainerFlags::AutoRemove;
@@ -691,7 +962,6 @@ impl WSLContainerRunner {
             flags = flags | WslcContainerFlags::EnableGpu;
         }
         if has_host_rules {
-            // Privileged needed for iptables inside the container
             flags = flags | WslcContainerFlags::Privileged;
         }
         let hr = (sdk.WslcSetContainerSettingsFlags)(&mut container_settings, flags);
@@ -699,7 +969,6 @@ impl WSLContainerRunner {
             return sdk_error("WslcSetContainerSettingsFlags failed", hr, "");
         }
 
-        // Attach init process
         let hr = (sdk.WslcSetContainerSettingsInitProcess)(
             &mut container_settings,
             &mut process_settings,
@@ -708,9 +977,9 @@ impl WSLContainerRunner {
             return sdk_error("WslcSetContainerSettingsInitProcess failed", hr, "");
         }
 
-        // -- Step 9: Create container --
+        // -- Create & start container --
         let mut container: WslcContainer = ptr::null_mut();
-        err_msg = CoTaskMemPWSTR::null();
+        let mut err_msg = CoTaskMemPWSTR::null();
         let hr = (sdk.WslcCreateContainer)(
             session_guard.as_raw(),
             &container_settings,
@@ -724,7 +993,6 @@ impl WSLContainerRunner {
         let container_guard = WslcContainerGuard::from_raw(container, sdk.WslcReleaseContainer);
         let _ = writeln!(logger, "[WSLC] Container created");
 
-        // -- Step 10: Start container --
         err_msg = CoTaskMemPWSTR::null();
         let hr = (sdk.WslcStartContainer)(
             container_guard.as_raw(),
@@ -737,76 +1005,16 @@ impl WSLContainerRunner {
         }
         let _ = writeln!(logger, "[WSLC] Container started");
 
-        // -- Step 10b: Apply iptables rules (if per-host filtering) --
+        // -- Iptables (if needed) --
         if let Some(ref ipt_cmd) = iptables_cmd {
-            let _ = writeln!(logger, "[WSLC] Applying iptables rules for host filtering");
-            let mut ipt_settings = std::mem::zeroed::<WslcProcessSettings>();
-            let hr = (sdk.WslcInitProcessSettings)(&mut ipt_settings);
-            if hr != S_OK {
-                return sdk_error("WslcInitProcessSettings (iptables) failed", hr, "");
+            if let Err(e) =
+                Self::apply_iptables_rules(&sdk, container_guard.as_raw(), ipt_cmd, logger)
+            {
+                return e;
             }
-
-            let ipt_sh = b"/bin/sh\0";
-            let ipt_c = b"-c\0";
-            let ipt_script = format!("{}\0", ipt_cmd);
-            let ipt_script_bytes = ipt_script.as_bytes();
-            let ipt_argv: [PCSTR; 3] = [
-                ipt_sh.as_ptr() as PCSTR,
-                ipt_c.as_ptr() as PCSTR,
-                ipt_script_bytes.as_ptr() as PCSTR,
-            ];
-            let hr = (sdk.WslcSetProcessSettingsCmdLine)(
-                &mut ipt_settings,
-                ipt_argv.as_ptr(),
-                ipt_argv.len(),
-            );
-            if hr != S_OK {
-                return sdk_error("WslcSetProcessSettingsCmdLine (iptables) failed", hr, "");
-            }
-
-            let mut ipt_process: WslcProcess = ptr::null_mut();
-            err_msg = CoTaskMemPWSTR::null();
-            let hr = (sdk.WslcCreateContainerProcess)(
-                container_guard.as_raw(),
-                &mut ipt_settings,
-                &mut ipt_process,
-                err_msg.as_mut_ptr(),
-            );
-            if hr != S_OK {
-                let msg = err_msg.to_string_lossy();
-                return sdk_error("Failed to exec iptables rules", hr, &msg);
-            }
-            let ipt_guard = WslcProcessGuard::from_raw(ipt_process, sdk.WslcReleaseProcess);
-
-            // Wait for iptables to complete
-            let mut ipt_exit_event: HANDLE = ptr::null_mut();
-            let hr = (sdk.WslcGetProcessExitEvent)(ipt_guard.as_raw(), &mut ipt_exit_event);
-            if hr != S_OK {
-                return sdk_error("WslcGetProcessExitEvent (iptables) failed", hr, "");
-            }
-            if !ipt_exit_event.is_null() {
-                windows::Win32::System::Threading::WaitForSingleObject(
-                    windows::Win32::Foundation::HANDLE(ipt_exit_event),
-                    30_000, // 30s timeout for iptables
-                );
-            }
-
-            let mut ipt_exit_code: i32 = -1;
-            let hr = (sdk.WslcGetProcessExitCode)(ipt_guard.as_raw(), &mut ipt_exit_code);
-            if hr != S_OK {
-                return sdk_error("WslcGetProcessExitCode (iptables) failed", hr, "");
-            }
-            if ipt_exit_code != 0 {
-                return ScriptResponse::error(&format!(
-                    "iptables rules failed with exit code {} \
-                     (image may not have iptables installed)",
-                    ipt_exit_code
-                ));
-            }
-            let _ = writeln!(logger, "[WSLC] iptables rules applied successfully");
         }
 
-        // -- Step 11: Get init process handle --
+        // -- Get init process handle --
         let mut process: WslcProcess = ptr::null_mut();
         let hr = (sdk.WslcGetContainerInitProcess)(container_guard.as_raw(), &mut process);
         if hr != S_OK {
@@ -814,94 +1022,20 @@ impl WSLContainerRunner {
         }
         let process_guard = WslcProcessGuard::from_raw(process, sdk.WslcReleaseProcess);
 
-        // -- Step 12: Wait for exit with timeout enforcement --
-        let mut exit_event: HANDLE = ptr::null_mut();
-        let hr = (sdk.WslcGetProcessExitEvent)(process_guard.as_raw(), &mut exit_event);
-        if hr != S_OK {
-            return sdk_error("WslcGetProcessExitEvent failed", hr, "");
-        }
-
-        // Use configured timeout, or wait indefinitely if not set.
-        let wait_ms = if request.script_timeout > 0 {
-            request.script_timeout
-        } else {
-            u32::MAX
+        // -- Wait for exit --
+        let (exit_code, timed_out) = match Self::wait_for_process(
+            &sdk,
+            &process_guard,
+            &container_guard,
+            &io_ctx,
+            request,
+            logger,
+        ) {
+            Ok(r) => r,
+            Err(e) => return e,
         };
 
-        let mut timed_out = false;
-        if !exit_event.is_null() {
-            let wait_result = windows::Win32::System::Threading::WaitForSingleObject(
-                windows::Win32::Foundation::HANDLE(exit_event),
-                wait_ms,
-            );
-            // WAIT_TIMEOUT = 0x00000102 (258)
-            if wait_result.0 == 258 {
-                timed_out = true;
-                let _ = writeln!(
-                    logger,
-                    "[WSLC] Execution timeout ({}ms) reached — stopping container",
-                    wait_ms
-                );
-                // Send SIGTERM with 2-second grace period; the SDK escalates
-                // to SIGKILL automatically if the process doesn't exit.
-                err_msg = CoTaskMemPWSTR::null();
-                let _ = (sdk.WslcStopContainer)(
-                    container_guard.as_raw(),
-                    WslcSignal::SigTerm,
-                    2,
-                    err_msg.as_mut_ptr(),
-                );
-                drop(err_msg);
-            }
-        }
-
-        // Wait for exit callback to fire — this guarantees all I/O is flushed
-        // before we read the buffers (per SDK docs).
-        {
-            let (lock, cvar) = &*io_ctx_exited;
-            let mut exited = lock.lock().unwrap_or_else(|e| e.into_inner());
-            if !*exited {
-                let result = cvar
-                    .wait_timeout(exited, std::time::Duration::from_secs(30))
-                    .unwrap_or_else(|e| e.into_inner());
-                exited = result.0;
-                if !*exited {
-                    let _ = writeln!(
-                        logger,
-                        "[WSLC] Warning: exit callback did not fire within 30s"
-                    );
-                }
-            }
-            drop(exited);
-        }
-
-        let mut exit_code: i32 = -1;
-        let hr = (sdk.WslcGetProcessExitCode)(process_guard.as_raw(), &mut exit_code);
-        if hr != S_OK && !timed_out {
-            return sdk_error("WslcGetProcessExitCode failed", hr, "");
-        }
-        if timed_out {
-            let _ = writeln!(logger, "[WSLC] Process killed after timeout");
-        } else {
-            let _ = writeln!(logger, "[WSLC] Process exited with code {}", exit_code);
-        }
-
-        // -- Step 13: Collect captured I/O from callbacks (guaranteed flushed) --
-        let stdout =
-            String::from_utf8_lossy(&io_ctx_stdout.lock().unwrap_or_else(|e| e.into_inner()))
-                .to_string();
-        let stderr =
-            String::from_utf8_lossy(&io_ctx_stderr.lock().unwrap_or_else(|e| e.into_inner()))
-                .to_string();
-
-        if !stdout.is_empty() {
-            let _ = writeln!(logger, "[WSLC] Captured {} bytes stdout", stdout.len());
-        }
-        if !stderr.is_empty() {
-            let _ = writeln!(logger, "[WSLC] Captured {} bytes stderr", stderr.len());
-        }
-
-        // -- Step 14: Cleanup --
+        // -- Cleanup --
         if request.lifecycle.destroy_on_exit {
             err_msg = CoTaskMemPWSTR::null();
             let _ = (sdk.WslcStopContainer)(
@@ -921,26 +1055,15 @@ impl WSLContainerRunner {
             drop(err_msg);
         }
 
-        let _ = (sdk.WslcTerminateSession)(session_guard.as_raw());
+        // Session termination is handled by WslcSessionGuard's Drop impl.
         let _ = writeln!(logger, "[WSLC] Cleanup complete");
 
-        // IoCtxRawGuard drops here, reclaiming the Arc reference.
-        // All callbacks are guaranteed complete after the exit event wait.
-
-        // RAII guards will call Release on drop.
-        // CoUninitialize is not called explicitly — RAII guards need COM alive
-        // for the Release calls, and the process exits shortly after.
-
-        ScriptResponse {
-            exit_code: if timed_out { -1 } else { exit_code },
-            standard_out: stdout,
-            standard_err: stderr,
-            error_message: if timed_out {
-                format!("Process timed out after {}ms and was terminated", wait_ms)
-            } else {
-                String::new()
-            },
-        }
+        let wait_ms = if request.script_timeout > 0 {
+            request.script_timeout
+        } else {
+            u32::MAX
+        };
+        Self::collect_output(&io_ctx, exit_code, timed_out, wait_ms, logger)
     }
 }
 
