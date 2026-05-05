@@ -30,7 +30,9 @@ use crate::process_util::{
     PipeRelayParams, PipeRelayWithStopParams,
 };
 use crate::script_runner::ScriptRunner;
-use crate::state_aware_backend::{ExecHandle, ProvisionResult, StatefulSandboxBackend};
+use crate::state_aware_backend::{
+    ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend,
+};
 use isolation_session_bindings::bindings::{
     IsoSessionConfigId, IsoSessionError, IsoSessionOps, IsoSessionProcess,
     IsoSessionProcessOptions, IsoSessionProcessResult, IsoSessionResult, IsoSessionUserResult,
@@ -828,6 +830,21 @@ pub struct IsolationSessionProvisionMetadata {
     pub agent_user_name: String,
 }
 
+/// Parses the `iso:<provisionId>` form of a state-aware sandbox_id and
+/// returns the inner `provisionId` segment. Surfaces format mismatches as
+/// `MxcError::MalformedId` so callers can return the right wire-format
+/// error code.
+fn extract_provision_id(sandbox_id: &str) -> Result<&str, MxcError> {
+    let prefix = <IsolationSessionRunner as StatefulSandboxBackend>::ID_PREFIX;
+    match sandbox_id.split_once(':') {
+        Some((p, rest)) if p == prefix && !rest.is_empty() => Ok(rest),
+        _ => Err(MxcError::malformed_id(format!(
+            "expected {}:<provisionId>, got {:?}",
+            prefix, sandbox_id
+        ))),
+    }
+}
+
 impl StatefulSandboxBackend for IsolationSessionRunner {
     const ID_PREFIX: &'static str = "iso";
     const BACKEND_KEY: &'static str = "isolation_session";
@@ -871,6 +888,24 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         })
     }
 
+    fn start(
+        &mut self,
+        sandbox_id: &str,
+        _request: &CodexRequest,
+        config: Option<IsolationSessionConfig>,
+    ) -> Result<StartResult<()>, MxcError> {
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
+        // Config absent → Composable, mirroring the one-shot default. The
+        // OS-side service does not call back into MXC after start, so a
+        // return here means the session is ready to host process launches.
+        let configuration_id = config.map(|c| c.configuration_id).unwrap_or_default();
+        manager
+            .start_session(configuration_id)
+            .map_err(map_lifecycle_error)?;
+        Ok(StartResult { metadata: None })
+    }
+
     /// `exec` lands in a follow-up commit. Returning a typed error rather
     /// than panicking keeps a misrouted dispatcher path observable in tests
     /// instead of aborting the test binary.
@@ -907,6 +942,32 @@ mod tests {
             }
             other => panic!("expected Policy variant, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn extract_provision_id_unwraps_iso_prefix() {
+        assert_eq!(
+            extract_provision_id("iso:wxc-abcd1234").unwrap(),
+            "wxc-abcd1234"
+        );
+    }
+
+    #[test]
+    fn extract_provision_id_rejects_other_prefix() {
+        let err = extract_provision_id("wsb:abc").unwrap_err();
+        assert_eq!(err.code, crate::mxc_error::MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_provision_id_rejects_missing_colon() {
+        let err = extract_provision_id("no-colon").unwrap_err();
+        assert_eq!(err.code, crate::mxc_error::MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_provision_id_rejects_empty_payload() {
+        let err = extract_provision_id("iso:").unwrap_err();
+        assert_eq!(err.code, crate::mxc_error::MxcErrorCode::MalformedId);
     }
 
     #[test]

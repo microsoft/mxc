@@ -185,6 +185,8 @@ $provisionResult = Invoke-StateAware -Request $probeRequest -Experimental
 $provisionEnv = Parse-Envelope -Stdout $provisionResult.Stdout
 $arm = Envelope-Arm $provisionEnv
 
+$sandboxId = $null
+
 if ($arm -ne 'result') {
     Write-Host "  Envelope arm: $arm" -ForegroundColor Red
     Write-Host "  Stdout: $($provisionResult.Stdout)" -ForegroundColor Gray
@@ -200,6 +202,32 @@ if ($arm -ne 'result') {
     # call deprovision on $sandboxId to avoid leaking the agent user across
     # test runs. Until then, the OS-side service retains the registration —
     # acceptable while we are validating early phases only.
+}
+
+# Test 2: start succeeds against the provisioned sandbox. Exercises the
+# multi-invocation pattern — provision was a separate wxc-exec process; this
+# is a fresh wxc-exec process consuming the same sandbox_id. Skipped if
+# provision did not return a usable id.
+if ($null -ne $sandboxId) {
+    Write-Host "[start] provision + start sequence" -ForegroundColor Cyan
+    $startRequest = @{
+        phase     = 'start'
+        sandboxId = $sandboxId
+    }
+    $startResult = Invoke-StateAware -Request $startRequest -Experimental
+    $startEnv = Parse-Envelope -Stdout $startResult.Stdout
+    $startArm = Envelope-Arm $startEnv
+
+    if ($startArm -ne 'result') {
+        Write-Host "  Envelope arm: $startArm" -ForegroundColor Red
+        Write-Host "  Stdout: $($startResult.Stdout)" -ForegroundColor Gray
+        Write-Host "  Stderr: $($startResult.Stderr)" -ForegroundColor Gray
+        Assert-True $false "start returned a result envelope"
+    } else {
+        Assert-True ($startResult.ExitCode -eq 0) "exit code = 0 on success"
+        # Start has no metadata in v1 — `result` should be an empty object.
+        Assert-True ($null -eq $startEnv.result.metadata) "result.metadata is absent (no start metadata in v1)"
+    }
 }
 
 # ---------------- Summary ----------------
