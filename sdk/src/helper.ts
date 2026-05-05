@@ -9,6 +9,20 @@ import { FileLogger } from './logger';
 import { ContainerConfig, ContainmentType, ExperimentalBackends, SandboxingMethod } from './types';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
 import { SandboxSpawnOptions } from './sandbox';
+import { diagLog } from './diagnostic';
+
+/** SDK version constant. Must match package.json; validated by CI. */
+export const SDK_VERSION = '0.1.7';
+
+let sdkVersionLogged = false;
+
+/** Log the SDK version to the diagnostic console (once per process). */
+export function diagLogVersion(): void {
+    if (!sdkVersionLogged) {
+        sdkVersionLogged = true;
+        diagLog(`mxc-sdk v${SDK_VERSION} (PID ${process.pid})`);
+    }
+}
 
 /**
  * Result of preparing a sandbox spawn — includes the resolved binary,
