@@ -87,6 +87,10 @@ const BASELINE_ALLOW: &str = "\
 const SYSTEM_READ_ALLOW: &str = "\
 ;; --- read-only access to system locations ---
 (allow file-read*
+    (subpath \"/bin\")
+    (subpath \"/sbin\")
+    (subpath \"/usr/bin\")
+    (subpath \"/usr/sbin\")
     (subpath \"/usr/lib\")
     (subpath \"/usr/libexec\")
     (subpath \"/usr/share\")
@@ -94,6 +98,7 @@ const SYSTEM_READ_ALLOW: &str = "\
     (subpath \"/Library\")
     (subpath \"/private/var/db/timezone\")
     (subpath \"/private/var/db/dyld\")
+    (subpath \"/private/var/select\")
     (subpath \"/private/etc\")
     (literal \"/dev/null\")
     (literal \"/dev/zero\")
@@ -246,6 +251,8 @@ mod tests {
         assert!(p.contains("(allow process-exec)"));
         assert!(p.contains("/usr/lib"));
         assert!(p.contains("/System"));
+        assert!(p.contains("(subpath \"/bin\")"));
+        assert!(p.contains("(subpath \"/usr/bin\")"));
     }
 
     #[test]
