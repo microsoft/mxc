@@ -906,18 +906,43 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         Ok(StartResult { metadata: None })
     }
 
-    /// `exec` lands in a follow-up commit. Returning a typed error rather
-    /// than panicking keeps a misrouted dispatcher path observable in tests
-    /// instead of aborting the test binary.
+    /// Reuses `IsolationSessionManager::create_process` — the same path the
+    /// one-shot runner uses. Output streams to wxc-exec's stdout/stderr via
+    /// internal relay threads while the call is in flight; the call returns
+    /// once the process has exited and the relays have drained. The
+    /// resulting `ExecHandle` carries sentinel pipe handles plus a waiter
+    /// closure that yields the already-captured exit code, so the
+    /// dispatcher's `relay_exec_to_stdio` is a thin call-through.
     fn exec(
         &mut self,
-        _sandbox_id: &str,
-        _request: &CodexRequest,
+        sandbox_id: &str,
+        request: &CodexRequest,
         _config: Option<()>,
     ) -> Result<ExecHandle, MxcError> {
-        Err(MxcError::backend_error(
-            "IsolationSession state-aware exec not yet implemented",
-        ))
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
+
+        let mut options = build_process_options(request);
+        let interactive = std::io::stdout().is_terminal();
+        options.interactive = interactive;
+        options.redirect_flags = compute_redirect_flags(interactive);
+
+        let result = manager
+            .create_process(&options)
+            .map_err(map_lifecycle_error)?;
+        let exit_code = result.exit_code;
+
+        // The output relay completed inside `create_process`. The dispatcher
+        // sees zero pipe handles, skips its own relay setup, and gets the
+        // exit code from the waiter closure.
+        let null = HANDLE(std::ptr::null_mut());
+        Ok(ExecHandle {
+            stdout: null,
+            stderr: null,
+            stdin: null,
+            waiter: Box::new(move || Ok(exit_code)),
+            terminator: Box::new(|| {}),
+        })
     }
 }
 

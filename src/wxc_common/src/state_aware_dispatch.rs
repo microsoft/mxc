@@ -161,16 +161,16 @@ fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, MxcError> {
 }
 
 /// Streams the running process's pipes to executor stdio and waits for exit.
-/// At this stage no backend produces an `ExecHandle`, but the function is
-/// defined so `dispatch_state_aware` compiles and so I-commits drop their
-/// real impls into a stable seam.
 ///
-/// TODO: once an exec-capable backend lands, replace the placeholder with a
-/// `process_util`-driven 3-pipe relay and waiter join.
-fn relay_exec_to_stdio(_handle: ExecHandle) -> Result<i32, MxcError> {
-    Err(MxcError::backend_error(
-        "state-aware exec relay is not yet wired",
-    ))
+/// Backends that perform their own internal relay (e.g. IsolationSession,
+/// which reuses the one-shot path's relay threads) hand back zero pipe
+/// handles plus a waiter closure that yields the already-captured exit code
+/// — this function is a thin call-through in that case. When a backend
+/// surfaces live pipe handles, this function will gain `process_util`-driven
+/// relay threads and a waiter join; that path lands when the first such
+/// backend appears.
+fn relay_exec_to_stdio(handle: ExecHandle) -> Result<i32, MxcError> {
+    (handle.waiter)()
 }
 
 // ---------- Wire-format envelope construction ----------

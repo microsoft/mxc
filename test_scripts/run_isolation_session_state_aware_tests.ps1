@@ -208,6 +208,7 @@ if ($arm -ne 'result') {
 # multi-invocation pattern — provision was a separate wxc-exec process; this
 # is a fresh wxc-exec process consuming the same sandbox_id. Skipped if
 # provision did not return a usable id.
+$startedOk = $false
 if ($null -ne $sandboxId) {
     Write-Host "[start] provision + start sequence" -ForegroundColor Cyan
     $startRequest = @{
@@ -227,7 +228,35 @@ if ($null -ne $sandboxId) {
         Assert-True ($startResult.ExitCode -eq 0) "exit code = 0 on success"
         # Start has no metadata in v1 — `result` should be an empty object.
         Assert-True ($null -eq $startEnv.result.metadata) "result.metadata is absent (no start metadata in v1)"
+        $startedOk = ($startResult.ExitCode -eq 0)
     }
+}
+
+# Test 3: exec runs a command in the started session. Output streams live
+# (the backend reuses the one-shot relay path) so stdout from this
+# wxc-exec invocation is the script's output rather than a JSON envelope.
+# Skipped unless start succeeded.
+if ($startedOk) {
+    Write-Host "[exec] provision + start + exec sequence" -ForegroundColor Cyan
+    $execRequest = @{
+        phase     = 'exec'
+        sandboxId = $sandboxId
+        process   = @{
+            commandLine = 'echo state-aware-exec-marker'
+            timeout     = 30000
+        }
+    }
+    $execResult = Invoke-StateAware -Request $execRequest -Experimental
+
+    Assert-True ($execResult.ExitCode -eq 0) "exit code = 0 on success"
+    Assert-True ($execResult.Stdout -match 'state-aware-exec-marker') `
+        "stdout contains the script's output (streamed live, not enveloped)"
+    # Exec on success does not emit a JSON envelope on stdout — the SDK
+    # discriminates between exec success (raw stdout) and dispatch failure
+    # (JSON envelope) using exit code + envelope-parseability.
+    $maybeEnv = Parse-Envelope -Stdout $execResult.Stdout
+    Assert-True ($null -eq $maybeEnv -or $null -eq $maybeEnv.error) `
+        "stdout is not a state-aware error envelope on success"
 }
 
 # ---------------- Summary ----------------
