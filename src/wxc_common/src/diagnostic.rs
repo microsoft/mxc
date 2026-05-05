@@ -16,10 +16,8 @@ use std::env;
 
 use crate::models::CodexRequest;
 
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_DWORD,
-};
-use windows_core::PCWSTR;
+use winreg::enums::HKEY_LOCAL_MACHINE;
+use winreg::RegKey;
 
 const REGISTRY_SUBKEY: &str = r"SOFTWARE\Microsoft\MXC\Diagnostics";
 const ENV_CONSOLE: &str = "MXC_DIAG_CONSOLE";
@@ -59,31 +57,11 @@ impl DiagnosticConfig {
     /// to DWORD 1, the `learningModeLogging` capability is injected into the
     /// container policy regardless of what the config specifies.
     pub fn force_learning_mode() -> bool {
-        let subkey_wide: Vec<u16> = REGISTRY_SUBKEY
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let mut hkey = HKEY::default();
-        let result = unsafe {
-            RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                PCWSTR(subkey_wide.as_ptr()),
-                Some(0),
-                KEY_READ,
-                &mut hkey,
-            )
-        };
-
-        if result.is_err() {
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let Ok(key) = hklm.open_subkey_with_flags(REGISTRY_SUBKEY, winreg::enums::KEY_READ) else {
             return false;
-        }
-
-        let val = read_reg_dword(hkey, "ForceLearningMode").unwrap_or(0) == 1;
-        unsafe {
-            let _ = RegCloseKey(hkey);
-        }
-        val
+        };
+        key.get_value::<u32, _>("ForceLearningMode").unwrap_or(0) == 1
     }
 }
 
@@ -235,61 +213,11 @@ fn env_bool(name: &str) -> Option<bool> {
 
 /// Read the `ConsoleEnabled` setting from the Windows registry.
 fn read_registry_console_setting() -> bool {
-    let subkey_wide: Vec<u16> = REGISTRY_SUBKEY
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-
-    let mut hkey = HKEY::default();
-    let result = unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            PCWSTR(subkey_wide.as_ptr()),
-            Some(0),
-            KEY_READ,
-            &mut hkey,
-        )
-    };
-
-    if result.is_err() {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let Ok(key) = hklm.open_subkey_with_flags(REGISTRY_SUBKEY, winreg::enums::KEY_READ) else {
         return false;
-    }
-
-    let console = read_reg_dword(hkey, "ConsoleEnabled").unwrap_or(0) == 1;
-
-    unsafe {
-        let _ = RegCloseKey(hkey);
-    }
-
-    console
-}
-
-/// Read a DWORD value from an open registry key.
-fn read_reg_dword(hkey: HKEY, value_name: &str) -> Option<u32> {
-    let name_wide: Vec<u16> = value_name
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut data: u32 = 0;
-    let mut size = std::mem::size_of::<u32>() as u32;
-
-    let result = unsafe {
-        RegGetValueW(
-            hkey,
-            None,
-            PCWSTR(name_wide.as_ptr()),
-            RRF_RT_DWORD,
-            None,
-            Some(std::ptr::addr_of_mut!(data).cast()),
-            Some(&mut size),
-        )
     };
-
-    if result.is_ok() {
-        Some(data)
-    } else {
-        None
-    }
+    key.get_value::<u32, _>("ConsoleEnabled").unwrap_or(0) == 1
 }
 
 #[cfg(test)]
