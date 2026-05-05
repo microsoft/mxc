@@ -1950,7 +1950,10 @@ mod tests {
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.seatbelt_config.mode, crate::models::SeatbeltMode::Inproc);
+        assert_eq!(
+            req.seatbelt_config.mode,
+            crate::models::SeatbeltMode::Inproc
+        );
     }
 
     #[test]
