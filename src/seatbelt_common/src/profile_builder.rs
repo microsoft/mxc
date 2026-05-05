@@ -86,6 +86,9 @@ const BASELINE_ALLOW: &str = "\
 /// (dynamic linker, system libraries, time-zone data, etc.).
 const SYSTEM_READ_ALLOW: &str = "\
 ;; --- read-only access to system locations ---
+;; `/` itself must be readable as data so the shell / loader can resolve
+;; path lookups; without this the kernel kills the child during exec.
+(allow file-read-data (literal \"/\"))
 (allow file-read*
     (subpath \"/bin\")
     (subpath \"/sbin\")
@@ -253,6 +256,7 @@ mod tests {
         assert!(p.contains("/System"));
         assert!(p.contains("(subpath \"/bin\")"));
         assert!(p.contains("(subpath \"/usr/bin\")"));
+        assert!(p.contains("(allow file-read-data (literal \"/\"))"));
     }
 
     #[test]
