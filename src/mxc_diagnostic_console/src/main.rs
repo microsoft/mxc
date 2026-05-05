@@ -374,6 +374,8 @@ fn create_pipe_instance(first: bool) -> Result<HANDLE, String> {
     use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 
     // Create a security descriptor with a NULL DACL (allows all access).
+    // This is required so that medium/low integrity clients (e.g. sandboxed processes)
+    // can connect to the pipe when the server is running elevated.
     let mut sd = SECURITY_DESCRIPTOR::default();
     let psd = PSECURITY_DESCRIPTOR(std::ptr::addr_of_mut!(sd).cast());
     // SAFETY: `psd` points to a valid stack-allocated SECURITY_DESCRIPTOR;
@@ -508,10 +510,16 @@ fn parse_log_message(json: &str) -> Option<String> {
     v.get("msg").and_then(|m| m.as_str()).map(|s| s.to_string())
 }
 
+/// Tracks display metadata for a connected client process.
+struct PidInfo {
+    pid: u32,
+    color_idx: usize,
+    exe_name: String,
+}
+
 /// Display loop: reads events from the channel and prints them.
 fn display_loop(rx: mpsc::Receiver<DisplayEvent>) {
-    // (pid, color_index, exe_name)
-    let mut pid_info_map: Vec<(u32, usize, String)> = Vec::new();
+    let mut pid_info_map: Vec<PidInfo> = Vec::new();
     let mut next_color: usize = 0;
 
     for event in rx {
@@ -520,7 +528,7 @@ fn display_loop(rx: mpsc::Receiver<DisplayEvent>) {
             DisplayEvent::Connected { pid } => {
                 let color_idx = next_color % PID_COLORS.len();
                 let exe = process_exe_name(pid);
-                pid_info_map.push((pid, color_idx, exe.clone()));
+                pid_info_map.push(PidInfo { pid, color_idx, exe_name: exe.clone() });
                 next_color += 1;
                 let color = PID_COLORS[color_idx];
                 println!(
@@ -564,10 +572,10 @@ fn display_loop(rx: mpsc::Receiver<DisplayEvent>) {
 }
 
 /// Get the ANSI color code and exe name for a PID.
-fn get_pid_info(map: &[(u32, usize, String)], pid: u32) -> (&'static str, &str) {
+fn get_pid_info<'a>(map: &'a [PidInfo], pid: u32) -> (&'static str, &'a str) {
     map.iter()
-        .find(|(p, _, _)| *p == pid)
-        .map(|(_, idx, exe)| (PID_COLORS[*idx], exe.as_str()))
+        .find(|info| info.pid == pid)
+        .map(|info| (PID_COLORS[info.color_idx], info.exe_name.as_str()))
         .unwrap_or((PID_COLORS[0], "?"))
 }
 
@@ -586,6 +594,7 @@ fn process_exe_name(pid: u32) -> String {
         let len = GetModuleFileNameExW(Some(handle), None, &mut buf);
         let _ = CloseHandle(handle);
         if len == 0 {
+            // GetLastError would give details, but this is best-effort name resolution.
             return format!("PID{pid}");
         }
         let full = String::from_utf16_lossy(&buf[..len as usize]);
