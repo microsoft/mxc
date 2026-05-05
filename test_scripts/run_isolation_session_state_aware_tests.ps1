@@ -236,6 +236,7 @@ if ($null -ne $sandboxId) {
 # (the backend reuses the one-shot relay path) so stdout from this
 # wxc-exec invocation is the script's output rather than a JSON envelope.
 # Skipped unless start succeeded.
+$execedOk = $false
 if ($startedOk) {
     Write-Host "[exec] provision + start + exec sequence" -ForegroundColor Cyan
     $execRequest = @{
@@ -257,6 +258,31 @@ if ($startedOk) {
     $maybeEnv = Parse-Envelope -Stdout $execResult.Stdout
     Assert-True ($null -eq $maybeEnv -or $null -eq $maybeEnv.error) `
         "stdout is not a state-aware error envelope on success"
+    $execedOk = ($execResult.ExitCode -eq 0)
+}
+
+# Test 4: stop closes the started session. Asserts a clean result envelope
+# with no metadata. Skipped unless exec succeeded (so we know we have a
+# truly running session to stop, not a half-set-up one).
+if ($execedOk) {
+    Write-Host "[stop] full lifecycle through stop" -ForegroundColor Cyan
+    $stopRequest = @{
+        phase     = 'stop'
+        sandboxId = $sandboxId
+    }
+    $stopResult = Invoke-StateAware -Request $stopRequest -Experimental
+    $stopEnv = Parse-Envelope -Stdout $stopResult.Stdout
+    $stopArm = Envelope-Arm $stopEnv
+
+    if ($stopArm -ne 'result') {
+        Write-Host "  Envelope arm: $stopArm" -ForegroundColor Red
+        Write-Host "  Stdout: $($stopResult.Stdout)" -ForegroundColor Gray
+        Write-Host "  Stderr: $($stopResult.Stderr)" -ForegroundColor Gray
+        Assert-True $false "stop returned a result envelope"
+    } else {
+        Assert-True ($stopResult.ExitCode -eq 0) "exit code = 0 on success"
+        Assert-True ($null -eq $stopEnv.result.metadata) "result.metadata is absent (no stop metadata in v1)"
+    }
 }
 
 # ---------------- Summary ----------------

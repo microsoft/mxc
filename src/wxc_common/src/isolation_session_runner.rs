@@ -31,7 +31,7 @@ use crate::process_util::{
 };
 use crate::script_runner::ScriptRunner;
 use crate::state_aware_backend::{
-    ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend,
+    ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
 };
 use isolation_session_bindings::bindings::{
     IsoSessionConfigId, IsoSessionError, IsoSessionOps, IsoSessionProcess,
@@ -904,6 +904,18 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
             .start_session(configuration_id)
             .map_err(map_lifecycle_error)?;
         Ok(StartResult { metadata: None })
+    }
+
+    fn stop(
+        &mut self,
+        sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<()>,
+    ) -> Result<StopResult<()>, MxcError> {
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
+        manager.stop_session().map_err(map_lifecycle_error)?;
+        Ok(StopResult { metadata: None })
     }
 
     /// Reuses `IsolationSessionManager::create_process` — the same path the
