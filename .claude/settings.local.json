@@ -9,7 +9,9 @@
       "Bash(rustc --version)",
       "Bash(cargo fmt *)",
       "Bash(cargo test *)",
-      "Bash(cargo clippy *)"
+      "Bash(cargo clippy *)",
+      "Bash(build.bat *)",
+      "PowerShell(.\\\\build.bat)"
     ]
   }
 }

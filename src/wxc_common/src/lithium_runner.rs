@@ -228,8 +228,7 @@ impl LithiumScriptRunner {
         });
 
         if !self.config.ports.is_empty() {
-            body["ports"] = serde_json::to_value(&self.config.ports)
-                .unwrap_or_else(|_| json!([]));
+            body["ports"] = serde_json::to_value(&self.config.ports).unwrap_or_else(|_| json!([]));
         }
 
         // Carry the requested command line as a tag so it appears alongside
@@ -265,8 +264,9 @@ impl LithiumScriptRunner {
                 .set("api-version", &self.config.api_version)
                 .set("Content-Type", "application/json")
                 .send_json(body.clone())
+                .map_err(Box::new)
         })
-        .map_err(|e| format!("POST {} failed: {}", url, format_ureq_err_detailed(e)))?;
+        .map_err(|e| format!("POST {} failed: {}", url, format_ureq_err_detailed(*e)))?;
 
         let status = response.status();
         if status != 201 {
@@ -325,6 +325,7 @@ impl LithiumScriptRunner {
                 .set("Authorization", &format!("Bearer {}", token))
                 .set("api-version", &self.config.api_version)
                 .call()
+                .map_err(Box::new)
         });
         match result {
             Ok(resp) => {
@@ -401,13 +402,14 @@ impl LithiumScriptRunner {
                 .set("Authorization", &format!("Bearer {}", token))
                 .set("Content-Type", "application/json")
                 .send_json(body.clone())
+                .map_err(Box::new)
         }) {
             Ok(resp) => resp,
             Err(e) => {
                 return ScriptResponse::error(&format!(
                     "command-runner POST {} failed: {}",
                     url,
-                    format_ureq_err_detailed(e)
+                    format_ureq_err_detailed(*e)
                 ));
             }
         };
@@ -434,7 +436,7 @@ impl LithiumScriptRunner {
                     r.stdout.as_ref().map(|s| s.len()).unwrap_or(0),
                     r.stderr.as_ref().map(|s| s.len()).unwrap_or(0)
                 ));
-                let exit_code = r.returncode.unwrap_or_else(|| match status {
+                let exit_code = r.returncode.unwrap_or(match status {
                     200 => 0,
                     504 => 124, // GNU `timeout` convention
                     _ => -1,
@@ -561,14 +563,17 @@ fn with_retry_on_503<T, F>(
     max_attempts: u32,
     initial_backoff: Duration,
     mut f: F,
-) -> Result<T, ureq::Error>
+) -> Result<T, Box<ureq::Error>>
 where
-    F: FnMut() -> Result<T, ureq::Error>,
+    F: FnMut() -> Result<T, Box<ureq::Error>>,
 {
     let attempts = max_attempts.max(1);
     for attempt in 0..attempts {
         match f() {
-            Err(ureq::Error::Status(503, _)) if attempt + 1 < attempts => {
+            Err(boxed)
+                if attempt + 1 < attempts
+                    && matches!(boxed.as_ref(), ureq::Error::Status(503, _)) =>
+            {
                 let multiplier = 1u32 << attempt.min(5);
                 std::thread::sleep(initial_backoff.saturating_mul(multiplier));
                 continue;
@@ -842,8 +847,7 @@ mod tests {
         let response = runner.run_workload(&request, "tok", &checkout, &mut logger);
         assert_eq!(response.exit_code, -1);
         assert!(
-            response.standard_err.contains("proxyUri")
-                && response.standard_err.contains("8443"),
+            response.standard_err.contains("proxyUri") && response.standard_err.contains("8443"),
             "got: {}",
             response.standard_err
         );
@@ -988,7 +992,7 @@ mod tests {
     #[test]
     fn retry_helper_returns_first_success_immediately() {
         let calls = std::cell::RefCell::new(0u32);
-        let result: Result<ureq::Response, ureq::Error> =
+        let result: Result<ureq::Response, Box<ureq::Error>> =
             with_retry_on_503(3, Duration::ZERO, || {
                 *calls.borrow_mut() += 1;
                 Ok(fake_response(200))
@@ -1000,12 +1004,12 @@ mod tests {
     #[test]
     fn retry_helper_retries_on_503_then_succeeds() {
         let calls = std::cell::RefCell::new(0u32);
-        let result: Result<ureq::Response, ureq::Error> =
+        let result: Result<ureq::Response, Box<ureq::Error>> =
             with_retry_on_503(3, Duration::ZERO, || {
                 let mut n = calls.borrow_mut();
                 *n += 1;
                 if *n < 3 {
-                    Err(ureq::Error::Status(503, fake_response(503)))
+                    Err(Box::new(ureq::Error::Status(503, fake_response(503))))
                 } else {
                     Ok(fake_response(200))
                 }
@@ -1017,14 +1021,14 @@ mod tests {
     #[test]
     fn retry_helper_gives_up_after_max_attempts() {
         let calls = std::cell::RefCell::new(0u32);
-        let result: Result<ureq::Response, ureq::Error> =
+        let result: Result<ureq::Response, Box<ureq::Error>> =
             with_retry_on_503(3, Duration::ZERO, || {
                 *calls.borrow_mut() += 1;
-                Err(ureq::Error::Status(503, fake_response(503)))
+                Err(Box::new(ureq::Error::Status(503, fake_response(503))))
             });
         assert_eq!(*calls.borrow(), 3);
         match result {
-            Err(ureq::Error::Status(503, _)) => {}
+            Err(e) if matches!(*e, ureq::Error::Status(503, _)) => {}
             other => panic!("expected 503 after exhausting retries, got {:?}", other),
         }
     }
@@ -1033,14 +1037,14 @@ mod tests {
     fn retry_helper_does_not_retry_other_status_codes() {
         for status in [400u16, 401, 404, 500, 502, 504] {
             let calls = std::cell::RefCell::new(0u32);
-            let result: Result<ureq::Response, ureq::Error> =
+            let result: Result<ureq::Response, Box<ureq::Error>> =
                 with_retry_on_503(3, Duration::ZERO, || {
                     *calls.borrow_mut() += 1;
-                    Err(ureq::Error::Status(status, fake_response(status)))
+                    Err(Box::new(ureq::Error::Status(status, fake_response(status))))
                 });
             assert_eq!(*calls.borrow(), 1, "should not retry on HTTP {}", status);
             match result {
-                Err(ureq::Error::Status(s, _)) if s == status => {}
+                Err(e) if matches!(*e, ureq::Error::Status(s, _) if s == status) => {}
                 other => panic!("expected HTTP {}, got {:?}", status, other),
             }
         }
@@ -1049,7 +1053,7 @@ mod tests {
     #[test]
     fn retry_helper_max_attempts_zero_runs_once() {
         let calls = std::cell::RefCell::new(0u32);
-        let _: Result<ureq::Response, ureq::Error> =
+        let _: Result<ureq::Response, Box<ureq::Error>> =
             with_retry_on_503(0, Duration::ZERO, || {
                 *calls.borrow_mut() += 1;
                 Ok(fake_response(200))
@@ -1084,7 +1088,8 @@ mod tests {
                         body
                     )
                 } else {
-                    let body = r#"{"status":"completed","returncode":0,"stdout":"ok\n","stderr":""}"#;
+                    let body =
+                        r#"{"status":"completed","returncode":0,"stdout":"ok\n","stderr":""}"#;
                     format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -1122,7 +1127,11 @@ mod tests {
         let response = runner.run_workload(&request, "tok", &checkout, &mut logger);
         server.join().expect("server thread");
 
-        assert_eq!(counter.load(Ordering::SeqCst), 2, "expected exactly one retry");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "expected exactly one retry"
+        );
         assert_eq!(response.exit_code, 0);
         assert!(response.standard_out.contains("ok"));
         assert!(response.error_message.is_empty());
