@@ -109,23 +109,12 @@ fn is_elevated() -> bool {
     }
 }
 
-/// Registry path and key used by wxc-exec to decide whether to send diagnostics.
+/// Registry path used by wxc-exec for diagnostic settings.
 const DIAG_REGISTRY_SUBKEY: &str = r"SOFTWARE\Microsoft\MXC\Diagnostics";
-const DIAG_CONSOLE_VALUE: &str = "ConsoleEnabled";
 
-/// Check whether wxc-exec diagnostic console output is enabled (registry or env var).
+/// Check whether wxc-exec diagnostic console output is enabled (env var).
 fn is_diagnostic_console_enabled() -> bool {
-    // Environment variable takes precedence.
-    if std::env::var("MXC_DIAG_CONSOLE").ok().as_deref() == Some("1") {
-        return true;
-    }
-
-    // Check registry.
-    let hklm = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
-    let Ok(key) = hklm.open_subkey_with_flags(DIAG_REGISTRY_SUBKEY, winreg::enums::KEY_READ) else {
-        return false;
-    };
-    key.get_value::<u32, _>(DIAG_CONSOLE_VALUE).unwrap_or(0) == 1
+    std::env::var("MXC_DIAG_CONSOLE").ok().as_deref() == Some("1")
 }
 
 /// Check whether ForceLearningMode is enabled in the registry.
@@ -198,16 +187,7 @@ fn main() {
             w = W - 54
         );
         println!("{blank}");
-        line("  wxc-exec won't send messages to this console unless you enable it via the registry or an environment variable.");
-        println!("{blank}");
-        line("  Option 1 - Registry (persistent, run as admin):");
-        println!("{blank}");
-        line(&format!(
-            "    {c}New-Item -Path \"HKLM:\\SOFTWARE\\Microsoft\\MXC\\Diagnostics\" -Force{r}"
-        ));
-        line(&format!("    {c}Set-ItemProperty -Path \"HKLM:\\SOFTWARE\\Microsoft\\MXC\\Diagnostics\" -Name \"ConsoleEnabled\" -Value 1 -Type DWord{r}"));
-        println!("{blank}");
-        line("  Option 2 - Environment variable (per-session):");
+        line("  wxc-exec won't send messages to this console unless you set the environment variable:");
         println!("{blank}");
         line(&format!("    {c}$env:MXC_DIAG_CONSOLE = \"1\"{r}"));
         println!("{blank}");

@@ -3,12 +3,6 @@
 
 //! Diagnostic configuration for MXC real-time logging.
 //!
-//! Reads settings from the Windows registry (`HKLM\SOFTWARE\Microsoft\MXC\Diagnostics`)
-//! and environment variables. Environment variables take precedence over registry values.
-//!
-//! ## Registry keys
-//! - `ConsoleEnabled` (DWORD): 1 = send logs to the shared diagnostic console
-//!
 //! ## Environment variables
 //! - `MXC_DIAG_CONSOLE=1` — enable diagnostic console (named pipe)
 
@@ -100,12 +94,9 @@ impl DiagnosticConfig {
         self.console_enabled
     }
 
-    /// Read diagnostic settings from the registry and environment variables.
-    /// Environment variables take precedence over registry values.
+    /// Read diagnostic settings from environment variables.
     pub fn from_environment() -> Self {
-        let reg_console = read_registry_console_setting();
-
-        let console_enabled = env_bool(ENV_CONSOLE).unwrap_or(reg_console);
+        let console_enabled = env_bool(ENV_CONSOLE).unwrap_or(false);
 
         Self { console_enabled }
     }
@@ -275,15 +266,6 @@ fn env_bool(name: &str) -> Option<bool> {
     env::var(name)
         .ok()
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-}
-
-/// Read the `ConsoleEnabled` setting from the Windows registry.
-fn read_registry_console_setting() -> bool {
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let Ok(key) = hklm.open_subkey_with_flags(REGISTRY_SUBKEY, winreg::enums::KEY_READ) else {
-        return false;
-    };
-    key.get_value::<u32, _>("ConsoleEnabled").unwrap_or(0) == 1
 }
 
 #[cfg(test)]

@@ -22,19 +22,11 @@ $env:MXC_DIAG_CONSOLE = "1"
 wxc-exec.exe --experimental my-config.json
 ```
 
-Or enable persistently via registry (admin required):
-
-```powershell
-New-Item -Path "HKLM:\SOFTWARE\Microsoft\MXC\Diagnostics" -Force
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\MXC\Diagnostics" -Name "ConsoleEnabled" -Value 1 -Type DWord
-```
-
 ## Configuration
 
 | Method | Setting | Description |
 |--------|---------|-------------|
-| Registry | `HKLM\...\MXC\Diagnostics\ConsoleEnabled` = 1 | Machine-wide, persistent |
-| Env var | `MXC_DIAG_CONSOLE=1` | Per-session, no admin needed (takes precedence) |
+| Env var | `MXC_DIAG_CONSOLE=1` | Per-session, set before launching wxc-exec |
 
 ## What Gets Logged
 

@@ -9,8 +9,7 @@
  * Messages are best-effort: if the console is not running or the pipe
  * write fails, the error is silently ignored.
  *
- * Enabled by environment variable `MXC_DIAG_CONSOLE=1` or Windows registry
- * key `HKLM\SOFTWARE\Microsoft\MXC\Diagnostics\ConsoleEnabled` = 1.
+ * Enabled by environment variable `MXC_DIAG_CONSOLE=1`.
  */
 
 import { execSync } from 'child_process';
@@ -41,8 +40,6 @@ function getDiagnosticPipeName(): string {
 }
 
 const PIPE_NAME = getDiagnosticPipeName();
-const REGISTRY_KEY = 'HKLM\\SOFTWARE\\Microsoft\\MXC\\Diagnostics';
-const REGISTRY_VALUE = 'ConsoleEnabled';
 
 /** Cached pipe connection (lazy, best-effort). */
 let pipeSocket: net.Socket | null = null;
@@ -51,45 +48,17 @@ let pipeAttempted = false;
 let diagnosticEnabled: boolean | null = null;
 
 /**
- * Check whether diagnostic console logging is enabled via env var or registry.
+ * Check whether diagnostic console logging is enabled via env var.
  */
 function isDiagnosticEnabled(): boolean {
     if (diagnosticEnabled !== null) {
         return diagnosticEnabled;
     }
 
-    // Environment variable takes precedence.
     const envVal = process.env['MXC_DIAG_CONSOLE'];
-    if (envVal === '1' || envVal?.toLowerCase() === 'true') {
-        diagnosticEnabled = true;
-        return true;
-    }
-    if (envVal === '0' || envVal?.toLowerCase() === 'false') {
-        diagnosticEnabled = false;
-        return false;
-    }
-
-    // On Windows, check registry (best-effort, shell-based).
-    // Note: @vscode/windows-registry would be cleaner but requires native compilation.
-    if (os.platform() === 'win32') {
-        try {
-            const result = execSync(
-                `reg query "${REGISTRY_KEY}" /v ${REGISTRY_VALUE} 2>nul`,
-                { encoding: 'utf-8', timeout: 1000 },
-            );
-            const match = result.match(/REG_DWORD\s+(0x[0-9a-fA-F]+)/);
-            if (match && parseInt(match[1], 16) === 1) {
-                diagnosticEnabled = true;
-                return true;
-            }
-        } catch (e) {
-            // Registry key doesn't exist or access denied -- not actionable.
-            console.debug('MXC diagnostics: registry check failed:', e);
-        }
-    }
-
-    diagnosticEnabled = false;
-    return false;
+    diagnosticEnabled =
+        envVal === '1' || envVal?.toLowerCase() === 'true';
+    return diagnosticEnabled;
 }
 
 /**
