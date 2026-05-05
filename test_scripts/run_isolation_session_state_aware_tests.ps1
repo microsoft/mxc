@@ -4,7 +4,7 @@
 <#
 .SYNOPSIS
     Runs IsolationSession state-aware lifecycle E2E tests. Companion to
-    run_isolation_session_tests.ps1 — that script asserts the one-shot path;
+    run_isolation_session_tests.ps1 --that script asserts the one-shot path;
     this script asserts the state-aware path (`phase` / `sandboxId` envelope
     style, multi-invocation lifecycle).
 
@@ -16,11 +16,12 @@
     asserts only the provision phase.
 
     This script must run INTERACTIVELY on the test host. The OS-side service
-    cohort check rejects network-logon tokens, so PSSession-driven
-    invocations fail with Access Denied. Copy wxc-exec.exe and this script
-    to the host, then run it directly in cmd.exe or PowerShell on that host.
+    calling-process identity check rejects network-logon tokens, so
+    PSSession-driven invocations fail with Access Denied. Copy wxc-exec.exe
+    and this script to the host, then run it directly in cmd.exe or
+    PowerShell on that host.
 
-    Prerequisite probes (skip if missing — not a failure):
+    Prerequisite probes (skip if missing --not a failure):
       - IsoSessionApp.dll present in System32
       - WinRT activatable class IsoSessionOps registered
       - wxc-exec.exe responds to a state-aware request without
@@ -113,7 +114,7 @@ function Invoke-StateAware {
     $stderrFile = [System.IO.Path]::GetTempFileName()
     try {
         # Start-Process redirects to file so we can capture both streams without
-        # ConPTY interleaving — wxc-exec's stdout must be a single envelope.
+        # ConPTY interleaving --wxc-exec's stdout must be a single envelope.
         $proc = Start-Process -FilePath $WxcExec -ArgumentList $argList `
             -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile `
             -NoNewWindow -PassThru -Wait
@@ -178,14 +179,19 @@ function Assert-True {
     }
 }
 
+# try-finally wraps the lifecycle so any mid-flow failure still triggers a
+# best-effort deprovision. Mirrors the defensive cleanup in
+# IsolationSessionRunner::execute -- failed runs do not leak Indefinite-
+# lifetime agent users across test runs.
+$sandboxId = $null
+try {
+
 # Test 1: provision returns iso:wxc-<8-hex> and a backend_unavailable-free
 # envelope.
 Write-Host "[provision] sandbox_id format" -ForegroundColor Cyan
 $provisionResult = Invoke-StateAware -Request $probeRequest -Experimental
 $provisionEnv = Parse-Envelope -Stdout $provisionResult.Stdout
 $arm = Envelope-Arm $provisionEnv
-
-$sandboxId = $null
 
 if ($arm -ne 'result') {
     Write-Host "  Envelope arm: $arm" -ForegroundColor Red
@@ -198,14 +204,10 @@ if ($arm -ne 'result') {
     $agentUserName = $provisionEnv.result.metadata.agentUserName
     Assert-True ($sandboxId -match '^iso:wxc-[0-9a-f]{8}$') "sandbox_id matches iso:wxc-<8-hex> ($sandboxId)"
     Assert-True ($null -ne $agentUserName) "metadata.agentUserName is present ($agentUserName)"
-    # TODO(I5): once deprovision lands, wrap this test body in try-finally and
-    # call deprovision on $sandboxId to avoid leaking the agent user across
-    # test runs. Until then, the OS-side service retains the registration —
-    # acceptable while we are validating early phases only.
 }
 
 # Test 2: start succeeds against the provisioned sandbox. Exercises the
-# multi-invocation pattern — provision was a separate wxc-exec process; this
+# multi-invocation pattern --provision was a separate wxc-exec process; this
 # is a fresh wxc-exec process consuming the same sandbox_id. Skipped if
 # provision did not return a usable id.
 $startedOk = $false
@@ -226,7 +228,7 @@ if ($null -ne $sandboxId) {
         Assert-True $false "start returned a result envelope"
     } else {
         Assert-True ($startResult.ExitCode -eq 0) "exit code = 0 on success"
-        # Start has no metadata in v1 — `result` should be an empty object.
+        # Start has no metadata in v1 --`result` should be an empty object.
         Assert-True ($null -eq $startEnv.result.metadata) "result.metadata is absent (no start metadata in v1)"
         $startedOk = ($startResult.ExitCode -eq 0)
     }
@@ -252,7 +254,7 @@ if ($startedOk) {
     Assert-True ($execResult.ExitCode -eq 0) "exit code = 0 on success"
     Assert-True ($execResult.Stdout -match 'state-aware-exec-marker') `
         "stdout contains the script's output (streamed live, not enveloped)"
-    # Exec on success does not emit a JSON envelope on stdout — the SDK
+    # Exec on success does not emit a JSON envelope on stdout --the SDK
     # discriminates between exec success (raw stdout) and dispatch failure
     # (JSON envelope) using exit code + envelope-parseability.
     $maybeEnv = Parse-Envelope -Stdout $execResult.Stdout
@@ -264,6 +266,7 @@ if ($startedOk) {
 # Test 4: stop closes the started session. Asserts a clean result envelope
 # with no metadata. Skipped unless exec succeeded (so we know we have a
 # truly running session to stop, not a half-set-up one).
+$stoppedOk = $false
 if ($execedOk) {
     Write-Host "[stop] full lifecycle through stop" -ForegroundColor Cyan
     $stopRequest = @{
@@ -282,6 +285,58 @@ if ($execedOk) {
     } else {
         Assert-True ($stopResult.ExitCode -eq 0) "exit code = 0 on success"
         Assert-True ($null -eq $stopEnv.result.metadata) "result.metadata is absent (no stop metadata in v1)"
+        $stoppedOk = ($stopResult.ExitCode -eq 0)
+    }
+}
+
+# Test 5: deprovision tears down the agent user and unregisters the client.
+# After this test, $sandboxId is no longer addressable -- the finally block
+# below skips its cleanup pass when this test ran.
+$deprovisionedOk = $false
+if ($stoppedOk) {
+    Write-Host "[deprovision] full lifecycle through deprovision" -ForegroundColor Cyan
+    $deprovRequest = @{
+        phase     = 'deprovision'
+        sandboxId = $sandboxId
+    }
+    $deprovResult = Invoke-StateAware -Request $deprovRequest -Experimental
+    $deprovEnv = Parse-Envelope -Stdout $deprovResult.Stdout
+    $deprovArm = Envelope-Arm $deprovEnv
+
+    if ($deprovArm -ne 'result') {
+        Write-Host "  Envelope arm: $deprovArm" -ForegroundColor Red
+        Write-Host "  Stdout: $($deprovResult.Stdout)" -ForegroundColor Gray
+        Write-Host "  Stderr: $($deprovResult.Stderr)" -ForegroundColor Gray
+        Assert-True $false "deprovision returned a result envelope"
+    } else {
+        Assert-True ($deprovResult.ExitCode -eq 0) "exit code = 0 on success"
+        Assert-True ($null -eq $deprovEnv.result.metadata) "result.metadata is absent (no deprovision metadata in v1)"
+        $deprovisionedOk = $true
+    }
+}
+
+} finally {
+    # Best-effort cleanup. If the suite reached the deprovision test and it
+    # succeeded, the agent user is already torn down -- nothing to do. If
+    # the suite failed mid-flow, this still runs so a leaked Indefinite-
+    # lifetime agent user does not survive across test runs.
+    if ($null -ne $sandboxId -and -not $deprovisionedOk) {
+        Write-Host "" -ForegroundColor Gray
+        Write-Host "[cleanup] best-effort deprovision of $sandboxId" -ForegroundColor DarkGray
+        $cleanupRequest = @{
+            phase     = 'deprovision'
+            sandboxId = $sandboxId
+        }
+        try {
+            $cleanupResult = Invoke-StateAware -Request $cleanupRequest -Experimental
+            if ($cleanupResult.ExitCode -eq 0) {
+                Write-Host "  cleanup deprovision succeeded" -ForegroundColor DarkGray
+            } else {
+                Write-Host "  cleanup deprovision exit $($cleanupResult.ExitCode); stdout: $($cleanupResult.Stdout)" -ForegroundColor DarkGray
+            }
+        } catch {
+            Write-Host "  cleanup deprovision threw: $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
     }
 }
 

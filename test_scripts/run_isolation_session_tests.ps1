@@ -15,25 +15,25 @@
       and stdout content
     - Reports pass/fail summary
 
-    This script must run INTERACTIVELY on the test host. The IsoEnvBroker
-    cohort check rejects network-logon tokens, so PSSession-driven
-    invocations fail with Access Denied. Copy wxc-exec.exe, the test
-    configs, and this script to the host, then run it directly in
+    This script must run INTERACTIVELY on the test host. The OS-side service
+    calling-process identity check rejects network-logon tokens, so
+    PSSession-driven invocations fail with Access Denied. Copy wxc-exec.exe,
+    the test configs, and this script to the host, then run it directly in
     cmd.exe or PowerShell on that host.
 
     Automated configs (asserted by this script):
-      - isolation_session_hello.json — env vars + working dir + agent name
-      - isolation_session_exit42.json — exit code propagation
-      - isolation_session_stderr.json — separate stderr in non-ConPTY mode
-      - isolation_session_stdout_stderr_interleaved.json — interleaved streams
-      - isolation_session_timeout.json — OS-side timeout terminates with exit code 1
+      - isolation_session_hello.json --env vars + working dir + agent name
+      - isolation_session_exit42.json --exit code propagation
+      - isolation_session_stderr.json --separate stderr in non-ConPTY mode
+      - isolation_session_stdout_stderr_interleaved.json --interleaved streams
+      - isolation_session_timeout.json --OS-side timeout terminates with exit code 1
 
-    Manual smoke configs (NOT asserted — observe the output yourself):
-      - isolation_session_streaming_smoke.json — output appears with delays
+    Manual smoke configs (NOT asserted --observe the output yourself):
+      - isolation_session_streaming_smoke.json --output appears with delays
         rather than a burst at exit; verifies Commit 1 streaming.
         Run from cmd.exe directly (not redirected) so wxc-exec sees a TTY:
             wxc-exec.exe --experimental isolation_session_streaming_smoke.json
-      - isolation_session_powershell_interactive.json — launches
+      - isolation_session_powershell_interactive.json --launches
         powershell.exe in the isolation session; type commands at the prompt
         (e.g. `Get-Date`, `whoami`, `exit 7`) and verify input forwarding +
         ConPTY rendering + exit-code propagation. Requires a real cmd.exe
@@ -64,7 +64,7 @@ if (-not $ConfigDir) {
     $ConfigDir = Join-Path $RepoRoot "test_configs"
 }
 
-# Locate wxc-exec.exe — explicit path > host-arch target dir > other-arch
+# Locate wxc-exec.exe --explicit path > host-arch target dir > other-arch
 # target dir > default release dir. Detect the host arch so we look for the
 # matching build first, but also probe the other Windows target so a
 # cross-built binary is still discoverable.

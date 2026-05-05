@@ -31,7 +31,7 @@ use crate::process_util::{
 };
 use crate::script_runner::ScriptRunner;
 use crate::state_aware_backend::{
-    ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
+    DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
 };
 use isolation_session_bindings::bindings::{
     IsoSessionConfigId, IsoSessionError, IsoSessionOps, IsoSessionProcess,
@@ -46,11 +46,11 @@ use windows_core::{HSTRING, PCWSTR};
 
 // -- Identifiers -------------------------------------------------------------
 
-/// Cohort registration ID used with the `IsoSessionOps` wrapper.
+/// Registration ID used with the `IsoSessionOps` wrapper.
 ///
 /// The `IsoSessionOps` wrapper hardcodes `L"regid"` internally for every
 /// agent-name-keyed op, so callers must register with this exact literal
-/// or subsequent calls hit the wrong cohort.
+/// or subsequent calls hit the wrong registration.
 const REGISTRATION_ID: &str = "regid";
 
 /// Default provisionId used by the one-shot backend path. State-aware
@@ -312,7 +312,7 @@ fn check_result(result: &IsoSessionResult, op: &str) -> Result<(), IsolationSess
 /// Manages the `IsoSessionOps` lifecycle. Methods map 1:1 to the granular
 /// API steps.
 pub struct IsolationSessionManager {
-    /// Cohort/registration identifier used in `RegisterApp` / `AddUserAsync`
+    /// Registration identifier used in `RegisterApp` / `AddUserAsync`
     /// / `UnregisterAppAsync`. Pegged to the literal `"regid"` per the
     /// wrapper's internal hardcode.
     registration_id: HSTRING,
@@ -916,6 +916,30 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
         manager.stop_session().map_err(map_lifecycle_error)?;
         Ok(StopResult { metadata: None })
+    }
+
+    /// Removes the agent user, then unregisters the client. Mirrors the
+    /// one-shot teardown sequence so a state-aware lifecycle leaves the
+    /// OS-side service in the same end state as a one-shot run.
+    ///
+    /// `unregister_client` tears down the client registration that
+    /// `provision` set up via `register_client`. v1 does not target
+    /// concurrent state-aware sessions, which would share that
+    /// registration -- if that becomes a real requirement, this will
+    /// need either a refcount or a "leave-registration-alone" mode.
+    fn deprovision(
+        &mut self,
+        sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<()>,
+    ) -> Result<DeprovisionResult<()>, MxcError> {
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
+        manager
+            .deprovision_agent_user()
+            .map_err(map_lifecycle_error)?;
+        manager.unregister_client().map_err(map_lifecycle_error)?;
+        Ok(DeprovisionResult { metadata: None })
     }
 
     /// Reuses `IsolationSessionManager::create_process` — the same path the

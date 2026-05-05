@@ -279,9 +279,10 @@ expected output substrings, and reports a pass/fail summary. Pattern
 follows the existing per-backend integration scripts (e.g.
 `run_microvm_tests.ps1`, `run_wslc_all_tests.ps1`).
 
-The script must run **interactively** on the test host. The IsoEnvBroker's
-cohort check rejects network-logon tokens, so PSSession-driven
-invocations fail with `Access Denied`. Intended workflow: build a release
+The script must run **interactively** on the test host. The OS-side service's
+calling-process identity check rejects network-logon tokens, so
+PSSession-driven invocations fail with `Access Denied`. Intended workflow:
+build a release
 `wxc-exec.exe` (the repo's `.cargo/config.toml` already configures
 `+crt-static` for Windows MSVC, so the binary has no `vcruntime140.dll`
 dependency on the test host), copy it plus the two test configs and the
