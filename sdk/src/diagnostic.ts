@@ -34,11 +34,11 @@ function isDiagnosticEnabled(): boolean {
 
     // Environment variable takes precedence.
     const envVal = process.env['MXC_DIAG_CONSOLE'];
-    if (envVal === '1' || envVal === 'true') {
+    if (envVal === '1' || envVal?.toLowerCase() === 'true') {
         diagnosticEnabled = true;
         return true;
     }
-    if (envVal === '0' || envVal === 'false') {
+    if (envVal === '0' || envVal?.toLowerCase() === 'false') {
         diagnosticEnabled = false;
         return false;
     }
