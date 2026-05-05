@@ -34,7 +34,7 @@ export interface LifecycleConfig {
 /**
  * Containment type abstraction for createConfigFromPolicy.
  * Maps to platform-specific backends:
- * - "process": BaseProcessContainer (Windows) / LXC (Linux) / Seatbelt (macOS)
+ * - "process": BaseProcessContainer (Windows) / LXC (Linux) / macOS sandbox (macOS)
  * - "microvm": MicroVM/Nanvix backend (Windows only, experimental)
  */
 export type ContainmentType = "process" | "wslc" | "microvm";
@@ -172,7 +172,7 @@ export interface ContainerConfig {
   /** Externally assigned container identifier */
   containerId?: string;
   /** Containment backend */
-  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'seatbelt';
+  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'macos_sandbox';
   /** Container lifecycle settings */
   lifecycle?: LifecycleConfig;
   /** Process execution settings (required) */
@@ -181,8 +181,8 @@ export interface ContainerConfig {
   appContainer?: AppContainerConfig;
   /** LXC container configuration (Linux only) */
   lxc?: LxcConfig;
-  /** Seatbelt sandbox configuration (macOS only) */
-  seatbelt?: SeatbeltConfig;
+  /** macOS sandbox configuration (macOS only) */
+  macos_sandbox?: MacosSandboxConfig;
   /** Filesystem access configuration */
   filesystem?: FilesystemConfig;
   /** Network access configuration */
@@ -261,11 +261,11 @@ export interface LxcConfig {
 }
 
 /**
- * Seatbelt (macOS) sandbox configuration. Used when containment is 'seatbelt'.
+ * macOS sandbox configuration. Used when containment is 'macos_sandbox'.
  */
-export interface SeatbeltConfig {
+export interface MacosSandboxConfig {
   /**
-   * Which Seatbelt entry point to use:
+   * Which sandbox entry point to use:
    * - "exec" (default): spawn /usr/bin/sandbox-exec.
    * - "inproc": call sandbox_init_with_parameters in the child after fork
    *   (lower latency; relies on a private macOS API).
@@ -274,7 +274,7 @@ export interface SeatbeltConfig {
   /**
    * Optional override of the generated TinyScheme profile. When set the
    * generated policy-derived profile is ignored and this string is passed
-   * to Seatbelt verbatim. Intended for advanced/testing use.
+   * to the sandbox verbatim. Intended for advanced/testing use.
    */
   profileOverride?: string;
 }
@@ -282,7 +282,7 @@ export interface SeatbeltConfig {
 /**
  * Sandboxing methods available on the platform
  */
-export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'seatbelt';
+export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'macos_sandbox';
 
 /**
  * Platform support information

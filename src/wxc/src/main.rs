@@ -227,8 +227,10 @@ fn main() {
             eprintln!("Error: LXC backend not available on Windows");
             process::exit(1);
         }
-        ContainmentBackend::Seatbelt => {
-            eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-darwin)");
+        ContainmentBackend::MacosSandbox => {
+            eprintln!(
+                "Error: macOS sandbox backend is only available on macOS (use mxc-exec-darwin)"
+            );
             process::exit(1);
         }
         ContainmentBackend::Vm => {
