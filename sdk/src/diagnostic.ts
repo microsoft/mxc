@@ -106,8 +106,9 @@ function ensurePipe(): net.Socket | null {
         socket.unref();
 
         pipeSocket = socket;
-        pipeConnected = true;
-        return socket;
+        // Connection is in-flight; the 'connect' handler sets pipeConnected.
+        // First message may be dropped, which is acceptable for best-effort diagnostics.
+        return null;
     } catch {
         return null;
     }
