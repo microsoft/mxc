@@ -417,7 +417,7 @@ pub fn decode_request_input(
 // ---------- Cross-field validation ----------
 
 /// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: &str = ">=0.4, <=0.5";
+const SUPPORTED_VERSION: &str = ">=0.4, <=0.6";
 
 /// The minimum schema version that implies BaseContainer backend usage.
 const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
@@ -1285,6 +1285,30 @@ mod tests {
     }
 
     #[test]
+    fn network_default_policy_absent_defaults_to_block_on_any_version() {
+        // wxc-exec is the trust boundary: regardless of the declared schema
+        // version, an absent `network.defaultPolicy` resolves to `Block`.
+        // Older schemas (e.g. 0.5) document the field's default as "allow",
+        // but the Rust parser intentionally ignores that and falls back to
+        // deny-by-default.
+        for version in ["0.4.0-alpha", "0.5.0-alpha", "0.6.0-alpha"] {
+            let json = format!(
+                r#"{{"version": "{}", "process": {{"commandLine": "echo x"}}}}"#,
+                version
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+            let req = load_request(&encoded, &mut logger, true).unwrap();
+            assert_eq!(
+                req.policy.default_network_policy,
+                NetworkPolicy::Block,
+                "version {} should default to Block",
+                version
+            );
+        }
+    }
+
+    #[test]
     fn network_enforcement_mode_capabilities() {
         let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "capabilities"}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -1792,7 +1816,7 @@ mod tests {
 
     #[test]
     fn schema_version_too_new_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.6.0"}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.7.0"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1802,6 +1826,16 @@ mod tests {
 
     #[test]
     fn schema_version_current_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.6.0-alpha"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "0.6.0-alpha");
+    }
+
+    #[test]
+    fn schema_version_0_5_still_accepted() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.5.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();

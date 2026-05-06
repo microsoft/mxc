@@ -117,7 +117,7 @@ export interface NetworkConfig {
    * (default: "both")
    */
   enforcementMode?: 'capabilities' | 'firewall' | 'both';
-  /** Default network policy: "allow" or "block" (default: "allow") */
+  /** Default network policy: "allow" or "block" (default: "block") */
   defaultPolicy?: 'allow' | 'block';
   /** Hostnames or IP addresses/CIDR blocks to allow (firewall mode only) */
   allowedHosts?: string[];

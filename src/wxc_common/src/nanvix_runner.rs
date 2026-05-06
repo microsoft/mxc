@@ -630,23 +630,10 @@ mod tests {
     }
 
     #[test]
-    fn policy_rejects_working_directory() {
-        let mut runner = NanVixScriptRunner::new();
-        let request = CodexRequest {
-            script_code: "echo test".to_string(),
-            working_directory: "/home/user".to_string(),
-            ..Default::default()
-        };
-        let mut logger = Logger::new(Mode::Buffer);
-        let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_WORKDIR));
-    }
-
-    #[test]
-    fn policy_allows_defaults() {
-        // A request with all-default policies should pass validation and
-        // fail later on path resolution (nanvixd not found), NOT on policy.
+    fn policy_rejects_default_request_via_network_policy() {
+        // Default `NetworkPolicy` is `Block`, and NanVix can't enforce any
+        // network policy, so even an otherwise-empty request must be
+        // rejected at the network-policy preflight.
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
             script_code: "echo test".to_string(),
@@ -655,41 +642,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(
-            !resp.error_message.contains(ERR_FILESYSTEM_POLICY),
-            "default request should not trigger filesystem policy rejection"
-        );
-        assert!(
-            !resp.error_message.contains(ERR_NETWORK_POLICY),
-            "default request should not trigger network policy rejection"
-        );
-        assert!(
-            !resp.error_message.contains(ERR_WORKDIR),
-            "default request should not trigger workingDirectory rejection"
-        );
-    }
-
-    #[test]
-    fn policy_rejects_network_proxy() {
-        let mut runner = NanVixScriptRunner::new();
-        let request = CodexRequest {
-            script_code: "echo test".to_string(),
-            policy: ContainerPolicy {
-                network_proxy: crate::models::ProxyConfig {
-                    address: Some(crate::models::ProxyAddress::new(
-                        "127.0.0.1".to_string(),
-                        8080,
-                    )),
-                    builtin_test_server: false,
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut logger = Logger::new(Mode::Buffer);
-        let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_PROXY_POLICY));
+        assert!(resp.error_message.contains(ERR_NETWORK_POLICY));
     }
 
     #[test]

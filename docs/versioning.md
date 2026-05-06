@@ -50,7 +50,8 @@ mxc/schemas/
 ├── stable/
 │   └── mxc-config.schema.0.4.0-alpha.json  (shipped — current stable)
 └── dev/
-    └── mxc-config.schema.0.5.0-dev.json   (current — includes experimental section definition)
+    ├── mxc-config.schema.0.5.0-dev.json   (in-flight — includes experimental section definition)
+    └── mxc-config.schema.0.6.0-dev.json   (current — tightens default network posture to deny-by-default)
 ```
 
 The dev schema file (`mxc-config.schema.X.Y.Z-dev.json`) must define the `experimental`
@@ -60,8 +61,11 @@ schemas in `stable/` do not include the experimental section.
 ### Shipped vs Experimental
 
 The current stable schema version is `0.4.0-alpha`. The parser also accepts
-`0.5.0-alpha`, which should be used for configs that include promoted and experimental
-features:
+`0.5.0-alpha` and `0.6.0-alpha`. Use `0.6.0-alpha` for new configs that want
+the deny-by-default network posture; existing `0.5.0-alpha` configs continue
+to validate, but `wxc-exec` is the trust boundary and falls back to
+`block` whenever `network.defaultPolicy` is absent or unrecognized, regardless
+of the declared schema version:
 
 ```json
 {

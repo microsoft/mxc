@@ -10,7 +10,7 @@ import { SandboxPolicy, ContainerConfig, ContainmentType } from './types';
 import { prepareSpawn, diagLogVersion } from './helper';
 import { diagLog } from './diagnostic';
 
-const SUPPORTED_VERSION = '0.5.0-alpha';
+const SUPPORTED_VERSION = '0.6.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';
 
 /**

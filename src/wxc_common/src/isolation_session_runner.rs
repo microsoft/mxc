@@ -1281,9 +1281,12 @@ mod tests {
     }
 
     #[test]
-    fn policy_allows_defaults() {
+    fn policy_rejects_default_request_via_network_policy() {
+        // Default `NetworkPolicy` is `Block`, and IsolationSession can't
+        // enforce any network policy, so an otherwise-empty request must
+        // be rejected at the network-policy preflight.
         let request = CodexRequest::default();
-        assert!(validate_policy(&request).is_ok());
+        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
     }
 
     // ====== ProcessOptions / option building tests ======

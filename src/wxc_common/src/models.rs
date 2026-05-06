@@ -118,8 +118,9 @@ pub struct LxcConfig {
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkPolicy {
-    #[default]
     Allow,
+    /// Deny-by-default. `wxc-exec` is the trust boundary.
+    #[default]
     Block,
 }
 
