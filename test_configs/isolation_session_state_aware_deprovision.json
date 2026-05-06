@@ -1,0 +1,4 @@
+{
+    "phase": "deprovision",
+    "sandboxId": "{{SANDBOX_ID}}"
+}

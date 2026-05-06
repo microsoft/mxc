@@ -1,0 +1,8 @@
+{
+    "phase": "exec",
+    "sandboxId": "{{SANDBOX_ID}}",
+    "process": {
+        "commandLine": "echo %MY_SA_PERSIST%",
+        "timeout": 30000
+    }
+}
