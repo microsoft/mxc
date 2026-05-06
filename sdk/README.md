@@ -39,6 +39,7 @@ Then reference it from your project (e.g., via `npm link` or a relative path in 
 
 **Requirements**:
 - **Windows**: Windows 11 build 26100+ with UBR ≥ 7965 (for builds 26100–26500)
+- **Windows**: The host process must run **elevated (Administrator)** to create AppContainer-based sandboxes
 - **Linux**: LXC must be installed and available
 
 **Platform Support**:
@@ -446,6 +447,120 @@ const result = await spawnSandboxAsync(script, policy, {}, 'C:\\workspace');
 console.log('Output:', result.stdout);
 console.log('Exit code:', result.exitCode);
 ```
+
+## Common Pitfalls
+
+### `spawnSandboxAsync` merges stdout and stderr
+
+`spawnSandboxAsync` uses a PTY internally. **stderr is always empty** in the returned result — all output (including error output) arrives in `stdout`. If you need to distinguish stderr from stdout, you must handle it at the application level inside the sandbox (e.g., redirect stderr to a file, then read it back).
+
+```typescript
+// result.stderr will always be '' — this is by design
+const result = await spawnSandboxAsync('python script.py', policy);
+console.log(result.stdout); // Contains both stdout AND stderr
+console.log(result.stderr); // Always empty string
+```
+
+### `createConfigFromPolicy()` returns an empty command line
+
+If you use the advanced path (`createConfigFromPolicy()` → modify → `spawnSandboxFromConfig()`), the returned config has an **empty `process.commandLine`**. You must set it before spawning:
+
+```typescript
+import { createConfigFromPolicy, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+
+const config = createConfigFromPolicy(policy);
+config.process.commandLine = 'python -c "print(\'hello\')"'; // ← Required!
+const pty = spawnSandboxFromConfig(config);
+```
+
+### Elevation failures on Windows
+
+If the host process is not elevated, `spawnSandbox` will throw. The error message may not immediately indicate a privilege issue. Always ensure your host process runs as Administrator during development and testing.
+
+### Timeouts default to no limit
+
+If you delegate work to a sandbox, set `timeoutMs` in your policy to prevent runaway processes:
+
+```typescript
+const policy: SandboxPolicy = {
+  version: '0.4.0-alpha',
+  filesystem: { readonlyPaths: tools.readonlyPaths },
+  timeoutMs: 30000, // 30 seconds
+};
+```
+
+## Recommended Policy for Agentic Workloads
+
+Agents that execute code on behalf of a user typically need scoped filesystem access and limited (or no) network. The `SandboxPolicy` model is **default-deny** — omitted fields are restrictive.
+
+```typescript
+import {
+  SandboxPolicy,
+  getAvailableToolsPolicy,
+  getTemporaryFilesPolicy,
+} from '@microsoft/mxc-sdk';
+
+const tools = getAvailableToolsPolicy(process.env);
+const temp = getTemporaryFilesPolicy();
+
+const agentPolicy: SandboxPolicy = {
+  version: '0.4.0-alpha',
+  filesystem: {
+    readonlyPaths: [
+      ...tools.readonlyPaths,
+      // Add paths to project files the agent needs to read
+    ],
+    readwritePaths: [
+      ...temp.readwritePaths,
+      // Add a scoped output directory for agent artifacts
+    ],
+  },
+  network: {
+    // Only enable if the agent needs external API access
+    allowOutbound: false,
+    // Or restrict to specific hosts:
+    // allowedHosts: ['api.example.com'],
+  },
+  timeoutMs: 60000, // Prevent runaway execution
+};
+```
+
+**Principle:** Grant the sandbox only what the current task requires. If your agent performs multiple steps, consider spawning separate sandboxes with different policies for each step rather than one broad policy.
+
+## Error Handling
+
+```typescript
+import { getPlatformSupport, spawnSandboxAsync } from '@microsoft/mxc-sdk';
+
+// 1. Check platform before any sandbox operations
+const support = getPlatformSupport();
+if (!support.isSupported) {
+  // Degrade gracefully — run without containment or inform the user
+  console.error(`MXC not available: ${support.reason}`);
+}
+
+// 2. Wrap spawn calls in try/catch
+try {
+  const result = await spawnSandboxAsync(command, policy);
+  if (result.exitCode !== 0) {
+    // Non-zero exit — check result.stdout for error output (stderr is merged)
+    handleFailure(result.stdout, result.exitCode);
+  }
+} catch (err) {
+  // Spawn failures: privilege issues, invalid policy, missing binaries
+  handleSpawnError(err);
+}
+```
+
+## Integration Checklist
+
+- [ ] `getPlatformSupport()` called at startup; graceful fallback if unsupported
+- [ ] Host process runs elevated (Administrator) on Windows
+- [ ] Policy uses default-deny; only required paths/network are enabled
+- [ ] `timeoutMs` set to prevent unbounded execution
+- [ ] `spawnSandboxAsync` stdout handled knowing stderr is merged
+- [ ] Error handling covers both spawn failures and non-zero exit codes
+- [ ] Tested on Windows 11 build 26100+ with UBR ≥ 7965
 
 ## TypeScript Support
 
