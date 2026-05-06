@@ -132,18 +132,22 @@ SDK rejects it with a clear error, mirroring the Linux behavior.
 
 ### Command line
 
+The `macos_sandbox` backend is currently experimental, so every invocation
+must include the `--experimental` flag. Without it, the binary refuses to
+run with a clear error.
+
 ```bash
 # Run with config file
-./mxc-exec-darwin config.json
+./mxc-exec-darwin --experimental config.json
 
 # Run with base64-encoded config
-./mxc-exec-darwin --config-base64 <base64-string>
+./mxc-exec-darwin --experimental --config-base64 <base64-string>
 
 # Validate the config and exit without executing
-./mxc-exec-darwin --dry-run config.json
+./mxc-exec-darwin --experimental --dry-run config.json
 
 # Diagnostic output to console + file
-./mxc-exec-darwin --debug --log-file mxc.log config.json
+./mxc-exec-darwin --experimental --debug --log-file mxc.log config.json
 ```
 
 ### SDK
@@ -162,8 +166,9 @@ const policy: SandboxPolicy = {
 };
 
 // On macOS, spawnSandbox automatically resolves to mxc-exec-darwin and
-// builds a macos_sandbox config. No extra wiring required at the call site.
-const pty = spawnSandbox('echo hello', policy);
+// builds a macos_sandbox config. The backend is experimental, so the
+// caller must opt in via SandboxSpawnOptions.experimental.
+const pty = spawnSandbox('echo hello', policy, { experimental: true });
 pty.onData((data) => console.log(data));
 pty.onExit((e) => console.log('Exit:', e.exitCode));
 ```
