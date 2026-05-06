@@ -879,6 +879,7 @@ fn convert_raw_state_aware(
         containment: raw.containment,
         app_container: None,
         lxc: None,
+        macos_sandbox: None,
         filesystem: raw.filesystem,
         network: raw.network,
         ui: raw.ui,
@@ -909,9 +910,10 @@ fn parse_containment_str(s: &str, logger: &mut Logger) -> Result<ContainmentBack
         "vm" => Ok(ContainmentBackend::Vm),
         "microvm" => Ok(ContainmentBackend::MicroVm),
         "isolation_session" => Ok(ContainmentBackend::IsolationSession),
+        "macos_sandbox" => Ok(ContainmentBackend::MacosSandbox),
         other => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', or 'microvm')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', or 'macos_sandbox')",
                 other
             );
             logger.log_line(&msg);
