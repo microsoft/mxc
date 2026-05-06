@@ -110,11 +110,9 @@ pub unsafe fn create_relay_thread(params: *mut PipeRelayParams) -> Result<OwnedH
 // by the parent: node-pty, shell, etc.). Without an external signal the relay
 // sits in `ReadFile` forever.
 //
-// Pattern adopted from IsoSessionCLI's `ConsoleTtyRelay::WriteThread`
-// (`onecoreuap/windows/core/isoenvbroker/src/cli/ConsoleTtyRelay.cpp:188-263`
-// in the OS repo). `CancelSynchronousIo` was rejected because it has
-// documented edge cases on console handles, and wxc-exec's stdin is a console
-// handle in the dominant `spawnSandbox` (node-pty) and direct-cmd cases.
+// `CancelSynchronousIo` is the obvious alternative but has documented edge
+// cases on console handles, and wxc-exec's stdin is a console handle in the
+// dominant `spawnSandbox` (node-pty) and direct-cmd cases.
 //
 // `h_read` MUST be a waitable handle whose signal state correctly reflects
 // "input available" (a console input handle is the canonical case; events
@@ -475,12 +473,10 @@ pub fn run_process_with_captured_output(
 // The two consoles render the same input twice, producing visible artifacts
 // (partial echos, doubled prompts, `\r\n` confusion).
 //
-// The fix mirrors IsoSessionCLI's `ConsoleRestorer::SetRawVtMode`
-// (`onecoreuap/windows/core/isoenvbroker/src/cli/ConsoleTtyRelay.cpp:69-93`
-// in the OS repo): switch the local console to raw VT mode for the relay
-// duration. Only the agent's ConPTY does input echo and command processing;
-// the local console is a transparent forwarder. On scope exit the original
-// modes are restored.
+// Fix: switch the local console to raw VT mode for the relay duration. Only
+// the agent's ConPTY does input echo and command processing; the local
+// console is a transparent forwarder. On scope exit the original modes are
+// restored.
 
 /// RAII guard that switches the local console to raw VT mode. Only meaningful
 /// in interactive mode (`InteractiveConsole = true`). When wxc-exec's stdio

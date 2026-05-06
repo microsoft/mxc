@@ -9,14 +9,17 @@ use clap::Parser;
 use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
 use wxc_common::appcontainer_runner::AppContainerScriptRunner;
 use wxc_common::base_container_runner::BaseContainerRunner;
-use wxc_common::config_parser::{is_base_container_version, load_request};
+use wxc_common::config_parser::{is_base_container_version, load_mxc_request, ParseError};
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
 #[cfg(feature = "isolation_session")]
 use wxc_common::isolation_session_runner::IsolationSessionRunner;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
+use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::nanvix_runner::NanVixScriptRunner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use wxc_common::state_aware_dispatch::{run_state_aware, DispatchOutcome};
+use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
 use wxc_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 
 #[derive(Parser)]
@@ -82,6 +85,48 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
     let _ = writeln!(logger, "Exit code: {}", response.exit_code);
     if !response.error_message.is_empty() {
         let _ = writeln!(logger, "Error: {}", response.error_message);
+    }
+}
+
+/// Drives the state-aware dispatch flow. On envelope success, writes the
+/// JSON to stdout and exits 0. On exec success, exits with the script's
+/// exit code (output already streamed). On failure, writes a JSON error
+/// envelope to stdout and exits 1. Diagnostic logger output goes to stderr
+/// regardless of mode (per design §7.3 stream protocol — stdout reserved
+/// for the response envelope).
+fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: &mut Logger) -> ! {
+    let outcome = run_state_aware(parsed, dry_run);
+    // Diagnostic buffer flushes to stderr regardless of success/failure so it
+    // never interleaves with the stdout envelope.
+    let buffered = logger.get_buffer().to_string();
+    if !buffered.is_empty() {
+        eprint!("{}", buffered);
+    }
+    match outcome {
+        Ok(DispatchOutcome::Envelope(value)) => {
+            println!("{}", value);
+            process::exit(0);
+        }
+        Ok(DispatchOutcome::ExecCompleted { exit_code }) => process::exit(exit_code),
+        Err(e) => {
+            print_error_envelope(&e);
+            process::exit(1);
+        }
+    }
+}
+
+fn print_error_envelope(error: &MxcError) {
+    let envelope: ResponseEnvelope<()> = ResponseEnvelope::from_error(error);
+    match serde_json::to_string(&envelope) {
+        Ok(s) => println!("{}", s),
+        Err(_) => {
+            // Last-resort path: serialisation of the envelope itself failed —
+            // emit a minimal structurally-valid envelope so consumers that
+            // require `error.code` still parse something.
+            println!(
+                r#"{{"error":{{"code":"backend_error","message":"failed to serialise error envelope"}}}}"#
+            );
+        }
     }
 }
 
@@ -165,15 +210,27 @@ fn main() {
         process::exit(if success { 0 } else { 1 });
     }
 
-    // Load request
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
-        Ok(r) => r,
-        Err(_) => {
+    // Load request — discriminates state-aware (top-level `phase` field) from
+    // one-shot. State-aware failures emit a JSON envelope on stdout; one-shot
+    // and pre-discrimination failures keep the existing diagnostic-on-stderr
+    // convention.
+    let request = match load_mxc_request(&config_data, &mut logger, is_base64) {
+        Ok(MxcRequest::OneShot(req)) => req,
+        Ok(MxcRequest::StateAware(parsed)) => {
+            run_state_aware_main(parsed, cli.dry_run, &mut logger)
+        }
+        Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
             eprint!("Request error\n{}", logger.get_buffer());
+            process::exit(1);
+        }
+        Err(ParseError::StateAware(e)) => {
+            print_error_envelope(&e);
+            eprint!("{}", logger.get_buffer());
             process::exit(1);
         }
     };
 
+    let mut request = request;
     request.experimental_enabled = cli.experimental;
     request.dry_run = cli.dry_run;
 

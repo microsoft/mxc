@@ -16,13 +16,23 @@
 use std::fmt::Write;
 use std::io::IsTerminal;
 
+use serde::Serialize;
+
+use crate::id::mint_random_token;
 use crate::logger::Logger;
-use crate::models::{CodexRequest, IsolationSessionConfigurationId, NetworkPolicy, ScriptResponse};
+use crate::models::{
+    CodexRequest, IsolationSessionConfig, IsolationSessionConfigurationId, NetworkPolicy,
+    ScriptResponse,
+};
+use crate::mxc_error::MxcError;
 use crate::process_util::{
     create_relay_thread, create_relay_thread_with_stop, ConsoleModeRestorer, OwnedHandle,
     PipeRelayParams, PipeRelayWithStopParams,
 };
 use crate::script_runner::ScriptRunner;
+use crate::state_aware_backend::{
+    DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
+};
 use isolation_session_bindings::bindings::{
     IsoSessionConfigId, IsoSessionError, IsoSessionOps, IsoSessionProcess,
     IsoSessionProcessOptions, IsoSessionProcessResult, IsoSessionResult, IsoSessionUserResult,
@@ -36,21 +46,21 @@ use windows_core::{HSTRING, PCWSTR};
 
 // -- Identifiers -------------------------------------------------------------
 
-/// Cohort registration ID used with the `IsoSessionOps` wrapper.
+/// Registration ID used with the `IsoSessionOps` wrapper.
 ///
-/// The wrapper hardcodes `L"regid"` internally for every agent-name-keyed op
-/// (`ApiIsoSessionOps.cpp` lines 80, 90, 106, 115, 132, 187 in the OS repo),
-/// so callers must register with the literal `"regid"` or subsequent calls
-/// hit the wrong cohort.
+/// The `IsoSessionOps` wrapper hardcodes `L"regid"` internally for every
+/// agent-name-keyed op, so callers must register with this exact literal
+/// or subsequent calls hit the wrong registration.
 const REGISTRATION_ID: &str = "regid";
 
-/// Provision identifier scoping the agent user across the lifecycle.
+/// Default provisionId used by the one-shot backend path. State-aware
+/// callers mint their own dynamic ids (e.g. `wxc-<8-hex>`) instead.
 ///
-/// Reused as the `agentName` parameter on every subsequent op — the wrapper
-/// aliases agentName to provisionId at the COM layer (per the comment in
-/// `CommandSession.cpp:64` in the OS repo, `IsoSessionOps` callers pass
-/// `provisionId` where the IDL says `agentName`).
-const PROVISION_ID: &str = "wxc-provid";
+/// `provisionId` scopes the agent user across the lifecycle and is reused as
+/// the `agentName` parameter on every subsequent op — the `IsoSessionOps`
+/// wrapper aliases `agentName` to this `provisionId` at the COM layer, so
+/// callers pass `provisionId` where the IDL says `agentName`.
+pub const DEFAULT_PROVISION_ID: &str = "wxc-provid";
 
 impl From<IsolationSessionConfigurationId> for IsoSessionConfigId {
     fn from(value: IsolationSessionConfigurationId) -> Self {
@@ -75,9 +85,14 @@ pub enum IsolationSessionError {
     /// not available on this host (DLL not registered or
     /// `Feature_IsoBrokerSessionApis` disabled).
     ServiceUnavailable(String),
-    /// A broker-side lifecycle step (register / provision / start / exec /
+    /// An OS-side lifecycle step (register / provision / start / exec /
     /// stop / deprovision / unregister) returned a failure.
     Lifecycle(String),
+    /// The OS-side service could not find the provisionId — the sandbox
+    /// has been deprovisioned (or never provisioned in this user's
+    /// session) and any further state-aware op against it is a stale-id
+    /// reference. Surfaces as `MxcError::StaleId` at the dispatch boundary.
+    Stale(String),
 }
 
 impl std::fmt::Display for IsolationSessionError {
@@ -88,6 +103,7 @@ impl std::fmt::Display for IsolationSessionError {
                 write!(f, "Isolation Session service unavailable: {}", msg)
             }
             Self::Lifecycle(msg) => write!(f, "Isolation Session lifecycle error: {}", msg),
+            Self::Stale(msg) => write!(f, "Isolation Session stale id: {}", msg),
         }
     }
 }
@@ -156,11 +172,9 @@ pub(crate) const REDIRECT_STDERR: u32 = 0x4;
 ///   the same way).
 /// - Stdout is always redirected.
 /// - Stderr is redirected ONLY in non-interactive mode. In ConPTY mode the
-///   broker merges stderr into stdout and refuses to populate the stderr
-///   handle (predicate at `IsolationSessionWorkerProcess.cpp:309-310` in the
-///   OS repo: `optStderrHandleResult && !m_pseudoConsole && m_stderrPipeRead`).
-///   Setting `RedirectStandardError(true)` in ConPTY mode is benign but the
-///   handle returns 0 — so we just don't ask for it.
+///   OS-side service merges stderr into stdout and does not populate the
+///   stderr handle. Setting `RedirectStandardError(true)` in ConPTY mode
+///   is benign but the handle returns 0 — so we just don't ask for it.
 pub(crate) fn compute_redirect_flags(interactive: bool) -> u32 {
     let mut flags = REDIRECT_STDIN | REDIRECT_STDOUT;
     if !interactive {
@@ -186,11 +200,11 @@ pub(crate) struct ProcessOptions {
     pub env_vars: Vec<(String, String)>,
     /// Bitfield of I/O redirect flags (`REDIRECT_STDIN | REDIRECT_STDOUT | REDIRECT_STDERR`).
     pub redirect_flags: u32,
-    /// Whether to ask the broker to set up a ConPTY in the isolation session
-    /// (`InteractiveConsole = true`). Decided at runtime by the runner based
-    /// on `std::io::stdout().is_terminal()`. `build_process_options` returns
-    /// `false` as a safe default; the runner overwrites before passing to
-    /// `create_process`.
+    /// Whether to ask the OS-side service to set up a ConPTY in the
+    /// isolation session (`InteractiveConsole = true`). Decided at runtime
+    /// by the runner based on `std::io::stdout().is_terminal()`.
+    /// `build_process_options` returns `false` as a safe default; the
+    /// runner overwrites before passing to `create_process`.
     pub interactive: bool,
 }
 
@@ -265,8 +279,18 @@ pub(crate) fn check_service_available_and_activate() -> Result<IsoSessionOps, Is
 
 // -- Helper: structured error checks -----------------------------------------
 
-/// Formats an `IsoSessionError` (the WinRT result type) into a lifecycle
-/// error string with HRESULT, message, and remediation hint where present.
+/// `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` — returned by the OS-side service's
+/// `AgentManager::FindActiveAgentUserByProvisionId` when the provisionId is
+/// missing from both the in-memory cache and the persisted registry. Every
+/// non-provision lifecycle op (start / exec / stop / deprovision) goes
+/// through this lookup, so a `0x80070490` from any of them means the
+/// sandbox_id is stale.
+const ERROR_NOT_FOUND_HRESULT: u32 = 0x80070490;
+
+/// Formats an `IsoSessionError` (the WinRT result type) into a typed
+/// `IsolationSessionError`. Detects the ERROR_NOT_FOUND HRESULT and
+/// promotes it to `Stale` so callers (and ultimately the wire envelope)
+/// can return `MxcError::StaleId` for a deprovisioned sandbox_id.
 fn format_iso_error(op: &str, err: &IsoSessionError) -> IsolationSessionError {
     let msg = err.Message().map(|h| h.to_string()).unwrap_or_default();
     let code = err.Code().map(|h| h.0 as u32).unwrap_or(0);
@@ -274,12 +298,14 @@ fn format_iso_error(op: &str, err: &IsoSessionError) -> IsolationSessionError {
     let suffix = if remediation.is_empty() {
         String::new()
     } else {
-        format!(" — remediation: {}", remediation)
+        format!(" -- remediation: {}", remediation)
     };
-    lifecycle_err(format!(
-        "{} failed: {} (HRESULT: {:#010x}){}",
-        op, msg, code, suffix
-    ))
+    let formatted = format!("{} failed: {} (HRESULT: {:#010x}){}", op, msg, code, suffix);
+    if code == ERROR_NOT_FOUND_HRESULT {
+        IsolationSessionError::Stale(formatted)
+    } else {
+        IsolationSessionError::Lifecycle(formatted)
+    }
 }
 
 /// Checks the `Error` property of an `IsoSessionResult` and returns
@@ -304,7 +330,7 @@ fn check_result(result: &IsoSessionResult, op: &str) -> Result<(), IsolationSess
 /// Manages the `IsoSessionOps` lifecycle. Methods map 1:1 to the granular
 /// API steps.
 pub struct IsolationSessionManager {
-    /// Cohort/registration identifier used in `RegisterApp` / `AddUserAsync`
+    /// Registration identifier used in `RegisterApp` / `AddUserAsync`
     /// / `UnregisterAppAsync`. Pegged to the literal `"regid"` per the
     /// wrapper's internal hardcode.
     registration_id: HSTRING,
@@ -318,18 +344,20 @@ pub struct IsolationSessionManager {
 }
 
 impl IsolationSessionManager {
-    /// Activates the `IsoSessionOps` factory and verifies the service is
-    /// available.
-    pub fn new() -> Result<Self, IsolationSessionError> {
+    /// Activates the `IsoSessionOps` factory, verifies the service is
+    /// available, and pegs the manager to the supplied `provisionId`.
+    /// One-shot callers pass `DEFAULT_PROVISION_ID`; state-aware callers
+    /// mint a dynamic id per provision (e.g. `wxc-<8-hex>`).
+    pub fn new(provision_id: &str) -> Result<Self, IsolationSessionError> {
         let ops = check_service_available_and_activate()?;
         Ok(Self {
             registration_id: HSTRING::from(REGISTRATION_ID),
-            provision_id: HSTRING::from(PROVISION_ID),
+            provision_id: HSTRING::from(provision_id),
             ops,
         })
     }
 
-    /// Step 0: Register the app with the broker.
+    /// Step 0: Register the app with the OS-side service.
     pub fn register_client(&self) -> Result<(), IsolationSessionError> {
         let result = self
             .ops
@@ -339,13 +367,12 @@ impl IsolationSessionManager {
     }
 
     /// Step 1: Provision an agent user. Returns the OS-assigned agent
-    /// account name (e.g., `Adib-IEB-000`) for logging only — addressing
+    /// account name (e.g., `RealUser-IEB-000`) for logging only — addressing
     /// for subsequent ops continues to use the configured `provision_id`.
     ///
     /// Note: `lifecycle.destroyOnExit` is silently ignored on this backend.
-    /// The in-proc API hardcodes `Indefinite` lifetime in `AddUserAsync`
-    /// (`IsoSessionServerClient.cpp:147` in the OS repo) and the wrapper's
-    /// `RemoveUserAsync` papers over the Indefinite-deprovision bug.
+    /// The in-proc API hardcodes `Indefinite` lifetime in `AddUserAsync`,
+    /// and `RemoveUserAsync` papers over the Indefinite-deprovision bug.
     pub fn provision_agent_user(&self) -> Result<String, IsolationSessionError> {
         let async_op = self
             .ops
@@ -425,16 +452,14 @@ impl IsolationSessionManager {
         })?;
 
         // Streaming + interactive I/O via three pipe relay threads bridging
-        // wxc-exec's stdio with the broker's pipe handles. The relays cross
-        // the desktop-session boundary that kernel console-handle inheritance
-        // cannot (see `appcontainer_runner.rs:358-392` for the AppContainer
-        // comparison).
+        // wxc-exec's stdio with the pipe handles owned by `IsoSessionProcess`.
+        // The relays cross the desktop-session boundary that kernel
+        // console-handle inheritance cannot.
         //
         // Handle ownership across four sources:
-        //   - Broker pipe handles (`OutputHandle()` / `ErrorHandle()` /
-        //     `InputHandle()`, returned as u64): owned by `IsoSessionProcess`.
-        //     Released by `process.Close()` (`ApiProcess.cpp:131` in the OS
-        //     repo). We do NOT close them.
+        //   - Pipe handles owned by `IsoSessionProcess` (`OutputHandle()` /
+        //     `ErrorHandle()` / `InputHandle()`, returned as u64): released
+        //     by `process.Close()`. We do NOT close them.
         //   - wxc-exec's std handles (`GetStdHandle(STD_*_HANDLE)`): owned by
         //     the OS for the process lifetime. We do NOT close them.
         //   - Stop event for stdin relay (`CreateEventW`): RAII-closed via
@@ -472,8 +497,8 @@ impl IsolationSessionManager {
         // `h_read` (console = TTY mode); for pipe handles (non-TTY) it has no
         // effect on a blocked `ReadFile`, so we use a bounded
         // `WaitForSingleObject` after process exit and rely on
-        // `process.Close()` invalidating the broker handle (next WriteFile
-        // fails) plus OS cleanup on wxc-exec exit.
+        // `process.Close()` invalidating the `IsoSessionProcess` handle
+        // (next WriteFile fails) plus OS cleanup on wxc-exec exit.
         let stdin_stop_event = unsafe {
             CreateEventW(None, true, false, PCWSTR::null())
                 .map_err(|e| lifecycle_err(format!("CreateEventW(stdin stop): {}", e)))?
@@ -520,16 +545,16 @@ impl IsolationSessionManager {
         };
 
         // Wait for the agent process to exit. `WaitForExit` is a Win32
-        // `WaitForSingleObject` on a kernel handle (`ApiProcess.cpp:76` — no
-        // COM round-trip). On timeout it returns -1; otherwise the exit code.
+        // `WaitForSingleObject` on a kernel handle — no COM round-trip. On
+        // timeout it returns -1; otherwise the exit code.
         let _ = process
             .WaitForExit(options.timeout_ms)
             .map_err(|e| lifecycle_err(format!("WaitForExit failed: {}", e)))?;
 
         // Detect timeout via `ExitCode()` returning `STILL_ACTIVE` (the agent
-        // is still running). Trigger the 3-tier graceful shutdown pattern from
-        // `CommandTty.cpp:226-263` in the OS repo. In the natural-exit path,
-        // none of the tiers fire.
+        // is still running). Run a 3-tier graceful shutdown — escalating from
+        // stdin-close to control signal to terminate — so well-behaved agents
+        // exit cleanly. In the natural-exit path none of the tiers fire.
         const STILL_ACTIVE: i32 = 0x103;
         let mut exit_code = process
             .ExitCode()
@@ -542,9 +567,8 @@ impl IsolationSessionManager {
             let _ = process.WaitForExit(5000);
             exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
 
-            // Tier 2: `SendCtrlClose` is ConPTY-only (`E_NOTIMPL` otherwise
-            // per `IsolationSessionWorkerProcess.cpp:414-416`); benign call
-            // in non-ConPTY mode, just skips ahead.
+            // Tier 2: `SendCtrlClose` is ConPTY-only — `E_NOTIMPL` in
+            // non-ConPTY mode, which is benign and skips ahead.
             if exit_code == STILL_ACTIVE {
                 let _ = process.SendCtrlClose();
                 let _ = process.WaitForExit(3000);
@@ -552,7 +576,7 @@ impl IsolationSessionManager {
             }
 
             // Tier 3: force-terminate. Wait infinitely for the kill to land
-            // (timeout 0 == INFINITE per `ApiProcess.cpp:85`).
+            // (`WaitForExit(0)` = INFINITE).
             if exit_code == STILL_ACTIVE {
                 let _ = process.Terminate();
                 let _ = process.WaitForExit(0);
@@ -567,10 +591,10 @@ impl IsolationSessionManager {
             let _ = SetEvent(stdin_stop_owned.get());
         }
 
-        // Drain stdout / stderr relays (INFINITE — they exit on broker-pipe
-        // EOF once the agent's write ends close at OS-level handle cleanup;
-        // the broker's own timeout at
-        // `IsolationSessionWorkerProcess.cpp:153-170` is the safety net).
+        // Drain stdout / stderr relays (INFINITE — they exit when the
+        // `IsoSessionProcess` pipe-read EOFs once the agent's write ends
+        // close at OS-level cleanup. The OS-side per-process timeout is
+        // the safety net.
         if let Some(t) = stdout_relay {
             unsafe { WaitForSingleObject(t.get(), u32::MAX) };
         }
@@ -585,7 +609,7 @@ impl IsolationSessionManager {
             unsafe { WaitForSingleObject(t.get(), 1000) };
         }
 
-        // Now safe to release the broker handles.
+        // Now safe to release the `IsoSessionProcess` handles.
         let _ = process.Close();
 
         Ok(ProcessResult {
@@ -609,10 +633,9 @@ impl IsolationSessionManager {
 
     /// Step 5: Deprovision the agent user.
     ///
-    /// The wrapper's `RemoveUserAsync` internally re-provisions as
-    /// `CallerProcess` first then deprovisions, papering over the
-    /// Indefinite-deprovision broker bug
-    /// (`IsoSessionServerClient.cpp:184` in the OS repo).
+    /// `RemoveUserAsync` internally re-provisions as `CallerProcess` first
+    /// then deprovisions, papering over the Indefinite-deprovision bug in
+    /// the OS-side service.
     pub fn deprovision_agent_user(&self) -> Result<(), IsolationSessionError> {
         let async_op = self
             .ops
@@ -720,9 +743,9 @@ impl ScriptRunner for IsolationSessionRunner {
 
         // Detect at runtime whether wxc-exec's stdout is a TTY. This flips the
         // backend into ConPTY mode (`InteractiveConsole = true`) and adjusts
-        // the redirect flags (no separate stderr in ConPTY mode — the broker
-        // merges it into stdout). The check sees the handle wxc-exec was
-        // given by its immediate parent: ConPTY when launched by node-pty
+        // the redirect flags (no separate stderr in ConPTY mode — the OS-side
+        // service merges it into stdout). The check sees the handle wxc-exec
+        // was given by its immediate parent: ConPTY when launched by node-pty
         // (`spawnSandbox`), pipe when launched by `child_process.spawn`
         // (`spawnSandboxFromConfig({usePty: false})`), console when launched
         // directly from a shell.
@@ -744,8 +767,9 @@ impl ScriptRunner for IsolationSessionRunner {
             .map(|cfg| cfg.configuration_id)
             .unwrap_or_default();
 
-        // Activate the in-proc IsoSessionOps factory.
-        let manager = match IsolationSessionManager::new() {
+        // Activate the in-proc IsoSessionOps factory. One-shot uses the
+        // hardcoded default provisionId; state-aware mints a dynamic one.
+        let manager = match IsolationSessionManager::new(DEFAULT_PROVISION_ID) {
             Ok(m) => m,
             Err(e) => return e.into(),
         };
@@ -761,10 +785,10 @@ impl ScriptRunner for IsolationSessionRunner {
             }
             Err(e) => {
                 // provision_agent_user may return Err *after* a successful
-                // broker-side provision (e.g., the AgentUserName fetch
-                // fails on a non-error result). Defensively deprovision so
-                // an Indefinite-lifetime agent user does not leak. The
-                // wrapper no-ops these on absent state.
+                // OS-side provision (e.g., the AgentUserName fetch fails on
+                // a non-error result). Defensively deprovision so an
+                // Indefinite-lifetime agent user does not leak.
+                // `IsoSessionOps` no-ops these on absent state.
                 let _ = manager.deprovision_agent_user();
                 let _ = manager.unregister_client();
                 return e.into();
@@ -803,13 +827,240 @@ impl ScriptRunner for IsolationSessionRunner {
 
         // Output already streamed live to wxc-exec's stdio via relay threads in
         // `IsolationSessionManager::create_process` — captured fields are intentionally
-        // empty (matching the AppContainer pattern at `appcontainer_runner.rs:455-456`).
+        // empty (same pattern as AppContainer).
         ScriptResponse {
             exit_code: result.exit_code,
             standard_out: String::new(),
             standard_err: String::new(),
             error_message: String::new(),
         }
+    }
+}
+
+// -- StatefulSandboxBackend impl --------------------------------------------
+
+/// Provision-phase metadata. Carries the OS-assigned agent account name
+/// (e.g. `<CallingUser>-IEB-NNN`) for diagnostics; the SID is omitted (can
+/// be added later when a caller needs it).
+#[derive(Debug, Clone, Serialize)]
+pub struct IsolationSessionProvisionMetadata {
+    #[serde(rename = "agentUserName")]
+    pub agent_user_name: String,
+}
+
+/// Parses the `iso:<provisionId>` form of a state-aware sandbox_id and
+/// returns the inner `provisionId` segment. Surfaces format mismatches as
+/// `MxcError::MalformedId` so callers can return the right wire-format
+/// error code.
+fn extract_provision_id(sandbox_id: &str) -> Result<&str, MxcError> {
+    let prefix = <IsolationSessionRunner as StatefulSandboxBackend>::ID_PREFIX;
+    match sandbox_id.split_once(':') {
+        Some((p, rest)) if p == prefix && !rest.is_empty() => Ok(rest),
+        _ => Err(MxcError::malformed_id(format!(
+            "expected {}:<provisionId>, got {:?}",
+            prefix, sandbox_id
+        ))),
+    }
+}
+
+impl StatefulSandboxBackend for IsolationSessionRunner {
+    const ID_PREFIX: &'static str = "iso";
+    const BACKEND_KEY: &'static str = "isolation_session";
+
+    type ProvisionConfig = ();
+    /// `experimental.isolation_session.start` mirrors the one-shot
+    /// `experimental.isolation_session` shape — same `IsolationSessionConfig`
+    /// type, same wire keys.
+    type StartConfig = IsolationSessionConfig;
+    type ExecConfig = ();
+    type StopConfig = ();
+    type DeprovisionConfig = ();
+    type ProvisionMetadata = IsolationSessionProvisionMetadata;
+    type StartMetadata = ();
+    type StopMetadata = ();
+    type DeprovisionMetadata = ();
+
+    fn provision(
+        &mut self,
+        _request: &CodexRequest,
+        _config: Option<()>,
+    ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
+        let provision_id = format!("wxc-{}", mint_random_token());
+        let manager = IsolationSessionManager::new(&provision_id).map_err(map_lifecycle_error)?;
+        manager.register_client().map_err(map_lifecycle_error)?;
+        let agent_user_name = match manager.provision_agent_user() {
+            Ok(name) => name,
+            Err(e) => {
+                // Defensive cleanup mirrors the one-shot path: provision_agent_user
+                // can fail after the OS-side provision succeeded, leaving an
+                // Indefinite-lifetime agent user. Calls no-op on absent state.
+                let _ = manager.deprovision_agent_user();
+                let _ = manager.unregister_client();
+                return Err(map_lifecycle_error(e));
+            }
+        };
+
+        Ok(ProvisionResult {
+            sandbox_id: format!("{}:{}", Self::ID_PREFIX, provision_id),
+            metadata: Some(IsolationSessionProvisionMetadata { agent_user_name }),
+        })
+    }
+
+    fn start(
+        &mut self,
+        sandbox_id: &str,
+        _request: &CodexRequest,
+        config: Option<IsolationSessionConfig>,
+    ) -> Result<StartResult<()>, MxcError> {
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
+        // Config absent → Composable, mirroring the one-shot default. The
+        // OS-side service does not call back into MXC after start, so a
+        // return here means the session is ready to host process launches.
+        let configuration_id = config.map(|c| c.configuration_id).unwrap_or_default();
+        manager
+            .start_session(configuration_id)
+            .map_err(map_lifecycle_error)?;
+        Ok(StartResult { metadata: None })
+    }
+
+    fn stop(
+        &mut self,
+        sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<()>,
+    ) -> Result<StopResult<()>, MxcError> {
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
+        manager.stop_session().map_err(map_lifecycle_error)?;
+        Ok(StopResult { metadata: None })
+    }
+
+    /// Removes the agent user, then unregisters the client. Mirrors the
+    /// one-shot teardown sequence so a state-aware lifecycle leaves the
+    /// OS-side service in the same end state as a one-shot run.
+    ///
+    /// `unregister_client` tears down the client registration that
+    /// `provision` set up via `register_client`. v1 does not target
+    /// concurrent state-aware sessions, which would share that
+    /// registration -- if that becomes a real requirement, this will
+    /// need either a refcount or a "leave-registration-alone" mode.
+    fn deprovision(
+        &mut self,
+        sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<()>,
+    ) -> Result<DeprovisionResult<()>, MxcError> {
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
+        manager
+            .deprovision_agent_user()
+            .map_err(map_lifecycle_error)?;
+        manager.unregister_client().map_err(map_lifecycle_error)?;
+        Ok(DeprovisionResult { metadata: None })
+    }
+
+    // -- Validation hooks ----------------------------------------------------
+    //
+    // Cross-cutting policy fields (filesystem, network, ui, network proxy)
+    // are not honoured by IsolationSession at any phase: the OS-side service
+    // does not expose these knobs. Mirroring the one-shot path's
+    // `validate_runner` rejection, every state-aware phase rejects these
+    // fields up-front rather than silently ignoring them. This produces
+    // `policy_validation` per design 10.3 instead of letting unsupported
+    // fields slip through unnoticed.
+
+    fn validate_provision(
+        &self,
+        request: &CodexRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_start(
+        &self,
+        _sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<&IsolationSessionConfig>,
+    ) -> Result<(), MxcError> {
+        validate_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_exec(
+        &self,
+        _sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_stop(
+        &self,
+        _sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_deprovision(
+        &self,
+        _sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_policy(request).map_err(map_lifecycle_error)
+    }
+
+    /// Reuses `IsolationSessionManager::create_process` — the same path the
+    /// one-shot runner uses. Output streams to wxc-exec's stdout/stderr via
+    /// internal relay threads while the call is in flight; the call returns
+    /// once the process has exited and the relays have drained. The
+    /// resulting `ExecHandle` carries sentinel pipe handles plus a waiter
+    /// closure that yields the already-captured exit code, so the
+    /// dispatcher's `relay_exec_to_stdio` is a thin call-through.
+    fn exec(
+        &mut self,
+        sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<()>,
+    ) -> Result<ExecHandle, MxcError> {
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
+
+        let mut options = build_process_options(request);
+        let interactive = std::io::stdout().is_terminal();
+        options.interactive = interactive;
+        options.redirect_flags = compute_redirect_flags(interactive);
+
+        let result = manager
+            .create_process(&options)
+            .map_err(map_lifecycle_error)?;
+        let exit_code = result.exit_code;
+
+        // The output relay completed inside `create_process`. The dispatcher
+        // sees zero pipe handles, skips its own relay setup, and gets the
+        // exit code from the waiter closure.
+        let null = HANDLE(std::ptr::null_mut());
+        Ok(ExecHandle {
+            stdout: null,
+            stderr: null,
+            stdin: null,
+            waiter: Box::new(move || Ok(exit_code)),
+            terminator: Box::new(|| {}),
+        })
+    }
+}
+
+fn map_lifecycle_error(err: IsolationSessionError) -> MxcError {
+    let message = err.to_string();
+    match err {
+        IsolationSessionError::Policy(_) => MxcError::policy_validation(message),
+        IsolationSessionError::ServiceUnavailable(_) => MxcError::backend_unavailable(message),
+        IsolationSessionError::Lifecycle(_) => MxcError::backend_error(message),
+        IsolationSessionError::Stale(_) => MxcError::stale_id(message),
     }
 }
 
@@ -825,6 +1076,112 @@ mod tests {
             }
             other => panic!("expected Policy variant, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn extract_provision_id_unwraps_iso_prefix() {
+        assert_eq!(
+            extract_provision_id("iso:wxc-abcd1234").unwrap(),
+            "wxc-abcd1234"
+        );
+    }
+
+    #[test]
+    fn extract_provision_id_rejects_other_prefix() {
+        let err = extract_provision_id("wsb:abc").unwrap_err();
+        assert_eq!(err.code, crate::mxc_error::MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_provision_id_rejects_missing_colon() {
+        let err = extract_provision_id("no-colon").unwrap_err();
+        assert_eq!(err.code, crate::mxc_error::MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_provision_id_rejects_empty_payload() {
+        let err = extract_provision_id("iso:").unwrap_err();
+        assert_eq!(err.code, crate::mxc_error::MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn map_lifecycle_error_categorises_each_variant() {
+        use crate::mxc_error::MxcErrorCode;
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::Policy("x".into())).code,
+            MxcErrorCode::PolicyValidation,
+        );
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::ServiceUnavailable("x".into())).code,
+            MxcErrorCode::BackendUnavailable,
+        );
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::Lifecycle("x".into())).code,
+            MxcErrorCode::BackendError,
+        );
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::Stale("x".into())).code,
+            MxcErrorCode::StaleId,
+        );
+    }
+
+    fn request_with_filesystem_policy() -> CodexRequest {
+        CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\workspace".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_phase_hooks_reject_unsupported_filesystem_policy() {
+        use crate::mxc_error::MxcErrorCode;
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_filesystem_policy();
+
+        let p = runner.validate_provision(&req, None).unwrap_err();
+        assert_eq!(p.code, MxcErrorCode::PolicyValidation);
+
+        let s = runner.validate_start("iso:abc", &req, None).unwrap_err();
+        assert_eq!(s.code, MxcErrorCode::PolicyValidation);
+
+        let e = runner.validate_exec("iso:abc", &req, None).unwrap_err();
+        assert_eq!(e.code, MxcErrorCode::PolicyValidation);
+
+        let st = runner.validate_stop("iso:abc", &req, None).unwrap_err();
+        assert_eq!(st.code, MxcErrorCode::PolicyValidation);
+
+        let d = runner
+            .validate_deprovision("iso:abc", &req, None)
+            .unwrap_err();
+        assert_eq!(d.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_phase_hooks_accept_clean_request() {
+        let runner = IsolationSessionRunner::new();
+        let req = CodexRequest::default();
+
+        runner.validate_provision(&req, None).unwrap();
+        runner.validate_start("iso:abc", &req, None).unwrap();
+        runner.validate_exec("iso:abc", &req, None).unwrap();
+        runner.validate_stop("iso:abc", &req, None).unwrap();
+        runner.validate_deprovision("iso:abc", &req, None).unwrap();
+    }
+
+    #[test]
+    fn error_not_found_hresult_constant_matches_win32() {
+        // Sanity check: HRESULT_FROM_WIN32(ERROR_NOT_FOUND) =
+        //   0x80070000 | (1168 & 0xFFFF) = 0x80070490.
+        // The OS-side AgentManager::FindActiveAgentUserByProvisionId returns
+        // exactly this when the provisionId is gone, so a regression in the
+        // constant would silently downgrade stale-id detection to backend_error.
+        const ERROR_NOT_FOUND: u32 = 1168;
+        let expected = 0x8007_0000u32 | (ERROR_NOT_FOUND & 0xFFFF);
+        assert_eq!(ERROR_NOT_FOUND_HRESULT, expected);
+        assert_eq!(ERROR_NOT_FOUND_HRESULT, 0x80070490);
     }
 
     #[test]
@@ -1024,7 +1381,7 @@ mod tests {
         assert!(
             flags & REDIRECT_STDERR == 0,
             "stderr should NOT be redirected in interactive (ConPTY) mode \
-             — broker won't populate ErrorHandle"
+             — ErrorHandle is not populated by the OS-side service"
         );
     }
 

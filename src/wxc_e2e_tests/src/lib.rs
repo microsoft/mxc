@@ -67,11 +67,14 @@ fn current_triple() -> &'static str {
 
 /// Search for a binary in the target directory, checking multiple locations.
 ///
-/// Search order prefers the profile matching the current build mode, then falls
-/// back to the other profile. For each profile, the triple-prefixed
-/// `target/<triple>/<profile>/` path is checked before the plain
-/// `target/<profile>/` path so explicit target builds win over stale local
-/// builds.
+/// Two profile directories may both contain the binary on a given dev host —
+/// the triple-prefixed `target/<triple>/<profile>/` from explicit-target
+/// builds, and the plain `target/<profile>/` that `cargo build` /
+/// `cargo test` write by default. Returning the *most recently modified*
+/// candidate keeps tests aligned with the build the user just ran, instead
+/// of latching onto a stale triple-prefixed copy from a previous session.
+/// Profile preference (debug-vs-release) only resolves ties when neither
+/// candidate has been built more recently than the other.
 pub fn find_binary(name: &str) -> Option<PathBuf> {
     let src = src_dir();
     let (primary, fallback) = if is_release_mode() {
@@ -91,7 +94,12 @@ pub fn find_binary(name: &str) -> Option<PathBuf> {
     }
     candidates.push(src.join("target").join(fallback).join(name));
 
-    candidates.into_iter().find(|p| p.exists())
+    // Pick the most recently modified candidate that exists. Falls back to
+    // existence-order when mtimes are unavailable (read errors).
+    candidates
+        .into_iter()
+        .filter(|p| p.exists())
+        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +299,25 @@ pub fn run_wxc_config(config_file: &str, extra_args: &[&str]) -> CommandResult {
     args.push(config.display().to_string());
 
     run_executable(config_file, &exe, args)
+}
+
+/// Run `wxc-exec.exe` with a state-aware request envelope. The JSON value is
+/// serialised, base64-encoded, and passed via `--config-base64`. Used by the
+/// state-aware smoke tests.
+pub fn run_wxc_state_aware(
+    label: &str,
+    request: &serde_json::Value,
+    extra_args: &[&str],
+) -> CommandResult {
+    let exe = find_binary("wxc-exec.exe").expect("wxc-exec.exe should be available");
+    let json = request.to_string();
+    let encoded = STANDARD.encode(json.as_bytes());
+
+    let mut args: Vec<String> = extra_args.iter().map(|s| (*s).to_string()).collect();
+    args.push("--config-base64".to_string());
+    args.push(encoded);
+
+    run_executable(label, &exe, args)
 }
 
 /// Run `wxc-test-driver.exe` against a directory or a single config file.

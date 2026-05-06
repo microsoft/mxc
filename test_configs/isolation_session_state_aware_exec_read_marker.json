@@ -1,0 +1,8 @@
+{
+    "phase": "exec",
+    "sandboxId": "{{SANDBOX_ID}}",
+    "process": {
+        "commandLine": "type %TEMP%\\sa-multi-exec.txt",
+        "timeout": 30000
+    }
+}
