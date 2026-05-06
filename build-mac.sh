@@ -1,7 +1,7 @@
 #!/bin/bash
 # MXC macOS Build Script
 # Builds the mxc-exec-darwin binary (macos_sandbox backend) and the
-# TypeScript SDK/CLI. This is the macOS counterpart of build.sh.
+# TypeScript SDK. This is the macOS counterpart of build.sh.
 #
 # Codesigning + notarization are NOT performed here — those run later as a
 # release-time step (see docs/macos-sandbox-backend.md). This script just
@@ -12,7 +12,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/src"
 SDK_DIR="$SCRIPT_DIR/sdk"
-CLI_DIR="$SCRIPT_DIR/cli"
 
 # Parse arguments
 BUILD_TYPE="release"
@@ -39,7 +38,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --debug       Build in debug mode (default: release)"
-            echo "  --rust-only   Only build Rust binaries, skip SDK/CLI"
+            echo "  --rust-only   Only build Rust binaries, skip SDK"
             echo "  --all         Build for both x86_64-apple-darwin and aarch64-apple-darwin"
             echo "  -h, --help    Show this help message"
             exit 0
@@ -136,18 +135,12 @@ for triple in "${TARGETS[@]}"; do
     copy_binary_for_target "$triple"
 done
 
-# Build SDK and CLI
+# Build SDK
 if [ "$BUILD_SDK" = true ]; then
     echo ""
     echo "=== Building TypeScript SDK ==="
     cd "$SDK_DIR"
     npm install --ignore-scripts 2>/dev/null || true
-    npm run build
-
-    echo ""
-    echo "=== Building TypeScript CLI ==="
-    cd "$CLI_DIR"
-    npm install 2>/dev/null || true
     npm run build
 fi
 

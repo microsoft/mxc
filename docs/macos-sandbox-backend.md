@@ -49,6 +49,83 @@ session plan and `docs/versioning.md`.
 No additional packages are required at runtime — the macOS sandbox is part
 of the base OS.
 
+## Environment Setup
+
+Follow these steps to prepare a macOS machine for building and running
+`mxc-exec-darwin` from source.
+
+### 1. Xcode Command Line Tools
+
+```bash
+xcode-select --install
+```
+
+Provides `clang`, `ld`, system headers, and the macOS SDK needed by the
+Rust toolchain to compile native binaries.
+
+### 2. Homebrew
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+After installation, follow the shell setup instructions printed by the
+installer (adds `/opt/homebrew/bin` to `PATH` on Apple Silicon).
+
+### 3. Rust toolchain
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+Add the targets needed for building:
+
+```bash
+# Native Apple Silicon (required on M-series Macs)
+rustup target add aarch64-apple-darwin
+
+# Intel (optional — needed for --all / cross-compilation)
+rustup target add x86_64-apple-darwin
+```
+
+### 4. Python 3 (optional — needed for example 21)
+
+```bash
+brew install python
+```
+
+This makes `python3` available at `/opt/homebrew/bin/python3`. The example
+configs that invoke Python (`21_mac_python_info.json`) require this.
+
+> **Note:** On Apple Silicon, Homebrew installs to `/opt/homebrew`. Example
+> configs that run Python include `"readonlyPaths": ["/opt/homebrew"]` so
+> the sandbox can access the interpreter and its libraries.
+
+### 5. Node.js (optional — needed for SDK/CLI)
+
+```bash
+brew install node
+```
+
+Required only if you plan to build and test the TypeScript SDK or CLI
+layers (`npm run build` / `npm test`).
+
+### Verification
+
+After setup, verify the build works end-to-end:
+
+```bash
+# Build the binary
+./build-mac.sh --rust-only
+
+# Run a quick smoke test
+./src/target/aarch64-apple-darwin/release/mxc-exec-darwin --debug examples/15_mac_hello_world.json
+```
+
+You should see sandbox profile generation output followed by
+`hi from macos_sandbox`.
+
 ## Configuration
 
 The macOS sandbox backend uses the same JSON configuration schema as the
