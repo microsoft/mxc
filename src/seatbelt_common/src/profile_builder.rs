@@ -32,12 +32,17 @@ use wxc_common::models::{ClipboardPolicy, CodexRequest, NetworkPolicy};
 
 /// Build a complete sandbox profile string from the given request.
 ///
-/// If `request.seatbelt_config.profile_override` is set, that string is
-/// returned verbatim (after a no-op clone) and policy fields are ignored.
-/// This is the escape hatch for advanced/testing scenarios that need to
-/// hand-author a profile.
+/// If `request.experimental.macos_sandbox.profile_override` is set, that
+/// string is returned verbatim and policy fields are ignored. This is the
+/// escape hatch for advanced/testing scenarios that need to hand-author a
+/// profile.
 pub fn build_profile(request: &CodexRequest) -> String {
-    if let Some(ref override_profile) = request.seatbelt_config.profile_override {
+    if let Some(override_profile) = request
+        .experimental
+        .macos_sandbox
+        .as_ref()
+        .and_then(|c| c.profile_override.as_ref())
+    {
         return override_profile.clone();
     }
 
@@ -236,7 +241,7 @@ fn escape_for_quotes(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{SeatbeltConfig, UiPolicy};
+    use wxc_common::models::{MacosSandboxConfig, UiPolicy};
 
     fn req() -> CodexRequest {
         CodexRequest {
@@ -378,10 +383,10 @@ mod tests {
     fn profile_override_takes_precedence() {
         let mut r = req();
         r.policy.readonly_paths = vec!["/should/be/ignored".into()];
-        r.seatbelt_config = SeatbeltConfig {
+        r.experimental.macos_sandbox = Some(MacosSandboxConfig {
             profile_override: Some("(version 1)(allow default)".into()),
             ..Default::default()
-        };
+        });
         let p = build_profile(&r);
         assert_eq!(p, "(version 1)(allow default)");
     }

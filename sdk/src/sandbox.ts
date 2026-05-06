@@ -104,21 +104,25 @@ function buildLinuxProcessConfig(
 }
 
 /**
- * Builds the macOS process container (Seatbelt) portion of a ContainerConfig.
+ * Builds the macOS process container (macos_sandbox) portion of a ContainerConfig.
  *
- * Seatbelt's `sandbox-exec` reads a TinyScheme profile generated server-side
- * by `seatbelt_common::profile_builder`, so the SDK only needs to set the
- * containment type and the mode selector — the policy fields on
- * `ContainerConfig` (filesystem / network / ui) drive the actual rules.
+ * The macos_sandbox backend's `sandbox-exec` reads a TinyScheme profile
+ * generated server-side by `seatbelt_common::profile_builder`, so the SDK
+ * only needs to set the containment type and the mode selector under the
+ * experimental block — the policy fields on `ContainerConfig` (filesystem /
+ * network / ui) drive the actual rules.
  */
 function buildDarwinProcessConfig(
     config: ContainerConfig,
 ): ContainerConfig {
-    config.containment = 'seatbelt';
-    config.seatbelt = {
-        // 'exec' = spawn /usr/bin/sandbox-exec (Phase A, default).
-        // 'inproc' will switch to sandbox_init_with_parameters in Phase B.
-        mode: 'exec',
+    config.containment = 'macos_sandbox';
+    config.experimental = {
+        ...(config.experimental ?? {}),
+        macos_sandbox: {
+            // 'exec' = spawn /usr/bin/sandbox-exec (Phase A, default).
+            // 'inproc' will switch to sandbox_init_with_parameters in Phase B.
+            mode: 'exec',
+        },
     };
     return config;
 }
@@ -307,7 +311,8 @@ export function createConfigFromPolicy(
             return buildLinuxProcessConfig(config, containerId);
         }
         if (platform === 'darwin') {
-            // Seatbelt has no container abstraction (per-process fork+exec
+            // The macos_sandbox backend has no container abstraction
+            // (per-process fork+exec
             // sandbox), so containerId is intentionally not threaded through.
             return buildDarwinProcessConfig(config);
         }

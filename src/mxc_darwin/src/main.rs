@@ -109,10 +109,10 @@ fn main() {
 
     log_request(&request, &mut logger);
 
-    // The SDK should always select Seatbelt on darwin. Be lenient and
+    // The SDK should always select MacosSandbox on darwin. Be lenient and
     // log a note instead of failing — same behaviour as `lxc-exec`.
-    if request.containment != ContainmentBackend::Seatbelt {
-        logger.log_line("Note: Overriding containment backend to Seatbelt on macOS.");
+    if request.containment != ContainmentBackend::MacosSandbox {
+        logger.log_line("Note: Overriding containment backend to MacosSandbox on macOS.");
     }
 
     run_seatbelt(&request, &mut logger);

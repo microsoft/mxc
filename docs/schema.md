@@ -61,11 +61,6 @@ production configs and the dev schema when working on experimental features:
         "release": "3.19"
     },
 
-    "seatbelt": {                          // Seatbelt-specific (macOS)
-        "mode": "exec",                    // "exec" (default) or "inproc" (Phase B)
-        "profileOverride": null            // Optional raw TinyScheme profile (escape hatch)
-    },
-
     "experimental": {                      // Experimental features (requires --experimental)
         "wslc": {                          // WSL Container settings
             "image": "alpine:latest",      // Container image name
@@ -74,6 +69,10 @@ production configs and the dev schema when working on experimental features:
             "memoryMb": 2048,              // Memory in MB for WSLC session
             "gpu": false,                  // GPU passthrough
             "storagePath": "C:\\wslc-storage"  // Image store path
+        },
+        "macos_sandbox": {                 // macOS sandbox settings (macOS only)
+            "mode": "exec",                // "exec" (default) or "inproc" (Phase B)
+            "profileOverride": null        // Optional raw TinyScheme profile (escape hatch)
         }
     }
 }
@@ -87,7 +86,7 @@ production configs and the dev schema when working on experimental features:
 | `"windows_sandbox"` | Windows Sandbox VM isolation via a long-lived daemon |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation |
-| `"seatbelt"` | macOS Seatbelt sandbox via `sandbox-exec`. See [`seatbelt-backend.md`](./seatbelt-backend.md). |
+| `"macos_sandbox"` | macOS sandbox via `sandbox-exec` (experimental). See [`macos-sandbox-backend.md`](./macos-sandbox-backend.md). |
 | `"vm"` | VM-based isolation (not yet implemented) |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
 

@@ -37,12 +37,12 @@ export interface LifecycleConfig {
  * - "process": BaseProcessContainer (Windows) / LXC (Linux) / macOS sandbox (macOS)
  * - "microvm": MicroVM/Nanvix backend (Windows only, experimental)
  */
-export type ContainmentType = "process" | "wslc" | "microvm";
+export type ContainmentType = "process" | "wslc" | "microvm" | "macos_sandbox";
 
 /**
  * Containment backends that require the --experimental flag.
  */
-export const ExperimentalBackends: readonly ContainmentType[] = ['microvm', 'wslc'];
+export const ExperimentalBackends: readonly ContainmentType[] = ['microvm', 'wslc', 'macos_sandbox'];
 
 /**
  * Clipboard access policy levels

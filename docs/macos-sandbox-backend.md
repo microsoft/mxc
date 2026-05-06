@@ -1,13 +1,14 @@
-# Seatbelt (macOS) Container Backend
+# macOS Sandbox Container Backend
 
-The Seatbelt backend provides macOS sandbox isolation by wrapping Apple's
+The macOS sandbox backend (codenamed "Seatbelt" internally) provides macOS
+sandbox isolation by wrapping Apple's
 [Seatbelt](https://en.wikipedia.org/wiki/Seatbelt_%28software%29) sandbox —
 the same kernel-enforced sandbox that backs the App Sandbox used by every
 Mac App Store application.
 
 ## Overview
 
-On macOS, MXC executes scripts inside a Seatbelt sandbox via the system
+On macOS, MXC executes scripts inside the macOS sandbox via the system
 binary `/usr/bin/sandbox-exec`, with a TinyScheme profile generated
 on-the-fly from the MXC policy. This provides:
 
@@ -31,7 +32,7 @@ LXC.
 | Phase | Mechanism | Status |
 |---|---|---|
 | **A (default)** | Spawn `/usr/bin/sandbox-exec -f <profile> /bin/sh -c <script>` | Implemented |
-| **B (planned)** | Direct `sandbox_init_with_parameters` from the child process between fork and exec, no temp profile file | Not yet implemented; `seatbelt.mode = "inproc"` reserved |
+| **B (planned)** | Direct `sandbox_init_with_parameters` from the child process between fork and exec, no temp profile file | Not yet implemented; `experimental.macos_sandbox.mode = "inproc"` reserved |
 | **C (future)** | Mac App Store distribution via App Sandbox entitlements | Out of scope for npm/Developer-ID shipping |
 
 For the rationale behind the phasing, see the architecture notes in the
@@ -45,20 +46,22 @@ session plan and `docs/versioning.md`.
 - **Xcode Command Line Tools** for building from source (`xcode-select
   --install`). Not needed for `npm install` of pre-built binaries.
 
-No additional packages are required at runtime — Seatbelt is part of the
-base OS.
+No additional packages are required at runtime — the macOS sandbox is part
+of the base OS.
 
 ## Configuration
 
-The Seatbelt backend uses the same JSON configuration schema as the
-other backends, with `containment` set to `"seatbelt"`:
+The macOS sandbox backend uses the same JSON configuration schema as the
+other backends, with `containment` set to `"macos_sandbox"`. Backend-specific
+settings live under `experimental.macos_sandbox`, and the `--experimental`
+flag is required to enable the backend at runtime:
 
 ```json
 {
     "$schema": "./schemas/dev/mxc-config.schema.0.5.0-dev.json",
-    "containment": "seatbelt",
+    "containment": "macos_sandbox",
     "process": {
-        "commandLine": "echo hi from seatbelt",
+        "commandLine": "echo hi from macos_sandbox",
         "timeout": 30000
     },
     "filesystem": {
@@ -70,18 +73,20 @@ other backends, with `containment` set to `"seatbelt"`:
         "defaultPolicy": "block",
         "allowedHosts":  ["api.github.com"]
     },
-    "seatbelt": {
-        "mode": "exec"
+    "experimental": {
+        "macos_sandbox": {
+            "mode": "exec"
+        }
     }
 }
 ```
 
-### Seatbelt-specific options
+### macos_sandbox-specific options
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `seatbelt.mode` | `"exec"` \| `"inproc"` | `"exec"` | Selects how the sandbox is entered. `"exec"` spawns `/usr/bin/sandbox-exec`. `"inproc"` is reserved for Phase B (`sandbox_init_with_parameters` after fork, before exec). Unknown values fall back to `"exec"`. |
-| `seatbelt.profileOverride` | string | unset | Escape hatch for advanced/testing scenarios. When set, the SDK-generated profile is replaced with this raw TinyScheme string verbatim — all `filesystem`/`network`/`ui` policy fields are ignored for profile generation (they are still type-checked). Use this only when the auto-generated profile is insufficient. |
+| `experimental.macos_sandbox.mode` | `"exec"` \| `"inproc"` | `"exec"` | Selects how the sandbox is entered. `"exec"` spawns `/usr/bin/sandbox-exec`. `"inproc"` is reserved for Phase B (`sandbox_init_with_parameters` after fork, before exec). Unknown values fall back to `"exec"`. |
+| `experimental.macos_sandbox.profileOverride` | string | unset | Optional override of the generated TinyScheme sandbox profile. When set, the SDK-generated profile is replaced with this raw TinyScheme string verbatim — all `filesystem`/`network`/`ui` policy fields are ignored for profile generation (they are still type-checked). Use this only when the auto-generated profile is insufficient. |
 
 ### Filesystem policy
 
@@ -157,7 +162,7 @@ const policy: SandboxPolicy = {
 };
 
 // On macOS, spawnSandbox automatically resolves to mxc-exec-darwin and
-// builds a Seatbelt config. No extra wiring required at the call site.
+// builds a macos_sandbox config. No extra wiring required at the call site.
 const pty = spawnSandbox('echo hello', policy);
 pty.onData((data) => console.log(data));
 pty.onExit((e) => console.log('Exit:', e.exitCode));
@@ -216,7 +221,7 @@ environment.
 
 ## Comparison with other backends
 
-| Feature | AppContainer (Windows) | LXC (Linux) | Seatbelt (macOS) |
+| Feature | AppContainer (Windows) | LXC (Linux) | macos_sandbox (macOS) |
 |---|---|---|---|
 | Isolation level | Process | Container | Process |
 | Startup time | Fast (~10 ms) | Medium (~1 s) | Fast (~10 ms) |
