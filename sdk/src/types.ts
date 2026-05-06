@@ -181,8 +181,6 @@ export interface ContainerConfig {
   appContainer?: AppContainerConfig;
   /** LXC container configuration (Linux only) */
   lxc?: LxcConfig;
-  /** macOS sandbox configuration (macOS only) */
-  macos_sandbox?: MacosSandboxConfig;
   /** Filesystem access configuration */
   filesystem?: FilesystemConfig;
   /** Network access configuration */
@@ -191,6 +189,8 @@ export interface ContainerConfig {
   experimental?: {
     /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
+    /** macOS sandbox configuration (macOS only) */
+    macos_sandbox?: MacosSandboxConfig;
   };
   /** Cross-platform UI configuration */
   ui?: UiConfig;
@@ -261,7 +261,8 @@ export interface LxcConfig {
 }
 
 /**
- * macOS sandbox configuration. Used when containment is 'macos_sandbox'.
+ * macOS sandbox configuration (experimental). Used under
+ * `experimental.macos_sandbox` when containment is 'macos_sandbox'.
  */
 export interface MacosSandboxConfig {
   /**
@@ -272,9 +273,7 @@ export interface MacosSandboxConfig {
    */
   mode?: 'exec' | 'inproc';
   /**
-   * Optional override of the generated TinyScheme profile. When set the
-   * generated policy-derived profile is ignored and this string is passed
-   * to the sandbox verbatim. Intended for advanced/testing use.
+   * Optional override of the generated TinyScheme sandbox profile.
    */
   profileOverride?: string;
 }

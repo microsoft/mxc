@@ -179,6 +179,8 @@ struct RawExperimental {
     wslc: Option<RawContainerConfig>,
     #[serde(rename = "isolation_session")]
     isolation_session: Option<RawIsolationSession>,
+    #[serde(rename = "macos_sandbox")]
+    macos_sandbox: Option<RawMacosSandbox>,
 }
 
 #[derive(Deserialize, Default)]
@@ -202,8 +204,6 @@ struct RawConfig {
     #[serde(rename = "appContainer")]
     app_container: Option<RawAppContainer>,
     lxc: Option<RawLxc>,
-    #[serde(rename = "macos_sandbox")]
-    macos_sandbox: Option<RawMacosSandbox>,
     filesystem: Option<RawFilesystem>,
     network: Option<RawNetwork>,
     ui: Option<RawUi>,
@@ -595,26 +595,6 @@ fn convert_raw_config_inner(
         }
     };
 
-    // macOS sandbox configuration
-    let macos_sandbox_config = {
-        let raw_sb = raw.macos_sandbox.unwrap_or_default();
-        let mode = match raw_sb.mode.as_deref() {
-            None | Some("exec") => MacosSandboxMode::Exec,
-            Some("inproc") => MacosSandboxMode::Inproc,
-            Some(other) => {
-                logger.log_line(&format!(
-                    "Unknown macos_sandbox mode '{}', defaulting to 'exec'",
-                    other
-                ));
-                MacosSandboxMode::Exec
-            }
-        };
-        MacosSandboxConfig {
-            mode,
-            profile_override: raw_sb.profile_override,
-        }
-    };
-
     let mut policy = ContainerPolicy::default();
 
     // AppContainer section
@@ -809,11 +789,29 @@ fn convert_raw_config_inner(
             }
             config
         });
+        let macos_sandbox = raw_exp.macos_sandbox.map(|raw_sb| {
+            let mode = match raw_sb.mode.as_deref() {
+                None | Some("exec") => MacosSandboxMode::Exec,
+                Some("inproc") => MacosSandboxMode::Inproc,
+                Some(other) => {
+                    logger.log_line(&format!(
+                        "Unknown macos_sandbox mode '{}', defaulting to 'exec'",
+                        other
+                    ));
+                    MacosSandboxMode::Exec
+                }
+            };
+            MacosSandboxConfig {
+                mode,
+                profile_override: raw_sb.profile_override,
+            }
+        });
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
             isolation_session,
+            macos_sandbox,
         }
     } else {
         ExperimentalConfig::default()
@@ -846,7 +844,6 @@ fn convert_raw_config_inner(
         lifecycle,
         policy,
         lxc_config,
-        macos_sandbox_config,
         experimental_enabled: false,
         experimental,
         dry_run: false,
@@ -879,7 +876,6 @@ fn convert_raw_state_aware(
         containment: raw.containment,
         app_container: None,
         lxc: None,
-        macos_sandbox: None,
         filesystem: raw.filesystem,
         network: raw.network,
         ui: raw.ui,
@@ -2226,53 +2222,57 @@ mod tests {
 
     #[test]
     fn macos_sandbox_config_defaults() {
+        // When no experimental.macos_sandbox block is provided the parser
+        // leaves it unset (None) — runners should fall back to defaults.
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(
-            req.macos_sandbox_config.mode,
-            crate::models::MacosSandboxMode::Exec
-        );
-        assert!(req.macos_sandbox_config.profile_override.is_none());
+        assert!(req.experimental.macos_sandbox.is_none());
     }
 
     #[test]
     fn macos_sandbox_config_inproc_mode() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox", "macos_sandbox": {"mode": "inproc"}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox", "experimental": {"macos_sandbox": {"mode": "inproc"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(
-            req.macos_sandbox_config.mode,
-            crate::models::MacosSandboxMode::Inproc
-        );
+        let cfg = req
+            .experimental
+            .macos_sandbox
+            .expect("experimental.macos_sandbox should be populated");
+        assert_eq!(cfg.mode, crate::models::MacosSandboxMode::Inproc);
     }
 
     #[test]
     fn macos_sandbox_config_unknown_mode_defaults_to_exec() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox", "macos_sandbox": {"mode": "bogus"}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox", "experimental": {"macos_sandbox": {"mode": "bogus"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(
-            req.macos_sandbox_config.mode,
-            crate::models::MacosSandboxMode::Exec
-        );
+        let cfg = req
+            .experimental
+            .macos_sandbox
+            .expect("experimental.macos_sandbox should be populated");
+        assert_eq!(cfg.mode, crate::models::MacosSandboxMode::Exec);
     }
 
     #[test]
     fn macos_sandbox_profile_override_passed_through() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox", "macos_sandbox": {"profileOverride": "(version 1)(deny default)"}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox", "experimental": {"macos_sandbox": {"profileOverride": "(version 1)(deny default)"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req
+            .experimental
+            .macos_sandbox
+            .expect("experimental.macos_sandbox should be populated");
         assert_eq!(
-            req.macos_sandbox_config.profile_override.as_deref(),
+            cfg.profile_override.as_deref(),
             Some("(version 1)(deny default)")
         );
     }

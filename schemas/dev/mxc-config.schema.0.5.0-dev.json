@@ -21,7 +21,7 @@
       "type": "string",
       "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "macos_sandbox"],
       "default": "appcontainer",
-      "description": "Containment backend to use for execution. Note: 'windows_sandbox' and 'wslc' are experimental and require the --experimental CLI flag. 'macos_sandbox' is the macOS-only backend."
+      "description": "Containment backend to use for execution. Note: 'windows_sandbox', 'wslc', and 'macos_sandbox' are experimental and require the --experimental CLI flag."
     },
 
     "lifecycle": {
@@ -237,23 +237,6 @@
       }
     },
 
-    "macos_sandbox": {
-      "type": "object",
-      "description": "macOS sandbox settings. Used when containment is 'macos_sandbox'.",
-      "properties": {
-        "mode": {
-          "type": "string",
-          "enum": ["exec", "inproc"],
-          "default": "exec",
-          "description": "How the sandbox profile is applied: 'exec' spawns /usr/bin/sandbox-exec; 'inproc' calls sandbox_init_with_parameters after fork (uses a private macOS API)."
-        },
-        "profileOverride": {
-          "type": "string",
-          "description": "Optional override of the generated TinyScheme sandbox profile. When set the generated policy-derived profile is ignored and this string is passed to the sandbox verbatim. Advanced/testing use only."
-        }
-      }
-    },
-
     "experimental": {
       "type": "object",
       "description": "Experimental features. Only active when --experimental is passed.",
@@ -323,6 +306,22 @@
             "storagePath": {
               "type": "string",
               "description": "Storage path for the WSLC session image store. Omit to use a temporary directory."
+            }
+          }
+        },
+        "macos_sandbox": {
+          "type": "object",
+          "description": "macOS sandbox backend (experimental). Used when containment is 'macos_sandbox'.",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["exec", "inproc"],
+              "default": "exec",
+              "description": "How the sandbox profile is applied: 'exec' spawns /usr/bin/sandbox-exec; 'inproc' calls sandbox_init_with_parameters after fork (uses a private macOS API)."
+            },
+            "profileOverride": {
+              "type": "string",
+              "description": "Optional override of the generated TinyScheme sandbox profile."
             }
           }
         }

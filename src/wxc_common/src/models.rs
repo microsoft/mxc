@@ -24,9 +24,9 @@ pub enum ContainmentBackend {
     /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
     #[serde(rename = "isolation_session")]
     IsolationSession,
-    /// macOS sandbox — first-class backend on macOS (analogous to `Lxc` on
-    /// Linux). Implemented on top of the OS-bundled sandbox facility
-    /// (historical Apple internal codename: "Seatbelt").
+    /// macOS sandbox — experimental backend (requires --experimental).
+    /// Implemented on top of the OS-bundled sandbox facility (historical
+    /// Apple internal codename: "Seatbelt").
     #[serde(rename = "macos_sandbox")]
     MacosSandbox,
 }
@@ -45,16 +45,14 @@ pub enum MacosSandboxMode {
     Inproc,
 }
 
-/// Configuration specific to the macOS sandbox backend. Used when
-/// `containment == MacosSandbox`.
+/// Configuration specific to the macOS sandbox backend (experimental).
+/// Used under `experimental.macos_sandbox` when `containment == MacosSandbox`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MacosSandboxConfig {
     /// Which sandbox entry point to use. Default: `Exec` (sandbox-exec).
     pub mode: MacosSandboxMode,
-    /// Optional override of the generated TinyScheme profile. When set, the
-    /// generated policy-derived profile is ignored and this string is passed
-    /// to the sandbox verbatim. Intended for advanced/testing use.
+    /// Optional override of the generated TinyScheme profile.
     #[serde(rename = "profileOverride", skip_serializing_if = "Option::is_none")]
     pub profile_override: Option<String>,
 }
@@ -373,6 +371,9 @@ pub struct ExperimentalConfig {
     /// Isolation Session backend (experimental).
     #[serde(rename = "isolation_session")]
     pub isolation_session: Option<IsolationSessionConfig>,
+    /// macOS sandbox backend (experimental).
+    #[serde(rename = "macos_sandbox")]
+    pub macos_sandbox: Option<MacosSandboxConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,8 +398,6 @@ pub struct CodexRequest {
     pub policy: ContainerPolicy,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
-    /// macOS-sandbox-specific configuration (used when containment == MacosSandbox).
-    pub macos_sandbox_config: MacosSandboxConfig,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
     /// Experimental feature configs (only applied when experimental_enabled is true).
@@ -422,7 +421,6 @@ impl Default for CodexRequest {
             lifecycle: LifecycleConfig::default(),
             policy: ContainerPolicy::default(),
             lxc_config: LxcConfig::default(),
-            macos_sandbox_config: MacosSandboxConfig::default(),
             experimental_enabled: false,
             experimental: ExperimentalConfig::default(),
             dry_run: false,
