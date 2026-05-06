@@ -63,6 +63,9 @@ pub struct BaseContainerRunner {
 /// (e.g., disabled via feature-enablement mechanisms).
 const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 
+/// SandboxSpec FlatBuffer schema version embedded in every spec payload.
+const SANDBOX_SPEC_VERSION: &str = "0.1.0";
+
 impl BaseContainerRunner {
     pub fn new() -> Self {
         Self::default()
@@ -184,7 +187,7 @@ impl BaseContainerRunner {
     fn build_sandbox_spec(request: &CodexRequest) -> Vec<u8> {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
 
-        let version = builder.create_string("0.1.0");
+        let version = builder.create_string(SANDBOX_SPEC_VERSION);
 
         // Match legacy AppContainer behaviour: when network enforcement uses
         // capabilities and the default policy is Allow, ensure internetClient
@@ -343,7 +346,9 @@ impl ScriptRunner for BaseContainerRunner {
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let _ = writeln!(logger, "BaseContainer: building sandbox specification...");
+        let _ = writeln!(logger, "SECTION: Backend runner 'BaseContainer'");
+
+        let run_start = std::time::Instant::now();
 
         // Launch builtin test proxy if requested (before building spec so we have the port).
         let mut request = request.clone();
@@ -361,23 +366,38 @@ impl ScriptRunner for BaseContainerRunner {
             }
         }
 
+        // Log the effective proxy config after resolution.
+        if request.policy.network_proxy.is_enabled() {
+            let addr = request
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .map(|a| a.to_url())
+                .unwrap_or_else(|| "<pending>".to_string());
+            let _ = writeln!(
+                logger,
+                "effective proxy: {} (builtin_test_server={})",
+                addr, request.policy.network_proxy.builtin_test_server
+            );
+        }
+
+        let _ = writeln!(logger, "SECTION: Build sandbox spec");
+
         // 1. Build the FlatBuffer sandbox spec from the request policy.
         let spec_bytes = Self::build_sandbox_spec(&request);
 
         // Print proxy URL in debug mode
         if let Some(ref addr) = request.policy.network_proxy.address {
-            let _ = writeln!(
-                logger,
-                "BaseContainer: proxy URL in spec: {}",
-                addr.to_url()
-            );
+            let _ = writeln!(logger, "proxy URL in spec: {}", addr.to_url());
         }
 
         let ui_restrictions =
             Self::ui_restrictions_bitmask(&request.policy.ui, &request.policy.base_process_ui);
         let _ = writeln!(
             logger,
-            "BaseContainer: sandbox spec built ({} bytes)",
+            "sandbox spec built (version={}, {} bytes)",
+            SANDBOX_SPEC_VERSION,
             spec_bytes.len()
         );
 
@@ -389,12 +409,12 @@ impl ScriptRunner for BaseContainerRunner {
         );
         let _ = writeln!(
             logger,
-            "BaseContainer: ui.clipboard={:?}, ui.injection={}",
+            "ui.clipboard={:?}, ui.injection={}",
             request.policy.ui.clipboard, request.policy.ui.injection
         );
         let _ = writeln!(
             logger,
-            "BaseContainer: base_process_ui: isolation={}, desktopSystemControl={}, systemSettings={}, ime={}",
+            "base_process_ui: isolation={}, desktopSystemControl={}, systemSettings={}, ime={}",
             request.policy.base_process_ui.isolation,
             request.policy.base_process_ui.desktop_system_control,
             request.policy.base_process_ui.system_settings,
@@ -402,7 +422,7 @@ impl ScriptRunner for BaseContainerRunner {
         );
         let _ = writeln!(
             logger,
-            "BaseContainer: UILIMIT flags: HANDLES={} READCLIP={} WRITECLIP={} SYSPARAM={} DISPLAY={} ATOMS={} DESKTOP={} EXIT={} IME={} INJECT={}",
+            "UILIMIT flags: HANDLES={} READCLIP={} WRITECLIP={} SYSPARAM={} DISPLAY={} ATOMS={} DESKTOP={} EXIT={} IME={} INJECT={}",
             ui_restrictions & Self::UILIMIT_HANDLES != 0,
             ui_restrictions & Self::UILIMIT_READCLIPBOARD != 0,
             ui_restrictions & Self::UILIMIT_WRITECLIPBOARD != 0,
@@ -415,6 +435,8 @@ impl ScriptRunner for BaseContainerRunner {
             ui_restrictions & Self::UILIMIT_INJECTION != 0,
         );
 
+        let _ = writeln!(logger, "SECTION: Load API");
+
         // 2. Dynamically load the API from processmodel.dll.
         let create_process_in_sandbox = match Self::load_api() {
             Ok(f) => f,
@@ -422,8 +444,10 @@ impl ScriptRunner for BaseContainerRunner {
         };
         let _ = writeln!(
             logger,
-            "BaseContainer: loaded Experimental_CreateProcessInSandbox from processmodel.dll"
+            "loaded Experimental_CreateProcessInSandbox from processmodel.dll"
         );
+
+        let _ = writeln!(logger, "SECTION: Launch process");
 
         // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
         let mut cmd_wide = string_util::to_wide(&request.script_code);
@@ -437,7 +461,7 @@ impl ScriptRunner for BaseContainerRunner {
             cwd_wide.as_ptr()
         };
 
-        // Identity — used by the sandbox engine to name the AppContainer profile.
+        // Identity -- used by the sandbox engine to name the AppContainer profile.
         let identity = if request.container_id.is_empty() {
             "MxcBaseContainer".to_string()
         } else {
@@ -445,15 +469,15 @@ impl ScriptRunner for BaseContainerRunner {
         };
         let identity_wide = string_util::to_wide(&identity);
 
-        // STARTUPINFOW — minimal, no handle inheritance (not yet supported by the API).
+        // STARTUPINFOW -- minimal, no handle inheritance (not yet supported by the API).
         let si = STARTUPINFOW {
             cb: std::mem::size_of::<STARTUPINFOW>() as u32,
             ..unsafe { std::mem::zeroed() }
         };
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
-        let _ = writeln!(logger, "BaseContainer: launching: {}", request.script_code);
-        let _ = writeln!(logger, "BaseContainer: identity: {identity}");
+        let _ = writeln!(logger, "launching: {}", request.script_code);
+        let _ = writeln!(logger, "identity: {identity}");
 
         // 4. Call Experimental_CreateProcessInSandbox.
         let success = unsafe {
@@ -498,11 +522,9 @@ impl ScriptRunner for BaseContainerRunner {
             ));
         }
 
-        let _ = writeln!(
-            logger,
-            "BaseContainer: process created (PID: {})",
-            pi.dwProcessId
-        );
+        let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
+
+        let _ = writeln!(logger, "SECTION: Wait for exit");
 
         // 5. Wait for the child process to exit.
         let timeout_ms = get_timeout_milliseconds(request.script_timeout);
@@ -516,7 +538,7 @@ impl ScriptRunner for BaseContainerRunner {
                 let _ = CloseHandle(pi.hThread);
                 return ScriptResponse::error(&format!("WaitForSingleObject failed: {err:?}"));
             } else if wait_result == WAIT_TIMEOUT {
-                let _ = writeln!(logger, "BaseContainer: process timed out, terminating...");
+                let _ = writeln!(logger, "process timed out, terminating...");
                 let _ = TerminateProcess(pi.hProcess, u32::MAX);
                 let _ = WaitForSingleObject(pi.hProcess, 5000);
             }
@@ -527,9 +549,12 @@ impl ScriptRunner for BaseContainerRunner {
             let _ = CloseHandle(pi.hThread);
         }
 
+        let _ = writeln!(logger, "process exited with code {exit_code}");
+
         let _ = writeln!(
             logger,
-            "BaseContainer: process exited with code {exit_code}"
+            "SECTION: Done ({:.3}s)",
+            run_start.elapsed().as_secs_f64()
         );
 
         // Stop the builtin test proxy if it was started.

@@ -35,6 +35,10 @@ pub mod string_util;
 #[cfg(target_os = "windows")]
 pub mod windows_sandbox_runner;
 
+// Diagnostic logging (registry/env-controlled real-time output)
+#[cfg(target_os = "windows")]
+pub mod diagnostic;
+
 // BaseContainer (composable sandbox) support
 #[cfg(target_os = "windows")]
 pub mod base_container_runner;

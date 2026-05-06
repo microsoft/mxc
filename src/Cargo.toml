@@ -13,6 +13,7 @@ members = [
     "wslc_common",
     "isolation_session_bindings",
     "generated/base_container_specification",
+    "mxc_diagnostic_console",
 ]
 resolver = "3"
 
@@ -41,6 +42,11 @@ windows = { version = "0.62", features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_Shell",
     "Win32_System_Registry",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Time",
+    "Win32_System_SystemServices",
 ] }
 windows-core = "0.62"
 serde = { version = "1", features = ["derive"] }
@@ -62,3 +68,4 @@ flatbuffers = "25"
 sandbox_spec = { path = "generated/base_container_specification" }
 widestring = "1"
 url = "2"
+winreg = "0.55"

@@ -9,6 +9,31 @@ import { FileLogger } from './logger';
 import { ContainerConfig, ContainmentType, ExperimentalBackends, SandboxingMethod } from './types';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
 import { SandboxSpawnOptions } from './sandbox';
+import { diagLog } from './diagnostic';
+
+/** SDK version read from package.json at module load time. */
+export const SDK_VERSION: string = (() => {
+    try {
+        const pkgPath = require.resolve('@microsoft/mxc-sdk/package.json');
+        return require(pkgPath).version as string;
+    } catch {
+        try {
+            return require(path.resolve(__dirname, '..', 'package.json')).version as string;
+        } catch {
+            return 'unknown';
+        }
+    }
+})();
+
+let sdkVersionLogged = false;
+
+/** Log the SDK version to the diagnostic console (once per process). */
+export function diagLogVersion(): void {
+    if (!sdkVersionLogged) {
+        sdkVersionLogged = true;
+        diagLog(`mxc-sdk v${SDK_VERSION} (PID ${process.pid})`);
+    }
+}
 
 /**
  * Result of preparing a sandbox spawn — includes the resolved binary,

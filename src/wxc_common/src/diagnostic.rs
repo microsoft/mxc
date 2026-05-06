@@ -1,0 +1,319 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Diagnostic configuration for MXC real-time logging.
+//!
+//! ## Environment variables
+//! - `MXC_DIAG_CONSOLE=1` — enable diagnostic console (named pipe)
+
+use std::env;
+
+use crate::models::CodexRequest;
+
+use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+const ENV_CONSOLE: &str = "MXC_DIAG_CONSOLE";
+const PIPE_NAME_PREFIX: &str = r"\\.\pipe\mxc-diagnostics";
+
+/// Build the diagnostic pipe name for the current user: `\\.\pipe\mxc-diagnostics-{SID}`.
+///
+/// Falls back to the bare prefix if the SID cannot be determined.
+pub fn diagnostic_pipe_name() -> String {
+    match get_current_user_sid() {
+        Some(sid) => format!("{PIPE_NAME_PREFIX}-{sid}"),
+        None => PIPE_NAME_PREFIX.to_string(),
+    }
+}
+
+/// Retrieve the SID string for the current process token's user.
+fn get_current_user_sid() -> Option<String> {
+    use crate::string_util::sid_to_string;
+    use windows::Win32::Foundation::HANDLE;
+
+    let mut token = HANDLE::default();
+    // SAFETY: GetCurrentProcess returns a pseudo-handle always valid.
+    // OpenProcessToken with TOKEN_QUERY is safe on a valid process handle.
+    unsafe {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+    }
+
+    let mut buf = vec![0u8; 256];
+    let mut returned: u32 = 0;
+    // SAFETY: token is valid (from OpenProcessToken above); buf is large enough for TOKEN_USER.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr().cast()),
+            buf.len() as u32,
+            &mut returned,
+        )
+    };
+
+    if ok.is_err() {
+        unsafe {
+            let _ = CloseHandle(token);
+        }
+        return None;
+    }
+
+    // SAFETY: GetTokenInformation succeeded with TokenUser, so buf contains a valid TOKEN_USER.
+    let token_user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
+    let sid_str = unsafe { sid_to_string(token_user.User.Sid.0, "") };
+
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+
+    if sid_str.is_empty() {
+        None
+    } else {
+        Some(sid_str)
+    }
+}
+
+/// Maximum number of characters to include from `script_code` in diagnostic output.
+const SCRIPT_CODE_TRUNCATE_LEN: usize = 200;
+
+/// Resolved diagnostic configuration.
+#[derive(Debug, Clone)]
+pub struct DiagnosticConfig {
+    /// Whether to send log messages to the shared diagnostic console via named pipe.
+    pub console_enabled: bool,
+}
+
+impl DiagnosticConfig {
+    /// Returns true if any diagnostic sink is enabled.
+    pub fn any_enabled(&self) -> bool {
+        self.console_enabled
+    }
+
+    /// Read diagnostic settings from environment variables.
+    pub fn from_environment() -> Self {
+        let console_enabled = env_bool(ENV_CONSOLE).unwrap_or(false);
+
+        Self { console_enabled }
+    }
+
+    /// Check whether learning mode should be force-injected.
+    ///
+    /// When the diagnostic console is enabled (`MXC_DIAG_CONSOLE=1`), the
+    /// `learningModeLogging` capability is automatically injected into the
+    /// container policy so that access-check ETW events are captured.
+    pub fn force_learning_mode() -> bool {
+        env_bool(ENV_CONSOLE).unwrap_or(false)
+    }
+}
+
+/// Produce a redacted JSON representation of a `CodexRequest` suitable for diagnostic logging.
+///
+/// - Environment variable values are replaced with `<redacted>`.
+/// - `script_code` is truncated to [`SCRIPT_CODE_TRUNCATE_LEN`] characters.
+/// - `network_proxy` (which is `#[serde(skip)]`) is logged separately.
+pub fn redacted_request_json(request: &CodexRequest) -> String {
+    // Build a redacted copy for serialization.
+    let mut redacted = request.clone();
+
+    // Redact env values: keep keys, replace values.
+    redacted.env = redacted
+        .env
+        .iter()
+        .map(|entry| {
+            if let Some(pos) = entry.find('=') {
+                format!("{}=<redacted>", &entry[..pos])
+            } else {
+                entry.clone()
+            }
+        })
+        .collect();
+
+    // Truncate script_code.
+    if redacted.script_code.len() > SCRIPT_CODE_TRUNCATE_LEN {
+        let total_len = redacted.script_code.len();
+        redacted.script_code.truncate(SCRIPT_CODE_TRUNCATE_LEN);
+        redacted
+            .script_code
+            .push_str(&format!("... ({total_len} chars total)"));
+    }
+
+    // Serialize the redacted request.
+    let json = serde_json::to_string_pretty(&redacted)
+        .unwrap_or_else(|e| format!("{{\"error\": \"failed to serialize request: {e}\"}}"));
+
+    // Append network_proxy info (skipped by serde).
+    let proxy_info = if request.policy.network_proxy.is_enabled() {
+        let addr = request
+            .policy
+            .network_proxy
+            .address
+            .as_ref()
+            .map(|a| a.to_url())
+            .unwrap_or_else(|| "<builtin test server, not yet resolved>".to_string());
+        format!(
+            "\n[network_proxy: enabled, builtin_test_server={}, address={}]",
+            request.policy.network_proxy.builtin_test_server, addr
+        )
+    } else {
+        "\n[network_proxy: disabled]".to_string()
+    };
+
+    format!("{json}{proxy_info}")
+}
+
+/// Get the parent process name and PID (e.g. `"node.exe:67890"`).
+///
+/// Returns `"unknown"` if the parent PID cannot be determined, or
+/// `"?:<pid>"` if the parent process name cannot be resolved.
+pub fn get_parent_process_info() -> String {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let my_pid = std::process::id();
+
+    // Take a snapshot to find our parent PID.
+    // SAFETY: CreateToolhelp32Snapshot with TH32CS_SNAPPROCESS and pid 0
+    // takes a snapshot of all processes. No invalid memory access is possible.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    let snapshot = match snapshot {
+        Ok(h) => h,
+        Err(_) => return "unknown".to_string(),
+    };
+
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+
+    let mut parent_pid = None;
+    // SAFETY: `entry` is initialized with correct `dwSize` and `snapshot` is a valid handle
+    // returned by CreateToolhelp32Snapshot above. CloseHandle is called on the valid snapshot.
+    unsafe {
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                if entry.th32ProcessID == my_pid {
+                    parent_pid = Some(entry.th32ParentProcessID);
+                    break;
+                }
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+    }
+
+    let ppid = match parent_pid {
+        Some(p) => p,
+        None => return "unknown".to_string(),
+    };
+
+    // Resolve the parent's full image path.
+    // SAFETY: OpenProcess returns a valid handle or an error (checked via match).
+    // QueryFullProcessImageNameW writes into a stack-allocated buffer with bounded length.
+    // CloseHandle is called on the valid process handle before returning.
+    let exe_name = unsafe {
+        let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, ppid);
+        match proc {
+            Ok(handle) => {
+                let mut buf = [0u16; 1024];
+                let mut len = buf.len() as u32;
+                let name = if QueryFullProcessImageNameW(
+                    handle,
+                    PROCESS_NAME_FORMAT(0),
+                    windows::core::PWSTR(buf.as_mut_ptr()),
+                    &mut len,
+                )
+                .is_ok()
+                {
+                    let full = crate::string_util::from_wide(&buf[..len as usize]);
+                    full.rsplit('\\').next().unwrap_or(&full).to_string()
+                } else {
+                    "?".to_string()
+                };
+                let _ = CloseHandle(handle);
+                name
+            }
+            Err(_) => "?".to_string(),
+        }
+    };
+
+    format!("{exe_name}:{ppid}")
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Read a boolean from an environment variable ("1" or "true" = true).
+fn env_bool(name: &str) -> Option<bool> {
+    env::var(name)
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{ProxyAddress, ProxyConfig};
+
+    #[test]
+    fn redacted_request_hides_env_values() {
+        let request = CodexRequest {
+            env: vec![
+                "PATH=C:\\Windows".to_string(),
+                "SECRET_TOKEN=abc123".to_string(),
+            ],
+            ..Default::default()
+        };
+        let json = redacted_request_json(&request);
+        assert!(json.contains("PATH=<redacted>"));
+        assert!(json.contains("SECRET_TOKEN=<redacted>"));
+        assert!(!json.contains("abc123"));
+        assert!(!json.contains("C:\\\\Windows"));
+    }
+
+    #[test]
+    fn redacted_request_truncates_script_code() {
+        let request = CodexRequest {
+            script_code: "x".repeat(500),
+            ..Default::default()
+        };
+        let json = redacted_request_json(&request);
+        assert!(json.contains("500 chars total"));
+        assert!(!json.contains(&"x".repeat(500)));
+    }
+
+    #[test]
+    fn redacted_request_shows_proxy_info() {
+        let mut request = CodexRequest::default();
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+        let json = redacted_request_json(&request);
+        assert!(json.contains("network_proxy: enabled"));
+        assert!(json.contains("http://127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn redacted_request_shows_proxy_disabled() {
+        let request = CodexRequest::default();
+        let json = redacted_request_json(&request);
+        assert!(json.contains("network_proxy: disabled"));
+    }
+
+    #[test]
+    fn env_bool_parses_correctly() {
+        // env_bool on non-existent var returns None
+        assert!(env_bool("MXC_TEST_NONEXISTENT_VAR_12345").is_none());
+    }
+}
