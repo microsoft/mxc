@@ -21,8 +21,15 @@ pub const SCRIPT_FILENAME: &str = ".mxc-script.py";
 pub const RW_DIR: &str = "rw";
 /// Subdirectory for read-only staged host paths.
 pub const RO_DIR: &str = "ro";
+/// Guest mount root inside the NanVix VM.
+const GUEST_MOUNT_ROOT: &str = "/mnt";
 /// Maximum mount name length in characters to avoid exceeding MAX_PATH in the staging hierarchy.
 const MAX_MOUNT_NAME_CHARS: usize = 80;
+
+/// Builds the guest-visible path for a staged host directory.
+fn build_guest_path(category: &str, name: &str) -> String {
+    format!("{}/{}/{}", GUEST_MOUNT_ROOT, category, name)
+}
 /// Bootstrap Python source used by the guest runtime.
 /// Minimal — just runs the user script. Path translation is done at staging
 /// time by rewriting host paths in the script source before writing it.
@@ -49,8 +56,16 @@ pub enum StagingError {
     Io(#[from] std::io::Error),
 }
 
+/// Intermediate result from the staging build closure.
+struct StagingBuildOutput {
+    /// Read-write directory mappings for copyback.
+    rw_mappings: Vec<RwMapping>,
+    /// Total bytes written to the staging directory.
+    size_bytes: u64,
+}
+
 /// Return type of the staging build closure.
-type StagingBuildResult = Result<(Vec<(String, String)>, Vec<RwMapping>, u64), StagingError>;
+type StagingBuildResult = Result<StagingBuildOutput, StagingError>;
 
 /// Whether the original host path was a file or directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +132,7 @@ impl StagingDir {
                 let name = allocate_mount_name(&host_path, &mut used_names);
                 let slot_dir = path.join(RW_DIR).join(&name);
                 let kind = stage_host_path(&host_path, &slot_dir)?;
-                let guest_path = format!("/mnt/{}/{}", RW_DIR, name);
+                let guest_path = build_guest_path(RW_DIR, &name);
                 rewrite_map.push((source.clone(), guest_path));
                 rw_mappings.push(RwMapping {
                     host_path,
@@ -145,7 +160,7 @@ impl StagingDir {
                     fs::copy(&host_path, slot_dir.join(file_name))?;
                 }
                 set_readonly_recursive(&slot_dir)?;
-                let guest_path = format!("/mnt/{}/{}", RO_DIR, name);
+                let guest_path = build_guest_path(RO_DIR, &name);
                 rewrite_map.push((source.clone(), guest_path));
             }
 
@@ -163,10 +178,16 @@ impl StagingDir {
                 });
             }
 
-            Ok((rewrite_map, rw_mappings, size_bytes))
+            Ok(StagingBuildOutput {
+                rw_mappings,
+                size_bytes,
+            })
         }();
 
-        let (_rewrite_map, rw_mappings, size_bytes) = match build_result {
+        let StagingBuildOutput {
+            rw_mappings,
+            size_bytes,
+        } = match build_result {
             Ok(result) => result,
             Err(err) => {
                 let _ = remove_dir_all_force(&path);
@@ -292,9 +313,14 @@ fn rewrite_paths_in_script(script: &str, mappings: &[(String, String)]) -> Strin
     let mut sorted: Vec<_> = mappings.to_vec();
     sorted.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
     for (host_path, guest_path) in &sorted {
-        // Replace backslash variant (Windows-native).
+        // Replace escaped backslash variant first (Python string literals: C:\\Users\\work).
+        let escaped = host_path.replace('\\', "\\\\");
+        if escaped != *host_path {
+            result = result.replace(&escaped, guest_path);
+        }
+        // Replace native backslash variant (C:\Users\work).
         result = result.replace(host_path, guest_path);
-        // Replace forward-slash variant (Python cross-platform style).
+        // Replace forward-slash variant (C:/Users/work).
         let forward = host_path.replace('\\', "/");
         if forward != *host_path {
             result = result.replace(&forward, guest_path);
@@ -596,8 +622,9 @@ mod tests {
         assert!(staging.path().join(RW_DIR).join("sample").exists());
         // Verify the script was rewritten with the guest path.
         let rewritten = fs::read_to_string(staging.path().join(SCRIPT_FILENAME)).unwrap();
+        let expected_guest = build_guest_path(RW_DIR, "sample");
         assert!(
-            rewritten.contains("/mnt/rw/sample"),
+            rewritten.contains(&expected_guest),
             "expected guest path in rewritten script, got: {}",
             rewritten
         );
@@ -654,8 +681,9 @@ mod tests {
         let staging = StagingDir::new(root.path().to_path_buf(), &script, &rw, &[]).unwrap();
 
         let rewritten = fs::read_to_string(staging.path().join(SCRIPT_FILENAME)).unwrap();
+        let expected_guest = build_guest_path(RW_DIR, "sample");
         assert!(
-            rewritten.contains("/mnt/rw/sample"),
+            rewritten.contains(&expected_guest),
             "expected guest path in rewritten script, got: {}",
             rewritten
         );
