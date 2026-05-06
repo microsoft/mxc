@@ -1,0 +1,9 @@
+{
+    "phase": "exec",
+    "sandboxId": "{{SANDBOX_ID}}",
+    "process": {
+        "commandLine": "echo %MY_SA_ENV%",
+        "env": ["MY_SA_ENV=initial-value"],
+        "timeout": 30000
+    }
+}

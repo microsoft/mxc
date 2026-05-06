@@ -1,0 +1,7 @@
+{
+    "phase": "provision",
+    "containment": "isolation_session",
+    "filesystem": {
+        "readwritePaths": ["C:\\workspace"]
+    }
+}

@@ -72,7 +72,8 @@ node --test dist/cli.test.js
 # Local PowerShell helpers — run from repo root, require built binaries
 test_scripts\run_test_configs.ps1            # All test configs via wxc_test_driver
 test_scripts\run_basicac_test.ps1            # Single AppContainer test
-test_scripts\run_isolation_session_tests.ps1 # IsolationSession E2E (requires IsoEnvBroker host)
+test_scripts\run_isolation_session_tests.ps1                # IsolationSession one-shot E2E (requires host with the OS-side IsoSessionOps service)
+test_scripts\run_isolation_session_state_aware_tests.ps1    # IsolationSession state-aware lifecycle E2E (multi-invocation provision/start/exec/stop/deprovision, same host requirements)
 test_scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
 
 # E2E test crate — Rust executor integration tests (from src/)
@@ -94,7 +95,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 | BaseContainer (OS sandbox API) | `wxc-exec.exe` | Windows | `base_container_runner.rs` — calls `Experimental_CreateProcessInSandbox` via FlatBuffer |
 | Windows Sandbox | `wxc-exec.exe` | Windows | `windows_sandbox_runner.rs` |
 | MicroVM (NanVix) | `wxc-exec.exe` | Windows | `nanvix_runner.rs` — feature-gated behind `microvm` |
-| IsolationSession | `wxc-exec.exe` | Windows | `isolation_session_runner.rs` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
+| IsolationSession | `wxc-exec.exe` | Windows | `isolation_session_runner.rs` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Supports both one-shot (single-invocation lifecycle, via `ScriptRunner`) and state-aware (multi-invocation provision/start/exec/stop/deprovision, via `StatefulSandboxBackend`) modes. Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
 | LXC | `lxc-exec` | Linux | `lxc/src/main.rs` + `lxc_common/` |
 
 ### Config flow
@@ -124,7 +125,10 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
 - `docs/lxc-backend.md` — LXC container backend details
 - `docs/windows-sandbox.md` / `docs/windows-sandbox-reference.md` — Windows Sandbox backend
-- `docs/isolation-session/initial-bringup-plan.md` — IsolationSession backend (experimental, isolated user account per execution via the OS-side IsoEnvBroker)
+- `docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md` — state-aware sandbox lifecycle API (cross-backend wire format, Rust `StatefulSandboxBackend` trait, and dispatcher contract)
+- `docs/state-aware-lifecycle/mxc-state-aware-sandbox-api-overview.md` — companion overview to the full state-aware design
+- `docs/isolation-session/initial-bringup-plan.md` — IsolationSession backend, one-shot bringup (experimental, isolated user account per execution via the OS-side service)
+- `docs/isolation-session/state-aware-rust-initial-plan.md` — IsolationSession state-aware lifecycle, Rust-layer initial plan (per-phase config / metadata, policy honor matrix, idempotence, concurrency, error mapping)
 - `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
 
 ## Key Conventions
