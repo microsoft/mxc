@@ -115,7 +115,16 @@ impl ScriptRunner for SeatbeltScriptRunner {
             }
         };
 
-        // 4. Wait with timeout. `script_timeout == 0` means infinite.
+        // 4. Drain stdout/stderr in background threads to avoid deadlock
+        //    if the child fills the OS pipe buffer (~64KB on macOS).
+        let stdout_handle = child.stdout.take().map(|r| {
+            std::thread::spawn(move || read_to_string(r))
+        });
+        let stderr_handle = child.stderr.take().map(|r| {
+            std::thread::spawn(move || read_to_string(r))
+        });
+
+        // 5. Wait with timeout. `script_timeout == 0` means infinite.
         let timeout = if request.script_timeout == 0 {
             None
         } else {
@@ -129,8 +138,12 @@ impl ScriptRunner for SeatbeltScriptRunner {
                 let _ = child.wait();
                 return ScriptResponse {
                     exit_code: -1,
-                    standard_out: String::new(),
-                    standard_err: String::new(),
+                    standard_out: stdout_handle
+                        .and_then(|h| h.join().ok())
+                        .unwrap_or_default(),
+                    standard_err: stderr_handle
+                        .and_then(|h| h.join().ok())
+                        .unwrap_or_default(),
                     error_message: format!(
                         "Seatbelt: script timed out after {}ms",
                         request.script_timeout
@@ -140,9 +153,12 @@ impl ScriptRunner for SeatbeltScriptRunner {
             Err(WaitError::Io(e)) => return error_response(format!("wait failed: {e}")),
         };
 
-        // 5. Drain stdout / stderr.
-        let stdout = child.stdout.take().map(read_to_string).unwrap_or_default();
-        let stderr = child.stderr.take().map(read_to_string).unwrap_or_default();
+        let stdout = stdout_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        let stderr = stderr_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
 
         ScriptResponse {
             exit_code: exit_status.code().unwrap_or(-1),
