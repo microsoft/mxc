@@ -3,12 +3,12 @@
     "version": "0.5.0-alpha",
     "containment": "macos_sandbox",
     "process": {
-        "commandLine": "ls /Users/richiegomez/Documents && echo FS_ALLOWED || echo FS_BLOCKED",
+        "commandLine": "ls /Users && echo FS_ALLOWED || echo FS_BLOCKED",
         "timeout": 10000
     },
     "filesystem": {
         "readwritePaths": ["/tmp"],
-        "deniedPaths": ["/Users/richiegomez/Documents"]
+        "deniedPaths": ["/Users"]
     },
     "network": {
         "defaultPolicy": "block"
