@@ -197,11 +197,17 @@ fn write_network_rules(out: &mut String, request: &CodexRequest) {
 fn write_ui_rules(out: &mut String, request: &CodexRequest) {
     let ui = &request.policy.ui;
 
-    // When UI is disabled, deny the well-known mach services that gate
-    // window creation, pasteboard access, and HID injection. When UI is
-    // enabled we still want to keep clipboard / injection independently
-    // controllable.
-    if ui.disable {
+    // The baseline profile uses `(deny default)`, so services are blocked
+    // unless explicitly allowed. When UI is enabled, we allow the mach
+    // services that gate window creation and launch services. When UI is
+    // disabled we omit those allows (and add explicit denies for clarity).
+    if !ui.disable {
+        out.push_str(";; --- ui enabled: allow WindowServer + LaunchServices ---\n");
+        out.push_str("(allow mach-lookup\n");
+        out.push_str("    (global-name \"com.apple.windowserver.active\")\n");
+        out.push_str("    (global-name \"com.apple.windowserver.session\")\n");
+        out.push_str("    (global-name \"com.apple.coreservices.launchservicesd\"))\n");
+    } else {
         out.push_str(";; --- ui.disable: deny WindowServer + related ---\n");
         out.push_str("(deny mach-lookup\n");
         out.push_str("    (global-name \"com.apple.windowserver.active\")\n");
@@ -209,8 +215,14 @@ fn write_ui_rules(out: &mut String, request: &CodexRequest) {
         out.push_str("    (global-name \"com.apple.coreservices.launchservicesd\"))\n");
     }
 
-    let clipboard_blocked = matches!(ui.clipboard, ClipboardPolicy::None);
-    if clipboard_blocked {
+    // Clipboard: allow pasteboard mach service when clipboard is read,
+    // write, or all. The explicit deny when clipboard=none is redundant
+    // with `(deny default)` but documents intent.
+    let clipboard_allowed = !matches!(ui.clipboard, ClipboardPolicy::None);
+    if clipboard_allowed {
+        out.push_str(";; --- clipboard enabled: allow pasteboard ---\n");
+        out.push_str("(allow mach-lookup (global-name \"com.apple.pasteboard.1\"))\n");
+    } else {
         out.push_str(";; --- ui.clipboard=none: deny pasteboard ---\n");
         out.push_str("(deny mach-lookup (global-name \"com.apple.pasteboard.1\"))\n");
     }
@@ -368,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_enabled_does_not_block_windowserver() {
+    fn ui_enabled_allows_windowserver_and_clipboard() {
         let mut r = req();
         r.policy.ui = UiPolicy {
             disable: false,
@@ -376,8 +388,11 @@ mod tests {
             injection: true,
         };
         let p = build_profile(&r);
-        assert!(!p.contains("com.apple.windowserver.active"));
-        assert!(!p.contains("com.apple.pasteboard.1"));
+        // UI enabled → allow WindowServer
+        assert!(p.contains("(allow mach-lookup"));
+        assert!(p.contains("com.apple.windowserver.active"));
+        // Clipboard=all → allow pasteboard
+        assert!(p.contains("com.apple.pasteboard.1"));
         assert!(!p.contains("IOHIDLibUserClient"));
     }
 

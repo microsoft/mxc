@@ -1,0 +1,20 @@
+{
+    "$schema": "../schemas/dev/mxc-config.schema.0.5.0-dev.json",
+    "version": "0.5.0-alpha",
+    "containment": "macos_sandbox",
+    "process": {
+        "commandLine": "/bin/sh -c 'echo sandbox_clip_test | /usr/bin/pbcopy; /usr/bin/pbpaste'",
+        "timeout": 10000
+    },
+    "network": {
+        "defaultPolicy": "block"
+    },
+    "ui": {
+        "disable": true
+    },
+    "experimental": {
+        "macos_sandbox": {
+            "mode": "exec"
+        }
+    }
+}
