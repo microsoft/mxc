@@ -160,13 +160,16 @@ fn write_network_rules(out: &mut String, request: &CodexRequest) {
             return;
         }
         // defaultPolicy=block + allowedHosts = allowlist mode.
-        out.push_str(";; --- network: default-deny with allowedHosts allowlist ---\n");
-        out.push_str("(allow network-outbound\n");
-        for host in &policy.allowed_hosts {
-            let _ = writeln!(out, "    (remote tcp \"{}:*\")", escape_for_quotes(host));
-            let _ = writeln!(out, "    (remote udp \"{}:*\")", escape_for_quotes(host));
-        }
-        out.push_str(")\n");
+        // Seatbelt limitation: only `*` or `localhost` are valid hosts in
+        // `(remote ...)` filters — per-hostname filtering is not supported.
+        // Fall back to allowing all outbound when allowedHosts is specified.
+        out.push_str(
+            ";; --- network: allowedHosts requested but Seatbelt cannot filter by host;\n",
+        );
+        out.push_str(";;     allowing all outbound as best-effort ---\n");
+        out.push_str("(allow network-outbound)\n");
+        out.push_str("(allow network-bind (local ip))\n");
+        out.push_str("(allow system-socket)\n");
         return;
     }
 
@@ -176,24 +179,19 @@ fn write_network_rules(out: &mut String, request: &CodexRequest) {
         out.push_str("(allow network-bind (local ip))\n");
         out.push_str("(allow system-socket)\n");
     } else {
-        out.push_str(";; --- network: outbound restricted to allowedHosts ---\n");
-        out.push_str("(allow network-outbound\n");
-        for host in &policy.allowed_hosts {
-            let _ = writeln!(out, "    (remote tcp \"{}:*\")", escape_for_quotes(host));
-            let _ = writeln!(out, "    (remote udp \"{}:*\")", escape_for_quotes(host));
-        }
-        out.push_str(")\n");
+        // Seatbelt limitation: per-host filtering not supported.
+        // Allow all outbound as best-effort when allowedHosts is specified.
+        out.push_str(
+            ";; --- network: allowedHosts requested but Seatbelt cannot filter by host;\n",
+        );
+        out.push_str(";;     allowing all outbound as best-effort ---\n");
+        out.push_str("(allow network-outbound)\n");
+        out.push_str("(allow network-bind (local ip))\n");
+        out.push_str("(allow system-socket)\n");
     }
 
-    if !policy.blocked_hosts.is_empty() {
-        out.push_str(";; --- network: blockedHosts (override allow) ---\n");
-        out.push_str("(deny network-outbound\n");
-        for host in &policy.blocked_hosts {
-            let _ = writeln!(out, "    (remote tcp \"{}:*\")", escape_for_quotes(host));
-            let _ = writeln!(out, "    (remote udp \"{}:*\")", escape_for_quotes(host));
-        }
-        out.push_str(")\n");
-    }
+    // Note: blocked_hosts is rejected at the runner level before reaching
+    // the profile builder, so we don't need to handle it here.
 }
 
 fn write_ui_rules(out: &mut String, request: &CodexRequest) {
@@ -323,12 +321,10 @@ mod tests {
         r.policy.default_network_policy = NetworkPolicy::Block;
         r.policy.allowed_hosts = vec!["api.github.com".into(), "registry.npmjs.org".into()];
         let p = build_profile(&r);
-        assert!(p.contains("(allow network-outbound"));
-        assert!(p.contains("(remote tcp \"api.github.com:*\")"));
-        assert!(p.contains("(remote udp \"api.github.com:*\")"));
-        assert!(p.contains("(remote tcp \"registry.npmjs.org:*\")"));
-        // Should NOT have a blanket allow — only per-host rules.
-        assert!(!p.contains("(allow network-outbound)\n"));
+        assert!(p.contains("(allow network-outbound)"));
+        assert!(p.contains("Seatbelt cannot filter by host"));
+        // Should NOT have per-host remote rules.
+        assert!(!p.contains("(remote"));
     }
 
     #[test]
@@ -345,20 +341,20 @@ mod tests {
         r.policy.default_network_policy = NetworkPolicy::Allow;
         r.policy.allowed_hosts = vec!["api.github.com".into(), "1.2.3.4".into()];
         let p = build_profile(&r);
-        assert!(p.contains("network: outbound restricted to allowedHosts"));
-        assert!(p.contains("(remote tcp \"api.github.com:*\")"));
-        assert!(p.contains("(remote tcp \"1.2.3.4:*\")"));
-        assert!(!p.contains("(allow network-outbound)\n"));
+        assert!(p.contains("Seatbelt cannot filter by host"));
+        assert!(p.contains("(allow network-outbound)"));
+        assert!(!p.contains("(remote"));
     }
 
     #[test]
-    fn blocked_hosts_emit_explicit_deny_network() {
+    fn blocked_hosts_not_emitted_in_profile() {
+        // blocked_hosts is rejected at the runner level, but verify the
+        // profile builder doesn't crash if called with them anyway.
         let mut r = req();
         r.policy.default_network_policy = NetworkPolicy::Allow;
         r.policy.blocked_hosts = vec!["evil.example.com".into()];
         let p = build_profile(&r);
-        assert!(p.contains("(deny network-outbound"));
-        assert!(p.contains("(remote tcp \"evil.example.com:*\")"));
+        assert!(!p.contains("(deny network-outbound"));
     }
 
     #[test]

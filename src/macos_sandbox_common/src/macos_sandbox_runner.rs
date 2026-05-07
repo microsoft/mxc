@@ -61,6 +61,17 @@ impl ScriptRunner for SeatbeltScriptRunner {
             }
         }
 
+        // Seatbelt cannot filter network by hostname — reject blockedHosts
+        // rather than silently allowing traffic the user expects to be denied.
+        if !request.policy.blocked_hosts.is_empty() {
+            return error_response(
+                "macOS Seatbelt does not support per-host network filtering. \
+                 'blockedHosts' cannot be enforced; remove it or use \
+                 defaultPolicy: \"block\" to deny all network."
+                    .to_string(),
+            );
+        }
+
         // 1. Build the Seatbelt profile from the policy.
         let profile = build_profile(request);
 
@@ -223,5 +234,45 @@ fn wait_with_timeout(
             }
             Err(e) => return Err(WaitError::Io(e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wxc_common::logger::{Logger, Mode};
+    use wxc_common::models::{CodexRequest, MacosSandboxConfig, MacosSandboxMode};
+
+    fn base_request() -> CodexRequest {
+        let mut r = CodexRequest::default();
+        r.experimental_enabled = true;
+        r.experimental.macos_sandbox = Some(MacosSandboxConfig::default());
+        r
+    }
+
+    #[test]
+    fn rejects_blocked_hosts() {
+        let mut r = base_request();
+        r.policy.blocked_hosts = vec!["evil.example.com".into()];
+        let mut logger = Logger::new(Mode::Buffer);
+        let mut runner = SeatbeltScriptRunner::new();
+        let resp = runner.execute(&r, &mut logger);
+        assert_eq!(resp.exit_code, -1);
+        assert!(resp.error_message.contains("blockedHosts"));
+        assert!(resp.error_message.contains("cannot be enforced"));
+    }
+
+    #[test]
+    fn rejects_inproc_mode() {
+        let mut r = base_request();
+        r.experimental.macos_sandbox = Some(MacosSandboxConfig {
+            mode: MacosSandboxMode::Inproc,
+            ..Default::default()
+        });
+        let mut logger = Logger::new(Mode::Buffer);
+        let mut runner = SeatbeltScriptRunner::new();
+        let resp = runner.execute(&r, &mut logger);
+        assert_eq!(resp.exit_code, -1);
+        assert!(resp.error_message.contains("inproc"));
     }
 }
