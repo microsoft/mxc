@@ -280,9 +280,10 @@ export function createConfigFromPolicy(
         }
 
         // WSLC supports block + allowedHosts via iptables (Bridged networking
-        // with per-host filtering). Other backends require allowOutbound for
+        // with per-host filtering). macOS sandbox supports it natively via
+        // per-host Seatbelt rules. Other backends require allowOutbound for
         // host filtering since it maps to AppContainer capabilities.
-        if (containment !== 'wslc') {
+        if (containment !== 'wslc' && containment !== 'macos_sandbox') {
             if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
                 throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
             }
@@ -305,6 +306,13 @@ export function createConfigFromPolicy(
         return buildWslcContainerConfig(config, policy, containerId);
     }
 
+    if (containment === 'macos_sandbox') {
+        if (platform !== 'darwin') {
+            throw new Error("Containment type 'macos_sandbox' is only supported on macOS.");
+        }
+        return buildDarwinProcessConfig(config);
+    }
+
     if (containment === 'process') {
         if (platform === 'linux') {
             diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
@@ -312,8 +320,8 @@ export function createConfigFromPolicy(
         }
         if (platform === 'darwin') {
             // The macos_sandbox backend has no container abstraction
-            // (per-process fork+exec
-            // sandbox), so containerId is intentionally not threaded through.
+            // (per-process fork+exec sandbox), so containerId is intentionally
+            // not threaded through.
             return buildDarwinProcessConfig(config);
         }
         diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
