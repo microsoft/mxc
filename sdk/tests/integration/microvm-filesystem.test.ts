@@ -18,10 +18,24 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'os';
+import { execSync } from 'child_process';
 import { ChildProcess } from 'child_process';
 import { sdk } from './test-helpers';
 
-const isMicrovmAvailable = os.platform() === 'win32';
+function isWhpAvailable(): boolean {
+  if (os.platform() !== 'win32') return false;
+  try {
+    const result = execSync(
+      'powershell -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).HypervisorPresent"',
+      { encoding: 'utf8', timeout: 5000 }
+    ).trim();
+    return result === 'True';
+  } catch {
+    return false;
+  }
+}
+
+const isMicrovmAvailable = isWhpAvailable();
 
 /** Escape backslashes for embedding a Windows path in a Python string literal. */
 function pyEscape(p: string): string {
@@ -248,6 +262,62 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
         fs.readFileSync(path.join(rwDir, 'nonzero.txt'), 'utf8'),
         'persisted before non-zero exit'
       );
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should generate a PPTX file in a readwritePath and copy it back to the host', async () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-microvm-pptx-'));
+    const rwDir = path.join(testDir, 'output');
+    fs.mkdirSync(rwDir);
+
+    try {
+      const rwDirPy = pyEscape(rwDir);
+      const config = {
+        version: '0.5.0-alpha',
+        containment: 'microvm',
+        process: {
+          // Generate a minimal valid PPTX using only stdlib (zipfile + xml).
+          // A PPTX is an Office Open XML package — a zip with specific XML parts.
+          commandLine: [
+            "import zipfile, os",
+            `outdir = '${rwDirPy}'`,
+            "pptx_path = os.path.join(outdir, 'test.pptx')",
+            "ct = '<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/></Types>'",
+            "rels = '<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"ppt/presentation.xml\"/></Relationships>'",
+            "pres = '<?xml version=\"1.0\"?><p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><p:sldMasterIdLst/><p:sldIdLst/><p:sldSz cx=\"9144000\" cy=\"6858000\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/></p:presentation>'",
+            "with zipfile.ZipFile(pptx_path, 'w', zipfile.ZIP_DEFLATED) as z:",
+            "    z.writestr('[Content_Types].xml', ct)",
+            "    z.writestr('_rels/.rels', rels)",
+            "    z.writestr('ppt/presentation.xml', pres)",
+            "print(f'PPTX size: {os.path.getsize(pptx_path)} bytes')",
+          ].join('\n'),
+          timeout: 30000,
+        },
+        filesystem: {
+          readwritePaths: [rwDir],
+        },
+      };
+
+      const { stdout, stderr, exitCode } = await runMicrovm(config);
+      const combined = stdout + stderr;
+      assert.strictEqual(exitCode, 0, `Expected exit code 0.\nstdout: ${stdout}\nstderr: ${stderr}`);
+      assert.ok(combined.includes('PPTX size:'), `Expected PPTX size in output:\n${combined}`);
+
+      // Verify the PPTX was copied back to the host.
+      const pptxPath = path.join(rwDir, 'test.pptx');
+      assert.ok(fs.existsSync(pptxPath), `Expected test.pptx at ${pptxPath}`);
+      const size = fs.statSync(pptxPath).size;
+      assert.ok(size > 0, `Expected non-empty PPTX, got ${size} bytes`);
+
+      // Verify it's a valid zip (PPTX is zip-based).
+      const header = Buffer.alloc(4);
+      const fd = fs.openSync(pptxPath, 'r');
+      fs.readSync(fd, header, 0, 4, 0);
+      fs.closeSync(fd);
+      assert.strictEqual(header[0], 0x50, 'Expected PK zip header byte 1');
+      assert.strictEqual(header[1], 0x4B, 'Expected PK zip header byte 2');
     } finally {
       fs.rmSync(testDir, { recursive: true, force: true });
     }
