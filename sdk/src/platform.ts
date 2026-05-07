@@ -322,6 +322,14 @@ export function findLxcExecutable(): string | null {
  * @returns Path to mxc-exec-darwin if found, null otherwise
  */
 export function findDarwinExecutable(): string | null {
+  // Allow override for bundled deployments (debugging/testing)
+  if (process.env.MXC_BIN_DIR) {
+    const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'mxc-exec-darwin');
+    if (verifyExecutable(overridePath)) {
+      return overridePath;
+    }
+  }
+
   const targetTriple = getDarwinRustTargetTriple();
   const targetDir = path.join(__dirname, '..', '..', 'src', 'target');
 
