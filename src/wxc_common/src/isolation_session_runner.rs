@@ -131,10 +131,27 @@ pub(crate) const ERR_NETWORK_POLICY: &str =
 pub(crate) const ERR_PROXY_POLICY: &str =
     "network proxy is not supported by the isolation session backend";
 
-/// Validates that the request does not contain policy fields unsupported by
-/// the isolation session backend. Returns `Ok(())` if valid, or a
-/// `Policy`-variant error on rejection.
-pub(crate) fn validate_policy(request: &CodexRequest) -> Result<(), IsolationSessionError> {
+/// Validates the request for the provision phase. Filesystem `rw` and
+/// `ro` paths are honored at provision (applied via `share_folders`);
+/// `denied_paths` is rejected because the underlying API has no
+/// equivalent primitive. Network and proxy policy are always rejected.
+pub(crate) fn validate_provision_policy(
+    request: &CodexRequest,
+) -> Result<(), IsolationSessionError> {
+    if !request.policy.denied_paths.is_empty() {
+        return Err(IsolationSessionError::Policy(
+            ERR_FILESYSTEM_POLICY.to_string(),
+        ));
+    }
+    validate_network_and_proxy_policy(request)
+}
+
+/// Validates the request for any non-provision phase (start / exec / stop
+/// / deprovision). All filesystem fields are rejected because filesystem
+/// policy is bound to provision and immutable thereafter.
+pub(crate) fn validate_post_provision_policy(
+    request: &CodexRequest,
+) -> Result<(), IsolationSessionError> {
     if !request.policy.readwrite_paths.is_empty()
         || !request.policy.readonly_paths.is_empty()
         || !request.policy.denied_paths.is_empty()
@@ -143,6 +160,12 @@ pub(crate) fn validate_policy(request: &CodexRequest) -> Result<(), IsolationSes
             ERR_FILESYSTEM_POLICY.to_string(),
         ));
     }
+    validate_network_and_proxy_policy(request)
+}
+
+/// Network and proxy validation is identical at every phase: the backend
+/// honors neither.
+fn validate_network_and_proxy_policy(request: &CodexRequest) -> Result<(), IsolationSessionError> {
     if !request.policy.allowed_hosts.is_empty()
         || !request.policy.blocked_hosts.is_empty()
         || request.policy.default_network_policy != NetworkPolicy::Allow
@@ -894,7 +917,10 @@ impl Default for IsolationSessionRunner {
 
 impl ScriptRunner for IsolationSessionRunner {
     fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
-        validate_policy(request).map_err(ScriptResponse::from)
+        // One-shot runs the full provision -> start -> exec -> stop ->
+        // deprovision lifecycle in a single process, so provision-phase
+        // semantics apply to the whole call.
+        validate_provision_policy(request).map_err(ScriptResponse::from)
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
@@ -952,6 +978,15 @@ impl ScriptRunner for IsolationSessionRunner {
                 let _ = manager.unregister_client();
                 return e.into();
             }
+        }
+
+        if let Err(e) = manager.share_folders(
+            &request.policy.readwrite_paths,
+            &request.policy.readonly_paths,
+        ) {
+            let _ = manager.deprovision_agent_user();
+            let _ = manager.unregister_client();
+            return e.into();
         }
 
         if let Err(e) = manager.start_session(config_id) {
@@ -1041,7 +1076,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 
     fn provision(
         &mut self,
-        _request: &CodexRequest,
+        request: &CodexRequest,
         _config: Option<()>,
     ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
         let provision_id = format!("wxc-{}", mint_random_token());
@@ -1058,6 +1093,19 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                 return Err(map_lifecycle_error(e));
             }
         };
+
+        // Apply filesystem policy (rw + ro paths) before returning. A
+        // failure here leaves the agent user provisioned but no folders
+        // accessible to it; tear it down so the caller does not see a
+        // half-provisioned sandboxId.
+        if let Err(e) = manager.share_folders(
+            &request.policy.readwrite_paths,
+            &request.policy.readonly_paths,
+        ) {
+            let _ = manager.deprovision_agent_user();
+            let _ = manager.unregister_client();
+            return Err(map_lifecycle_error(e));
+        }
 
         Ok(ProvisionResult {
             sandbox_id: format!("{}:{}", Self::ID_PREFIX, provision_id),
@@ -1121,20 +1169,19 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 
     // -- Validation hooks ----------------------------------------------------
     //
-    // Cross-cutting policy fields (filesystem, network, ui, network proxy)
-    // are not honoured by IsolationSession at any phase: the OS-side service
-    // does not expose these knobs. Mirroring the one-shot path's
-    // `validate_runner` rejection, every state-aware phase rejects these
-    // fields up-front rather than silently ignoring them. This produces
-    // `policy_validation` per design 10.3 instead of letting unsupported
-    // fields slip through unnoticed.
+    // Filesystem rw/ro paths are honoured at provision (applied via
+    // `share_folders`) and rejected at every later phase, because the
+    // grant lifecycle is bound to the agent user. `denied_paths`,
+    // network, and proxy policy are rejected at every phase: the
+    // backend has no equivalent primitive. Anything rejected produces
+    // a `policy_validation` envelope rather than silent ignore.
 
     fn validate_provision(
         &self,
         request: &CodexRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        validate_policy(request).map_err(map_lifecycle_error)
+        validate_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     fn validate_start(
@@ -1143,7 +1190,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &CodexRequest,
         _config: Option<&IsolationSessionConfig>,
     ) -> Result<(), MxcError> {
-        validate_policy(request).map_err(map_lifecycle_error)
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     fn validate_exec(
@@ -1152,7 +1199,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &CodexRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        validate_policy(request).map_err(map_lifecycle_error)
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     fn validate_stop(
@@ -1161,7 +1208,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &CodexRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        validate_policy(request).map_err(map_lifecycle_error)
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     fn validate_deprovision(
@@ -1170,7 +1217,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &CodexRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        validate_policy(request).map_err(map_lifecycle_error)
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     /// Reuses `IsolationSessionManager::create_process` — the same path the
@@ -1295,13 +1342,32 @@ mod tests {
     }
 
     #[test]
-    fn validate_phase_hooks_reject_unsupported_filesystem_policy() {
+    fn validate_provision_hook_accepts_filesystem_policy() {
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_filesystem_policy();
+        runner.validate_provision(&req, None).unwrap();
+    }
+
+    #[test]
+    fn validate_provision_hook_rejects_denied_paths() {
+        use crate::mxc_error::MxcErrorCode;
+        let runner = IsolationSessionRunner::new();
+        let req = CodexRequest {
+            policy: ContainerPolicy {
+                denied_paths: vec!["C:\\secret".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = runner.validate_provision(&req, None).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_post_provision_hooks_reject_filesystem_policy() {
         use crate::mxc_error::MxcErrorCode;
         let runner = IsolationSessionRunner::new();
         let req = request_with_filesystem_policy();
-
-        let p = runner.validate_provision(&req, None).unwrap_err();
-        assert_eq!(p.code, MxcErrorCode::PolicyValidation);
 
         let s = runner.validate_start("iso:abc", &req, None).unwrap_err();
         assert_eq!(s.code, MxcErrorCode::PolicyValidation);
@@ -1343,23 +1409,28 @@ mod tests {
         assert_eq!(ERROR_NOT_FOUND_HRESULT, 0x80070490);
     }
 
+    // ====== Phase-specific policy validation ======
+    //
+    // Filesystem fields behave differently per phase; network and proxy
+    // policy share `validate_network_and_proxy_policy` and behave the
+    // same at every phase. Coverage strategy: filesystem tests on both
+    // phase-specific helpers; network/proxy tests split across them so
+    // every branch of the shared helper runs at least once.
+
     #[test]
-    fn policy_rejects_readwrite_paths() {
+    fn provision_policy_accepts_readwrite_paths() {
         let request = CodexRequest {
             policy: ContainerPolicy {
-                readwrite_paths: vec!["C:\\data".to_string()],
+                readwrite_paths: vec!["C:\\src".to_string()],
                 ..Default::default()
             },
             ..Default::default()
         };
-        assert_policy_err_contains(
-            validate_policy(&request).unwrap_err(),
-            ERR_FILESYSTEM_POLICY,
-        );
+        assert!(validate_provision_policy(&request).is_ok());
     }
 
     #[test]
-    fn policy_rejects_readonly_paths() {
+    fn provision_policy_accepts_readonly_paths() {
         let request = CodexRequest {
             policy: ContainerPolicy {
                 readonly_paths: vec!["C:\\data".to_string()],
@@ -1367,14 +1438,24 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_policy_err_contains(
-            validate_policy(&request).unwrap_err(),
-            ERR_FILESYSTEM_POLICY,
-        );
+        assert!(validate_provision_policy(&request).is_ok());
     }
 
     #[test]
-    fn policy_rejects_denied_paths() {
+    fn provision_policy_accepts_readwrite_and_readonly_together() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\src".to_string()],
+                readonly_paths: vec!["C:\\data".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(validate_provision_policy(&request).is_ok());
+    }
+
+    #[test]
+    fn provision_policy_rejects_denied_paths() {
         let request = CodexRequest {
             policy: ContainerPolicy {
                 denied_paths: vec!["C:\\secret".to_string()],
@@ -1383,13 +1464,29 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_policy(&request).unwrap_err(),
+            validate_provision_policy(&request).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
     }
 
     #[test]
-    fn policy_rejects_allowed_hosts() {
+    fn provision_policy_rejects_denied_even_with_rw() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\src".to_string()],
+                denied_paths: vec!["C:\\secret".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn provision_policy_rejects_network_policy() {
         let request = CodexRequest {
             policy: ContainerPolicy {
                 allowed_hosts: vec!["example.com".to_string()],
@@ -1397,35 +1494,14 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
     }
 
     #[test]
-    fn policy_rejects_blocked_hosts() {
-        let request = CodexRequest {
-            policy: ContainerPolicy {
-                blocked_hosts: vec!["evil.com".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
-    }
-
-    #[test]
-    fn policy_rejects_network_block_policy() {
-        let request = CodexRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Block,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
-    }
-
-    #[test]
-    fn policy_rejects_proxy() {
+    fn provision_policy_rejects_proxy() {
         let request = CodexRequest {
             policy: ContainerPolicy {
                 network_proxy: ProxyConfig {
@@ -1436,13 +1512,91 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_PROXY_POLICY);
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_PROXY_POLICY,
+        );
     }
 
     #[test]
-    fn policy_allows_defaults() {
+    fn post_provision_policy_rejects_readwrite_paths() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\src".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_readonly_paths() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readonly_paths: vec!["C:\\data".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_denied_paths() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                denied_paths: vec!["C:\\secret".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_blocked_hosts() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                blocked_hosts: vec!["evil.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_network_block_policy() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Block,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_allows_defaults() {
         let request = CodexRequest::default();
-        assert!(validate_policy(&request).is_ok());
+        assert!(validate_post_provision_policy(&request).is_ok());
     }
 
     // ====== ProcessOptions / option building tests ======

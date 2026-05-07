@@ -453,19 +453,40 @@ try {
         if ($deprovPassed) { $deprovisionedOk = $true }
     }
 
-    # Test 11: policy_validation rejects unsupported cross-cutting fields.
-    # IsolationSession does not honour filesystem / network / ui / proxy at
-    # any phase (per the plan-doc honor matrix). validate_<phase> hooks must
-    # surface a `policy_validation` error envelope for any request that
-    # carries these fields. Runs as its own provision attempt -- no sandbox
-    # is created, so no cleanup is required.
-    Run-StateAwareTest "policy_validation (unsupported filesystem field rejected)" {
-        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_filesystem.json' -Experimental
-        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
-        $envObj = Parse-Envelope -Stdout $r.Stdout
-        Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
-        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    # Test 11: provision now honours readwritePaths and readonlyPaths.
+    # Throwaway sandbox -- not used by later tests. Comprehensive
+    # filesystem-policy lifecycle (write to rw, read from ro, etc.) lands
+    # in the Lifecycle B suite added separately.
+    Run-StateAwareTest "provision (with filesystem policy accepted)" {
+        # share_folders requires the calling MXC process to have WRITE_DAC
+        # on each target path; user-owned dirs satisfy that.
+        $rwDir = 'C:\mxc_share_test_provision\rw'
+        $roDir = 'C:\mxc_share_test_provision\ro'
+        New-Item -Path $rwDir -ItemType Directory -Force | Out-Null
+        New-Item -Path $roDir -ItemType Directory -Force | Out-Null
+
+        $throwawaySandboxId = $null
+        try {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_with_filesystem.json' -Experimental
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $arm = Envelope-Arm $envObj
+            if ($arm -ne 'result') {
+                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
+                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+                Assert-True $false "provision-with-filesystem returned a result envelope"
+            } else {
+                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+                $throwawaySandboxId = $envObj.result.sandboxId
+                Assert-True ($throwawaySandboxId -match '^iso:wxc-[0-9a-f]{8}$') `
+                    "sandbox_id matches iso:wxc-<8-hex> ($throwawaySandboxId)"
+            }
+        } finally {
+            if ($throwawaySandboxId) {
+                $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $throwawaySandboxId -Experimental
+            }
+            Remove-Item -Recurse -Force 'C:\mxc_share_test_provision' -ErrorAction SilentlyContinue
+        }
     } | Out-Null
 
     # Test 12: stale_id detection. The just-deprovisioned $sandboxId is now
