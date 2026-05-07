@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `mxc-exec-darwin` — macOS Seatbelt executor.
+//! `mxc-exec-darwin` — macOS sandbox executor.
 //!
 //! Mirrors the CLI shape of `lxc-exec` (clap args, config loading, dry-run,
 //! log-file). On macOS it dispatches to `SeatbeltScriptRunner`; on every
@@ -24,7 +24,7 @@ use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 #[derive(Parser)]
 #[command(
     name = "mxc-exec-darwin",
-    about = "macOS Seatbelt sandbox executor for MXC"
+    about = "macOS sandbox executor for MXC"
 )]
 struct Cli {
     /// Path to config JSON file (positional)
@@ -115,12 +115,12 @@ fn main() {
         logger.log_line("Note: Overriding containment backend to MacosSandbox on macOS.");
     }
 
-    run_seatbelt(&request, &mut logger);
+    run_macos_sandbox(&request, &mut logger);
 }
 
 #[cfg(target_os = "macos")]
-fn run_seatbelt(request: &CodexRequest, logger: &mut Logger) -> ! {
-    use seatbelt_common::seatbelt_runner::SeatbeltScriptRunner;
+fn run_macos_sandbox(request: &CodexRequest, logger: &mut Logger) -> ! {
+    use macos_sandbox_common::macos_sandbox_runner::SeatbeltScriptRunner;
 
     let mut runner = SeatbeltScriptRunner::new();
     let run_start = Instant::now();
@@ -140,13 +140,13 @@ fn run_seatbelt(request: &CodexRequest, logger: &mut Logger) -> ! {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run_seatbelt(_request: &CodexRequest, logger: &mut Logger) -> ! {
+fn run_macos_sandbox(_request: &CodexRequest, logger: &mut Logger) -> ! {
     // Build-only stub on non-macOS hosts so cargo workspace builds in CI.
     // Suppress the unused-import warnings for `Instant` etc.
     let _ = Instant::now();
     let _ = ScriptResponse::default();
     eprintln!(
-        "mxc-exec-darwin: the Seatbelt backend is only available on macOS. \
+        "mxc-exec-darwin: the macOS sandbox backend is only available on macOS. \
          This binary was built for a non-Darwin target and cannot execute scripts."
     );
     print!("{}", logger.get_buffer());

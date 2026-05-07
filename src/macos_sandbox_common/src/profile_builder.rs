@@ -22,7 +22,7 @@
 //! ;; policy-derived deny rules (deniedPaths) ...
 //! ```
 //!
-//! Seatbelt evaluates rules with last-match-wins semantics (within a given
+//! Apple's Seatbelt sandbox evaluates rules with last-match-wins semantics (within a given
 //! operation), so trailing deny rules take precedence over earlier allow
 //! rules — the behavior callers expect from MXC's `denied_paths`.
 
@@ -48,7 +48,7 @@ pub fn build_profile(request: &CodexRequest) -> String {
 
     let mut out = String::with_capacity(2048);
 
-    // Header — Seatbelt requires `(version 1)` and we baseline with deny-default.
+    // Header — Apple's Seatbelt requires `(version 1)` and we baseline with deny-default.
     out.push_str("(version 1)\n");
     out.push_str("(deny default)\n");
 

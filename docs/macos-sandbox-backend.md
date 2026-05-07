@@ -1,6 +1,6 @@
 # macOS Sandbox Container Backend
 
-The macOS sandbox backend (codenamed "Seatbelt" internally) provides macOS
+The macOS sandbox backend provides macOS
 sandbox isolation by wrapping Apple's
 [Seatbelt](https://en.wikipedia.org/wiki/Seatbelt_%28software%29) sandbox —
 the same kernel-enforced sandbox that backs the App Sandbox used by every
@@ -22,7 +22,7 @@ on-the-fly from the MXC policy. This provides:
   pasteboard, and HID iokit user clients when `ui.disable` /
   `ui.clipboard=none` / `ui.injection=false`.
 
-Seatbelt is **process-scoped**, not container-scoped: there is no named
+The macOS sandbox is **process-scoped**, not container-scoped: there is no named
 container, no lifecycle, and nothing to clean up. The sandbox lives only
 as long as the spawned process tree. This is intentionally simpler than
 LXC.
@@ -173,7 +173,7 @@ flag is required to enable the backend at runtime:
 | `readwritePaths` | `(allow file-read* file-write* (subpath …))` | Script can read and write |
 | `deniedPaths` | `(deny file-read* file-write* (subpath …))` emitted **last** | Overrides any broader allow above |
 
-Seatbelt evaluates rules with last-match-wins semantics within an
+Apple's Seatbelt evaluates rules with last-match-wins semantics within an
 operation, so denies emitted after allows correctly override them. This
 matches MXC's `denied_paths` contract on every other backend.
 
@@ -191,7 +191,7 @@ independently of the profile.
 |---|---|
 | `defaultPolicy: "block"` | No `(allow network-outbound)` is emitted; the baseline `(deny default)` then blocks all sockets. |
 | `defaultPolicy: "allow"` (no host list) | `(allow network-outbound)` plus `(allow network-bind (local ip))` and `(allow system-socket)`. |
-| `allowedHosts` | `(allow network-outbound (remote tcp "host:*") (remote udp "host:*"))` per host. Seatbelt does not perform DNS — host filtering is best-effort and applied at connect time. |
+| `allowedHosts` | `(allow network-outbound (remote tcp "host:*") (remote udp "host:*"))` per host. Apple's Seatbelt does not perform DNS — host filtering is best-effort and applied at connect time. |
 | `blockedHosts` | `(deny network-outbound …)` emitted last so explicit blocks override allows. |
 
 Proxy configuration (`network.proxy`) is **not supported** on macOS — the
@@ -285,8 +285,8 @@ environment.
 
 ## Limitations and caveats
 
-- **No proxy support.** Seatbelt cannot interpose at the TLS layer.
-- **Host-based network filtering is best-effort.** Seatbelt resolves
+- **No proxy support.** The macOS sandbox cannot interpose at the TLS layer.
+- **Host-based network filtering is best-effort.** Apple's Seatbelt resolves
   `(remote tcp "host:*")` rules at connect time without DNS interception.
   IP-literal allow lists are exact; hostname allow lists rely on system
   resolver behavior.

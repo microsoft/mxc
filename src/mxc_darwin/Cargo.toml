@@ -9,5 +9,5 @@ path = "src/main.rs"
 
 [dependencies]
 wxc_common = { workspace = true }
-seatbelt_common = { path = "../seatbelt_common" }
+macos_sandbox_common = { path = "../macos_sandbox_common" }
 clap = { workspace = true }
