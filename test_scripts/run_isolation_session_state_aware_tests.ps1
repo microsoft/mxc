@@ -505,6 +505,111 @@ try {
     }
 }
 
+# ---------------- Lifecycle C: Medium configurationId ----------------
+
+# A separate, throwaway sandbox that exercises the Medium config-id end-to-end.
+# Lifecycle A defaulted to Composable (no `experimental.isolation_session.start`
+# block). This lifecycle proves Medium also works on the target OS build:
+# provision -> start with configurationId=medium -> one echo exec -> stop ->
+# deprovision. Independent of Lifecycle A's sandbox so a failure here does not
+# pollute the main lifecycle's results.
+$script:mediumSandboxId = $null
+$mediumDeprovisionedOk = $false
+try {
+    Run-StateAwareTest "Medium: provision" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $arm = Envelope-Arm $envObj
+        if ($arm -ne 'result') {
+            Write-Host "  Envelope arm: $arm" -ForegroundColor Red
+            Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+            Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+            Assert-True $false "Medium provision returned a result envelope"
+        } else {
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+            $script:mediumSandboxId = $envObj.result.sandboxId
+            Assert-True ($script:mediumSandboxId -match '^iso:wxc-[0-9a-f]{8}$') `
+                "sandbox_id matches iso:wxc-<8-hex> ($script:mediumSandboxId)"
+        }
+    } | Out-Null
+
+    $mediumStartedOk = $false
+    if ($null -ne $script:mediumSandboxId) {
+        $mediumStartedOk = Run-StateAwareTest "Medium: start (configurationId=medium)" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_medium.json' -SandboxId $script:mediumSandboxId -Experimental
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $arm = Envelope-Arm $envObj
+            if ($arm -ne 'result') {
+                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
+                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+                Assert-True $false "Medium start returned a result envelope"
+            } else {
+                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+            }
+        }
+    }
+
+    $mediumExecedOk = $false
+    if ($mediumStartedOk) {
+        $mediumExecedOk = Run-StateAwareTest "Medium: exec (basic echo)" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_basic.json' -SandboxId $script:mediumSandboxId -Experimental
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+            Assert-True ($r.Stdout -match 'state-aware-exec-marker') `
+                "stdout contains the script's output (Medium config supports process launch)"
+        }
+    }
+
+    $mediumStoppedOk = $false
+    if ($mediumExecedOk) {
+        $mediumStoppedOk = Run-StateAwareTest "Medium: stop" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:mediumSandboxId -Experimental
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $arm = Envelope-Arm $envObj
+            if ($arm -ne 'result') {
+                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
+                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+                Assert-True $false "Medium stop returned a result envelope"
+            } else {
+                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+            }
+        }
+    }
+
+    if ($mediumStoppedOk) {
+        $mediumDeprovPassed = Run-StateAwareTest "Medium: deprovision" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:mediumSandboxId -Experimental
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $arm = Envelope-Arm $envObj
+            if ($arm -ne 'result') {
+                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
+                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+                Assert-True $false "Medium deprovision returned a result envelope"
+            } else {
+                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+            }
+        }
+        if ($mediumDeprovPassed) { $mediumDeprovisionedOk = $true }
+    }
+} finally {
+    if ($null -ne $script:mediumSandboxId -and -not $mediumDeprovisionedOk) {
+        Write-Host ""
+        Write-Host "[cleanup] best-effort deprovision of $script:mediumSandboxId" -ForegroundColor DarkGray
+        try {
+            $cleanupResult = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:mediumSandboxId -Experimental
+            if ($cleanupResult.ExitCode -eq 0) {
+                Write-Host "  cleanup deprovision succeeded" -ForegroundColor DarkGray
+            } else {
+                Write-Host "  cleanup deprovision exit $($cleanupResult.ExitCode); stdout: $($cleanupResult.Stdout)" -ForegroundColor DarkGray
+            }
+        } catch {
+            Write-Host "  cleanup deprovision threw: $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+    }
+}
+
 # ---------------- Summary ----------------
 
 $total  = $script:TestResults.Count

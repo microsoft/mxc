@@ -170,6 +170,10 @@ Write-Host "--- Tests ---" -ForegroundColor Cyan
 New-Item -Path 'C:\mxc_workdir_test' -ItemType Directory -Force | Out-Null
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
     -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test", "-IEB-")))
+# Same shape as hello.json but with experimental.isolation_session.configurationId=medium.
+# Proves the Medium config-id end-to-ends through the one-shot path on the target build.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_hello_medium.json" `
+    -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test", "-IEB-")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
 # stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
