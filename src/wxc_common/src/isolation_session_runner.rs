@@ -26,8 +26,8 @@ use crate::models::{
 };
 use crate::mxc_error::MxcError;
 use crate::process_util::{
-    create_relay_thread, create_relay_thread_with_stop, ConsoleModeRestorer, OwnedHandle,
-    PipeRelayParams, PipeRelayWithStopParams,
+    create_relay_thread, create_relay_thread_with_stop, get_local_console_size,
+    ConsoleModeRestorer, OwnedHandle, PipeRelayParams, PipeRelayWithStopParams,
 };
 use crate::script_runner::ScriptRunner;
 use crate::state_aware_backend::{
@@ -492,6 +492,17 @@ impl IsolationSessionManager {
         } else {
             None
         };
+
+        // Push the local console's current viewport size into the agent's
+        // inner ConPTY. Without this, the inner HPCON keeps its default
+        // dimensions and VT-aware agents (e.g. PSReadLine) anchor their
+        // prompt to that smaller-than-local last row, overlaying text once
+        // they reach it. Mid-session resize is not handled here.
+        if options.interactive {
+            if let Some((cols, rows)) = get_local_console_size() {
+                let _ = process.ResizeConsole(cols, rows);
+            }
+        }
 
         // Manual-reset stop event for the stdin relay. Effective for waitable
         // `h_read` (console = TTY mode); for pipe handles (non-TTY) it has no

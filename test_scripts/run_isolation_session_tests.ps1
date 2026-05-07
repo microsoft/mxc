@@ -166,6 +166,8 @@ function Run-IsolationSessionTest {
 [System.Collections.ArrayList]$results = @()
 
 Write-Host "--- Tests ---" -ForegroundColor Cyan
+# Setup for isolation_session_hello.json: cwd must exist before agent start.
+New-Item -Path 'C:\mxc_workdir_test' -ItemType Directory -Force | Out-Null
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
     -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test", "-IEB-")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `

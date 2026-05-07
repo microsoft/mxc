@@ -13,9 +13,10 @@ use windows::Win32::Foundation::{
 use windows::Win32::Security::{DeriveCapabilitySidsFromName, PSID, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile};
 use windows::Win32::System::Console::{
-    GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE, DISABLE_NEWLINE_AUTO_RETURN,
-    ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
-    ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WINDOW_INPUT, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, SetConsoleMode, CONSOLE_MODE,
+    CONSOLE_SCREEN_BUFFER_INFO, DISABLE_NEWLINE_AUTO_RETURN, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
+    ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+    ENABLE_WINDOW_INPUT, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
@@ -580,6 +581,27 @@ impl Drop for ConsoleModeRestorer {
             }
         }
     }
+}
+
+/// Returns the dimensions of the local console's visible viewport as
+/// `(columns, rows)`, or `None` if stdout is not a real console (redirected,
+/// piped, or otherwise not console-backed).
+///
+/// Reads `srWindow` from `CONSOLE_SCREEN_BUFFER_INFO` — the visible window —
+/// rather than `dwSize`, which is the full back-buffer and can be larger.
+/// Callers that drive a ConPTY want the viewport.
+pub fn get_local_console_size() -> Option<(u16, u16)> {
+    let h_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }.ok()?;
+    let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
+    if unsafe { GetConsoleScreenBufferInfo(h_stdout, &mut info) }.is_err() {
+        return None;
+    }
+    let cols = (info.srWindow.Right - info.srWindow.Left + 1).max(0) as u16;
+    let rows = (info.srWindow.Bottom - info.srWindow.Top + 1).max(0) as u16;
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    Some((cols, rows))
 }
 
 // ── Capability SID helpers ────────────────────────────────────────────────
@@ -1192,6 +1214,18 @@ mod tests {
     // (test_pipe_relay_with_stop_exits_on_stop_event) and the "EOF-after-data"
     // path (test_pipe_relay_with_stop_copies_data_before_exit) together cover
     // the invariants that matter for the production case.
+
+    #[test]
+    fn test_get_local_console_size_does_not_panic() {
+        // `cargo test` runs with stdio as pipes (`None`) on CI; locally a
+        // real console is also possible (`Some((cols, rows))` with positive
+        // dimensions). Either is acceptable — the contract under test is
+        // "no panic, well-formed result".
+        if let Some((cols, rows)) = get_local_console_size() {
+            assert!(cols > 0);
+            assert!(rows > 0);
+        }
+    }
 
     #[test]
     fn test_console_mode_restorer_handles_non_console() {
