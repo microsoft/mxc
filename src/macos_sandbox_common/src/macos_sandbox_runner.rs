@@ -19,7 +19,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, ScriptResponse};
+use wxc_common::models::{CodexRequest, MacosSandboxMode, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 
 use crate::profile_builder::build_profile;
@@ -50,6 +50,17 @@ impl Default for SeatbeltScriptRunner {
 
 impl ScriptRunner for SeatbeltScriptRunner {
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+        // Reject unsupported modes early.
+        if let Some(ref cfg) = request.experimental.macos_sandbox {
+            if cfg.mode == MacosSandboxMode::Inproc {
+                return error_response(
+                    "macOS sandbox mode 'inproc' is not yet implemented. \
+                     Use mode 'exec' (the default) or omit the mode field."
+                        .to_string(),
+                );
+            }
+        }
+
         // 1. Build the Seatbelt profile from the policy.
         let profile = build_profile(request);
 
