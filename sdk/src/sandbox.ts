@@ -6,7 +6,7 @@ import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, ContainerConfig, ContainmentType } from './types';
+import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } from './types';
 import { prepareSpawn } from './helper';
 
 const SUPPORTED_VERSION = '0.5.0-alpha';
@@ -91,7 +91,6 @@ function buildLinuxProcessConfig(
     config: ContainerConfig,
     containerId: string,
 ): ContainerConfig {
-    config.containment = 'lxc';
     config.lxc = {
         containerName: containerId,
         distribution: 'alpine',
@@ -203,7 +202,7 @@ function buildMicroVmConfig(
  */
 export function createConfigFromPolicy(
     policy: SandboxPolicy,
-    containment: ContainmentType = "process",
+    containment: ContainmentType | ContainmentBackend = "process",
     containerName?: string,
 ): ContainerConfig {
     validatePolicyVersion(policy.version);
@@ -276,6 +275,7 @@ export function createConfigFromPolicy(
     }
 
     if (containment === 'process') {
+        config.containment = 'process';
         if (platform === 'linux') {
             return buildLinuxProcessConfig(config, containerId);
         }
@@ -299,7 +299,7 @@ export function buildSandboxPayload(
     policy: SandboxPolicy,
     workingDirectory?: string,
     containerName?: string,
-    containment: ContainmentType = "process",
+    containment: ContainmentType | ContainmentBackend = "process",
 ): ContainerConfig {
     const config = createConfigFromPolicy(policy, containment, containerName);
 

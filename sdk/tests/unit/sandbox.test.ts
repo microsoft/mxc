@@ -206,11 +206,11 @@ describe('buildSandboxPayload', () => {
       }
     };
 
-    it('should default to lxc on Linux', () => {
+    it('should default to process containment on Linux (resolved by binary to lxc)', () => {
       mockLinux();
       try {
         const payload = buildSandboxPayload('echo hi', defaultPolicy);
-        assert.strictEqual(payload.containment, 'lxc');
+        assert.strictEqual(payload.containment, 'process');
         assert.strictEqual(payload.lxc!.destroyOnExit, true);
       } finally {
         restore();
@@ -517,11 +517,11 @@ describe('createConfigFromPolicy', () => {
       }
     };
 
-    it('should default to lxc containment', () => {
+    it('should default to process containment (resolved by binary to lxc on Linux)', () => {
       mockLinux();
       try {
         const config = createConfigFromPolicy(defaultPolicy);
-        assert.strictEqual(config.containment, 'lxc');
+        assert.strictEqual(config.containment, 'process');
         assert.strictEqual(config.lxc!.distribution, 'alpine');
         assert.strictEqual(config.lxc!.destroyOnExit, true);
       } finally {

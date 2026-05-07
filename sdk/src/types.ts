@@ -32,17 +32,41 @@ export interface LifecycleConfig {
 }
 
 /**
- * Containment type abstraction for createConfigFromPolicy.
- * Maps to platform-specific backends:
- * - "process": BaseProcessContainer (Windows) / LXC (Linux)
- * - "microvm": MicroVM/Nanvix backend (Windows only, experimental)
+ * Abstract containment intent. Names the *kind* of isolation the caller
+ * wants. The native binary (or the SDK as a fallback) resolves this to a
+ * concrete {@link ContainmentBackend} at run time based on what the host
+ * supports.
+ *
+ * Today's intents:
+ * - "process": OS-native process-level isolation. Resolves to AppContainer
+ *   (Windows) or LXC (Linux).
+ * - "microvm": lightweight-VM isolation. Resolves to the current MicroVM
+ *   runner (Windows only, experimental); intended to expand as additional
+ *   microvm backends (e.g. NanVix) are added.
+ *
+ * Concrete-only backends (such as `"wslc"`) live on
+ * {@link ContainmentBackend} until there is a meaningful abstraction over
+ * multiple implementations of the same kind.
  */
-export type ContainmentType = "process" | "wslc" | "microvm";
+export type ContainmentType = "process" | "microvm";
 
 /**
- * Containment backends that require the --experimental flag.
+ * Concrete containment backend. Each value names a specific runner
+ * implementation in the native binary. Prefer a {@link ContainmentType}
+ * value unless you specifically need to force a particular backend.
  */
-export const ExperimentalBackends: readonly ContainmentType[] = ['microvm', 'wslc'];
+export type ContainmentBackend =
+  | 'appcontainer'
+  | 'windows_sandbox'
+  | 'wslc'
+  | 'lxc'
+  | 'microvm';
+
+/**
+ * Containment values (abstract intent or concrete backend) that require
+ * the `--experimental` flag.
+ */
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'wslc'];
 
 /**
  * Clipboard access policy levels
@@ -171,8 +195,8 @@ export interface ContainerConfig {
   version: string;
   /** Externally assigned container identifier */
   containerId?: string;
-  /** Containment backend */
-  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm';
+  /** Containment intent (preferred) or concrete backend (override). */
+  containment?: ContainmentType | ContainmentBackend;
   /** Container lifecycle settings */
   lifecycle?: LifecycleConfig;
   /** Process execution settings (required) */
@@ -259,9 +283,13 @@ export interface LxcConfig {
 }
 
 /**
- * Sandboxing methods available on the platform
+ * Sandboxing methods available on the platform.
+ *
+ * @deprecated Prefer {@link ContainmentBackend} (concrete) or
+ * {@link ContainmentType} (abstract). This alias is retained for
+ * backward compatibility and may be removed in a future minor release.
  */
-export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm';
+export type SandboxingMethod = ContainmentType | ContainmentBackend;
 
 /**
  * Platform support information
@@ -272,5 +300,5 @@ export interface PlatformSupport {
   /** Reason why the platform is not supported (if applicable) */
   reason?: string;
   /** Available sandboxing methods on this platform */
-  availableMethods: SandboxingMethod[];
+  availableMethods: ContainmentBackend[];
 }

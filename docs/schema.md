@@ -76,6 +76,19 @@ production configs and the dev schema when working on experimental features:
 
 ### Containment Backends
 
+The `containment` field accepts both **abstract intent values** (which the
+native binary resolves per host) and **concrete backend values** (which select
+a specific runner). Prefer abstract intents unless you specifically need to
+force a particular backend.
+
+#### Abstract intents
+
+| Value | Resolution |
+|-------|------------|
+| `"process"` | AppContainer on Windows, LXC on Linux |
+
+#### Concrete backends
+
 | Value | Description |
 |-------|-------------|
 | `"appcontainer"` | (Default) Windows AppContainer process-level isolation |

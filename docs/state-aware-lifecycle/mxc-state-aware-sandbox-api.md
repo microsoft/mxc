@@ -60,7 +60,7 @@ elaborates.
 
 | MXC layer | What's new | What's unchanged |
 |---|---|---|
-| TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-phase typed `*Config` types per backend. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation. Typed exception classes per error code. | `spawnSandbox` family preserved. `SandboxPolicy` reused as the cross-cutting policy across both surfaces. `SandboxingMethod` extension mechanism reused. Existing typed `*Config` naming convention reused. |
+| TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-phase typed `*Config` types per backend. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation. Typed exception classes per error code. | `spawnSandbox` family preserved. `SandboxPolicy` reused as the cross-cutting policy across both surfaces. `ContainmentBackend` extension mechanism reused. Existing typed `*Config` naming convention reused. |
 | JSON wire format (§7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union over `phase`. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` fields at top level for state-aware too — backends declare per-phase honor. |
 | Rust executor (§9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (private to parser, matching `RawConfig` pattern). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
 | Error model (§8) | Closed enum of 12 error codes. `MxcError` base + per-code subclasses. `details` open object as escape hatch for backend-specific structured information. | Existing one-shot error paths preserved. |
@@ -232,7 +232,7 @@ type SandboxId<C extends StateAwareSandboxingMethod> =
 
 type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
 
-type StateAwareSandboxingMethod = Extract<SandboxingMethod, 'isolation_session'>;
+type StateAwareSandboxingMethod = Extract<ContainmentBackend, 'isolation_session'>;
 // extended as state-aware-capable backends are added
 
 interface ExperimentalStateAwareConfigs {
@@ -477,12 +477,12 @@ await deprovisionSandbox(sandboxId);
 ### 6.4 Composition with the one-shot surface
 
 `spawnSandbox` is the composition of the five state-aware phases run end-to-end. The two
-surfaces share `SandboxPolicy` and `SandboxingMethod`; they differ in granularity. A
+surfaces share `SandboxPolicy` and `ContainmentBackend`; they differ in granularity. A
 backend that participates in both modes can be invoked through either surface; a backend
 that participates in only one returns `unsupported_phase` from the other (§8).
 
-State-aware-capable backends extend `SandboxingMethod` and `StateAwareSandboxingMethod`
-the same way ephemeral backends extend `SandboxingMethod`. Cancellation via
+State-aware-capable backends extend `ContainmentBackend` and `StateAwareSandboxingMethod`
+the same way ephemeral backends extend `ContainmentBackend`. Cancellation via
 `AbortSignal` is supported on all state-aware methods. Detached / fire-and-forget exec
 (process outliving the SDK call) is deferred to v2 (§14).
 
@@ -529,7 +529,7 @@ single call — `phase` fully discriminates which interpretation applies.
 interface OneShotRequest {
   phase?: never;                                  // discriminator: absent
   version?: string;
-  containment: SandboxingMethod;
+  containment: ContainmentType | ContainmentBackend;
   containerId?: string;
   process: ProcessConfig;
   filesystem?: FilesystemConfig;
@@ -582,7 +582,7 @@ Backend-routing fields:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `containment` | `SandboxingMethod` member | One-shot: yes. State-aware: yes for `provision`, absent for `start` / `exec` / `stop` / `deprovision`. | Backend selection on calls that do not yet have a `sandboxId`. |
+| `containment` | `ContainmentType` or `ContainmentBackend` member | One-shot: yes. State-aware: yes for `provision`, absent for `start` / `exec` / `stop` / `deprovision`. | Backend selection on calls that do not yet have a `sandboxId`. |
 | `sandboxId` | branded string | State-aware non-provision: yes. Otherwise absent. | Opaque sandbox id returned by `provision`. Carries the backend prefix used to route non-provision calls (§5). |
 
 State-aware-only fields:
@@ -1532,7 +1532,7 @@ interface MyBackendStateAwareConfigs {
 }
 ```
 
-If the backend was not previously SDK-exposed, also extend `SandboxingMethod` and add
+If the backend was not previously SDK-exposed, also extend `ContainmentBackend` and add
 an entry to `StateAwareSandboxingMethod`.
 
 ### 11.4 Register in the `ContainmentBackend` enum

@@ -559,6 +559,21 @@ fn convert_raw_config_inner(
     // Containment backend selection
     let containment = match raw.containment.as_deref() {
         None | Some("appcontainer") => ContainmentBackend::AppContainer,
+        Some("process") => {
+            // Abstract intent: the caller wants process-level containment but
+            // does not care which concrete backend implements it. Today this
+            // resolves trivially per OS (AppContainer on Windows, LXC on
+            // Linux). The lxc-exec binary additionally overrides this to LXC
+            // unconditionally on Linux.
+            #[cfg(target_os = "linux")]
+            {
+                ContainmentBackend::Lxc
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                ContainmentBackend::AppContainer
+            }
+        }
         Some("windows_sandbox") => ContainmentBackend::WindowsSandbox,
         Some("wslc") => ContainmentBackend::Wslc,
         Some("lxc") => ContainmentBackend::Lxc,
@@ -567,7 +582,7 @@ fn convert_raw_config_inner(
         Some("isolation_session") => ContainmentBackend::IsolationSession,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', or 'microvm')",
+                "Invalid containment value '{}' (must be 'process', 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', or 'microvm')",
                 other
             );
             logger.log_line(&msg);
@@ -871,6 +886,16 @@ fn convert_raw_state_aware(
 fn parse_containment_str(s: &str, logger: &mut Logger) -> Result<ContainmentBackend, WxcError> {
     match s {
         "appcontainer" => Ok(ContainmentBackend::AppContainer),
+        "process" => {
+            #[cfg(target_os = "linux")]
+            {
+                Ok(ContainmentBackend::Lxc)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Ok(ContainmentBackend::AppContainer)
+            }
+        }
         "windows_sandbox" => Ok(ContainmentBackend::WindowsSandbox),
         "wslc" => Ok(ContainmentBackend::Wslc),
         "lxc" => Ok(ContainmentBackend::Lxc),
@@ -879,7 +904,7 @@ fn parse_containment_str(s: &str, logger: &mut Logger) -> Result<ContainmentBack
         "isolation_session" => Ok(ContainmentBackend::IsolationSession),
         other => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', or 'microvm')",
+                "Invalid containment value '{}' (must be 'process', 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', or 'microvm')",
                 other
             );
             logger.log_line(&msg);
@@ -1411,6 +1436,22 @@ mod tests {
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::AppContainer);
+    }
+
+    #[test]
+    fn process_containment_resolves_per_target() {
+        // Abstract intent "process" resolves to the per-OS default backend:
+        // AppContainer on Windows, LXC on Linux.
+        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "process"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(req.containment, ContainmentBackend::Lxc);
+        #[cfg(not(target_os = "linux"))]
         assert_eq!(req.containment, ContainmentBackend::AppContainer);
     }
 

@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { FileLogger } from './logger';
-import { ContainerConfig, ContainmentType, ExperimentalBackends, SandboxingMethod } from './types';
+import { ContainerConfig, ContainmentBackend, ExperimentalBackends } from './types';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
 import { SandboxSpawnOptions } from './sandbox';
 
@@ -50,7 +50,7 @@ export function resolveExecutableAndArgs(
 
   // Check experimental mode before anything else so the caller gets a clear
   // message about the missing flag rather than a platform/binary error.
-  if (ExperimentalBackends.includes(config.containment as ContainmentType) && !options.experimental) {
+  if (config.containment && ExperimentalBackends.includes(config.containment) && !options.experimental) {
     throw new Error(
       `'${config.containment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
     );
@@ -67,7 +67,7 @@ export function resolveExecutableAndArgs(
       throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
     }
     if (!(ExperimentalBackends as readonly string[]).includes(config.containment) &&
-        !platformSupport.availableMethods.includes(config.containment as SandboxingMethod)) {
+        !platformSupport.availableMethods.includes(config.containment as ContainmentBackend)) {
       throw new Error(
         `Containment backend '${config.containment}' is not available on this platform. ` +
         `Available methods: ${platformSupport.availableMethods.join(', ')}`

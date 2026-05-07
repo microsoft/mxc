@@ -19,9 +19,9 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc"],
+      "enum": ["process", "appcontainer", "windows_sandbox", "lxc", "microvm", "wslc"],
       "default": "appcontainer",
-      "description": "Containment backend to use for execution. Note: 'windows_sandbox' and 'wslc' are experimental and require the --experimental CLI flag."
+      "description": "Containment value to use for execution. Accepts both abstract intents ('process') and concrete backends ('appcontainer', 'windows_sandbox', 'lxc', 'microvm', 'wslc'). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities. Note: 'windows_sandbox' and 'wslc' are experimental and require the --experimental CLI flag."
     },
 
     "lifecycle": {

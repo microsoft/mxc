@@ -104,6 +104,22 @@ ptyProcess.onExit((event: { exitCode: number }) => {
 
 ### Platform Detection
 
+#### Containment values: intent vs. backend
+
+The SDK distinguishes two layers of containment values:
+
+- **`ContainmentType`** — abstract intent (what *kind* of isolation you want).
+  Currently `"process"` and `"microvm"`. The native binary resolves these
+  to a concrete backend per host. Prefer these in policy code so the
+  same policy works across hosts with different capabilities.
+- **`ContainmentBackend`** — concrete backend (a specific runner). Currently
+  `"appcontainer"`, `"windows_sandbox"`, `"wslc"`, `"lxc"`, `"microvm"`. Use
+  these to force a particular backend.
+
+`ContainerConfig.containment` accepts either layer. The deprecated
+`SandboxingMethod` alias is the union of both and is retained for backward
+compatibility.
+
 #### `getPlatformSupport(): PlatformSupport`
 
 Returns platform support information including whether MXC is supported.
@@ -126,7 +142,7 @@ if (support.reason) {
 interface PlatformSupport {
   isSupported: boolean;
   reason?: string;
-  availableMethods: SandboxingMethod[];
+  availableMethods: ContainmentBackend[];
 }
 ```
 
@@ -439,7 +455,9 @@ The package includes full TypeScript definitions. All public types are exported 
 import {
   // Types
   SandboxPolicy,
-  SandboxingMethod,
+  ContainmentType,
+  ContainmentBackend,
+  SandboxingMethod, // deprecated alias for ContainmentType | ContainmentBackend
   PlatformSupport,
 
   // Platform detection
