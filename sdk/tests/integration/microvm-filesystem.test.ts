@@ -8,7 +8,7 @@
 //   - wxc-exec.exe built (in src/target/debug/ or src/target/x86_64-pc-windows-msvc/debug/)
 //   - NanVix binaries next to wxc-exec.exe: nanvixd.exe, kernel.elf, python3.12, nanvix_rootfs.img
 //
-// Run: npx tsc && node --test dist/sandbox.microvm.e2etest.js
+// Run: cd sdk/tests/integration && npx tsc -p tsconfig.json && node --test dist/microvm-filesystem.test.js
 //
 // All tests use spawnSandboxFromConfig with usePty:false (non-PTY mode).
 // PTY mode is not supported for the MicroVM backend.
@@ -157,7 +157,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
       const { stdout, stderr, exitCode } = await runMicrovm(config);
       const combined = stdout + stderr;
       assert.strictEqual(exitCode, 0, `Expected exit code 0.\nstdout: ${stdout}\nstderr: ${stderr}`);
-      assert.ok(combined.includes('Guest path: /mnt/rw/work'), `Expected guest path in output:\n${combined}`);
+      assert.ok(combined.includes('Guest path: /mnt/rw/'), `Expected guest path starting with /mnt/rw/ in output:\n${combined}`);
       assert.ok(combined.includes('Read: data from host'), `Expected host data in output:\n${combined}`);
     } finally {
       fs.rmSync(testDir, { recursive: true, force: true });

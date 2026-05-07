@@ -1,6 +1,6 @@
 {
     "nanvix_python": {
-        "tag": "3.12.3-nanvix-0.12.506-aca41ca",
+        "tag": "3.12.3-nanvix-0.12.529-7b756ef",
         "asset": "microvm-standalone-256mb.zip",
         "binaries": ["nanvixd.exe", "kernel.elf", "python3.12", "nanvix_rootfs.img"]
     }

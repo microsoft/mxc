@@ -49,7 +49,7 @@ mounts are used.
 ```json
 {
   "process": {
-    "commandLine": "import os\npath = os.environ['MXC_PATH_WORK']\nwith open(os.path.join(path, 'result.txt'), 'w') as f:\n    f.write('done')",
+    "commandLine": "import os\npath = 'C:\\\\Users\\\\me\\\\work'\nwith open(os.path.join(path, 'result.txt'), 'w') as f:\n    f.write('done')",
     "timeout": 30000
   },
   "containment": "microvm",
@@ -59,13 +59,14 @@ mounts are used.
 }
 ```
 
-Inside the guest, the path is accessible via the `MXC_PATH_<SLUG>` environment variable.
+Inside the guest, host paths in the script are transparently rewritten to their
+guest mount equivalents at staging time. The script uses the original host paths
+and the staging layer translates them before the code reaches the VM.
 
-
-| Host path          | Env var             | Guest path         |
-| -------------------- | --------------------- | -------------------- |
-| `C:\Users\me\work` | `MXC_PATH_WORK`     | `/mnt/rw/work`     |
-| `C:\data\ref-data` | `MXC_PATH_REF_DATA` | `/mnt/rw/ref_data` |
+| Host path          | Guest path                  |
+| -------------------- | ----------------------------- |
+| `C:\Users\me\work` | `/mnt/rw/c/Users/me/work`   |
+| `C:\data\ref-data` | `/mnt/rw/c/data/ref-data`   |
 
 **Copyback semantics:** After `nanvixd` exits normally, MXC copies the modified
 snapshot back to the original host paths. Copyback runs for both exit code `0`

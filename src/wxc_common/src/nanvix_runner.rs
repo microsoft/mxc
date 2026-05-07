@@ -8,7 +8,7 @@
 //!
 //! ## I/O model
 //!
-//! - **stdin**: inherited from parent (not used by the runner; mount-based script delivery)
+//! - **stdin**: inherited from parent via `Stdio::inherit()`
 //! - **stdout**: inherited from parent via `Stdio::inherit()` (not captured)
 //! - **stderr**: inherited from parent via `Stdio::inherit()` (kernel traces)
 //!
@@ -277,10 +277,10 @@ impl NanVixScriptRunner {
         // -B: no .pyc writing (read-only filesystem)
         //
         // The bootstrap script lives in the staging directory mounted at /mnt.
-        // It reads /mnt/.mxc-pathmap.json, exports MXC_PATH_* env vars,
-        // then runs /mnt/.mxc-script.py via runpy.run_path().
+        // It exec()s /mnt/.mxc-script.py which has host paths rewritten to
+        // guest mount paths by the staging layer.
         //
-        // NanVix splits on spaces: argv = ["python.elf", "-S", "-B", "/mnt/..."]
+        // NanVix splits on spaces: argv = ["python3.12", "-S", "-B", "/mnt/..."]
         // NanVix splits on ';': env = ["PYTHONHOME=/sysroot"]
         format!("-S -B /mnt/.mxc-bootstrap.py;PYTHONHOME={}", PYTHON_HOME)
     }

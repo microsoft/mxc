@@ -3,7 +3,6 @@
 
 //! MicroVM staging directory builder for mount-based script delivery.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -23,8 +22,6 @@ pub const RW_DIR: &str = "rw";
 pub const RO_DIR: &str = "ro";
 /// Guest mount root inside the NanVix VM.
 const GUEST_MOUNT_ROOT: &str = "/mnt";
-/// Maximum mount name length in characters to avoid exceeding MAX_PATH in the staging hierarchy.
-const MAX_MOUNT_NAME_CHARS: usize = 80;
 
 /// Builds the guest-visible path for a staged host directory.
 fn build_guest_path(category: &str, name: &str) -> String {
@@ -117,7 +114,6 @@ impl StagingDir {
         let build_result = || -> StagingBuildResult {
             fs::write(path.join(BOOTSTRAP_FILENAME), BOOTSTRAP_SOURCE)?;
 
-            let mut used_names: Vec<String> = Vec::new();
             // Collect host→guest path mappings for script rewriting.
             let mut rewrite_map: Vec<(String, String)> = Vec::new();
             let mut rw_mappings: Vec<RwMapping> = Vec::new();
@@ -129,10 +125,10 @@ impl StagingDir {
                 let host_path = PathBuf::from(source);
                 validate_source_path(&host_path, source)?;
 
-                let name = allocate_mount_name(&host_path, &mut used_names);
-                let slot_dir = path.join(RW_DIR).join(&name);
+                let relative = host_path_to_guest_relative(&host_path);
+                let slot_dir = path.join(RW_DIR).join(&relative);
                 let kind = stage_host_path(&host_path, &slot_dir)?;
-                let guest_path = build_guest_path(RW_DIR, &name);
+                let guest_path = build_guest_path(RW_DIR, &relative);
                 rewrite_map.push((source.clone(), guest_path));
                 rw_mappings.push(RwMapping {
                     host_path,
@@ -148,8 +144,8 @@ impl StagingDir {
                 let host_path = PathBuf::from(source);
                 validate_source_path(&host_path, source)?;
 
-                let name = allocate_mount_name(&host_path, &mut used_names);
-                let slot_dir = path.join(RO_DIR).join(&name);
+                let relative = host_path_to_guest_relative(&host_path);
+                let slot_dir = path.join(RO_DIR).join(&relative);
                 if host_path.is_dir() {
                     copy_dir_recursive(&host_path, &slot_dir)?;
                 } else {
@@ -160,7 +156,7 @@ impl StagingDir {
                     fs::copy(&host_path, slot_dir.join(file_name))?;
                 }
                 set_readonly_recursive(&slot_dir)?;
-                let guest_path = build_guest_path(RO_DIR, &name);
+                let guest_path = build_guest_path(RO_DIR, &relative);
                 rewrite_map.push((source.clone(), guest_path));
             }
 
@@ -254,54 +250,23 @@ impl Drop for StagingDir {
     }
 }
 
-/// Allocates a unique mount directory name, avoiding collisions with previously used names.
-fn allocate_mount_name(host_path: &Path, used_names: &mut Vec<String>) -> String {
-    let raw_base = host_path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or("path")
-        .to_ascii_lowercase()
-        .replace('-', "_");
-
-    let base = sanitize_mount_name(&raw_base);
-    let mut counter = 1_u64;
-
-    loop {
-        let candidate = if counter == 1 {
-            base.clone()
-        } else {
-            format!("{}_{}", base, counter)
-        };
-        if !used_names.iter().any(|s| s == &candidate) {
-            used_names.push(candidate.clone());
-            return candidate;
-        }
-        counter += 1;
-    }
-}
-
-fn sanitize_mount_name(value: &str) -> String {
-    let sanitized: String = value
-        .chars()
-        .map(|ch| match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' => ch.to_ascii_lowercase(),
-            _ => '_',
-        })
-        .collect();
-
-    let trimmed = sanitized.trim_matches('_');
-    let capped = if trimmed.len() > MAX_MOUNT_NAME_CHARS {
-        &trimmed[..MAX_MOUNT_NAME_CHARS]
+/// Converts a host path to a guest-relative path by stripping the drive letter prefix
+/// and normalizing separators. E.g. `C:\Users\me\work` → `c/Users/me/work`.
+fn host_path_to_guest_relative(host_path: &Path) -> String {
+    let s = host_path.to_string_lossy();
+    // Strip drive letter prefix (e.g. "C:\") and normalize to forward slashes.
+    let stripped = if s.len() >= 3
+        && s.as_bytes()[1] == b':'
+        && (s.as_bytes()[2] == b'\\' || s.as_bytes()[2] == b'/')
+    {
+        let drive = s.as_bytes()[0].to_ascii_lowercase() as char;
+        format!("{}/{}", drive, s[3..].replace('\\', "/"))
     } else {
-        trimmed
+        // UNC or relative path — just normalize slashes.
+        s.replace('\\', "/")
     };
-    // Re-trim in case the cap landed on a trailing underscore.
-    let final_name = capped.trim_end_matches('_');
-    if final_name.is_empty() {
-        "path".to_string()
-    } else {
-        final_name.to_string()
-    }
+    // Trim trailing slash.
+    stripped.trim_end_matches('/').to_string()
 }
 
 /// Replaces host paths in the script source with their guest mount equivalents.
@@ -542,9 +507,8 @@ fn estimate_source_size(paths: &[String]) -> Result<u64, StagingError> {
     let mut total = 0_u64;
     for s in paths {
         let p = Path::new(s);
-        if !p.exists() {
-            return Err(StagingError::PathNotFound(s.clone()));
-        }
+        // Validate before sizing to avoid following symlinks/reparse points during traversal.
+        validate_source_path(p, s)?;
         total = total.saturating_add(dir_size(p)?);
     }
     Ok(total)
@@ -585,6 +549,14 @@ mod tests {
         fs::write(path, content).unwrap();
     }
 
+    /// Helper: compute the staged directory path for a host path.
+    fn staged_rw(staging: &StagingDir, host_path: &Path) -> PathBuf {
+        staging
+            .path()
+            .join(RW_DIR)
+            .join(host_path_to_guest_relative(host_path))
+    }
+
     #[test]
     fn staging_creates_bootstrap_and_script() {
         let root = tempdir().unwrap();
@@ -615,14 +587,14 @@ mod tests {
         write_file(&source.join("data.txt"), "abc");
 
         let host_path = source.display().to_string();
-        // Script references the host path as-is (backslashes on Windows).
         let script = format!("open('{}')", host_path);
-        let rw = vec![host_path];
+        let rw = vec![host_path.clone()];
         let staging = StagingDir::new(root.path().to_path_buf(), &script, &rw, &[]).unwrap();
-        assert!(staging.path().join(RW_DIR).join("sample").exists());
+        let guest_rel = host_path_to_guest_relative(&PathBuf::from(&host_path));
+        assert!(staging.path().join(RW_DIR).join(&guest_rel).exists());
         // Verify the script was rewritten with the guest path.
         let rewritten = fs::read_to_string(staging.path().join(SCRIPT_FILENAME)).unwrap();
-        let expected_guest = build_guest_path(RW_DIR, "sample");
+        let expected_guest = build_guest_path(RW_DIR, &guest_rel);
         assert!(
             rewritten.contains(&expected_guest),
             "expected guest path in rewritten script, got: {}",
@@ -640,17 +612,18 @@ mod tests {
 
         let ro = vec![source.display().to_string()];
         let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &ro).unwrap();
+        let guest_rel = host_path_to_guest_relative(&source);
         let staged_file = staging
             .path()
             .join(RO_DIR)
-            .join("readonly")
+            .join(&guest_rel)
             .join("data.txt");
         let metadata = fs::metadata(staged_file).unwrap();
         assert!(metadata.permissions().readonly());
     }
 
     #[test]
-    fn staging_name_collision() {
+    fn staging_two_rw_paths_get_distinct_guest_dirs() {
         let root = tempdir().unwrap();
         let source_root = tempdir().unwrap();
         let first = source_root.path().join("input");
@@ -661,9 +634,12 @@ mod tests {
 
         let rw = vec![first.display().to_string(), second.display().to_string()];
         let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
-        // Both names should exist, second gets a suffix to avoid collision.
-        assert!(staging.path().join(RW_DIR).join("input").exists());
-        assert!(staging.path().join(RW_DIR).join("input_2").exists());
+        // Full path mirroring means both exist at distinct paths.
+        let rel1 = host_path_to_guest_relative(&first);
+        let rel2 = host_path_to_guest_relative(&second);
+        assert!(staging.path().join(RW_DIR).join(&rel1).exists());
+        assert!(staging.path().join(RW_DIR).join(&rel2).exists());
+        assert_ne!(rel1, rel2);
     }
 
     #[test]
@@ -675,13 +651,13 @@ mod tests {
 
         let host_path = source.display().to_string();
         let forward_path = host_path.replace('\\', "/");
-        // Script references both backslash and forward-slash variants.
         let script = format!("a = '{}'\nb = '{}'", host_path, forward_path);
-        let rw = vec![host_path];
+        let rw = vec![host_path.clone()];
         let staging = StagingDir::new(root.path().to_path_buf(), &script, &rw, &[]).unwrap();
 
         let rewritten = fs::read_to_string(staging.path().join(SCRIPT_FILENAME)).unwrap();
-        let expected_guest = build_guest_path(RW_DIR, "sample");
+        let guest_rel = host_path_to_guest_relative(&PathBuf::from(&host_path));
+        let expected_guest = build_guest_path(RW_DIR, &guest_rel);
         assert!(
             rewritten.contains(&expected_guest),
             "expected guest path in rewritten script, got: {}",
@@ -734,20 +710,20 @@ mod tests {
 
         let rw = vec![source_file.display().to_string()];
         let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
-        // File "payload" has no extension, name stays "payload"
-        let staged_file = staging.path().join(RW_DIR).join("payload").join("payload");
+        let staged_file = staged_rw(&staging, &source_file).join("payload");
         assert!(staged_file.exists());
     }
 
     #[test]
-    fn mount_name_dash_to_underscore() {
-        let root = tempdir().unwrap();
-        let source = root.path().join("ref-data");
-        fs::create_dir_all(&source).unwrap();
+    fn host_path_to_guest_relative_strips_drive() {
+        let p = PathBuf::from(r"C:\Users\me\work");
+        assert_eq!(host_path_to_guest_relative(&p), "c/Users/me/work");
+    }
 
-        let mut used_keys = Vec::new();
-        let name = allocate_mount_name(&source, &mut used_keys);
-        assert_eq!(name, "ref_data");
+    #[test]
+    fn host_path_to_guest_relative_normalizes_slashes() {
+        let p = PathBuf::from(r"D:\data\ref-data");
+        assert_eq!(host_path_to_guest_relative(&p), "d/data/ref-data");
     }
 
     #[test]
@@ -760,7 +736,7 @@ mod tests {
 
         let rw = vec![source.display().to_string()];
         let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
-        let staged_file = staging.path().join(RW_DIR).join("work").join("data.txt");
+        let staged_file = staged_rw(&staging, &source).join("data.txt");
 
         // Mutate the staged copy — original must remain unchanged.
         fs::write(&staged_file, "after").unwrap();
@@ -786,12 +762,7 @@ mod tests {
 
         let rw = vec![source_file.display().to_string()];
         let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
-        // mount name for "payload.txt" is "payload_txt" (dot sanitized to underscore)
-        let staged_file = staging
-            .path()
-            .join(RW_DIR)
-            .join("payload_txt")
-            .join("payload.txt");
+        let staged_file = staged_rw(&staging, &source_file).join("payload.txt");
 
         fs::write(&staged_file, "after").unwrap();
         assert_eq!(fs::read_to_string(&source_file).unwrap(), "before");
@@ -811,7 +782,7 @@ mod tests {
 
         let rw = vec![source.display().to_string()];
         let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
-        let staged_dir = staging.path().join(RW_DIR).join("work");
+        let staged_dir = staged_rw(&staging, &source);
 
         fs::remove_file(staged_dir.join("deleted.txt")).unwrap();
         fs::write(staged_dir.join("kept.txt"), "after").unwrap();
@@ -828,22 +799,6 @@ mod tests {
             "new"
         );
         assert!(!source.join("deleted.txt").exists());
-    }
-
-    #[test]
-    fn staging_name_collision_is_disambiguated() {
-        let root = tempdir().unwrap();
-        let source_root = tempdir().unwrap();
-        let first = source_root.path().join("foo-bar");
-        let second = source_root.path().join("foo bar");
-        fs::create_dir_all(&first).unwrap();
-        fs::create_dir_all(&second).unwrap();
-
-        let rw = vec![first.display().to_string(), second.display().to_string()];
-        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
-
-        assert!(staging.path().join(RW_DIR).join("foo_bar").exists());
-        assert!(staging.path().join(RW_DIR).join("foo_bar_2").exists());
     }
 
     #[test]
@@ -911,10 +866,11 @@ mod tests {
         let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &ro).unwrap();
 
         // Mutate the staged read-only copy.
+        let guest_rel = host_path_to_guest_relative(&source);
         let staged_file = staging
             .path()
             .join(RO_DIR)
-            .join("reference")
+            .join(&guest_rel)
             .join("data.txt");
         // Clear read-only flag so we can write to the staged copy.
         let mut perms = fs::metadata(&staged_file).unwrap().permissions();
@@ -928,18 +884,6 @@ mod tests {
             fs::read_to_string(source.join("data.txt")).unwrap(),
             "original",
             "read-only paths must not be copied back to host"
-        );
-    }
-
-    #[test]
-    fn sanitize_mount_name_caps_at_max_chars() {
-        let long_name = "a".repeat(MAX_MOUNT_NAME_CHARS + 20);
-        let name = sanitize_mount_name(&long_name);
-        assert!(
-            name.len() <= MAX_MOUNT_NAME_CHARS,
-            "mount name length {} exceeds MAX_MOUNT_NAME_CHARS {}",
-            name.len(),
-            MAX_MOUNT_NAME_CHARS
         );
     }
 
