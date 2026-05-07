@@ -154,9 +154,19 @@ fn write_network_rules(out: &mut String, request: &CodexRequest) {
     let allow_outbound = matches!(policy.default_network_policy, NetworkPolicy::Allow);
 
     if !allow_outbound {
-        // Default-deny network is implicit from `(deny default)` but we emit
-        // a comment so reviewing a generated profile is clearer.
-        out.push_str(";; --- network: default-deny (no allow-network rules emitted) ---\n");
+        if policy.allowed_hosts.is_empty() {
+            // Pure deny — implicit from `(deny default)`.
+            out.push_str(";; --- network: default-deny (no allow-network rules emitted) ---\n");
+            return;
+        }
+        // defaultPolicy=block + allowedHosts = allowlist mode.
+        out.push_str(";; --- network: default-deny with allowedHosts allowlist ---\n");
+        out.push_str("(allow network-outbound\n");
+        for host in &policy.allowed_hosts {
+            let _ = writeln!(out, "    (remote tcp \"{}:*\")", escape_for_quotes(host));
+            let _ = writeln!(out, "    (remote udp \"{}:*\")", escape_for_quotes(host));
+        }
+        out.push_str(")\n");
         return;
     }
 
@@ -169,9 +179,6 @@ fn write_network_rules(out: &mut String, request: &CodexRequest) {
         out.push_str(";; --- network: outbound restricted to allowedHosts ---\n");
         out.push_str("(allow network-outbound\n");
         for host in &policy.allowed_hosts {
-            // Seatbelt doesn't do DNS — host-based filtering is best-effort.
-            // We emit a literal remote-host match; resolution is the kernel's
-            // problem at connect() time.
             let _ = writeln!(out, "    (remote tcp \"{}:*\")", escape_for_quotes(host));
             let _ = writeln!(out, "    (remote udp \"{}:*\")", escape_for_quotes(host));
         }
@@ -308,6 +315,20 @@ mod tests {
         let p = build_profile(&r);
         assert!(!p.contains("(allow network-outbound"));
         assert!(p.contains("network: default-deny"));
+    }
+
+    #[test]
+    fn block_with_allowed_hosts_emits_allowlist() {
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.allowed_hosts = vec!["api.github.com".into(), "registry.npmjs.org".into()];
+        let p = build_profile(&r);
+        assert!(p.contains("(allow network-outbound"));
+        assert!(p.contains("(remote tcp \"api.github.com:*\")"));
+        assert!(p.contains("(remote udp \"api.github.com:*\")"));
+        assert!(p.contains("(remote tcp \"registry.npmjs.org:*\")"));
+        // Should NOT have a blanket allow — only per-host rules.
+        assert!(!p.contains("(allow network-outbound)\n"));
     }
 
     #[test]
