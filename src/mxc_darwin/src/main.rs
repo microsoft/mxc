@@ -22,10 +22,7 @@ use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
 #[derive(Parser)]
-#[command(
-    name = "mxc-exec-darwin",
-    about = "macOS sandbox executor for MXC"
-)]
+#[command(name = "mxc-exec-darwin", about = "macOS sandbox executor for MXC")]
 struct Cli {
     /// Path to config JSON file (positional)
     #[arg(value_name = "CONFIG_PATH")]
@@ -82,13 +79,15 @@ fn main() {
     } else if let Some(ref path) = cli.config_path {
         (path.clone(), false)
     } else {
-        eprintln!(
-            "Error: No config provided. Use a positional path, --config, or --config-base64"
-        );
+        eprintln!("Error: No config provided. Use a positional path, --config, or --config-base64");
         process::exit(1);
     };
 
-    let mut logger = Logger::new(if cli.debug { Mode::Console } else { Mode::Buffer });
+    let mut logger = Logger::new(if cli.debug {
+        Mode::Console
+    } else {
+        Mode::Buffer
+    });
 
     if let Some(ref log_path) = cli.log_file {
         if let Err(e) = logger.enable_file_sink(std::path::Path::new(log_path)) {

@@ -141,16 +141,8 @@ impl ScriptRunner for SeatbeltScriptRunner {
         };
 
         // 5. Drain stdout / stderr.
-        let stdout = child
-            .stdout
-            .take()
-            .map(read_to_string)
-            .unwrap_or_default();
-        let stderr = child
-            .stderr
-            .take()
-            .map(read_to_string)
-            .unwrap_or_default();
+        let stdout = child.stdout.take().map(read_to_string).unwrap_or_default();
+        let stderr = child.stderr.take().map(read_to_string).unwrap_or_default();
 
         ScriptResponse {
             exit_code: exit_status.code().unwrap_or(-1),
