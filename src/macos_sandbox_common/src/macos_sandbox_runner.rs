@@ -117,12 +117,14 @@ impl ScriptRunner for SeatbeltScriptRunner {
 
         // 4. Drain stdout/stderr in background threads to avoid deadlock
         //    if the child fills the OS pipe buffer (~64KB on macOS).
-        let stdout_handle = child.stdout.take().map(|r| {
-            std::thread::spawn(move || read_to_string(r))
-        });
-        let stderr_handle = child.stderr.take().map(|r| {
-            std::thread::spawn(move || read_to_string(r))
-        });
+        let stdout_handle = child
+            .stdout
+            .take()
+            .map(|r| std::thread::spawn(move || read_to_string(r)));
+        let stderr_handle = child
+            .stderr
+            .take()
+            .map(|r| std::thread::spawn(move || read_to_string(r)));
 
         // 5. Wait with timeout. `script_timeout == 0` means infinite.
         let timeout = if request.script_timeout == 0 {
