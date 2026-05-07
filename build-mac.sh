@@ -140,7 +140,7 @@ if [ "$BUILD_SDK" = true ]; then
     echo ""
     echo "=== Building TypeScript SDK ==="
     cd "$SDK_DIR"
-    npm install --ignore-scripts 2>/dev/null || true
+    npm install --ignore-scripts
     npm run build
 fi
 
