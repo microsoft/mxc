@@ -2,6 +2,6 @@
     "phase": "provision",
     "containment": "isolation_session",
     "filesystem": {
-        "readwritePaths": ["C:\\workspace"]
+        "deniedPaths": ["C:\\mxc_share_test\\rw"]
     }
 }

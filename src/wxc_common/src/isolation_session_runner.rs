@@ -26,22 +26,25 @@ use crate::models::{
 };
 use crate::mxc_error::MxcError;
 use crate::process_util::{
-    create_relay_thread, create_relay_thread_with_stop, ConsoleModeRestorer, OwnedHandle,
-    PipeRelayParams, PipeRelayWithStopParams,
+    create_relay_thread, create_relay_thread_with_stop, get_local_console_size,
+    ConsoleModeRestorer, OwnedHandle, PipeRelayParams, PipeRelayWithStopParams,
 };
 use crate::script_runner::ScriptRunner;
 use crate::state_aware_backend::{
     DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
 };
 use isolation_session_bindings::bindings::{
-    IsoSessionConfigId, IsoSessionError, IsoSessionOps, IsoSessionProcess,
-    IsoSessionProcessOptions, IsoSessionProcessResult, IsoSessionResult, IsoSessionUserResult,
+    IsoSessionConfigId, IsoSessionError, IsoSessionFolderSharingAccessLevel,
+    IsoSessionFolderSharingRequest, IsoSessionFolderSharingResult, IsoSessionFolderSharingStatus,
+    IsoSessionOps, IsoSessionProcess, IsoSessionProcessOptions, IsoSessionProcessResult,
+    IsoSessionResult, IsoSessionUserResult,
 };
 use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, HANDLE, REGDB_E_CLASSNOTREG};
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows_collections::IVectorView;
 use windows_core::{HSTRING, PCWSTR};
 
 // -- Identifiers -------------------------------------------------------------
@@ -128,10 +131,27 @@ pub(crate) const ERR_NETWORK_POLICY: &str =
 pub(crate) const ERR_PROXY_POLICY: &str =
     "network proxy is not supported by the isolation session backend";
 
-/// Validates that the request does not contain policy fields unsupported by
-/// the isolation session backend. Returns `Ok(())` if valid, or a
-/// `Policy`-variant error on rejection.
-pub(crate) fn validate_policy(request: &CodexRequest) -> Result<(), IsolationSessionError> {
+/// Validates the request for the provision phase. Filesystem `rw` and
+/// `ro` paths are honored at provision (applied via `share_folders`);
+/// `denied_paths` is rejected because the underlying API has no
+/// equivalent primitive. Network and proxy policy are always rejected.
+pub(crate) fn validate_provision_policy(
+    request: &CodexRequest,
+) -> Result<(), IsolationSessionError> {
+    if !request.policy.denied_paths.is_empty() {
+        return Err(IsolationSessionError::Policy(
+            ERR_FILESYSTEM_POLICY.to_string(),
+        ));
+    }
+    validate_network_and_proxy_policy(request)
+}
+
+/// Validates the request for any non-provision phase (start / exec / stop
+/// / deprovision). All filesystem fields are rejected because filesystem
+/// policy is bound to provision and immutable thereafter.
+pub(crate) fn validate_post_provision_policy(
+    request: &CodexRequest,
+) -> Result<(), IsolationSessionError> {
     if !request.policy.readwrite_paths.is_empty()
         || !request.policy.readonly_paths.is_empty()
         || !request.policy.denied_paths.is_empty()
@@ -140,6 +160,12 @@ pub(crate) fn validate_policy(request: &CodexRequest) -> Result<(), IsolationSes
             ERR_FILESYSTEM_POLICY.to_string(),
         ));
     }
+    validate_network_and_proxy_policy(request)
+}
+
+/// Network and proxy validation is identical at every phase: the backend
+/// honors neither.
+fn validate_network_and_proxy_policy(request: &CodexRequest) -> Result<(), IsolationSessionError> {
     if !request.policy.allowed_hosts.is_empty()
         || !request.policy.blocked_hosts.is_empty()
         || request.policy.default_network_policy != NetworkPolicy::Allow
@@ -325,6 +351,118 @@ fn check_result(result: &IsoSessionResult, op: &str) -> Result<(), IsolationSess
     }
 }
 
+// -- Folder-sharing helpers --------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShareFolderFailure {
+    pub message: String,
+    pub remediation: String,
+    pub hresult: u32,
+}
+
+/// Per-path outcome from a folder-share batch. The batch result type is a
+/// COM runtime class that can't be built in unit tests; this struct is the
+/// test-friendly equivalent that aggregation logic operates on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShareFolderOutcome {
+    pub folder_path: String,
+    /// `Some` iff the per-path status was `Failed`.
+    pub failure: Option<ShareFolderFailure>,
+}
+
+/// Builds the per-path WinRT requests with rw paths first, ro paths second.
+/// A path appearing in both slices ends up read-only (the ro request is
+/// applied second and overwrites the earlier rw ACE for the same SID).
+/// Callers should keep the slices disjoint to avoid relying on this.
+pub(crate) fn build_share_folder_requests(
+    rw: &[String],
+    ro: &[String],
+) -> Vec<IsoSessionFolderSharingRequest> {
+    let mut requests = Vec::with_capacity(rw.len() + ro.len());
+    for path in rw {
+        requests.push(IsoSessionFolderSharingRequest {
+            FolderPath: HSTRING::from(path),
+            AccessLevel: IsoSessionFolderSharingAccessLevel::ReadWrite,
+        });
+    }
+    for path in ro {
+        requests.push(IsoSessionFolderSharingRequest {
+            FolderPath: HSTRING::from(path),
+            AccessLevel: IsoSessionFolderSharingAccessLevel::Read,
+        });
+    }
+    requests
+}
+
+/// Extracts MXC-internal per-path outcomes from the WinRT
+/// `IVectorView<IsoSessionFolderSharingResult>` returned by the API.
+fn extract_share_folder_outcomes(
+    results: &IVectorView<IsoSessionFolderSharingResult>,
+) -> Result<Vec<ShareFolderOutcome>, IsolationSessionError> {
+    let size = results
+        .Size()
+        .map_err(|e| lifecycle_err(format!("ShareFolderBatch results.Size: {}", e)))?;
+    let mut outcomes = Vec::with_capacity(size as usize);
+    for i in 0..size {
+        let result = results
+            .GetAt(i)
+            .map_err(|e| lifecycle_err(format!("ShareFolderBatch results.GetAt({}): {}", i, e)))?;
+        let folder_path = result
+            .FolderPath()
+            .map_err(|e| lifecycle_err(format!("ShareFolderBatch result.FolderPath: {}", e)))?
+            .to_string();
+        let status = result
+            .Status()
+            .map_err(|e| lifecycle_err(format!("ShareFolderBatch result.Status: {}", e)))?;
+        let failure = if status == IsoSessionFolderSharingStatus::Failed {
+            let err = result
+                .Error()
+                .map_err(|e| lifecycle_err(format!("ShareFolderBatch result.Error: {}", e)))?;
+            Some(ShareFolderFailure {
+                message: err.Message().map(|h| h.to_string()).unwrap_or_default(),
+                remediation: err.Remediation().map(|h| h.to_string()).unwrap_or_default(),
+                hresult: err.Code().map(|h| h.0 as u32).unwrap_or(0),
+            })
+        } else {
+            None
+        };
+        outcomes.push(ShareFolderOutcome {
+            folder_path,
+            failure,
+        });
+    }
+    Ok(outcomes)
+}
+
+/// Aggregates per-path outcomes into a single Result. Ok iff every path
+/// succeeded; otherwise a `Lifecycle` error with each failed path's
+/// message and HRESULT. The batch call does not fail as a whole on
+/// per-path errors, so this is where per-path failures become a single
+/// MXC error.
+pub(crate) fn aggregate_share_folder_outcomes(
+    outcomes: &[ShareFolderOutcome],
+) -> Result<(), IsolationSessionError> {
+    let any_failure = outcomes.iter().any(|o| o.failure.is_some());
+    if !any_failure {
+        return Ok(());
+    }
+    let mut msg = String::from("ShareFolderBatchAsync had per-path failures:");
+    for outcome in outcomes {
+        let Some(f) = &outcome.failure else {
+            continue;
+        };
+        let _ = write!(
+            msg,
+            "\n  {}: {} (HRESULT: {:#010x})",
+            outcome.folder_path, f.message, f.hresult,
+        );
+        if !f.remediation.is_empty() {
+            let _ = write!(msg, " -- remediation: {}", f.remediation);
+        }
+    }
+    Err(IsolationSessionError::Lifecycle(msg))
+}
+
 // -- IsolationSessionManager (lifecycle core) --------------------------------
 
 /// Manages the `IsoSessionOps` lifecycle. Methods map 1:1 to the granular
@@ -394,6 +532,39 @@ impl IsolationSessionManager {
             .AgentUserName()
             .map_err(|e| lifecycle_err(format!("AddUserAsync: get AgentUserName failed: {}", e)))?;
         Ok(name.to_string())
+    }
+
+    /// Grants the agent user access to host folders. `readwrite_paths`
+    /// get read+write access, `readonly_paths` get read-only. Both apply
+    /// recursively to each subtree.
+    ///
+    /// Independent of session start: requires only that the agent user
+    /// exists (call after `provision_agent_user`, before
+    /// `deprovision_agent_user`).
+    ///
+    /// The MXC process needs `WRITE_DAC` on each target folder. On
+    /// all-success returns `Ok`; on any per-path failure returns a
+    /// `Lifecycle` error listing every failed path. Empty input on both
+    /// slices is a no-op.
+    pub fn share_folders(
+        &self,
+        readwrite_paths: &[String],
+        readonly_paths: &[String],
+    ) -> Result<(), IsolationSessionError> {
+        let requests = build_share_folder_requests(readwrite_paths, readonly_paths);
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let view: IVectorView<IsoSessionFolderSharingRequest> = requests.into();
+        let async_op = self
+            .ops
+            .ShareFolderBatchAsync(&self.provision_id, &view)
+            .map_err(|e| lifecycle_err(format!("ShareFolderBatchAsync call failed: {}", e)))?;
+        let results: IVectorView<IsoSessionFolderSharingResult> = async_op
+            .join()
+            .map_err(|e| lifecycle_err(format!("ShareFolderBatchAsync wait failed: {}", e)))?;
+        let outcomes = extract_share_folder_outcomes(&results)?;
+        aggregate_share_folder_outcomes(&outcomes)
     }
 
     /// Step 2: Start the isolation session.
@@ -492,6 +663,17 @@ impl IsolationSessionManager {
         } else {
             None
         };
+
+        // Push the local console's current viewport size into the agent's
+        // inner ConPTY. Without this, the inner HPCON keeps its default
+        // dimensions and VT-aware agents (e.g. PSReadLine) anchor their
+        // prompt to that smaller-than-local last row, overlaying text once
+        // they reach it. Mid-session resize is not handled here.
+        if options.interactive {
+            if let Some((cols, rows)) = get_local_console_size() {
+                let _ = process.ResizeConsole(cols, rows);
+            }
+        }
 
         // Manual-reset stop event for the stdin relay. Effective for waitable
         // `h_read` (console = TTY mode); for pipe handles (non-TTY) it has no
@@ -735,7 +917,10 @@ impl Default for IsolationSessionRunner {
 
 impl ScriptRunner for IsolationSessionRunner {
     fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
-        validate_policy(request).map_err(ScriptResponse::from)
+        // One-shot runs the full provision -> start -> exec -> stop ->
+        // deprovision lifecycle in a single process, so provision-phase
+        // semantics apply to the whole call.
+        validate_provision_policy(request).map_err(ScriptResponse::from)
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
@@ -793,6 +978,15 @@ impl ScriptRunner for IsolationSessionRunner {
                 let _ = manager.unregister_client();
                 return e.into();
             }
+        }
+
+        if let Err(e) = manager.share_folders(
+            &request.policy.readwrite_paths,
+            &request.policy.readonly_paths,
+        ) {
+            let _ = manager.deprovision_agent_user();
+            let _ = manager.unregister_client();
+            return e.into();
         }
 
         if let Err(e) = manager.start_session(config_id) {
@@ -882,7 +1076,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 
     fn provision(
         &mut self,
-        _request: &CodexRequest,
+        request: &CodexRequest,
         _config: Option<()>,
     ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
         let provision_id = format!("wxc-{}", mint_random_token());
@@ -899,6 +1093,19 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                 return Err(map_lifecycle_error(e));
             }
         };
+
+        // Apply filesystem policy (rw + ro paths) before returning. A
+        // failure here leaves the agent user provisioned but no folders
+        // accessible to it; tear it down so the caller does not see a
+        // half-provisioned sandboxId.
+        if let Err(e) = manager.share_folders(
+            &request.policy.readwrite_paths,
+            &request.policy.readonly_paths,
+        ) {
+            let _ = manager.deprovision_agent_user();
+            let _ = manager.unregister_client();
+            return Err(map_lifecycle_error(e));
+        }
 
         Ok(ProvisionResult {
             sandbox_id: format!("{}:{}", Self::ID_PREFIX, provision_id),
@@ -962,20 +1169,19 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 
     // -- Validation hooks ----------------------------------------------------
     //
-    // Cross-cutting policy fields (filesystem, network, ui, network proxy)
-    // are not honoured by IsolationSession at any phase: the OS-side service
-    // does not expose these knobs. Mirroring the one-shot path's
-    // `validate_runner` rejection, every state-aware phase rejects these
-    // fields up-front rather than silently ignoring them. This produces
-    // `policy_validation` per design 10.3 instead of letting unsupported
-    // fields slip through unnoticed.
+    // Filesystem rw/ro paths are honoured at provision (applied via
+    // `share_folders`) and rejected at every later phase, because the
+    // grant lifecycle is bound to the agent user. `denied_paths`,
+    // network, and proxy policy are rejected at every phase: the
+    // backend has no equivalent primitive. Anything rejected produces
+    // a `policy_validation` envelope rather than silent ignore.
 
     fn validate_provision(
         &self,
         request: &CodexRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        validate_policy(request).map_err(map_lifecycle_error)
+        validate_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     fn validate_start(
@@ -984,7 +1190,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &CodexRequest,
         _config: Option<&IsolationSessionConfig>,
     ) -> Result<(), MxcError> {
-        validate_policy(request).map_err(map_lifecycle_error)
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     fn validate_exec(
@@ -993,7 +1199,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &CodexRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        validate_policy(request).map_err(map_lifecycle_error)
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     fn validate_stop(
@@ -1002,7 +1208,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &CodexRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        validate_policy(request).map_err(map_lifecycle_error)
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     fn validate_deprovision(
@@ -1011,7 +1217,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &CodexRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        validate_policy(request).map_err(map_lifecycle_error)
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     /// Reuses `IsolationSessionManager::create_process` — the same path the
@@ -1136,13 +1342,32 @@ mod tests {
     }
 
     #[test]
-    fn validate_phase_hooks_reject_unsupported_filesystem_policy() {
+    fn validate_provision_hook_accepts_filesystem_policy() {
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_filesystem_policy();
+        runner.validate_provision(&req, None).unwrap();
+    }
+
+    #[test]
+    fn validate_provision_hook_rejects_denied_paths() {
+        use crate::mxc_error::MxcErrorCode;
+        let runner = IsolationSessionRunner::new();
+        let req = CodexRequest {
+            policy: ContainerPolicy {
+                denied_paths: vec!["C:\\secret".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = runner.validate_provision(&req, None).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_post_provision_hooks_reject_filesystem_policy() {
         use crate::mxc_error::MxcErrorCode;
         let runner = IsolationSessionRunner::new();
         let req = request_with_filesystem_policy();
-
-        let p = runner.validate_provision(&req, None).unwrap_err();
-        assert_eq!(p.code, MxcErrorCode::PolicyValidation);
 
         let s = runner.validate_start("iso:abc", &req, None).unwrap_err();
         assert_eq!(s.code, MxcErrorCode::PolicyValidation);
@@ -1184,23 +1409,28 @@ mod tests {
         assert_eq!(ERROR_NOT_FOUND_HRESULT, 0x80070490);
     }
 
+    // ====== Phase-specific policy validation ======
+    //
+    // Filesystem fields behave differently per phase; network and proxy
+    // policy share `validate_network_and_proxy_policy` and behave the
+    // same at every phase. Coverage strategy: filesystem tests on both
+    // phase-specific helpers; network/proxy tests split across them so
+    // every branch of the shared helper runs at least once.
+
     #[test]
-    fn policy_rejects_readwrite_paths() {
+    fn provision_policy_accepts_readwrite_paths() {
         let request = CodexRequest {
             policy: ContainerPolicy {
-                readwrite_paths: vec!["C:\\data".to_string()],
+                readwrite_paths: vec!["C:\\src".to_string()],
                 ..Default::default()
             },
             ..Default::default()
         };
-        assert_policy_err_contains(
-            validate_policy(&request).unwrap_err(),
-            ERR_FILESYSTEM_POLICY,
-        );
+        assert!(validate_provision_policy(&request).is_ok());
     }
 
     #[test]
-    fn policy_rejects_readonly_paths() {
+    fn provision_policy_accepts_readonly_paths() {
         let request = CodexRequest {
             policy: ContainerPolicy {
                 readonly_paths: vec!["C:\\data".to_string()],
@@ -1208,14 +1438,24 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_policy_err_contains(
-            validate_policy(&request).unwrap_err(),
-            ERR_FILESYSTEM_POLICY,
-        );
+        assert!(validate_provision_policy(&request).is_ok());
     }
 
     #[test]
-    fn policy_rejects_denied_paths() {
+    fn provision_policy_accepts_readwrite_and_readonly_together() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\src".to_string()],
+                readonly_paths: vec!["C:\\data".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(validate_provision_policy(&request).is_ok());
+    }
+
+    #[test]
+    fn provision_policy_rejects_denied_paths() {
         let request = CodexRequest {
             policy: ContainerPolicy {
                 denied_paths: vec!["C:\\secret".to_string()],
@@ -1224,13 +1464,29 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_policy(&request).unwrap_err(),
+            validate_provision_policy(&request).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
     }
 
     #[test]
-    fn policy_rejects_allowed_hosts() {
+    fn provision_policy_rejects_denied_even_with_rw() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\src".to_string()],
+                denied_paths: vec!["C:\\secret".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn provision_policy_rejects_network_policy() {
         let request = CodexRequest {
             policy: ContainerPolicy {
                 allowed_hosts: vec!["example.com".to_string()],
@@ -1238,35 +1494,14 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
     }
 
     #[test]
-    fn policy_rejects_blocked_hosts() {
-        let request = CodexRequest {
-            policy: ContainerPolicy {
-                blocked_hosts: vec!["evil.com".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
-    }
-
-    #[test]
-    fn policy_rejects_network_block_policy() {
-        let request = CodexRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Block,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
-    }
-
-    #[test]
-    fn policy_rejects_proxy() {
+    fn provision_policy_rejects_proxy() {
         let request = CodexRequest {
             policy: ContainerPolicy {
                 network_proxy: ProxyConfig {
@@ -1277,13 +1512,91 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_PROXY_POLICY);
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_PROXY_POLICY,
+        );
     }
 
     #[test]
-    fn policy_allows_defaults() {
+    fn post_provision_policy_rejects_readwrite_paths() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\src".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_readonly_paths() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readonly_paths: vec!["C:\\data".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_denied_paths() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                denied_paths: vec!["C:\\secret".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_blocked_hosts() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                blocked_hosts: vec!["evil.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_network_block_policy() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Block,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_allows_defaults() {
         let request = CodexRequest::default();
-        assert!(validate_policy(&request).is_ok());
+        assert!(validate_post_provision_policy(&request).is_ok());
     }
 
     // ====== ProcessOptions / option building tests ======
@@ -1457,5 +1770,179 @@ mod tests {
     fn config_id_conversion_composable() {
         let iso_id: IsoSessionConfigId = IsolationSessionConfigurationId::Composable.into();
         assert_eq!(iso_id, IsoSessionConfigId::Composable);
+    }
+
+    // ====== Folder-sharing helpers ======
+    //
+    // The runtime path (`share_folders` itself) needs a live IsoSessionOps,
+    // which is only available on a configured VM — covered by the C6
+    // integration tests. These unit tests cover the two pure helpers that
+    // bracket the COM call: request-building and outcome aggregation.
+
+    #[test]
+    fn build_requests_empty_inputs_returns_empty_vec() {
+        let requests = build_share_folder_requests(&[], &[]);
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn build_requests_rw_only() {
+        let rw = vec!["C:\\rw1".to_string(), "C:\\rw2".to_string()];
+        let requests = build_share_folder_requests(&rw, &[]);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].FolderPath.to_string(), "C:\\rw1");
+        assert_eq!(
+            requests[0].AccessLevel,
+            IsoSessionFolderSharingAccessLevel::ReadWrite
+        );
+        assert_eq!(requests[1].FolderPath.to_string(), "C:\\rw2");
+        assert_eq!(
+            requests[1].AccessLevel,
+            IsoSessionFolderSharingAccessLevel::ReadWrite
+        );
+    }
+
+    #[test]
+    fn build_requests_ro_only() {
+        let ro = vec!["C:\\ro1".to_string()];
+        let requests = build_share_folder_requests(&[], &ro);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].FolderPath.to_string(), "C:\\ro1");
+        assert_eq!(
+            requests[0].AccessLevel,
+            IsoSessionFolderSharingAccessLevel::Read
+        );
+    }
+
+    #[test]
+    fn build_requests_rw_then_ro_in_input_order() {
+        let rw = vec!["C:\\a".to_string()];
+        let ro = vec!["C:\\b".to_string(), "C:\\c".to_string()];
+        let requests = build_share_folder_requests(&rw, &ro);
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].FolderPath.to_string(), "C:\\a");
+        assert_eq!(
+            requests[0].AccessLevel,
+            IsoSessionFolderSharingAccessLevel::ReadWrite
+        );
+        assert_eq!(requests[1].FolderPath.to_string(), "C:\\b");
+        assert_eq!(
+            requests[1].AccessLevel,
+            IsoSessionFolderSharingAccessLevel::Read
+        );
+        assert_eq!(requests[2].FolderPath.to_string(), "C:\\c");
+        assert_eq!(
+            requests[2].AccessLevel,
+            IsoSessionFolderSharingAccessLevel::Read
+        );
+    }
+
+    fn ok_outcome(path: &str) -> ShareFolderOutcome {
+        ShareFolderOutcome {
+            folder_path: path.to_string(),
+            failure: None,
+        }
+    }
+
+    fn fail_outcome(path: &str, msg: &str, hr: u32, remediation: &str) -> ShareFolderOutcome {
+        ShareFolderOutcome {
+            folder_path: path.to_string(),
+            failure: Some(ShareFolderFailure {
+                message: msg.to_string(),
+                remediation: remediation.to_string(),
+                hresult: hr,
+            }),
+        }
+    }
+
+    #[test]
+    fn aggregate_empty_outcomes_is_ok() {
+        // Defensive: the runtime path returns Ok early on empty inputs, but
+        // if extract_share_folder_outcomes ever returns an empty Vec, the
+        // aggregator should still report success.
+        assert!(matches!(aggregate_share_folder_outcomes(&[]), Ok(())));
+    }
+
+    #[test]
+    fn aggregate_all_succeeded_is_ok() {
+        let outcomes = vec![ok_outcome("C:\\a"), ok_outcome("C:\\b")];
+        assert!(matches!(aggregate_share_folder_outcomes(&outcomes), Ok(())));
+    }
+
+    #[test]
+    fn aggregate_single_failure_includes_path_message_and_hresult() {
+        let outcomes = vec![fail_outcome("C:\\bad", "denied", 0x80070005, "")];
+        let err = aggregate_share_folder_outcomes(&outcomes).unwrap_err();
+        let IsolationSessionError::Lifecycle(msg) = err else {
+            panic!("expected Lifecycle, got {:?}", err);
+        };
+        assert!(msg.contains("C:\\bad"), "missing path in: {}", msg);
+        assert!(msg.contains("denied"), "missing message in: {}", msg);
+        assert!(msg.contains("0x80070005"), "missing hresult in: {}", msg);
+    }
+
+    #[test]
+    fn aggregate_mixed_outcomes_includes_all_failures_only() {
+        let outcomes = vec![
+            ok_outcome("C:\\good"),
+            fail_outcome("C:\\bad1", "first failure", 0xdeadbeef, ""),
+            ok_outcome("C:\\good2"),
+            fail_outcome("C:\\bad2", "second failure", 0xfeedface, ""),
+        ];
+        let err = aggregate_share_folder_outcomes(&outcomes).unwrap_err();
+        let IsolationSessionError::Lifecycle(msg) = err else {
+            panic!("expected Lifecycle, got {:?}", err);
+        };
+        assert!(msg.contains("C:\\bad1"), "missing bad1 in: {}", msg);
+        assert!(
+            msg.contains("first failure"),
+            "missing first msg in: {}",
+            msg
+        );
+        assert!(msg.contains("C:\\bad2"), "missing bad2 in: {}", msg);
+        assert!(
+            msg.contains("second failure"),
+            "missing second msg in: {}",
+            msg
+        );
+        // Successful paths must not appear in the error message.
+        assert!(
+            !msg.contains("C:\\good"),
+            "good path leaked into error: {}",
+            msg
+        );
+        assert!(
+            !msg.contains("C:\\good2"),
+            "good2 path leaked into error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn aggregate_failure_with_remediation_appends_remediation() {
+        let outcomes = vec![fail_outcome("C:\\rd", "denied", 0x80070005, "run as admin")];
+        let err = aggregate_share_folder_outcomes(&outcomes).unwrap_err();
+        let IsolationSessionError::Lifecycle(msg) = err else {
+            panic!("expected Lifecycle, got {:?}", err);
+        };
+        assert!(
+            msg.contains("remediation: run as admin"),
+            "missing remediation in: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn aggregate_failure_with_empty_remediation_omits_suffix() {
+        let outcomes = vec![fail_outcome("C:\\nor", "msg", 0x80004005, "")];
+        let err = aggregate_share_folder_outcomes(&outcomes).unwrap_err();
+        let IsolationSessionError::Lifecycle(msg) = err else {
+            panic!("expected Lifecycle, got {:?}", err);
+        };
+        assert!(
+            !msg.contains("remediation:"),
+            "unexpected remediation suffix in: {}",
+            msg
+        );
     }
 }

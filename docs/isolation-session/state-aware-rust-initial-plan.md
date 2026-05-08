@@ -104,14 +104,18 @@ subsequent op against it surfaces `stale_id`.
 
 ## Cross-cutting policy honor matrix
 
-IsolationSession's underlying OS-side service does not expose filesystem,
-network, or UI policy knobs. Every state-aware phase rejects these fields
-up-front via the trait's `validate_<phase>` hooks, mirroring the one-shot
-path's `validate_runner` rejection.
+IsolationSession honors `readwritePaths` and `readonlyPaths` at provision
+(applied via `ShareFolderBatchAsync`), and rejects everything else at
+every phase. The grant lifecycle is bound to the agent user, so
+filesystem policy is bound to provision and immutable thereafter — every
+non-provision phase rejects any non-empty filesystem field. The OS-side
+service has no equivalent for `deniedPaths`, network, or UI policy, so
+those are rejected at every phase including provision.
 
 | Field | provision | start | exec | stop | deprovision |
 |---|---|---|---|---|---|
-| `policy.filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected | rejected | rejected | rejected | rejected |
+| `policy.filesystem.{readwritePaths,readonlyPaths}` | **honored** | rejected | rejected | rejected | rejected |
+| `policy.filesystem.deniedPaths` | rejected | rejected | rejected | rejected | rejected |
 | `policy.network.{allowedHosts,blockedHosts,defaultPolicy}` | rejected | rejected | rejected | rejected | rejected |
 | `policy.network.proxy` | rejected | rejected | rejected | rejected | rejected |
 | `policy.ui` | rejected | rejected | rejected | rejected | rejected |
@@ -131,11 +135,18 @@ Rejection surfaces as wire-format `error.code = "policy_validation"`.
   `experimental.isolation_session.start.configurationId` (state-aware) —
   same enum (`small` / `medium` / `large` / `composable`).
 
-### Fields valid in one-shot only
+### Policy fields and mode parity
 
-- `policy.filesystem`, `policy.network`, `policy.ui`, `policy.network.proxy`
-  — rejected by both modes (one-shot via `ScriptRunner::validate_runner`;
-  state-aware via `validate_<phase>` hooks).
+Both modes share the same policy-honor matrix above:
+
+- `policy.filesystem.readwritePaths` / `readonlyPaths` are honored at
+  provision (state-aware) or at the start of the lifecycle (one-shot,
+  via `ScriptRunner::validate_runner` then `share_folders` in
+  `IsolationSessionRunner::execute`). Rejected at all later state-aware
+  phases.
+- `policy.filesystem.deniedPaths`, `policy.network`, `policy.ui`, and
+  `policy.network.proxy` are rejected at every phase (one-shot via
+  `validate_runner`, state-aware via `validate_<phase>` hooks).
 
 ### Fields valid in state-aware only
 
@@ -190,7 +201,7 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 
 | `IsolationSessionError` variant | Wire `error.code` | Trigger |
 |---|---|---|
-| `Policy(...)` | `policy_validation` | Caller-supplied `policy.filesystem` / `policy.network` / `policy.ui` / `policy.network_proxy` at any phase (rejected by `validate_<phase>` hooks). |
+| `Policy(...)` | `policy_validation` | Caller-supplied policy field that this phase does not accept — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot). |
 | `ServiceUnavailable(...)` | `backend_unavailable` | `IsoSessionOps` activation failure: `IsoSessionApp.dll` not registered, or `Feature_IsoBrokerSessionApis` disabled at the OS-side. HRESULTs `CLASS_E_CLASSNOTAVAILABLE` (`0x80040111`) or `REGDB_E_CLASSNOTREG` (`0x80040154`). |
 | `Stale(...)` | `stale_id` | OS-side `AgentManager::FindActiveAgentUserByProvisionId` returns `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` (`0x80070490`) — the `provisionId` is missing from both the in-memory cache and the persisted registry. After `deprovision`, every non-provision op against the dead `sandboxId` triggers this. |
 | `Lifecycle(...)` | `backend_error` | Any other HRESULT from a lifecycle op. The error message embeds the operation name, HRESULT, OS-side message, and remediation hint where present. |

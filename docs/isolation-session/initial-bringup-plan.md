@@ -253,7 +253,7 @@ matching `windows` crate version").
 | Category | Count | Location | What it verifies |
 |---|---:|---|---|
 | Config parsing | ~8 | `config_parser.rs` | `"isolation_session"` containment value, `experimental.isolation_session` section, `configurationId` values + defaults |
-| Policy validation | ~7 | `isolation_session_runner.rs` | Each unsupported policy field (filesystem, network, etc.) produces the correct error message |
+| Policy validation | ~15 | `isolation_session_runner.rs` | Phase-specific behaviour: provision accepts `readwritePaths` / `readonlyPaths` and rejects `deniedPaths`; non-provision phases reject every filesystem field; network and proxy are rejected at every phase |
 | Option building | ~6 | `isolation_session_runner.rs` | `CodexRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
 | Feature unavailable | 1 | `isolation_session_runner.rs` | Runner returns a clean error on machines without `Feature_IsoBrokerSessionApis`, so the test passes everywhere |
 

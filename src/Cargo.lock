@@ -1812,6 +1812,7 @@ dependencies = [
  "url",
  "widestring",
  "windows",
+ "windows-collections",
  "windows-core",
  "windows-future",
 ]

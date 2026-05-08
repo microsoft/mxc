@@ -1,0 +1,11 @@
+{
+    "phase": "start",
+    "sandboxId": "{{SANDBOX_ID}}",
+    "experimental": {
+        "isolation_session": {
+            "start": {
+                "configurationId": "medium"
+            }
+        }
+    }
+}
