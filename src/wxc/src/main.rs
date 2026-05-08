@@ -357,9 +357,7 @@ fn main() {
             process::exit(1);
         }
         ContainmentBackend::MacosSandbox => {
-            eprintln!(
-                "Error: macOS sandbox backend is only available on macOS (use mxc-exec-mac)"
-            );
+            eprintln!("Error: macOS sandbox backend is only available on macOS (use mxc-exec-mac)");
             process::exit(1);
         }
         ContainmentBackend::Vm => {
