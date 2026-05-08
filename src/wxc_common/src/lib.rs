@@ -5,13 +5,18 @@
 pub mod config_parser;
 pub mod encoding;
 pub mod error;
+pub mod id;
 pub mod logger;
 #[cfg(target_os = "windows")]
 pub mod microvm_staging;
 pub mod models;
+pub mod mxc_error;
 #[cfg(target_os = "windows")]
 pub mod nanvix_runner;
 pub mod script_runner;
+pub mod state_aware_backend;
+pub mod state_aware_dispatch;
+pub mod state_aware_request;
 pub mod validator;
 
 // Windows-specific modules
@@ -31,6 +36,10 @@ pub mod sandbox_protocol;
 pub mod string_util;
 #[cfg(target_os = "windows")]
 pub mod windows_sandbox_runner;
+
+// Diagnostic logging (registry/env-controlled real-time output)
+#[cfg(target_os = "windows")]
+pub mod diagnostic;
 
 // BaseContainer (composable sandbox) support
 #[cfg(target_os = "windows")]

@@ -33,12 +33,12 @@ export {
   ExperimentalBackends,
   ContainerConfig,
   PlatformSupport,
-} from './types';
+} from './types.js';
 
 // Export platform detection functions
 export {
   getPlatformSupport,
-} from './platform';
+} from './platform.js';
 
 // Export sandbox spawning functions
 export {
@@ -48,7 +48,7 @@ export {
   spawnSandboxFromConfig,
   buildSandboxPayload,
   SandboxSpawnOptions,
-} from './sandbox';
+} from './sandbox.js';
 
 // Export policy discovery functions
 export {
@@ -57,9 +57,4 @@ export {
   getTemporaryFilesPolicy,
   FilesystemPolicyResult,
   ToolsPolicyOptions,
-} from './policy';
-
-// Export diagnostic logging
-export {
-  FileLogger,
-} from './logger';
+} from './policy.js';

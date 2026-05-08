@@ -1,4 +1,4 @@
-# IsoEnvBroker Session API — WinMD Provenance
+# Windows.AI.IsolationSession — WinMD Provenance
 
 This directory tracks provenance for the generated Rust bindings in
 `src/isolation_session_bindings/`. The WinMD file itself is NOT checked in.
@@ -28,7 +28,7 @@ After regeneration:
    - `os_official_branch` — the `official/...` rolling branch (development lineage).
    - `os_commit` — full 40-char commit SHA.
    - `winmd_sha256` — SHA-256 of the WinMD file.
-   - `windows_bindgen_version` — version reported on line 1 of the generated `bindings.rs`.
+   - `windows_bindgen_version` — version reported in the header comment of the generated `bindings.rs`.
    - `target_windows_crate` — major.minor of the `windows` crate in `src/Cargo.lock`.
    - `generated_date` — ISO date.
 3. Build and test: `cd src && cargo test --workspace`

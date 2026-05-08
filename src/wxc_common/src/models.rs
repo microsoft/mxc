@@ -24,6 +24,37 @@ pub enum ContainmentBackend {
     /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
     #[serde(rename = "isolation_session")]
     IsolationSession,
+    /// macOS sandbox — experimental backend (requires --experimental).
+    /// Implemented on top of the OS-bundled sandbox facility (historical
+    /// Apple internal codename: "Seatbelt").
+    #[serde(rename = "macos_sandbox")]
+    MacosSandbox,
+}
+
+/// Mode used by the macOS sandbox backend to apply the sandbox profile.
+///
+/// `Exec` (default) spawns `/usr/bin/sandbox-exec` and is always available.
+/// `Inproc` calls the private `sandbox_init_with_parameters` API in the
+/// child after fork and before exec — lower latency but relies on a
+/// non-public macOS interface.
+#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MacosSandboxMode {
+    #[default]
+    Exec,
+    Inproc,
+}
+
+/// Configuration specific to the macOS sandbox backend (experimental).
+/// Used under `experimental.macos_sandbox` when `containment == MacosSandbox`.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MacosSandboxConfig {
+    /// Which sandbox entry point to use. Default: `Exec` (sandbox-exec).
+    pub mode: MacosSandboxMode,
+    /// Optional override of the generated TinyScheme profile.
+    #[serde(rename = "profileOverride", skip_serializing_if = "Option::is_none")]
+    pub profile_override: Option<String>,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
@@ -340,6 +371,9 @@ pub struct ExperimentalConfig {
     /// Isolation Session backend (experimental).
     #[serde(rename = "isolation_session")]
     pub isolation_session: Option<IsolationSessionConfig>,
+    /// macOS sandbox backend (experimental).
+    #[serde(rename = "macos_sandbox")]
+    pub macos_sandbox: Option<MacosSandboxConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

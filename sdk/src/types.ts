@@ -34,7 +34,7 @@ export interface LifecycleConfig {
 /**
  * Containment type abstraction for createConfigFromPolicy.
  * Maps to platform-specific backends:
- * - "process": BaseProcessContainer (Windows) / LXC (Linux)
+ * - "process": BaseProcessContainer (Windows) / LXC (Linux) / macOS sandbox (macOS)
  * - "microvm": MicroVM/Nanvix backend (Windows only, experimental)
  */
 export type ContainmentType = "process" | "wslc" | "microvm";
@@ -172,7 +172,7 @@ export interface ContainerConfig {
   /** Externally assigned container identifier */
   containerId?: string;
   /** Containment backend */
-  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm';
+  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'macos_sandbox';
   /** Container lifecycle settings */
   lifecycle?: LifecycleConfig;
   /** Process execution settings (required) */
@@ -189,6 +189,8 @@ export interface ContainerConfig {
   experimental?: {
     /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
+    /** macOS sandbox configuration (macOS only) */
+    macos_sandbox?: MacosSandboxConfig;
   };
   /** Cross-platform UI configuration */
   ui?: UiConfig;
@@ -259,9 +261,27 @@ export interface LxcConfig {
 }
 
 /**
+ * macOS sandbox configuration (experimental). Used under
+ * `experimental.macos_sandbox` when containment is 'macos_sandbox'.
+ */
+export interface MacosSandboxConfig {
+  /**
+   * Which sandbox entry point to use:
+   * - "exec" (default): spawn /usr/bin/sandbox-exec.
+   * - "inproc": call sandbox_init_with_parameters in the child after fork
+   *   (lower latency; relies on a private macOS API).
+   */
+  mode?: 'exec' | 'inproc';
+  /**
+   * Optional override of the generated TinyScheme sandbox profile.
+   */
+  profileOverride?: string;
+}
+
+/**
  * Sandboxing methods available on the platform
  */
-export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm';
+export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'macos_sandbox';
 
 /**
  * Platform support information

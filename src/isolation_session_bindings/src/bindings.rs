@@ -2418,7 +2418,7 @@ pub struct IsoSessionFolderSharingAccessLevel(pub i32);
 impl IsoSessionFolderSharingAccessLevel {
     pub const Read: Self = Self(0i32);
     pub const ReadWrite: Self = Self(1i32);
-    pub const Denied: Self = Self(2i32);
+    pub const Remove: Self = Self(2i32);
 }
 impl windows_core::TypeKind for IsoSessionFolderSharingAccessLevel {
     type TypeKind = windows_core::CopyType;

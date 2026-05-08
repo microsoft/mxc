@@ -2,7 +2,26 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
-import { PlatformSupport } from './types';
+import { fileURLToPath } from 'node:url';
+import { PlatformSupport } from './types.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+/**
+ * Resolves the SDK package root directory.
+ * Uses require.resolve to find the package.json (works when the SDK is installed
+ * in node_modules, even if the consuming code is bundled by esbuild/webpack).
+ * Falls back to __dirname for local development (monorepo layout).
+ */
+function getSdkPackageRoot(): string {
+  try {
+    return path.dirname(require.resolve('@microsoft/mxc-sdk/package.json'));
+  } catch {
+    // Fallback: __dirname is dist/, so parent is package root
+    return path.join(__dirname, '..');
+  }
+}
 
 /**
  * Query Windows Registry for a value
@@ -171,12 +190,21 @@ function getLinuxRustTargetTriple(): string {
  * @returns Path to wxc-exec.exe if found, null otherwise
  */
 export function findWxcExecutable(): string | null {
+  // Allow override for bundled deployments (debugging/testing)
+  if (process.env.MXC_BIN_DIR) {
+    const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'wxc-exec.exe');
+    if (verifyWxcExecutable(overridePath)) {
+      return overridePath;
+    }
+  }
+
+  const pkgRoot = getSdkPackageRoot();
   const targetTriple = getRustTargetTriple();
-  const targetDir = path.join(__dirname, '..', '..', 'src', 'target');
+  const targetDir = path.join(pkgRoot, '..', 'src', 'target');
 
   const possiblePaths = [
     // Bundled in the SDK package (e.g. when installed via npm)
-    path.join(__dirname, '..', 'bin', getSdkArch(), 'wxc-exec.exe'),
+    path.join(pkgRoot, 'bin', getSdkArch(), 'wxc-exec.exe'),
     // Architecture-specific release build output (monorepo dev)
     path.join(targetDir, targetTriple, 'release', 'wxc-exec.exe'),
     // Architecture-specific debug build output (monorepo dev)
@@ -224,12 +252,21 @@ function verifyWxcExecutable(wxcPath: string): boolean {
  * @returns Path to lxc-exec if found, null otherwise
  */
 export function findLxcExecutable(): string | null {
+  // Allow override for bundled deployments (debugging/testing)
+  if (process.env.MXC_BIN_DIR) {
+    const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'lxc-exec');
+    if (verifyExecutable(overridePath)) {
+      return overridePath;
+    }
+  }
+
+  const pkgRoot = getSdkPackageRoot();
   const targetTriple = getLinuxRustTargetTriple();
-  const targetDir = path.join(__dirname, '..', '..', 'src', 'target');
+  const targetDir = path.join(pkgRoot, '..', 'src', 'target');
 
   const possiblePaths = [
     // Bundled in the SDK package
-    path.join(__dirname, '..', 'bin', getSdkArch(), 'lxc-exec'),
+    path.join(pkgRoot, 'bin', getSdkArch(), 'lxc-exec'),
     // Architecture-specific release build
     path.join(targetDir, targetTriple, 'release', 'lxc-exec'),
     // Architecture-specific debug build

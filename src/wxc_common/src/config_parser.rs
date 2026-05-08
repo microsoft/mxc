@@ -11,10 +11,28 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
-    IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
-    PortMapping, ProxyAddress, ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
-    WslcConfig,
+    IsolationSessionConfig, LifecycleConfig, LxcConfig, MacosSandboxConfig, MacosSandboxMode,
+    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig,
+    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
+use crate::mxc_error::MxcError;
+use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+
+/// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
+/// variant to choose the failure-output convention: state-aware failures
+/// emit a JSON `{"error": ...}` envelope on stdout, while one-shot and
+/// pre-discrimination failures keep the existing diagnostic-on-stderr path.
+#[derive(Debug)]
+pub enum ParseError {
+    /// I/O, base64-decode, or top-level JSON parse failure — the input could
+    /// not be discriminated as state-aware vs one-shot.
+    Decode(WxcError),
+    /// Discriminated as one-shot; conversion to `CodexRequest` failed.
+    OneShot(WxcError),
+    /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
+    /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
+    StateAware(MxcError),
+}
 
 // ---------- Intermediate serde structs matching the JSON schema ----------
 
@@ -146,6 +164,14 @@ struct RawIsolationSession {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawMacosSandbox {
+    mode: Option<String>,
+    #[serde(rename = "profileOverride")]
+    profile_override: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawExperimental {
     test: Option<RawTestFeature>,
     #[serde(rename = "windows_sandbox")]
@@ -153,6 +179,8 @@ struct RawExperimental {
     wslc: Option<RawContainerConfig>,
     #[serde(rename = "isolation_session")]
     isolation_session: Option<RawIsolationSession>,
+    #[serde(rename = "macos_sandbox")]
+    macos_sandbox: Option<RawMacosSandbox>,
 }
 
 #[derive(Deserialize, Default)]
@@ -180,6 +208,44 @@ struct RawConfig {
     network: Option<RawNetwork>,
     ui: Option<RawUi>,
     experimental: Option<RawExperimental>,
+}
+
+// State-aware request shape. `phase` is required (no `#[serde(default)]` on
+// the struct, no field-level default) and acts as the discriminator against
+// `RawConfig`; the other fields mirror `RawConfig`'s wire shape so
+// cross-cutting fields (filesystem/network/ui/process) populate the inner
+// `CodexRequest` via the same conversion path. The `experimental` block stays
+// raw — typed deserialisation happens at dispatch time keyed by backend.
+#[derive(Deserialize)]
+struct RawStateAwareRequest {
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    containment: Option<String>,
+    phase: String,
+    #[serde(rename = "sandboxId", default)]
+    sandbox_id: Option<String>,
+    #[serde(default)]
+    process: Option<RawProcess>,
+    #[serde(default)]
+    filesystem: Option<RawFilesystem>,
+    #[serde(default)]
+    network: Option<RawNetwork>,
+    #[serde(default)]
+    ui: Option<RawUi>,
+    #[serde(default)]
+    experimental: Option<serde_json::Value>,
+}
+
+// Untagged enum: serde tries `StateAware` first (requires `phase`), falls
+// through to `OneShot` when `phase` is absent. Order matters — `OneShot` is
+// permissive enough to accept arbitrary wire shapes. Both variants are boxed
+// so the enum stays a single tagged pointer regardless of inner growth.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawMxcRequest {
+    StateAware(Box<RawStateAwareRequest>),
+    OneShot(Box<RawConfig>),
 }
 
 // ---------- Public API ----------
@@ -277,7 +343,52 @@ pub fn load_request(
     logger: &mut Logger,
     is_base64: bool,
 ) -> Result<CodexRequest, WxcError> {
-    let json_str = if is_base64 {
+    let json_str = decode_request_input(input, logger, is_base64)?;
+
+    let raw: RawConfig = serde_json::from_str(&json_str).map_err(|e| {
+        logger.log_line("Error parsing JSON");
+        WxcError::ConfigParse(format!("JSON parse error: {}", e))
+    })?;
+
+    convert_raw_config(raw, logger)
+}
+
+/// Loads a request and routes to the one-shot or state-aware path based on
+/// presence of the wire-format `phase` field. Errors are categorised so the
+/// driver can pick the right output convention per path (envelope on stdout
+/// for state-aware, diagnostic on stderr for one-shot and pre-discrimination
+/// failures).
+pub fn load_mxc_request(
+    input: &str,
+    logger: &mut Logger,
+    is_base64: bool,
+) -> Result<MxcRequest, ParseError> {
+    let json_str = decode_request_input(input, logger, is_base64).map_err(ParseError::Decode)?;
+
+    let raw: RawMxcRequest = serde_json::from_str(&json_str).map_err(|e| {
+        logger.log_line("Error parsing JSON");
+        ParseError::Decode(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
+    })?;
+
+    match raw {
+        RawMxcRequest::StateAware(state_aware) => convert_raw_state_aware(*state_aware, logger)
+            .map(MxcRequest::StateAware)
+            .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string()))),
+        RawMxcRequest::OneShot(one_shot) => convert_raw_config(*one_shot, logger)
+            .map(MxcRequest::OneShot)
+            .map_err(ParseError::OneShot),
+    }
+}
+
+/// Reads a request from disk or decodes it from base64. Public so the driver
+/// can decode once and reuse the JSON across multiple parse attempts; the
+/// internal `load_request` and `load_mxc_request` use it too.
+pub fn decode_request_input(
+    input: &str,
+    logger: &mut Logger,
+    is_base64: bool,
+) -> Result<String, WxcError> {
+    if is_base64 {
         let bytes = base64_decode(input).map_err(|_| {
             let msg = "Failed to decode base64 configuration";
             logger.log_line(msg);
@@ -287,9 +398,8 @@ pub fn load_request(
             let msg = "Base64 decoded content is not valid UTF-8";
             logger.log_line(msg);
             WxcError::ConfigParse(msg.to_string())
-        })?
+        })
     } else {
-        // Treat input as a file path
         if !std::path::Path::new(input).exists() {
             let _ = write!(logger, "Configuration file not found: {}", input);
             return Err(WxcError::ConfigParse(format!(
@@ -300,15 +410,8 @@ pub fn load_request(
         fs::read_to_string(input).map_err(|e| {
             let _ = write!(logger, "Failed to open configuration file: {}", input);
             WxcError::ConfigParse(format!("Failed to read configuration file: {}", e))
-        })?
-    };
-
-    let raw: RawConfig = serde_json::from_str(&json_str).map_err(|e| {
-        logger.log_line("Error parsing JSON");
-        WxcError::ConfigParse(format!("JSON parse error: {}", e))
-    })?;
-
-    convert_raw_config(raw, logger)
+        })
+    }
 }
 
 // ---------- Cross-field validation ----------
@@ -403,43 +506,65 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
 // ---------- Conversion from raw JSON to domain model ----------
 
 fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
+    convert_raw_config_inner(raw, logger, true)
+}
+
+// `require_process = false` allows state-aware non-exec phases to omit the
+// `process` block entirely; those phases leave `script_code` / `working_directory`
+// / `script_timeout` / `env` at their defaults and never read them.
+fn convert_raw_config_inner(
+    raw: RawConfig,
+    logger: &mut Logger,
+    require_process: bool,
+) -> Result<CodexRequest, WxcError> {
     // New top-level fields
     let schema_version = raw.version.unwrap_or_default();
     let container_id = raw.container_id.unwrap_or_default();
     let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
 
-    // Process section is required
-    let process = raw
-        .process
-        .ok_or_else(|| WxcError::ConfigParse("'process' section is required".into()))?;
+    // Process section: required for one-shot and for state-aware exec; absent
+    // is allowed for state-aware non-exec phases (require_process == false).
+    let (script_code, working_directory, script_timeout, env) = match raw.process {
+        Some(process) => {
+            let script_code = match process.command_line {
+                Some(s) if !s.is_empty() => s,
+                Some(_) if require_process => {
+                    logger.log_line("process.commandLine cannot be empty");
+                    return Err(WxcError::ConfigParse(
+                        "process.commandLine cannot be empty".to_string(),
+                    ));
+                }
+                None if require_process => {
+                    logger.log_line("Missing required field: process.commandLine");
+                    return Err(WxcError::ConfigParse(
+                        "Missing required field: process.commandLine".to_string(),
+                    ));
+                }
+                _ => String::new(),
+            };
 
-    let script_code = match process.command_line {
-        Some(s) if !s.is_empty() => s,
-        Some(_) => {
-            logger.log_line("process.commandLine cannot be empty");
+            // Null bytes can be used to hide malicious payloads from audit logs or
+            // other inspection.
+            if script_code.contains('\0') {
+                return Err(WxcError::ConfigParse(
+                    "process.commandLine must not contain null bytes".to_string(),
+                ));
+            }
+
+            (
+                script_code,
+                process.cwd.unwrap_or_default(),
+                process.timeout.unwrap_or(0),
+                process.env.unwrap_or_default(),
+            )
+        }
+        None if require_process => {
             return Err(WxcError::ConfigParse(
-                "process.commandLine cannot be empty".to_string(),
+                "'process' section is required".into(),
             ));
         }
-        None => {
-            logger.log_line("Missing required field: process.commandLine");
-            return Err(WxcError::ConfigParse(
-                "Missing required field: process.commandLine".to_string(),
-            ));
-        }
+        None => (String::new(), String::new(), 0, Vec::new()),
     };
-
-    // Script should not have embedded null bytes
-    // Null bytes can be used to hide malicious payloads from audit logs or other inspection
-    if script_code.contains('\0') {
-        return Err(WxcError::ConfigParse(
-            "process.commandLine must not contain null bytes".to_string(),
-        ));
-    }
-
-    let working_directory = process.cwd.unwrap_or_default();
-    let script_timeout = process.timeout.unwrap_or(0);
-    let env = process.env.unwrap_or_default();
 
     // Containment backend selection
     let containment = match raw.containment.as_deref() {
@@ -450,9 +575,10 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
         Some("vm") => ContainmentBackend::Vm,
         Some("microvm") => ContainmentBackend::MicroVm,
         Some("isolation_session") => ContainmentBackend::IsolationSession,
+        Some("macos_sandbox") => ContainmentBackend::MacosSandbox,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', or 'microvm')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', or 'macos_sandbox')",
                 other
             );
             logger.log_line(&msg);
@@ -663,11 +789,29 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
             }
             config
         });
+        let macos_sandbox = raw_exp.macos_sandbox.map(|raw_sb| {
+            let mode = match raw_sb.mode.as_deref() {
+                None | Some("exec") => MacosSandboxMode::Exec,
+                Some("inproc") => MacosSandboxMode::Inproc,
+                Some(other) => {
+                    logger.log_line(&format!(
+                        "Unknown macos_sandbox mode '{}', defaulting to 'exec'",
+                        other
+                    ));
+                    MacosSandboxMode::Exec
+                }
+            };
+            MacosSandboxConfig {
+                mode,
+                profile_override: raw_sb.profile_override,
+            }
+        });
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
             isolation_session,
+            macos_sandbox,
         }
     } else {
         ExperimentalConfig::default()
@@ -706,6 +850,74 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
     })
 }
 
+fn convert_raw_state_aware(
+    raw: RawStateAwareRequest,
+    logger: &mut Logger,
+) -> Result<ParsedStateAwareRequest, WxcError> {
+    let phase = Phase::from_wire(&raw.phase).map_err(|e| {
+        let msg = e.message.clone();
+        logger.log_line(&msg);
+        WxcError::ConfigParse(msg)
+    })?;
+
+    let containment = match raw.containment.as_deref() {
+        None => None,
+        Some(s) => Some(parse_containment_str(s, logger)?),
+    };
+
+    // Build a RawConfig surrogate so the inner CodexRequest is populated by the
+    // same conversion path one-shot uses for cross-cutting wire fields.
+    let surrogate = RawConfig {
+        version: raw.version,
+        container_id: None,
+        platform: None,
+        process: raw.process,
+        lifecycle: None,
+        containment: raw.containment,
+        app_container: None,
+        lxc: None,
+        filesystem: raw.filesystem,
+        network: raw.network,
+        ui: raw.ui,
+        // The state-aware experimental block has a different shape from the
+        // one-shot RawExperimental; it is preserved separately on
+        // ParsedStateAwareRequest as raw JSON.
+        experimental: None,
+    };
+
+    let require_process = phase == Phase::Exec;
+    let request = convert_raw_config_inner(surrogate, logger, require_process)?;
+
+    Ok(ParsedStateAwareRequest {
+        request,
+        phase,
+        containment,
+        sandbox_id: raw.sandbox_id,
+        experimental_raw: raw.experimental,
+    })
+}
+
+fn parse_containment_str(s: &str, logger: &mut Logger) -> Result<ContainmentBackend, WxcError> {
+    match s {
+        "appcontainer" => Ok(ContainmentBackend::AppContainer),
+        "windows_sandbox" => Ok(ContainmentBackend::WindowsSandbox),
+        "wslc" => Ok(ContainmentBackend::Wslc),
+        "lxc" => Ok(ContainmentBackend::Lxc),
+        "vm" => Ok(ContainmentBackend::Vm),
+        "microvm" => Ok(ContainmentBackend::MicroVm),
+        "isolation_session" => Ok(ContainmentBackend::IsolationSession),
+        "macos_sandbox" => Ok(ContainmentBackend::MacosSandbox),
+        other => {
+            let msg = format!(
+                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', or 'macos_sandbox')",
+                other
+            );
+            logger.log_line(&msg);
+            Err(WxcError::ConfigParse(msg))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,6 +926,113 @@ mod tests {
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
+    }
+
+    fn load_mxc(json: &str) -> Result<MxcRequest, ParseError> {
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        load_mxc_request(&encoded, &mut logger, true)
+    }
+
+    #[test]
+    fn one_shot_routes_via_load_mxc_request() {
+        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::OneShot(req) => assert_eq!(req.script_code, "echo hello"),
+            MxcRequest::StateAware(_) => panic!("expected one-shot"),
+        }
+    }
+
+    #[test]
+    fn state_aware_provision_request_routes_to_state_aware_arm() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "filesystem": {"readwritePaths": ["C:\\workspace"]}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => {
+                assert_eq!(p.phase, Phase::Provision);
+                assert_eq!(p.containment, Some(ContainmentBackend::IsolationSession));
+                assert!(p.sandbox_id.is_none());
+                assert!(p.experimental_raw.is_none());
+                assert_eq!(p.request.policy.readwrite_paths, vec!["C:\\workspace"]);
+                // Non-exec phase: process-related fields stay default.
+                assert!(p.request.script_code.is_empty());
+            }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_start_request_carries_sandbox_id_and_experimental() {
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": {
+                "isolation_session": {"start": {"configurationId": "small"}}
+            }
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => {
+                assert_eq!(p.phase, Phase::Start);
+                assert_eq!(p.sandbox_id.as_deref(), Some("iso:abcd1234"));
+                assert!(p.experimental_raw.is_some());
+            }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_exec_request_requires_command_line() {
+        let json = r#"{
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234",
+            "process": {"commandLine": "echo hello"}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => {
+                assert_eq!(p.phase, Phase::Exec);
+                assert_eq!(p.request.script_code, "echo hello");
+            }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_exec_without_process_is_rejected() {
+        // Exec phase still requires the process.commandLine wire field.
+        let json = r#"{ "phase": "exec", "sandboxId": "iso:abcd1234" }"#;
+        let r = load_mxc(json);
+        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+    }
+
+    #[test]
+    fn state_aware_unknown_phase_is_rejected() {
+        let json = r#"{"phase": "teleport"}"#;
+        let r = load_mxc(json);
+        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+    }
+
+    #[test]
+    fn state_aware_unknown_containment_is_rejected() {
+        let json = r#"{"phase": "provision", "containment": "totally_made_up"}"#;
+        let r = load_mxc(json);
+        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+    }
+
+    #[test]
+    fn state_aware_provision_works_with_no_containment() {
+        // Containment is optional at parse time; the dispatcher enforces it
+        // (provision needs containment, non-provision uses sandbox_id prefix).
+        let json = r#"{"phase": "provision"}"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => {
+                assert_eq!(p.phase, Phase::Provision);
+                assert!(p.containment.is_none());
+            }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
     }
 
     #[test]
@@ -1889,5 +2208,72 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.experimental.isolation_session.is_none());
+    }
+
+    #[test]
+    fn containment_macos_sandbox_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::MacosSandbox);
+    }
+
+    #[test]
+    fn macos_sandbox_config_defaults() {
+        // When no experimental.macos_sandbox block is provided the parser
+        // leaves it unset (None) — runners should fall back to defaults.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.macos_sandbox.is_none());
+    }
+
+    #[test]
+    fn macos_sandbox_config_inproc_mode() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox", "experimental": {"macos_sandbox": {"mode": "inproc"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req
+            .experimental
+            .macos_sandbox
+            .expect("experimental.macos_sandbox should be populated");
+        assert_eq!(cfg.mode, crate::models::MacosSandboxMode::Inproc);
+    }
+
+    #[test]
+    fn macos_sandbox_config_unknown_mode_defaults_to_exec() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox", "experimental": {"macos_sandbox": {"mode": "bogus"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req
+            .experimental
+            .macos_sandbox
+            .expect("experimental.macos_sandbox should be populated");
+        assert_eq!(cfg.mode, crate::models::MacosSandboxMode::Exec);
+    }
+
+    #[test]
+    fn macos_sandbox_profile_override_passed_through() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox", "experimental": {"macos_sandbox": {"profileOverride": "(version 1)(deny default)"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req
+            .experimental
+            .macos_sandbox
+            .expect("experimental.macos_sandbox should be populated");
+        assert_eq!(
+            cfg.profile_override.as_deref(),
+            Some("(version 1)(deny default)")
+        );
     }
 }

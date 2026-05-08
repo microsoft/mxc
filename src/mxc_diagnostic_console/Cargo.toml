@@ -1,0 +1,16 @@
+[package]
+name = "mxc_diagnostic_console"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mxc-diagnostic-console"
+path = "src/main.rs"
+
+[dependencies]
+windows.workspace = true
+windows-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+wxc_common.workspace = true

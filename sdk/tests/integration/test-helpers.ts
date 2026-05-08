@@ -7,9 +7,11 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import semver from 'semver';
+import { createRequire } from 'node:module';
+import * as sdkNamespace from '@microsoft/mxc-sdk';
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-export const sdk = require('@microsoft/mxc-sdk');
+const require = createRequire(import.meta.url);
+export const sdk = sdkNamespace;
 
 // Schema versions
 

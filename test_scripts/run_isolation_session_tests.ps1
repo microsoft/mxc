@@ -15,25 +15,25 @@
       and stdout content
     - Reports pass/fail summary
 
-    This script must run INTERACTIVELY on the test host. The IsoEnvBroker
-    cohort check rejects network-logon tokens, so PSSession-driven
-    invocations fail with Access Denied. Copy wxc-exec.exe, the test
-    configs, and this script to the host, then run it directly in
+    This script must run INTERACTIVELY on the test host. The OS-side service
+    calling-process identity check rejects network-logon tokens, so
+    PSSession-driven invocations fail with Access Denied. Copy wxc-exec.exe,
+    the test configs, and this script to the host, then run it directly in
     cmd.exe or PowerShell on that host.
 
     Automated configs (asserted by this script):
-      - isolation_session_hello.json — env vars + working dir + agent name
-      - isolation_session_exit42.json — exit code propagation
-      - isolation_session_stderr.json — separate stderr in non-ConPTY mode
-      - isolation_session_stdout_stderr_interleaved.json — interleaved streams
-      - isolation_session_timeout.json — broker terminates with exit code 1
+      - isolation_session_hello.json --env vars + working dir + agent name
+      - isolation_session_exit42.json --exit code propagation
+      - isolation_session_stderr.json --separate stderr in non-ConPTY mode
+      - isolation_session_stdout_stderr_interleaved.json --interleaved streams
+      - isolation_session_timeout.json --OS-side timeout terminates with exit code 1
 
-    Manual smoke configs (NOT asserted — observe the output yourself):
-      - isolation_session_streaming_smoke.json — output appears with delays
+    Manual smoke configs (NOT asserted --observe the output yourself):
+      - isolation_session_streaming_smoke.json --output appears with delays
         rather than a burst at exit; verifies Commit 1 streaming.
         Run from cmd.exe directly (not redirected) so wxc-exec sees a TTY:
             wxc-exec.exe --experimental isolation_session_streaming_smoke.json
-      - isolation_session_powershell_interactive.json — launches
+      - isolation_session_powershell_interactive.json --launches
         powershell.exe in the isolation session; type commands at the prompt
         (e.g. `Get-Date`, `whoami`, `exit 7`) and verify input forwarding +
         ConPTY rendering + exit-code propagation. Requires a real cmd.exe
@@ -64,7 +64,7 @@ if (-not $ConfigDir) {
     $ConfigDir = Join-Path $RepoRoot "test_configs"
 }
 
-# Locate wxc-exec.exe — explicit path > host-arch target dir > other-arch
+# Locate wxc-exec.exe --explicit path > host-arch target dir > other-arch
 # target dir > default release dir. Detect the host arch so we look for the
 # matching build first, but also probe the other Windows target so a
 # cross-built binary is still discoverable.
@@ -109,6 +109,12 @@ Write-Host "Binary: $WxcExec" -ForegroundColor Gray
 Write-Host "Configs: $ConfigDir`n" -ForegroundColor Gray
 
 # Helper: run one IsolationSession test config.
+#
+# The wxc-exec invocation is wrapped in try-catch so an unexpected
+# PowerShell error (e.g., a parameter-binding mistake) fails THIS test
+# only -- the suite keeps going. The output checks use String.Contains()
+# rather than -match/-notmatch to avoid the array-return edge case those
+# operators have when the LHS is unexpectedly null or array-typed.
 function Run-IsolationSessionTest {
     param(
         [string]$ConfigFile,
@@ -125,11 +131,21 @@ function Run-IsolationSessionTest {
 
     Write-Host "  $ConfigFile ... " -NoNewline
 
-    $prevPref = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $output = & $WxcExec --experimental $configPath 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
-    $ErrorActionPreference = $prevPref
+    $output = ""
+    $exitCode = -1
+    try {
+        $prevPref = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $output = & $WxcExec --experimental $configPath 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevPref
+    } catch {
+        Write-Host "FAIL" -ForegroundColor Red
+        Write-Host "    Reason: invocation threw: $($_.Exception.Message)" -ForegroundColor Red
+        return @{ Name = $ConfigFile; Pass = $false; Skipped = $false; Reason = "invocation threw: $($_.Exception.Message)" }
+    }
+
+    $output = if ($null -eq $output) { "" } else { [string]$output }
 
     $pass = $true
     $reason = ""
@@ -141,7 +157,7 @@ function Run-IsolationSessionTest {
 
     if ($pass -and $OutputContains) {
         foreach ($needle in $OutputContains) {
-            if ($output -notmatch [regex]::Escape($needle)) {
+            if (-not $output.Contains($needle)) {
                 $pass = $false
                 $reason = "Output missing '$needle'"
                 break
@@ -163,10 +179,46 @@ function Run-IsolationSessionTest {
     return @{ Name = $ConfigFile; Pass = $pass; Skipped = $false; Reason = $reason }
 }
 
+# Creates a directory with a locked-down DACL: inheritance disabled, ACEs
+# reset to current user + SYSTEM + Administrators (FullControl). Used by
+# the filesystem-policy test so the agent user has no inherited access by
+# default -- the test then proves the share_folders grant is what enables
+# read access.
+function Setup-LockedDownTestDir {
+    param([string]$Path)
+
+    New-Item -Path $Path -ItemType Directory -Force | Out-Null
+
+    $acl = Get-Acl $Path
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.Access | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
+
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $inherit = "ContainerInherit,ObjectInherit"
+    foreach ($principal in @($currentUser, "SYSTEM", "Administrators")) {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    $principal, "FullControl", $inherit, "None", "Allow")))
+    }
+    Set-Acl -Path $Path -AclObject $acl
+}
+
 [System.Collections.ArrayList]$results = @()
 
+# Filesystem-policy test scaffolding: a locked-down dir the test expects
+# the agent to read via a readwritePaths grant.
+$FsTestRoot = 'C:\mxc_share_test_oneshot'
+$FsMarkerContent = 'oneshot-marker-content'
+
+try {
+
 Write-Host "--- Tests ---" -ForegroundColor Cyan
+# Setup for isolation_session_hello.json: cwd must exist before agent start.
+New-Item -Path 'C:\mxc_workdir_test' -ItemType Directory -Force | Out-Null
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
+    -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test", "-IEB-")))
+# Same shape as hello.json but with experimental.isolation_session.configurationId=medium.
+# Proves the Medium config-id end-to-ends through the one-shot path on the target build.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_hello_medium.json" `
     -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test", "-IEB-")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
@@ -179,10 +231,22 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stderr.json" `
 # must appear in the captured output (proves streams aren't crossed or dropped mid-run).
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_interleaved.json" `
     -OutputContains @("OUT_A", "ERR_A", "OUT_B", "ERR_B", "OUT_C")))
-# Timeout: ping runs ~30s; broker timer set to 1500ms forces TerminateProcess(handle, 1)
-# (verified at IsolationSessionWorkerProcess.cpp:153-170 in the OS repo). Exit code = 1.
+# Timeout: ping runs ~30s; OS-side per-process timer set to 1500ms forces
+# the agent to exit with code 1.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
     -ExpectedExit 1))
+# Filesystem policy: provision the agent with a readwritePaths grant on a
+# locked-down host dir that has a pre-populated marker; agent reads it.
+# The `type` exit being 0 + the marker content in stdout proves the grant
+# was applied and the agent has read access.
+Setup-LockedDownTestDir $FsTestRoot
+$FsMarkerContent | Set-Content -Path (Join-Path $FsTestRoot 'marker.txt') -NoNewline
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_filesystem.json" `
+    -OutputContains @($FsMarkerContent)))
+
+} finally {
+    Remove-Item -Recurse -Force $FsTestRoot -ErrorAction SilentlyContinue
+}
 
 # Summary
 $passed = ($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count

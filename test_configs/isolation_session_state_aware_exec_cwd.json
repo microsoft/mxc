@@ -1,0 +1,9 @@
+{
+    "phase": "exec",
+    "sandboxId": "{{SANDBOX_ID}}",
+    "process": {
+        "commandLine": "cd",
+        "cwd": "C:\\Windows",
+        "timeout": 30000
+    }
+}

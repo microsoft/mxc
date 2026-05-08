@@ -69,7 +69,7 @@ extends:
           displayName: 'Publish to NPM'
           inputs:
             connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
-            usemanagedidentity: true
+            usemanagedidentity: false
             keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
             authcertname: ${{ parameters.ESRPInfo.authCertName }}
             signcertname: ${{ parameters.ESRPInfo.signCertName }}

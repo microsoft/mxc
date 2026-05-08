@@ -72,7 +72,8 @@ node --test dist/cli.test.js
 # Local PowerShell helpers — run from repo root, require built binaries
 test_scripts\run_test_configs.ps1            # All test configs via wxc_test_driver
 test_scripts\run_basicac_test.ps1            # Single AppContainer test
-test_scripts\run_isolation_session_tests.ps1 # IsolationSession E2E (requires IsoEnvBroker host)
+test_scripts\run_isolation_session_tests.ps1                # IsolationSession one-shot E2E (requires host with the OS-side IsoSessionOps service)
+test_scripts\run_isolation_session_state_aware_tests.ps1    # IsolationSession state-aware lifecycle E2E (multi-invocation provision/start/exec/stop/deprovision, same host requirements)
 test_scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
 
 # E2E test crate — Rust executor integration tests (from src/)
@@ -94,7 +95,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 | BaseContainer (OS sandbox API) | `wxc-exec.exe` | Windows | `base_container_runner.rs` — calls `Experimental_CreateProcessInSandbox` via FlatBuffer |
 | Windows Sandbox | `wxc-exec.exe` | Windows | `windows_sandbox_runner.rs` |
 | MicroVM (NanVix) | `wxc-exec.exe` | Windows | `nanvix_runner.rs` — feature-gated behind `microvm` |
-| IsolationSession | `wxc-exec.exe` | Windows | `isolation_session_runner.rs` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
+| IsolationSession | `wxc-exec.exe` | Windows | `isolation_session_runner.rs` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Supports both one-shot (single-invocation lifecycle, via `ScriptRunner`) and state-aware (multi-invocation provision/start/exec/stop/deprovision, via `StatefulSandboxBackend`) modes. Honors `readwritePaths` and `readonlyPaths` at provision via `ShareFolderBatchAsync` (rejects `deniedPaths` since the API has no Deny ACE primitive); filesystem policy is immutable post-provision and rejected at later phases. Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
 | LXC | `lxc-exec` | Linux | `lxc/src/main.rs` + `lxc_common/` |
 
 ### Config flow
@@ -124,7 +125,10 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
 - `docs/lxc-backend.md` — LXC container backend details
 - `docs/windows-sandbox.md` / `docs/windows-sandbox-reference.md` — Windows Sandbox backend
-- `docs/isolation-session/initial-bringup-plan.md` — IsolationSession backend (experimental, isolated user account per execution via the OS-side IsoEnvBroker)
+- `docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md` — state-aware sandbox lifecycle API (cross-backend wire format, Rust `StatefulSandboxBackend` trait, and dispatcher contract)
+- `docs/state-aware-lifecycle/mxc-state-aware-sandbox-api-overview.md` — companion overview to the full state-aware design
+- `docs/isolation-session/initial-bringup-plan.md` — IsolationSession backend, one-shot bringup (experimental, isolated user account per execution via the OS-side service)
+- `docs/isolation-session/state-aware-rust-initial-plan.md` — IsolationSession state-aware lifecycle, Rust-layer initial plan (per-phase config / metadata, policy honor matrix, idempotence, concurrency, error mapping)
 - `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
 
 ## Key Conventions
@@ -268,3 +272,37 @@ This section is **required**.
 - For feature requests, explain the *why* (user problem) before the *how* (implementation)
 - Reference relevant source files, config fields, or docs when applicable
 - If any required field is unknown, **ask for the information rather than fabricating content**
+
+## Creating Pull Requests
+
+Pull requests must follow the template in `.github/PULL_REQUEST_TEMPLATE.md`. Complete all checklist items and add content below the separator (`-----`).
+
+### Required structure
+
+Every PR body should include:
+
+1. **Template checklist** — check the boxes that apply (CLA, related issue, copilot-instructions update).
+2. **Summary** — a brief description of what the PR does and why.
+3. **Issue references** — if the PR is intended to close an issue, use GitHub closing keywords (`Closes #NNN`, `Fixes #NNN`, or `Resolves #NNN`). If the PR is related but does not close an issue, use an unordered list under a "Related Issues" heading (`- #NNN`).
+
+### Example
+
+```markdown
+- [x] I have signed the [Contributor License Agreement](https://opensource.microsoft.com/cla/).
+- [x] This pull request is related to an issue.
+- [ ] If this PR changes build commands, project architecture, or key conventions, I have updated [`.github/copilot-instructions.md`](.github/copilot-instructions.md).
+
+-----
+
+## Summary
+
+Brief description of the change.
+
+Closes #42
+```
+
+### Guidelines
+
+- One PR should address one issue or concern. Avoid bundling unrelated changes.
+- If the PR updates build commands, project architecture, or key conventions, update `.github/copilot-instructions.md` in the same PR.
+- Draft PRs are appropriate for work-in-progress that needs early feedback.

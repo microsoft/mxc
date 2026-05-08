@@ -4,7 +4,7 @@ import assert from 'node:assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { FileLogger } from '../../src/logger';
+import { FileLogger } from '../../src/logger.js';
 
 describe('FileLogger', () => {
   let tmpDir: string;

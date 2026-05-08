@@ -1,13 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import * as pty from 'node-pty';
+import pty from 'node-pty';
 import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, ContainerConfig, ContainmentType } from './types';
-import { prepareSpawn } from './helper';
+import { SandboxPolicy, ContainerConfig, ContainmentType } from './types.js';
+import { prepareSpawn, diagLogVersion } from './helper.js';
+import { diagLog } from './diagnostic.js';
 
 const SUPPORTED_VERSION = '0.5.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';
@@ -206,6 +207,7 @@ export function createConfigFromPolicy(
     containment: ContainmentType = "process",
     containerName?: string,
 ): ContainerConfig {
+    diagLogVersion();
     validatePolicyVersion(policy.version);
 
     const platform = os.platform();
@@ -227,6 +229,7 @@ export function createConfigFromPolicy(
 
     // Microvm: delegate to dedicated builder
     if (containment === 'microvm') {
+        diagLog(`createConfigFromPolicy: containment=microvm, id=${containerId}`);
         return buildMicroVmConfig(config, policy);
     }
 
@@ -277,8 +280,10 @@ export function createConfigFromPolicy(
 
     if (containment === 'process') {
         if (platform === 'linux') {
+            diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
             return buildLinuxProcessConfig(config, containerId);
         }
+        diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
         return buildProcessBaseContainerConfig(config, policy, containerId);
     }
 
@@ -375,6 +380,8 @@ function spawnWithConfig(
       cwd: workingDirectory || process.cwd(),
       env: env ?? options.ptyOptions?.env,
     };
+
+    diagLog(`spawnWithConfig: spawning PTY process, cwd=${ptyOpts.cwd}`);
 
     const ptyProcess = pty.spawn(executablePath, args, ptyOpts);
 
@@ -496,6 +503,8 @@ export function spawnSandboxFromConfig(
       throw err;
     }
   }
+
+  diagLogVersion();
   return spawnWithConfig(config, options, workingDirectory, env);
 }
 

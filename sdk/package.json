@@ -1,13 +1,21 @@
 {
   "name": "@microsoft/mxc-sdk",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "description": "TypeScript SDK for MXC (Microsoft eXecution Containers)",
-  "main": "dist/index.js",
+  "type": "module",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "bin/",
     "dist/",
-    "LICENSE.md"
+    "LICENSE.md",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc",
@@ -40,10 +48,6 @@
     "semver": "^7.7.4"
   },
   "engines": {
-    "node": ">=16.0.0"
-  },
-  "os": [
-    "win32",
-    "linux"
-  ]
+    "node": ">=18.0.0"
+  }
 }

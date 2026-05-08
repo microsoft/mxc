@@ -16,41 +16,54 @@
 use std::fmt::Write;
 use std::io::IsTerminal;
 
+use serde::Serialize;
+
+use crate::id::mint_random_token;
 use crate::logger::Logger;
-use crate::models::{CodexRequest, IsolationSessionConfigurationId, NetworkPolicy, ScriptResponse};
+use crate::models::{
+    CodexRequest, IsolationSessionConfig, IsolationSessionConfigurationId, NetworkPolicy,
+    ScriptResponse,
+};
+use crate::mxc_error::MxcError;
 use crate::process_util::{
-    create_relay_thread, create_relay_thread_with_stop, ConsoleModeRestorer, OwnedHandle,
-    PipeRelayParams, PipeRelayWithStopParams,
+    create_relay_thread, create_relay_thread_with_stop, get_local_console_size,
+    ConsoleModeRestorer, OwnedHandle, PipeRelayParams, PipeRelayWithStopParams,
 };
 use crate::script_runner::ScriptRunner;
+use crate::state_aware_backend::{
+    DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
+};
 use isolation_session_bindings::bindings::{
-    IsoSessionConfigId, IsoSessionError, IsoSessionOps, IsoSessionProcess,
-    IsoSessionProcessOptions, IsoSessionProcessResult, IsoSessionResult, IsoSessionUserResult,
+    IsoSessionConfigId, IsoSessionError, IsoSessionFolderSharingAccessLevel,
+    IsoSessionFolderSharingRequest, IsoSessionFolderSharingResult, IsoSessionFolderSharingStatus,
+    IsoSessionOps, IsoSessionProcess, IsoSessionProcessOptions, IsoSessionProcessResult,
+    IsoSessionResult, IsoSessionUserResult,
 };
 use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, HANDLE, REGDB_E_CLASSNOTREG};
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows_collections::IVectorView;
 use windows_core::{HSTRING, PCWSTR};
 
 // -- Identifiers -------------------------------------------------------------
 
-/// Cohort registration ID used with the `IsoSessionOps` wrapper.
+/// Registration ID used with the `IsoSessionOps` wrapper.
 ///
-/// The wrapper hardcodes `L"regid"` internally for every agent-name-keyed op
-/// (`ApiIsoSessionOps.cpp` lines 80, 90, 106, 115, 132, 187 in the OS repo),
-/// so callers must register with the literal `"regid"` or subsequent calls
-/// hit the wrong cohort.
+/// The `IsoSessionOps` wrapper hardcodes `L"regid"` internally for every
+/// agent-name-keyed op, so callers must register with this exact literal
+/// or subsequent calls hit the wrong registration.
 const REGISTRATION_ID: &str = "regid";
 
-/// Provision identifier scoping the agent user across the lifecycle.
+/// Default provisionId used by the one-shot backend path. State-aware
+/// callers mint their own dynamic ids (e.g. `wxc-<8-hex>`) instead.
 ///
-/// Reused as the `agentName` parameter on every subsequent op — the wrapper
-/// aliases agentName to provisionId at the COM layer (per the comment in
-/// `CommandSession.cpp:64` in the OS repo, `IsoSessionOps` callers pass
-/// `provisionId` where the IDL says `agentName`).
-const PROVISION_ID: &str = "wxc-provid";
+/// `provisionId` scopes the agent user across the lifecycle and is reused as
+/// the `agentName` parameter on every subsequent op — the `IsoSessionOps`
+/// wrapper aliases `agentName` to this `provisionId` at the COM layer, so
+/// callers pass `provisionId` where the IDL says `agentName`.
+pub const DEFAULT_PROVISION_ID: &str = "wxc-provid";
 
 impl From<IsolationSessionConfigurationId> for IsoSessionConfigId {
     fn from(value: IsolationSessionConfigurationId) -> Self {
@@ -75,9 +88,14 @@ pub enum IsolationSessionError {
     /// not available on this host (DLL not registered or
     /// `Feature_IsoBrokerSessionApis` disabled).
     ServiceUnavailable(String),
-    /// A broker-side lifecycle step (register / provision / start / exec /
+    /// An OS-side lifecycle step (register / provision / start / exec /
     /// stop / deprovision / unregister) returned a failure.
     Lifecycle(String),
+    /// The OS-side service could not find the provisionId — the sandbox
+    /// has been deprovisioned (or never provisioned in this user's
+    /// session) and any further state-aware op against it is a stale-id
+    /// reference. Surfaces as `MxcError::StaleId` at the dispatch boundary.
+    Stale(String),
 }
 
 impl std::fmt::Display for IsolationSessionError {
@@ -88,6 +106,7 @@ impl std::fmt::Display for IsolationSessionError {
                 write!(f, "Isolation Session service unavailable: {}", msg)
             }
             Self::Lifecycle(msg) => write!(f, "Isolation Session lifecycle error: {}", msg),
+            Self::Stale(msg) => write!(f, "Isolation Session stale id: {}", msg),
         }
     }
 }
@@ -112,10 +131,27 @@ pub(crate) const ERR_NETWORK_POLICY: &str =
 pub(crate) const ERR_PROXY_POLICY: &str =
     "network proxy is not supported by the isolation session backend";
 
-/// Validates that the request does not contain policy fields unsupported by
-/// the isolation session backend. Returns `Ok(())` if valid, or a
-/// `Policy`-variant error on rejection.
-pub(crate) fn validate_policy(request: &CodexRequest) -> Result<(), IsolationSessionError> {
+/// Validates the request for the provision phase. Filesystem `rw` and
+/// `ro` paths are honored at provision (applied via `share_folders`);
+/// `denied_paths` is rejected because the underlying API has no
+/// equivalent primitive. Network and proxy policy are always rejected.
+pub(crate) fn validate_provision_policy(
+    request: &CodexRequest,
+) -> Result<(), IsolationSessionError> {
+    if !request.policy.denied_paths.is_empty() {
+        return Err(IsolationSessionError::Policy(
+            ERR_FILESYSTEM_POLICY.to_string(),
+        ));
+    }
+    validate_network_and_proxy_policy(request)
+}
+
+/// Validates the request for any non-provision phase (start / exec / stop
+/// / deprovision). All filesystem fields are rejected because filesystem
+/// policy is bound to provision and immutable thereafter.
+pub(crate) fn validate_post_provision_policy(
+    request: &CodexRequest,
+) -> Result<(), IsolationSessionError> {
     if !request.policy.readwrite_paths.is_empty()
         || !request.policy.readonly_paths.is_empty()
         || !request.policy.denied_paths.is_empty()
@@ -124,6 +160,12 @@ pub(crate) fn validate_policy(request: &CodexRequest) -> Result<(), IsolationSes
             ERR_FILESYSTEM_POLICY.to_string(),
         ));
     }
+    validate_network_and_proxy_policy(request)
+}
+
+/// Network and proxy validation is identical at every phase: the backend
+/// honors neither.
+fn validate_network_and_proxy_policy(request: &CodexRequest) -> Result<(), IsolationSessionError> {
     if !request.policy.allowed_hosts.is_empty()
         || !request.policy.blocked_hosts.is_empty()
         || request.policy.default_network_policy != NetworkPolicy::Allow
@@ -156,11 +198,9 @@ pub(crate) const REDIRECT_STDERR: u32 = 0x4;
 ///   the same way).
 /// - Stdout is always redirected.
 /// - Stderr is redirected ONLY in non-interactive mode. In ConPTY mode the
-///   broker merges stderr into stdout and refuses to populate the stderr
-///   handle (predicate at `IsolationSessionWorkerProcess.cpp:309-310` in the
-///   OS repo: `optStderrHandleResult && !m_pseudoConsole && m_stderrPipeRead`).
-///   Setting `RedirectStandardError(true)` in ConPTY mode is benign but the
-///   handle returns 0 — so we just don't ask for it.
+///   OS-side service merges stderr into stdout and does not populate the
+///   stderr handle. Setting `RedirectStandardError(true)` in ConPTY mode
+///   is benign but the handle returns 0 — so we just don't ask for it.
 pub(crate) fn compute_redirect_flags(interactive: bool) -> u32 {
     let mut flags = REDIRECT_STDIN | REDIRECT_STDOUT;
     if !interactive {
@@ -186,11 +226,11 @@ pub(crate) struct ProcessOptions {
     pub env_vars: Vec<(String, String)>,
     /// Bitfield of I/O redirect flags (`REDIRECT_STDIN | REDIRECT_STDOUT | REDIRECT_STDERR`).
     pub redirect_flags: u32,
-    /// Whether to ask the broker to set up a ConPTY in the isolation session
-    /// (`InteractiveConsole = true`). Decided at runtime by the runner based
-    /// on `std::io::stdout().is_terminal()`. `build_process_options` returns
-    /// `false` as a safe default; the runner overwrites before passing to
-    /// `create_process`.
+    /// Whether to ask the OS-side service to set up a ConPTY in the
+    /// isolation session (`InteractiveConsole = true`). Decided at runtime
+    /// by the runner based on `std::io::stdout().is_terminal()`.
+    /// `build_process_options` returns `false` as a safe default; the
+    /// runner overwrites before passing to `create_process`.
     pub interactive: bool,
 }
 
@@ -265,8 +305,18 @@ pub(crate) fn check_service_available_and_activate() -> Result<IsoSessionOps, Is
 
 // -- Helper: structured error checks -----------------------------------------
 
-/// Formats an `IsoSessionError` (the WinRT result type) into a lifecycle
-/// error string with HRESULT, message, and remediation hint where present.
+/// `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` — returned by the OS-side service's
+/// `AgentManager::FindActiveAgentUserByProvisionId` when the provisionId is
+/// missing from both the in-memory cache and the persisted registry. Every
+/// non-provision lifecycle op (start / exec / stop / deprovision) goes
+/// through this lookup, so a `0x80070490` from any of them means the
+/// sandbox_id is stale.
+const ERROR_NOT_FOUND_HRESULT: u32 = 0x80070490;
+
+/// Formats an `IsoSessionError` (the WinRT result type) into a typed
+/// `IsolationSessionError`. Detects the ERROR_NOT_FOUND HRESULT and
+/// promotes it to `Stale` so callers (and ultimately the wire envelope)
+/// can return `MxcError::StaleId` for a deprovisioned sandbox_id.
 fn format_iso_error(op: &str, err: &IsoSessionError) -> IsolationSessionError {
     let msg = err.Message().map(|h| h.to_string()).unwrap_or_default();
     let code = err.Code().map(|h| h.0 as u32).unwrap_or(0);
@@ -274,12 +324,14 @@ fn format_iso_error(op: &str, err: &IsoSessionError) -> IsolationSessionError {
     let suffix = if remediation.is_empty() {
         String::new()
     } else {
-        format!(" — remediation: {}", remediation)
+        format!(" -- remediation: {}", remediation)
     };
-    lifecycle_err(format!(
-        "{} failed: {} (HRESULT: {:#010x}){}",
-        op, msg, code, suffix
-    ))
+    let formatted = format!("{} failed: {} (HRESULT: {:#010x}){}", op, msg, code, suffix);
+    if code == ERROR_NOT_FOUND_HRESULT {
+        IsolationSessionError::Stale(formatted)
+    } else {
+        IsolationSessionError::Lifecycle(formatted)
+    }
 }
 
 /// Checks the `Error` property of an `IsoSessionResult` and returns
@@ -299,12 +351,124 @@ fn check_result(result: &IsoSessionResult, op: &str) -> Result<(), IsolationSess
     }
 }
 
+// -- Folder-sharing helpers --------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShareFolderFailure {
+    pub message: String,
+    pub remediation: String,
+    pub hresult: u32,
+}
+
+/// Per-path outcome from a folder-share batch. The batch result type is a
+/// COM runtime class that can't be built in unit tests; this struct is the
+/// test-friendly equivalent that aggregation logic operates on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShareFolderOutcome {
+    pub folder_path: String,
+    /// `Some` iff the per-path status was `Failed`.
+    pub failure: Option<ShareFolderFailure>,
+}
+
+/// Builds the per-path WinRT requests with rw paths first, ro paths second.
+/// A path appearing in both slices ends up read-only (the ro request is
+/// applied second and overwrites the earlier rw ACE for the same SID).
+/// Callers should keep the slices disjoint to avoid relying on this.
+pub(crate) fn build_share_folder_requests(
+    rw: &[String],
+    ro: &[String],
+) -> Vec<IsoSessionFolderSharingRequest> {
+    let mut requests = Vec::with_capacity(rw.len() + ro.len());
+    for path in rw {
+        requests.push(IsoSessionFolderSharingRequest {
+            FolderPath: HSTRING::from(path),
+            AccessLevel: IsoSessionFolderSharingAccessLevel::ReadWrite,
+        });
+    }
+    for path in ro {
+        requests.push(IsoSessionFolderSharingRequest {
+            FolderPath: HSTRING::from(path),
+            AccessLevel: IsoSessionFolderSharingAccessLevel::Read,
+        });
+    }
+    requests
+}
+
+/// Extracts MXC-internal per-path outcomes from the WinRT
+/// `IVectorView<IsoSessionFolderSharingResult>` returned by the API.
+fn extract_share_folder_outcomes(
+    results: &IVectorView<IsoSessionFolderSharingResult>,
+) -> Result<Vec<ShareFolderOutcome>, IsolationSessionError> {
+    let size = results
+        .Size()
+        .map_err(|e| lifecycle_err(format!("ShareFolderBatch results.Size: {}", e)))?;
+    let mut outcomes = Vec::with_capacity(size as usize);
+    for i in 0..size {
+        let result = results
+            .GetAt(i)
+            .map_err(|e| lifecycle_err(format!("ShareFolderBatch results.GetAt({}): {}", i, e)))?;
+        let folder_path = result
+            .FolderPath()
+            .map_err(|e| lifecycle_err(format!("ShareFolderBatch result.FolderPath: {}", e)))?
+            .to_string();
+        let status = result
+            .Status()
+            .map_err(|e| lifecycle_err(format!("ShareFolderBatch result.Status: {}", e)))?;
+        let failure = if status == IsoSessionFolderSharingStatus::Failed {
+            let err = result
+                .Error()
+                .map_err(|e| lifecycle_err(format!("ShareFolderBatch result.Error: {}", e)))?;
+            Some(ShareFolderFailure {
+                message: err.Message().map(|h| h.to_string()).unwrap_or_default(),
+                remediation: err.Remediation().map(|h| h.to_string()).unwrap_or_default(),
+                hresult: err.Code().map(|h| h.0 as u32).unwrap_or(0),
+            })
+        } else {
+            None
+        };
+        outcomes.push(ShareFolderOutcome {
+            folder_path,
+            failure,
+        });
+    }
+    Ok(outcomes)
+}
+
+/// Aggregates per-path outcomes into a single Result. Ok iff every path
+/// succeeded; otherwise a `Lifecycle` error with each failed path's
+/// message and HRESULT. The batch call does not fail as a whole on
+/// per-path errors, so this is where per-path failures become a single
+/// MXC error.
+pub(crate) fn aggregate_share_folder_outcomes(
+    outcomes: &[ShareFolderOutcome],
+) -> Result<(), IsolationSessionError> {
+    let any_failure = outcomes.iter().any(|o| o.failure.is_some());
+    if !any_failure {
+        return Ok(());
+    }
+    let mut msg = String::from("ShareFolderBatchAsync had per-path failures:");
+    for outcome in outcomes {
+        let Some(f) = &outcome.failure else {
+            continue;
+        };
+        let _ = write!(
+            msg,
+            "\n  {}: {} (HRESULT: {:#010x})",
+            outcome.folder_path, f.message, f.hresult,
+        );
+        if !f.remediation.is_empty() {
+            let _ = write!(msg, " -- remediation: {}", f.remediation);
+        }
+    }
+    Err(IsolationSessionError::Lifecycle(msg))
+}
+
 // -- IsolationSessionManager (lifecycle core) --------------------------------
 
 /// Manages the `IsoSessionOps` lifecycle. Methods map 1:1 to the granular
 /// API steps.
 pub struct IsolationSessionManager {
-    /// Cohort/registration identifier used in `RegisterApp` / `AddUserAsync`
+    /// Registration identifier used in `RegisterApp` / `AddUserAsync`
     /// / `UnregisterAppAsync`. Pegged to the literal `"regid"` per the
     /// wrapper's internal hardcode.
     registration_id: HSTRING,
@@ -318,18 +482,20 @@ pub struct IsolationSessionManager {
 }
 
 impl IsolationSessionManager {
-    /// Activates the `IsoSessionOps` factory and verifies the service is
-    /// available.
-    pub fn new() -> Result<Self, IsolationSessionError> {
+    /// Activates the `IsoSessionOps` factory, verifies the service is
+    /// available, and pegs the manager to the supplied `provisionId`.
+    /// One-shot callers pass `DEFAULT_PROVISION_ID`; state-aware callers
+    /// mint a dynamic id per provision (e.g. `wxc-<8-hex>`).
+    pub fn new(provision_id: &str) -> Result<Self, IsolationSessionError> {
         let ops = check_service_available_and_activate()?;
         Ok(Self {
             registration_id: HSTRING::from(REGISTRATION_ID),
-            provision_id: HSTRING::from(PROVISION_ID),
+            provision_id: HSTRING::from(provision_id),
             ops,
         })
     }
 
-    /// Step 0: Register the app with the broker.
+    /// Step 0: Register the app with the OS-side service.
     pub fn register_client(&self) -> Result<(), IsolationSessionError> {
         let result = self
             .ops
@@ -339,13 +505,12 @@ impl IsolationSessionManager {
     }
 
     /// Step 1: Provision an agent user. Returns the OS-assigned agent
-    /// account name (e.g., `Adib-IEB-000`) for logging only — addressing
+    /// account name (e.g., `RealUser-IEB-000`) for logging only — addressing
     /// for subsequent ops continues to use the configured `provision_id`.
     ///
     /// Note: `lifecycle.destroyOnExit` is silently ignored on this backend.
-    /// The in-proc API hardcodes `Indefinite` lifetime in `AddUserAsync`
-    /// (`IsoSessionServerClient.cpp:147` in the OS repo) and the wrapper's
-    /// `RemoveUserAsync` papers over the Indefinite-deprovision bug.
+    /// The in-proc API hardcodes `Indefinite` lifetime in `AddUserAsync`,
+    /// and `RemoveUserAsync` papers over the Indefinite-deprovision bug.
     pub fn provision_agent_user(&self) -> Result<String, IsolationSessionError> {
         let async_op = self
             .ops
@@ -367,6 +532,39 @@ impl IsolationSessionManager {
             .AgentUserName()
             .map_err(|e| lifecycle_err(format!("AddUserAsync: get AgentUserName failed: {}", e)))?;
         Ok(name.to_string())
+    }
+
+    /// Grants the agent user access to host folders. `readwrite_paths`
+    /// get read+write access, `readonly_paths` get read-only. Both apply
+    /// recursively to each subtree.
+    ///
+    /// Independent of session start: requires only that the agent user
+    /// exists (call after `provision_agent_user`, before
+    /// `deprovision_agent_user`).
+    ///
+    /// The MXC process needs `WRITE_DAC` on each target folder. On
+    /// all-success returns `Ok`; on any per-path failure returns a
+    /// `Lifecycle` error listing every failed path. Empty input on both
+    /// slices is a no-op.
+    pub fn share_folders(
+        &self,
+        readwrite_paths: &[String],
+        readonly_paths: &[String],
+    ) -> Result<(), IsolationSessionError> {
+        let requests = build_share_folder_requests(readwrite_paths, readonly_paths);
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let view: IVectorView<IsoSessionFolderSharingRequest> = requests.into();
+        let async_op = self
+            .ops
+            .ShareFolderBatchAsync(&self.provision_id, &view)
+            .map_err(|e| lifecycle_err(format!("ShareFolderBatchAsync call failed: {}", e)))?;
+        let results: IVectorView<IsoSessionFolderSharingResult> = async_op
+            .join()
+            .map_err(|e| lifecycle_err(format!("ShareFolderBatchAsync wait failed: {}", e)))?;
+        let outcomes = extract_share_folder_outcomes(&results)?;
+        aggregate_share_folder_outcomes(&outcomes)
     }
 
     /// Step 2: Start the isolation session.
@@ -425,16 +623,14 @@ impl IsolationSessionManager {
         })?;
 
         // Streaming + interactive I/O via three pipe relay threads bridging
-        // wxc-exec's stdio with the broker's pipe handles. The relays cross
-        // the desktop-session boundary that kernel console-handle inheritance
-        // cannot (see `appcontainer_runner.rs:358-392` for the AppContainer
-        // comparison).
+        // wxc-exec's stdio with the pipe handles owned by `IsoSessionProcess`.
+        // The relays cross the desktop-session boundary that kernel
+        // console-handle inheritance cannot.
         //
         // Handle ownership across four sources:
-        //   - Broker pipe handles (`OutputHandle()` / `ErrorHandle()` /
-        //     `InputHandle()`, returned as u64): owned by `IsoSessionProcess`.
-        //     Released by `process.Close()` (`ApiProcess.cpp:131` in the OS
-        //     repo). We do NOT close them.
+        //   - Pipe handles owned by `IsoSessionProcess` (`OutputHandle()` /
+        //     `ErrorHandle()` / `InputHandle()`, returned as u64): released
+        //     by `process.Close()`. We do NOT close them.
         //   - wxc-exec's std handles (`GetStdHandle(STD_*_HANDLE)`): owned by
         //     the OS for the process lifetime. We do NOT close them.
         //   - Stop event for stdin relay (`CreateEventW`): RAII-closed via
@@ -468,12 +664,23 @@ impl IsolationSessionManager {
             None
         };
 
+        // Push the local console's current viewport size into the agent's
+        // inner ConPTY. Without this, the inner HPCON keeps its default
+        // dimensions and VT-aware agents (e.g. PSReadLine) anchor their
+        // prompt to that smaller-than-local last row, overlaying text once
+        // they reach it. Mid-session resize is not handled here.
+        if options.interactive {
+            if let Some((cols, rows)) = get_local_console_size() {
+                let _ = process.ResizeConsole(cols, rows);
+            }
+        }
+
         // Manual-reset stop event for the stdin relay. Effective for waitable
         // `h_read` (console = TTY mode); for pipe handles (non-TTY) it has no
         // effect on a blocked `ReadFile`, so we use a bounded
         // `WaitForSingleObject` after process exit and rely on
-        // `process.Close()` invalidating the broker handle (next WriteFile
-        // fails) plus OS cleanup on wxc-exec exit.
+        // `process.Close()` invalidating the `IsoSessionProcess` handle
+        // (next WriteFile fails) plus OS cleanup on wxc-exec exit.
         let stdin_stop_event = unsafe {
             CreateEventW(None, true, false, PCWSTR::null())
                 .map_err(|e| lifecycle_err(format!("CreateEventW(stdin stop): {}", e)))?
@@ -520,16 +727,16 @@ impl IsolationSessionManager {
         };
 
         // Wait for the agent process to exit. `WaitForExit` is a Win32
-        // `WaitForSingleObject` on a kernel handle (`ApiProcess.cpp:76` — no
-        // COM round-trip). On timeout it returns -1; otherwise the exit code.
+        // `WaitForSingleObject` on a kernel handle — no COM round-trip. On
+        // timeout it returns -1; otherwise the exit code.
         let _ = process
             .WaitForExit(options.timeout_ms)
             .map_err(|e| lifecycle_err(format!("WaitForExit failed: {}", e)))?;
 
         // Detect timeout via `ExitCode()` returning `STILL_ACTIVE` (the agent
-        // is still running). Trigger the 3-tier graceful shutdown pattern from
-        // `CommandTty.cpp:226-263` in the OS repo. In the natural-exit path,
-        // none of the tiers fire.
+        // is still running). Run a 3-tier graceful shutdown — escalating from
+        // stdin-close to control signal to terminate — so well-behaved agents
+        // exit cleanly. In the natural-exit path none of the tiers fire.
         const STILL_ACTIVE: i32 = 0x103;
         let mut exit_code = process
             .ExitCode()
@@ -542,9 +749,8 @@ impl IsolationSessionManager {
             let _ = process.WaitForExit(5000);
             exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
 
-            // Tier 2: `SendCtrlClose` is ConPTY-only (`E_NOTIMPL` otherwise
-            // per `IsolationSessionWorkerProcess.cpp:414-416`); benign call
-            // in non-ConPTY mode, just skips ahead.
+            // Tier 2: `SendCtrlClose` is ConPTY-only — `E_NOTIMPL` in
+            // non-ConPTY mode, which is benign and skips ahead.
             if exit_code == STILL_ACTIVE {
                 let _ = process.SendCtrlClose();
                 let _ = process.WaitForExit(3000);
@@ -552,7 +758,7 @@ impl IsolationSessionManager {
             }
 
             // Tier 3: force-terminate. Wait infinitely for the kill to land
-            // (timeout 0 == INFINITE per `ApiProcess.cpp:85`).
+            // (`WaitForExit(0)` = INFINITE).
             if exit_code == STILL_ACTIVE {
                 let _ = process.Terminate();
                 let _ = process.WaitForExit(0);
@@ -567,10 +773,10 @@ impl IsolationSessionManager {
             let _ = SetEvent(stdin_stop_owned.get());
         }
 
-        // Drain stdout / stderr relays (INFINITE — they exit on broker-pipe
-        // EOF once the agent's write ends close at OS-level handle cleanup;
-        // the broker's own timeout at
-        // `IsolationSessionWorkerProcess.cpp:153-170` is the safety net).
+        // Drain stdout / stderr relays (INFINITE — they exit when the
+        // `IsoSessionProcess` pipe-read EOFs once the agent's write ends
+        // close at OS-level cleanup. The OS-side per-process timeout is
+        // the safety net.
         if let Some(t) = stdout_relay {
             unsafe { WaitForSingleObject(t.get(), u32::MAX) };
         }
@@ -585,7 +791,7 @@ impl IsolationSessionManager {
             unsafe { WaitForSingleObject(t.get(), 1000) };
         }
 
-        // Now safe to release the broker handles.
+        // Now safe to release the `IsoSessionProcess` handles.
         let _ = process.Close();
 
         Ok(ProcessResult {
@@ -609,10 +815,9 @@ impl IsolationSessionManager {
 
     /// Step 5: Deprovision the agent user.
     ///
-    /// The wrapper's `RemoveUserAsync` internally re-provisions as
-    /// `CallerProcess` first then deprovisions, papering over the
-    /// Indefinite-deprovision broker bug
-    /// (`IsoSessionServerClient.cpp:184` in the OS repo).
+    /// `RemoveUserAsync` internally re-provisions as `CallerProcess` first
+    /// then deprovisions, papering over the Indefinite-deprovision bug in
+    /// the OS-side service.
     pub fn deprovision_agent_user(&self) -> Result<(), IsolationSessionError> {
         let async_op = self
             .ops
@@ -712,7 +917,10 @@ impl Default for IsolationSessionRunner {
 
 impl ScriptRunner for IsolationSessionRunner {
     fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
-        validate_policy(request).map_err(ScriptResponse::from)
+        // One-shot runs the full provision -> start -> exec -> stop ->
+        // deprovision lifecycle in a single process, so provision-phase
+        // semantics apply to the whole call.
+        validate_provision_policy(request).map_err(ScriptResponse::from)
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
@@ -720,9 +928,9 @@ impl ScriptRunner for IsolationSessionRunner {
 
         // Detect at runtime whether wxc-exec's stdout is a TTY. This flips the
         // backend into ConPTY mode (`InteractiveConsole = true`) and adjusts
-        // the redirect flags (no separate stderr in ConPTY mode — the broker
-        // merges it into stdout). The check sees the handle wxc-exec was
-        // given by its immediate parent: ConPTY when launched by node-pty
+        // the redirect flags (no separate stderr in ConPTY mode — the OS-side
+        // service merges it into stdout). The check sees the handle wxc-exec
+        // was given by its immediate parent: ConPTY when launched by node-pty
         // (`spawnSandbox`), pipe when launched by `child_process.spawn`
         // (`spawnSandboxFromConfig({usePty: false})`), console when launched
         // directly from a shell.
@@ -744,8 +952,9 @@ impl ScriptRunner for IsolationSessionRunner {
             .map(|cfg| cfg.configuration_id)
             .unwrap_or_default();
 
-        // Activate the in-proc IsoSessionOps factory.
-        let manager = match IsolationSessionManager::new() {
+        // Activate the in-proc IsoSessionOps factory. One-shot uses the
+        // hardcoded default provisionId; state-aware mints a dynamic one.
+        let manager = match IsolationSessionManager::new(DEFAULT_PROVISION_ID) {
             Ok(m) => m,
             Err(e) => return e.into(),
         };
@@ -761,14 +970,23 @@ impl ScriptRunner for IsolationSessionRunner {
             }
             Err(e) => {
                 // provision_agent_user may return Err *after* a successful
-                // broker-side provision (e.g., the AgentUserName fetch
-                // fails on a non-error result). Defensively deprovision so
-                // an Indefinite-lifetime agent user does not leak. The
-                // wrapper no-ops these on absent state.
+                // OS-side provision (e.g., the AgentUserName fetch fails on
+                // a non-error result). Defensively deprovision so an
+                // Indefinite-lifetime agent user does not leak.
+                // `IsoSessionOps` no-ops these on absent state.
                 let _ = manager.deprovision_agent_user();
                 let _ = manager.unregister_client();
                 return e.into();
             }
+        }
+
+        if let Err(e) = manager.share_folders(
+            &request.policy.readwrite_paths,
+            &request.policy.readonly_paths,
+        ) {
+            let _ = manager.deprovision_agent_user();
+            let _ = manager.unregister_client();
+            return e.into();
         }
 
         if let Err(e) = manager.start_session(config_id) {
@@ -803,13 +1021,252 @@ impl ScriptRunner for IsolationSessionRunner {
 
         // Output already streamed live to wxc-exec's stdio via relay threads in
         // `IsolationSessionManager::create_process` — captured fields are intentionally
-        // empty (matching the AppContainer pattern at `appcontainer_runner.rs:455-456`).
+        // empty (same pattern as AppContainer).
         ScriptResponse {
             exit_code: result.exit_code,
             standard_out: String::new(),
             standard_err: String::new(),
             error_message: String::new(),
         }
+    }
+}
+
+// -- StatefulSandboxBackend impl --------------------------------------------
+
+/// Provision-phase metadata. Carries the OS-assigned agent account name
+/// (e.g. `<CallingUser>-IEB-NNN`) for diagnostics; the SID is omitted (can
+/// be added later when a caller needs it).
+#[derive(Debug, Clone, Serialize)]
+pub struct IsolationSessionProvisionMetadata {
+    #[serde(rename = "agentUserName")]
+    pub agent_user_name: String,
+}
+
+/// Parses the `iso:<provisionId>` form of a state-aware sandbox_id and
+/// returns the inner `provisionId` segment. Surfaces format mismatches as
+/// `MxcError::MalformedId` so callers can return the right wire-format
+/// error code.
+fn extract_provision_id(sandbox_id: &str) -> Result<&str, MxcError> {
+    let prefix = <IsolationSessionRunner as StatefulSandboxBackend>::ID_PREFIX;
+    match sandbox_id.split_once(':') {
+        Some((p, rest)) if p == prefix && !rest.is_empty() => Ok(rest),
+        _ => Err(MxcError::malformed_id(format!(
+            "expected {}:<provisionId>, got {:?}",
+            prefix, sandbox_id
+        ))),
+    }
+}
+
+impl StatefulSandboxBackend for IsolationSessionRunner {
+    const ID_PREFIX: &'static str = "iso";
+    const BACKEND_KEY: &'static str = "isolation_session";
+
+    type ProvisionConfig = ();
+    /// `experimental.isolation_session.start` mirrors the one-shot
+    /// `experimental.isolation_session` shape — same `IsolationSessionConfig`
+    /// type, same wire keys.
+    type StartConfig = IsolationSessionConfig;
+    type ExecConfig = ();
+    type StopConfig = ();
+    type DeprovisionConfig = ();
+    type ProvisionMetadata = IsolationSessionProvisionMetadata;
+    type StartMetadata = ();
+    type StopMetadata = ();
+    type DeprovisionMetadata = ();
+
+    fn provision(
+        &mut self,
+        request: &CodexRequest,
+        _config: Option<()>,
+    ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
+        let provision_id = format!("wxc-{}", mint_random_token());
+        let manager = IsolationSessionManager::new(&provision_id).map_err(map_lifecycle_error)?;
+        manager.register_client().map_err(map_lifecycle_error)?;
+        let agent_user_name = match manager.provision_agent_user() {
+            Ok(name) => name,
+            Err(e) => {
+                // Defensive cleanup mirrors the one-shot path: provision_agent_user
+                // can fail after the OS-side provision succeeded, leaving an
+                // Indefinite-lifetime agent user. Calls no-op on absent state.
+                let _ = manager.deprovision_agent_user();
+                let _ = manager.unregister_client();
+                return Err(map_lifecycle_error(e));
+            }
+        };
+
+        // Apply filesystem policy (rw + ro paths) before returning. A
+        // failure here leaves the agent user provisioned but no folders
+        // accessible to it; tear it down so the caller does not see a
+        // half-provisioned sandboxId.
+        if let Err(e) = manager.share_folders(
+            &request.policy.readwrite_paths,
+            &request.policy.readonly_paths,
+        ) {
+            let _ = manager.deprovision_agent_user();
+            let _ = manager.unregister_client();
+            return Err(map_lifecycle_error(e));
+        }
+
+        Ok(ProvisionResult {
+            sandbox_id: format!("{}:{}", Self::ID_PREFIX, provision_id),
+            metadata: Some(IsolationSessionProvisionMetadata { agent_user_name }),
+        })
+    }
+
+    fn start(
+        &mut self,
+        sandbox_id: &str,
+        _request: &CodexRequest,
+        config: Option<IsolationSessionConfig>,
+    ) -> Result<StartResult<()>, MxcError> {
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
+        // Config absent → Composable, mirroring the one-shot default. The
+        // OS-side service does not call back into MXC after start, so a
+        // return here means the session is ready to host process launches.
+        let configuration_id = config.map(|c| c.configuration_id).unwrap_or_default();
+        manager
+            .start_session(configuration_id)
+            .map_err(map_lifecycle_error)?;
+        Ok(StartResult { metadata: None })
+    }
+
+    fn stop(
+        &mut self,
+        sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<()>,
+    ) -> Result<StopResult<()>, MxcError> {
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
+        manager.stop_session().map_err(map_lifecycle_error)?;
+        Ok(StopResult { metadata: None })
+    }
+
+    /// Removes the agent user, then unregisters the client. Mirrors the
+    /// one-shot teardown sequence so a state-aware lifecycle leaves the
+    /// OS-side service in the same end state as a one-shot run.
+    ///
+    /// `unregister_client` tears down the client registration that
+    /// `provision` set up via `register_client`. v1 does not target
+    /// concurrent state-aware sessions, which would share that
+    /// registration -- if that becomes a real requirement, this will
+    /// need either a refcount or a "leave-registration-alone" mode.
+    fn deprovision(
+        &mut self,
+        sandbox_id: &str,
+        _request: &CodexRequest,
+        _config: Option<()>,
+    ) -> Result<DeprovisionResult<()>, MxcError> {
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
+        manager
+            .deprovision_agent_user()
+            .map_err(map_lifecycle_error)?;
+        manager.unregister_client().map_err(map_lifecycle_error)?;
+        Ok(DeprovisionResult { metadata: None })
+    }
+
+    // -- Validation hooks ----------------------------------------------------
+    //
+    // Filesystem rw/ro paths are honoured at provision (applied via
+    // `share_folders`) and rejected at every later phase, because the
+    // grant lifecycle is bound to the agent user. `denied_paths`,
+    // network, and proxy policy are rejected at every phase: the
+    // backend has no equivalent primitive. Anything rejected produces
+    // a `policy_validation` envelope rather than silent ignore.
+
+    fn validate_provision(
+        &self,
+        request: &CodexRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_provision_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_start(
+        &self,
+        _sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<&IsolationSessionConfig>,
+    ) -> Result<(), MxcError> {
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_exec(
+        &self,
+        _sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_stop(
+        &self,
+        _sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_deprovision(
+        &self,
+        _sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
+    }
+
+    /// Reuses `IsolationSessionManager::create_process` — the same path the
+    /// one-shot runner uses. Output streams to wxc-exec's stdout/stderr via
+    /// internal relay threads while the call is in flight; the call returns
+    /// once the process has exited and the relays have drained. The
+    /// resulting `ExecHandle` carries sentinel pipe handles plus a waiter
+    /// closure that yields the already-captured exit code, so the
+    /// dispatcher's `relay_exec_to_stdio` is a thin call-through.
+    fn exec(
+        &mut self,
+        sandbox_id: &str,
+        request: &CodexRequest,
+        _config: Option<()>,
+    ) -> Result<ExecHandle, MxcError> {
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
+
+        let mut options = build_process_options(request);
+        let interactive = std::io::stdout().is_terminal();
+        options.interactive = interactive;
+        options.redirect_flags = compute_redirect_flags(interactive);
+
+        let result = manager
+            .create_process(&options)
+            .map_err(map_lifecycle_error)?;
+        let exit_code = result.exit_code;
+
+        // The output relay completed inside `create_process`. The dispatcher
+        // sees zero pipe handles, skips its own relay setup, and gets the
+        // exit code from the waiter closure.
+        let null = HANDLE(std::ptr::null_mut());
+        Ok(ExecHandle {
+            stdout: null,
+            stderr: null,
+            stdin: null,
+            waiter: Box::new(move || Ok(exit_code)),
+            terminator: Box::new(|| {}),
+        })
+    }
+}
+
+fn map_lifecycle_error(err: IsolationSessionError) -> MxcError {
+    let message = err.to_string();
+    match err {
+        IsolationSessionError::Policy(_) => MxcError::policy_validation(message),
+        IsolationSessionError::ServiceUnavailable(_) => MxcError::backend_unavailable(message),
+        IsolationSessionError::Lifecycle(_) => MxcError::backend_error(message),
+        IsolationSessionError::Stale(_) => MxcError::stale_id(message),
     }
 }
 
@@ -828,22 +1285,152 @@ mod tests {
     }
 
     #[test]
-    fn policy_rejects_readwrite_paths() {
-        let request = CodexRequest {
-            policy: ContainerPolicy {
-                readwrite_paths: vec!["C:\\data".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(
-            validate_policy(&request).unwrap_err(),
-            ERR_FILESYSTEM_POLICY,
+    fn extract_provision_id_unwraps_iso_prefix() {
+        assert_eq!(
+            extract_provision_id("iso:wxc-abcd1234").unwrap(),
+            "wxc-abcd1234"
         );
     }
 
     #[test]
-    fn policy_rejects_readonly_paths() {
+    fn extract_provision_id_rejects_other_prefix() {
+        let err = extract_provision_id("wsb:abc").unwrap_err();
+        assert_eq!(err.code, crate::mxc_error::MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_provision_id_rejects_missing_colon() {
+        let err = extract_provision_id("no-colon").unwrap_err();
+        assert_eq!(err.code, crate::mxc_error::MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_provision_id_rejects_empty_payload() {
+        let err = extract_provision_id("iso:").unwrap_err();
+        assert_eq!(err.code, crate::mxc_error::MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn map_lifecycle_error_categorises_each_variant() {
+        use crate::mxc_error::MxcErrorCode;
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::Policy("x".into())).code,
+            MxcErrorCode::PolicyValidation,
+        );
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::ServiceUnavailable("x".into())).code,
+            MxcErrorCode::BackendUnavailable,
+        );
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::Lifecycle("x".into())).code,
+            MxcErrorCode::BackendError,
+        );
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::Stale("x".into())).code,
+            MxcErrorCode::StaleId,
+        );
+    }
+
+    fn request_with_filesystem_policy() -> CodexRequest {
+        CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\workspace".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_provision_hook_accepts_filesystem_policy() {
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_filesystem_policy();
+        runner.validate_provision(&req, None).unwrap();
+    }
+
+    #[test]
+    fn validate_provision_hook_rejects_denied_paths() {
+        use crate::mxc_error::MxcErrorCode;
+        let runner = IsolationSessionRunner::new();
+        let req = CodexRequest {
+            policy: ContainerPolicy {
+                denied_paths: vec!["C:\\secret".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = runner.validate_provision(&req, None).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_post_provision_hooks_reject_filesystem_policy() {
+        use crate::mxc_error::MxcErrorCode;
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_filesystem_policy();
+
+        let s = runner.validate_start("iso:abc", &req, None).unwrap_err();
+        assert_eq!(s.code, MxcErrorCode::PolicyValidation);
+
+        let e = runner.validate_exec("iso:abc", &req, None).unwrap_err();
+        assert_eq!(e.code, MxcErrorCode::PolicyValidation);
+
+        let st = runner.validate_stop("iso:abc", &req, None).unwrap_err();
+        assert_eq!(st.code, MxcErrorCode::PolicyValidation);
+
+        let d = runner
+            .validate_deprovision("iso:abc", &req, None)
+            .unwrap_err();
+        assert_eq!(d.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_phase_hooks_accept_clean_request() {
+        let runner = IsolationSessionRunner::new();
+        let req = CodexRequest::default();
+
+        runner.validate_provision(&req, None).unwrap();
+        runner.validate_start("iso:abc", &req, None).unwrap();
+        runner.validate_exec("iso:abc", &req, None).unwrap();
+        runner.validate_stop("iso:abc", &req, None).unwrap();
+        runner.validate_deprovision("iso:abc", &req, None).unwrap();
+    }
+
+    #[test]
+    fn error_not_found_hresult_constant_matches_win32() {
+        // Sanity check: HRESULT_FROM_WIN32(ERROR_NOT_FOUND) =
+        //   0x80070000 | (1168 & 0xFFFF) = 0x80070490.
+        // The OS-side AgentManager::FindActiveAgentUserByProvisionId returns
+        // exactly this when the provisionId is gone, so a regression in the
+        // constant would silently downgrade stale-id detection to backend_error.
+        const ERROR_NOT_FOUND: u32 = 1168;
+        let expected = 0x8007_0000u32 | (ERROR_NOT_FOUND & 0xFFFF);
+        assert_eq!(ERROR_NOT_FOUND_HRESULT, expected);
+        assert_eq!(ERROR_NOT_FOUND_HRESULT, 0x80070490);
+    }
+
+    // ====== Phase-specific policy validation ======
+    //
+    // Filesystem fields behave differently per phase; network and proxy
+    // policy share `validate_network_and_proxy_policy` and behave the
+    // same at every phase. Coverage strategy: filesystem tests on both
+    // phase-specific helpers; network/proxy tests split across them so
+    // every branch of the shared helper runs at least once.
+
+    #[test]
+    fn provision_policy_accepts_readwrite_paths() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\src".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(validate_provision_policy(&request).is_ok());
+    }
+
+    #[test]
+    fn provision_policy_accepts_readonly_paths() {
         let request = CodexRequest {
             policy: ContainerPolicy {
                 readonly_paths: vec!["C:\\data".to_string()],
@@ -851,14 +1438,24 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_policy_err_contains(
-            validate_policy(&request).unwrap_err(),
-            ERR_FILESYSTEM_POLICY,
-        );
+        assert!(validate_provision_policy(&request).is_ok());
     }
 
     #[test]
-    fn policy_rejects_denied_paths() {
+    fn provision_policy_accepts_readwrite_and_readonly_together() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\src".to_string()],
+                readonly_paths: vec!["C:\\data".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(validate_provision_policy(&request).is_ok());
+    }
+
+    #[test]
+    fn provision_policy_rejects_denied_paths() {
         let request = CodexRequest {
             policy: ContainerPolicy {
                 denied_paths: vec!["C:\\secret".to_string()],
@@ -867,13 +1464,29 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_policy(&request).unwrap_err(),
+            validate_provision_policy(&request).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
     }
 
     #[test]
-    fn policy_rejects_allowed_hosts() {
+    fn provision_policy_rejects_denied_even_with_rw() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\src".to_string()],
+                denied_paths: vec!["C:\\secret".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn provision_policy_rejects_network_policy() {
         let request = CodexRequest {
             policy: ContainerPolicy {
                 allowed_hosts: vec!["example.com".to_string()],
@@ -881,35 +1494,14 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
     }
 
     #[test]
-    fn policy_rejects_blocked_hosts() {
-        let request = CodexRequest {
-            policy: ContainerPolicy {
-                blocked_hosts: vec!["evil.com".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
-    }
-
-    #[test]
-    fn policy_rejects_network_block_policy() {
-        let request = CodexRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Block,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_NETWORK_POLICY);
-    }
-
-    #[test]
-    fn policy_rejects_proxy() {
+    fn provision_policy_rejects_proxy() {
         let request = CodexRequest {
             policy: ContainerPolicy {
                 network_proxy: ProxyConfig {
@@ -920,13 +1512,91 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_policy_err_contains(validate_policy(&request).unwrap_err(), ERR_PROXY_POLICY);
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_PROXY_POLICY,
+        );
     }
 
     #[test]
-    fn policy_allows_defaults() {
+    fn post_provision_policy_rejects_readwrite_paths() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\src".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_readonly_paths() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                readonly_paths: vec!["C:\\data".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_denied_paths() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                denied_paths: vec!["C:\\secret".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_blocked_hosts() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                blocked_hosts: vec!["evil.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_network_block_policy() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Block,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+    }
+
+    #[test]
+    fn post_provision_policy_allows_defaults() {
         let request = CodexRequest::default();
-        assert!(validate_policy(&request).is_ok());
+        assert!(validate_post_provision_policy(&request).is_ok());
     }
 
     // ====== ProcessOptions / option building tests ======
@@ -1024,7 +1694,7 @@ mod tests {
         assert!(
             flags & REDIRECT_STDERR == 0,
             "stderr should NOT be redirected in interactive (ConPTY) mode \
-             — broker won't populate ErrorHandle"
+             — ErrorHandle is not populated by the OS-side service"
         );
     }
 
@@ -1100,5 +1770,179 @@ mod tests {
     fn config_id_conversion_composable() {
         let iso_id: IsoSessionConfigId = IsolationSessionConfigurationId::Composable.into();
         assert_eq!(iso_id, IsoSessionConfigId::Composable);
+    }
+
+    // ====== Folder-sharing helpers ======
+    //
+    // The runtime path (`share_folders` itself) needs a live IsoSessionOps,
+    // which is only available on a configured VM — covered by the C6
+    // integration tests. These unit tests cover the two pure helpers that
+    // bracket the COM call: request-building and outcome aggregation.
+
+    #[test]
+    fn build_requests_empty_inputs_returns_empty_vec() {
+        let requests = build_share_folder_requests(&[], &[]);
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn build_requests_rw_only() {
+        let rw = vec!["C:\\rw1".to_string(), "C:\\rw2".to_string()];
+        let requests = build_share_folder_requests(&rw, &[]);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].FolderPath.to_string(), "C:\\rw1");
+        assert_eq!(
+            requests[0].AccessLevel,
+            IsoSessionFolderSharingAccessLevel::ReadWrite
+        );
+        assert_eq!(requests[1].FolderPath.to_string(), "C:\\rw2");
+        assert_eq!(
+            requests[1].AccessLevel,
+            IsoSessionFolderSharingAccessLevel::ReadWrite
+        );
+    }
+
+    #[test]
+    fn build_requests_ro_only() {
+        let ro = vec!["C:\\ro1".to_string()];
+        let requests = build_share_folder_requests(&[], &ro);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].FolderPath.to_string(), "C:\\ro1");
+        assert_eq!(
+            requests[0].AccessLevel,
+            IsoSessionFolderSharingAccessLevel::Read
+        );
+    }
+
+    #[test]
+    fn build_requests_rw_then_ro_in_input_order() {
+        let rw = vec!["C:\\a".to_string()];
+        let ro = vec!["C:\\b".to_string(), "C:\\c".to_string()];
+        let requests = build_share_folder_requests(&rw, &ro);
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].FolderPath.to_string(), "C:\\a");
+        assert_eq!(
+            requests[0].AccessLevel,
+            IsoSessionFolderSharingAccessLevel::ReadWrite
+        );
+        assert_eq!(requests[1].FolderPath.to_string(), "C:\\b");
+        assert_eq!(
+            requests[1].AccessLevel,
+            IsoSessionFolderSharingAccessLevel::Read
+        );
+        assert_eq!(requests[2].FolderPath.to_string(), "C:\\c");
+        assert_eq!(
+            requests[2].AccessLevel,
+            IsoSessionFolderSharingAccessLevel::Read
+        );
+    }
+
+    fn ok_outcome(path: &str) -> ShareFolderOutcome {
+        ShareFolderOutcome {
+            folder_path: path.to_string(),
+            failure: None,
+        }
+    }
+
+    fn fail_outcome(path: &str, msg: &str, hr: u32, remediation: &str) -> ShareFolderOutcome {
+        ShareFolderOutcome {
+            folder_path: path.to_string(),
+            failure: Some(ShareFolderFailure {
+                message: msg.to_string(),
+                remediation: remediation.to_string(),
+                hresult: hr,
+            }),
+        }
+    }
+
+    #[test]
+    fn aggregate_empty_outcomes_is_ok() {
+        // Defensive: the runtime path returns Ok early on empty inputs, but
+        // if extract_share_folder_outcomes ever returns an empty Vec, the
+        // aggregator should still report success.
+        assert!(matches!(aggregate_share_folder_outcomes(&[]), Ok(())));
+    }
+
+    #[test]
+    fn aggregate_all_succeeded_is_ok() {
+        let outcomes = vec![ok_outcome("C:\\a"), ok_outcome("C:\\b")];
+        assert!(matches!(aggregate_share_folder_outcomes(&outcomes), Ok(())));
+    }
+
+    #[test]
+    fn aggregate_single_failure_includes_path_message_and_hresult() {
+        let outcomes = vec![fail_outcome("C:\\bad", "denied", 0x80070005, "")];
+        let err = aggregate_share_folder_outcomes(&outcomes).unwrap_err();
+        let IsolationSessionError::Lifecycle(msg) = err else {
+            panic!("expected Lifecycle, got {:?}", err);
+        };
+        assert!(msg.contains("C:\\bad"), "missing path in: {}", msg);
+        assert!(msg.contains("denied"), "missing message in: {}", msg);
+        assert!(msg.contains("0x80070005"), "missing hresult in: {}", msg);
+    }
+
+    #[test]
+    fn aggregate_mixed_outcomes_includes_all_failures_only() {
+        let outcomes = vec![
+            ok_outcome("C:\\good"),
+            fail_outcome("C:\\bad1", "first failure", 0xdeadbeef, ""),
+            ok_outcome("C:\\good2"),
+            fail_outcome("C:\\bad2", "second failure", 0xfeedface, ""),
+        ];
+        let err = aggregate_share_folder_outcomes(&outcomes).unwrap_err();
+        let IsolationSessionError::Lifecycle(msg) = err else {
+            panic!("expected Lifecycle, got {:?}", err);
+        };
+        assert!(msg.contains("C:\\bad1"), "missing bad1 in: {}", msg);
+        assert!(
+            msg.contains("first failure"),
+            "missing first msg in: {}",
+            msg
+        );
+        assert!(msg.contains("C:\\bad2"), "missing bad2 in: {}", msg);
+        assert!(
+            msg.contains("second failure"),
+            "missing second msg in: {}",
+            msg
+        );
+        // Successful paths must not appear in the error message.
+        assert!(
+            !msg.contains("C:\\good"),
+            "good path leaked into error: {}",
+            msg
+        );
+        assert!(
+            !msg.contains("C:\\good2"),
+            "good2 path leaked into error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn aggregate_failure_with_remediation_appends_remediation() {
+        let outcomes = vec![fail_outcome("C:\\rd", "denied", 0x80070005, "run as admin")];
+        let err = aggregate_share_folder_outcomes(&outcomes).unwrap_err();
+        let IsolationSessionError::Lifecycle(msg) = err else {
+            panic!("expected Lifecycle, got {:?}", err);
+        };
+        assert!(
+            msg.contains("remediation: run as admin"),
+            "missing remediation in: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn aggregate_failure_with_empty_remediation_omits_suffix() {
+        let outcomes = vec![fail_outcome("C:\\nor", "msg", 0x80004005, "")];
+        let err = aggregate_share_folder_outcomes(&outcomes).unwrap_err();
+        let IsolationSessionError::Lifecycle(msg) = err else {
+            panic!("expected Lifecycle, got {:?}", err);
+        };
+        assert!(
+            !msg.contains("remediation:"),
+            "unexpected remediation suffix in: {}",
+            msg
+        );
     }
 }

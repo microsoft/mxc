@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use std::fmt::Write;
+use std::fs;
 use std::process;
 use std::time::Instant;
 
@@ -9,14 +10,18 @@ use clap::Parser;
 use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
 use wxc_common::appcontainer_runner::AppContainerScriptRunner;
 use wxc_common::base_container_runner::BaseContainerRunner;
-use wxc_common::config_parser::{is_base_container_version, load_request};
+use wxc_common::config_parser::{is_base_container_version, load_mxc_request, ParseError};
+use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
 #[cfg(feature = "isolation_session")]
 use wxc_common::isolation_session_runner::IsolationSessionRunner;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
+use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::nanvix_runner::NanVixScriptRunner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use wxc_common::state_aware_dispatch::{run_state_aware, DispatchOutcome};
+use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
 use wxc_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 
 #[derive(Parser)]
@@ -82,6 +87,48 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
     let _ = writeln!(logger, "Exit code: {}", response.exit_code);
     if !response.error_message.is_empty() {
         let _ = writeln!(logger, "Error: {}", response.error_message);
+    }
+}
+
+/// Drives the state-aware dispatch flow. On envelope success, writes the
+/// JSON to stdout and exits 0. On exec success, exits with the script's
+/// exit code (output already streamed). On failure, writes a JSON error
+/// envelope to stdout and exits 1. Diagnostic logger output goes to stderr
+/// regardless of mode (per design §7.3 stream protocol — stdout reserved
+/// for the response envelope).
+fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: &mut Logger) -> ! {
+    let outcome = run_state_aware(parsed, dry_run);
+    // Diagnostic buffer flushes to stderr regardless of success/failure so it
+    // never interleaves with the stdout envelope.
+    let buffered = logger.get_buffer().to_string();
+    if !buffered.is_empty() {
+        eprint!("{}", buffered);
+    }
+    match outcome {
+        Ok(DispatchOutcome::Envelope(value)) => {
+            println!("{}", value);
+            process::exit(0);
+        }
+        Ok(DispatchOutcome::ExecCompleted { exit_code }) => process::exit(exit_code),
+        Err(e) => {
+            print_error_envelope(&e);
+            process::exit(1);
+        }
+    }
+}
+
+fn print_error_envelope(error: &MxcError) {
+    let envelope: ResponseEnvelope<()> = ResponseEnvelope::from_error(error);
+    match serde_json::to_string(&envelope) {
+        Ok(s) => println!("{}", s),
+        Err(_) => {
+            // Last-resort path: serialisation of the envelope itself failed —
+            // emit a minimal structurally-valid envelope so consumers that
+            // require `error.code` still parse something.
+            println!(
+                r#"{{"error":{{"code":"backend_error","message":"failed to serialise error envelope"}}}}"#
+            );
+        }
     }
 }
 
@@ -165,19 +212,101 @@ fn main() {
         process::exit(if success { 0 } else { 1 });
     }
 
-    // Load request
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
-        Ok(r) => r,
-        Err(_) => {
+    // Load request — discriminates state-aware (top-level `phase` field) from
+    // one-shot. State-aware failures emit a JSON envelope on stdout; one-shot
+    // and pre-discrimination failures keep the existing diagnostic-on-stderr
+    // convention.
+    let request = match load_mxc_request(&config_data, &mut logger, is_base64) {
+        Ok(MxcRequest::OneShot(req)) => req,
+        Ok(MxcRequest::StateAware(parsed)) => {
+            run_state_aware_main(parsed, cli.dry_run, &mut logger)
+        }
+        Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
             eprint!("Request error\n{}", logger.get_buffer());
+            process::exit(1);
+        }
+        Err(ParseError::StateAware(e)) => {
+            print_error_envelope(&e);
+            eprint!("{}", logger.get_buffer());
             process::exit(1);
         }
     };
 
+    let mut request = request;
     request.experimental_enabled = cli.experimental;
     request.dry_run = cli.dry_run;
 
+    // Inject learningModeLogging capability when diagnostic console is enabled.
+    let learning_mode_injected = if DiagnosticConfig::force_learning_mode()
+        && !request
+            .policy
+            .capabilities
+            .iter()
+            .any(|c| c == "learningModeLogging")
+    {
+        request
+            .policy
+            .capabilities
+            .push("learningModeLogging".to_string());
+        true
+    } else {
+        false
+    };
+
+    // Initialize diagnostic logging (registry/env-controlled).
+    let diag_config = DiagnosticConfig::from_environment();
+    if diag_config.console_enabled {
+        logger.enable_diagnostics(&diag_config);
+
+        // Log the preamble
+        let exe_path = std::env::current_exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let parent_info = wxc_common::diagnostic::get_parent_process_info();
+        let _ = writeln!(
+            logger,
+            "wxc-exec v{} (PID {})",
+            env!("CARGO_PKG_VERSION"),
+            std::process::id()
+        );
+        let _ = writeln!(logger, "\tpath: {}", exe_path);
+        let _ = writeln!(logger, "\tparent: {}", parent_info);
+
+        // Log if we're injecting Learning Mode
+        if learning_mode_injected {
+            let _ = writeln!(
+                logger,
+                "WARNING: injected 'learningModeLogging' capability via ForceLearningMode registry key"
+            );
+        }
+
+        // Log the raw input JSON config before any transformation.
+        let raw_json = if is_base64 {
+            wxc_common::encoding::base64_decode(&config_data)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+        } else {
+            fs::read_to_string(&config_data).ok()
+        };
+        if let Some(json) = raw_json {
+            let _ = writeln!(logger, "SECTION: JSON Config");
+            let _ = writeln!(logger, "{}", json.trim());
+        }
+    }
+
+    let _ = writeln!(logger, "SECTION: Request simplified");
     log_request(&request, &mut logger);
+
+    // Emit the full (redacted) request policy for diagnostics.
+    let _ = writeln!(
+        logger,
+        "SECTION: Full `CodexRequest` configuration (redacted)"
+    );
+    let _ = writeln!(
+        logger,
+        "{}",
+        wxc_common::diagnostic::redacted_request_json(&request)
+    );
 
     // Run script in selected containment backend.
     // BaseContainer is used when --experimental is passed or schema version >= 0.5.
@@ -227,6 +356,12 @@ fn main() {
             eprintln!("Error: LXC backend not available on Windows");
             process::exit(1);
         }
+        ContainmentBackend::MacosSandbox => {
+            eprintln!(
+                "Error: macOS sandbox backend is only available on macOS (use mxc-exec-darwin)"
+            );
+            process::exit(1);
+        }
         ContainmentBackend::Vm => {
             eprintln!("Error: VM backend not yet implemented");
             process::exit(1);
@@ -273,6 +408,7 @@ fn main() {
             }
         }
     };
+
     let run_start = Instant::now();
     let response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
@@ -283,6 +419,9 @@ fn main() {
     }
 
     display_script_results(&response, &mut logger);
+
+    // Close diagnostic pipe.
+    logger.close_diagnostics();
 
     // Output was already relayed to the console by pipe threads.
     // Only print captured output if present (e.g. from error paths).
