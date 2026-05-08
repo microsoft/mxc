@@ -109,6 +109,12 @@ Write-Host "Binary: $WxcExec" -ForegroundColor Gray
 Write-Host "Configs: $ConfigDir`n" -ForegroundColor Gray
 
 # Helper: run one IsolationSession test config.
+#
+# The wxc-exec invocation is wrapped in try-catch so an unexpected
+# PowerShell error (e.g., a parameter-binding mistake) fails THIS test
+# only -- the suite keeps going. The output checks use String.Contains()
+# rather than -match/-notmatch to avoid the array-return edge case those
+# operators have when the LHS is unexpectedly null or array-typed.
 function Run-IsolationSessionTest {
     param(
         [string]$ConfigFile,
@@ -125,11 +131,21 @@ function Run-IsolationSessionTest {
 
     Write-Host "  $ConfigFile ... " -NoNewline
 
-    $prevPref = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $output = & $WxcExec --experimental $configPath 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
-    $ErrorActionPreference = $prevPref
+    $output = ""
+    $exitCode = -1
+    try {
+        $prevPref = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $output = & $WxcExec --experimental $configPath 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevPref
+    } catch {
+        Write-Host "FAIL" -ForegroundColor Red
+        Write-Host "    Reason: invocation threw: $($_.Exception.Message)" -ForegroundColor Red
+        return @{ Name = $ConfigFile; Pass = $false; Skipped = $false; Reason = "invocation threw: $($_.Exception.Message)" }
+    }
+
+    $output = if ($null -eq $output) { "" } else { [string]$output }
 
     $pass = $true
     $reason = ""
@@ -141,7 +157,7 @@ function Run-IsolationSessionTest {
 
     if ($pass -and $OutputContains) {
         foreach ($needle in $OutputContains) {
-            if ($output -notmatch [regex]::Escape($needle)) {
+            if (-not $output.Contains($needle)) {
                 $pass = $false
                 $reason = "Output missing '$needle'"
                 break
@@ -163,7 +179,37 @@ function Run-IsolationSessionTest {
     return @{ Name = $ConfigFile; Pass = $pass; Skipped = $false; Reason = $reason }
 }
 
+# Creates a directory with a locked-down DACL: inheritance disabled, ACEs
+# reset to current user + SYSTEM + Administrators (FullControl). Used by
+# the filesystem-policy test so the agent user has no inherited access by
+# default -- the test then proves the share_folders grant is what enables
+# read access.
+function Setup-LockedDownTestDir {
+    param([string]$Path)
+
+    New-Item -Path $Path -ItemType Directory -Force | Out-Null
+
+    $acl = Get-Acl $Path
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.Access | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
+
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $inherit = "ContainerInherit,ObjectInherit"
+    foreach ($principal in @($currentUser, "SYSTEM", "Administrators")) {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    $principal, "FullControl", $inherit, "None", "Allow")))
+    }
+    Set-Acl -Path $Path -AclObject $acl
+}
+
 [System.Collections.ArrayList]$results = @()
+
+# Filesystem-policy test scaffolding: a locked-down dir the test expects
+# the agent to read via a readwritePaths grant.
+$FsTestRoot = 'C:\mxc_share_test_oneshot'
+$FsMarkerContent = 'oneshot-marker-content'
+
+try {
 
 Write-Host "--- Tests ---" -ForegroundColor Cyan
 # Setup for isolation_session_hello.json: cwd must exist before agent start.
@@ -189,6 +235,18 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_
 # the agent to exit with code 1.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
     -ExpectedExit 1))
+# Filesystem policy: provision the agent with a readwritePaths grant on a
+# locked-down host dir that has a pre-populated marker; agent reads it.
+# The `type` exit being 0 + the marker content in stdout proves the grant
+# was applied and the agent has read access.
+Setup-LockedDownTestDir $FsTestRoot
+$FsMarkerContent | Set-Content -Path (Join-Path $FsTestRoot 'marker.txt') -NoNewline
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_filesystem.json" `
+    -OutputContains @($FsMarkerContent)))
+
+} finally {
+    Remove-Item -Recurse -Force $FsTestRoot -ErrorAction SilentlyContinue
+}
 
 # Summary
 $passed = ($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count

@@ -1,0 +1,7 @@
+{
+    "phase": "provision",
+    "containment": "isolation_session",
+    "filesystem": {
+        "deniedPaths": ["C:\\mxc_share_test\\rw"]
+    }
+}

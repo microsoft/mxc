@@ -1,0 +1,8 @@
+{
+    "phase": "exec",
+    "sandboxId": "{{SANDBOX_ID}}",
+    "process": {
+        "commandLine": "type C:\\mxc_share_test\\rw\\agent_wrote.txt",
+        "timeout": 30000
+    }
+}

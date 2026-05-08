@@ -2,7 +2,7 @@
     "phase": "provision",
     "containment": "isolation_session",
     "filesystem": {
-        "readwritePaths": ["C:\\mxc_share_test_provision\\rw"],
-        "readonlyPaths": ["C:\\mxc_share_test_provision\\ro"]
+        "readwritePaths": ["C:\\mxc_share_test\\rw"],
+        "readonlyPaths": ["C:\\mxc_share_test\\ro"]
     }
 }
