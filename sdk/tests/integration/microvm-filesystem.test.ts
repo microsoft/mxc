@@ -24,6 +24,8 @@ import { sdk } from './test-helpers';
 
 function isWhpAvailable(): boolean {
   if (os.platform() !== 'win32') return false;
+  // CI sets this when wxc-exec/nanvix binaries aren't available.
+  if (process.env.MXC_SKIP_OS_BUILD_DEPENDENT_TESTS === '1') return false;
   try {
     const result = execSync(
       'powershell -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).HypervisorPresent"',
