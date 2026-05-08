@@ -53,33 +53,21 @@ fn main() {
     let checksums: HashMap<String, String> = load_checksums("checksums.json");
 
     let all_binaries: Vec<&str> = versions
-        .nanvix
+        .nanvix_python
         .binaries
         .iter()
-        .chain(versions.cpython.binaries.iter())
         .map(|s| s.as_str())
         .collect();
 
-    let needs_nanvix = needs_download(&versions.nanvix, &bin_dir, &checksums);
-    let needs_cpython = needs_download(&versions.cpython, &bin_dir, &checksums);
+    let needs_nanvix_python = needs_download(&versions.nanvix_python, &bin_dir, &checksums);
 
-    if needs_nanvix {
+    if needs_nanvix_python {
         eprintln!(
-            "nanvix_binaries: downloading nanvix/nanvix {}...",
-            versions.nanvix.tag
+            "nanvix_binaries: downloading nanvix/nanvix-python {}...",
+            versions.nanvix_python.tag
         );
-        download_and_extract(&versions.nanvix, "nanvix/nanvix", &bin_dir);
-    }
-
-    if needs_cpython {
-        eprintln!(
-            "nanvix_binaries: downloading nanvix/cpython {}...",
-            versions.cpython.tag
-        );
-        download_and_extract(&versions.cpython, "nanvix/cpython", &bin_dir);
-    }
-
-    if !needs_nanvix && !needs_cpython {
+        download_and_extract(&versions.nanvix_python, "nanvix/nanvix-python", &bin_dir);
+    } else {
         eprintln!("nanvix_binaries: all binaries cached and verified");
     }
 
@@ -195,29 +183,63 @@ fn try_curl_download(url: &str, dest: &Path) -> Result<(), String> {
 // -- tar.exe -----------------------------------------------------------------
 
 fn try_tar_extract(zip_path: &Path, dest_dir: &Path, files: &[&str]) -> Result<(), String> {
-    let mut cmd = Command::new("tar");
-    cmd.arg("-xf");
-    cmd.arg(zip_path);
-    cmd.arg("-C");
-    cmd.arg(dest_dir);
-    for f in files {
-        cmd.arg(f);
+    // The nanvix-python zip has a top-level directory with two sub-layouts:
+    //   bin/nanvixd.exe, bin/kernel.elf, bin/python3.12  → strip 2 components
+    //   nanvix_rootfs.img                                 → strip 1 component
+    // We run two passes to handle both depths.
+
+    const ARCHIVE_PREFIX: &str = "microvm-standalone-256mb";
+    const BIN_DIR_FILES: &[&str] = &["nanvixd.exe", "kernel.elf", "python3.12"];
+
+    let (bin_files, root_files): (Vec<&&str>, Vec<&&str>) =
+        files.iter().partition(|f| BIN_DIR_FILES.contains(f));
+
+    // Pass 1: files under <prefix>/bin/ — strip 2 path components.
+    if !bin_files.is_empty() {
+        let mut cmd = Command::new("tar");
+        cmd.arg("-xf").arg(zip_path).arg("-C").arg(dest_dir);
+        cmd.args(["--strip-components", "2"]);
+        for f in &bin_files {
+            cmd.arg(format!("{}/bin/{}", ARCHIVE_PREFIX, f));
+        }
+        let output = cmd.output().map_err(|e| {
+            format!(
+                "tar.exe not found: {}\n\
+                 tar.exe ships with Windows 10 1803+. Ensure it's in PATH.",
+                e
+            )
+        })?;
+        if !output.status.success() {
+            return Err(format!(
+                "tar extraction failed (bin files)\n  exit code: {}\n  stderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
     }
 
-    let output = cmd.output().map_err(|e| {
-        format!(
-            "tar.exe not found: {}\n\
-             tar.exe ships with Windows 10 1803+. Ensure it's in PATH.",
-            e
-        )
-    })?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "tar extraction failed\n  exit code: {}\n  stderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    // Pass 2: files at <prefix>/ root — strip 1 path component.
+    if !root_files.is_empty() {
+        let mut cmd = Command::new("tar");
+        cmd.arg("-xf").arg(zip_path).arg("-C").arg(dest_dir);
+        cmd.args(["--strip-components", "1"]);
+        for f in &root_files {
+            cmd.arg(format!("{}/{}", ARCHIVE_PREFIX, f));
+        }
+        let output = cmd.output().map_err(|e| {
+            format!(
+                "tar.exe not found: {}\n\
+                 tar.exe ships with Windows 10 1803+. Ensure it's in PATH.",
+                e
+            )
+        })?;
+        if !output.status.success() {
+            return Err(format!(
+                "tar extraction failed (root files)\n  exit code: {}\n  stderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
     }
 
     for f in files {

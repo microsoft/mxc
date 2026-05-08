@@ -39,4 +39,6 @@ output
 **/target/
 
 # Copilot
-.copilot/
+.copilot/TEST_COVERAGE_ANALYSIS.md
+*.pdb
+pathrel_test.exe

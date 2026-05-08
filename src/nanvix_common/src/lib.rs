@@ -16,23 +16,18 @@ use serde::Deserialize;
 pub const REQUIRED_BINARIES: &[&str] = &[
     "nanvixd.exe",
     "kernel.elf",
-    "python.elf",
-    "cpython-ramfs.img",
+    "python3.12",
+    "nanvix_rootfs.img",
 ];
 
-/// Binaries sourced from the `nanvix/nanvix` GitHub release.
-pub const NANVIX_REPO_BINARIES: &[&str] = &["nanvixd.exe", "kernel.elf"];
-
-/// Binaries sourced from the `nanvix/cpython` GitHub release.
-pub const CPYTHON_REPO_BINARIES: &[&str] = &["python.elf", "cpython-ramfs.img"];
+/// Binaries sourced from the `nanvix/nanvix-python` GitHub release.
+pub const NANVIX_PYTHON_REPO_BINARIES: &[&str] = REQUIRED_BINARIES;
 
 /// Release configuration loaded from `versions.json`.
 #[derive(Debug, Deserialize)]
 pub struct ReleaseConfig {
-    /// Configuration for the `nanvix/nanvix` GitHub repo.
-    pub nanvix: RepoConfig,
-    /// Configuration for the `nanvix/cpython` GitHub repo.
-    pub cpython: RepoConfig,
+    /// Configuration for the `nanvix/nanvix-python` GitHub repo.
+    pub nanvix_python: RepoConfig,
 }
 
 /// Configuration for a single upstream GitHub repo release.

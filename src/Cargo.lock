@@ -1810,6 +1810,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "url",
+ "uuid",
  "widestring",
  "windows",
  "windows-collections",
