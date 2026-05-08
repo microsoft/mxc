@@ -1,6 +1,6 @@
 #!/bin/bash
 # MXC macOS Build Script
-# Builds the mxc-exec-darwin binary (macos_sandbox backend) and the
+# Builds the mxc-exec-mac binary (macos_sandbox backend) and the
 # TypeScript SDK. This is the macOS counterpart of build.sh.
 #
 # Codesigning + notarization are NOT performed here — those run later as a
@@ -93,7 +93,7 @@ done
 
 # Build Rust binaries
 echo ""
-echo "=== Building mxc-exec-darwin ($BUILD_TYPE) ==="
+echo "=== Building mxc-exec-mac ($BUILD_TYPE) ==="
 cd "$SRC_DIR"
 
 CARGO_FLAGS=("-p" "mxc_darwin")
@@ -121,11 +121,11 @@ copy_binary_for_target() {
     local bin_dir="$SDK_DIR/bin/$sdk_arch"
     mkdir -p "$bin_dir"
 
-    local src="$SRC_DIR/target/$triple/$BUILD_TYPE/mxc-exec-darwin"
+    local src="$SRC_DIR/target/$triple/$BUILD_TYPE/mxc-exec-mac"
     if [ -f "$src" ]; then
-        cp "$src" "$bin_dir/mxc-exec-darwin"
-        chmod +x "$bin_dir/mxc-exec-darwin"
-        echo "Copied $src -> $bin_dir/mxc-exec-darwin"
+        cp "$src" "$bin_dir/mxc-exec-mac"
+        chmod +x "$bin_dir/mxc-exec-mac"
+        echo "Copied $src -> $bin_dir/mxc-exec-mac"
     else
         echo "Warning: $src not found, skipping copy"
     fi
@@ -147,7 +147,7 @@ fi
 echo ""
 echo "=== Build complete ==="
 for triple in "${TARGETS[@]}"; do
-    echo "Binary: $SRC_DIR/target/$triple/$BUILD_TYPE/mxc-exec-darwin"
+    echo "Binary: $SRC_DIR/target/$triple/$BUILD_TYPE/mxc-exec-mac"
 done
 echo ""
 echo "Note: this binary is unsigned. Codesigning + notarization happen at"

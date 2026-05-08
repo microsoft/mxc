@@ -119,7 +119,7 @@ export function resolveExecutableAndArgs(
     executablePath = findDarwinExecutable();
     if (!executablePath) {
       throw new Error(
-        'mxc-exec-darwin not found. Set options.executablePath or ensure it exists in a standard location.'
+        'mxc-exec-mac not found. Set options.executablePath or ensure it exists in a standard location.'
       );
     }
   } else {

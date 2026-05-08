@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "mxc-exec-darwin"
+name = "mxc-exec-mac"
 path = "src/main.rs"
 
 [dependencies]

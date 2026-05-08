@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `mxc-exec-darwin` — macOS sandbox executor.
+//! `mxc-exec-mac` — macOS sandbox executor.
 //!
 //! Mirrors the CLI shape of `lxc-exec` (clap args, config loading, dry-run,
 //! log-file). On macOS it dispatches to `SeatbeltScriptRunner`; on every
@@ -22,7 +22,7 @@ use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
 #[derive(Parser)]
-#[command(name = "mxc-exec-darwin", about = "macOS sandbox executor for MXC")]
+#[command(name = "mxc-exec-mac", about = "macOS sandbox executor for MXC")]
 struct Cli {
     /// Path to config JSON file (positional)
     #[arg(value_name = "CONFIG_PATH")]
@@ -154,7 +154,7 @@ fn run_macos_sandbox(_request: &CodexRequest, logger: &mut Logger) -> ! {
     let _ = Instant::now();
     let _ = ScriptResponse::default();
     eprintln!(
-        "mxc-exec-darwin: the macOS sandbox backend is only available on macOS. \
+        "mxc-exec-mac: the macOS sandbox backend is only available on macOS. \
          This binary was built for a non-Darwin target and cannot execute scripts."
     );
     print!("{}", logger.get_buffer());

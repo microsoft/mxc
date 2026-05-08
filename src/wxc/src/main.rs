@@ -358,7 +358,7 @@ fn main() {
         }
         ContainmentBackend::MacosSandbox => {
             eprintln!(
-                "Error: macOS sandbox backend is only available on macOS (use mxc-exec-darwin)"
+                "Error: macOS sandbox backend is only available on macOS (use mxc-exec-mac)"
             );
             process::exit(1);
         }

@@ -316,15 +316,15 @@ export function findLxcExecutable(): string | null {
 }
 
 /**
- * Find the mxc-exec-darwin executable on macOS.
+ * Find the mxc-exec-mac executable on macOS.
  * Searches in the SDK bin directory (npm install path) and Cargo build
  * output directories (monorepo dev path).
- * @returns Path to mxc-exec-darwin if found, null otherwise
+ * @returns Path to mxc-exec-mac if found, null otherwise
  */
 export function findDarwinExecutable(): string | null {
   // Allow override for bundled deployments (debugging/testing)
   if (process.env.MXC_BIN_DIR) {
-    const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'mxc-exec-darwin');
+    const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'mxc-exec-mac');
     if (verifyExecutable(overridePath)) {
       return overridePath;
     }
@@ -335,15 +335,15 @@ export function findDarwinExecutable(): string | null {
 
   const possiblePaths = [
     // Bundled in the SDK package
-    path.join(__dirname, '..', 'bin', getSdkArch(), 'mxc-exec-darwin'),
+    path.join(__dirname, '..', 'bin', getSdkArch(), 'mxc-exec-mac'),
     // Architecture-specific release build
-    path.join(targetDir, targetTriple, 'release', 'mxc-exec-darwin'),
+    path.join(targetDir, targetTriple, 'release', 'mxc-exec-mac'),
     // Architecture-specific debug build
-    path.join(targetDir, targetTriple, 'debug', 'mxc-exec-darwin'),
+    path.join(targetDir, targetTriple, 'debug', 'mxc-exec-mac'),
     // Default Cargo release build
-    path.join(targetDir, 'release', 'mxc-exec-darwin'),
+    path.join(targetDir, 'release', 'mxc-exec-mac'),
     // Default Cargo debug build
-    path.join(targetDir, 'debug', 'mxc-exec-darwin'),
+    path.join(targetDir, 'debug', 'mxc-exec-mac'),
   ];
 
   for (const darwinPath of possiblePaths) {
