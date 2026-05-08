@@ -8,7 +8,7 @@
 //!
 //! ## I/O model
 //!
-//! - **stdin**: inherited from parent via `Stdio::inherit()`
+//! - **stdin**: set to `Stdio::null()` (NanVix guest does not read host stdin)
 //! - **stdout**: inherited from parent via `Stdio::inherit()` (not captured)
 //! - **stderr**: inherited from parent via `Stdio::inherit()` (kernel traces)
 //!
@@ -238,6 +238,9 @@ impl NanVixScriptRunner {
     }
 
     /// Compute total timeout: boot grace + staging overhead + script timeout.
+    /// When `script_timeout == 0` the caller intends "no limit", so the watchdog
+    /// is disabled entirely (returns `u64::MAX`). Boot and staging time are
+    /// unbounded in this case — this is by design for interactive/exploratory use.
     fn total_timeout_ms(script_timeout: u32, staging_overhead_ms: u64) -> u64 {
         if script_timeout == 0 {
             u64::MAX

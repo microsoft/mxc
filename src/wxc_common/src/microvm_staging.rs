@@ -366,14 +366,14 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), StagingError> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
-        let ft = entry.metadata()?.file_type();
-        if ft.is_symlink() {
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
             return Err(StagingError::SymlinkFound(
                 entry.path().display().to_string(),
             ));
         }
         let target = dst.join(entry.file_name());
-        if ft.is_dir() {
+        if metadata.file_type().is_dir() {
             copy_dir_recursive(&entry.path(), &target)?;
         } else {
             fs::copy(entry.path(), target)?;
@@ -415,6 +415,16 @@ fn validate_source_path(path: &Path, original: &str) -> Result<(), StagingError>
             "root paths are not supported for microvm filesystem staging: {}",
             original
         )));
+    }
+    // Reject paths with `..` components to prevent path-traversal attacks that
+    // could write outside the staging directory (e.g., `C:\a\..\b`).
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(StagingError::PathNotFound(format!(
+                "paths with '..' components are not supported: {}",
+                original
+            )));
+        }
     }
     check_no_reparse_points(path)
 }

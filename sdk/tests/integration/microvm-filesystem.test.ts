@@ -20,7 +20,8 @@ import path from 'node:path';
 import os from 'os';
 import { execSync } from 'child_process';
 import { ChildProcess } from 'child_process';
-import { sdk } from './test-helpers';
+import { sdk } from './test-helpers.js';
+import type { ContainerConfig } from '../../dist/types.js';
 
 function isWhpAvailable(): boolean {
   if (os.platform() !== 'win32') return false;
@@ -49,7 +50,7 @@ function pyEscape(p: string): string {
  * Returns stdout, stderr, and exit code.
  */
 function runMicrovm(
-  config: Record<string, unknown>,
+  config: ContainerConfig,
   options: { timeoutMs?: number } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve, reject) => {
@@ -95,7 +96,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
   it('should run a simple Python script and capture output', async () => {
     const config = {
       version: '0.5.0-alpha',
-      containment: 'microvm',
+      containment: 'microvm' as const,
       process: {
         commandLine: "print('Hello from MicroVM SDK E2E!')",
         timeout: 30000,
@@ -111,7 +112,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
   it('should propagate non-zero exit codes', async () => {
     const config = {
       version: '0.5.0-alpha',
-      containment: 'microvm',
+      containment: 'microvm' as const,
       process: {
         commandLine: "import sys; sys.exit(42)",
         timeout: 30000,
@@ -125,7 +126,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
   it('should run multiline scripts with imports', async () => {
     const config = {
       version: '0.5.0-alpha',
-      containment: 'microvm',
+      containment: 'microvm' as const,
       process: {
         commandLine: [
           "import sys",
@@ -154,7 +155,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
       // it to the guest mount path before the script reaches the VM.
       const config = {
         version: '0.5.0-alpha',
-        containment: 'microvm',
+        containment: 'microvm' as const,
         process: {
           commandLine: [
             "import os",
@@ -183,7 +184,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
   it('should reject denied_paths with an error', async () => {
     const config = {
       version: '0.5.0-alpha',
-      containment: 'microvm',
+      containment: 'microvm' as const,
       process: {
         commandLine: "print('should not run')",
         timeout: 30000,
@@ -208,7 +209,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
     try {
       const config = {
         version: '0.5.0-alpha',
-        containment: 'microvm',
+        containment: 'microvm' as const,
         process: {
           commandLine: [
             "import os",
@@ -242,7 +243,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
     try {
       const config = {
         version: '0.5.0-alpha',
-        containment: 'microvm',
+        containment: 'microvm' as const,
         process: {
           commandLine: [
             "import os, sys",
@@ -278,7 +279,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
       const rwDirPy = pyEscape(rwDir);
       const config = {
         version: '0.5.0-alpha',
-        containment: 'microvm',
+        containment: 'microvm' as const,
         process: {
           // Generate a minimal valid PPTX using only stdlib (zipfile + xml).
           // A PPTX is an Office Open XML package — a zip with specific XML parts.
