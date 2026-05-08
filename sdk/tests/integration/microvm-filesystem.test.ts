@@ -21,7 +21,7 @@ import os from 'os';
 import { execSync } from 'child_process';
 import { ChildProcess } from 'child_process';
 import { sdk } from './test-helpers.js';
-import type { ContainerConfig } from '../../dist/types.js';
+import type { ContainerConfig } from '@microsoft/mxc-sdk';
 
 function isWhpAvailable(): boolean {
   if (os.platform() !== 'win32') return false;
