@@ -12,7 +12,7 @@ import {
   EXPECTED_LINUX_BINARIES,
   ALL_KNOWN_BINARIES,
   platformName,
-} from './test-helpers';
+} from './test-helpers.js';
 
 const expectedBinaries: Record<string, string[]> = {
   win32: EXPECTED_WINDOWS_BINARIES,

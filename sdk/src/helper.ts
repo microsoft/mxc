@@ -5,11 +5,11 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
-import { FileLogger } from './logger';
-import { ContainerConfig, ContainmentType, ExperimentalBackends, SandboxingMethod } from './types';
-import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
-import { SandboxSpawnOptions } from './sandbox';
-import { diagLog } from './diagnostic';
+import { FileLogger } from './logger.js';
+import { ContainerConfig, ContainmentType, ExperimentalBackends, SandboxingMethod } from './types.js';
+import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform.js';
+import { SandboxSpawnOptions } from './sandbox.js';
+import { diagLog } from './diagnostic.js';
 
 /** SDK version read from package.json at module load time. */
 export const SDK_VERSION: string = (() => {

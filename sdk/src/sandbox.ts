@@ -1,14 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import * as pty from 'node-pty';
+import pty from 'node-pty';
 import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, ContainerConfig, ContainmentType } from './types';
-import { prepareSpawn, diagLogVersion } from './helper';
-import { diagLog } from './diagnostic';
+import { SandboxPolicy, ContainerConfig, ContainmentType } from './types.js';
+import { prepareSpawn, diagLogVersion } from './helper.js';
+import { diagLog } from './diagnostic.js';
 
 const SUPPORTED_VERSION = '0.5.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';

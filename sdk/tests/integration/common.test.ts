@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import os from 'os';
 import {
@@ -9,12 +10,11 @@ import {
   expectDryRunValidationPass,
   assertDryRunResult,
   debugSpawnOptions,
-} from './test-helpers';
+} from './test-helpers.js';
 
 describe('Platform support', () => {
   it('should report platform support information', () => {
     const support = sdk.getPlatformSupport();
-    const assert = require('node:assert');
     assert.ok(typeof support.isSupported === 'boolean', 'isSupported should be a boolean');
     assert.ok(Array.isArray(support.availableMethods), 'availableMethods should be an array');
   });
@@ -46,9 +46,9 @@ for (const schemaVersion of supportedVersions) {
 
     it('should dry-run via spawnSandboxFromConfig with usePty: false', async () => {
       const config = sdk.createConfigFromPolicy(policy);
-      config.process = config.process || {};
+      config.process = config.process ?? { commandLine: '' };
       config.process.commandLine = 'cmd.exe /c echo test';
-      config.containerName = `dryrun-npty-${schemaVersion}`;
+      config.containerId = `dryrun-npty-${schemaVersion}`;
 
       const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
         const child = sdk.spawnSandboxFromConfig(config, { dryRun: true, usePty: false, ...debugSpawnOptions });
@@ -71,9 +71,9 @@ for (const schemaVersion of supportedVersions) {
 
     it('should dry-run via spawnSandboxFromConfig', async () => {
       const config = sdk.createConfigFromPolicy(policy);
-      config.process = config.process || {};
+      config.process = config.process ?? { commandLine: '' };
       config.process.commandLine = 'cmd.exe /c echo test';
-      config.containerName = `dryrun-fromcfg-${schemaVersion}`;
+      config.containerId = `dryrun-fromcfg-${schemaVersion}`;
 
       const result = await new Promise<{ exitCode: number; stdout: string }>((resolve) => {
         const ptyProcess = sdk.spawnSandboxFromConfig(config, { dryRun: true, ...debugSpawnOptions });

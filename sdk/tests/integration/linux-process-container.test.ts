@@ -14,7 +14,7 @@ import {
   NETWORK_TEST_URL,
   lxcNetworkSkipReason,
   debugSpawnOptions,
-} from './test-helpers';
+} from './test-helpers.js';
 
 for (const schemaVersion of supportedVersions) {
 describe(`Linux Process Container (schema ${schemaVersion})`, {
