@@ -17,7 +17,7 @@ export const sdk = sdkNamespace;
 
 export const supportedVersions = [
   new semver.SemVer('0.4.0-alpha'),
-  new semver.SemVer('0.5.0-dev'),
+  new semver.SemVer('0.5.0-alpha'),
 ];
 
 // SDK package location

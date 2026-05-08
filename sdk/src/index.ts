@@ -58,3 +58,61 @@ export {
   FilesystemPolicyResult,
   ToolsPolicyOptions,
 } from './policy.js';
+
+// Export typed wire-format errors
+export {
+  ErrorCode,
+  MxcError,
+  MxcMalformedRequestError,
+  MxcUnsupportedContainmentError,
+  MxcUnsupportedPhaseError,
+  MxcBackendUnavailableError,
+  MxcMalformedIdError,
+  MxcStaleIdError,
+  MxcNotProvisionedError,
+  MxcNotStartedError,
+  MxcAlreadyStartedError,
+  MxcAlreadyStoppedError,
+  MxcPolicyValidationError,
+  MxcBackendError,
+  mxcErrorFromCode,
+} from './errors.js';
+
+// Export state-aware lifecycle types
+export {
+  Phase,
+  StateAwareSandboxingMethod,
+  SandboxId,
+  IsolationSessionProvisionConfig,
+  IsolationSessionStartConfig,
+  IsolationSessionExecConfig,
+  IsolationSessionStopConfig,
+  IsolationSessionDeprovisionConfig,
+  IsolationSessionProvisionMetadata,
+  ConfigsForBackend,
+  ProvisionConfigFor,
+  StartConfigFor,
+  ExecConfigFor,
+  StopConfigFor,
+  DeprovisionConfigFor,
+  StateAwareMetadata,
+  ProvisionMetadataFor,
+  StartMetadataFor,
+  StopMetadataFor,
+  DeprovisionMetadataFor,
+  ProvisionResult,
+  StartResult,
+  StopResult,
+  DeprovisionResult,
+  ExecResult,
+} from './state-aware-types.js';
+
+// Export state-aware lifecycle functions
+export {
+  provisionSandbox,
+  startSandbox,
+  execInSandbox,
+  execInSandboxAsync,
+  stopSandbox,
+  deprovisionSandbox,
+} from './state-aware.js';

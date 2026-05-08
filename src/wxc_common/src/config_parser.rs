@@ -417,7 +417,7 @@ pub fn decode_request_input(
 // ---------- Cross-field validation ----------
 
 /// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: &str = ">=0.4, <=0.5";
+const SUPPORTED_VERSION: &str = ">=0.4, <=0.6";
 
 /// The minimum schema version that implies BaseContainer backend usage.
 const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
@@ -1792,7 +1792,7 @@ mod tests {
 
     #[test]
     fn schema_version_too_new_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.6.0"}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.7.0"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1808,6 +1808,19 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "0.5.0-alpha");
+    }
+
+    #[test]
+    fn schema_version_state_aware_06_accepted() {
+        // 0.6 is the state-aware schema version (SDK side bumps to it for
+        // provision/start/exec/stop/deprovision envelopes); the parser must
+        // accept it on the same path used for one-shot 0.5 requests.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.6.0-alpha"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, "0.6.0-alpha");
     }
 
     #[test]

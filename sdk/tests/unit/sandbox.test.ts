@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
-import { SandboxPolicy } from '../../src/types.js';
+import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
 
 describe('buildSandboxPayload', () => {
   const defaultPolicy: SandboxPolicy = { version: '0.4.0-alpha' };
@@ -84,6 +84,15 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         assert.doesNotThrow(() => buildSandboxPayload('echo hi', { version: '0.4.0-alpha' }));
+      } finally {
+        restore();
+      }
+    });
+
+    it('should accept version 0.6.0-alpha', () => {
+      mockWindows();
+      try {
+        assert.doesNotThrow(() => buildSandboxPayload('echo hi', { version: '0.6.0-alpha' }));
       } finally {
         restore();
       }
@@ -659,5 +668,20 @@ describe('createConfigFromPolicy', () => {
         { message: /experimental mode/ },
       );
     });
+  });
+});
+
+describe('Schema 0.6.0 vocabulary', () => {
+  it('should accept isolation_session as a SandboxingMethod', () => {
+    const m: SandboxingMethod = 'isolation_session';
+    assert.strictEqual(m, 'isolation_session');
+  });
+
+  it('should accept isolation_session as a ContainerConfig.containment value', () => {
+    const c: ContainerConfig = {
+      version: '0.6.0-alpha',
+      containment: 'isolation_session',
+    };
+    assert.strictEqual(c.containment, 'isolation_session');
   });
 });

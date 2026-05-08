@@ -36,6 +36,17 @@ These scripts are local helpers. Not every script is run by CI because several
 depend on local OS features such as Windows Sandbox, WHP, proxy setup, or stress
 test duration.
 
+### Deployment helpers (TShell `putd`)
+
+These scripts copy build artifacts onto a remote test VM via TShell. Source them
+from inside an active TShell session (`Open-Device -vm <vm>`).
+
+| Script | Copies |
+|--------|--------|
+| `push_exes_to_vm.ps1` | Native Rust binaries (Debug + Release) |
+| `push_batch_and_config_files_to_vm.ps1` | `test_configs\`, `examples\`, runner batch files, helper scripts |
+| `push_sdk_integration_tests_to_vm.ps1` | SDK integration test artifacts (`sdk\bin\x64`, compiled tests, `node_modules`, `package.json`, `run-tests.js`) |
+
 CI currently runs the MicroVM Rust E2E suite when WHP is available. Other
 executor E2E tests are local/prerequisite-gated and should be run on machines
 with the required Windows features and binaries.
