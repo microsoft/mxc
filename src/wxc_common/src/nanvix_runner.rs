@@ -8,27 +8,25 @@
 //!
 //! ## I/O model
 //!
-//! - **stdin**: runner writes script code, then closes (EOF triggers `exec()`)
-//! - **stdout**: relayed directly to parent process via `Stdio::inherit()` (not captured)
-//! - **stderr**: relayed directly to parent process via `Stdio::inherit()` (kernel traces)
+//! - **stdin**: set to `Stdio::null()` (NanVix guest does not read host stdin)
+//! - **stdout**: inherited from parent via `Stdio::inherit()` (not captured)
+//! - **stderr**: inherited from parent via `Stdio::inherit()` (kernel traces)
 //!
-//! **Note for SDK consumers:** Because stdout/stderr are inherited (not captured),
-//! `ScriptResponse.standard_out` and `standard_err` are always empty strings for
-//! the NanVix backend. Output is streamed directly to the parent's console/pipes.
-//! Programmatic consumers that need captured output should redirect wxc-exec's
-//! stdout/stderr at the process level.
+//! **Note for SDK consumers:** Use `usePty: false` (non-PTY mode) for the MicroVM
+//! backend. PTY mode is not supported. Because stdout/stderr are inherited,
+//! `ScriptResponse.standard_out` and `standard_err` are always empty strings.
+//! Output is streamed directly to the parent's pipes.
 //!
 //! ## Exit codes
 //!
 //! `nanvixd` propagates the guest process exit code directly.
 //!
-//! ## Auto-discovery
+//! Auto-discovery
 //!
-//! All required binaries (`nanvixd.exe`, `python.elf`, `cpython-ramfs.img`)
+//! All required binaries (`nanvixd.exe`, `python3.12`, `nanvix_rootfs.img`)
 //! are discovered next to the running executable. No configuration is needed.
 
 use std::fmt::Write;
-use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,22 +39,27 @@ use crate::logger::Logger;
 use crate::models::{CodexRequest, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 
-/// CPython guest binary loaded by NanVix.
-const PYTHON_BINARY: &str = "python.elf";
+/// Python guest binary loaded by NanVix (embedded in the rootfs, also provided as a sidecar).
+const PYTHON_BINARY: &str = "python3.12";
 /// Guest PYTHONHOME value used by CPython inside NanVix.
 /// Must NOT contain ';' or spaces — these are NanVix argument delimiters
 /// that would corrupt the guest cmdline string.
 const PYTHON_HOME: &str = "/sysroot";
 /// NanVix daemon binary launched by the host runner.
 const NANVIXD_BINARY: &str = "nanvixd.exe";
-/// CPython stdlib ramfs image mounted by NanVix.
-const RAMFS_IMAGE: &str = "cpython-ramfs.img";
+/// Combined rootfs image (NanVix kernel userspace + CPython stdlib).
+const RAMFS_IMAGE: &str = "nanvix_rootfs.img";
 /// Boot grace period that is always enforced.
 const BOOT_TIMEOUT_MS: u64 = 60_000;
 /// Generic error exit code returned to host callers.
 const ERROR_EXIT_CODE: i32 = -1;
-const ERR_FILESYSTEM_POLICY: &str =
-    "filesystem policy is not supported by the NanVix backend -- guest has a read-only ramfs";
+/// Maximum age of orphaned staging dirs before cleanup (1 hour).
+const ORPHAN_SWEEP_MAX_AGE_SECS: u64 = 3600;
+const ERR_DENIED_PATHS: &str = concat!(
+    "denied_paths is not meaningful for the microvm backend ",
+    "-- the guest has no host filesystem visibility. ",
+    "Only readwrite_paths and readonly_paths are supported",
+);
 const ERR_NETWORK_POLICY: &str =
     "network policy is not supported by the NanVix backend -- NanVix has no network stack";
 const ERR_PROXY_POLICY: &str =
@@ -201,11 +204,11 @@ impl NanVixScriptRunner {
     }
 
     /// Resolve and validate all required paths next to the running executable.
-    fn resolve_paths(&self) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), NanVixError> {
+    fn resolve_paths(&self) -> Result<(PathBuf, PathBuf, PathBuf), NanVixError> {
         let dir = exe_dir()?;
-        // NanVix runtime artifacts (nanvixd.exe, kernel.elf, python.elf, cpython-ramfs.img)
-        // are distributed via GitHub releases from nanvix/nanvix and nanvix/cpython.
-        // They are placed next to wxc-exec.exe by setup scripts.
+        // NanVix runtime artifacts (nanvixd.exe, kernel.elf, python3.12, nanvix_rootfs.img)
+        // are distributed via GitHub releases from nanvix/nanvix-python.
+        // They are placed next to wxc-exec.exe by the build system.
 
         let nanvixd = dir.join(NANVIXD_BINARY);
         if !nanvixd.exists() {
@@ -231,25 +234,27 @@ impl NanVixScriptRunner {
             )));
         }
 
-        Ok((nanvixd, dir, ramfs, python))
+        Ok((nanvixd, ramfs, python))
     }
 
-    /// Compute total timeout: boot grace + script timeout.
-    fn total_timeout_ms(script_timeout: u32) -> u64 {
+    /// Compute total timeout: boot grace + staging overhead + script timeout.
+    /// When `script_timeout == 0` the caller intends "no limit", so the watchdog
+    /// is disabled entirely (returns `u64::MAX`). Boot and staging time are
+    /// unbounded in this case — this is by design for interactive/exploratory use.
+    fn total_timeout_ms(script_timeout: u32, staging_overhead_ms: u64) -> u64 {
         if script_timeout == 0 {
-            // Infinite script timeout — still enforce boot timeout.
             u64::MAX
         } else {
-            BOOT_TIMEOUT_MS.saturating_add(script_timeout as u64)
+            BOOT_TIMEOUT_MS
+                .saturating_add(staging_overhead_ms)
+                .saturating_add(script_timeout as u64)
         }
     }
 
     fn validate_policies(request: &CodexRequest) -> Result<(), NanVixError> {
-        if !request.policy.readwrite_paths.is_empty()
-            || !request.policy.readonly_paths.is_empty()
-            || !request.policy.denied_paths.is_empty()
-        {
-            return Err(NanVixError::Preflight(ERR_FILESYSTEM_POLICY.to_string()));
+        // denied_paths is explicitly rejected — microvm has no host visibility.
+        if !request.policy.denied_paths.is_empty() {
+            return Err(NanVixError::Preflight(ERR_DENIED_PATHS.to_string()));
         }
         if !request.policy.allowed_hosts.is_empty()
             || !request.policy.blocked_hosts.is_empty()
@@ -268,59 +273,47 @@ impl NanVixScriptRunner {
     }
 
     fn build_guest_args() -> String {
-        // Build the NanVix guest argument string.
-        // Format: "-S -B -c exec(__import__('sys').stdin.read());PYTHONHOME=/sysroot"
+        // Build the NanVix guest argument string for mount-based script delivery.
+        // Format: "-S -B /mnt/.mxc-bootstrap.py;PYTHONHOME=/sysroot"
         //
-        // ';' is NanVix's separator between argv and environment variables.
-        // Everything before ';' is split on spaces into argv entries.
-        // Everything after ';' is set as environment variables.
+        // -S: skip site.py (critical — site import is very slow with large ramfs)
+        // -B: no .pyc writing (read-only filesystem)
         //
-        // -S: skip site.py  -B: no .pyc writing
-        // -c exec(...): reads all of stdin and executes it (no interactive >>> prompts)
-        // Note: exec(__import__('sys').stdin.read()) has NO spaces, so it survives
-        //       NanVix's space-splitting in build_string_table().
-        format!(
-            "-S -B -c exec(__import__('sys').stdin.read());PYTHONHOME={}",
-            PYTHON_HOME
-        )
+        // The bootstrap script lives in the staging directory mounted at /mnt.
+        // It exec()s /mnt/.mxc-script.py which has host paths rewritten to
+        // guest mount paths by the staging layer.
+        //
+        // NanVix splits on spaces: argv = ["python3.12", "-S", "-B", "/mnt/..."]
+        // NanVix splits on ';': env = ["PYTHONHOME=/sysroot"]
+        format!("-S -B /mnt/.mxc-bootstrap.py;PYTHONHOME={}", PYTHON_HOME)
     }
 
     fn spawn_nanvixd(
-        paths: (&Path, &Path, &Path, &Path),
+        paths: (&Path, &Path, &Path),
         guest_args: &str,
-        script: &str,
+        staging_dir: &Path,
     ) -> Result<std::process::Child, NanVixError> {
-        let (nanvixd_path, bin_dir, ramfs_path, python_path) = paths;
-        let mut child = Command::new(nanvixd_path)
+        let (nanvixd_path, ramfs_path, python_path) = paths;
+        let bin_dir = nanvixd_path
+            .parent()
+            .expect("nanvixd path must have a parent directory");
+        Command::new(nanvixd_path)
             .arg("-bin-dir")
             .arg(bin_dir)
             .arg("-ramfs")
             .arg(ramfs_path)
+            .arg("-mount")
+            .arg(staging_dir)
             .arg("--")
             .arg(python_path)
             .arg(guest_args)
-            .stdin(Stdio::piped())
+            .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| {
                 NanVixError::Platform(format!("failed to spawn {}: {}", NANVIXD_BINARY, e))
-            })?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(e) = stdin.write_all(script.as_bytes()) {
-                let err = NanVixError::Runtime(format!(
-                    "failed to write script to {} stdin: {}",
-                    NANVIXD_BINARY, e
-                ));
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(err);
-            }
-            drop(stdin);
-        }
-
-        Ok(child)
+            })
     }
 
     fn start_watchdog(
@@ -412,15 +405,8 @@ impl NanVixScriptRunner {
         Ok((watchdog, cancel_pair, timed_out))
     }
 
-    fn log_resolved_paths(
-        logger: &mut Logger,
-        nanvixd: &Path,
-        bin_dir: &Path,
-        ramfs: &Path,
-        python: &Path,
-    ) {
+    fn log_resolved_paths(logger: &mut Logger, nanvixd: &Path, ramfs: &Path, python: &Path) {
         let _ = writeln!(logger, "NanVix: nanvixd={:?}", nanvixd);
-        let _ = writeln!(logger, "NanVix: bin_dir={:?}", bin_dir);
         let _ = writeln!(logger, "NanVix: ramfs={:?}", ramfs);
         let _ = writeln!(logger, "NanVix: python={:?}", python);
     }
@@ -474,6 +460,13 @@ impl NanVixScriptRunner {
             }
         }
     }
+    /// Returns `true` when filesystem copyback should run.
+    /// Copyback runs on any normal process exit (including non-zero exit codes).
+    /// It is skipped for preflight, spawn, runtime, and timeout errors, and for
+    /// OS crashes (negative exit codes from NTSTATUS values).
+    fn should_copy_back(response: &ScriptResponse) -> bool {
+        response.error_message.is_empty() && response.exit_code >= 0
+    }
 }
 
 impl ScriptRunner for NanVixScriptRunner {
@@ -482,18 +475,40 @@ impl ScriptRunner for NanVixScriptRunner {
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let (nanvixd_path, bin_dir, ramfs_path, python_path) = match self.resolve_paths() {
+        let (nanvixd_path, ramfs_path, python_path) = match self.resolve_paths() {
             Ok(paths) => paths,
             Err(e) => return e.to_response(),
         };
 
-        Self::log_resolved_paths(logger, &nanvixd_path, &bin_dir, &ramfs_path, &python_path);
+        // Build staging directory with script and filesystem policy paths.
+        let staging_root = std::env::temp_dir().join("mxc-microvm");
+        // Sweep orphaned staging dirs from previous crashed runs (older than 1 hour).
+        crate::microvm_staging::sweep_orphaned_staging_dirs(
+            &staging_root,
+            std::time::Duration::from_secs(ORPHAN_SWEEP_MAX_AGE_SECS),
+        );
+        let mut staging = match crate::microvm_staging::StagingDir::new(
+            staging_root,
+            &request.script_code,
+            &request.policy.readwrite_paths,
+            &request.policy.readonly_paths,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                let err = NanVixError::Preflight(e.to_string());
+                let _ = writeln!(logger, "{}", err);
+                return err.to_response();
+            }
+        };
+
+        Self::log_resolved_paths(logger, &nanvixd_path, &ramfs_path, &python_path);
+        let _ = writeln!(logger, "NanVix: staging_dir={:?}", staging.path());
         let guest_args = Self::build_guest_args();
 
         let mut child = match Self::spawn_nanvixd(
-            (&nanvixd_path, &bin_dir, &ramfs_path, &python_path),
+            (&nanvixd_path, &ramfs_path, &python_path),
             &guest_args,
-            &request.script_code,
+            staging.path(),
         ) {
             Ok(c) => c,
             Err(e) => {
@@ -502,14 +517,15 @@ impl ScriptRunner for NanVixScriptRunner {
             }
         };
 
-        let timeout_ms = Self::total_timeout_ms(request.script_timeout);
+        let staging_overhead = staging.staging_overhead_ms();
+        let timeout_ms = Self::total_timeout_ms(request.script_timeout, staging_overhead);
         let (watchdog, cancel_pair, timed_out) =
             match Self::setup_watchdog(&mut child, timeout_ms, logger) {
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
 
-        Self::wait_and_respond(
+        let response = Self::wait_and_respond(
             &mut child,
             watchdog,
             &cancel_pair,
@@ -517,7 +533,27 @@ impl ScriptRunner for NanVixScriptRunner {
             timeout_ms,
             request.script_timeout,
             logger,
-        )
+        );
+
+        // Copy back RW filesystem changes on normal process exit.
+        if Self::should_copy_back(&response) {
+            if let Err(e) = staging.copy_back_to_host() {
+                let preserved = staging
+                    .preserved_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                let err = NanVixError::Runtime(format!(
+                    "failed to copy back microvm filesystem changes: {}. \
+                     Staged files preserved at: {}",
+                    e, preserved
+                ));
+                let _ = writeln!(logger, "{}", err);
+                return err.to_response();
+            }
+        }
+
+        response
+        // staging is dropped here → cleanup
     }
 }
 
@@ -528,11 +564,13 @@ mod tests {
     use crate::models::{ContainerPolicy, NetworkPolicy};
 
     #[test]
-    fn total_timeout_adds_boot_and_script() {
+    fn total_timeout_adds_boot_staging_and_script() {
         // script_timeout=0 => infinite script timeout sentinel.
-        assert_eq!(NanVixScriptRunner::total_timeout_ms(0), u64::MAX);
-        // script_timeout=30000 -> 30s + 60s boot = 90s
-        assert_eq!(NanVixScriptRunner::total_timeout_ms(30_000), 90_000);
+        assert_eq!(NanVixScriptRunner::total_timeout_ms(0, 0), u64::MAX);
+        // script_timeout=30000, staging_overhead=500 -> 30s + 500ms + 60s boot = 90.5s
+        assert_eq!(NanVixScriptRunner::total_timeout_ms(30_000, 500), 90_500);
+        // script_timeout=30000, no staging -> 30s + 60s boot = 90s
+        assert_eq!(NanVixScriptRunner::total_timeout_ms(30_000, 0), 90_000);
     }
 
     #[test]
@@ -545,8 +583,8 @@ mod tests {
     // -- Policy validation tests -------------------------------------------------
 
     #[test]
-    fn policy_rejects_filesystem_paths() {
-        let mut runner = NanVixScriptRunner::new();
+    fn policy_accepts_readwrite_paths() {
+        // Validation passes; the runner fails later on path resolution.
         let request = CodexRequest {
             script_code: "echo test".to_string(),
             policy: ContainerPolicy {
@@ -555,15 +593,12 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut logger = Logger::new(Mode::Buffer);
-        let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_FILESYSTEM_POLICY));
+        let result = NanVixScriptRunner::validate_policies(&request);
+        assert!(result.is_ok(), "readwrite_paths accepted");
     }
 
     #[test]
-    fn policy_rejects_readonly_paths() {
-        let mut runner = NanVixScriptRunner::new();
+    fn policy_accepts_readonly_paths() {
         let request = CodexRequest {
             script_code: "echo test".to_string(),
             policy: ContainerPolicy {
@@ -572,10 +607,27 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut logger = Logger::new(Mode::Buffer);
-        let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_FILESYSTEM_POLICY));
+        let result = NanVixScriptRunner::validate_policies(&request);
+        assert!(result.is_ok(), "readonly_paths accepted");
+    }
+
+    #[test]
+    fn policy_rejects_denied_paths() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                denied_paths: vec!["/secret".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = NanVixScriptRunner::validate_policies(&request);
+        assert!(result.is_err(), "denied_paths should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains(ERR_DENIED_PATHS),
+            "expected denied_paths error, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -656,7 +708,7 @@ mod tests {
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(
-            !resp.error_message.contains(ERR_FILESYSTEM_POLICY),
+            !resp.error_message.contains("denied_paths"),
             "default request should not trigger filesystem policy rejection"
         );
         assert!(
@@ -702,9 +754,74 @@ mod tests {
 
     #[test]
     fn guest_args_format_is_correct() {
-        let expected = "-S -B -c exec(__import__('sys').stdin.read());PYTHONHOME=/sysroot";
+        let expected = "-S -B /mnt/.mxc-bootstrap.py;PYTHONHOME=/sysroot";
         let actual = NanVixScriptRunner::build_guest_args();
         assert_eq!(actual, expected);
-        assert!(!"exec(__import__('sys').stdin.read())".contains(' '));
+        // The bootstrap path segment itself must not contain spaces.
+        // (The -S and -B flags are intentional space-separated argv entries.)
+        assert!(
+            actual.contains("/mnt/.mxc-bootstrap.py"),
+            "must contain bootstrap path"
+        );
+    }
+
+    #[test]
+    fn guest_args_use_bootstrap_path() {
+        let args = NanVixScriptRunner::build_guest_args();
+        assert!(
+            args.contains(".mxc-bootstrap.py"),
+            "guest args should reference bootstrap script, got: {}",
+            args
+        );
+        assert!(
+            !args.contains("exec(__import__"),
+            "guest args should NOT use stdin exec trick, got: {}",
+            args
+        );
+    }
+
+    // -- Copyback decision tests ------------------------------------------------
+
+    #[test]
+    fn copyback_allowed_for_zero_exit() {
+        let response = ScriptResponse {
+            exit_code: 0,
+            ..Default::default()
+        };
+        assert!(NanVixScriptRunner::should_copy_back(&response));
+    }
+
+    #[test]
+    fn copyback_allowed_for_nonzero_normal_exit() {
+        let response = ScriptResponse {
+            exit_code: 42,
+            ..Default::default()
+        };
+        assert!(NanVixScriptRunner::should_copy_back(&response));
+    }
+
+    #[test]
+    fn copyback_skipped_for_runner_error() {
+        let response = ScriptResponse {
+            exit_code: ERROR_EXIT_CODE,
+            error_message: "NanVix execution timed out after 90000ms".to_string(),
+            ..Default::default()
+        };
+        assert!(!NanVixScriptRunner::should_copy_back(&response));
+    }
+
+    #[test]
+    fn copyback_skipped_for_os_crash() {
+        // STATUS_ACCESS_VIOLATION = 0xC0000005 → interpreted as i32 = -1073741819.
+        // This is a nanvixd OS crash — copyback must be suppressed.
+        let response = ScriptResponse {
+            exit_code: -1073741819_i32,
+            error_message: String::new(),
+            ..Default::default()
+        };
+        assert!(
+            !NanVixScriptRunner::should_copy_back(&response),
+            "copyback must be skipped for NTSTATUS crash exit codes"
+        );
     }
 }

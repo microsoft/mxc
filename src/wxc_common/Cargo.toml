@@ -27,6 +27,7 @@ sandbox_spec = { workspace = true }
 widestring = { workspace = true }
 isolation_session_bindings = { workspace = true, optional = true }
 windows-future = { version = "0.3", optional = true }
+uuid = { workspace = true }
 windows-collections = { version = "0.3", optional = true }
 
 [dev-dependencies]

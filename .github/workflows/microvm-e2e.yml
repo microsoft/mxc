@@ -47,7 +47,7 @@ jobs:
         shell: pwsh
         run: |
           $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
-          $required = @("wxc-exec.exe", "nanvixd.exe", "kernel.elf", "python.elf", "cpython-ramfs.img")
+          $required = @("wxc-exec.exe", "nanvixd.exe", "kernel.elf", "python3.12", "nanvix_rootfs.img")
           $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
           if ($missing) {
             Write-Host "::error::Missing binaries: $($missing -join ', ')"

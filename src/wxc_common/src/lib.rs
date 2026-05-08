@@ -7,6 +7,8 @@ pub mod encoding;
 pub mod error;
 pub mod id;
 pub mod logger;
+#[cfg(target_os = "windows")]
+pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
 #[cfg(target_os = "windows")]
