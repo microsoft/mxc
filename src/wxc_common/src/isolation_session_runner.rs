@@ -21,8 +21,8 @@ use serde::Serialize;
 use crate::id::mint_random_token;
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, IsolationSessionConfig, IsolationSessionConfigurationId, NetworkPolicy,
-    ScriptResponse,
+    CodexRequest, IsolationSessionConfig, IsolationSessionConfigurationId,
+    IsolationSessionProvisionConfig, IsolationSessionUser, NetworkPolicy, ScriptResponse,
 };
 use crate::mxc_error::MxcError;
 use crate::process_util::{
@@ -39,7 +39,9 @@ use isolation_session_bindings::bindings::{
     IsoSessionOps, IsoSessionProcess, IsoSessionProcessOptions, IsoSessionProcessResult,
     IsoSessionResult, IsoSessionUserResult,
 };
-use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, HANDLE, REGDB_E_CLASSNOTREG};
+use windows::Win32::Foundation::{
+    CLASS_E_CLASSNOTAVAILABLE, E_NOINTERFACE, HANDLE, REGDB_E_CLASSNOTREG,
+};
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
@@ -161,6 +163,26 @@ pub(crate) fn validate_post_provision_policy(
         ));
     }
     validate_network_and_proxy_policy(request)
+}
+
+/// Validates the shape of an `IsolationSessionUser` bundle: `upn` must be a
+/// non-empty UPN containing `@` not at either boundary; `wam_token` must be
+/// non-empty. Surfaces shape errors as `policy_validation` so they appear as
+/// structured wire-format errors at the dispatch boundary.
+fn validate_isolation_session_user(user: &IsolationSessionUser) -> Result<(), MxcError> {
+    let upn = user.upn.trim();
+    if upn.is_empty() || !upn.contains('@') || upn.starts_with('@') || upn.ends_with('@') {
+        return Err(MxcError::policy_validation(format!(
+            "user.upn must be a UPN containing '@' (got {:?})",
+            user.upn
+        )));
+    }
+    if user.wam_token.is_empty() {
+        return Err(MxcError::policy_validation(
+            "user.wamToken must not be empty",
+        ));
+    }
+    Ok(())
 }
 
 /// Network and proxy validation is identical at every phase: the backend
@@ -534,6 +556,47 @@ impl IsolationSessionManager {
         Ok(name.to_string())
     }
 
+    /// Step 1 (Entra): Provision an agent user backed by Entra cloud
+    /// credentials. Calls `IIsoSessionOps2::AddUserAsync2` with the
+    /// caller-supplied `wam_token`. Returns `ServiceUnavailable` when the
+    /// host OS lacks the v2 interface (older builds without
+    /// `IIsoSessionOps2`); the caller does not fall back to v1.
+    pub fn provision_agent_user_v2(
+        &self,
+        wam_token: &str,
+    ) -> Result<String, IsolationSessionError> {
+        let async_op = match self.ops.AddUserAsync2(
+            &self.registration_id,
+            &self.provision_id,
+            &HSTRING::from(wam_token),
+        ) {
+            Ok(op) => op,
+            Err(e) if e.code() == E_NOINTERFACE => {
+                return Err(IsolationSessionError::ServiceUnavailable(
+                    "IsoSessionOps2 (Entra agent support) is not available on this OS build"
+                        .to_string(),
+                ));
+            }
+            Err(e) => return Err(lifecycle_err(format!("AddUserAsync2 call failed: {}", e))),
+        };
+        let user_result: IsoSessionUserResult = async_op
+            .join()
+            .map_err(|e| lifecycle_err(format!("AddUserAsync2 wait failed: {}", e)))?;
+
+        let err = user_result
+            .Error()
+            .map_err(|e| lifecycle_err(format!("AddUserAsync2: get Error failed: {}", e)))?;
+        let is_error = err.IsError().unwrap_or(false);
+        if is_error {
+            return Err(format_iso_error("AddUserAsync2", &err));
+        }
+
+        let name = user_result.AgentUserName().map_err(|e| {
+            lifecycle_err(format!("AddUserAsync2: get AgentUserName failed: {}", e))
+        })?;
+        Ok(name.to_string())
+    }
+
     /// Grants the agent user access to host folders. `readwrite_paths`
     /// get read+write access, `readonly_paths` get read-only. Both apply
     /// recursively to each subtree.
@@ -581,6 +644,41 @@ impl IsolationSessionManager {
             .join()
             .map_err(|e| lifecycle_err(format!("StartSessionAsync wait failed: {}", e)))?;
         check_result(&result, "StartSessionAsync")
+    }
+
+    /// Step 2 (Entra): Start an Entra-backed isolation session. Calls
+    /// `IIsoSessionOps2::StartSessionAsync2` with the caller-supplied
+    /// `wam_token`. Returns `ServiceUnavailable` when the host OS lacks
+    /// the v2 interface.
+    pub fn start_session_v2(
+        &self,
+        config_id: IsolationSessionConfigurationId,
+        wam_token: &str,
+    ) -> Result<(), IsolationSessionError> {
+        let cfg: IsoSessionConfigId = config_id.into();
+        let async_op =
+            match self
+                .ops
+                .StartSessionAsync2(&self.provision_id, cfg, &HSTRING::from(wam_token))
+            {
+                Ok(op) => op,
+                Err(e) if e.code() == E_NOINTERFACE => {
+                    return Err(IsolationSessionError::ServiceUnavailable(
+                        "IsoSessionOps2 (Entra agent support) is not available on this OS build"
+                            .to_string(),
+                    ));
+                }
+                Err(e) => {
+                    return Err(lifecycle_err(format!(
+                        "StartSessionAsync2 call failed: {}",
+                        e
+                    )));
+                }
+            };
+        let result = async_op
+            .join()
+            .map_err(|e| lifecycle_err(format!("StartSessionAsync2 wait failed: {}", e)))?;
+        check_result(&result, "StartSessionAsync2")
     }
 
     /// Step 3: Create a process inside the started isolation session and
@@ -920,6 +1018,13 @@ impl ScriptRunner for IsolationSessionRunner {
         // One-shot runs the full provision -> start -> exec -> stop ->
         // deprovision lifecycle in a single process, so provision-phase
         // semantics apply to the whole call.
+        if let Some(cfg) = request.experimental.isolation_session.as_ref() {
+            if cfg.user.is_some() {
+                return Err(ScriptResponse::error(
+                    "user is not supported in one-shot mode; use the state-aware lifecycle",
+                ));
+            }
+        }
         validate_provision_policy(request).map_err(ScriptResponse::from)
     }
 
@@ -1061,7 +1166,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     const ID_PREFIX: &'static str = "iso";
     const BACKEND_KEY: &'static str = "isolation_session";
 
-    type ProvisionConfig = ();
+    type ProvisionConfig = IsolationSessionProvisionConfig;
     /// `experimental.isolation_session.start` mirrors the one-shot
     /// `experimental.isolation_session` shape — same `IsolationSessionConfig`
     /// type, same wire keys.
@@ -1077,12 +1182,23 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     fn provision(
         &mut self,
         request: &CodexRequest,
-        _config: Option<()>,
+        config: Option<IsolationSessionProvisionConfig>,
     ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
-        let provision_id = format!("wxc-{}", mint_random_token());
+        let user = config.and_then(|c| c.user);
+        // For Entra sandboxes the UPN IS the OS-layer provisionId; encoding
+        // it as the sandboxId tail keeps subsequent phases stateless.
+        let provision_id = match &user {
+            Some(u) => u.upn.clone(),
+            None => format!("wxc-{}", mint_random_token()),
+        };
         let manager = IsolationSessionManager::new(&provision_id).map_err(map_lifecycle_error)?;
         manager.register_client().map_err(map_lifecycle_error)?;
-        let agent_user_name = match manager.provision_agent_user() {
+
+        let provision_result = match &user {
+            Some(u) => manager.provision_agent_user_v2(&u.wam_token),
+            None => manager.provision_agent_user(),
+        };
+        let agent_user_name = match provision_result {
             Ok(name) => name,
             Err(e) => {
                 // Defensive cleanup mirrors the one-shot path: provision_agent_user
@@ -1124,10 +1240,13 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         // Config absent → Composable, mirroring the one-shot default. The
         // OS-side service does not call back into MXC after start, so a
         // return here means the session is ready to host process launches.
-        let configuration_id = config.map(|c| c.configuration_id).unwrap_or_default();
-        manager
-            .start_session(configuration_id)
-            .map_err(map_lifecycle_error)?;
+        let cfg = config.unwrap_or_default();
+        let configuration_id = cfg.configuration_id;
+        let start_result = match cfg.user {
+            Some(u) => manager.start_session_v2(configuration_id, &u.wam_token),
+            None => manager.start_session(configuration_id),
+        };
+        start_result.map_err(map_lifecycle_error)?;
         Ok(StartResult { metadata: None })
     }
 
@@ -1179,17 +1298,44 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     fn validate_provision(
         &self,
         request: &CodexRequest,
-        _config: Option<&()>,
+        config: Option<&IsolationSessionProvisionConfig>,
     ) -> Result<(), MxcError> {
+        if let Some(user) = config.and_then(|c| c.user.as_ref()) {
+            validate_isolation_session_user(user)?;
+        }
         validate_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     fn validate_start(
         &self,
-        _sandbox_id: &str,
+        sandbox_id: &str,
         request: &CodexRequest,
-        _config: Option<&IsolationSessionConfig>,
+        config: Option<&IsolationSessionConfig>,
     ) -> Result<(), MxcError> {
+        let provision_id = extract_provision_id(sandbox_id)?;
+        let is_entra = provision_id.contains('@');
+        let user = config.and_then(|c| c.user.as_ref());
+        match (is_entra, user) {
+            (true, None) => {
+                return Err(MxcError::malformed_request(
+                    "Entra sandbox requires user at start",
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(MxcError::malformed_request(
+                    "user is not allowed for local sandbox",
+                ));
+            }
+            (true, Some(u)) => {
+                validate_isolation_session_user(u)?;
+                if !u.upn.eq_ignore_ascii_case(provision_id) {
+                    return Err(MxcError::malformed_request(
+                        "user.upn does not match sandboxId",
+                    ));
+                }
+            }
+            (false, None) => {}
+        }
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
@@ -1944,5 +2090,243 @@ mod tests {
             "unexpected remediation suffix in: {}",
             msg
         );
+    }
+
+    // ====== Entra agent support: validation matrix ======
+
+    use crate::models::{ExperimentalConfig, IsolationSessionUser};
+
+    fn well_formed_user() -> IsolationSessionUser {
+        IsolationSessionUser {
+            upn: "alice@contoso.com".to_string(),
+            wam_token: "tok".to_string(),
+        }
+    }
+
+    #[test]
+    fn validate_isolation_session_user_accepts_well_formed_bundle() {
+        validate_isolation_session_user(&well_formed_user()).unwrap();
+    }
+
+    #[test]
+    fn validate_isolation_session_user_rejects_upn_without_at() {
+        use crate::mxc_error::MxcErrorCode;
+        let user = IsolationSessionUser {
+            upn: "alice".to_string(),
+            wam_token: "tok".to_string(),
+        };
+        let err = validate_isolation_session_user(&user).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        assert!(err.message.contains("upn"), "got {}", err.message);
+    }
+
+    #[test]
+    fn validate_isolation_session_user_rejects_upn_at_at_start() {
+        use crate::mxc_error::MxcErrorCode;
+        let user = IsolationSessionUser {
+            upn: "@contoso.com".to_string(),
+            wam_token: "tok".to_string(),
+        };
+        let err = validate_isolation_session_user(&user).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_isolation_session_user_rejects_upn_at_at_end() {
+        use crate::mxc_error::MxcErrorCode;
+        let user = IsolationSessionUser {
+            upn: "alice@".to_string(),
+            wam_token: "tok".to_string(),
+        };
+        let err = validate_isolation_session_user(&user).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_isolation_session_user_rejects_empty_upn() {
+        use crate::mxc_error::MxcErrorCode;
+        let user = IsolationSessionUser {
+            upn: String::new(),
+            wam_token: "tok".to_string(),
+        };
+        let err = validate_isolation_session_user(&user).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_isolation_session_user_rejects_empty_wam_token() {
+        use crate::mxc_error::MxcErrorCode;
+        let user = IsolationSessionUser {
+            upn: "alice@contoso.com".to_string(),
+            wam_token: String::new(),
+        };
+        let err = validate_isolation_session_user(&user).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        assert!(err.message.contains("wamToken"), "got {}", err.message);
+    }
+
+    #[test]
+    fn validate_provision_accepts_well_formed_user() {
+        let runner = IsolationSessionRunner::new();
+        let cfg = IsolationSessionProvisionConfig {
+            user: Some(well_formed_user()),
+        };
+        runner
+            .validate_provision(&CodexRequest::default(), Some(&cfg))
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_provision_rejects_malformed_user() {
+        use crate::mxc_error::MxcErrorCode;
+        let runner = IsolationSessionRunner::new();
+        let cfg = IsolationSessionProvisionConfig {
+            user: Some(IsolationSessionUser {
+                upn: "no-at-sign".to_string(),
+                wam_token: "tok".to_string(),
+            }),
+        };
+        let err = runner
+            .validate_provision(&CodexRequest::default(), Some(&cfg))
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_start_entra_sandbox_with_matching_user_accepts() {
+        let runner = IsolationSessionRunner::new();
+        let cfg = IsolationSessionConfig {
+            user: Some(well_formed_user()),
+            ..Default::default()
+        };
+        runner
+            .validate_start(
+                "iso:alice@contoso.com",
+                &CodexRequest::default(),
+                Some(&cfg),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_start_entra_sandbox_without_user_is_malformed() {
+        use crate::mxc_error::MxcErrorCode;
+        let runner = IsolationSessionRunner::new();
+        let err = runner
+            .validate_start("iso:alice@contoso.com", &CodexRequest::default(), None)
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert!(
+            err.message.contains("Entra sandbox requires user"),
+            "got {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn validate_start_local_sandbox_with_user_is_malformed() {
+        use crate::mxc_error::MxcErrorCode;
+        let runner = IsolationSessionRunner::new();
+        let cfg = IsolationSessionConfig {
+            user: Some(well_formed_user()),
+            ..Default::default()
+        };
+        let err = runner
+            .validate_start("iso:wxc-abcd1234", &CodexRequest::default(), Some(&cfg))
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert!(
+            err.message.contains("not allowed for local sandbox"),
+            "got {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn validate_start_local_sandbox_without_user_accepts() {
+        let runner = IsolationSessionRunner::new();
+        runner
+            .validate_start("iso:wxc-abcd1234", &CodexRequest::default(), None)
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_start_entra_user_upn_mismatch_is_malformed() {
+        use crate::mxc_error::MxcErrorCode;
+        let runner = IsolationSessionRunner::new();
+        let cfg = IsolationSessionConfig {
+            user: Some(IsolationSessionUser {
+                upn: "bob@contoso.com".to_string(),
+                wam_token: "tok".to_string(),
+            }),
+            ..Default::default()
+        };
+        let err = runner
+            .validate_start(
+                "iso:alice@contoso.com",
+                &CodexRequest::default(),
+                Some(&cfg),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert!(
+            err.message.contains("does not match sandboxId"),
+            "got {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn validate_start_entra_user_upn_match_is_case_insensitive() {
+        let runner = IsolationSessionRunner::new();
+        let cfg = IsolationSessionConfig {
+            user: Some(IsolationSessionUser {
+                upn: "Alice@Contoso.COM".to_string(),
+                wam_token: "tok".to_string(),
+            }),
+            ..Default::default()
+        };
+        runner
+            .validate_start(
+                "iso:alice@contoso.com",
+                &CodexRequest::default(),
+                Some(&cfg),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_runner_one_shot_rejects_user() {
+        let runner = IsolationSessionRunner::new();
+        let req = CodexRequest {
+            experimental: ExperimentalConfig {
+                isolation_session: Some(IsolationSessionConfig {
+                    user: Some(well_formed_user()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resp = runner.validate_runner(&req).unwrap_err();
+        assert!(
+            resp.error_message
+                .contains("user is not supported in one-shot mode"),
+            "got {}",
+            resp.error_message
+        );
+    }
+
+    #[test]
+    fn validate_runner_one_shot_accepts_no_user() {
+        let runner = IsolationSessionRunner::new();
+        let req = CodexRequest {
+            experimental: ExperimentalConfig {
+                isolation_session: Some(IsolationSessionConfig::default()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        runner.validate_runner(&req).unwrap();
     }
 }
