@@ -17,9 +17,9 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "macos_sandbox", "isolation_session"],
-      "default": "appcontainer",
-      "description": "Containment backend to use for execution. Note: 'windows_sandbox', 'wslc', 'macos_sandbox', and 'isolation_session' are experimental and require the --experimental CLI flag."
+      "enum": ["process", "processcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "seatbelt", "isolation_session"],
+      "default": "processcontainer",
+      "description": "Containment value to use for execution. Accepts both abstract intents ('process', 'microvm') and concrete backends ('processcontainer', 'windows_sandbox', 'lxc', 'microvm', 'wslc', 'seatbelt', 'isolation_session'). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities. Note: 'windows_sandbox', 'wslc', 'seatbelt', and 'isolation_session' are experimental and require the --experimental CLI flag."
     },
 
     "phase": {
@@ -122,16 +122,16 @@
         "allowedHosts": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Enforced by 'lxc' and 'appcontainer' containment backends."
+          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Enforced by 'lxc' and 'processcontainer' containment backends."
         },
         "blockedHosts": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc' and 'appcontainer' containment backends."
+          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc' and 'processcontainer' containment backends."
         },
         "proxy": {
           "type": "object",
-          "description": "Proxy configuration. Only supported with appcontainer backend.",
+          "description": "Proxy configuration. Only supported with processcontainer backend.",
           "oneOf": [
             {
               "properties": {
@@ -184,9 +184,9 @@
       }
     },
 
-    "appContainer": {
+    "processContainer": {
       "type": "object",
-      "description": "AppContainer-specific settings. Used when containment is 'appcontainer'.",
+      "description": "ProcessContainer-specific settings. Used when containment is 'processcontainer'. The runner picks the legacy AppContainer implementation (which honors `capabilities` and `leastPrivilege`) or the newer BaseContainer implementation (which honors `ui`) at run time based on the host OS and the --experimental flag.",
       "properties": {
         "leastPrivilege": {
           "type": "boolean",
@@ -317,9 +317,9 @@
             }
           }
         },
-        "macos_sandbox": {
+        "seatbelt": {
           "type": "object",
-          "description": "macOS sandbox backend (experimental). Used when containment is 'macos_sandbox'.",
+          "description": "macOS sandbox backend (experimental). Used when containment is 'seatbelt'.",
           "properties": {
             "mode": {
               "type": "string",

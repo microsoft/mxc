@@ -1,7 +1,7 @@
 {
   "version": "0.4.0-alpha",
   "containerId": "CLI-Filesystem-Test",
-  "containment": "appcontainer",
+  "containment": "processcontainer",
   "process": {
     "commandLine": "cmd /c echo Test AppContainer for deletion"
   },

@@ -6,7 +6,7 @@ import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, ContainerConfig, ContainmentType } from './types.js';
+import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } from './types.js';
 import { prepareSpawn, diagLogVersion } from './helper.js';
 import { diagLog } from './diagnostic.js';
 
@@ -92,7 +92,6 @@ function buildLinuxProcessConfig(
     config: ContainerConfig,
     containerId: string,
 ): ContainerConfig {
-    config.containment = 'lxc';
     config.lxc = {
         containerName: containerId,
         distribution: 'alpine',
@@ -119,7 +118,7 @@ function buildProcessBaseContainerConfig(
         capabilities.push("privateNetworkClientServer");
     }
 
-    config.appContainer = {
+    config.processContainer = {
         name: containerId,
         leastPrivilege: false,
         capabilities,
@@ -199,12 +198,12 @@ function buildMicroVmConfig(
  *
  * // Advanced: tweak backend-specific settings
  * const config = createConfigFromPolicy(policy, "process");
- * config.appContainer!.ui!.isolation = "atoms";
+ * config.processContainer!.ui!.isolation = "atoms";
  * ```
  */
 export function createConfigFromPolicy(
     policy: SandboxPolicy,
-    containment: ContainmentType = "process",
+    containment: ContainmentType | ContainmentBackend = "process",
     containerName?: string,
 ): ContainerConfig {
     diagLogVersion();
@@ -279,6 +278,7 @@ export function createConfigFromPolicy(
     }
 
     if (containment === 'process') {
+        config.containment = 'process';
         if (platform === 'linux') {
             diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
             return buildLinuxProcessConfig(config, containerId);
@@ -304,7 +304,7 @@ export function buildSandboxPayload(
     policy: SandboxPolicy,
     workingDirectory?: string,
     containerName?: string,
-    containment: ContainmentType = "process",
+    containment: ContainmentType | ContainmentBackend = "process",
 ): ContainerConfig {
     const config = createConfigFromPolicy(policy, containment, containerName);
 
@@ -465,7 +465,7 @@ export function spawnSandbox(
  * ```typescript
  * const config = createConfigFromPolicy(policy, "process");
  * config.process!.commandLine = 'echo hello';
- * config.appContainer!.ui!.isolation = "atoms";
+ * config.processContainer!.ui!.isolation = "atoms";
  *
  * // PTY mode (default) — returns IPty:
  * const ptyProcess = spawnSandboxFromConfig(config);

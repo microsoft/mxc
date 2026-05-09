@@ -25,7 +25,7 @@ production configs and the dev schema when working on experimental features:
 {
     "version": "0.4.0-alpha",              // Schema version (semver). Current stable: "0.4.0-alpha". Also accepts "0.5.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
-    "containment": "appcontainer",         // Backend (see table below)
+    "containment": "processcontainer",     // Backend (see table below)
 
     "lifecycle": {
         "destroyOnExit": true,             // Destroy container after execution
@@ -48,10 +48,10 @@ production configs and the dev schema when working on experimental features:
     "network": {
         "defaultPolicy": "block",          // "allow" or "block"
         "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
-        "proxy": { "localhost": 8080 }     // Localhost proxy port (appcontainer only)
+        "proxy": { "localhost": 8080 }     // Localhost proxy port (processcontainer only)
     },
 
-    "appContainer": {                      // Process-based container-specific
+    "processContainer": {                  // Process-based container-specific
         "leastPrivilege": false,
         "capabilities": ["internetClient"]
     },
@@ -76,14 +76,29 @@ production configs and the dev schema when working on experimental features:
 
 ### Containment Backends
 
+The `containment` field accepts both **abstract intent values** (which the
+native binary resolves per host) and **concrete backend values** (which select
+a specific runner). Prefer abstract intents unless you specifically need to
+force a particular backend.
+
+#### Abstract intents
+
+| Value | Resolution |
+|-------|------------|
+| `"process"` | `processcontainer` on Windows, `lxc` on Linux, `seatbelt` on macOS |
+| `"vm"` | Full hardware-virtualised VM isolation. Resolves to `windows_sandbox` on Windows. |
+| `"microvm"` | MicroVM on Windows (NanVix via the Windows Hypervisor Platform). Experimental. |
+
+#### Concrete backends
+
 | Value | Description |
 |-------|-------------|
-| `"appcontainer"` | (Default) Windows AppContainer process-level isolation |
+| `"processcontainer"` | (Default) Windows process-level isolation. Resolves to AppContainer (legacy) or BaseContainer (newer OS sandbox API) at run time depending on host capabilities and the `--experimental` flag. |
 | `"windows_sandbox"` | Windows Sandbox VM isolation via a long-lived daemon |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation |
-| `"vm"` | VM-based isolation (not yet implemented) |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
+| `"seatbelt"` | macOS sandbox isolation (Seatbelt; experimental) |
 
 Only the backend section matching the selected `containment` value is used;
 other backend sections are ignored.
@@ -137,6 +152,6 @@ changes require a major bump.
 | Version | Changes |
 |---|---|
 | 0.3.0-alpha | Initial versioned schema. Added `process`, `lifecycle`, `containerId`, `wslc` alias. Dual-read fallbacks for legacy fields. |
-| 0.4.0-alpha | Removed legacy fields (`script`, `workingDirectory`, `appContainer.name`, etc.). `process` section now required. |
+| 0.4.0-alpha | Removed legacy fields (`script`, `workingDirectory`, `processContainer.name`, etc.). `process` section now required. |
 
 See the `examples/` directory for complete configuration examples.

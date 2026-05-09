@@ -8,8 +8,12 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum ContainmentBackend {
     #[default]
-    /// Windows AppContainer — process-level isolation on the host.
-    AppContainer,
+    /// Windows process-level containment. Resolves at runtime to either
+    /// AppContainer (legacy OS API) or BaseContainer (newer Windows
+    /// sandbox API exposed via `Experimental_CreateProcessInSandbox`),
+    /// based on `--experimental` and the schema version of the request.
+    /// Selected on the wire as `"processcontainer"`.
+    ProcessContainer,
     /// Linux container via WSL Container SDK (WSLC SDK).
     Wslc,
     /// LXC — Linux container isolation.
@@ -24,14 +28,14 @@ pub enum ContainmentBackend {
     /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
     #[serde(rename = "isolation_session")]
     IsolationSession,
-    /// macOS sandbox — experimental backend (requires --experimental).
-    /// Implemented on top of the OS-bundled sandbox facility (historical
-    /// Apple internal codename: "Seatbelt").
-    #[serde(rename = "macos_sandbox")]
-    MacosSandbox,
+    /// macOS Seatbelt — experimental sandbox backend (requires --experimental).
+    /// Implemented on top of the OS-bundled sandbox facility (Apple's
+    /// internal codename for the App Sandbox / `sandbox-exec` machinery
+    /// is "Seatbelt"); selected on the wire as `"seatbelt"`.
+    Seatbelt,
 }
 
-/// Mode used by the macOS sandbox backend to apply the sandbox profile.
+/// Mode used by the Seatbelt backend to apply the sandbox profile.
 ///
 /// `Exec` (default) spawns `/usr/bin/sandbox-exec` and is always available.
 /// `Inproc` calls the private `sandbox_init_with_parameters` API in the
@@ -39,19 +43,19 @@ pub enum ContainmentBackend {
 /// non-public macOS interface.
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum MacosSandboxMode {
+pub enum SeatbeltMode {
     #[default]
     Exec,
     Inproc,
 }
 
-/// Configuration specific to the macOS sandbox backend (experimental).
-/// Used under `experimental.macos_sandbox` when `containment == MacosSandbox`.
+/// Configuration specific to the Seatbelt backend (experimental).
+/// Used under `experimental.seatbelt` when `containment == Seatbelt`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct MacosSandboxConfig {
+pub struct SeatbeltConfig {
     /// Which sandbox entry point to use. Default: `Exec` (sandbox-exec).
-    pub mode: MacosSandboxMode,
+    pub mode: SeatbeltMode,
     /// Optional override of the generated TinyScheme profile.
     #[serde(rename = "profileOverride", skip_serializing_if = "Option::is_none")]
     pub profile_override: Option<String>,
@@ -257,7 +261,7 @@ impl Default for UiPolicy {
 }
 
 /// BaseProcessContainer-specific UI configuration (Windows only).
-/// Parsed from `appContainer.ui` in the JSON config.
+/// Parsed from `processContainer.ui` in the JSON config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BaseProcessUiConfig {
@@ -300,7 +304,7 @@ pub struct ContainerPolicy {
     pub network_proxy: ProxyConfig,
     /// Cross-platform UI policy.
     pub ui: UiPolicy,
-    /// BaseProcessContainer-specific UI config (Windows only, from appContainer.ui).
+    /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
 }
 
@@ -403,9 +407,8 @@ pub struct ExperimentalConfig {
     /// Isolation Session backend (experimental).
     #[serde(rename = "isolation_session")]
     pub isolation_session: Option<IsolationSessionConfig>,
-    /// macOS sandbox backend (experimental).
-    #[serde(rename = "macos_sandbox")]
-    pub macos_sandbox: Option<MacosSandboxConfig>,
+    /// Seatbelt (macOS) backend (experimental).
+    pub seatbelt: Option<SeatbeltConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -422,11 +425,11 @@ pub struct CodexRequest {
     pub script_code: String,
     pub working_directory: String,
     pub script_timeout: u32,
-    /// Which containment backend to use. Default: AppContainer.
+    /// Which containment backend to use. Default: ProcessContainer.
     pub containment: ContainmentBackend,
     /// Shared lifecycle settings.
     pub lifecycle: LifecycleConfig,
-    /// AppContainer-specific policy (used when containment == AppContainer).
+    /// ProcessContainer-specific policy (used when containment == ProcessContainer).
     pub policy: ContainerPolicy,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,

@@ -64,11 +64,11 @@ fn assert_wxc_success(config_file: &str, extra_args: &[&str]) {
     assert_success_or_skip_missing_prerequisite(&result);
 }
 
-fn appcontainer_basic() {
-    assert_wxc_success("basic_appcontainer.json", &["--debug"]);
+fn processcontainer_basic() {
+    assert_wxc_success("basic_processcontainer.json", &["--debug"]);
 }
 
-fn appcontainer_lpac() {
+fn processcontainer_lpac() {
     assert_wxc_success("basic_lpac.json", &["--debug"]);
 }
 
@@ -120,7 +120,7 @@ fn microvm_basic() {
     assert_wxc_success("microvm_hello.json", &["--debug", "--experimental"]);
 }
 
-fn appcontainer_proxy() {
+fn processcontainer_proxy() {
     let config = test_configs_dir().join("proxy_builtin_test.json");
     if !config.exists() {
         println!("SKIPPED: proxy config not found: {}", config.display());
@@ -137,20 +137,20 @@ fn appcontainer_proxy() {
 
 #[test]
 #[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
-fn test_appcontainer_basic() {
+fn test_processcontainer_basic() {
     if !cached_has_wxc_exe() {
         return;
     }
-    with_test_lock(appcontainer_basic);
+    with_test_lock(processcontainer_basic);
 }
 
 #[test]
 #[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
-fn test_appcontainer_lpac() {
+fn test_processcontainer_lpac() {
     if !cached_has_wxc_exe() {
         return;
     }
-    with_test_lock(appcontainer_lpac);
+    with_test_lock(processcontainer_lpac);
 }
 
 #[test]
@@ -245,11 +245,11 @@ fn test_microvm_suite() {
 
 #[test]
 #[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled and elevation
-fn test_appcontainer_proxy() {
+fn test_processcontainer_proxy() {
     if !cached_has_test_driver() {
         return;
     }
-    with_test_lock(appcontainer_proxy);
+    with_test_lock(processcontainer_proxy);
 }
 
 #[test]
@@ -262,10 +262,10 @@ fn test_on_repeat() {
     with_test_lock(|| {
         for pass in 1..=10 {
             println!("=== Pass {pass} of 10 ===");
-            appcontainer_basic();
+            processcontainer_basic();
             filesystem_bfs();
             filesystem_bfs_readonly();
-            appcontainer_lpac();
+            processcontainer_lpac();
         }
     });
 }

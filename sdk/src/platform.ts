@@ -127,7 +127,7 @@ export function getPlatformSupport(): PlatformSupport {
   const buildSupported = checkWindowsBuildVersion();
   if (buildSupported) {
     support.isSupported = true;
-    support.availableMethods = ['appcontainer'];
+    support.availableMethods = ['processcontainer'];
     return support;
   }
 

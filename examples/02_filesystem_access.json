@@ -1,7 +1,7 @@
 {
   "version": "0.4.0-alpha",
   "containerId": "CLI-Filesystem-Test",
-  "containment": "appcontainer",
+  "containment": "processcontainer",
   "process": {
     "commandLine": "python -c \"import os\nimport sys\n\nprint('Testing filesystem access control...')\nprint()\n\n# Test 1: Write to allowed path\nallowed_file = 'C:\\\\temp\\\\wxc_sandbox\\\\output.txt'\nprint(f'Test 1: Writing to allowed path: {allowed_file}')\ntry:\n    os.makedirs(os.path.dirname(allowed_file), exist_ok=True)\n    with open(allowed_file, 'w') as f:\n        f.write('This write succeeded!')\n    print('  SUCCESS: File written successfully')\n    \n    # Read it back\n    with open(allowed_file, 'r') as f:\n        content = f.read()\n    print(f'  Content: {content}')\nexcept Exception as e:\n    print(f'  ERROR: {e}')\n\nprint()\n\n# Test 2: Try to write to denied path (Windows System32)\ndenied_file = 'C:\\\\Windows\\\\System32\\\\test_forbidden.txt'\nprint(f'Test 2: Writing to denied path: {denied_file}')\ntry:\n    with open(denied_file, 'w') as f:\n        f.write('This should fail')\n    print('  ERROR: Should not have succeeded!')\nexcept PermissionError:\n    print('  SUCCESS: Access denied as expected')\nexcept Exception as e:\n    print(f'  SUCCESS: Access blocked with {type(e).__name__}: {e}')\n\nprint()\nprint('Filesystem access control test complete!')\"",
     "timeout": 15000

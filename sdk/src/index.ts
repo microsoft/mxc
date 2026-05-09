@@ -30,6 +30,8 @@ export {
   SandboxPolicy,
   SandboxingMethod,
   ContainmentType,
+  ContainmentTypes,
+  ContainmentBackend,
   ExperimentalBackends,
   ContainerConfig,
   PlatformSupport,
