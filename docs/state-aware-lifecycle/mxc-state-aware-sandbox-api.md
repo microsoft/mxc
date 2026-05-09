@@ -63,10 +63,10 @@ elaborates.
 
 | MXC layer | What's new | What's unchanged |
 |---|---|---|
-| TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed exception classes per error code. | `spawnSandbox` family preserved. `SandboxingMethod` extension mechanism reused. The existing wire-format-aligned `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` interfaces from `sdk/src/types.ts` are reused as field types inside the new state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). Existing typed `*Config` naming convention reused. |
+| TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `SandboxingMethod` extension mechanism reused. The existing wire-format-aligned `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` interfaces from `sdk/src/types.ts` are reused as field types inside the new state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). Existing typed `*Config` naming convention reused. |
 | JSON wire format (§7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union over `phase`. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` fields at top level for state-aware too — backends declare per-phase honor. |
 | Rust executor (§9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (private to parser, matching `RawConfig` pattern). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
-| Error model (§8) | Closed enum of 12 error codes. `MxcError` base + per-code subclasses. `details` open object as escape hatch for backend-specific structured information. | Existing one-shot error paths preserved. |
+| Error model (§8) | Closed enum of 12 error codes. `MxcError` class with `code: ErrorCode`. `details` open object as escape hatch for backend-specific structured information. | Existing one-shot error paths preserved. |
 | Plug-in surface (§11) | Implement `StatefulSandboxBackend` (in addition to or instead of `ScriptRunner`). Define typed per-(backend, phase) `*Config` interfaces. Declare the backend's `ID_PREFIX` and `BACKEND_KEY` consts on the trait impl. Document the cross-cutting policy honor matrix. | Ephemeral-only backends require no changes. The `ContainmentBackend` Rust enum is extended, not replaced. |
 
 ## 2. Context and motivation
@@ -905,10 +905,10 @@ caller sees a plain `ProvisionResult` / `StartResult` / `ExecResult` / `StopResu
 ## 8. Error model
 
 Errors crossing the wire-format boundary are typed by a closed enum of error codes
-defined at the MXC layer. Backends map their native errors to these codes; the SDK maps
-each code to a typed TypeScript exception class. An `MxcStaleIdError` thrown from
-IsolationSession behaves the same as one thrown from any other state-aware backend, so
-caller error-handling code is portable across backends.
+defined at the MXC layer. Backends map their native errors to these codes; the SDK
+throws an `MxcError` carrying the corresponding `code` field. An `MxcError` with
+`code: 'stale_id'` thrown from IsolationSession behaves the same as one thrown from any
+other state-aware backend, so caller error-handling code is portable across backends.
 
 ### 8.1 Error code enum
 
@@ -957,29 +957,21 @@ convey structured information that callers may inspect: a backend's native error
 partial output captured before a timeout fired, or any other context. The shape of
 `details` for each error code is documented in the relevant backend's own docs (§11).
 
-### 8.3 TypeScript exception classes
+### 8.3 TypeScript error class
 
-The SDK throws (rejects) typed exception classes, one per error code, all extending a
-common base:
+The SDK throws (rejects) a single `MxcError` class. The wire-format error code lives on
+the `code` field and is the discriminator callers pattern-match on:
 
 ```typescript
 class MxcError extends Error {
   readonly code: ErrorCode;
   readonly details?: Record<string, unknown>;
 }
-
-// Per-code subclasses, named by converting the snake_case code to PascalCase with
-// 'Mxc' prefix; the class name ends with 'Error'. If the code already ends with
-// '_error' (i.e., `backend_error`), the existing suffix is preserved (so the class
-// is `MxcBackendError`, not `MxcBackendErrorError`):
-class MxcStaleIdError extends MxcError { /* code = 'stale_id' */ }
-class MxcPolicyValidationError extends MxcError { /* code = 'policy_validation' */ }
-class MxcBackendError extends MxcError { /* code = 'backend_error' */ }
 ```
 
-Callers can pattern-match either via `instanceof` on the typed class or by inspecting
-`error.code` directly. Both forms are supported; the typed-class form is generally
-preferred in TypeScript code.
+Callers discriminate by comparing `.code` to a wire-format error code string
+(`err instanceof MxcError && err.code === 'stale_id'`). The TypeScript string-literal
+union on `ErrorCode` gives the same IDE completion as a per-code class hierarchy.
 
 ## 9. Rust layer architecture
 
@@ -1514,11 +1506,15 @@ documented in the backend's plan doc):
 The matrix lands at two layers, each enforcing it independently:
 
 - **Compile-time enforcement at the SDK.** Each per-(backend, phase) Config (§6.1)
-  declares only the cross-cutting fields the matrix marks as `applied` for that phase.
-  TypeScript rejects callers passing fields the backend does not honor at that phase.
-  For IsolationSession's matrix above, only `IsolationSessionProvisionConfig` carries
-  `filesystem` / `network` / `ui`; the start, exec, stop, and deprovision Configs do
-  not. Callers cannot accidentally pass them.
+  declares only the cross-cutting fields the matrix marks as `applied` for that phase
+  *and* that the runtime currently honors. TypeScript rejects callers passing fields
+  the backend does not honor at that phase, and also fields the matrix would mark as
+  `applied` but the runtime does not yet implement. For IsolationSession's matrix
+  above, `IsolationSessionProvisionConfig` is the only Config that carries any
+  cross-cutting fields. The SDK currently exposes `filesystem` only; `network` and
+  `ui` will be added at provision when the IsolationSession runtime honors them.
+  The start, exec, stop, and deprovision Configs carry none of these fields. Callers
+  cannot accidentally pass them.
 - **Runtime enforcement at Rust.** The backend's `validate_<phase>` hooks reject
   cross-cutting fields received from raw-JSON callers (or from a future SDK release
   whose typing has fallen out of step) that the matrix marks as `rejected`. Failures

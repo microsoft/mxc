@@ -36,18 +36,31 @@ describe('SandboxId<C> brand', () => {
   });
 });
 
-describe('Per-(backend, phase) Configs', () => {
-  it('IsolationSessionProvisionConfig accepts cross-cutting fields per the policy honor matrix', () => {
+describe('IsolationSessionProvisionConfig', () => {
+  it('accepts version and filesystem', () => {
     const cfg: IsolationSessionProvisionConfig = {
       version: '0.6.0-alpha',
       filesystem: { readwritePaths: ['C:\\workspace'] },
-      network: { defaultPolicy: 'block' },
-      ui: { disable: true, clipboard: 'none', injection: false },
     };
-    assert.strictEqual(cfg.network?.defaultPolicy, 'block');
+    assert.deepStrictEqual(cfg.filesystem?.readwritePaths, ['C:\\workspace']);
   });
 
-  it('IsolationSessionStartConfig rejects cross-cutting fields the matrix marks as rejected', () => {
+  it('rejects network and ui until those features land Rust-side', () => {
+    const withNetwork: IsolationSessionProvisionConfig = {
+      // @ts-expect-error — network is not exposed at provision until the Rust runtime honors it.
+      network: { defaultPolicy: 'block' },
+    };
+    const withUi: IsolationSessionProvisionConfig = {
+      // @ts-expect-error — ui is not exposed at provision until the Rust runtime honors it.
+      ui: { disable: true, clipboard: 'none', injection: false },
+    };
+    assert.ok(withNetwork);
+    assert.ok(withUi);
+  });
+});
+
+describe('IsolationSessionStartConfig', () => {
+  it('rejects cross-cutting fields the matrix marks as rejected', () => {
     const cfg: IsolationSessionStartConfig = {
       // @ts-expect-error — start phase does not honor filesystem.
       filesystem: { readwritePaths: ['C:\\workspace'] },
@@ -55,7 +68,7 @@ describe('Per-(backend, phase) Configs', () => {
     assert.ok(cfg);
   });
 
-  it('IsolationSessionStartConfig accepts configurationId only from the closed enum', () => {
+  it('accepts configurationId only from the closed enum', () => {
     const ok: IsolationSessionStartConfig = { configurationId: 'composable' };
     assert.strictEqual(ok.configurationId, 'composable');
 
@@ -65,8 +78,10 @@ describe('Per-(backend, phase) Configs', () => {
     };
     assert.ok(bogus);
   });
+});
 
-  it('IsolationSessionExecConfig requires process', () => {
+describe('IsolationSessionExecConfig', () => {
+  it('requires process', () => {
     const cfg: ExecConfigFor<'isolation_session'> = {
       process: { commandLine: 'echo hi' },
     };
@@ -76,8 +91,10 @@ describe('Per-(backend, phase) Configs', () => {
     const missing: ExecConfigFor<'isolation_session'> = {};
     assert.ok(missing);
   });
+});
 
-  it('IsolationSessionStopConfig and DeprovisionConfig only carry version', () => {
+describe('IsolationSessionStopConfig and IsolationSessionDeprovisionConfig', () => {
+  it('only carry version', () => {
     const stopCfg: StopConfigFor<'isolation_session'> = { version: '0.6.0-alpha' };
     const deprovCfg: DeprovisionConfigFor<'isolation_session'> = {};
 
@@ -91,7 +108,7 @@ describe('Per-(backend, phase) Configs', () => {
   });
 });
 
-describe('ConfigsForBackend conditional', () => {
+describe('ConfigsForBackend', () => {
   it('selects the IsolationSession bundle for the isolation_session backend', () => {
     const bundle: ConfigsForBackend<'isolation_session'> = {
       provision: { version: '0.6.0-alpha' },
@@ -104,8 +121,8 @@ describe('ConfigsForBackend conditional', () => {
   });
 });
 
-describe('ProvisionResult<C> carries backend-typed metadata', () => {
-  it('ProvisionResult<isolation_session>.metadata is IsolationSessionProvisionMetadata', () => {
+describe('ProvisionResult<C>', () => {
+  it('carries backend-typed metadata for isolation_session', () => {
     const result: ProvisionResult<'isolation_session'> = {
       sandboxId: 'iso:abcd' as SandboxId<'isolation_session'>,
       metadata: { agentUserName: 'iso\\agent' },

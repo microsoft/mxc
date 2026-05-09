@@ -63,18 +63,6 @@ export {
 export {
   ErrorCode,
   MxcError,
-  MxcMalformedRequestError,
-  MxcUnsupportedContainmentError,
-  MxcUnsupportedPhaseError,
-  MxcBackendUnavailableError,
-  MxcMalformedIdError,
-  MxcStaleIdError,
-  MxcNotProvisionedError,
-  MxcNotStartedError,
-  MxcAlreadyStartedError,
-  MxcAlreadyStoppedError,
-  MxcPolicyValidationError,
-  MxcBackendError,
   mxcErrorFromCode,
 } from './errors.js';
 

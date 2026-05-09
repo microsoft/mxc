@@ -3,91 +3,22 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { EventEmitter } from 'events';
-import { Readable } from 'stream';
 import {
-  _resetSpawnImpl,
-  _setSpawnImpl,
-  buildStateAwareEnvelope,
   deprovisionSandbox,
   execInSandboxAsync,
-  parseNonExecResponse,
   provisionSandbox,
   startSandbox,
   stopSandbox,
 } from '../../src/state-aware.js';
 import {
-  MxcAlreadyStartedError,
-  MxcBackendError,
-  MxcBackendUnavailableError,
-  MxcMalformedIdError,
-  MxcMalformedRequestError,
-  MxcNotProvisionedError,
-  MxcNotStartedError,
-  MxcPolicyValidationError,
-  MxcStaleIdError,
-  MxcUnsupportedContainmentError,
-  MxcUnsupportedPhaseError,
-} from '../../src/errors.js';
+  _resetSpawnImpl,
+  _setSpawnImpl,
+  buildStateAwareEnvelope,
+  parseNonExecResponse,
+} from '../../src/state-aware-helper.js';
+import { MxcError } from '../../src/errors.js';
 import { SandboxId } from '../../src/state-aware-types.js';
-import { SandboxSpawnOptions } from '../../src/sandbox.js';
-
-// Tests stub child_process.spawn but the binary-resolution path runs first
-// and demands an existing executable on disk. Pointing it at the Node
-// binary is the simplest always-on-disk choice; the fake spawn ignores the
-// path anyway.
-function testOptions(extra?: Partial<SandboxSpawnOptions>): SandboxSpawnOptions {
-  return { experimental: true, executablePath: process.execPath, ...extra };
-}
-
-interface FakeChildOpts {
-  stdout?: string;
-  stderr?: string;
-  exitCode?: number;
-  error?: Error;
-}
-
-function fakeSpawn(opts: FakeChildOpts): {
-  spawn: (cmd: string, args: string[], spawnOpts: unknown) => unknown;
-  captured: { cmd?: string; args?: string[]; envelope?: Record<string, unknown> };
-  killCount: () => number;
-} {
-  const captured: { cmd?: string; args?: string[]; envelope?: Record<string, unknown> } = {};
-  let kills = 0;
-  const spawn = (cmd: string, args: string[], _spawnOpts: unknown) => {
-    captured.cmd = cmd;
-    captured.args = args;
-    const idx = args.indexOf('--config-base64');
-    if (idx >= 0 && idx + 1 < args.length) {
-      const decoded = Buffer.from(args[idx + 1], 'base64').toString('utf-8');
-      captured.envelope = JSON.parse(decoded);
-    }
-    const ee = new EventEmitter();
-    const stdout = new Readable({ read() { /* no-op */ } });
-    const stderr = new Readable({ read() { /* no-op */ } });
-    setImmediate(() => {
-      if (opts.error) {
-        ee.emit('error', opts.error);
-        return;
-      }
-      stdout.push(opts.stdout ?? '');
-      stdout.push(null);
-      stderr.push(opts.stderr ?? '');
-      stderr.push(null);
-      ee.emit('close', opts.exitCode ?? 0);
-    });
-    return Object.assign(ee, {
-      stdout,
-      stderr,
-      kill: (_sig?: NodeJS.Signals | number) => {
-        kills += 1;
-        setImmediate(() => ee.emit('close', null));
-        return true;
-      },
-    });
-  };
-  return { spawn, captured, killCount: () => kills };
-}
+import { fakeSpawn, testOptions } from './test-helpers.js';
 
 describe('buildStateAwareEnvelope', () => {
   it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {
@@ -168,24 +99,26 @@ describe('parseNonExecResponse', () => {
     assert.deepStrictEqual(result, { sandboxId: 'iso:abc' });
   });
 
-  it('throws the matching MxcError subclass on each wire error code', () => {
-    type MxcCtor = new (message: string, details?: Record<string, unknown>) => Error;
-    const cases: Array<[string, MxcCtor]> = [
-      ['malformed_request', MxcMalformedRequestError],
-      ['unsupported_containment', MxcUnsupportedContainmentError],
-      ['unsupported_phase', MxcUnsupportedPhaseError],
-      ['backend_unavailable', MxcBackendUnavailableError],
-      ['malformed_id', MxcMalformedIdError],
-      ['stale_id', MxcStaleIdError],
-      ['not_provisioned', MxcNotProvisionedError],
-      ['not_started', MxcNotStartedError],
-      ['already_started', MxcAlreadyStartedError],
-      ['policy_validation', MxcPolicyValidationError],
-      ['backend_error', MxcBackendError],
+  it('throws an MxcError carrying each wire error code', () => {
+    const codes = [
+      'malformed_request',
+      'unsupported_containment',
+      'unsupported_phase',
+      'backend_unavailable',
+      'malformed_id',
+      'stale_id',
+      'not_provisioned',
+      'not_started',
+      'already_started',
+      'policy_validation',
+      'backend_error',
     ];
-    for (const [code, cls] of cases) {
+    for (const code of codes) {
       const stdout = JSON.stringify({ error: { code, message: 'boom' } });
-      assert.throws(() => parseNonExecResponse(stdout), (err: unknown) => err instanceof cls);
+      assert.throws(
+        () => parseNonExecResponse(stdout),
+        (err: unknown) => err instanceof MxcError && err.code === code,
+      );
     }
   });
 
@@ -194,14 +127,15 @@ describe('parseNonExecResponse', () => {
       error: { code: 'backend_error', message: 'boom', details: { hresult: '0x80004005' } },
     });
     assert.throws(() => parseNonExecResponse(stdout), (err: unknown) => {
-      return err instanceof MxcBackendError &&
-        (err as MxcBackendError).details?.hresult === '0x80004005';
+      return err instanceof MxcError &&
+        err.code === 'backend_error' &&
+        err.details?.hresult === '0x80004005';
     });
   });
 
   it('throws a plain Error on unparseable stdout', () => {
     assert.throws(() => parseNonExecResponse('not json'), (err: unknown) => {
-      return err instanceof Error && !(err instanceof MxcBackendError);
+      return err instanceof Error && !(err instanceof MxcError);
     });
   });
 
@@ -236,7 +170,7 @@ describe('provisionSandbox', () => {
     assert.ok(fake.captured.args?.includes('--experimental'));
   });
 
-  it('throws MxcBackendUnavailableError when the executor reports backend_unavailable', async () => {
+  it('throws an MxcError carrying backend_unavailable when the executor reports it', async () => {
     const fake = fakeSpawn({
       stdout: '{"error":{"code":"backend_unavailable","message":"IsoSessionApp.dll not registered"}}',
       exitCode: 1,
@@ -245,7 +179,7 @@ describe('provisionSandbox', () => {
     _setSpawnImpl(fake.spawn);
     await assert.rejects(
       () => provisionSandbox('isolation_session', undefined, testOptions()),
-      (err: unknown) => err instanceof MxcBackendUnavailableError,
+      (err: unknown) => err instanceof MxcError && err.code === 'backend_unavailable',
     );
   });
 
@@ -265,10 +199,10 @@ describe('provisionSandbox', () => {
   });
 });
 
-describe('startSandbox / stopSandbox / deprovisionSandbox', () => {
+describe('startSandbox', () => {
   afterEach(() => { _resetSpawnImpl(); });
 
-  it('startSandbox infers backend from sandboxId prefix and nests configurationId under experimental', async () => {
+  it('infers backend from sandboxId prefix and nests configurationId under experimental', async () => {
     const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
     _setSpawnImpl(fake.spawn);
     const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
@@ -279,8 +213,12 @@ describe('startSandbox / stopSandbox / deprovisionSandbox', () => {
       isolation_session: { start: { configurationId: 'small' } },
     });
   });
+});
 
-  it('stopSandbox builds a minimal stop envelope', async () => {
+describe('stopSandbox', () => {
+  afterEach(() => { _resetSpawnImpl(); });
+
+  it('builds a minimal stop envelope', async () => {
     const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
     _setSpawnImpl(fake.spawn);
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
@@ -290,24 +228,28 @@ describe('startSandbox / stopSandbox / deprovisionSandbox', () => {
     assert.strictEqual(fake.captured.envelope?.experimental, undefined);
   });
 
-  it('deprovisionSandbox builds a minimal deprovision envelope', async () => {
+  it('rejects with malformed_id when sandboxId has no recognised prefix', async () => {
+    await assert.rejects(
+      () => stopSandbox('not-a-real-id' as SandboxId<'isolation_session'>),
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_id',
+    );
+    await assert.rejects(
+      () => stopSandbox('unknownprefix:abc' as SandboxId<'isolation_session'>),
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_id',
+    );
+  });
+});
+
+describe('deprovisionSandbox', () => {
+  afterEach(() => { _resetSpawnImpl(); });
+
+  it('builds a minimal deprovision envelope', async () => {
     const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
     _setSpawnImpl(fake.spawn);
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
     await deprovisionSandbox(id, undefined, testOptions());
     assert.strictEqual(fake.captured.envelope?.phase, 'deprovision');
     assert.strictEqual(fake.captured.envelope?.sandboxId, 'iso:abc');
-  });
-
-  it('rejects with MxcMalformedIdError when sandboxId has no recognised prefix', async () => {
-    await assert.rejects(
-      () => stopSandbox('not-a-real-id' as SandboxId<'isolation_session'>),
-      (err: unknown) => err instanceof MxcMalformedIdError,
-    );
-    await assert.rejects(
-      () => stopSandbox('unknownprefix:abc' as SandboxId<'isolation_session'>),
-      (err: unknown) => err instanceof MxcMalformedIdError,
-    );
   });
 });
 
@@ -348,7 +290,7 @@ describe('execInSandboxAsync', () => {
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
     await assert.rejects(
       () => execInSandboxAsync(id, { process: { commandLine: 'echo' } }, testOptions()),
-      (err: unknown) => err instanceof MxcStaleIdError,
+      (err: unknown) => err instanceof MxcError && err.code === 'stale_id',
     );
   });
 });

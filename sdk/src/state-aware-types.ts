@@ -3,10 +3,8 @@
 
 import {
   FilesystemConfig,
-  NetworkConfig,
   ProcessConfig,
   SandboxingMethod,
-  UiConfig,
 } from './types.js';
 
 /**
@@ -30,19 +28,15 @@ export type StateAwareSandboxingMethod = Extract<SandboxingMethod, 'isolation_se
 export type SandboxId<C extends StateAwareSandboxingMethod> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
-// IsolationSession per-(backend, phase) Configs. Each declares only the
-// fields valid for the IsolationSession backend at that phase. Cross-cutting
-// fields appear inline at the Config root, only in phases where the backend
-// honors them per its policy honor matrix; phases with no backend-specific
-// or cross-cutting fields declare a Config carrying only `version?` —
-// explicit and minimal.
+// IsolationSession per-(backend, phase) Configs. Each declares only
+// the fields the SDK currently exposes at that phase — scoped to
+// what the backend honors per the policy honor matrix and currently
+// implements. TypeScript rejects passing fields outside this set.
 
 export interface IsolationSessionProvisionConfig {
   /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
   version?: string;
   filesystem?: FilesystemConfig;
-  network?: NetworkConfig;
-  ui?: UiConfig;
 }
 
 export interface IsolationSessionStartConfig {
@@ -117,22 +111,15 @@ export interface StateAwareMetadata {
   // Future state-aware-capable backends add typed entries here.
 }
 
-export type ProvisionMetadataFor<C extends StateAwareSandboxingMethod> =
-  'provision' extends keyof NonNullable<StateAwareMetadata[C]>
-    ? NonNullable<StateAwareMetadata[C]>['provision']
+type MetadataForPhase<C extends StateAwareSandboxingMethod, Phase extends string> =
+  Phase extends keyof NonNullable<StateAwareMetadata[C]>
+    ? NonNullable<StateAwareMetadata[C]>[Phase]
     : undefined;
-export type StartMetadataFor<C extends StateAwareSandboxingMethod> =
-  'start' extends keyof NonNullable<StateAwareMetadata[C]>
-    ? NonNullable<StateAwareMetadata[C]>['start']
-    : undefined;
-export type StopMetadataFor<C extends StateAwareSandboxingMethod> =
-  'stop' extends keyof NonNullable<StateAwareMetadata[C]>
-    ? NonNullable<StateAwareMetadata[C]>['stop']
-    : undefined;
-export type DeprovisionMetadataFor<C extends StateAwareSandboxingMethod> =
-  'deprovision' extends keyof NonNullable<StateAwareMetadata[C]>
-    ? NonNullable<StateAwareMetadata[C]>['deprovision']
-    : undefined;
+
+export type ProvisionMetadataFor<C extends StateAwareSandboxingMethod> = MetadataForPhase<C, 'provision'>;
+export type StartMetadataFor<C extends StateAwareSandboxingMethod> = MetadataForPhase<C, 'start'>;
+export type StopMetadataFor<C extends StateAwareSandboxingMethod> = MetadataForPhase<C, 'stop'>;
+export type DeprovisionMetadataFor<C extends StateAwareSandboxingMethod> = MetadataForPhase<C, 'deprovision'>;
 
 export interface ProvisionResult<C extends StateAwareSandboxingMethod> {
   sandboxId: SandboxId<C>;
