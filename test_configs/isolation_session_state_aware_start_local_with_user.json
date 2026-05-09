@@ -1,0 +1,14 @@
+{
+    "phase": "start",
+    "sandboxId": "iso:wxc-fake1234",
+    "experimental": {
+        "isolation_session": {
+            "start": {
+                "user": {
+                    "upn": "alice@contoso.com",
+                    "wamToken": "tok"
+                }
+            }
+        }
+    }
+}

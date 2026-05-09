@@ -261,6 +261,13 @@ $FsMarkerContent | Set-Content -Path (Join-Path $FsTestRoot 'marker.txt') -NoNew
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_filesystem.json" `
     -OutputContains @($FsMarkerContent)))
 
+# One-shot rejection: experimental.isolation_session.user is only honored on
+# the state-aware path. validate_runner rejects any one-shot request that
+# carries the user bundle so callers do not silently get a non-Entra agent.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_user_rejected.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("user is not supported in one-shot mode")))
+
 } finally {
     Remove-Item -Recurse -Force $FsTestRoot -ErrorAction SilentlyContinue
 }
