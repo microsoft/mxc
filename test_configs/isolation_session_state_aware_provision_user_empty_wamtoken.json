@@ -1,0 +1,14 @@
+{
+    "phase": "provision",
+    "containment": "isolation_session",
+    "experimental": {
+        "isolation_session": {
+            "provision": {
+                "user": {
+                    "upn": "alice@contoso.com",
+                    "wamToken": ""
+                }
+            }
+        }
+    }
+}
