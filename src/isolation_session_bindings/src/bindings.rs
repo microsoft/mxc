@@ -422,6 +422,127 @@ pub struct IIsoSessionAppConfig_Vtbl {
     ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
+    IIsoSessionAppConfig2,
+    IIsoSessionAppConfig2_Vtbl,
+    0x051c29de_ca75_5cdb_af2c_3012cf1a62ec
+);
+impl windows_core::RuntimeType for IIsoSessionAppConfig2 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl windows_core::RuntimeName for IIsoSessionAppConfig2 {
+    const NAME: &'static str = "Windows.AI.IsolationSession.IIsoSessionAppConfig2";
+}
+pub trait IIsoSessionAppConfig2_Impl: windows_core::IUnknownImpl {
+    fn ProvisionId(&self) -> windows_core::Result<windows_core::HSTRING>;
+    fn SetProvisionId(&self, value: &windows_core::HSTRING) -> windows_core::Result<()>;
+    fn WamToken(&self) -> windows_core::Result<windows_core::HSTRING>;
+    fn SetWamToken(&self, value: &windows_core::HSTRING) -> windows_core::Result<()>;
+}
+impl IIsoSessionAppConfig2_Vtbl {
+    pub const fn new<Identity: IIsoSessionAppConfig2_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn ProvisionId<
+            Identity: IIsoSessionAppConfig2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionAppConfig2_Impl::ProvisionId(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn SetProvisionId<
+            Identity: IIsoSessionAppConfig2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            value: *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IIsoSessionAppConfig2_Impl::SetProvisionId(this, core::mem::transmute(&value))
+                    .into()
+            }
+        }
+        unsafe extern "system" fn WamToken<
+            Identity: IIsoSessionAppConfig2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionAppConfig2_Impl::WamToken(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn SetWamToken<
+            Identity: IIsoSessionAppConfig2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            value: *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IIsoSessionAppConfig2_Impl::SetWamToken(this, core::mem::transmute(&value)).into()
+            }
+        }
+        Self {
+            base__: windows_core::IInspectable_Vtbl::new::<Identity, IIsoSessionAppConfig2, OFFSET>(
+            ),
+            ProvisionId: ProvisionId::<Identity, OFFSET>,
+            SetProvisionId: SetProvisionId::<Identity, OFFSET>,
+            WamToken: WamToken::<Identity, OFFSET>,
+            SetWamToken: SetWamToken::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IIsoSessionAppConfig2 as windows_core::Interface>::IID
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IIsoSessionAppConfig2_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub ProvisionId: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetProvisionId: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub WamToken: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetWamToken: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
     IIsoSessionAppConnectResult,
     IIsoSessionAppConnectResult_Vtbl,
     0x951478b0_1667_5bc2_9eb9_63d4e402cf04
@@ -1178,6 +1299,257 @@ pub struct IIsoSessionOps_Vtbl {
         *mut core::ffi::c_void,
         *mut core::ffi::c_void,
         *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IIsoSessionOps2,
+    IIsoSessionOps2_Vtbl,
+    0x78940d90_d410_5998_9a3c_9a696045ca0d
+);
+impl windows_core::RuntimeType for IIsoSessionOps2 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl windows_core::RuntimeName for IIsoSessionOps2 {
+    const NAME: &'static str = "Windows.AI.IsolationSession.IIsoSessionOps2";
+}
+pub trait IIsoSessionOps2_Impl: windows_core::IUnknownImpl {
+    fn AddUserAsync2(
+        &self,
+        registrationId: &windows_core::HSTRING,
+        entraAccountName: &windows_core::HSTRING,
+        wamToken: &windows_core::HSTRING,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionUserResult>>;
+    fn StartSessionAsync2(
+        &self,
+        entraAccountName: &windows_core::HSTRING,
+        configId: IsoSessionConfigId,
+        wamToken: &windows_core::HSTRING,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionResult>>;
+}
+impl IIsoSessionOps2_Vtbl {
+    pub const fn new<Identity: IIsoSessionOps2_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn AddUserAsync2<
+            Identity: IIsoSessionOps2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            registrationid: *mut core::ffi::c_void,
+            entraaccountname: *mut core::ffi::c_void,
+            wamtoken: *mut core::ffi::c_void,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOps2_Impl::AddUserAsync2(
+                    this,
+                    core::mem::transmute(&registrationid),
+                    core::mem::transmute(&entraaccountname),
+                    core::mem::transmute(&wamtoken),
+                ) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn StartSessionAsync2<
+            Identity: IIsoSessionOps2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            entraaccountname: *mut core::ffi::c_void,
+            configid: IsoSessionConfigId,
+            wamtoken: *mut core::ffi::c_void,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOps2_Impl::StartSessionAsync2(
+                    this,
+                    core::mem::transmute(&entraaccountname),
+                    configid,
+                    core::mem::transmute(&wamtoken),
+                ) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        Self {
+            base__: windows_core::IInspectable_Vtbl::new::<Identity, IIsoSessionOps2, OFFSET>(),
+            AddUserAsync2: AddUserAsync2::<Identity, OFFSET>,
+            StartSessionAsync2: StartSessionAsync2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IIsoSessionOps2 as windows_core::Interface>::IID
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IIsoSessionOps2_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub AddUserAsync2: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub StartSessionAsync2: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        IsoSessionConfigId,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IIsoSessionOps3,
+    IIsoSessionOps3_Vtbl,
+    0xdd069f2d_ff63_539f_85ff_e54e1881cd47
+);
+impl windows_core::RuntimeType for IIsoSessionOps3 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl windows_core::RuntimeName for IIsoSessionOps3 {
+    const NAME: &'static str = "Windows.AI.IsolationSession.IIsoSessionOps3";
+}
+pub trait IIsoSessionOps3_Impl: windows_core::IUnknownImpl {
+    fn GetAgentUsers(
+        &self,
+        registrationId: &windows_core::HSTRING,
+        includeInactive: bool,
+    ) -> windows_core::Result<windows_core::Array<IsoSessionUserResult>>;
+    fn GetAllAgentUsers(
+        &self,
+        includeInactive: bool,
+    ) -> windows_core::Result<windows_core::Array<IsoSessionUserResult>>;
+    fn GetProcesses(
+        &self,
+        agentName: &windows_core::HSTRING,
+    ) -> windows_core::Result<windows_core::Array<IsoSessionProcess>>;
+}
+impl IIsoSessionOps3_Vtbl {
+    pub const fn new<Identity: IIsoSessionOps3_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn GetAgentUsers<
+            Identity: IIsoSessionOps3_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            registrationid: *mut core::ffi::c_void,
+            includeinactive: bool,
+            result_size__: *mut u32,
+            result__: *mut *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOps3_Impl::GetAgentUsers(
+                    this,
+                    core::mem::transmute(&registrationid),
+                    includeinactive,
+                ) {
+                    Ok(ok__) => {
+                        let (ok_data__, ok_data_len__) = ok__.into_abi();
+                        result__.write(core::mem::transmute(ok_data__));
+                        result_size__.write(ok_data_len__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn GetAllAgentUsers<
+            Identity: IIsoSessionOps3_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            includeinactive: bool,
+            result_size__: *mut u32,
+            result__: *mut *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOps3_Impl::GetAllAgentUsers(this, includeinactive) {
+                    Ok(ok__) => {
+                        let (ok_data__, ok_data_len__) = ok__.into_abi();
+                        result__.write(core::mem::transmute(ok_data__));
+                        result_size__.write(ok_data_len__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn GetProcesses<
+            Identity: IIsoSessionOps3_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            agentname: *mut core::ffi::c_void,
+            result_size__: *mut u32,
+            result__: *mut *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOps3_Impl::GetProcesses(this, core::mem::transmute(&agentname)) {
+                    Ok(ok__) => {
+                        let (ok_data__, ok_data_len__) = ok__.into_abi();
+                        result__.write(core::mem::transmute(ok_data__));
+                        result_size__.write(ok_data_len__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        Self {
+            base__: windows_core::IInspectable_Vtbl::new::<Identity, IIsoSessionOps3, OFFSET>(),
+            GetAgentUsers: GetAgentUsers::<Identity, OFFSET>,
+            GetAllAgentUsers: GetAllAgentUsers::<Identity, OFFSET>,
+            GetProcesses: GetProcesses::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IIsoSessionOps3 as windows_core::Interface>::IID
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IIsoSessionOps3_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub GetAgentUsers: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        bool,
+        *mut u32,
+        *mut *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub GetAllAgentUsers: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        bool,
+        *mut u32,
+        *mut *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub GetProcesses: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut u32,
+        *mut *mut *mut core::ffi::c_void,
     ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
@@ -2019,6 +2391,62 @@ pub struct IIsoSessionUserResult_Vtbl {
         *mut *mut core::ffi::c_void,
     ) -> windows_core::HRESULT,
 }
+windows_core::imp::define_interface!(
+    IIsoSessionUserResult2,
+    IIsoSessionUserResult2_Vtbl,
+    0x00cd4400_fa69_5ccb_9b4f_1837752b1f93
+);
+impl windows_core::RuntimeType for IIsoSessionUserResult2 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl windows_core::RuntimeName for IIsoSessionUserResult2 {
+    const NAME: &'static str = "Windows.AI.IsolationSession.IIsoSessionUserResult2";
+}
+pub trait IIsoSessionUserResult2_Impl: windows_core::IUnknownImpl {
+    fn RegistrationId(&self) -> windows_core::Result<windows_core::HSTRING>;
+}
+impl IIsoSessionUserResult2_Vtbl {
+    pub const fn new<Identity: IIsoSessionUserResult2_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn RegistrationId<
+            Identity: IIsoSessionUserResult2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionUserResult2_Impl::RegistrationId(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        Self {
+            base__: windows_core::IInspectable_Vtbl::new::<Identity, IIsoSessionUserResult2, OFFSET>(
+            ),
+            RegistrationId: RegistrationId::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IIsoSessionUserResult2 as windows_core::Interface>::IID
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IIsoSessionUserResult2_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub RegistrationId: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IsoSessionApp(windows_core::IUnknown);
@@ -2226,6 +2654,48 @@ impl IsoSessionAppConfig {
         let this = self;
         unsafe {
             (windows_core::Interface::vtable(this).SetRegistrationId)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(value),
+            )
+            .ok()
+        }
+    }
+    pub fn ProvisionId(&self) -> windows_core::Result<windows_core::HSTRING> {
+        let this = &windows_core::Interface::cast::<IIsoSessionAppConfig2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).ProvisionId)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| core::mem::transmute(result__))
+        }
+    }
+    pub fn SetProvisionId(&self, value: &windows_core::HSTRING) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IIsoSessionAppConfig2>(self)?;
+        unsafe {
+            (windows_core::Interface::vtable(this).SetProvisionId)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(value),
+            )
+            .ok()
+        }
+    }
+    pub fn WamToken(&self) -> windows_core::Result<windows_core::HSTRING> {
+        let this = &windows_core::Interface::cast::<IIsoSessionAppConfig2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).WamToken)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| core::mem::transmute(result__))
+        }
+    }
+    pub fn SetWamToken(&self, value: &windows_core::HSTRING) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IIsoSessionAppConfig2>(self)?;
+        unsafe {
+            (windows_core::Interface::vtable(this).SetWamToken)(
                 windows_core::Interface::as_raw(this),
                 core::mem::transmute_copy(value),
             )
@@ -2712,6 +3182,100 @@ impl IsoSessionOps {
             .and_then(|| windows_core::Type::from_abi(result__))
         }
     }
+    pub fn AddUserAsync2(
+        &self,
+        registrationid: &windows_core::HSTRING,
+        entraaccountname: &windows_core::HSTRING,
+        wamtoken: &windows_core::HSTRING,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionUserResult>> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOps2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).AddUserAsync2)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(registrationid),
+                core::mem::transmute_copy(entraaccountname),
+                core::mem::transmute_copy(wamtoken),
+                &mut result__,
+            )
+            .and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    pub fn StartSessionAsync2(
+        &self,
+        entraaccountname: &windows_core::HSTRING,
+        configid: IsoSessionConfigId,
+        wamtoken: &windows_core::HSTRING,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionResult>> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOps2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).StartSessionAsync2)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(entraaccountname),
+                configid,
+                core::mem::transmute_copy(wamtoken),
+                &mut result__,
+            )
+            .and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    pub fn GetAgentUsers(
+        &self,
+        registrationid: &windows_core::HSTRING,
+        includeinactive: bool,
+    ) -> windows_core::Result<windows_core::Array<IsoSessionUserResult>> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOps3>(self)?;
+        unsafe {
+            let mut result__ = core::mem::MaybeUninit::zeroed();
+            (windows_core::Interface::vtable(this).GetAgentUsers)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(registrationid),
+                includeinactive,
+                windows_core::Array::<IsoSessionUserResult>::set_abi_len(core::mem::transmute(
+                    &mut result__,
+                )),
+                result__.as_mut_ptr() as *mut _ as _,
+            )
+            .map(|| result__.assume_init())
+        }
+    }
+    pub fn GetAllAgentUsers(
+        &self,
+        includeinactive: bool,
+    ) -> windows_core::Result<windows_core::Array<IsoSessionUserResult>> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOps3>(self)?;
+        unsafe {
+            let mut result__ = core::mem::MaybeUninit::zeroed();
+            (windows_core::Interface::vtable(this).GetAllAgentUsers)(
+                windows_core::Interface::as_raw(this),
+                includeinactive,
+                windows_core::Array::<IsoSessionUserResult>::set_abi_len(core::mem::transmute(
+                    &mut result__,
+                )),
+                result__.as_mut_ptr() as *mut _ as _,
+            )
+            .map(|| result__.assume_init())
+        }
+    }
+    pub fn GetProcesses(
+        &self,
+        agentname: &windows_core::HSTRING,
+    ) -> windows_core::Result<windows_core::Array<IsoSessionProcess>> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOps3>(self)?;
+        unsafe {
+            let mut result__ = core::mem::MaybeUninit::zeroed();
+            (windows_core::Interface::vtable(this).GetProcesses)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(agentname),
+                windows_core::Array::<IsoSessionProcess>::set_abi_len(core::mem::transmute(
+                    &mut result__,
+                )),
+                result__.as_mut_ptr() as *mut _ as _,
+            )
+            .map(|| result__.assume_init())
+        }
+    }
 }
 impl windows_core::RuntimeType for IsoSessionOps {
     const SIGNATURE: windows_core::imp::ConstBuffer =
@@ -3179,6 +3743,17 @@ impl IsoSessionUserResult {
                 &mut result__,
             )
             .and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    pub fn RegistrationId(&self) -> windows_core::Result<windows_core::HSTRING> {
+        let this = &windows_core::Interface::cast::<IIsoSessionUserResult2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).RegistrationId)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| core::mem::transmute(result__))
         }
     }
 }

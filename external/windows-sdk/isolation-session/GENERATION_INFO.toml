@@ -5,12 +5,12 @@
 # OS repo branches and commit that produced the WinMD.
 # - os_build_branch: labelled build snapshot (immutable — matches VM build number).
 # - os_official_branch: rolling development lineage (moves over time).
-os_build_branch = "build/ge_current_directwinpd_uxip/26613.260505-1700"
+os_build_branch = "build/ge_current_directwinpd_uxip/26615.260507-1700"
 os_official_branch = "official/ge_current_directwinpd_uxip"
-os_commit = "45fdb8cd7b060f5172349068f93cfeb1b7a1f17a"
-winmd_sha256 = "719ca8e04eb73b758bcc6c55e483671eae45d5eb8105a4a4a29cc7ac88e662e5"
+os_commit = "130f7599db3455c18ed4cde01ca93c686f439c3b"
+winmd_sha256 = "bc1b6b9ad941a977f4147e8504a450c7ad2bad80841c1cd631464697c8839132"
 
 [tool]
 windows_bindgen_version = "0.62.1"
 target_windows_crate = "0.62"
-generated_date = "2026-05-07"
+generated_date = "2026-05-08"
