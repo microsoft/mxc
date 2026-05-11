@@ -20,7 +20,7 @@ function signatures throughout. One-line summaries; full definitions live in
 
 | Type | Where | Role |
 |---|---|---|
-| `SandboxingMethod` | `sdk/src/types.ts` | String union of MXC backend names (`'appcontainer' \| 'windows_sandbox' \| 'lxc' \| 'wslc' \| 'vm' \| 'microvm' \| 'isolation_session'`). |
+| `ContainmentType` / `ContainmentBackend` | `sdk/src/types.ts` | Two-tier containment names: `ContainmentType` for abstract intents (`'process' \| 'vm' \| 'microvm'` today); `ContainmentBackend` for concrete runners (`'processcontainer' \| 'windows_sandbox' \| 'lxc' \| 'wslc' \| 'microvm' \| 'seatbelt' \| 'isolation_session'`). Wire `containment` accepts either. The deprecated alias `SandboxingMethod = ContainmentType \| ContainmentBackend` is retained for back-compat. |
 | `ProcessConfig` | `sdk/src/types.ts` | Per-process settings: `commandLine`, `cwd`, `env`, `timeout`. Reused inside state-aware exec Configs. |
 | `FilesystemConfig`, `NetworkConfig`, `UiConfig` | `sdk/src/types.ts` | Wire-format-aligned cross-cutting interfaces. Reused inline as field types inside the per-(backend, phase) state-aware Configs. |
 | `SandboxSpawnOptions` | `sdk/src/sandbox.ts` | Existing options bag (debug, dryRun, logDir, executablePath, ptyOptions, usePty, experimental). State-aware reuses it as the third positional arg, extended with `signal?: AbortSignal` for cancellation. |
@@ -40,7 +40,7 @@ on the response, and neither shape carries `containerId`.
 
 | MXC layer | What's new | What's unchanged |
 |---|---|---|
-| TypeScript SDK (reference §6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `SandboxingMethod` extension reused. The wire-format-aligned `Process` / `Filesystem` / `Network` / `UiConfig` interfaces from `sdk/src/types.ts` are reused as field types inside state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). `*Config` naming convention reused. |
+| TypeScript SDK (reference §6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension reused. The wire-format-aligned `Process` / `Filesystem` / `Network` / `UiConfig` interfaces from `sdk/src/types.ts` are reused as field types inside state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). `*Config` naming convention reused. |
 | JSON wire format (reference §7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` at top level for state-aware too — backends declare per-phase honor. |
 | Rust executor (reference §9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (private `Raw*` parser pattern). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends unchanged. |
 | Error model (reference §8) | Closed enum of 12 codes. `MxcError` class with `code: ErrorCode`. `details` open object. | Existing one-shot error paths preserved. |
@@ -71,7 +71,7 @@ definitions and worked types are in
 type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
 type SandboxId<C extends StateAwareSandboxingMethod> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
-type StateAwareSandboxingMethod = Extract<SandboxingMethod, 'isolation_session'>;
+type StateAwareSandboxingMethod = Extract<ContainmentBackend, 'isolation_session'>;
 // extended as state-aware-capable backends are added
 
 interface ExecResult {
@@ -149,7 +149,7 @@ information.
 ```typescript
 interface OneShotRequest {
   phase?: never;
-  containment: SandboxingMethod;
+  containment: ContainmentType | ContainmentBackend;
   process: ProcessConfig;
   filesystem?: FilesystemConfig;
   network?: NetworkConfig;
@@ -400,7 +400,7 @@ Reference §11 has the full guide. Operational checklist:
    use `()` for any phase that doesn't need them.
 3. Define typed per-(backend, phase) `*Config` interfaces in `@microsoft/mxc-sdk` and
    add an arm to `ConfigsForBackend<C>` mapping the backend to its five phase Configs.
-   If newly SDK-exposed, extend `SandboxingMethod` and `StateAwareSandboxingMethod`.
+   If newly SDK-exposed, extend `ContainmentBackend` and `StateAwareSandboxingMethod`.
 4. Register a variant in the `ContainmentBackend` enum and declare two consts on the
    trait impl: `ID_PREFIX` (the sandbox-id tag, dispatcher's routing key for
    non-provision calls — pick a short distinct tag and treat it as permanent) and

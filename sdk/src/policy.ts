@@ -32,11 +32,11 @@ export interface FilesystemPolicyResult {
  */
 export interface ToolsPolicyOptions {
     /**
-     * When set to `'appcontainer'`, directories whose ACLs already grant
+     * When set to `'processcontainer'`, directories whose ACLs already grant
      * access to ALL_APPLICATION_PACKAGES are excluded from the result
      * because AppContainer processes can already see them implicitly.
      */
-    containerType?: 'appcontainer';
+    containerType?: 'processcontainer';
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +253,7 @@ function getPowerShellPolicy(
  *
  * 1. Directories that do not exist on disk are removed.
  * 2. System-critical directories (under `%WINDIR%`) are removed.
- * 3. When `options.containerType` is `'appcontainer'`, directories whose ACLs
+ * 3. When `options.containerType` is `'processcontainer'`, directories whose ACLs
  *    already grant access to `ALL_APPLICATION_PACKAGES` are removed because
  *    AppContainer processes can see them without explicit brokering.
  *
@@ -297,7 +297,7 @@ export function getAvailableToolsPolicy(
         if (isSystemCriticalPath(dirPath)) {
             return false;
         }
-        if (options?.containerType === 'appcontainer' && hasAllApplicationPackagesAccess(dirPath)) {
+        if (options?.containerType === 'processcontainer' && hasAllApplicationPackagesAccess(dirPath)) {
             return false;
         }
         return true;

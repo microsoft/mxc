@@ -90,13 +90,13 @@ This avoids the 30-60s boot cost for subsequent executions.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `containment` | `"appcontainer"` | Must be `"windows_sandbox"` to use this backend |
+| `containment` | `"processcontainer"` | Must be `"windows_sandbox"` to use this backend |
 | `process.commandLine` | *(required)* | Command line to execute inside the sandbox |
 | `process.timeout` | `0` (none) | Script execution timeout in milliseconds |
 | `experimental.windows_sandbox.idleTimeoutMs` | `300000` (5 min) | Daemon idle timeout before VM teardown |
 | `experimental.windows_sandbox.daemonPipeName` | `"wxc-windows-sandbox"` | IPC identifier (determines TCP port) |
 
-When `containment` is `"windows_sandbox"`, the `appContainer`, `filesystem`, and `network` sections are ignored — isolation is managed by the sandbox VM and guest agent firewall.
+When `containment` is `"windows_sandbox"`, the `processContainer`, `filesystem`, and `network` sections are ignored — isolation is managed by the sandbox VM and guest agent firewall.
 
 ## Security Model
 

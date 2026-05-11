@@ -110,7 +110,7 @@ spawnSandbox(script, policy);
 
 // Advanced: choose containment, get config, modify, then spawn.
 const config = createConfigFromPolicy(policy, "process");
-config.appContainer!.ui!.isolation = "atoms";  // backend-specific tweak
+config.processContainer!.ui!.isolation = "atoms";  // backend-specific tweak
 spawnSandboxFromConfig(config);
 ```
 
@@ -255,8 +255,8 @@ specific backend. Users receive it, may modify backend-specific fields, then pas
 `spawnSandboxFromConfig()`.
 Key rules:
 
-- **One backend per Config.** A Windows process config has an `appcontainer` section; no `lxc`
-  section. A Linux process config has an `lxc` section; no `appcontainer`.
+- **One backend per Config.** A Windows process config has an `processcontainer` section; no `lxc`
+  section. A Linux process config has an `lxc` section; no `processcontainer`.
 - **User-modifiable.** Advanced users can set any Config field before spawning.
 - **Schema-defined.** Schemas live in `schemas/`. The SDK TypeScript types mirror them.
 
@@ -298,7 +298,7 @@ type ContainerConfig =
     "blockedHosts": [],
     "proxy": null
   },
-  "appcontainer": {
+  "processcontainer": {
     "leastPrivilege": true,
     "capabilities": [],
     "ui": {
@@ -317,7 +317,7 @@ type ContainerConfig =
 ```
 
 Backend-specific UI fields (`isolation`, `desktopSystemControl`, `systemSettings`, `ime`)
-live inside `appcontainer.ui`, not at the top level. Top-level `ui` contains only the
+live inside `processcontainer.ui`, not at the top level. Top-level `ui` contains only the
 cross-platform fields mapped from Policy.
 
 ### Example: LxcContainerConfig
@@ -352,7 +352,7 @@ cross-platform fields mapped from Policy.
 }
 ```
 
-No `appcontainer` section. No `ui` section. Backend-specific fields are scoped to the backend
+No `processcontainer` section. No `ui` section. Backend-specific fields are scoped to the backend
 that uses them.
 
 ---
@@ -424,7 +424,7 @@ spawnSandbox("myapp.exe --flag1 arg", policy);
 
 ```typescript
 const config = createConfigFromPolicy(policy, "process");
-config.appContainer!.ui!.isolation = "atoms";
+config.processContainer!.ui!.isolation = "atoms";
 spawnSandboxFromConfig(config);
 ```
 
@@ -463,7 +463,7 @@ Top-level `ui` (maps from policy, all backends):
 Process container-specific UI fields (in this case Windows):
 
 ```json
-"appcontainer": {
+"processcontainer": {
   "ui": {
     "isolation": "full",
     "desktopSystemControl": false,
@@ -486,10 +486,10 @@ ui: {
 };
 ```
 
-Process container-specific UI (inside `appcontainer`):
+Process container-specific UI (inside `processcontainer`):
 
 ```typescript
-// Add to ProcessContainerConfig.appcontainer:
+// Add to ProcessContainerConfig.processcontainer:
 ui: {
   isolation: "desktop" | "handles" | "atoms" | "full";
   desktopSystemControl: boolean;
@@ -513,7 +513,7 @@ config.ui = {
 
 // Process container-specific ui (Windows only):
 if (platform === 'win32' && config.containment === 'process') {
-  config.appcontainer.ui = {
+  config.processcontainer.ui = {
     isolation: 'full',
     desktopSystemControl: false,
     systemSettings: 'none',
@@ -548,7 +548,7 @@ Backend-specific mechanisms belong in ContainerConfig.
 
 ### "What if my feature is Windows-only?"
 
-Put it in ContainerConfig under the appropriate backend section (e.g., `appcontainer` or `ui`
+Put it in ContainerConfig under the appropriate backend section (e.g., `processcontainer` or `ui`
 inside ProcessContainerConfig). Policy stays cross-platform.
 
 ### "Can a developer bypass the SDK defaults?"

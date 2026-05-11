@@ -1,12 +1,12 @@
 {
   "version": "0.4.0-alpha",
   "containerId": "CLI-Proxy-Builtin-Test",
-  "containment": "appcontainer",
+  "containment": "processcontainer",
   "process": {
     "commandLine": "python -c \"import urllib.request\n\nprint('Test 1: Requesting api.github.com...')\ntry:\n    response = urllib.request.urlopen('https://api.github.com', timeout=10)\n    print(f'  Status: {response.status}')\nexcept Exception as err:\n    print(f'  Error: {err}')\n\nprint()\nprint('Done.')\"",
     "timeout": 15000
   },
-  "appContainer": {
+  "processContainer": {
     "capabilities": [
       "internetClient"
     ]

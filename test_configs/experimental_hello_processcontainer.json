@@ -1,7 +1,7 @@
 {
   "version": "0.5.0-alpha",
   "containerId": "CLI-Experimental-Hello",
-  "containment": "appcontainer",
+  "containment": "processcontainer",
   "process": {
     "commandLine": "cmd.exe /c echo experimental hello test"
   },

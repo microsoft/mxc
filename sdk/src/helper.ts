@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { FileLogger } from './logger.js';
-import { ContainerConfig, ContainmentType, ExperimentalBackends, SandboxingMethod } from './types.js';
+import { ContainerConfig, ContainmentBackend, ContainmentTypes, ExperimentalBackends } from './types.js';
 import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { diagLog } from './diagnostic.js';
@@ -129,7 +129,7 @@ export function resolveExecutableAndArgs(
 
   // Check experimental mode before anything else so the caller gets a clear
   // message about the missing flag rather than a platform/binary error.
-  if (ExperimentalBackends.includes(config.containment as ContainmentType) && !options.experimental) {
+  if (config.containment && ExperimentalBackends.includes(config.containment) && !options.experimental) {
     throw new Error(
       `'${config.containment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
     );
@@ -147,8 +147,13 @@ export function resolveExecutableAndArgs(
     if (config.containment === 'microvm' && os.platform() !== 'win32') {
       throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
     }
-    if (!(ExperimentalBackends as readonly string[]).includes(config.containment) &&
-        !platformSupport.availableMethods.includes(config.containment as SandboxingMethod)) {
+    // Abstract intents (process, microvm) are resolved by the native binary
+    // at run time, so the SDK accepts them without checking against the
+    // host's concrete backend list.
+    const isIntent = (ContainmentTypes as readonly string[]).includes(config.containment);
+    const isExperimental = (ExperimentalBackends as readonly string[]).includes(config.containment);
+    const isAvailable = platformSupport.availableMethods.includes(config.containment as ContainmentBackend);
+    if (!isIntent && !isExperimental && !isAvailable) {
       throw new Error(
         `Containment backend '${config.containment}' is not available on this platform. ` +
         `Available methods: ${platformSupport.availableMethods.join(', ')}`
