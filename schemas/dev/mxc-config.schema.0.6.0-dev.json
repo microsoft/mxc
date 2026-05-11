@@ -345,7 +345,24 @@
             },
             "provision": {
               "type": "object",
-              "description": "State-aware: provision-phase configuration. No fields defined yet."
+              "description": "State-aware: provision-phase configuration.",
+              "properties": {
+                "user": {
+                  "type": "object",
+                  "description": "Optional Entra credentials. When supplied, provisioning uses the Entra identity for the sandbox; the same 'user' must be supplied at start.",
+                  "required": ["upn", "wamToken"],
+                  "properties": {
+                    "upn": {
+                      "type": "string",
+                      "description": "User Principal Name (must contain '@' not at either boundary)."
+                    },
+                    "wamToken": {
+                      "type": "string",
+                      "description": "WAM token for the Entra identity. Treat as a secret."
+                    }
+                  }
+                }
+              }
             },
             "start": {
               "type": "object",
@@ -356,6 +373,21 @@
                   "enum": ["small", "medium", "large", "composable"],
                   "default": "composable",
                   "description": "IsoSession configuration ID. Unknown values are accepted but warned and downgraded to 'composable'."
+                },
+                "user": {
+                  "type": "object",
+                  "description": "Required when the sandbox was provisioned with a 'user' bundle; rejected otherwise. When required, 'upn' must match the UPN supplied at provision (case-insensitive).",
+                  "required": ["upn", "wamToken"],
+                  "properties": {
+                    "upn": {
+                      "type": "string",
+                      "description": "User Principal Name (must contain '@' not at either boundary)."
+                    },
+                    "wamToken": {
+                      "type": "string",
+                      "description": "WAM token for the Entra identity. Treat as a secret."
+                    }
+                  }
                 }
               }
             },

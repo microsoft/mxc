@@ -17,7 +17,7 @@ import {
   parseNonExecResponse,
 } from '../../src/state-aware-helper.js';
 import { MxcError } from '../../src/errors.js';
-import { SandboxId } from '../../src/state-aware-types.js';
+import { IsolationSessionUserConfig, SandboxId } from '../../src/state-aware-types.js';
 import { fakeSpawn, testOptions } from './test-helpers.js';
 
 describe('buildStateAwareEnvelope', () => {
@@ -91,6 +91,43 @@ describe('buildStateAwareEnvelope', () => {
     });
     assert.strictEqual(env.version, '0.6.5-alpha');
   });
+
+  it('nests provision user under experimental.isolation_session.provision', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'isolation_session',
+      containment: 'isolation_session',
+      config: { user: new IsolationSessionUserConfig('alice@contoso.com', 'tok') },
+    });
+    const wire = JSON.parse(JSON.stringify(env));
+    assert.deepStrictEqual(wire.experimental, {
+      isolation_session: {
+        provision: { user: { upn: 'alice@contoso.com', wamToken: 'tok' } },
+      },
+    });
+  });
+
+  it('nests start user under experimental.isolation_session.start alongside configurationId', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'start',
+      backendKey: 'isolation_session',
+      sandboxId: 'iso:alice@contoso.com',
+      config: {
+        configurationId: 'composable',
+        user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+      },
+    });
+    const wire = JSON.parse(JSON.stringify(env));
+    assert.deepStrictEqual(wire.experimental, {
+      isolation_session: {
+        start: {
+          configurationId: 'composable',
+          user: { upn: 'alice@contoso.com', wamToken: 'tok' },
+        },
+      },
+    });
+  });
+
 });
 
 describe('parseNonExecResponse', () => {

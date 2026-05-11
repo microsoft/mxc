@@ -73,6 +73,7 @@ export {
   Phase,
   StateAwareSandboxingMethod,
   SandboxId,
+  IsolationSessionUserConfig,
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
   IsolationSessionExecConfig,

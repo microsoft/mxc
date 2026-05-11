@@ -28,6 +28,28 @@ export type StateAwareSandboxingMethod = Extract<SandboxingMethod, 'isolation_se
 export type SandboxId<C extends StateAwareSandboxingMethod> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
+const ISO_USER_INSPECT = Symbol.for('nodejs.util.inspect.custom');
+
+/**
+ * Entra credentials, supplied at provision to opt into an Entra-backed
+ * sandbox and at start to authenticate the session. `wamToken` is treated
+ * as a secret: `util.inspect` and `console.log` redact it. `JSON.stringify`
+ * is unaffected — the wire envelope carries the token verbatim.
+ */
+export class IsolationSessionUserConfig {
+  readonly upn: string;
+  readonly wamToken: string;
+
+  constructor(upn: string, wamToken: string) {
+    this.upn = upn;
+    this.wamToken = wamToken;
+  }
+
+  [ISO_USER_INSPECT](): string {
+    return `IsolationSessionUserConfig { upn: '${this.upn}', wamToken: '<redacted>' }`;
+  }
+}
+
 // IsolationSession per-(backend, phase) Configs. Each declares only
 // the fields the SDK currently exposes at that phase — scoped to
 // what the backend honors per the policy honor matrix and currently
@@ -37,6 +59,12 @@ export interface IsolationSessionProvisionConfig {
   /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
   version?: string;
   filesystem?: FilesystemConfig;
+  /**
+   * Optional Entra credentials. When supplied, provisioning uses the Entra
+   * identity for the sandbox; the same `user` must be supplied to
+   * `startSandbox`. Hosts that don't support this surface `backend_unavailable`.
+   */
+  user?: IsolationSessionUserConfig;
 }
 
 export interface IsolationSessionStartConfig {
@@ -47,6 +75,12 @@ export interface IsolationSessionStartConfig {
    * downgraded to `'composable'` on the Rust side.
    */
   configurationId?: 'small' | 'medium' | 'large' | 'composable';
+  /**
+   * Entra credentials. Required when the sandbox was provisioned with a
+   * `user` bundle; rejected otherwise. When required, `upn` must match the
+   * UPN supplied at provision (case-insensitive).
+   */
+  user?: IsolationSessionUserConfig;
 }
 
 export interface IsolationSessionExecConfig {
