@@ -898,6 +898,64 @@ try {
     }
 }
 
+# ---------------- Lifecycle D: Entra agent validation rejections ----------------
+
+# Validation runs before any OS-side call, so these tests never reach the
+# IsoEnvBroker service and need no sandbox cleanup. They cover the four
+# rejection cells of the validate_provision/validate_start matrix added
+# alongside the v2 binding wiring: malformed user shape at provision, and
+# the three sandboxId-vs-user mismatches at start.
+
+Run-StateAwareTest "provision (user.upn malformed: missing @)" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_user_malformed_upn.json' -Experimental
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg.Contains('upn')) "error.message mentions 'upn' (got '$msg')"
+} | Out-Null
+
+Run-StateAwareTest "provision (user.wamToken empty)" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_user_empty_wamtoken.json' -Experimental
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg.Contains('wamToken')) "error.message mentions 'wamToken' (got '$msg')"
+} | Out-Null
+
+Run-StateAwareTest "start (Entra sandbox without user)" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_entra_missing_user.json' -Experimental
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg.Contains('Entra sandbox requires user')) "error.message mentions Entra-requires-user (got '$msg')"
+} | Out-Null
+
+Run-StateAwareTest "start (local sandbox with user)" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_local_with_user.json' -Experimental
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg.Contains('not allowed for local sandbox')) "error.message mentions local-sandbox restriction (got '$msg')"
+} | Out-Null
+
+Run-StateAwareTest "start (user.upn mismatches sandboxId)" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_upn_mismatch.json' -Experimental
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg.Contains('does not match sandboxId')) "error.message mentions sandboxId mismatch (got '$msg')"
+} | Out-Null
+
 } finally {
     # Outer-try finally: remove the locked-down test tree. Runs even if a
     # test panics so we don't leak the directory between runs.

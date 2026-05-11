@@ -43,7 +43,7 @@ without metadata use `()`.
 
 | Phase | `*Config` | `*Metadata` |
 |---|---|---|
-| provision | `()` | `IsolationSessionProvisionMetadata` |
+| provision | `IsolationSessionProvisionConfig` | `IsolationSessionProvisionMetadata` |
 | start | `IsolationSessionConfig` | `()` |
 | exec | `()` | (n/a — exec returns an exit code, not metadata) |
 | stop | `()` | `()` |
@@ -51,17 +51,26 @@ without metadata use `()`.
 
 ### Provision
 
-**Config (none).** Provision takes no per-phase config. The agent user
-account name is OS-assigned (`<CallingUser>-IEB-<NNN>`).
+**Config (`IsolationSessionProvisionConfig`):**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `user` | `IsolationSessionUser` (object) \| absent | absent | Optional Entra cloud-agent credentials. When present, provision routes through `IIsoSessionOps2::AddUserAsync2` and the resulting sandbox is Entra-backed. When absent, provision uses the v1 `AddUserAsync` path and produces a local-agent sandbox. The bundle is `{ upn: string, wamToken: string }`; both fields required when supplied. `wamToken` is passed verbatim to the OS-side service and never stored by MXC. The wire path is `experimental.isolation_session.provision.user`. |
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
 
 | Field | Type | Description |
 |---|---|---|
-| `agentUserName` | string | The OS-assigned agent account name returned by `AddUserAsync`. Diagnostic only — not used as an addressing key. |
+| `agentUserName` | string | The OS-assigned agent account name returned by `AddUserAsync` / `AddUserAsync2`. Diagnostic only — not used as an addressing key. Format is OS-internal and not stable across builds. |
 
-The provisioned `sandboxId` shape is `iso:wxc-<8-hex>`, where the 8-hex
-suffix is `mint_random_token()`. Example: `iso:wxc-1b65bd11`.
+The provisioned `sandboxId` shape depends on whether `user` was supplied:
+
+- **Local sandbox** (no `user`): `iso:wxc-<8-hex>`, where the 8-hex suffix is
+  `mint_random_token()`. Example: `iso:wxc-1b65bd11`.
+- **Entra sandbox** (`user` supplied): `iso:<UPN>`. The UPN is the OS-layer
+  `provisionId` for Entra agents — no separate identifier exists — so encoding
+  it as the tail keeps every later phase stateless. Example:
+  `iso:alice@contoso.com`.
 
 ### Start
 
@@ -70,10 +79,14 @@ suffix is `mint_random_token()`. Example: `iso:wxc-1b65bd11`.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `configurationId` | `"small" \| "medium" \| "large" \| "composable"` | `"composable"` | Maps to the OS-side `IsoSessionConfigId`. `composable` is the lightweight, ConPTY-friendly default; `small` triggers a known cache-teardown bug on the current OS build (see [Known issues](#known-issues)) and is not recommended. |
+| `user` | `IsolationSessionUser` (object) \| absent | absent | Required when starting an Entra sandbox (one whose `sandboxId` tail contains `@`); rejected for local sandboxes. When required, `user.upn` must match the `sandboxId` tail (case-insensitive) and `wamToken` must be non-empty — `validate_start` enforces this matrix and surfaces mismatches as `malformed_request`. Routes start through `IIsoSessionOps2::StartSessionAsync2`. The wire path is `experimental.isolation_session.start.user`. |
 
 This is the same `IsolationSessionConfig` shape used by the one-shot
-`experimental.isolation_session` block — there is no separate state-aware
-type. The wire path is `experimental.isolation_session.start.configurationId`.
+`experimental.isolation_session` block, with one mode difference: `user` is
+honoured here at state-aware start, but rejected on the one-shot path
+(`validate_runner` returns `policy_validation` if a one-shot request carries
+it). The wire path for `configurationId` is
+`experimental.isolation_session.start.configurationId`.
 
 **Metadata (none).** Start returns an empty `result: {}` envelope on success.
 
@@ -119,8 +132,13 @@ those are rejected at every phase including provision.
 | `policy.network.{allowedHosts,blockedHosts,defaultPolicy}` | rejected | rejected | rejected | rejected | rejected |
 | `policy.network.proxy` | rejected | rejected | rejected | rejected | rejected |
 | `policy.ui` | rejected | rejected | rejected | rejected | rejected |
+| `experimental.isolation_session.{provision,start}.user` | **honored** | **honored** | n/a | n/a | n/a |
 
-Rejection surfaces as wire-format `error.code = "policy_validation"`.
+Rejection of `policy.*` fields surfaces as `error.code = "policy_validation"`.
+Rejection of malformed `user` shape (UPN missing `@`, empty `wamToken`) surfaces
+as `policy_validation`; rejection at start due to a sandboxId/user inconsistency
+(missing user for Entra sandbox, user supplied for local sandbox, or UPN
+mismatch) surfaces as `malformed_request`.
 
 ## Mode-specific fields
 
@@ -153,7 +171,11 @@ Both modes share the same policy-honor matrix above:
 - `phase` — the discriminator. Required for state-aware; absent for one-shot.
 - `sandboxId` — required for non-provision phases.
 - `experimental.isolation_session.<phase>` — typed per-phase config blocks
-  (only `start` is populated in v1; the others use `()`).
+  (`provision` carries optional `user`; `start` carries `configurationId` and
+  optional `user`; `exec` / `stop` / `deprovision` use `()`).
+- `experimental.isolation_session.{provision,start}.user` — Entra cloud-agent
+  credentials. Honoured here; the same field on a one-shot `experimental.isolation_session`
+  is rejected with `policy_validation`.
 
 ## Idempotence per phase
 

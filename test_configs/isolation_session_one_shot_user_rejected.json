@@ -1,0 +1,19 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "isolation-session-one-shot-user-rejected",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "echo unreachable",
+    "cwd": "C:\\",
+    "env": [],
+    "timeout": 30000
+  },
+  "experimental": {
+    "isolation_session": {
+      "user": {
+        "upn": "alice@contoso.com",
+        "wamToken": "tok"
+      }
+    }
+  }
+}

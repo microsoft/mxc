@@ -11,9 +11,9 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
-    IsolationSessionConfig, LifecycleConfig, LxcConfig, MacosSandboxConfig, MacosSandboxMode,
-    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig,
-    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    IsolationSessionConfig, IsolationSessionUser, LifecycleConfig, LxcConfig, MacosSandboxConfig,
+    MacosSandboxMode, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress,
+    ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -160,6 +160,7 @@ struct RawTestFeature {
 struct RawIsolationSession {
     #[serde(rename = "configurationId")]
     configuration_id: Option<String>,
+    user: Option<IsolationSessionUser>,
 }
 
 #[derive(Deserialize, Default)]
@@ -787,6 +788,7 @@ fn convert_raw_config_inner(
                     }
                 };
             }
+            config.user = as_cfg.user;
             config
         });
         let macos_sandbox = raw_exp.macos_sandbox.map(|raw_sb| {
@@ -2208,6 +2210,32 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.experimental.isolation_session.is_none());
+    }
+
+    #[test]
+    fn isolation_session_user_field_round_trips_through_one_shot_parser() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
+        let user = cfg
+            .user
+            .expect("user field should round-trip through the one-shot parser");
+        assert_eq!(user.upn, "alice@contoso.com");
+        assert_eq!(user.wam_token, "tok");
+    }
+
+    #[test]
+    fn isolation_session_user_absent_when_field_omitted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
+        assert!(cfg.user.is_none());
     }
 
     #[test]

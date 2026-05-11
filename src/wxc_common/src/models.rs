@@ -103,6 +103,38 @@ pub struct IsolationSessionConfig {
     /// Session size/weight. Default: Composable.
     #[serde(rename = "configurationId")]
     pub configuration_id: IsolationSessionConfigurationId,
+    /// Optional Entra cloud-agent credentials. Honored on the state-aware
+    /// `start` phase; rejected by the one-shot path.
+    pub user: Option<IsolationSessionUser>,
+}
+
+/// Entra cloud-agent credentials. Both fields are required when the bundle
+/// is supplied. `wam_token` is a short-lived bearer token passed verbatim to
+/// the OS-side service; MXC stores nothing.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsolationSessionUser {
+    pub upn: String,
+    pub wam_token: String,
+}
+
+impl std::fmt::Debug for IsolationSessionUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IsolationSessionUser")
+            .field("upn", &self.upn)
+            .field("wam_token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// State-aware provision-phase config for the Isolation Session backend.
+/// Nested under `experimental.isolation_session.provision`. Carries Entra
+/// credentials when the caller wants a cloud-agent sandbox; absent for
+/// local sandboxes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IsolationSessionProvisionConfig {
+    pub user: Option<IsolationSessionUser>,
 }
 
 /// Configuration specific to the LXC container backend.
@@ -457,5 +489,62 @@ impl ScriptResponse {
             error_message: msg.to_string(),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn isolation_session_user_serde_round_trips_camel_case() {
+        let wire = json!({"upn": "alice@contoso.com", "wamToken": "tok"});
+        let parsed: IsolationSessionUser = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(parsed.upn, "alice@contoso.com");
+        assert_eq!(parsed.wam_token, "tok");
+        let serialised = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(serialised, wire);
+    }
+
+    #[test]
+    fn isolation_session_user_debug_redacts_wam_token() {
+        let user = IsolationSessionUser {
+            upn: "alice@contoso.com".to_string(),
+            wam_token: "super-secret-token".to_string(),
+        };
+        let s = format!("{:?}", user);
+        assert!(s.contains("alice@contoso.com"), "got {}", s);
+        assert!(s.contains("<redacted>"), "got {}", s);
+        assert!(!s.contains("super-secret-token"), "got {}", s);
+    }
+
+    #[test]
+    fn isolation_session_provision_config_accepts_user_field() {
+        let wire = json!({"user": {"upn": "alice@contoso.com", "wamToken": "tok"}});
+        let parsed: IsolationSessionProvisionConfig = serde_json::from_value(wire).unwrap();
+        let u = parsed.user.unwrap();
+        assert_eq!(u.upn, "alice@contoso.com");
+        assert_eq!(u.wam_token, "tok");
+    }
+
+    #[test]
+    fn isolation_session_provision_config_defaults_to_no_user() {
+        let parsed: IsolationSessionProvisionConfig = serde_json::from_value(json!({})).unwrap();
+        assert!(parsed.user.is_none());
+    }
+
+    #[test]
+    fn isolation_session_config_carries_optional_user() {
+        let wire = json!({
+            "configurationId": "medium",
+            "user": {"upn": "alice@contoso.com", "wamToken": "tok"}
+        });
+        let parsed: IsolationSessionConfig = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            parsed.configuration_id,
+            IsolationSessionConfigurationId::Medium
+        );
+        assert!(parsed.user.is_some());
     }
 }
