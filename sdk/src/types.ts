@@ -172,7 +172,7 @@ export interface ContainerConfig {
   /** Externally assigned container identifier */
   containerId?: string;
   /** Containment backend */
-  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'seatbelt';
+  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'seatbelt' | 'isolation_session';
   /** Container lifecycle settings */
   lifecycle?: LifecycleConfig;
   /** Process execution settings (required) */
@@ -281,7 +281,7 @@ export interface SeatbeltConfig {
 /**
  * Sandboxing methods available on the platform
  */
-export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'seatbelt';
+export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'seatbelt' | 'isolation_session';
 
 /**
  * Platform support information

@@ -1,0 +1,375 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.6.0-dev.json",
+  "title": "MXC Configuration",
+  "description": "Configuration schema for MXC container execution engine. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. The parser also accepts legacy fields not listed here during the migration period.",
+  "type": "object",
+
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "MXC config schema version (semver). Current stable: '0.4.0-alpha'. Configs using promoted or experimental features should use '0.6.0-alpha'. State-aware lifecycle requests use '0.6.0-alpha'.",
+      "examples": ["0.4.0-alpha", "0.6.0-alpha"]
+    },
+    "containerId": {
+      "type": "string",
+      "description": "Externally assigned container identifier."
+    },
+    "containment": {
+      "type": "string",
+      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "macos_sandbox", "isolation_session"],
+      "default": "appcontainer",
+      "description": "Containment backend to use for execution. Note: 'windows_sandbox', 'wslc', 'macos_sandbox', and 'isolation_session' are experimental and require the --experimental CLI flag."
+    },
+
+    "phase": {
+      "type": "string",
+      "enum": ["provision", "start", "exec", "stop", "deprovision"],
+      "description": "State-aware lifecycle phase. When present, the request is a state-aware request: 'sandboxId' is required for non-provision phases, and 'process' is required only for the 'exec' phase. When absent, the request is a one-shot request and 'process' is required."
+    },
+    "sandboxId": {
+      "type": "string",
+      "description": "Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases ('start', 'exec', 'stop', 'deprovision')."
+    },
+
+    "lifecycle": {
+      "type": "object",
+      "description": "Container lifecycle settings shared across all backends.",
+      "properties": {
+        "destroyOnExit": {
+          "type": "boolean",
+          "default": true,
+          "description": "Destroy the container after execution completes."
+        },
+        "preservePolicy": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, retain filesystem and network policies after execution. If false (default), policies are cleaned up on exit."
+        }
+      }
+    },
+
+    "process": {
+      "type": "object",
+      "description": "Process execution settings. Required for one-shot requests and for the state-aware 'exec' phase; omitted for non-exec state-aware phases.",
+      "required": ["commandLine"],
+      "properties": {
+        "commandLine": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Complete command line to execute (e.g., \"python3 app.py\")."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for the process."
+        },
+        "env": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Environment variables as KEY=VALUE strings.",
+          "examples": [["MY_VAR=value", "PATH=/usr/bin"]]
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Execution timeout in milliseconds. 0 = no timeout (infinite)."
+        }
+      }
+    },
+
+    "filesystem": {
+      "type": "object",
+      "description": "Filesystem access policy. Shared across all backends.",
+      "properties": {
+        "readwritePaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Paths the process can read and write."
+        },
+        "readonlyPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Paths the process can read but not write."
+        },
+        "deniedPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Paths the process cannot access at all."
+        }
+      }
+    },
+
+    "network": {
+      "type": "object",
+      "description": "Network access policy. Shared across all backends.",
+      "properties": {
+        "defaultPolicy": {
+          "type": "string",
+          "enum": ["allow", "block"],
+          "default": "allow",
+          "description": "Default network posture."
+        },
+        "enforcementMode": {
+          "type": "string",
+          "enum": ["capabilities", "firewall", "both"],
+          "default": "capabilities",
+          "description": "How network policy is enforced."
+        },
+        "allowedHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Enforced by 'lxc' and 'appcontainer' containment backends."
+        },
+        "blockedHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc' and 'appcontainer' containment backends."
+        },
+        "proxy": {
+          "type": "object",
+          "description": "Proxy configuration. Only supported with appcontainer backend.",
+          "oneOf": [
+            {
+              "properties": {
+                "localhost": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "description": "Port of an external already running proxy on localhost."
+                }
+              },
+              "required": ["localhost"],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "builtinTestServer": {
+                  "type": "boolean",
+                  "const": true,
+                  "description": "Use WXC's built-in test proxy server. Mutually exclusive with localhost."
+                }
+              },
+              "required": ["builtinTestServer"],
+              "additionalProperties": false
+            }
+          ]
+        }
+      }
+    },
+
+    "ui": {
+      "type": "object",
+      "description": "Cross-platform UI policy. Mapped from SandboxPolicy.ui by createConfigFromPolicy.",
+      "properties": {
+        "disable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether UI is disabled (no visible windows)."
+        },
+        "clipboard": {
+          "type": "string",
+          "enum": ["none", "read", "write", "all"],
+          "default": "none",
+          "description": "Clipboard access level."
+        },
+        "injection": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether input injection (keyboard/mouse) is allowed."
+        }
+      }
+    },
+
+    "appContainer": {
+      "type": "object",
+      "description": "AppContainer-specific settings. Used when containment is 'appcontainer'.",
+      "properties": {
+        "leastPrivilege": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enforce least privilege mode."
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "AppContainer capabilities (e.g., 'internetClient', 'registryRead')."
+        },
+        "ui": {
+          "type": "object",
+          "description": "BaseProcessContainer-specific UI settings (Windows only).",
+          "properties": {
+            "isolation": {
+              "type": "string",
+              "enum": ["desktop", "handles", "atoms", "container"],
+              "default": "container",
+              "description": "UI isolation level for the desktop."
+            },
+            "desktopSystemControl": {
+              "type": "boolean",
+              "default": false,
+              "description": "Whether desktop system control is allowed."
+            },
+            "systemSettings": {
+              "type": "string",
+              "default": "none",
+              "description": "System settings access level."
+            },
+            "ime": {
+              "type": "boolean",
+              "default": false,
+              "description": "Whether IME (Input Method Editor) is allowed."
+            }
+          }
+        }
+      }
+    },
+
+    "lxc": {
+      "type": "object",
+      "description": "LXC-specific settings. Used when containment is 'lxc'.",
+      "required": ["distribution", "release"],
+      "properties": {
+        "distribution": {
+          "type": "string",
+          "description": "Linux distribution for the container rootfs (e.g., 'alpine', 'ubuntu'). Required."
+        },
+        "release": {
+          "type": "string",
+          "description": "Distribution release version (e.g., '3.20', '24.04'). Required."
+        }
+      }
+    },
+
+    "experimental": {
+      "type": "object",
+      "description": "Experimental features. Only active when --experimental is passed.",
+      "properties": {
+        "test": {
+          "type": "object",
+          "description": "Placeholder feature for testing experimental infrastructure.",
+          "properties": {
+            "message": {
+              "type": "string",
+              "description": "Message to log when the feature is applied."
+            }
+          }
+        },
+        "windows_sandbox": {
+          "type": "object",
+          "description": "Windows Sandbox backend (experimental). Full VM isolation via a long-lived sandbox daemon.",
+          "properties": {
+            "idleTimeoutMs": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 300000,
+              "description": "Idle timeout in milliseconds before the daemon tears down the sandbox VM. 0 = no timeout."
+            },
+            "daemonPipeName": {
+              "type": "string",
+              "default": "wxc-windows-sandbox",
+              "description": "Named pipe name the daemon listens on (without \\\\.\\pipe\\ prefix)."
+            }
+          }
+        },
+        "wslc": {
+          "type": "object",
+          "description": "WSL Container (WSLC SDK) settings. Used when containment is 'wslc'.",
+          "properties": {
+            "targetOs": {
+              "type": "string",
+              "default": "linux",
+              "description": "Target OS for the container. Currently only 'linux' is supported."
+            },
+            "image": {
+              "type": "string",
+              "default": "alpine:latest",
+              "description": "Container image name (e.g., 'alpine:latest', 'python:3.12').",
+              "examples": ["alpine:latest", "python:3.12", "ubuntu:24.04"]
+            },
+            "imageTarPath": {
+              "type": "string",
+              "description": "Path to a local tar file to import as the container image. Supports both rootfs tars (from `docker export`) and Docker image archives (from `docker save`). When set, the image is imported from this file instead of pulling from a registry. The format is auto-detected: archives containing `manifest.json` are treated as Docker image format, archives with Linux root directories (bin/, etc/, usr/) are treated as rootfs tars, and unrecognized formats are rejected.",
+              "examples": ["C:\\images\\alpine.tar", "/home/user/images/alpine.tar"]
+            },
+            "cpuCount": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of CPUs allocated to the WSLC session. Omit for host-determined default."
+            },
+            "memoryMb": {
+              "type": "integer",
+              "minimum": 256,
+              "description": "Memory in MB allocated to the WSLC session. Omit for host-determined default."
+            },
+            "gpu": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable GPU passthrough to the container."
+            },
+            "storagePath": {
+              "type": "string",
+              "description": "Storage path for the WSLC session image store. Omit to use a temporary directory."
+            }
+          }
+        },
+        "macos_sandbox": {
+          "type": "object",
+          "description": "macOS sandbox backend (experimental). Used when containment is 'macos_sandbox'.",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["exec", "inproc"],
+              "default": "exec",
+              "description": "How the sandbox profile is applied: 'exec' spawns /usr/bin/sandbox-exec; 'inproc' calls sandbox_init_with_parameters after fork (uses a private macOS API)."
+            },
+            "profileOverride": {
+              "type": "string",
+              "description": "Optional override of the generated TinyScheme sandbox profile."
+            }
+          }
+        },
+        "isolation_session": {
+          "type": "object",
+          "description": "IsolationSession backend (experimental, Windows-only). Used when containment is 'isolation_session'. For one-shot requests, set 'configurationId' directly on this object. For state-aware requests, place per-phase configuration under 'provision', 'start', 'stop', or 'deprovision'.",
+          "properties": {
+            "configurationId": {
+              "type": "string",
+              "enum": ["small", "medium", "large", "composable"],
+              "default": "composable",
+              "description": "IsoSession configuration ID for one-shot requests. For state-aware requests, place this under 'start.configurationId' instead. Unknown values are accepted but warned and downgraded to 'composable'."
+            },
+            "provision": {
+              "type": "object",
+              "description": "State-aware: provision-phase configuration. No fields defined yet."
+            },
+            "start": {
+              "type": "object",
+              "description": "State-aware: start-phase configuration.",
+              "properties": {
+                "configurationId": {
+                  "type": "string",
+                  "enum": ["small", "medium", "large", "composable"],
+                  "default": "composable",
+                  "description": "IsoSession configuration ID. Unknown values are accepted but warned and downgraded to 'composable'."
+                }
+              }
+            },
+            "stop": {
+              "type": "object",
+              "description": "State-aware: stop-phase configuration. No fields defined yet."
+            },
+            "deprovision": {
+              "type": "object",
+              "description": "State-aware: deprovision-phase configuration. No fields defined yet."
+            }
+          }
+        }
+      }
+    }
+  }
+}
