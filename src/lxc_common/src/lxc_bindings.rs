@@ -102,62 +102,56 @@ impl LxcContainer {
         &self.lxc_path
     }
 
+    /// Build a `Command` for an `lxc-*` tool with `-P <lxc_path> -n <name>`
+    /// already populated. Centralizes the argv prefix so we can't accidentally
+    /// drop `-P` again (see #274).
+    fn lxc_command(&self, tool: &str) -> std::process::Command {
+        let mut cmd = std::process::Command::new(tool);
+        cmd.arg("-P").arg(&self.lxc_path).arg("-n").arg(&self.name);
+        cmd
+    }
+
+    /// Run a prepared `lxc-*` command, mapping spawn / non-zero-exit failures
+    /// to a `String` error tagged with the tool name.
+    fn run_status(mut cmd: std::process::Command, tool: &str) -> Result<(), String> {
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run {}: {}", tool, e))?;
+        if !output.status.success() {
+            return Err(format!(
+                "{} failed: {}",
+                tool,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(())
+    }
+
     /// Check if the container exists.
     pub fn is_defined(&self) -> bool {
-        let output = std::process::Command::new("lxc-info")
-            .arg("-P")
-            .arg(&self.lxc_path)
-            .arg("-n")
-            .arg(&self.name)
-            .output();
+        let output = self.lxc_command("lxc-info").output();
         matches!(output, Ok(o) if o.status.success())
     }
 
     /// Check if the container is running.
     pub fn is_running(&self) -> bool {
-        let output = std::process::Command::new("lxc-info")
-            .arg("-P")
-            .arg(&self.lxc_path)
-            .arg("-n")
-            .arg(&self.name)
-            .arg("-s")
-            .output();
+        let output = self.lxc_command("lxc-info").arg("-s").output();
         match output {
-            Ok(o) => {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                stdout.contains("RUNNING")
-            }
+            Ok(o) => String::from_utf8_lossy(&o.stdout).contains("RUNNING"),
             Err(_) => false,
         }
     }
 
     /// Create the container from a template/distribution.
     pub fn create(&self, distribution: &str, release: &str) -> Result<(), String> {
-        let mut cmd = std::process::Command::new("lxc-create");
-        cmd.arg("-P")
-            .arg(&self.lxc_path)
-            .arg("-n")
-            .arg(&self.name)
-            .arg("-t")
-            .arg("download")
-            .arg("--")
-            .arg("-d")
+        let mut cmd = self.lxc_command("lxc-create");
+        cmd.args(["-t", "download", "--", "-d"])
             .arg(distribution)
             .arg("-r")
             .arg(release)
             .arg("-a")
             .arg(Self::current_arch());
-
-        let output = cmd
-            .output()
-            .map_err(|e| format!("Failed to run lxc-create: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("lxc-create failed: {}", stderr));
-        }
-
-        Ok(())
+        Self::run_status(cmd, "lxc-create")
     }
 
     /// Set a configuration item on the container.
@@ -187,19 +181,7 @@ impl LxcContainer {
 
     /// Start the container.
     pub fn start(&self) -> Result<(), String> {
-        let mut cmd = std::process::Command::new("lxc-start");
-        cmd.arg("-P").arg(&self.lxc_path).arg("-n").arg(&self.name);
-
-        let output = cmd
-            .output()
-            .map_err(|e| format!("Failed to run lxc-start: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("lxc-start failed: {}", stderr));
-        }
-
-        Ok(())
+        Self::run_status(self.lxc_command("lxc-start"), "lxc-start")
     }
 
     /// Execute a command inside the container, capturing stdout/stderr.
@@ -211,21 +193,18 @@ impl LxcContainer {
         _timeout_ms: u32,
     ) -> Result<(i32, String, String), String> {
         // TODO: Implement timeout and working directory support.
-
-        let mut cmd = std::process::Command::new("lxc-execute");
-        cmd.arg("-P").arg(&self.lxc_path).arg("-n").arg(&self.name);
-
-        cmd.arg("--").arg("/bin/sh").arg("-c").arg(command);
+        let mut cmd = self.lxc_command("lxc-execute");
+        cmd.args(["--", "/bin/sh", "-c", command]);
 
         let output = cmd
             .output()
             .map_err(|e| format!("Failed to run lxc-execute: {}", e))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        Ok((exit_code, stdout, stderr))
+        Ok((
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ))
     }
 
     /// Execute a command inside a running container using lxc-attach.
@@ -234,37 +213,23 @@ impl LxcContainer {
         command: &str,
         _working_directory: &str,
     ) -> Result<(i32, String, String), String> {
-        let mut cmd = std::process::Command::new("lxc-attach");
-        cmd.arg("-P").arg(&self.lxc_path).arg("-n").arg(&self.name);
-
-        cmd.arg("--").arg("/bin/sh").arg("-c").arg(command);
+        let mut cmd = self.lxc_command("lxc-attach");
+        cmd.args(["--", "/bin/sh", "-c", command]);
 
         let output = cmd
             .output()
             .map_err(|e| format!("Failed to run lxc-attach: {}", e))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        Ok((exit_code, stdout, stderr))
+        Ok((
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ))
     }
 
     /// Stop the container.
     pub fn stop(&self) -> Result<(), String> {
-        let mut cmd = std::process::Command::new("lxc-stop");
-        cmd.arg("-P").arg(&self.lxc_path).arg("-n").arg(&self.name);
-
-        let output = cmd
-            .output()
-            .map_err(|e| format!("Failed to run lxc-stop: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("lxc-stop failed: {}", stderr));
-        }
-
-        Ok(())
+        Self::run_status(self.lxc_command("lxc-stop"), "lxc-stop")
     }
 
     /// Destroy the container (removes rootfs and config).
@@ -272,24 +237,9 @@ impl LxcContainer {
         if self.is_running() {
             let _ = self.stop();
         }
-
-        let mut cmd = std::process::Command::new("lxc-destroy");
-        cmd.arg("-P")
-            .arg(&self.lxc_path)
-            .arg("-n")
-            .arg(&self.name)
-            .arg("-f");
-
-        let output = cmd
-            .output()
-            .map_err(|e| format!("Failed to run lxc-destroy: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("lxc-destroy failed: {}", stderr));
-        }
-
-        Ok(())
+        let mut cmd = self.lxc_command("lxc-destroy");
+        cmd.arg("-f");
+        Self::run_status(cmd, "lxc-destroy")
     }
 
     /// Get the path to the container's config file.
