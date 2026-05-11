@@ -303,7 +303,8 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
 ///
 /// 1. Same-path conflict: if a path string appears in multiple lists, it is kept
 ///    only in the most restrictive list (e.g. a path in both `readwritePaths` and
-///    `deniedPaths` is normalized to denied).
+///    `deniedPaths` is normalized to denied). Denied paths are subtracted before
+///    backend dispatch so allow-list-only backends cannot accidentally grant access.
 /// 2. Paths should exist: logs a WARNING for paths that don't exist on the host
 ///    (advisory — some backends create mount targets dynamically; not a hard error).
 ///
@@ -316,7 +317,6 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
     {
         return;
     }
-
     // 1. Same-path (string) conflict: drop a path from a list if it also appears
     //    in a more restrictive list.
     let denied: std::collections::HashSet<String> = policy.denied_paths.iter().cloned().collect();
@@ -1910,6 +1910,59 @@ mod tests {
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn denied_paths_override_readonly_paths() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "filesystem": {
+                "readonlyPaths": ["C:\\temp", "C:\\keep"],
+                "deniedPaths": ["C:\\temp"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.readonly_paths, vec!["C:\\keep"]);
+        assert_eq!(req.policy.denied_paths, vec!["C:\\temp"]);
+    }
+
+    #[test]
+    fn denied_paths_override_readwrite_paths() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "filesystem": {
+                "readwritePaths": ["C:\\temp", "C:\\keep"],
+                "deniedPaths": ["C:\\temp"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.readwrite_paths, vec!["C:\\keep"]);
+        assert_eq!(req.policy.denied_paths, vec!["C:\\temp"]);
+    }
+
+    #[test]
+    fn denied_paths_override_both_allow_lists() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "filesystem": {
+                "readwritePaths": ["C:\\shared", "C:\\rw"],
+                "readonlyPaths": ["C:\\shared", "C:\\ro"],
+                "deniedPaths": ["C:\\shared"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.readwrite_paths, vec!["C:\\rw"]);
+        assert_eq!(req.policy.readonly_paths, vec!["C:\\ro"]);
+        assert_eq!(req.policy.denied_paths, vec!["C:\\shared"]);
     }
 
     #[test]
