@@ -62,8 +62,62 @@ export function makeLogFilePath(dir: string): string {
 }
 
 /**
- * Resolves the executable path and builds CLI arguments for a sandbox invocation.
- * Shared setup used by both PTY and non-PTY spawn paths.
+ * Resolves the executor binary and builds the common CLI arguments for any
+ * MXC request envelope (one-shot or state-aware). Performs platform support
+ * and binary-presence checks; does not validate envelope contents — callers
+ * apply request-specific validation before delegating to this helper.
+ */
+export function resolveBinaryAndCommonArgs(
+  envelopeJson: string,
+  options: SandboxSpawnOptions,
+): { executablePath: string; args: string[] } {
+  const platformSupport = getPlatformSupport();
+  if (!platformSupport.isSupported) {
+    throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
+  }
+
+  const platform = os.platform();
+  let executablePath: string;
+
+  if (options.executablePath) {
+    if (!fs.existsSync(options.executablePath)) {
+      throw new Error(`File not found: ${options.executablePath}`);
+    }
+    executablePath = options.executablePath;
+  } else if (platform === 'linux') {
+    const p = findLxcExecutable();
+    if (!p) {
+      throw new Error(
+        'lxc-exec not found. Ensure it is built and available in a standard location.'
+      );
+    }
+    executablePath = p;
+  } else {
+    const p = findWxcExecutable();
+    if (!p) {
+      throw new Error(
+        'wxc-exec.exe not found. Set options.executablePath or ensure it exists in a standard location.'
+      );
+    }
+    executablePath = p;
+  }
+
+  const args: string[] = [];
+  const envelopeBase64 = Buffer.from(envelopeJson, 'utf-8').toString('base64');
+  args.push('--config-base64', envelopeBase64);
+
+  if (options.dryRun) args.push('--dry-run');
+  if (options.debug) args.push('--debug');
+  if (options.experimental) args.push('--experimental');
+
+  return { executablePath, args };
+}
+
+/**
+ * Resolves the executable path and builds CLI arguments for a one-shot
+ * sandbox invocation. Validates one-shot-specific invariants (commandLine
+ * required, experimental gating, containment-vs-platform compatibility)
+ * before delegating to the shared `resolveBinaryAndCommonArgs`.
  */
 export function resolveExecutableAndArgs(
   config: ContainerConfig,
@@ -102,48 +156,7 @@ export function resolveExecutableAndArgs(
     }
   }
 
-  const platform = os.platform();
-  let executablePath: string | null;
-
-  if (options.executablePath) {
-    if (!fs.existsSync(options.executablePath)) {
-      throw new Error(`File not found: ${options.executablePath}`);
-    }
-    executablePath = options.executablePath;
-  } else if (platform === 'linux') {
-    executablePath = findLxcExecutable();
-    if (!executablePath) {
-      throw new Error(
-        'lxc-exec not found. Ensure it is built and available in a standard location.'
-      );
-    }
-  } else {
-    executablePath = findWxcExecutable();
-    if (!executablePath) {
-      throw new Error(
-        'wxc-exec.exe not found. Set options.executablePath or ensure it exists in a standard location.'
-      );
-    }
-  }
-
-  const args: string[] = [];
-  const configJson = JSON.stringify(config);
-  const configBase64 = Buffer.from(configJson, 'utf-8').toString('base64');
-  args.push('--config-base64', configBase64);
-
-  if (options.dryRun) {
-    args.push('--dry-run');
-  }
-
-  if (options.debug) {
-    args.push('--debug');
-  }
-
-  if (options.experimental) {
-    args.push('--experimental');
-  }
-
-  return { executablePath, args };
+  return resolveBinaryAndCommonArgs(JSON.stringify(config), options);
 }
 
 /**

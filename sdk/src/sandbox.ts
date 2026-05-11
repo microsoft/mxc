@@ -10,7 +10,7 @@ import { SandboxPolicy, ContainerConfig, ContainmentType } from './types.js';
 import { prepareSpawn, diagLogVersion } from './helper.js';
 import { diagLog } from './diagnostic.js';
 
-const SUPPORTED_VERSION = '0.5.0-alpha';
+const SUPPORTED_VERSION = '0.6.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';
 
 /**
@@ -358,6 +358,20 @@ export interface SandboxSpawnOptions {
    * Defaults to true (uses PTY).
    */
   usePty?: boolean;
+
+  /**
+   * Optional cancellation signal. When it aborts, the SDK kills the
+   * spawned executor process and rejects any pending result promise with
+   * the signal's reason. Honored by the state-aware lifecycle functions;
+   * one-shot spawn currently ignores it (kill the returned IPty /
+   * ChildProcess directly instead).
+   *
+   * Cancellation is best-effort: killing the executor mid-call leaves
+   * any backend-side state (e.g. a partially-provisioned IsolationSession)
+   * wherever it landed. Callers may need a follow-up `deprovisionSandbox`
+   * (or its equivalent) to clean up an orphaned sandbox after an abort.
+   */
+  signal?: AbortSignal;
 }
 
 /**
