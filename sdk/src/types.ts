@@ -227,6 +227,16 @@ export interface ContainerConfig {
   process?: ProcessConfig;
   /** ProcessContainer configuration */
   processContainer?: ProcessContainerConfig;
+  /**
+   * Legacy alias of {@link processContainer}. Retained so callers
+   * migrating from pre-0.6 SDK versions can keep their existing code
+   * compiling; the native binary parses both names into the same slot
+   * via a serde alias.
+   *
+   * @deprecated Use {@link processContainer} instead. This alias may be
+   * removed in a future minor release.
+   */
+  appContainer?: ProcessContainerConfig;
   /** LXC container configuration (Linux only) */
   lxc?: LxcConfig;
   /** Filesystem access configuration */
