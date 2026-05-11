@@ -12,7 +12,7 @@ members = [
     "lxc_common",
     "wslc_common",
     "isolation_session_bindings",
-    "macos_sandbox_common",
+    "seatbelt_common",
     "mxc_darwin",
     "generated/base_container_specification",
     "mxc_diagnostic_console",

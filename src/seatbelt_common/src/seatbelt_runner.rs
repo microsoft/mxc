@@ -19,7 +19,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, MacosSandboxMode, ScriptResponse};
+use wxc_common::models::{CodexRequest, SeatbeltMode, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 
 use crate::profile_builder::build_profile;
@@ -51,8 +51,8 @@ impl Default for SeatbeltScriptRunner {
 impl ScriptRunner for SeatbeltScriptRunner {
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         // Reject unsupported modes early.
-        if let Some(ref cfg) = request.experimental.macos_sandbox {
-            if cfg.mode == MacosSandboxMode::Inproc {
+        if let Some(ref cfg) = request.experimental.seatbelt {
+            if cfg.mode == SeatbeltMode::Inproc {
                 return error_response(
                     "macOS sandbox mode 'inproc' is not yet implemented. \
                      Use mode 'exec' (the default) or omit the mode field."
@@ -241,12 +241,12 @@ fn wait_with_timeout(
 mod tests {
     use super::*;
     use wxc_common::logger::{Logger, Mode};
-    use wxc_common::models::{CodexRequest, MacosSandboxConfig, MacosSandboxMode};
+    use wxc_common::models::{CodexRequest, SeatbeltConfig, SeatbeltMode};
 
     fn base_request() -> CodexRequest {
         let mut r = CodexRequest::default();
         r.experimental_enabled = true;
-        r.experimental.macos_sandbox = Some(MacosSandboxConfig::default());
+        r.experimental.seatbelt = Some(SeatbeltConfig::default());
         r
     }
 
@@ -265,8 +265,8 @@ mod tests {
     #[test]
     fn rejects_inproc_mode() {
         let mut r = base_request();
-        r.experimental.macos_sandbox = Some(MacosSandboxConfig {
-            mode: MacosSandboxMode::Inproc,
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            mode: SeatbeltMode::Inproc,
             ..Default::default()
         });
         let mut logger = Logger::new(Mode::Buffer);

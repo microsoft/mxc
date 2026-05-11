@@ -104,12 +104,12 @@ export function getPlatformSupport(): PlatformSupport {
 
   // Non-Windows platforms
   if (platform === 'darwin') {
-    // macos_sandbox is the only containment backend on macOS.
+    // seatbelt is the only containment backend on macOS.
     // /usr/bin/sandbox-exec ships with every release of macOS so the check
     // is effectively just confirming we're on a supported OS.
-    if (isMacosSandboxAvailable()) {
+    if (isSeatbeltAvailable()) {
       support.isSupported = true;
-      support.availableMethods = ['macos_sandbox'];
+      support.availableMethods = ['seatbelt'];
     } else {
       support.reason = '/usr/bin/sandbox-exec not found; macOS install is incomplete';
     }
@@ -160,7 +160,7 @@ function isLxcAvailable(): boolean {
  * of the macOS base install and present on every shipping version of macOS,
  * so this is effectively a sanity check for a corrupted install.
  */
-function isMacosSandboxAvailable(): boolean {
+function isSeatbeltAvailable(): boolean {
   try {
     return fs.existsSync('/usr/bin/sandbox-exec');
   } catch {

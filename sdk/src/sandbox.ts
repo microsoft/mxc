@@ -104,10 +104,10 @@ function buildLinuxProcessConfig(
 }
 
 /**
- * Builds the macOS process container (macos_sandbox) portion of a ContainerConfig.
+ * Builds the macOS process container (seatbelt) portion of a ContainerConfig.
  *
- * The macos_sandbox backend's `sandbox-exec` reads a TinyScheme profile
- * generated server-side by `macos_sandbox_common::profile_builder`, so the SDK
+ * The seatbelt backend's `sandbox-exec` reads a TinyScheme profile
+ * generated server-side by `seatbelt_common::profile_builder`, so the SDK
  * only needs to set the containment type and the mode selector under the
  * experimental block — the policy fields on `ContainerConfig` (filesystem /
  * network / ui) drive the actual rules.
@@ -115,10 +115,10 @@ function buildLinuxProcessConfig(
 function buildDarwinProcessConfig(
     config: ContainerConfig,
 ): ContainerConfig {
-    config.containment = 'macos_sandbox';
+    config.containment = 'seatbelt';
     config.experimental = {
         ...(config.experimental ?? {}),
-        macos_sandbox: {
+        seatbelt: {
             // 'exec' = spawn /usr/bin/sandbox-exec (Phase A, default).
             // 'inproc' will switch to sandbox_init_with_parameters in Phase B.
             mode: 'exec',
@@ -283,7 +283,7 @@ export function createConfigFromPolicy(
         // with per-host filtering). macOS sandbox supports it natively via
         // per-host Seatbelt rules. Other backends require allowOutbound for
         // host filtering since it maps to AppContainer capabilities.
-        if (containment !== 'wslc' && containment !== 'macos_sandbox') {
+        if (containment !== 'wslc' && containment !== 'seatbelt') {
             if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
                 throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
             }
@@ -306,20 +306,13 @@ export function createConfigFromPolicy(
         return buildWslcContainerConfig(config, policy, containerId);
     }
 
-    if (containment === 'macos_sandbox') {
-        if (platform !== 'darwin') {
-            throw new Error("Containment type 'macos_sandbox' is only supported on macOS.");
-        }
-        return buildDarwinProcessConfig(config);
-    }
-
     if (containment === 'process') {
         if (platform === 'linux') {
             diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
             return buildLinuxProcessConfig(config, containerId);
         }
         if (platform === 'darwin') {
-            // The macos_sandbox backend has no container abstraction
+            // The seatbelt backend has no container abstraction
             // (per-process fork+exec sandbox), so containerId is intentionally
             // not threaded through.
             return buildDarwinProcessConfig(config);

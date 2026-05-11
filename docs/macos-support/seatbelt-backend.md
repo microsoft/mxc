@@ -32,7 +32,7 @@ LXC.
 | Phase | Mechanism | Status |
 |---|---|---|
 | **A (default)** | Spawn `/usr/bin/sandbox-exec -f <profile> /bin/sh -c <script>` | Implemented |
-| **B (planned)** | Direct `sandbox_init_with_parameters` from the child process between fork and exec, no temp profile file | Not yet implemented; `experimental.macos_sandbox.mode = "inproc"` reserved |
+| **B (planned)** | Direct `sandbox_init_with_parameters` from the child process between fork and exec, no temp profile file | Not yet implemented; `experimental.seatbelt.mode = "inproc"` reserved |
 | **C (future)** | Mac App Store distribution via App Sandbox entitlements | Out of scope for npm/Developer-ID shipping |
 
 For the rationale behind the phasing, see the architecture notes in the
@@ -124,21 +124,21 @@ After setup, verify the build works end-to-end:
 ```
 
 You should see sandbox profile generation output followed by
-`hi from macos_sandbox`.
+`hi from seatbelt`.
 
 ## Configuration
 
 The macOS sandbox backend uses the same JSON configuration schema as the
-other backends, with `containment` set to `"macos_sandbox"`. Backend-specific
-settings live under `experimental.macos_sandbox`, and the `--experimental`
+other backends, with `containment` set to `"seatbelt"`. Backend-specific
+settings live under `experimental.seatbelt`, and the `--experimental`
 flag is required to enable the backend at runtime:
 
 ```json
 {
     "$schema": "./schemas/dev/mxc-config.schema.0.5.0-dev.json",
-    "containment": "macos_sandbox",
+    "containment": "seatbelt",
     "process": {
-        "commandLine": "echo hi from macos_sandbox",
+        "commandLine": "echo hi from seatbelt",
         "timeout": 30000
     },
     "filesystem": {
@@ -151,19 +151,19 @@ flag is required to enable the backend at runtime:
         "allowedHosts":  ["api.github.com"]
     },
     "experimental": {
-        "macos_sandbox": {
+        "seatbelt": {
             "mode": "exec"
         }
     }
 }
 ```
 
-### macos_sandbox-specific options
+### seatbelt-specific options
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `experimental.macos_sandbox.mode` | `"exec"` \| `"inproc"` | `"exec"` | Selects how the sandbox is entered. `"exec"` spawns `/usr/bin/sandbox-exec`. `"inproc"` is reserved for Phase B (`sandbox_init_with_parameters` after fork, before exec). Unknown values fall back to `"exec"`. |
-| `experimental.macos_sandbox.profileOverride` | string | unset | Optional override of the generated TinyScheme sandbox profile. When set, the SDK-generated profile is replaced with this raw TinyScheme string verbatim — all `filesystem`/`network`/`ui` policy fields are ignored for profile generation (they are still type-checked). Use this only when the auto-generated profile is insufficient. |
+| `experimental.seatbelt.mode` | `"exec"` \| `"inproc"` | `"exec"` | Selects how the sandbox is entered. `"exec"` spawns `/usr/bin/sandbox-exec`. `"inproc"` is reserved for Phase B (`sandbox_init_with_parameters` after fork, before exec). Unknown values fall back to `"exec"`. |
+| `experimental.seatbelt.profileOverride` | string | unset | Optional override of the generated TinyScheme sandbox profile. When set, the SDK-generated profile is replaced with this raw TinyScheme string verbatim — all `filesystem`/`network`/`ui` policy fields are ignored for profile generation (they are still type-checked). Use this only when the auto-generated profile is insufficient. |
 
 ### Filesystem policy
 
@@ -209,7 +209,7 @@ SDK rejects it with a clear error, mirroring the Linux behavior.
 
 ### Command line
 
-The `macos_sandbox` backend is currently experimental, so every invocation
+The `seatbelt` backend is currently experimental, so every invocation
 must include the `--experimental` flag. Without it, the binary refuses to
 run with a clear error.
 
@@ -243,7 +243,7 @@ const policy: SandboxPolicy = {
 };
 
 // On macOS, spawnSandbox automatically resolves to mxc-exec-mac and
-// builds a macos_sandbox config. The backend is experimental, so the
+// builds a seatbelt config. The backend is experimental, so the
 // caller must opt in via SandboxSpawnOptions.experimental.
 const pty = spawnSandbox('echo hello', policy, { experimental: true });
 pty.onData((data) => console.log(data));
@@ -303,7 +303,7 @@ environment.
 
 ## Comparison with other backends
 
-| Feature | AppContainer (Windows) | LXC (Linux) | macos_sandbox (macOS) |
+| Feature | AppContainer (Windows) | LXC (Linux) | seatbelt (macOS) |
 |---|---|---|---|
 | Isolation level | Process | Container | Process |
 | Startup time | Fast (~10 ms) | Medium (~1 s) | Fast (~10 ms) |

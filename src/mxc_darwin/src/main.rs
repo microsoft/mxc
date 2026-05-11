@@ -117,18 +117,18 @@ fn main() {
         process::exit(1);
     }
 
-    // The SDK should always select MacosSandbox on darwin. Be lenient and
+    // The SDK should always select Seatbelt on darwin. Be lenient and
     // log a note instead of failing — same behaviour as `lxc-exec`.
-    if request.containment != ContainmentBackend::MacosSandbox {
-        logger.log_line("Note: Overriding containment backend to MacosSandbox on macOS.");
+    if request.containment != ContainmentBackend::Seatbelt {
+        logger.log_line("Note: Overriding containment backend to Seatbelt on macOS.");
     }
 
-    run_macos_sandbox(&request, &mut logger);
+    run_seatbelt(&request, &mut logger);
 }
 
 #[cfg(target_os = "macos")]
-fn run_macos_sandbox(request: &CodexRequest, logger: &mut Logger) -> ! {
-    use macos_sandbox_common::macos_sandbox_runner::SeatbeltScriptRunner;
+fn run_seatbelt(request: &CodexRequest, logger: &mut Logger) -> ! {
+    use seatbelt_common::seatbelt_runner::SeatbeltScriptRunner;
 
     let mut runner = SeatbeltScriptRunner::new();
     let run_start = Instant::now();
@@ -148,7 +148,7 @@ fn run_macos_sandbox(request: &CodexRequest, logger: &mut Logger) -> ! {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run_macos_sandbox(_request: &CodexRequest, logger: &mut Logger) -> ! {
+fn run_seatbelt(_request: &CodexRequest, logger: &mut Logger) -> ! {
     // Build-only stub on non-macOS hosts so cargo workspace builds in CI.
     // Suppress the unused-import warnings for `Instant` etc.
     let _ = Instant::now();

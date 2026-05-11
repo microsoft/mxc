@@ -11,9 +11,9 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
-    IsolationSessionConfig, IsolationSessionUser, LifecycleConfig, LxcConfig, MacosSandboxConfig,
-    MacosSandboxMode, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress,
-    ProxyConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    IsolationSessionConfig, IsolationSessionUser, LifecycleConfig, LxcConfig,
+    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
+    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -165,7 +165,7 @@ struct RawIsolationSession {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct RawMacosSandbox {
+struct RawSeatbelt {
     mode: Option<String>,
     #[serde(rename = "profileOverride")]
     profile_override: Option<String>,
@@ -180,8 +180,8 @@ struct RawExperimental {
     wslc: Option<RawContainerConfig>,
     #[serde(rename = "isolation_session")]
     isolation_session: Option<RawIsolationSession>,
-    #[serde(rename = "macos_sandbox")]
-    macos_sandbox: Option<RawMacosSandbox>,
+    #[serde(rename = "seatbelt")]
+    seatbelt: Option<RawSeatbelt>,
 }
 
 #[derive(Deserialize, Default)]
@@ -576,10 +576,10 @@ fn convert_raw_config_inner(
         Some("vm") => ContainmentBackend::Vm,
         Some("microvm") => ContainmentBackend::MicroVm,
         Some("isolation_session") => ContainmentBackend::IsolationSession,
-        Some("macos_sandbox") => ContainmentBackend::MacosSandbox,
+        Some("seatbelt") => ContainmentBackend::Seatbelt,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', or 'macos_sandbox')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', or 'seatbelt')",
                 other
             );
             logger.log_line(&msg);
@@ -791,19 +791,19 @@ fn convert_raw_config_inner(
             config.user = as_cfg.user;
             config
         });
-        let macos_sandbox = raw_exp.macos_sandbox.map(|raw_sb| {
+        let seatbelt = raw_exp.seatbelt.map(|raw_sb| {
             let mode = match raw_sb.mode.as_deref() {
-                None | Some("exec") => MacosSandboxMode::Exec,
-                Some("inproc") => MacosSandboxMode::Inproc,
+                None | Some("exec") => SeatbeltMode::Exec,
+                Some("inproc") => SeatbeltMode::Inproc,
                 Some(other) => {
                     logger.log_line(&format!(
-                        "Unknown macos_sandbox mode '{}', defaulting to 'exec'",
+                        "Unknown seatbelt mode '{}', defaulting to 'exec'",
                         other
                     ));
-                    MacosSandboxMode::Exec
+                    SeatbeltMode::Exec
                 }
             };
-            MacosSandboxConfig {
+            SeatbeltConfig {
                 mode,
                 profile_override: raw_sb.profile_override,
             }
@@ -813,7 +813,7 @@ fn convert_raw_config_inner(
             windows_sandbox,
             wslc,
             isolation_session,
-            macos_sandbox,
+            seatbelt,
         }
     } else {
         ExperimentalConfig::default()
@@ -908,10 +908,10 @@ fn parse_containment_str(s: &str, logger: &mut Logger) -> Result<ContainmentBack
         "vm" => Ok(ContainmentBackend::Vm),
         "microvm" => Ok(ContainmentBackend::MicroVm),
         "isolation_session" => Ok(ContainmentBackend::IsolationSession),
-        "macos_sandbox" => Ok(ContainmentBackend::MacosSandbox),
+        "seatbelt" => Ok(ContainmentBackend::Seatbelt),
         other => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', or 'macos_sandbox')",
+                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', or 'seatbelt')",
                 other
             );
             logger.log_line(&msg);
@@ -2239,66 +2239,66 @@ mod tests {
     }
 
     #[test]
-    fn containment_macos_sandbox_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox"}"#;
+    fn containment_seatbelt_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::MacosSandbox);
+        assert_eq!(req.containment, ContainmentBackend::Seatbelt);
     }
 
     #[test]
-    fn macos_sandbox_config_defaults() {
-        // When no experimental.macos_sandbox block is provided the parser
+    fn seatbelt_config_defaults() {
+        // When no experimental.seatbelt block is provided the parser
         // leaves it unset (None) — runners should fall back to defaults.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox"}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.experimental.macos_sandbox.is_none());
+        assert!(req.experimental.seatbelt.is_none());
     }
 
     #[test]
-    fn macos_sandbox_config_inproc_mode() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox", "experimental": {"macos_sandbox": {"mode": "inproc"}}}"#;
+    fn seatbelt_config_inproc_mode() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"mode": "inproc"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         let cfg = req
             .experimental
-            .macos_sandbox
-            .expect("experimental.macos_sandbox should be populated");
-        assert_eq!(cfg.mode, crate::models::MacosSandboxMode::Inproc);
+            .seatbelt
+            .expect("experimental.seatbelt should be populated");
+        assert_eq!(cfg.mode, crate::models::SeatbeltMode::Inproc);
     }
 
     #[test]
-    fn macos_sandbox_config_unknown_mode_defaults_to_exec() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox", "experimental": {"macos_sandbox": {"mode": "bogus"}}}"#;
+    fn seatbelt_config_unknown_mode_defaults_to_exec() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"mode": "bogus"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         let cfg = req
             .experimental
-            .macos_sandbox
-            .expect("experimental.macos_sandbox should be populated");
-        assert_eq!(cfg.mode, crate::models::MacosSandboxMode::Exec);
+            .seatbelt
+            .expect("experimental.seatbelt should be populated");
+        assert_eq!(cfg.mode, crate::models::SeatbeltMode::Exec);
     }
 
     #[test]
-    fn macos_sandbox_profile_override_passed_through() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox", "experimental": {"macos_sandbox": {"profileOverride": "(version 1)(deny default)"}}}"#;
+    fn seatbelt_profile_override_passed_through() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"profileOverride": "(version 1)(deny default)"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         let cfg = req
             .experimental
-            .macos_sandbox
-            .expect("experimental.macos_sandbox should be populated");
+            .seatbelt
+            .expect("experimental.seatbelt should be populated");
         assert_eq!(
             cfg.profile_override.as_deref(),
             Some("(version 1)(deny default)")

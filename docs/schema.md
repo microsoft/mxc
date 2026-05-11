@@ -70,7 +70,7 @@ production configs and the dev schema when working on experimental features:
             "gpu": false,                  // GPU passthrough
             "storagePath": "C:\\wslc-storage"  // Image store path
         },
-        "macos_sandbox": {                 // macOS sandbox settings (macOS only)
+        "seatbelt": {                 // macOS sandbox settings (macOS only)
             "mode": "exec",                // "exec" (default) or "inproc" (Phase B)
             "profileOverride": null        // Optional raw TinyScheme profile (escape hatch)
         }
@@ -86,7 +86,7 @@ production configs and the dev schema when working on experimental features:
 | `"windows_sandbox"` | Windows Sandbox VM isolation via a long-lived daemon |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation |
-| `"macos_sandbox"` | macOS sandbox via `sandbox-exec` (experimental). See [`macos-sandbox-backend.md`](./macos-sandbox-backend.md). |
+| `"seatbelt"` | macOS sandbox via `sandbox-exec` (experimental). See [`seatbelt-backend.md`](./macos-support/seatbelt-backend.md). |
 | `"vm"` | VM-based isolation (not yet implemented) |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
 

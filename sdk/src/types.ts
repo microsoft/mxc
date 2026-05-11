@@ -34,15 +34,15 @@ export interface LifecycleConfig {
 /**
  * Containment type abstraction for createConfigFromPolicy.
  * Maps to platform-specific backends:
- * - "process": BaseProcessContainer (Windows) / LXC (Linux) / macOS sandbox (macOS)
+ * - "process": BaseProcessContainer (Windows) / LXC (Linux) / Seatbelt sandbox (macOS)
  * - "microvm": MicroVM/Nanvix backend (Windows only, experimental)
  */
-export type ContainmentType = "process" | "wslc" | "microvm" | "macos_sandbox";
+export type ContainmentType = "process" | "wslc" | "microvm" | "seatbelt";
 
 /**
  * Containment backends that require the --experimental flag.
  */
-export const ExperimentalBackends: readonly ContainmentType[] = ['microvm', 'wslc', 'macos_sandbox'];
+export const ExperimentalBackends: readonly ContainmentType[] = ['microvm', 'wslc', 'seatbelt'];
 
 /**
  * Clipboard access policy levels
@@ -172,7 +172,7 @@ export interface ContainerConfig {
   /** Externally assigned container identifier */
   containerId?: string;
   /** Containment backend */
-  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'macos_sandbox';
+  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'seatbelt';
   /** Container lifecycle settings */
   lifecycle?: LifecycleConfig;
   /** Process execution settings (required) */
@@ -190,7 +190,7 @@ export interface ContainerConfig {
     /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
     /** macOS sandbox configuration (macOS only) */
-    macos_sandbox?: MacosSandboxConfig;
+    seatbelt?: SeatbeltConfig;
   };
   /** Cross-platform UI configuration */
   ui?: UiConfig;
@@ -262,9 +262,9 @@ export interface LxcConfig {
 
 /**
  * macOS sandbox configuration (experimental). Used under
- * `experimental.macos_sandbox` when containment is 'macos_sandbox'.
+ * `experimental.seatbelt` when containment is 'seatbelt'.
  */
-export interface MacosSandboxConfig {
+export interface SeatbeltConfig {
   /**
    * Which sandbox entry point to use:
    * - "exec" (default): spawn /usr/bin/sandbox-exec.
@@ -281,7 +281,7 @@ export interface MacosSandboxConfig {
 /**
  * Sandboxing methods available on the platform
  */
-export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'macos_sandbox';
+export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'seatbelt';
 
 /**
  * Platform support information
