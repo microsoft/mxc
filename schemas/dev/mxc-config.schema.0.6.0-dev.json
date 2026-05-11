@@ -17,9 +17,9 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "macos_sandbox", "isolation_session"],
+      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "seatbelt", "isolation_session"],
       "default": "appcontainer",
-      "description": "Containment backend to use for execution. Note: 'windows_sandbox', 'wslc', 'macos_sandbox', and 'isolation_session' are experimental and require the --experimental CLI flag."
+      "description": "Containment backend to use for execution. Note: 'windows_sandbox', 'wslc', 'seatbelt', and 'isolation_session' are experimental and require the --experimental CLI flag."
     },
 
     "phase": {
@@ -317,9 +317,9 @@
             }
           }
         },
-        "macos_sandbox": {
+        "seatbelt": {
           "type": "object",
-          "description": "macOS sandbox backend (experimental). Used when containment is 'macos_sandbox'.",
+          "description": "macOS sandbox backend (experimental). Used when containment is 'seatbelt'.",
           "properties": {
             "profileOverride": {
               "type": "string",
