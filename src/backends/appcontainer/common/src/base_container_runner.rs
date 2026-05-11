@@ -1595,7 +1595,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_empty_policy() {
-        // Default network policy is Block — no internetClient auto-add.
+        // Default network policy is Block - no internetClient auto-add.
         let request = ExecutionRequest::default();
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
 
@@ -1613,6 +1613,38 @@ mod tests {
         assert!(spec.fs_deny().is_none());
         assert!(spec.disallow_win32k_system_calls());
         assert!(spec.network_policy().is_none());
+    }
+
+    #[test]
+    fn build_sandbox_spec_explicit_allow_adds_internet_client() {
+        // With network enforcement = Capabilities and an explicit Allow
+        // policy, internetClient is auto-added even with an otherwise empty
+        // capability list.
+        let mut request = ExecutionRequest::default();
+        request.policy.default_network_policy = NetworkPolicy::Allow;
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+
+        assert!(base_container_layout::sandbox_spec_buffer_has_identifier(
+            &bytes
+        ));
+
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+        assert_eq!(spec.version(), "0.1.0");
+        assert!(spec.app_container());
+        assert!(!spec.least_privilege());
+        assert_eq!(spec.capabilities(), Some("internetClient"));
+        assert!(spec.fs_read_write().is_none());
+        assert!(spec.fs_read_only().is_none());
+        assert!(spec.disallow_win32k_system_calls());
+        assert!(spec.network_policy().is_none());
+    }
+
+    #[test]
+    fn build_sandbox_spec_default_policy_does_not_grant_internet_client() {
+        let request = ExecutionRequest::default();
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+        assert!(spec.capabilities().is_none());
     }
 
     #[test]

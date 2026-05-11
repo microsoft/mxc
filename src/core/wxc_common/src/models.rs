@@ -342,6 +342,10 @@ pub struct LxcConfig {
     pub release: String,
 }
 
+/// Deny-by-default at the wxc-exec trust boundary: a request that omits the
+/// `network` section gets a closed sandbox, not an open one. SDK callers
+/// already pass `defaultPolicy: "block"` explicitly; this just makes the
+/// Rust enum match that intent for any direct binary user.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkPolicy {
@@ -858,6 +862,17 @@ mod tests {
     fn isolation_session_provision_config_defaults_to_no_user() {
         let parsed: IsolationSessionProvisionConfig = serde_json::from_value(json!({})).unwrap();
         assert!(parsed.user.is_none());
+    }
+
+    #[test]
+    fn network_policy_default_is_block() {
+        assert_eq!(NetworkPolicy::default(), NetworkPolicy::Block);
+    }
+
+    #[test]
+    fn container_policy_default_denies_network() {
+        let p = ContainerPolicy::default();
+        assert_eq!(p.default_network_policy, NetworkPolicy::Block);
     }
 
     #[test]
