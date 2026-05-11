@@ -416,7 +416,6 @@ mod tests {
         r.policy.readonly_paths = vec!["/should/be/ignored".into()];
         r.experimental.seatbelt = Some(SeatbeltConfig {
             profile_override: Some("(version 1)(allow default)".into()),
-            ..Default::default()
         });
         let p = build_profile(&r);
         assert_eq!(p, "(version 1)(allow default)");
