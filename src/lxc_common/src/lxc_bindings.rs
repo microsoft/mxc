@@ -51,11 +51,20 @@ where
 /// See [`resolve_lxcpath_with_env`] for the exact algorithm. This wrapper
 /// reads the real environment and effective UID.
 pub fn resolve_default_lxcpath() -> String {
+    // `geteuid` only exists on Unix; on other targets the function is never
+    // invoked in production (lxc-exec is Linux-only) but the crate still
+    // needs to compile workspace-wide, so fall back to a non-root EUID.
+    #[cfg(unix)]
     // SAFETY: `geteuid` is a thread-safe, side-effect-free libc call.
-    resolve_lxcpath_with_env(
-        |k| std::env::var(k).ok(),
-        || unsafe { libc::geteuid() } as u32,
-    )
+    fn current_euid() -> u32 {
+        unsafe { libc::geteuid() as u32 }
+    }
+    #[cfg(not(unix))]
+    fn current_euid() -> u32 {
+        1
+    }
+
+    resolve_lxcpath_with_env(|k| std::env::var(k).ok(), current_euid)
 }
 
 /// Safe wrapper around an LXC container.
