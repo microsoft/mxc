@@ -166,7 +166,6 @@ struct RawIsolationSession {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawSeatbelt {
-    mode: Option<String>,
     #[serde(rename = "profileOverride")]
     profile_override: Option<String>,
 }
@@ -791,22 +790,8 @@ fn convert_raw_config_inner(
             config.user = as_cfg.user;
             config
         });
-        let seatbelt = raw_exp.seatbelt.map(|raw_sb| {
-            let mode = match raw_sb.mode.as_deref() {
-                None | Some("exec") => SeatbeltMode::Exec,
-                Some("inproc") => SeatbeltMode::Inproc,
-                Some(other) => {
-                    logger.log_line(&format!(
-                        "Unknown seatbelt mode '{}', defaulting to 'exec'",
-                        other
-                    ));
-                    SeatbeltMode::Exec
-                }
-            };
-            SeatbeltConfig {
-                mode,
-                profile_override: raw_sb.profile_override,
-            }
+        let seatbelt = raw_exp.seatbelt.map(|raw_sb| SeatbeltConfig {
+            profile_override: raw_sb.profile_override,
         });
         ExperimentalConfig {
             test,
@@ -2271,34 +2256,6 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.experimental.seatbelt.is_none());
-    }
-
-    #[test]
-    fn seatbelt_config_inproc_mode() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"mode": "inproc"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("experimental.seatbelt should be populated");
-        assert_eq!(cfg.mode, crate::models::SeatbeltMode::Inproc);
-    }
-
-    #[test]
-    fn seatbelt_config_unknown_mode_defaults_to_exec() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"mode": "bogus"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("experimental.seatbelt should be populated");
-        assert_eq!(cfg.mode, crate::models::SeatbeltMode::Exec);
     }
 
     #[test]

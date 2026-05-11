@@ -27,16 +27,11 @@ container, no lifecycle, and nothing to clean up. The sandbox lives only
 as long as the spawned process tree. This is intentionally simpler than
 LXC.
 
-## Phases
+## Mechanism
 
-| Phase | Mechanism | Status |
-|---|---|---|
-| **A (default)** | Spawn `/usr/bin/sandbox-exec -f <profile> /bin/sh -c <script>` | Implemented |
-| **B (planned)** | Direct `sandbox_init_with_parameters` from the child process between fork and exec, no temp profile file | Not yet implemented; `experimental.seatbelt.mode = "inproc"` reserved |
-| **C (future)** | Mac App Store distribution via App Sandbox entitlements | Out of scope for npm/Developer-ID shipping |
-
-For the rationale behind the phasing, see the architecture notes in the
-session plan and `docs/versioning.md`.
+The sandbox spawns `/usr/bin/sandbox-exec -f <profile> /bin/sh -c <script>` with
+a generated Seatbelt (TinyScheme) profile. The profile is written to a temporary
+file and passed to `sandbox-exec`.
 
 ## Prerequisites
 
@@ -135,7 +130,7 @@ flag is required to enable the backend at runtime:
 
 ```json
 {
-    "$schema": "./schemas/dev/mxc-config.schema.0.5.0-dev.json",
+    "$schema": "./schemas/dev/mxc-config.schema.0.6.0-dev.json",
     "containment": "seatbelt",
     "process": {
         "commandLine": "echo hi from seatbelt",
@@ -162,7 +157,6 @@ flag is required to enable the backend at runtime:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `experimental.seatbelt.mode` | `"exec"` \| `"inproc"` | `"exec"` | Selects how the sandbox is entered. `"exec"` spawns `/usr/bin/sandbox-exec`. `"inproc"` is reserved for Phase B (`sandbox_init_with_parameters` after fork, before exec). Unknown values fall back to `"exec"`. |
 | `experimental.seatbelt.profileOverride` | string | unset | Optional override of the generated TinyScheme sandbox profile. When set, the SDK-generated profile is replaced with this raw TinyScheme string verbatim — all `filesystem`/`network`/`ui` policy fields are ignored for profile generation (they are still type-checked). Use this only when the auto-generated profile is insufficient. |
 
 ### Filesystem policy
@@ -286,14 +280,23 @@ environment.
 ## Limitations and caveats
 
 - **No proxy support.** The macOS sandbox cannot interpose at the TLS layer.
-- **Host-based network filtering is best-effort.** Apple's Seatbelt resolves
-  `(remote tcp "host:*")` rules at connect time without DNS interception.
-  IP-literal allow lists are exact; hostname allow lists rely on system
-  resolver behavior.
+- **Per-host network filtering (`blockedHosts`) is not supported.** Apple's
+  Seatbelt profile language has no mechanism for selectively blocking individual
+  hostnames while allowing all other traffic. The `blockedHosts` config field is
+  rejected at validation time rather than silently ignored.
+
+  Alternative approaches considered:
+
+  | Approach | Status | Notes |
+  |---|---|---|
+  | **`pf` (Packet Filter) rules** | Not viable | Requires root privileges, operates system-wide (not per-process), and hostname → IP resolution is unstable for CDN-backed hosts. |
+  | **`/etc/hosts` manipulation** | Not viable | Requires root, affects all processes on the system, and is bypassable via direct IP connections or DNS-over-HTTPS. |
+  | **Network Extension framework** | Potential future path | Apple's `NEFilterDataProvider` API can filter per-process at the hostname level. Requires a signed System Extension with the `com.apple.developer.networking.networkextension` entitlement and user approval via System Preferences. Would run as a separate daemon alongside MXC. |
+
+  To deny all network access, use `defaultPolicy: "block"` instead.
+
 - **`sandbox-exec` is technically deprecated** in headers but remains
-  shipping and is the same code path the App Sandbox uses. Phase B will
-  switch to `sandbox_init_with_parameters` for in-process entry without
-  removing the `sandbox-exec` fallback.
+  shipping and is the same code path the App Sandbox uses.
 - **No container abstraction.** Unlike LXC, there is no persistent
   container to attach to or destroy — every invocation is a fresh
   process tree.

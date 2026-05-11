@@ -2,8 +2,7 @@
 // Licensed under the MIT License.
 
 //! Pure builder that converts a [`CodexRequest`] into a TinyScheme sandbox
-//! profile string suitable for `/usr/bin/sandbox-exec -p <profile>` or for
-//! the in-process `sandbox_init_with_parameters` API.
+//! profile string suitable for `/usr/bin/sandbox-exec -p <profile>`.
 //!
 //! This module is platform-agnostic — it is just string generation — so it
 //! is unit-tested on every host (Windows / Linux / macOS) in CI.

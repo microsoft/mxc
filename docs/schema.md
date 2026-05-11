@@ -71,7 +71,6 @@ production configs and the dev schema when working on experimental features:
             "storagePath": "C:\\wslc-storage"  // Image store path
         },
         "seatbelt": {                 // macOS sandbox settings (macOS only)
-            "mode": "exec",                // "exec" (default) or "inproc" (Phase B)
             "profileOverride": null        // Optional raw TinyScheme profile (escape hatch)
         }
     }

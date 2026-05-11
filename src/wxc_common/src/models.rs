@@ -31,27 +31,11 @@ pub enum ContainmentBackend {
     Seatbelt,
 }
 
-/// Mode used by the Seatbelt backend to apply the sandbox profile.
-///
-/// `Exec` (default) spawns `/usr/bin/sandbox-exec` and is always available.
-/// `Inproc` calls the private `sandbox_init_with_parameters` API in the
-/// child after fork and before exec — lower latency but relies on a
-/// non-public macOS interface.
-#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum SeatbeltMode {
-    #[default]
-    Exec,
-    Inproc,
-}
-
 /// Configuration specific to the Seatbelt backend (experimental).
 /// Used under `experimental.seatbelt` when `containment == Seatbelt`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SeatbeltConfig {
-    /// Which sandbox entry point to use. Default: `Exec` (sandbox-exec).
-    pub mode: SeatbeltMode,
     /// Optional override of the generated TinyScheme profile.
     #[serde(rename = "profileOverride", skip_serializing_if = "Option::is_none")]
     pub profile_override: Option<String>,

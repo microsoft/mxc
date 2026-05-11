@@ -4,8 +4,7 @@
 //! `SeatbeltScriptRunner` — executes scripts inside Apple's Seatbelt
 //! sandbox via `/usr/bin/sandbox-exec`.
 //!
-//! This is the Phase A "exec mode" implementation. It generates a
-//! TinyScheme profile from the [`CodexRequest`] using
+//! It generates a TinyScheme profile from the [`CodexRequest`] using
 //! [`crate::profile_builder::build_profile`], writes it to a tempfile in
 //! `TMPDIR`, then spawns `sandbox-exec -f <profile> /bin/sh -c <script>`
 //! with the request's env and working directory.
@@ -19,7 +18,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, SeatbeltMode, ScriptResponse};
+use wxc_common::models::{CodexRequest, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 
 use crate::profile_builder::build_profile;
@@ -34,6 +33,7 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// from inside the sandbox.
 const DEFAULT_SHELL: &str = "/bin/sh";
 
+#[derive(Default)]
 pub struct SeatbeltScriptRunner;
 
 impl SeatbeltScriptRunner {
@@ -42,59 +42,59 @@ impl SeatbeltScriptRunner {
     }
 }
 
-impl Default for SeatbeltScriptRunner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+const POLL_INTERVAL_MS: u64 = 500;
 
 impl ScriptRunner for SeatbeltScriptRunner {
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        // Reject unsupported modes early.
-        if let Some(ref cfg) = request.experimental.seatbelt {
-            if cfg.mode == SeatbeltMode::Inproc {
-                return error_response(
-                    "macOS sandbox mode 'inproc' is not yet implemented. \
-                     Use mode 'exec' (the default) or omit the mode field."
-                        .to_string(),
-                );
-            }
-        }
-
+    fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
         // Seatbelt cannot filter network by hostname — reject blockedHosts
         // rather than silently allowing traffic the user expects to be denied.
         if !request.policy.blocked_hosts.is_empty() {
-            return error_response(
+            return Err(error_response(
                 "macOS Seatbelt does not support per-host network filtering. \
                  'blockedHosts' cannot be enforced; remove it or use \
                  defaultPolicy: \"block\" to deny all network."
                     .to_string(),
-            );
+            ));
         }
 
+        // Reject timeouts that are too small for our polling interval to
+        // enforce accurately.
+        if request.script_timeout > 0 && u64::from(request.script_timeout) < POLL_INTERVAL_MS {
+            return Err(error_response(format!(
+                "scriptTimeout {}ms is below the minimum of {}ms",
+                request.script_timeout, POLL_INTERVAL_MS
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         // 1. Build the Seatbelt profile from the policy.
         let profile = build_profile(request);
 
         // 2. Persist it to a tempfile so sandbox-exec can read it via -f.
         //    We use `tempfile::NamedTempFile` so the file is removed on drop
         //    even on panic.
-        let mut tmp = match tempfile::Builder::new()
+        let mut profile_file = match tempfile::Builder::new()
             .prefix("mxc-seatbelt-")
             .suffix(".sb")
             .tempfile()
         {
-            Ok(t) => t,
-            Err(e) => return error_response(format!("failed to create profile tempfile: {e}")),
+            Ok(file) => file,
+            Err(error) => {
+                return error_response(format!("failed to create profile tempfile: {error}"))
+            }
         };
 
-        if let Err(e) = tmp.write_all(profile.as_bytes()) {
-            return error_response(format!("failed to write profile: {e}"));
+        if let Err(error) = profile_file.write_all(profile.as_bytes()) {
+            return error_response(format!("failed to write profile: {error}"));
         }
-        if let Err(e) = tmp.flush() {
-            return error_response(format!("failed to flush profile: {e}"));
+        if let Err(error) = profile_file.flush() {
+            return error_response(format!("failed to flush profile: {error}"));
         }
 
-        let profile_path = tmp.path().to_path_buf();
+        let profile_path = profile_file.path().to_path_buf();
         let _ = writeln!(
             logger,
             "Seatbelt: profile written to {}",
@@ -102,8 +102,9 @@ impl ScriptRunner for SeatbeltScriptRunner {
         );
 
         // 3. Spawn `sandbox-exec -f <profile> /bin/sh -c <script>`.
-        let mut cmd = Command::new(SANDBOX_EXEC);
-        cmd.arg("-f")
+        let mut command = Command::new(SANDBOX_EXEC);
+        command
+            .arg("-f")
             .arg(&profile_path)
             .arg(DEFAULT_SHELL)
             .arg("-c")
@@ -112,27 +113,28 @@ impl ScriptRunner for SeatbeltScriptRunner {
         // Apply env if any was specified — otherwise inherit the parent
         // environment (matches LXC behaviour for empty env vectors).
         if !request.env.is_empty() {
-            cmd.env_clear();
+            command.env_clear();
             for kv in &request.env {
-                if let Some((k, v)) = kv.split_once('=') {
-                    cmd.env(k, v);
+                if let Some((key, value)) = kv.split_once('=') {
+                    command.env(key, value);
                 }
             }
         }
 
         if !request.working_directory.is_empty() {
-            cmd.current_dir(&request.working_directory);
+            command.current_dir(&request.working_directory);
         }
 
-        cmd.stdin(Stdio::null())
+        command
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
+        let mut child = match command.spawn() {
+            Ok(process) => process,
+            Err(error) => {
                 return error_response(format!(
-                    "failed to spawn {SANDBOX_EXEC}: {e}; ensure sandbox-exec exists"
+                    "failed to spawn {SANDBOX_EXEC}: {error}; ensure sandbox-exec exists"
                 ))
             }
         };
@@ -142,11 +144,11 @@ impl ScriptRunner for SeatbeltScriptRunner {
         let stdout_handle = child
             .stdout
             .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
+            .map(|reader| std::thread::spawn(move || read_to_string(reader)));
         let stderr_handle = child
             .stderr
             .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
+            .map(|reader| std::thread::spawn(move || read_to_string(reader)));
 
         // 5. Wait with timeout. `script_timeout == 0` means infinite.
         let timeout = if request.script_timeout == 0 {
@@ -162,27 +164,19 @@ impl ScriptRunner for SeatbeltScriptRunner {
                 let _ = child.wait();
                 return ScriptResponse {
                     exit_code: -1,
-                    standard_out: stdout_handle
-                        .and_then(|h| h.join().ok())
-                        .unwrap_or_default(),
-                    standard_err: stderr_handle
-                        .and_then(|h| h.join().ok())
-                        .unwrap_or_default(),
+                    standard_out: join_reader("stdout", stdout_handle),
+                    standard_err: join_reader("stderr", stderr_handle),
                     error_message: format!(
                         "Seatbelt: script timed out after {}ms",
                         request.script_timeout
                     ),
                 };
             }
-            Err(WaitError::Io(e)) => return error_response(format!("wait failed: {e}")),
+            Err(WaitError::Io(error)) => return error_response(format!("wait failed: {error}")),
         };
 
-        let stdout = stdout_handle
-            .and_then(|h| h.join().ok())
-            .unwrap_or_default();
-        let stderr = stderr_handle
-            .and_then(|h| h.join().ok())
-            .unwrap_or_default();
+        let stdout = join_reader("stdout", stdout_handle);
+        let stderr = join_reader("stderr", stderr_handle);
 
         ScriptResponse {
             exit_code: exit_status.code().unwrap_or(-1),
@@ -193,19 +187,46 @@ impl ScriptRunner for SeatbeltScriptRunner {
     }
 }
 
-fn error_response(msg: String) -> ScriptResponse {
+fn error_response(message: String) -> ScriptResponse {
     ScriptResponse {
         exit_code: -1,
         standard_out: String::new(),
         standard_err: String::new(),
-        error_message: msg,
+        error_message: message,
     }
 }
 
-fn read_to_string<R: std::io::Read>(mut r: R) -> String {
-    let mut buf = String::new();
-    let _ = r.read_to_string(&mut buf);
-    buf
+/// Reads all bytes from `r` into a String. Returns whatever was captured
+/// even if the read fails partway (e.g. broken pipe from a killed child).
+fn read_to_string<R: std::io::Read>(mut reader: R) -> (String, Option<std::io::Error>) {
+    let mut buffer = String::new();
+    match reader.read_to_string(&mut buffer) {
+        Ok(_) => (buffer, None),
+        Err(error) => (buffer, Some(error)),
+    }
+}
+
+fn join_reader(
+    name: &str,
+    handle: Option<std::thread::JoinHandle<(String, Option<std::io::Error>)>>,
+) -> String {
+    match handle {
+        Some(h) => match h.join() {
+            Ok((output, None)) => output,
+            Ok((output, Some(error))) => {
+                eprintln!(
+                    "Seatbelt: warning: failed to read child {}: {}",
+                    name, error
+                );
+                output
+            }
+            Err(_) => {
+                eprintln!("Seatbelt: warning: child {} reader thread panicked", name);
+                String::new()
+            }
+        },
+        None => String::new(),
+    }
 }
 
 enum WaitError {
@@ -213,13 +234,14 @@ enum WaitError {
     Io(std::io::Error),
 }
 
-/// Wait for `child` to exit, polling at 50ms intervals if a timeout is set.
-/// We avoid pulling in `tokio` here — the runner is otherwise synchronous.
+/// Wait for `child` to exit, polling at `POLL_INTERVAL_MS` intervals if a
+/// timeout is set. We poll manually rather than adding an async runtime
+/// dependency since the runner is otherwise synchronous.
 fn wait_with_timeout(
     child: &mut std::process::Child,
     timeout: Option<Duration>,
 ) -> Result<std::process::ExitStatus, WaitError> {
-    let Some(deadline) = timeout.map(|t| Instant::now() + t) else {
+    let Some(deadline) = timeout.map(|duration| Instant::now() + duration) else {
         return child.wait().map_err(WaitError::Io);
     };
 
@@ -230,9 +252,9 @@ fn wait_with_timeout(
                 if Instant::now() >= deadline {
                     return Err(WaitError::Timeout);
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
             }
-            Err(e) => return Err(WaitError::Io(e)),
+            Err(error) => return Err(WaitError::Io(error)),
         }
     }
 }
@@ -241,38 +263,23 @@ fn wait_with_timeout(
 mod tests {
     use super::*;
     use wxc_common::logger::{Logger, Mode};
-    use wxc_common::models::{CodexRequest, SeatbeltConfig, SeatbeltMode};
+    use wxc_common::models::{CodexRequest, SeatbeltConfig};
 
     fn base_request() -> CodexRequest {
-        let mut r = CodexRequest::default();
-        r.experimental_enabled = true;
-        r.experimental.seatbelt = Some(SeatbeltConfig::default());
-        r
+        let mut request = CodexRequest::default();
+        request.experimental_enabled = true;
+        request.experimental.seatbelt = Some(SeatbeltConfig::default());
+        request
     }
 
     #[test]
     fn rejects_blocked_hosts() {
-        let mut r = base_request();
-        r.policy.blocked_hosts = vec!["evil.example.com".into()];
-        let mut logger = Logger::new(Mode::Buffer);
-        let mut runner = SeatbeltScriptRunner::new();
-        let resp = runner.execute(&r, &mut logger);
-        assert_eq!(resp.exit_code, -1);
-        assert!(resp.error_message.contains("blockedHosts"));
-        assert!(resp.error_message.contains("cannot be enforced"));
-    }
-
-    #[test]
-    fn rejects_inproc_mode() {
-        let mut r = base_request();
-        r.experimental.seatbelt = Some(SeatbeltConfig {
-            mode: SeatbeltMode::Inproc,
-            ..Default::default()
-        });
-        let mut logger = Logger::new(Mode::Buffer);
-        let mut runner = SeatbeltScriptRunner::new();
-        let resp = runner.execute(&r, &mut logger);
-        assert_eq!(resp.exit_code, -1);
-        assert!(resp.error_message.contains("inproc"));
+        let mut request = base_request();
+        request.policy.blocked_hosts = vec!["evil.example.com".into()];
+        let runner = SeatbeltScriptRunner::new();
+        let response = runner.validate_runner(&request).unwrap_err();
+        assert_eq!(response.exit_code, -1);
+        assert!(response.error_message.contains("blockedHosts"));
+        assert!(response.error_message.contains("cannot be enforced"));
     }
 }

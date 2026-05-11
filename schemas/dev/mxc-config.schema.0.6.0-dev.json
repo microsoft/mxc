@@ -321,12 +321,6 @@
           "type": "object",
           "description": "macOS sandbox backend (experimental). Used when containment is 'macos_sandbox'.",
           "properties": {
-            "mode": {
-              "type": "string",
-              "enum": ["exec", "inproc"],
-              "default": "exec",
-              "description": "How the sandbox profile is applied: 'exec' spawns /usr/bin/sandbox-exec; 'inproc' calls sandbox_init_with_parameters after fork (uses a private macOS API)."
-            },
             "profileOverride": {
               "type": "string",
               "description": "Optional override of the generated TinyScheme sandbox profile."

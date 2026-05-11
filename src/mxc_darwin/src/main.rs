@@ -11,12 +11,16 @@
 
 use std::fmt::Write;
 use std::process;
-use std::time::Instant;
 
 use clap::Parser;
 use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
+use wxc_common::models::{CodexRequest, ContainmentBackend};
+
+#[cfg(target_os = "macos")]
+use std::time::Instant;
+#[cfg(target_os = "macos")]
+use wxc_common::models::ScriptResponse;
 
 #[cfg(target_os = "macos")]
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
@@ -149,10 +153,6 @@ fn run_seatbelt(request: &CodexRequest, logger: &mut Logger) -> ! {
 
 #[cfg(not(target_os = "macos"))]
 fn run_seatbelt(_request: &CodexRequest, logger: &mut Logger) -> ! {
-    // Build-only stub on non-macOS hosts so cargo workspace builds in CI.
-    // Suppress the unused-import warnings for `Instant` etc.
-    let _ = Instant::now();
-    let _ = ScriptResponse::default();
     eprintln!(
         "mxc-exec-mac: the macOS sandbox backend is only available on macOS. \
          This binary was built for a non-Darwin target and cannot execute scripts."

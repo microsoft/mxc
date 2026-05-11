@@ -118,11 +118,7 @@ function buildDarwinProcessConfig(
     config.containment = 'seatbelt';
     config.experimental = {
         ...(config.experimental ?? {}),
-        seatbelt: {
-            // 'exec' = spawn /usr/bin/sandbox-exec (Phase A, default).
-            // 'inproc' will switch to sandbox_init_with_parameters in Phase B.
-            mode: 'exec',
-        },
+        seatbelt: {},
     };
     return config;
 }
