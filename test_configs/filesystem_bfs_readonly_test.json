@@ -1,7 +1,7 @@
 {
   "version": "0.4.0-alpha",
   "containerId": "CLI-BFSReadOnly-Test",
-  "containment": "appcontainer",
+  "containment": "processcontainer",
   "process": {
     "commandLine": "python -c \"import os\nallowedreadonly_path = 'C:\\\\temp\\\\wxc_test_allowedreadonly\\\\test_input.txt'\nprint('Testing filesystem BFS Read-Only enforcement...')\nf = open(allowedreadonly_path, 'r')\ntemp = f.read()\nf.close()\nprint(f'Successfully read from : {allowedreadonly_path}')\nprint('Now attempting to write to readonly path...')\ntry:\n    f2 = open(allowedreadonly_path, 'w')\n    f2.write('This should fail')\n    f2.close()\n    print('ERROR: Should not have been able to write to read-only path!')\nexcept PermissionError:\n    print('SUCCESS: Write access to read-only path was blocked as expected')\"",
     "timeout": 30000

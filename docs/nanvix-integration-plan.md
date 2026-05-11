@@ -80,7 +80,7 @@ Inside the NanVix VM:
 3. **Pre-built artifacts, not built from source** — NanVix binaries (`nanvixd.exe`, `kernel.elf`, `python.elf`, `cpython-ramfs.img`) are downloaded from GitHub pre-releases. MXC does not compile or build NanVix components.
 
 
-4. **Unsupported policies are rejected** — If a config specifies `filesystem`, `network`, or `appContainer` policies with `containment: "nanvix"`, the runner returns a clear error.
+4. **Unsupported policies are rejected** — If a config specifies `filesystem`, `network`, or `processContainer` policies with `containment: "nanvix"`, the runner returns a clear error.
 
 5. **Host-side I/O risk mitigated by IKC framing** — `nanvixd.exe` parses guest I/O via IKC (Inter-Kernel Communication) messages using fixed-size frames with bounds checking. A crafted guest could attempt malformed messages. Mitigation: formal fuzzing (future work).
 
@@ -185,12 +185,12 @@ All variants are surfaced via stderr output. Preflight and Platform errors preve
 | `timeout` | `script_timeout: u32` | ✅ **Used** — script execution timeout in ms |
 | `containment` | `containment: ContainmentBackend` | ✅ **Used** — must be `"nanvix"` |
 | `workingDirectory` | `working_directory: String` | ❌ **Rejected** — guest has its own filesystem namespace |
-| `appContainer.*` | `policy: ContainerPolicy` | ❌ **Rejected** — not applicable to NanVix |
+| `processContainer.*` | `policy: ContainerPolicy` | ❌ **Rejected** — not applicable to NanVix |
 | `filesystem.*` | (part of `policy`) | ❌ **Rejected** — guest FS is a read-only ramfs |
 | `network.*` | (part of `policy`) | ❌ **Rejected** — no network stack in guest |
 | `sandbox.*` | `sandbox_config: WindowsSandboxConfig` | ❌ **Rejected** — NanVix is not Windows Sandbox |
 
-**Policy validation**: If a config specifies `containment: "nanvix"` alongside `filesystem`, `network`, `appContainer`, or `workingDirectory` fields, the runner returns a error.
+**Policy validation**: If a config specifies `containment: "nanvix"` alongside `filesystem`, `network`, `processContainer`, or `workingDirectory` fields, the runner returns a error.
 
 ## Binary Distribution & Versioning
 

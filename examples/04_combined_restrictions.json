@@ -1,12 +1,12 @@
 {
   "version": "0.4.0-alpha",
   "containerId": "CLI-Combined-Test",
-  "containment": "appcontainer",
+  "containment": "processcontainer",
   "process": {
     "commandLine": "python -c \"import os\nimport urllib.request\nimport json\n\nprint('Combined Filesystem and Network Restrictions Test')\nprint('=' * 60)\nprint('NOTE: Network restrictions require administrator privileges')\nprint()\n\n# Test filesystem access\nprint('FILESYSTEM TESTS:')\nprint('-' * 60)\n\nworkdir = 'C:\\\\temp\\\\wxc_combined_test'\nos.makedirs(workdir, exist_ok=True)\n\n# Test 1: Download data to allowed path\ndata_file = os.path.join(workdir, 'github_data.json')\nprint(f'Test 1: Downloading data from allowed host to allowed path...')\ntry:\n    response = urllib.request.urlopen('https://api.github.com', timeout=10)\n    data = response.read()\n    with open(data_file, 'wb') as f:\n        f.write(data)\n    print(f'  SUCCESS: Downloaded and saved to {data_file}')\n    print(f'  File size: {len(data)} bytes')\nexcept Exception as e:\n    print(f'  ERROR: {type(e).__name__}: {e}')\n\nprint()\n\n# Test 2: Try to write to restricted path\ndenied_file = 'C:\\\\Windows\\\\System32\\\\forbidden.txt'\nprint(f'Test 2: Attempting to write to denied path...')\ntry:\n    with open(denied_file, 'w') as f:\n        f.write('This should fail')\n    print('  ERROR: Should not have succeeded!')\nexcept Exception as e:\n    print(f'  SUCCESS: Access denied - {type(e).__name__}')\n\nprint()\nprint('NETWORK TESTS:')\nprint('-' * 60)\n\n# Test 3: Allowed network access\nprint('Test 3: Connecting to allowed host (api.github.com)...')\ntry:\n    response = urllib.request.urlopen('https://api.github.com', timeout=10)\n    print(f'  SUCCESS: Connected (status: {response.status})')\nexcept Exception as e:\n    print(f'  ERROR: {type(e).__name__}: {e}')\n\nprint()\n\n# Test 4: Blocked network access\nprint('Test 4: Attempting to connect to blocked host (example.com)...')\ntry:\n    response = urllib.request.urlopen('https://example.com', timeout=5)\n    print(f'  ERROR: Should not have connected!')\nexcept Exception as e:\n    print(f'  SUCCESS: Connection blocked - {type(e).__name__}')\n\nprint()\nprint('=' * 60)\nprint('Combined restrictions test complete!')\"",
     "timeout": 45000
   },
-  "appContainer": {
+  "processContainer": {
     "capabilities": [ "internetClient" ]
   },
   "filesystem": {

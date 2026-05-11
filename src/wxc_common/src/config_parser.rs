@@ -38,7 +38,7 @@ pub enum ParseError {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct RawAppContainer {
+struct RawProcessContainer {
     #[serde(rename = "leastPrivilege")]
     least_privilege: Option<bool>,
     #[serde(rename = "learningMode")]
@@ -179,7 +179,7 @@ struct RawExperimental {
     wslc: Option<RawContainerConfig>,
     #[serde(rename = "isolation_session")]
     isolation_session: Option<RawIsolationSession>,
-    #[serde(rename = "seatbelt")]
+    #[serde(alias = "macos_sandbox")]
     seatbelt: Option<RawSeatbelt>,
 }
 
@@ -201,8 +201,8 @@ struct RawConfig {
     process: Option<RawProcess>,
     lifecycle: Option<RawLifecycle>,
     containment: Option<String>,
-    #[serde(rename = "appContainer")]
-    app_container: Option<RawAppContainer>,
+    #[serde(rename = "processContainer", alias = "appContainer")]
+    process_container: Option<RawProcessContainer>,
     lxc: Option<RawLxc>,
     filesystem: Option<RawFilesystem>,
     network: Option<RawNetwork>,
@@ -566,19 +566,80 @@ fn convert_raw_config_inner(
         None => (String::new(), String::new(), 0, Vec::new()),
     };
 
-    // Containment backend selection
+    // Containment backend selection.
+    //
+    // The `containment` wire field is dual-purpose: callers may pass either
+    //   (a) an abstract intent (e.g. "process") that names a *kind* of
+    //       isolation and lets the binary pick the host-appropriate runner,
+    //   or
+    //   (b) a concrete backend id (e.g. "processcontainer", "lxc", "seatbelt")
+    //       that pins the runner explicitly.
+    //
+    // Both forms target the same internal `ContainmentBackend` enum. The
+    // match below recognises every concrete id verbatim and resolves the
+    // abstract intents into the appropriate concrete variant per
+    // target_os. Any future concrete-only backend just needs an arm; any
+    // future abstract intent should resolve here (and likewise in
+    // `parse_containment_str` below for the state-aware path).
     let containment = match raw.containment.as_deref() {
-        None | Some("appcontainer") => ContainmentBackend::AppContainer,
+        None | Some("processcontainer") => ContainmentBackend::ProcessContainer,
+        Some("appcontainer") => {
+            logger.log_line(
+                "[deprecated] containment value 'appcontainer' is a legacy alias for 'processcontainer'; \
+                 update your config to use 'processcontainer' (the 'appcontainer' alias may be removed in a future schema version).",
+            );
+            ContainmentBackend::ProcessContainer
+        }
+        Some("process") => {
+            // Abstract intent: the caller wants process-level containment but
+            // does not care which concrete backend implements it. Today this
+            // resolves trivially per OS (ProcessContainer on Windows, LXC on
+            // Linux, Seatbelt on macOS). The lxc-exec binary additionally
+            // overrides this to LXC unconditionally on Linux.
+            #[cfg(target_os = "linux")]
+            {
+                ContainmentBackend::Lxc
+            }
+            #[cfg(target_os = "macos")]
+            {
+                ContainmentBackend::Seatbelt
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                ContainmentBackend::ProcessContainer
+            }
+        }
         Some("windows_sandbox") => ContainmentBackend::WindowsSandbox,
         Some("wslc") => ContainmentBackend::Wslc,
         Some("lxc") => ContainmentBackend::Lxc,
-        Some("vm") => ContainmentBackend::Vm,
+        Some("vm") => {
+            // Abstract intent: full hardware-virtualised VM isolation.
+            // Today the only concrete VM backend is Windows Sandbox; on
+            // non-Windows targets we fall through to the historical
+            // `Vm` variant which the host binaries surface as an
+            // explicit "not implemented" error.
+            #[cfg(target_os = "windows")]
+            {
+                ContainmentBackend::WindowsSandbox
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                ContainmentBackend::Vm
+            }
+        }
         Some("microvm") => ContainmentBackend::MicroVm,
         Some("isolation_session") => ContainmentBackend::IsolationSession,
         Some("seatbelt") => ContainmentBackend::Seatbelt,
+        Some("macos_sandbox") => {
+            logger.log_line(
+                "[deprecated] containment value 'macos_sandbox' is a legacy alias for 'seatbelt'; \
+                 update your config to use 'seatbelt' (the 'macos_sandbox' alias may be removed in a future schema version).",
+            );
+            ContainmentBackend::Seatbelt
+        }
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', or 'seatbelt')",
+                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm' or 'seatbelt')",
                 other
             );
             logger.log_line(&msg);
@@ -597,8 +658,12 @@ fn convert_raw_config_inner(
 
     let mut policy = ContainerPolicy::default();
 
-    // AppContainer section
-    if let Some(ac) = raw.app_container {
+    // ProcessContainer section. Holds settings that apply to the Windows
+    // process-level backend regardless of whether the runner picks the
+    // legacy AppContainer implementation (which honors `capabilities`,
+    // `learningMode`, `leastPrivilege`) or the newer BaseContainer
+    // implementation (which honors `ui`).
+    if let Some(ac) = raw.process_container {
         if let Some(lp) = ac.least_privilege {
             policy.least_privilege_mode = lp;
         }
@@ -666,9 +731,9 @@ fn convert_raw_config_inner(
     if let Some(net) = raw.network {
         if let Some(proxy_value) = net.proxy {
             let proxy_config = parse_proxy_config(&proxy_value)?;
-            if proxy_config.is_enabled() && containment != ContainmentBackend::AppContainer {
+            if proxy_config.is_enabled() && containment != ContainmentBackend::ProcessContainer {
                 let msg =
-                    "Network proxy is only supported with the 'appcontainer' containment backend";
+                    "Network proxy is only supported with the 'processcontainer' containment backend";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -861,7 +926,7 @@ fn convert_raw_state_aware(
         process: raw.process,
         lifecycle: None,
         containment: raw.containment,
-        app_container: None,
+        process_container: None,
         lxc: None,
         filesystem: raw.filesystem,
         network: raw.network,
@@ -884,19 +949,63 @@ fn convert_raw_state_aware(
     })
 }
 
+/// State-aware path: parse the `containment` wire field on a per-phase
+/// request envelope.
+///
+/// Mirrors the dual-acceptance contract of the one-shot match in
+/// `convert_raw_config_inner`: the input may be either an abstract intent
+/// (resolved per `target_os`) or a concrete backend id. Keep the two
+/// match expressions in lockstep when adding new values.
 fn parse_containment_str(s: &str, logger: &mut Logger) -> Result<ContainmentBackend, WxcError> {
     match s {
-        "appcontainer" => Ok(ContainmentBackend::AppContainer),
+        "processcontainer" => Ok(ContainmentBackend::ProcessContainer),
+        "appcontainer" => {
+            logger.log_line(
+                "[deprecated] containment value 'appcontainer' is a legacy alias for 'processcontainer'; \
+                 update your config to use 'processcontainer' (the 'appcontainer' alias may be removed in a future schema version).",
+            );
+            Ok(ContainmentBackend::ProcessContainer)
+        }
+        "process" => {
+            #[cfg(target_os = "linux")]
+            {
+                Ok(ContainmentBackend::Lxc)
+            }
+            #[cfg(target_os = "macos")]
+            {
+                Ok(ContainmentBackend::Seatbelt)
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                Ok(ContainmentBackend::ProcessContainer)
+            }
+        }
         "windows_sandbox" => Ok(ContainmentBackend::WindowsSandbox),
         "wslc" => Ok(ContainmentBackend::Wslc),
         "lxc" => Ok(ContainmentBackend::Lxc),
-        "vm" => Ok(ContainmentBackend::Vm),
+        "vm" => {
+            #[cfg(target_os = "windows")]
+            {
+                Ok(ContainmentBackend::WindowsSandbox)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Ok(ContainmentBackend::Vm)
+            }
+        }
         "microvm" => Ok(ContainmentBackend::MicroVm),
         "isolation_session" => Ok(ContainmentBackend::IsolationSession),
         "seatbelt" => Ok(ContainmentBackend::Seatbelt),
+        "macos_sandbox" => {
+            logger.log_line(
+                "[deprecated] containment value 'macos_sandbox' is a legacy alias for 'seatbelt'; \
+                 update your config to use 'seatbelt' (the 'macos_sandbox' alias may be removed in a future schema version).",
+            );
+            Ok(ContainmentBackend::Seatbelt)
+        }
         other => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'appcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', or 'seatbelt')",
+                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', or 'seatbelt')",
                 other
             );
             logger.log_line(&msg);
@@ -1036,7 +1145,7 @@ mod tests {
 
     #[test]
     fn missing_process_section() {
-        let json = r#"{"containment": "appcontainer"}"#;
+        let json = r#"{"containment": "processcontainer"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1083,7 +1192,7 @@ mod tests {
                 "cwd": "C:\\temp",
                 "timeout": 3000
             },
-            "appContainer": {
+            "processContainer": {
                 "leastPrivilege": true,
                 "capabilities": ["internetClient"]
             },
@@ -1183,7 +1292,7 @@ mod tests {
     #[test]
     fn learning_mode_adds_capability_in_debug() {
         let json =
-            r#"{"process": {"commandLine": "echo x"}, "appContainer": {"learningMode": true}}"#;
+            r#"{"process": {"commandLine": "echo x"}, "processContainer": {"learningMode": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1198,7 +1307,7 @@ mod tests {
     #[cfg(not(debug_assertions))]
     #[test]
     fn learning_mode_stripped_in_release() {
-        let json = r#"{"process": {"commandLine": "echo x"}, "appContainer": {"capabilities": ["permissiveLearningMode"]}}"#;
+        let json = r#"{"process": {"commandLine": "echo x"}, "processContainer": {"capabilities": ["permissiveLearningMode"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1224,10 +1333,10 @@ mod tests {
     }
 
     #[test]
-    fn app_container_capabilities() {
+    fn process_container_capabilities() {
         let json = r#"{
             "process": {"commandLine": "print('test')"},
-            "appContainer": {
+            "processContainer": {
                 "capabilities": ["internetClient", "privateNetworkClientServer", "documentsLibrary"]
             }
         }"#;
@@ -1243,7 +1352,7 @@ mod tests {
 
     #[test]
     fn least_privilege_mode() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "appContainer": {"leastPrivilege": true}}"#;
+        let json = r#"{"process": {"commandLine": "print('test')"}, "processContainer": {"leastPrivilege": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1375,7 +1484,7 @@ mod tests {
                 "commandLine": "import sys\nprint(sys.version)",
                 "timeout": 10000
             },
-            "appContainer": {
+            "processContainer": {
                 "capabilities": ["internetClient", "privateNetworkClientServer"]
             }
         }"#;
@@ -1412,23 +1521,60 @@ mod tests {
     // ====== Containment backend selection tests ======
 
     #[test]
-    fn default_containment_is_appcontainer() {
+    fn default_containment_is_processcontainer() {
         let json = r#"{"process": {"commandLine": "echo hello"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::AppContainer);
+        assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
     }
 
     #[test]
-    fn explicit_appcontainer_containment() {
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "appcontainer"}"#;
+    fn explicit_processcontainer_containment() {
+        let json =
+            r#"{"process": {"commandLine": "echo hello"}, "containment": "processcontainer"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::AppContainer);
+        assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
+    }
+
+    #[test]
+    fn process_containment_resolves_per_target() {
+        // Abstract intent "process" resolves to the per-OS default backend:
+        // ProcessContainer on Windows, LXC on Linux, Seatbelt on macOS.
+        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "process"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(req.containment, ContainmentBackend::Lxc);
+        #[cfg(target_os = "macos")]
+        assert_eq!(req.containment, ContainmentBackend::Seatbelt);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
+    }
+
+    #[test]
+    fn vm_containment_resolves_per_target() {
+        // Abstract intent "vm" resolves to Windows Sandbox on Windows. On
+        // other targets there is no concrete VM backend yet, so the parser
+        // returns the historical `Vm` placeholder variant which the host
+        // binaries surface as a "not implemented" error.
+        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "vm"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(req.containment, ContainmentBackend::WindowsSandbox);
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(req.containment, ContainmentBackend::Vm);
     }
 
     #[test]
@@ -1601,7 +1747,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_rejected_with_non_appcontainer() {
+    fn proxy_rejected_with_non_processcontainer() {
         let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -1679,7 +1825,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_builtin_test_server_rejected_with_non_appcontainer() {
+    fn proxy_builtin_test_server_rejected_with_non_processcontainer() {
         let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -1758,16 +1904,6 @@ mod tests {
     }
 
     #[test]
-    fn containment_vm_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "vm"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Vm);
-    }
-
-    #[test]
     fn containment_microvm_accepted() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "microvm"}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -1835,7 +1971,7 @@ mod tests {
         let json = r#"{
             "version": "0.5.0-alpha",
             "containerId": "test-050",
-            "containment": "appcontainer",
+            "containment": "processcontainer",
             "process": { "commandLine": "echo hello", "timeout": 5000 },
             "filesystem": { "readwritePaths": ["C:\\workspace"] },
             "network": { "defaultPolicy": "block" }
@@ -2272,6 +2408,76 @@ mod tests {
         assert_eq!(
             cfg.profile_override.as_deref(),
             Some("(version 1)(deny default)")
+        );
+    }
+
+    // Legacy wire-name aliases. The parser accepts the pre-0.6 wire vocabulary
+    // (`appcontainer`, `macos_sandbox`, and the `appContainer` /
+    // `experimental.macos_sandbox` sub-block keys) so that configs declaring
+    // earlier stable schemas (0.4.0-alpha, 0.5.0-alpha) continue to parse.
+    // Each alias maps to the canonical backend / sub-block and emits a
+    // deprecation log so callers know to migrate.
+
+    #[test]
+    fn legacy_appcontainer_wire_value_aliases_processcontainer() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "appcontainer"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
+    }
+
+    #[test]
+    fn legacy_macos_sandbox_wire_value_aliases_seatbelt() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::Seatbelt);
+    }
+
+    #[test]
+    fn legacy_app_container_subblock_alias_accepted() {
+        // Configs written against 0.4.0-alpha / 0.5.0-alpha still use the
+        // `appContainer` JSON key; serde's alias routes it to the same
+        // `processContainer` parsing path.
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "appContainer": {
+                "leastPrivilege": true,
+                "capabilities": ["internetClient"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.least_privilege_mode);
+        assert_eq!(req.policy.capabilities, vec!["internetClient".to_string()]);
+    }
+
+    #[test]
+    fn legacy_experimental_macos_sandbox_subblock_alias_accepted() {
+        // `experimental.macos_sandbox` is the pre-rename key; serde's alias
+        // routes it to the same `seatbelt` parsing path.
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "containment": "macos_sandbox",
+            "experimental": {"macos_sandbox": {"profileOverride": "(version 1)(allow default)"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req
+            .experimental
+            .seatbelt
+            .expect("experimental.seatbelt should be populated (via macos_sandbox alias)");
+        assert_eq!(
+            cfg.profile_override.as_deref(),
+            Some("(version 1)(allow default)")
         );
     }
 }

@@ -69,7 +69,7 @@ experimental features:
   "process": { ... },
   "filesystem": { ... },
   "network": { ... },
-  "appContainer": { ... },
+  "processContainer": { ... },
   "lxc": { ... },
 
   "experimental": {

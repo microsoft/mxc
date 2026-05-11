@@ -1,11 +1,11 @@
 {
   "version": "0.4.0-alpha",
   "containerId": "UI-Test-05",
-  "containment": "appcontainer",
+  "containment": "processcontainer",
   "process": {
     "commandLine": "cmd.exe /c \"echo test | clip.exe && echo PASS: clipboard write allowed || echo FAIL: clipboard write blocked\"",
     "timeout": 15000
   },
-  "appContainer": { "capabilities": [], "ui": { "isolation": "desktop", "desktopSystemControl": true, "systemSettings": "all", "ime": true } },
+  "processContainer": { "capabilities": [], "ui": { "isolation": "desktop", "desktopSystemControl": true, "systemSettings": "all", "ime": true } },
   "ui": { "disable": false, "clipboard": "write", "injection": true }
 }

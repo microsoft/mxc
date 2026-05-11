@@ -312,7 +312,7 @@ fn main() {
     // BaseContainer is used when --experimental is passed or schema version >= 0.5.
     // Sandbox and MicroVM require --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
-        ContainmentBackend::AppContainer => {
+        ContainmentBackend::ProcessContainer => {
             let version_implies_base_container = is_base_container_version(&request.schema_version);
             let use_base_container = request.experimental_enabled || version_implies_base_container;
 
@@ -357,7 +357,7 @@ fn main() {
             process::exit(1);
         }
         ContainmentBackend::Seatbelt => {
-            eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-mac)");
+            eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-darwin)");
             process::exit(1);
         }
         ContainmentBackend::Vm => {
