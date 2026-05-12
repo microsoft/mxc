@@ -244,25 +244,26 @@ impl LxcContainer {
         // Allocate an inner pty pair. The slave goes to lxc-attach (and thus
         // bash inside the container) so the inner process sees a real tty;
         // we keep the master and bridge it to our own stdio.
-        let pty_pair = openpty(None, None)
-            .map_err(|e| format!("openpty failed: {}", e))?;
+        let pty_pair = openpty(None, None).map_err(|e| format!("openpty failed: {}", e))?;
 
         // Three fd duplicates of the slave so each Stdio takes ownership of
         // its own handle; otherwise std::process::Stdio::from would consume
         // the single OwnedFd and the rest of the spawn calls would fail.
-        let slave_in: Stdio = pty_pair.slave.try_clone()
+        let slave_in: Stdio = pty_pair
+            .slave
+            .try_clone()
             .map_err(|e| format!("dup slave for stdin: {}", e))?
             .into();
-        let slave_out: Stdio = pty_pair.slave.try_clone()
+        let slave_out: Stdio = pty_pair
+            .slave
+            .try_clone()
             .map_err(|e| format!("dup slave for stdout: {}", e))?
             .into();
         let slave_err: Stdio = pty_pair.slave.into();
 
         let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(["--", "/bin/sh", "-c", command]);
-        cmd.stdin(slave_in)
-            .stdout(slave_out)
-            .stderr(slave_err);
+        cmd.stdin(slave_in).stdout(slave_out).stderr(slave_err);
 
         // Drop the inherited controlling terminal in the child and make the
         // slave end of our pty its new controlling tty. Without this,
