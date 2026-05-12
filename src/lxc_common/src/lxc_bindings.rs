@@ -221,6 +221,13 @@ impl LxcContainer {
     /// Stdout/stderr are streamed live via the master fd; the returned
     /// strings are always empty. Callers needing captured output should run
     /// a self-contained `commandLine` and read it back from a file.
+    ///
+    /// Only available on Unix targets — the implementation depends on
+    /// `pre_exec`, `openpty`, and `TIOCSCTTY`, none of which exist on
+    /// Windows. The crate still has to compile workspace-wide on Windows
+    /// (the `wxc-exec-lint` CI job runs `cargo clippy --workspace` on
+    /// `windows-latest`), so a non-Unix stub is provided below.
+    #[cfg(unix)]
     pub fn attach_run(
         &self,
         command: &str,
@@ -349,6 +356,18 @@ impl LxcContainer {
         let _ = output_thread.join();
 
         Ok((status.code().unwrap_or(-1), String::new(), String::new()))
+    }
+
+    /// Non-Unix stub. `lxc-exec` is Linux-only at runtime, but the workspace
+    /// is still built workspace-wide on Windows during clippy/CI, so this
+    /// signature has to exist on every target.
+    #[cfg(not(unix))]
+    pub fn attach_run(
+        &self,
+        _command: &str,
+        _working_directory: &str,
+    ) -> Result<(i32, String, String), String> {
+        Err("LxcContainer::attach_run is only supported on Unix targets".to_string())
     }
 
     /// Stop the container.
