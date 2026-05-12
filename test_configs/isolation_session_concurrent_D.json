@@ -1,0 +1,9 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "isolation-session-concurrent-D",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "echo D-start & ping -n 11 127.0.0.1 > nul & echo D-done",
+    "timeout": 30000
+  }
+}

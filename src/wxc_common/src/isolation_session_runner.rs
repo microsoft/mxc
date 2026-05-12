@@ -51,21 +51,17 @@ use windows_core::{HSTRING, PCWSTR};
 
 // -- Identifiers -------------------------------------------------------------
 
-/// Registration ID used with the `IsoSessionOps` wrapper.
+/// Registration ID used with the in-proc `IsoSessionOps` API.
 ///
-/// The `IsoSessionOps` wrapper hardcodes `L"regid"` internally for every
-/// agent-name-keyed op, so callers must register with this exact literal
-/// or subsequent calls hit the wrong registration.
+/// The OS API hardcodes `L"regid"` internally for every agent-name-keyed
+/// op, so callers must register with this exact literal or subsequent
+/// calls hit the wrong registration. Because the id is hardcoded, the
+/// registration is effectively shared across all concurrent MXC
+/// isolation-session sandboxes for the calling user; see
+/// `IsolationSessionManager::register_client` (idempotence) and
+/// `unregister_client` (intentional non-call) for the lifecycle
+/// implications.
 const REGISTRATION_ID: &str = "regid";
-
-/// Default provisionId used by the one-shot backend path. State-aware
-/// callers mint their own dynamic ids (e.g. `wxc-<8-hex>`) instead.
-///
-/// `provisionId` scopes the agent user across the lifecycle and is reused as
-/// the `agentName` parameter on every subsequent op — the `IsoSessionOps`
-/// wrapper aliases `agentName` to this `provisionId` at the COM layer, so
-/// callers pass `provisionId` where the IDL says `agentName`.
-pub const DEFAULT_PROVISION_ID: &str = "wxc-provid";
 
 impl From<IsolationSessionConfigurationId> for IsoSessionConfigId {
     fn from(value: IsolationSessionConfigurationId) -> Self {
@@ -91,7 +87,7 @@ pub enum IsolationSessionError {
     /// `Feature_IsoBrokerSessionApis` disabled).
     ServiceUnavailable(String),
     /// An OS-side lifecycle step (register / provision / start / exec /
-    /// stop / deprovision / unregister) returned a failure.
+    /// stop / deprovision) returned a failure.
     Lifecycle(String),
     /// The OS-side service could not find the provisionId — the sandbox
     /// has been deprovisioned (or never provisioned in this user's
@@ -492,11 +488,11 @@ pub(crate) fn aggregate_share_folder_outcomes(
 pub struct IsolationSessionManager {
     /// Registration identifier used in `RegisterApp` / `AddUserAsync`
     /// / `UnregisterAppAsync`. Pegged to the literal `"regid"` per the
-    /// wrapper's internal hardcode.
+    /// OS API's internal hardcode.
     registration_id: HSTRING,
     /// Provision identifier. Used as the `provisionId` argument to
     /// `AddUserAsync` and as the `agentName` argument to every subsequent
-    /// op (the wrapper aliases them at the COM layer).
+    /// op (the OS API aliases them at the COM layer).
     provision_id: HSTRING,
     /// The activated `IsoSessionOps` instance. Held for the lifetime of the
     /// manager so the WinRT factory is reused across calls.
@@ -506,8 +502,8 @@ pub struct IsolationSessionManager {
 impl IsolationSessionManager {
     /// Activates the `IsoSessionOps` factory, verifies the service is
     /// available, and pegs the manager to the supplied `provisionId`.
-    /// One-shot callers pass `DEFAULT_PROVISION_ID`; state-aware callers
-    /// mint a dynamic id per provision (e.g. `wxc-<8-hex>`).
+    /// Both one-shot and state-aware callers mint a dynamic id per
+    /// invocation (e.g. `wxc-<8-hex>`).
     pub fn new(provision_id: &str) -> Result<Self, IsolationSessionError> {
         let ops = check_service_available_and_activate()?;
         Ok(Self {
@@ -517,8 +513,11 @@ impl IsolationSessionManager {
         })
     }
 
-    /// Step 0: Register the app with the OS-side service.
+    /// Registers the app with the OS-side service.
     pub fn register_client(&self) -> Result<(), IsolationSessionError> {
+        // RegisterApp is safe to call repeatedly with the same regid — the
+        // OS API returns a non-error result on duplicates, so we register
+        // on every provision and let the service dedupe.
         let result = self
             .ops
             .RegisterApp(&self.registration_id)
@@ -927,16 +926,26 @@ impl IsolationSessionManager {
         check_result(&result, "RemoveUserAsync")
     }
 
-    /// Step 6: Unregister the client.
+    /// Tears down the client registration set up by `register_client` —
+    /// currently a no-op (see body comment).
     pub fn unregister_client(&self) -> Result<(), IsolationSessionError> {
-        let async_op = self
-            .ops
-            .UnregisterAppAsync(&self.registration_id)
-            .map_err(|e| lifecycle_err(format!("UnregisterAppAsync call failed: {}", e)))?;
-        let result = async_op
-            .join()
-            .map_err(|e| lifecycle_err(format!("UnregisterAppAsync wait failed: {}", e)))?;
-        check_result(&result, "UnregisterAppAsync")
+        // The following call is commented out by design. The regid is
+        // currently hardcoded as `L"regid"` and shared across all
+        // concurrent MXC isolation-session sandboxes for the calling
+        // user; calling UnregisterAppAsync would tear down the
+        // registration for every other still-running one. Reversible
+        // when the OS APIs eliminate registration IDs entirely; do not
+        // uncomment without verifying OS API behavior has changed.
+        //
+        // let async_op = self
+        //     .ops
+        //     .UnregisterAppAsync(&self.registration_id)
+        //     .map_err(|e| lifecycle_err(format!("UnregisterAppAsync call failed: {}", e)))?;
+        // let result = async_op
+        //     .join()
+        //     .map_err(|e| lifecycle_err(format!("UnregisterAppAsync wait failed: {}", e)))?;
+        // check_result(&result, "UnregisterAppAsync")
+        Ok(())
     }
 }
 
@@ -998,7 +1007,9 @@ pub struct ProcessResult {
 
 /// Thin `ScriptRunner` wrapper that performs the full isolation session
 /// lifecycle per invocation. For v0.1, each `run()` call does:
-/// register → provision → start → execute → stop → deprovision → unregister.
+/// register → provision → start → execute → stop → deprovision.
+/// `unregister_client` is still called as part of teardown but is a
+/// deliberate no-op — see its body comment.
 pub struct IsolationSessionRunner;
 
 impl IsolationSessionRunner {
@@ -1057,14 +1068,16 @@ impl ScriptRunner for IsolationSessionRunner {
             .map(|cfg| cfg.configuration_id)
             .unwrap_or_default();
 
-        // Activate the in-proc IsoSessionOps factory. One-shot uses the
-        // hardcoded default provisionId; state-aware mints a dynamic one.
-        let manager = match IsolationSessionManager::new(DEFAULT_PROVISION_ID) {
+        // Activate the in-proc IsoSessionOps factory. Both one-shot and
+        // state-aware mint a per-invocation provisionId so concurrent MXC
+        // isolation-session processes do not collide on agent identity.
+        let provision_id = format!("wxc-{}", mint_random_token());
+        let manager = match IsolationSessionManager::new(&provision_id) {
             Ok(m) => m,
             Err(e) => return e.into(),
         };
 
-        // Full lifecycle: register → provision → start → execute → stop → deprovision → unregister.
+        // Full lifecycle: register → provision → start → execute → stop → deprovision.
         if let Err(e) = manager.register_client() {
             return e.into();
         }
@@ -1113,7 +1126,7 @@ impl ScriptRunner for IsolationSessionRunner {
             }
         };
 
-        // Cleanup: stop → deprovision → unregister.
+        // Cleanup: stop → deprovision.
         if let Err(e) = manager.stop_session() {
             let _ = writeln!(logger, "Warning: stop_session failed: {}", e);
         }
@@ -1262,15 +1275,11 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         Ok(StopResult { metadata: None })
     }
 
-    /// Removes the agent user, then unregisters the client. Mirrors the
-    /// one-shot teardown sequence so a state-aware lifecycle leaves the
-    /// OS-side service in the same end state as a one-shot run.
-    ///
-    /// `unregister_client` tears down the client registration that
-    /// `provision` set up via `register_client`. v1 does not target
-    /// concurrent state-aware sessions, which would share that
-    /// registration -- if that becomes a real requirement, this will
-    /// need either a refcount or a "leave-registration-alone" mode.
+    /// Removes the agent user. The `unregister_client` step is currently
+    /// a no-op (see `IsolationSessionManager::unregister_client`) so
+    /// concurrent MXC isolation-session sandboxes can coexist on the
+    /// shared hardcoded regid; deprovisioning one does not tear down
+    /// another still-running sandbox.
     fn deprovision(
         &mut self,
         sandbox_id: &str,
