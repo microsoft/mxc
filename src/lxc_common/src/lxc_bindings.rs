@@ -208,23 +208,36 @@ impl LxcContainer {
     }
 
     /// Execute a command inside a running container using lxc-attach.
+    ///
+    /// Inherits the parent process's stdin/stdout/stderr so that the inner
+    /// process is wired straight to whatever drives lxc-exec — typically a
+    /// pty owned by node-pty on the host. This matches the AppContainer
+    /// runner on Windows, where the sandboxed child shares the parent's
+    /// ConPTY (see `wxc_common::appcontainer_runner`). Without this, the
+    /// inner process gets a closed stdin and exits immediately on EOF,
+    /// breaking interactive shells.
+    ///
+    /// Stdout/stderr are streamed live; the returned strings are always
+    /// empty. Callers that need captured output should run a self-contained
+    /// `commandLine` (e.g. `echo ... > file`) and read the file separately.
     pub fn attach_run(
         &self,
         command: &str,
         _working_directory: &str,
     ) -> Result<(i32, String, String), String> {
+        use std::process::Stdio;
+
         let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(["--", "/bin/sh", "-c", command]);
+        cmd.stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
 
-        let output = cmd
-            .output()
+        let status = cmd
+            .status()
             .map_err(|e| format!("Failed to run lxc-attach: {}", e))?;
 
-        Ok((
-            output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stdout).to_string(),
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ))
+        Ok((status.code().unwrap_or(-1), String::new(), String::new()))
     }
 
     /// Stop the container.
