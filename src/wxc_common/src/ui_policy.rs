@@ -1,106 +1,132 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! UI policy bitmask helpers.
+//! UI policy resolution.
 //!
-//! Maps cross-platform [`UiPolicy`] and BaseProcessContainer-specific
-//! [`BaseProcessUiConfig`] values onto the Windows `JOB_OBJECT_UILIMIT_*`
-//! flag set. The mapping follows `docs/UIPolicy_Schema.md`.
+//! Reads the user-facing [`UiPolicy`] and [`BaseProcessUiConfig`] structs
+//! from [`crate::models`] and produces an [`EffectiveUiRestrictions`] —
+//! a normalized, platform-agnostic record of which UI capabilities are
+//! to be blocked. The mapping follows `docs/UIPolicy_Schema.md`.
 //!
-//! This module is platform-agnostic: the values are pure `u64` bitmasks
-//! computed from the policy structs in [`crate::models`]. The actual
-//! application of the bitmask to a Job Object is performed by Windows-only
-//! runners (BaseContainer in Phase 1a; AppContainer in Phase 1c).
+//! Encoding the result into a platform-specific shape (Windows
+//! `JOB_OBJECT_UILIMIT_*` bitmask, or future macOS/Linux equivalents) is
+//! done in platform-specific modules — for Windows, see
+//! `crate::job_object::to_job_object_uilimit_mask`.
 
 use crate::models::{BaseProcessUiConfig, ClipboardPolicy, UiPolicy};
 
-/// JOB_OBJECT_UILIMIT_* flag constants (from UIPolicy_Schema.md).
-pub const UILIMIT_HANDLES: u64 = 0x0001;
-pub const UILIMIT_READCLIPBOARD: u64 = 0x0002;
-pub const UILIMIT_WRITECLIPBOARD: u64 = 0x0004;
-pub const UILIMIT_SYSTEMPARAMETERS: u64 = 0x0008;
-pub const UILIMIT_DISPLAYSETTINGS: u64 = 0x0010;
-pub const UILIMIT_GLOBALATOMS: u64 = 0x0020;
-pub const UILIMIT_DESKTOP: u64 = 0x0040;
-pub const UILIMIT_EXITWINDOWS: u64 = 0x0080;
-pub const UILIMIT_IME: u64 = 0x0100;
-pub const UILIMIT_INJECTION: u64 = 0x0200;
+/// Resolved UI restrictions ready for platform-specific encoding.
+///
+/// Each field names a single capability the child must be denied; `true`
+/// means "block this." This layer carries intent only — there is no
+/// Windows (or other OS) coupling here.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveUiRestrictions {
+    // Clipboard
+    pub block_clipboard_read: bool,
+    pub block_clipboard_write: bool,
 
-/// Build the JOB_OBJECT_UILIMIT_* bitmask from the cross-platform UI policy
-/// and the BaseProcessContainer-specific UI config.
-/// Mapping follows docs/UIPolicy_Schema.md.
-pub fn ui_restrictions_bitmask(ui: &UiPolicy, base_proc_ui: &BaseProcessUiConfig) -> u64 {
-    // When UI is fully disabled: DisallowWin32kSystemCalls handles everything
-    // except atoms (NT executive syscalls, not Win32k). Only set GLOBALATOMS.
+    // Input
+    pub block_input_injection: bool,
+    pub block_input_method_changes: bool,
+
+    // UI-object isolation
+    pub block_external_ui_objects: bool,
+    pub block_global_ui_namespace: bool,
+    pub block_desktop_switching: bool,
+    pub block_logoff_or_shutdown: bool,
+
+    // System-wide settings
+    pub block_system_parameter_changes: bool,
+    pub block_display_settings_changes: bool,
+}
+
+/// Resolve user policy into the set of UI capabilities to block.
+///
+/// Mapping follows `docs/UIPolicy_Schema.md`.
+pub fn resolve_ui_restrictions(
+    ui: &UiPolicy,
+    base_proc_ui: &BaseProcessUiConfig,
+) -> EffectiveUiRestrictions {
+    // When UI is fully disabled: on Windows, DisallowWin32kSystemCalls
+    // handles every UI surface except the global namespace (which is an
+    // NT-executive concern, not Win32k). Block only that here.
     if ui.disable {
-        return UILIMIT_GLOBALATOMS;
+        return EffectiveUiRestrictions {
+            block_global_ui_namespace: true,
+            ..Default::default()
+        };
     }
 
-    let mut mask: u64 = 0;
+    let mut r = EffectiveUiRestrictions::default();
 
-    // Cross-platform: clipboard (default: "none" = block both)
+    // Clipboard (default: "none" = block both)
     match ui.clipboard {
         ClipboardPolicy::All => {}
         ClipboardPolicy::Read => {
-            mask |= UILIMIT_WRITECLIPBOARD;
+            r.block_clipboard_write = true;
         }
         ClipboardPolicy::Write => {
-            mask |= UILIMIT_READCLIPBOARD;
+            r.block_clipboard_read = true;
         }
         // "none" or unrecognized → default-deny: block both
         _ => {
-            mask |= UILIMIT_READCLIPBOARD | UILIMIT_WRITECLIPBOARD;
+            r.block_clipboard_read = true;
+            r.block_clipboard_write = true;
         }
     }
 
-    // Cross-platform: input injection
+    // Input injection
     if !ui.injection {
-        mask |= UILIMIT_INJECTION;
+        r.block_input_injection = true;
     }
 
-    // Backend-specific: isolation level (default: "container" = HANDLES + GLOBALATOMS)
+    // UI-object isolation level (default: "container" = external objects + global namespace)
     match base_proc_ui.isolation.as_str() {
         "desktop" => {
-            // No isolation flags
+            // No isolation restrictions
         }
         "handles" => {
-            mask |= UILIMIT_HANDLES;
+            r.block_external_ui_objects = true;
         }
         "atoms" => {
-            mask |= UILIMIT_GLOBALATOMS;
+            r.block_global_ui_namespace = true;
         }
         // "container" or unrecognized → default-deny: full isolation
         _ => {
-            mask |= UILIMIT_HANDLES | UILIMIT_GLOBALATOMS;
+            r.block_external_ui_objects = true;
+            r.block_global_ui_namespace = true;
         }
     }
 
-    // Backend-specific: desktop system control
+    // Desktop system control: blocks switching desktops and ending the session
     if !base_proc_ui.desktop_system_control {
-        mask |= UILIMIT_DESKTOP | UILIMIT_EXITWINDOWS;
+        r.block_desktop_switching = true;
+        r.block_logoff_or_shutdown = true;
     }
 
-    // Backend-specific: system settings (default: "none" = block all)
+    // System settings (default: "none" = block all)
     match base_proc_ui.system_settings.as_str() {
         "all" => {}
         "parameters" => {
-            mask |= UILIMIT_DISPLAYSETTINGS;
+            r.block_display_settings_changes = true;
         }
         "display" => {
-            mask |= UILIMIT_SYSTEMPARAMETERS;
+            r.block_system_parameter_changes = true;
         }
         // "none" or unrecognized → default-deny: block all
         _ => {
-            mask |= UILIMIT_SYSTEMPARAMETERS | UILIMIT_DISPLAYSETTINGS;
+            r.block_system_parameter_changes = true;
+            r.block_display_settings_changes = true;
         }
     }
 
-    // Backend-specific: IME
+    // Input method changes
     if !base_proc_ui.ime {
-        mask |= UILIMIT_IME;
+        r.block_input_method_changes = true;
     }
 
-    mask
+    r
 }
 
 #[cfg(test)]
@@ -109,46 +135,62 @@ mod tests {
     use crate::models::{BaseProcessUiConfig, ClipboardPolicy, UiPolicy};
 
     #[test]
-    fn ui_bitmask_disabled() {
+    fn disabled_blocks_only_global_ui_namespace() {
         let ui = UiPolicy {
             disable: true,
             ..Default::default()
         };
         let bp = BaseProcessUiConfig::default();
-        // disable=true → only GLOBALATOMS
-        assert_eq!(ui_restrictions_bitmask(&ui, &bp), UILIMIT_GLOBALATOMS);
-    }
-
-    #[test]
-    fn ui_bitmask_default_deny() {
-        // UiPolicy default: disable=true → only GLOBALATOMS
+        let r = resolve_ui_restrictions(&ui, &bp);
         assert_eq!(
-            ui_restrictions_bitmask(&UiPolicy::default(), &BaseProcessUiConfig::default()),
-            UILIMIT_GLOBALATOMS
+            r,
+            EffectiveUiRestrictions {
+                block_global_ui_namespace: true,
+                ..Default::default()
+            }
         );
     }
 
     #[test]
-    fn ui_bitmask_clipboard_read_with_default_backend() {
+    fn default_policy_blocks_only_global_ui_namespace() {
+        // UiPolicy::default has disable=true → only the global namespace.
+        let r = resolve_ui_restrictions(&UiPolicy::default(), &BaseProcessUiConfig::default());
+        assert_eq!(
+            r,
+            EffectiveUiRestrictions {
+                block_global_ui_namespace: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn clipboard_read_with_default_backend() {
         let ui = UiPolicy {
             disable: false,
             clipboard: ClipboardPolicy::Read,
             injection: true,
         };
-        let bp = BaseProcessUiConfig::default(); // isolation=container, desktopSystemControl=false, systemSettings=none, ime=false
-        let expected = UILIMIT_WRITECLIPBOARD
-            | UILIMIT_HANDLES
-            | UILIMIT_GLOBALATOMS
-            | UILIMIT_DESKTOP
-            | UILIMIT_EXITWINDOWS
-            | UILIMIT_SYSTEMPARAMETERS
-            | UILIMIT_DISPLAYSETTINGS
-            | UILIMIT_IME;
-        assert_eq!(ui_restrictions_bitmask(&ui, &bp), expected);
+        let bp = BaseProcessUiConfig::default();
+        let r = resolve_ui_restrictions(&ui, &bp);
+        assert_eq!(
+            r,
+            EffectiveUiRestrictions {
+                block_clipboard_write: true,
+                block_external_ui_objects: true,
+                block_global_ui_namespace: true,
+                block_desktop_switching: true,
+                block_logoff_or_shutdown: true,
+                block_system_parameter_changes: true,
+                block_display_settings_changes: true,
+                block_input_method_changes: true,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
-    fn ui_bitmask_no_backend_restrictions() {
+    fn no_restrictions_when_everything_allowed() {
         let ui = UiPolicy {
             disable: false,
             clipboard: ClipboardPolicy::All,
@@ -160,7 +202,9 @@ mod tests {
             system_settings: "all".to_string(),
             ime: true,
         };
-        // No cross-platform restrictions + no backend restrictions = 0
-        assert_eq!(ui_restrictions_bitmask(&ui, &bp), 0);
+        assert_eq!(
+            resolve_ui_restrictions(&ui, &bp),
+            EffectiveUiRestrictions::default()
+        );
     }
 }
