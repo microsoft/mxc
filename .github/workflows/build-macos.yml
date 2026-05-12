@@ -1,0 +1,114 @@
+name: Build (macOS)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_call:
+
+jobs:
+
+  # Check formatting and linting for the macOS Rust code
+  macos-lint:
+    name: macOS Lint
+    runs-on: macos-latest
+
+    defaults:
+      run:
+        working-directory: src
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup update stable
+          rustup component add rustfmt clippy
+
+      - name: Check formatting
+        id: fmt
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      # Clippy is scoped to macOS-specific crates because the full workspace
+      # includes Windows-only crates that do not compile on macOS.
+      # wxc_common (a workspace dependency) has Windows-only diagnostic code
+      # that produces warnings on macOS; it is fully linted by the Windows CI.
+      # We allow those specific warnings here to avoid false failures.
+      - name: Run clippy
+        run: cargo clippy -p mxc_darwin -p seatbelt_common --all-targets -- -D warnings -A unreachable-code -A unused-variables
+
+      - name: Fail if formatting check failed
+        if: steps.fmt.outcome == 'failure'
+        run: exit 1
+
+
+  # Build and test mxc-exec-mac on ARM64
+  macos-build:
+    name: macOS Build
+    runs-on: macos-14
+
+    defaults:
+      run:
+        working-directory: src
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup update stable
+          rustup target add aarch64-apple-darwin
+
+      - name: Build release
+        run: cargo build --release --target aarch64-apple-darwin -p mxc_darwin
+
+      - name: Run tests
+        run: cargo test --release --target aarch64-apple-darwin -p mxc_darwin -p seatbelt_common -p wxc_common
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mxc-exec-mac
+          path: src/target/aarch64-apple-darwin/release/mxc-exec-mac
+
+
+  # Run SDK integration tests for the seatbelt backend on macOS
+  macos-integration-tests:
+    name: macOS Integration Tests
+    needs: macos-build
+
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download mxc-exec-mac binary
+        uses: actions/download-artifact@v4
+        with:
+          name: mxc-exec-mac
+          path: sdk/bin/arm64
+
+      - name: Make binary executable
+        run: chmod +x sdk/bin/arm64/mxc-exec-mac
+
+      - name: Build SDK
+        working-directory: sdk
+        run: npm install && npm run build
+
+      - name: Install integration test dependencies
+        working-directory: sdk/tests/integration
+        run: npm install
+
+      - name: Build integration tests
+        working-directory: sdk/tests/integration
+        run: npm run build
+
+      - name: Run seatbelt integration tests
+        working-directory: sdk/tests/integration
+        run: node --test dist/macos-seatbelt.test.js

@@ -321,7 +321,7 @@ export function findLxcExecutable(): string | null {
  * output directories (monorepo dev path).
  * @returns Path to mxc-exec-mac if found, null otherwise
  */
-export function findDarwinExecutable(): string | null {
+export function findSeatbeltExecutable(): string | null {
   // Allow override for bundled deployments (debugging/testing)
   if (process.env.MXC_BIN_DIR) {
     const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'mxc-exec-mac');

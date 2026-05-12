@@ -7,7 +7,7 @@ import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { FileLogger } from './logger.js';
 import { ContainerConfig, ContainmentBackend, ContainmentTypes, ExperimentalBackends } from './types.js';
-import { findWxcExecutable, findLxcExecutable, findDarwinExecutable, getPlatformSupport } from './platform.js';
+import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupport } from './platform.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { diagLog } from './diagnostic.js';
 
@@ -93,7 +93,7 @@ export function resolveBinaryAndCommonArgs(
     }
     executablePath = p;
   } else if (platform === 'darwin') {
-    const p = findDarwinExecutable();
+    const p = findSeatbeltExecutable();
     if (!p) {
       throw new Error(
         'mxc-exec-mac not found. Ensure it is built and available in a standard location.'
