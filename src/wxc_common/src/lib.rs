@@ -30,6 +30,8 @@ pub mod filesystem_bfs;
 #[cfg(target_os = "windows")]
 pub mod network_manager;
 #[cfg(target_os = "windows")]
+pub mod process_mitigation;
+#[cfg(target_os = "windows")]
 pub mod process_util;
 #[cfg(target_os = "windows")]
 pub mod proxy_coordinator;
