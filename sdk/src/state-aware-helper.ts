@@ -6,7 +6,7 @@ import { resolveBinaryAndCommonArgs } from './helper.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { mxcErrorFromCode } from './errors.js';
 import { diagLog } from './diagnostic.js';
-import { Phase, StateAwareSandboxingMethod } from './state-aware-types.js';
+import { Phase, StateAwareContainmentBackend } from './state-aware-types.js';
 
 export const STATE_AWARE_VERSION = '0.6.0-alpha';
 
@@ -23,7 +23,7 @@ export const ISOLATION_SESSION_ID_PREFIX = 'iso';
 
 // Mapping from a sandboxId's leading prefix segment to the wire-format
 // backend key. Extended as more state-aware backends opt in.
-export const PREFIX_TO_BACKEND: Record<string, StateAwareSandboxingMethod> = {
+export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = {
   [ISOLATION_SESSION_ID_PREFIX]: 'isolation_session',
 };
 
@@ -32,7 +32,7 @@ export const PREFIX_TO_BACKEND: Record<string, StateAwareSandboxingMethod> = {
  * leading prefix segment. Throws an `MxcError` with `code: 'malformed_id'`
  * when the id has no recognised prefix.
  */
-export function backendForSandboxId(sandboxId: string): StateAwareSandboxingMethod {
+export function backendForSandboxId(sandboxId: string): StateAwareContainmentBackend {
   const colon = sandboxId.indexOf(':');
   if (colon < 0) {
     throw mxcErrorFromCode('malformed_id', `sandboxId must carry a backend prefix: ${sandboxId}`);
@@ -47,8 +47,8 @@ export function backendForSandboxId(sandboxId: string): StateAwareSandboxingMeth
 
 export interface BuildEnvelopeArgs {
   phase: Phase;
-  backendKey: StateAwareSandboxingMethod;
-  containment?: StateAwareSandboxingMethod; // provision only
+  backendKey: StateAwareContainmentBackend;
+  containment?: StateAwareContainmentBackend; // provision only
   sandboxId?: string;                        // non-provision only
   config?: Record<string, unknown>;
 }

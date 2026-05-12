@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 import {
+  ContainmentBackend,
   FilesystemConfig,
   ProcessConfig,
-  SandboxingMethod,
 } from './types.js';
 
 /**
@@ -13,10 +13,10 @@ import {
 export type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
 
 /**
- * Subset of `SandboxingMethod` whose backends participate in the state-aware
+ * Subset of `ContainmentBackend` whose backends participate in the state-aware
  * lifecycle. Extended as more backends opt in.
  */
-export type StateAwareSandboxingMethod = Extract<SandboxingMethod, 'isolation_session'>;
+export type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session'>;
 
 /**
  * Branded sandbox identifier returned by `provisionSandbox` and routed back
@@ -25,7 +25,7 @@ export type StateAwareSandboxingMethod = Extract<SandboxingMethod, 'isolation_se
  * callers from passing a bare string, or a `SandboxId` from one backend
  * where one for a different backend is expected.
  */
-export type SandboxId<C extends StateAwareSandboxingMethod> =
+export type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
 const ISO_USER_INSPECT = Symbol.for('nodejs.util.inspect.custom');
@@ -111,7 +111,7 @@ export interface IsolationSessionProvisionMetadata {
  * Per-backend per-phase typed Config bundle. Selects the correct Config
  * bundle for the backend type parameter.
  */
-export type ConfigsForBackend<C extends StateAwareSandboxingMethod> =
+export type ConfigsForBackend<C extends StateAwareContainmentBackend> =
   C extends 'isolation_session'
     ? {
         provision: IsolationSessionProvisionConfig;
@@ -122,15 +122,15 @@ export type ConfigsForBackend<C extends StateAwareSandboxingMethod> =
       }
     : never;
 
-export type ProvisionConfigFor<C extends StateAwareSandboxingMethod> =
+export type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['provision'];
-export type StartConfigFor<C extends StateAwareSandboxingMethod> =
+export type StartConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['start'];
-export type ExecConfigFor<C extends StateAwareSandboxingMethod> =
+export type ExecConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['exec'];
-export type StopConfigFor<C extends StateAwareSandboxingMethod> =
+export type StopConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['stop'];
-export type DeprovisionConfigFor<C extends StateAwareSandboxingMethod> =
+export type DeprovisionConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['deprovision'];
 
 /**
@@ -145,30 +145,30 @@ export interface StateAwareMetadata {
   // Future state-aware-capable backends add typed entries here.
 }
 
-type MetadataForPhase<C extends StateAwareSandboxingMethod, Phase extends string> =
+type MetadataForPhase<C extends StateAwareContainmentBackend, Phase extends string> =
   Phase extends keyof NonNullable<StateAwareMetadata[C]>
     ? NonNullable<StateAwareMetadata[C]>[Phase]
     : undefined;
 
-export type ProvisionMetadataFor<C extends StateAwareSandboxingMethod> = MetadataForPhase<C, 'provision'>;
-export type StartMetadataFor<C extends StateAwareSandboxingMethod> = MetadataForPhase<C, 'start'>;
-export type StopMetadataFor<C extends StateAwareSandboxingMethod> = MetadataForPhase<C, 'stop'>;
-export type DeprovisionMetadataFor<C extends StateAwareSandboxingMethod> = MetadataForPhase<C, 'deprovision'>;
+export type ProvisionMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'provision'>;
+export type StartMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'start'>;
+export type StopMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'stop'>;
+export type DeprovisionMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'deprovision'>;
 
-export interface ProvisionResult<C extends StateAwareSandboxingMethod> {
+export interface ProvisionResult<C extends StateAwareContainmentBackend> {
   sandboxId: SandboxId<C>;
   metadata?: ProvisionMetadataFor<C>;
 }
 
-export interface StartResult<C extends StateAwareSandboxingMethod> {
+export interface StartResult<C extends StateAwareContainmentBackend> {
   metadata?: StartMetadataFor<C>;
 }
 
-export interface StopResult<C extends StateAwareSandboxingMethod> {
+export interface StopResult<C extends StateAwareContainmentBackend> {
   metadata?: StopMetadataFor<C>;
 }
 
-export interface DeprovisionResult<C extends StateAwareSandboxingMethod> {
+export interface DeprovisionResult<C extends StateAwareContainmentBackend> {
   metadata?: DeprovisionMetadataFor<C>;
 }
 

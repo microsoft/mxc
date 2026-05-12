@@ -15,7 +15,7 @@ import {
   deprovisionSandbox,
   provisionSandbox,
   type SandboxId,
-  type StateAwareSandboxingMethod,
+  type StateAwareContainmentBackend,
 } from '@microsoft/mxc-sdk';
 
 const require = createRequire(import.meta.url);
@@ -193,7 +193,7 @@ export async function runOrSkipIfBackendUnavailable<T>(
 }
 
 /** Deprovision a sandbox best-effort, swallowing errors so cleanup never masks the original failure. */
-export async function safeDeprovision<C extends StateAwareSandboxingMethod>(
+export async function safeDeprovision<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
 ): Promise<void> {
   try {
@@ -211,7 +211,7 @@ export async function safeDeprovision<C extends StateAwareSandboxingMethod>(
  * failures aren't masked as "skipped." Intended for one-shot probing at
  * module load — pair the result with `describe`'s `{ skip }` option.
  */
-export async function probeStateAwareRuntime<C extends StateAwareSandboxingMethod>(
+export async function probeStateAwareRuntime<C extends StateAwareContainmentBackend>(
   containment: C,
 ): Promise<string | undefined> {
   try {
