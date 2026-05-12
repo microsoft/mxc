@@ -8,6 +8,7 @@ set "BUILD_ALL=0"
 set "WITH_NANVIX=0"
 set "WITH_WSLC=0"
 set "WITH_ISOLATION_SESSION=0"
+set "WITH_HYPERLIGHT=0"
 
 :: Parse arguments
 :parse_args
@@ -20,6 +21,7 @@ if /i "%~1"=="--all"     ( set "BUILD_ALL=1"           & shift & goto :parse_arg
 if /i "%~1"=="--with-microvm" ( set "WITH_NANVIX=1"    & shift & goto :parse_args )
 if /i "%~1"=="--with-wslc"    ( set "WITH_WSLC=1"      & shift & goto :parse_args )
 if /i "%~1"=="--with-isolation-session" ( set "WITH_ISOLATION_SESSION=1" & shift & goto :parse_args )
+if /i "%~1"=="--with-hyperlight" ( set "WITH_HYPERLIGHT=1" & shift & goto :parse_args )
 if /i "%~1"=="--help"    ( goto :usage )
 if /i "%~1"=="-h"        ( goto :usage )
 echo Unknown argument: %~1
@@ -41,6 +43,7 @@ if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
 if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
 if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
+if "%WITH_HYPERLIGHT%"=="1" set "CARGO_FLAGS=--features hyperlight %CARGO_FLAGS%"
 
 :: Build Rust
 echo.
@@ -140,6 +143,7 @@ echo   --all             Build for both x64 and ARM64
 echo   --with-microvm    Download and include NanVix micro-VM binaries
 echo   --with-wslc       Build with WSL Container (WSLC SDK) support
 echo   --with-isolation-session   Build with IsolationSession backend (IsoEnvBroker)
+echo   --with-hyperlight         Build with Hyperlight (micro-VM) backend (x86_64 only)
 echo   -h, --help        Show this help
 echo.
 echo Default: builds release for the current machine architecture.

@@ -16,8 +16,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use wxc_e2e_tests::{
     assert_exit, assert_success, assert_success_or_skip_missing_prerequisite, examples_dir,
-    find_binary, has_daemon, has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature,
-    has_wxc_exe, repo_root, run_test_driver, run_wxc_config, test_configs_dir, TempDirs,
+    find_binary, has_daemon, has_hyperlight_snapshot, has_nanvix_binaries, has_test_driver,
+    has_windows_sandbox_feature, has_wxc_exe, repo_root, run_test_driver, run_wxc_config,
+    run_wxc_state_aware, test_configs_dir, TempDirs,
 };
 
 static HAS_WXC_EXE: OnceLock<bool> = OnceLock::new();
@@ -25,6 +26,7 @@ static HAS_TEST_DRIVER: OnceLock<bool> = OnceLock::new();
 static HAS_NANVIX_BINARIES: OnceLock<bool> = OnceLock::new();
 static HAS_DAEMON: OnceLock<bool> = OnceLock::new();
 static HAS_WINDOWS_SANDBOX: OnceLock<bool> = OnceLock::new();
+static HAS_HYPERLIGHT: OnceLock<bool> = OnceLock::new();
 static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Caches the `wxc-exec.exe` prerequisite probe so repeated tests do not
@@ -51,6 +53,11 @@ fn cached_has_daemon() -> bool {
 /// Caches the Windows Sandbox feature probe.
 fn cached_has_windows_sandbox_feature() -> bool {
     *HAS_WINDOWS_SANDBOX.get_or_init(has_windows_sandbox_feature)
+}
+
+/// Caches the Hyperlight snapshot probe.
+fn cached_has_hyperlight() -> bool {
+    *HAS_HYPERLIGHT.get_or_init(has_hyperlight_snapshot)
 }
 
 fn with_test_lock(run: impl FnOnce()) {
@@ -562,6 +569,131 @@ fn expected_exit_description(case: &MicrovmCase) -> String {
         format!("exit {}", case.expected_exit.unwrap_or(0))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Hyperlight suite
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct HyperlightCase {
+    config: &'static str,
+    description: &'static str,
+    expected_exit: i32,
+    output_contains: Option<&'static str>,
+}
+
+fn hyperlight_suite() {
+    let cases = [
+        HyperlightCase {
+            config: "hyperlight_hello.json",
+            description: "Hello world",
+            expected_exit: 0,
+            output_contains: Some("Hello from Hyperlight!"),
+        },
+        HyperlightCase {
+            config: "hyperlight_pandas.json",
+            description: "numpy + pandas",
+            expected_exit: 0,
+            output_contains: Some("'x':"),
+        },
+    ];
+
+    let mut failures = Vec::new();
+    for case in cases {
+        println!("--- {} ({}) ---", case.description, case.config);
+        let result = run_wxc_config(case.config, &["--debug", "--experimental"]);
+
+        if result.code != Some(case.expected_exit) {
+            failures.push(format!(
+                "{}: expected exit {}, got {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                case.config, case.expected_exit, result.code, result.stdout, result.stderr
+            ));
+        } else if let Some(expected) = case.output_contains {
+            let combined = result.combined_output_with_decoded_base64();
+            if !combined.contains(expected) {
+                failures.push(format!(
+                    "{}: output missing '{}'\n--- combined ---\n{}",
+                    case.config, expected, combined
+                ));
+            } else {
+                println!("  PASS ({} ms)", result.wall_time_ms);
+            }
+        } else {
+            println!("  PASS ({} ms)", result.wall_time_ms);
+        }
+    }
+
+    // Filesystem test — uses an absolute temp dir to avoid relative-path issues.
+    {
+        println!("--- hostfs read/write (hyperlight_fs) ---");
+        let mount_dir = std::env::temp_dir().join("hyperlight-fs-e2e");
+        let _ = std::fs::remove_dir_all(&mount_dir);
+        std::fs::create_dir_all(&mount_dir).unwrap();
+
+        let script = format!(
+            "import os\n\
+             BASE = '/host/{}'\n\
+             path = f'{{BASE}}/hello.txt'\n\
+             with open(path, 'w') as f:\n\
+             \x20   f.write('hyperlight was here\\n')\n\
+             print(f'wrote: {{path}}')\n\
+             with open(path, 'r') as f:\n\
+             \x20   print(f'read: {{f.read().strip()}}')\n\
+             print('done')\n",
+            mount_dir.file_name().unwrap().to_string_lossy()
+        );
+
+        let config = serde_json::json!({
+            "process": { "commandLine": script, "timeout": 30000 },
+            "containment": "hyperlight",
+            "filesystem": { "readwritePaths": [mount_dir.to_string_lossy()] }
+        });
+
+        let result = run_wxc_state_aware("hyperlight-fs", &config, &["--debug", "--experimental"]);
+
+        if result.code != Some(0) {
+            failures.push(format!(
+                "hyperlight-fs: expected exit 0, got {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                result.code, result.stdout, result.stderr
+            ));
+        } else {
+            let written = mount_dir.join("hello.txt");
+            if !written.exists() {
+                failures.push("hyperlight-fs: hello.txt not created on host".to_string());
+            } else {
+                let contents = std::fs::read_to_string(&written).unwrap_or_default();
+                if !contents.contains("hyperlight was here") {
+                    failures.push(format!(
+                        "hyperlight-fs: hello.txt missing expected content, got: {contents}"
+                    ));
+                } else {
+                    println!("  PASS ({} ms)", result.wall_time_ms);
+                }
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&mount_dir);
+    }
+
+    if !failures.is_empty() {
+        panic!("Hyperlight E2E failures:\n{}", failures.join("\n"));
+    }
+}
+
+#[test]
+fn test_hyperlight_suite() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+    if !cached_has_hyperlight() {
+        return;
+    }
+    with_test_lock(hyperlight_suite);
+}
+
+// ---------------------------------------------------------------------------
+// MicroVM perf results
+// ---------------------------------------------------------------------------
 
 fn write_microvm_perf_results(results: Vec<MicrovmPerfEntry>) {
     let output = MicrovmPerfOutput {

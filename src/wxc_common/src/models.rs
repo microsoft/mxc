@@ -23,6 +23,11 @@ pub enum ContainmentBackend {
     /// MicroVM isolation via Windows Hypervisor Platform (internally powered by NanVix).
     #[serde(rename = "microvm")]
     MicroVm,
+    /// MicroVM isolation via Hyperlight + Unikraft, using an embedded
+    /// warmed-up CPython snapshot. ~100 ms cold start per invocation,
+    /// hermetic via snapshot restore. Experimental — requires
+    /// --experimental. Cross-platform (Linux KVM, Windows WHP).
+    Hyperlight,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
     WindowsSandbox,
     /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
