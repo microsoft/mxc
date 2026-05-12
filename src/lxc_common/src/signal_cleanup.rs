@@ -15,10 +15,14 @@
 //! observes a normal signal-style exit.
 
 use std::sync::{Mutex, OnceLock};
+
+#[cfg(target_os = "linux")]
 use std::thread;
 
+#[cfg(target_os = "linux")]
 use nix::sys::signal::{SigSet, Signal};
 
+#[cfg(target_os = "linux")]
 use crate::lxc_bindings::LxcContainer;
 
 static ACTIVE_CONTAINER: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -45,12 +49,14 @@ pub fn set_active(name: &str) {
 /// but new threads inherit the mask at creation time. If a thread starts
 /// before `install()`, that thread's mask leaves the signals unblocked and
 /// the kernel may deliver them there instead of to the watchdog.
-pub fn install() -> nix::Result<()> {
+#[cfg(target_os = "linux")]
+pub fn install() -> Result<(), String> {
     let mut mask = SigSet::empty();
     mask.add(Signal::SIGHUP);
     mask.add(Signal::SIGTERM);
     mask.add(Signal::SIGINT);
-    mask.thread_block()?;
+    mask.thread_block()
+        .map_err(|e| format!("pthread_sigmask: {}", e))?;
 
     thread::Builder::new()
         .name("lxc-signal-cleanup".into())
@@ -59,6 +65,17 @@ pub fn install() -> nix::Result<()> {
     Ok(())
 }
 
+/// Non-Linux stub. `lxc-exec` is Linux-only at runtime, but the workspace
+/// still builds on Windows (clippy CI) and macOS (dev), so the signature
+/// has to exist on every target. Signal-driven cleanup is a no-op on
+/// non-Linux targets — the watchdog relies on POSIX `sigwait` semantics
+/// that aren't meaningful on Windows.
+#[cfg(not(target_os = "linux"))]
+pub fn install() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn run_watchdog(mask: SigSet) -> ! {
     loop {
         // sigwait isn't normally interruptible; on the unlikely failure, retry.
