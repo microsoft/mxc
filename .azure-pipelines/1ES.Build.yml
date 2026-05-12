@@ -4,6 +4,11 @@
 trigger: none
 name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
 
+pr:
+- main
+- feature/*
+- user/*
+
 resources:
   repositories:
   - repository: 1ESPipelineTemplates
@@ -16,7 +21,7 @@ parameters:
   - name: officialBuild
     displayName: Build Official or Unofficial
     type: string
-    default: Official
+    default: Unofficial
     values:
       - Official
       - Unofficial
