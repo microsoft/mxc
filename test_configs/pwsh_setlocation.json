@@ -1,7 +1,7 @@
 {
   "version": "0.4.0-alpha",
   "containerId": "CLI-Pwsh-SetLocation-Test",
-  "containment": "appcontainer",
+  "containment": "processcontainer",
   "process": {
     "commandLine": "pwsh.exe -nop -nol -c \"Set-PSReadLineOption -HistorySaveStyle SaveNothing; Set-Location c:\\temp\"; Get-ChildItem",
     "timeout": 30000

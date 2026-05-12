@@ -8,8 +8,12 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum ContainmentBackend {
     #[default]
-    /// Windows AppContainer — process-level isolation on the host.
-    AppContainer,
+    /// Windows process-level containment. Resolves at runtime to either
+    /// AppContainer (legacy OS API) or BaseContainer (newer Windows
+    /// sandbox API exposed via `Experimental_CreateProcessInSandbox`),
+    /// based on `--experimental` and the schema version of the request.
+    /// Selected on the wire as `"processcontainer"`.
+    ProcessContainer,
     /// Linux container via WSL Container SDK (WSLC SDK).
     Wslc,
     /// LXC — Linux container isolation.
@@ -19,39 +23,28 @@ pub enum ContainmentBackend {
     /// MicroVM isolation via Windows Hypervisor Platform (internally powered by NanVix).
     #[serde(rename = "microvm")]
     MicroVm,
+    /// MicroVM isolation via Hyperlight + Unikraft, using an embedded
+    /// warmed-up CPython snapshot. ~100 ms cold start per invocation,
+    /// hermetic via snapshot restore. Experimental — requires
+    /// --experimental. Cross-platform (Linux KVM, Windows WHP).
+    Hyperlight,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
     WindowsSandbox,
     /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
     #[serde(rename = "isolation_session")]
     IsolationSession,
-    /// macOS sandbox — experimental backend (requires --experimental).
-    /// Implemented on top of the OS-bundled sandbox facility (historical
-    /// Apple internal codename: "Seatbelt").
-    #[serde(rename = "macos_sandbox")]
-    MacosSandbox,
+    /// macOS Seatbelt — experimental sandbox backend (requires --experimental).
+    /// Implemented on top of the OS-bundled sandbox facility (Apple's
+    /// internal codename for the App Sandbox / `sandbox-exec` machinery
+    /// is "Seatbelt"); selected on the wire as `"seatbelt"`.
+    Seatbelt,
 }
 
-/// Mode used by the macOS sandbox backend to apply the sandbox profile.
-///
-/// `Exec` (default) spawns `/usr/bin/sandbox-exec` and is always available.
-/// `Inproc` calls the private `sandbox_init_with_parameters` API in the
-/// child after fork and before exec — lower latency but relies on a
-/// non-public macOS interface.
-#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum MacosSandboxMode {
-    #[default]
-    Exec,
-    Inproc,
-}
-
-/// Configuration specific to the macOS sandbox backend (experimental).
-/// Used under `experimental.macos_sandbox` when `containment == MacosSandbox`.
+/// Configuration specific to the Seatbelt backend (experimental).
+/// Used under `experimental.seatbelt` when `containment == Seatbelt`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct MacosSandboxConfig {
-    /// Which sandbox entry point to use. Default: `Exec` (sandbox-exec).
-    pub mode: MacosSandboxMode,
+pub struct SeatbeltConfig {
     /// Optional override of the generated TinyScheme profile.
     #[serde(rename = "profileOverride", skip_serializing_if = "Option::is_none")]
     pub profile_override: Option<String>,
@@ -103,6 +96,38 @@ pub struct IsolationSessionConfig {
     /// Session size/weight. Default: Composable.
     #[serde(rename = "configurationId")]
     pub configuration_id: IsolationSessionConfigurationId,
+    /// Optional Entra cloud-agent credentials. Honored on the state-aware
+    /// `start` phase; rejected by the one-shot path.
+    pub user: Option<IsolationSessionUser>,
+}
+
+/// Entra cloud-agent credentials. Both fields are required when the bundle
+/// is supplied. `wam_token` is a short-lived bearer token passed verbatim to
+/// the OS-side service; MXC stores nothing.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsolationSessionUser {
+    pub upn: String,
+    pub wam_token: String,
+}
+
+impl std::fmt::Debug for IsolationSessionUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IsolationSessionUser")
+            .field("upn", &self.upn)
+            .field("wam_token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// State-aware provision-phase config for the Isolation Session backend.
+/// Nested under `experimental.isolation_session.provision`. Carries Entra
+/// credentials when the caller wants a cloud-agent sandbox; absent for
+/// local sandboxes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IsolationSessionProvisionConfig {
+    pub user: Option<IsolationSessionUser>,
 }
 
 /// Configuration specific to the LXC container backend.
@@ -225,7 +250,7 @@ impl Default for UiPolicy {
 }
 
 /// BaseProcessContainer-specific UI configuration (Windows only).
-/// Parsed from `appContainer.ui` in the JSON config.
+/// Parsed from `processContainer.ui` in the JSON config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BaseProcessUiConfig {
@@ -252,7 +277,30 @@ impl Default for BaseProcessUiConfig {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+/// Operator consent for host-impacting containment fallbacks. Each flag gates
+/// a specific fallback the runner may otherwise pick when the preferred
+/// primitive is unavailable. Defaults preserve the pre-fallback-section
+/// behavior (all permitted).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FallbackPolicy {
+    /// When the BaseContainer API is absent and `bfscfg.exe` is unavailable,
+    /// allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). This
+    /// modifies host filesystem security descriptors; original DACLs are
+    /// restored on exit. Defaults to `true`. Set to `false` to refuse the
+    /// fallback (the run will fail on machines that require Tier 3).
+    pub allow_dacl_mutation: bool,
+}
+
+impl Default for FallbackPolicy {
+    fn default() -> Self {
+        Self {
+            allow_dacl_mutation: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContainerPolicy {
     pub least_privilege_mode: bool,
@@ -260,6 +308,7 @@ pub struct ContainerPolicy {
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
     pub denied_paths: Vec<String>,
+    pub fallback: FallbackPolicy,
     pub default_network_policy: NetworkPolicy,
     pub network_enforcement_mode: NetworkEnforcementMode,
     pub allowed_hosts: Vec<String>,
@@ -268,7 +317,7 @@ pub struct ContainerPolicy {
     pub network_proxy: ProxyConfig,
     /// Cross-platform UI policy.
     pub ui: UiPolicy,
-    /// BaseProcessContainer-specific UI config (Windows only, from appContainer.ui).
+    /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
 }
 
@@ -371,9 +420,8 @@ pub struct ExperimentalConfig {
     /// Isolation Session backend (experimental).
     #[serde(rename = "isolation_session")]
     pub isolation_session: Option<IsolationSessionConfig>,
-    /// macOS sandbox backend (experimental).
-    #[serde(rename = "macos_sandbox")]
-    pub macos_sandbox: Option<MacosSandboxConfig>,
+    /// Seatbelt (macOS) backend (experimental).
+    pub seatbelt: Option<SeatbeltConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -390,11 +438,11 @@ pub struct CodexRequest {
     pub script_code: String,
     pub working_directory: String,
     pub script_timeout: u32,
-    /// Which containment backend to use. Default: AppContainer.
+    /// Which containment backend to use. Default: ProcessContainer.
     pub containment: ContainmentBackend,
     /// Shared lifecycle settings.
     pub lifecycle: LifecycleConfig,
-    /// AppContainer-specific policy (used when containment == AppContainer).
+    /// ProcessContainer-specific policy (used when containment == ProcessContainer).
     pub policy: ContainerPolicy,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
@@ -457,5 +505,62 @@ impl ScriptResponse {
             error_message: msg.to_string(),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn isolation_session_user_serde_round_trips_camel_case() {
+        let wire = json!({"upn": "alice@contoso.com", "wamToken": "tok"});
+        let parsed: IsolationSessionUser = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(parsed.upn, "alice@contoso.com");
+        assert_eq!(parsed.wam_token, "tok");
+        let serialised = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(serialised, wire);
+    }
+
+    #[test]
+    fn isolation_session_user_debug_redacts_wam_token() {
+        let user = IsolationSessionUser {
+            upn: "alice@contoso.com".to_string(),
+            wam_token: "super-secret-token".to_string(),
+        };
+        let s = format!("{:?}", user);
+        assert!(s.contains("alice@contoso.com"), "got {}", s);
+        assert!(s.contains("<redacted>"), "got {}", s);
+        assert!(!s.contains("super-secret-token"), "got {}", s);
+    }
+
+    #[test]
+    fn isolation_session_provision_config_accepts_user_field() {
+        let wire = json!({"user": {"upn": "alice@contoso.com", "wamToken": "tok"}});
+        let parsed: IsolationSessionProvisionConfig = serde_json::from_value(wire).unwrap();
+        let u = parsed.user.unwrap();
+        assert_eq!(u.upn, "alice@contoso.com");
+        assert_eq!(u.wam_token, "tok");
+    }
+
+    #[test]
+    fn isolation_session_provision_config_defaults_to_no_user() {
+        let parsed: IsolationSessionProvisionConfig = serde_json::from_value(json!({})).unwrap();
+        assert!(parsed.user.is_none());
+    }
+
+    #[test]
+    fn isolation_session_config_carries_optional_user() {
+        let wire = json!({
+            "configurationId": "medium",
+            "user": {"upn": "alice@contoso.com", "wamToken": "tok"}
+        });
+        let parsed: IsolationSessionConfig = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            parsed.configuration_id,
+            IsolationSessionConfigurationId::Medium
+        );
+        assert!(parsed.user.is_some());
     }
 }

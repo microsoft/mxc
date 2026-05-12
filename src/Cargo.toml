@@ -12,6 +12,8 @@ members = [
     "lxc_common",
     "wslc_common",
     "isolation_session_bindings",
+    "seatbelt_common",
+    "mxc_darwin",
     "generated/base_container_specification",
     "mxc_diagnostic_console",
 ]
@@ -47,6 +49,7 @@ windows = { version = "0.62", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Time",
     "Win32_System_SystemServices",
+    "Win32_System_JobObjects",
 ] }
 windows-core = "0.62"
 serde = { version = "1", features = ["derive"] }

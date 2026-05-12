@@ -13,6 +13,8 @@ use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::{is_base_container_version, load_mxc_request, ParseError};
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
+#[cfg(feature = "hyperlight")]
+use wxc_common::hyperlight_runner::HyperlightScriptRunner;
 #[cfg(feature = "isolation_session")]
 use wxc_common::isolation_session_runner::IsolationSessionRunner;
 use wxc_common::logger::{Logger, Mode};
@@ -62,6 +64,21 @@ struct Cli {
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
     log_file: Option<String>,
+
+    /// Install the warmed Hyperlight snapshot and exit. Pulls the
+    /// published kernel + initrd from GHCR (via docker or podman),
+    /// warms them up, and writes the snapshot into the default user
+    /// data dir (~/.local/share/pyhl on Linux, %LOCALAPPDATA%\pyhl on
+    /// Windows). $PYHL_HOME overrides the destination if set. Intended
+    /// for tool install hooks so first-run has zero warmup cost.
+    #[arg(long = "setup-hyperlight")]
+    setup_hyperlight: bool,
+
+    /// Rebuild the snapshot even if one already exists. Use after
+    /// upgrading `kernel` or `initrd.cpio` so the warm state matches
+    /// the new bits. Requires --setup-hyperlight.
+    #[arg(long, requires = "setup_hyperlight")]
+    force: bool,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
@@ -171,6 +188,35 @@ fn main() {
     };
 
     let cli = Cli::parse();
+
+    // --setup-hyperlight: warm up the snapshot and exit. Runs before
+    // config parsing so the user doesn't need a JSON file on disk
+    // just to install.
+    if cli.setup_hyperlight {
+        #[cfg(feature = "hyperlight")]
+        {
+            let mut logger = Logger::new(if cli.debug {
+                Mode::Console
+            } else {
+                Mode::Buffer
+            });
+            match wxc_common::hyperlight_runner::setup(cli.force, &mut logger) {
+                Ok(snap) => {
+                    eprintln!("hyperlight setup: snapshot ready at {:?}", snap);
+                    process::exit(0);
+                }
+                Err(msg) => {
+                    eprintln!("hyperlight setup failed: {msg}");
+                    process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(feature = "hyperlight"))]
+        {
+            eprintln!("Error: --setup-hyperlight requires x86_64 (Hyperlight needs KVM or WHP)");
+            process::exit(1);
+        }
+    }
 
     // Determine config input and whether it's base64
     let (config_data, is_base64) = if let Some(ref b64) = cli.config_base64 {
@@ -312,7 +358,7 @@ fn main() {
     // BaseContainer is used when --experimental is passed or schema version >= 0.5.
     // Sandbox and MicroVM require --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
-        ContainmentBackend::AppContainer => {
+        ContainmentBackend::ProcessContainer => {
             let version_implies_base_container = is_base_container_version(&request.schema_version);
             let use_base_container = request.experimental_enabled || version_implies_base_container;
 
@@ -356,10 +402,8 @@ fn main() {
             eprintln!("Error: LXC backend not available on Windows");
             process::exit(1);
         }
-        ContainmentBackend::MacosSandbox => {
-            eprintln!(
-                "Error: macOS sandbox backend is only available on macOS (use mxc-exec-darwin)"
-            );
+        ContainmentBackend::Seatbelt => {
+            eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-mac)");
             process::exit(1);
         }
         ContainmentBackend::Vm => {
@@ -372,6 +416,26 @@ fn main() {
                 process::exit(1);
             }
             Box::new(NanVixScriptRunner::new())
+        }
+        ContainmentBackend::Hyperlight => {
+            #[cfg(feature = "hyperlight")]
+            {
+                if !request.experimental_enabled {
+                    eprintln!(
+                        "Error: Hyperlight (Hyperlight+Unikraft) is an experimental feature. \
+                         Use --experimental flag."
+                    );
+                    process::exit(1);
+                }
+                Box::new(HyperlightScriptRunner::new())
+            }
+            #[cfg(not(feature = "hyperlight"))]
+            {
+                eprintln!(
+                    "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
+                );
+                process::exit(1);
+            }
         }
         ContainmentBackend::WindowsSandbox => {
             if !request.experimental_enabled {

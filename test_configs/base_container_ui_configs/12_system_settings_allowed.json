@@ -1,11 +1,11 @@
 {
   "version": "0.4.0-alpha",
   "containerId": "UI-Test-12",
-  "containment": "appcontainer",
+  "containment": "processcontainer",
   "process": {
     "commandLine": "cmd.exe /c echo PASS: system settings all mode active",
     "timeout": 15000
   },
-  "appContainer": { "capabilities": [], "ui": { "isolation": "desktop", "desktopSystemControl": true, "systemSettings": "all", "ime": true } },
+  "processContainer": { "capabilities": [], "ui": { "isolation": "desktop", "desktopSystemControl": true, "systemSettings": "all", "ime": true } },
   "ui": { "disable": false, "clipboard": "none", "injection": false }
 }

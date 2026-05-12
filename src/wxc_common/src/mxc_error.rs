@@ -57,7 +57,7 @@ impl std::fmt::Display for MxcErrorCode {
     }
 }
 
-/// Typed Rust equivalent of the SDK `MxcError` class hierarchy.
+/// Typed Rust equivalent of the SDK `MxcError`.
 ///
 /// Constructed via `MxcError::new(code, message)` or one of the per-code
 /// convenience constructors (e.g. `MxcError::stale_id("...")`); attach

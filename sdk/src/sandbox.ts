@@ -6,11 +6,11 @@ import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, ContainerConfig, ContainmentType } from './types.js';
+import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } from './types.js';
 import { prepareSpawn, diagLogVersion } from './helper.js';
 import { diagLog } from './diagnostic.js';
 
-const SUPPORTED_VERSION = '0.5.0-alpha';
+const SUPPORTED_VERSION = '0.6.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';
 
 /**
@@ -92,7 +92,6 @@ function buildLinuxProcessConfig(
     config: ContainerConfig,
     containerId: string,
 ): ContainerConfig {
-    config.containment = 'lxc';
     config.lxc = {
         containerName: containerId,
         distribution: 'alpine',
@@ -100,6 +99,26 @@ function buildLinuxProcessConfig(
         destroyOnExit: true,
     };
 
+    return config;
+}
+
+/**
+ * Builds the macOS process container (seatbelt) portion of a ContainerConfig.
+ *
+ * The seatbelt backend's `sandbox-exec` reads a TinyScheme profile
+ * generated server-side by `seatbelt_common::profile_builder`, so the SDK
+ * only needs to set the containment type and the mode selector under the
+ * experimental block — the policy fields on `ContainerConfig` (filesystem /
+ * network / ui) drive the actual rules.
+ */
+function buildDarwinProcessConfig(
+    config: ContainerConfig,
+): ContainerConfig {
+    config.containment = 'seatbelt';
+    config.experimental = {
+        ...(config.experimental ?? {}),
+        seatbelt: {},
+    };
     return config;
 }
 
@@ -119,7 +138,7 @@ function buildProcessBaseContainerConfig(
         capabilities.push("privateNetworkClientServer");
     }
 
-    config.appContainer = {
+    config.processContainer = {
         name: containerId,
         leastPrivilege: false,
         capabilities,
@@ -199,12 +218,12 @@ function buildMicroVmConfig(
  *
  * // Advanced: tweak backend-specific settings
  * const config = createConfigFromPolicy(policy, "process");
- * config.appContainer!.ui!.isolation = "atoms";
+ * config.processContainer!.ui!.isolation = "atoms";
  * ```
  */
 export function createConfigFromPolicy(
     policy: SandboxPolicy,
-    containment: ContainmentType = "process",
+    containment: ContainmentType | ContainmentBackend = "process",
     containerName?: string,
 ): ContainerConfig {
     diagLogVersion();
@@ -251,11 +270,15 @@ export function createConfigFromPolicy(
         if (policy.network.proxy && platform === 'linux') {
             throw new Error('Proxy configuration is not supported on Linux');
         }
+        if (policy.network.proxy && platform === 'darwin') {
+            throw new Error('Proxy configuration is not supported on macOS');
+        }
 
         // WSLC supports block + allowedHosts via iptables (Bridged networking
-        // with per-host filtering). Other backends require allowOutbound for
+        // with per-host filtering). macOS sandbox supports it natively via
+        // per-host Seatbelt rules. Other backends require allowOutbound for
         // host filtering since it maps to AppContainer capabilities.
-        if (containment !== 'wslc') {
+        if (containment !== 'wslc' && containment !== 'seatbelt') {
             if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
                 throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
             }
@@ -279,9 +302,16 @@ export function createConfigFromPolicy(
     }
 
     if (containment === 'process') {
+        config.containment = 'process';
         if (platform === 'linux') {
             diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
             return buildLinuxProcessConfig(config, containerId);
+        }
+        if (platform === 'darwin') {
+            // The seatbelt backend has no container abstraction
+            // (per-process fork+exec sandbox), so containerId is intentionally
+            // not threaded through.
+            return buildDarwinProcessConfig(config);
         }
         diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
         return buildProcessBaseContainerConfig(config, policy, containerId);
@@ -304,7 +334,7 @@ export function buildSandboxPayload(
     policy: SandboxPolicy,
     workingDirectory?: string,
     containerName?: string,
-    containment: ContainmentType = "process",
+    containment: ContainmentType | ContainmentBackend = "process",
 ): ContainerConfig {
     const config = createConfigFromPolicy(policy, containment, containerName);
 
@@ -358,6 +388,20 @@ export interface SandboxSpawnOptions {
    * Defaults to true (uses PTY).
    */
   usePty?: boolean;
+
+  /**
+   * Optional cancellation signal. When it aborts, the SDK kills the
+   * spawned executor process and rejects any pending result promise with
+   * the signal's reason. Honored by the state-aware lifecycle functions;
+   * one-shot spawn currently ignores it (kill the returned IPty /
+   * ChildProcess directly instead).
+   *
+   * Cancellation is best-effort: killing the executor mid-call leaves
+   * any backend-side state (e.g. a partially-provisioned IsolationSession)
+   * wherever it landed. Callers may need a follow-up `deprovisionSandbox`
+   * (or its equivalent) to clean up an orphaned sandbox after an abort.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -451,7 +495,7 @@ export function spawnSandbox(
  * ```typescript
  * const config = createConfigFromPolicy(policy, "process");
  * config.process!.commandLine = 'echo hello';
- * config.appContainer!.ui!.isolation = "atoms";
+ * config.processContainer!.ui!.isolation = "atoms";
  *
  * // PTY mode (default) — returns IPty:
  * const ptyProcess = spawnSandboxFromConfig(config);

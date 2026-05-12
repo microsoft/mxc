@@ -1,0 +1,179 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+import {
+  ContainmentBackend,
+  FilesystemConfig,
+  ProcessConfig,
+} from './types.js';
+
+/**
+ * Lifecycle phase in a state-aware sandbox request.
+ */
+export type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
+
+/**
+ * Subset of `ContainmentBackend` whose backends participate in the state-aware
+ * lifecycle. Extended as more backends opt in.
+ */
+export type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session'>;
+
+/**
+ * Branded sandbox identifier returned by `provisionSandbox` and routed back
+ * to the same backend by subsequent phases. The runtime value is a plain
+ * string; the brand exists at compile time only — TypeScript prevents
+ * callers from passing a bare string, or a `SandboxId` from one backend
+ * where one for a different backend is expected.
+ */
+export type SandboxId<C extends StateAwareContainmentBackend> =
+  string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
+
+const ISO_USER_INSPECT = Symbol.for('nodejs.util.inspect.custom');
+
+/**
+ * Entra credentials, supplied at provision to opt into an Entra-backed
+ * sandbox and at start to authenticate the session. `wamToken` is treated
+ * as a secret: `util.inspect` and `console.log` redact it. `JSON.stringify`
+ * is unaffected — the wire envelope carries the token verbatim.
+ */
+export class IsolationSessionUserConfig {
+  readonly upn: string;
+  readonly wamToken: string;
+
+  constructor(upn: string, wamToken: string) {
+    this.upn = upn;
+    this.wamToken = wamToken;
+  }
+
+  [ISO_USER_INSPECT](): string {
+    return `IsolationSessionUserConfig { upn: '${this.upn}', wamToken: '<redacted>' }`;
+  }
+}
+
+// IsolationSession per-(backend, phase) Configs. Each declares only
+// the fields the SDK currently exposes at that phase — scoped to
+// what the backend honors per the policy honor matrix and currently
+// implements. TypeScript rejects passing fields outside this set.
+
+export interface IsolationSessionProvisionConfig {
+  /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
+  version?: string;
+  filesystem?: FilesystemConfig;
+  /**
+   * Optional Entra credentials. When supplied, provisioning uses the Entra
+   * identity for the sandbox; the same `user` must be supplied to
+   * `startSandbox`. Hosts that don't support this surface `backend_unavailable`.
+   */
+  user?: IsolationSessionUserConfig;
+}
+
+export interface IsolationSessionStartConfig {
+  /** Schema version (semver). */
+  version?: string;
+  /**
+   * Selected IsoSession size profile. Unknown values are warned and
+   * downgraded to `'composable'` on the Rust side.
+   */
+  configurationId?: 'small' | 'medium' | 'large' | 'composable';
+  /**
+   * Entra credentials. Required when the sandbox was provisioned with a
+   * `user` bundle; rejected otherwise. When required, `upn` must match the
+   * UPN supplied at provision (case-insensitive).
+   */
+  user?: IsolationSessionUserConfig;
+}
+
+export interface IsolationSessionExecConfig {
+  /** Schema version (semver). */
+  version?: string;
+  process: ProcessConfig;
+}
+
+export interface IsolationSessionStopConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+export interface IsolationSessionDeprovisionConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+/**
+ * IsolationSession's provision-phase metadata: the per-instance agent user
+ * account name minted for this sandbox.
+ */
+export interface IsolationSessionProvisionMetadata {
+  agentUserName: string;
+}
+
+/**
+ * Per-backend per-phase typed Config bundle. Selects the correct Config
+ * bundle for the backend type parameter.
+ */
+export type ConfigsForBackend<C extends StateAwareContainmentBackend> =
+  C extends 'isolation_session'
+    ? {
+        provision: IsolationSessionProvisionConfig;
+        start: IsolationSessionStartConfig;
+        exec: IsolationSessionExecConfig;
+        stop: IsolationSessionStopConfig;
+        deprovision: IsolationSessionDeprovisionConfig;
+      }
+    : never;
+
+export type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
+  ConfigsForBackend<C>['provision'];
+export type StartConfigFor<C extends StateAwareContainmentBackend> =
+  ConfigsForBackend<C>['start'];
+export type ExecConfigFor<C extends StateAwareContainmentBackend> =
+  ConfigsForBackend<C>['exec'];
+export type StopConfigFor<C extends StateAwareContainmentBackend> =
+  ConfigsForBackend<C>['stop'];
+export type DeprovisionConfigFor<C extends StateAwareContainmentBackend> =
+  ConfigsForBackend<C>['deprovision'];
+
+/**
+ * Per-backend per-phase metadata bundle. Backends that don't return
+ * metadata for a given phase omit that key.
+ */
+export interface StateAwareMetadata {
+  isolation_session?: {
+    provision?: IsolationSessionProvisionMetadata;
+    // IsolationSession returns no metadata for start, stop, or deprovision.
+  };
+  // Future state-aware-capable backends add typed entries here.
+}
+
+type MetadataForPhase<C extends StateAwareContainmentBackend, Phase extends string> =
+  Phase extends keyof NonNullable<StateAwareMetadata[C]>
+    ? NonNullable<StateAwareMetadata[C]>[Phase]
+    : undefined;
+
+export type ProvisionMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'provision'>;
+export type StartMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'start'>;
+export type StopMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'stop'>;
+export type DeprovisionMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'deprovision'>;
+
+export interface ProvisionResult<C extends StateAwareContainmentBackend> {
+  sandboxId: SandboxId<C>;
+  metadata?: ProvisionMetadataFor<C>;
+}
+
+export interface StartResult<C extends StateAwareContainmentBackend> {
+  metadata?: StartMetadataFor<C>;
+}
+
+export interface StopResult<C extends StateAwareContainmentBackend> {
+  metadata?: StopMetadataFor<C>;
+}
+
+export interface DeprovisionResult<C extends StateAwareContainmentBackend> {
+  metadata?: DeprovisionMetadataFor<C>;
+}
+
+export interface ExecResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}

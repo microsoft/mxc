@@ -4,7 +4,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
-import { SandboxPolicy } from '../../src/types.js';
+import { resolveExecutableAndArgs } from '../../src/helper.js';
+import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
 
 describe('buildSandboxPayload', () => {
   const defaultPolicy: SandboxPolicy = { version: '0.4.0-alpha' };
@@ -33,7 +34,7 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should map network policy to appcontainer capabilities', () => {
+    it('should map network policy to processcontainer capabilities', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
@@ -41,8 +42,8 @@ describe('buildSandboxPayload', () => {
           network: { allowOutbound: true, allowLocalNetwork: true },
         };
         const payload = buildSandboxPayload('echo hi', policy);
-        assert.ok(payload.appContainer!.capabilities!.includes('internetClient'));
-        assert.ok(payload.appContainer!.capabilities!.includes('privateNetworkClientServer'));
+        assert.ok(payload.processContainer!.capabilities!.includes('internetClient'));
+        assert.ok(payload.processContainer!.capabilities!.includes('privateNetworkClientServer'));
       } finally {
         restore();
       }
@@ -84,6 +85,15 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         assert.doesNotThrow(() => buildSandboxPayload('echo hi', { version: '0.4.0-alpha' }));
+      } finally {
+        restore();
+      }
+    });
+
+    it('should accept version 0.6.0-alpha', () => {
+      mockWindows();
+      try {
+        assert.doesNotThrow(() => buildSandboxPayload('echo hi', { version: '0.6.0-alpha' }));
       } finally {
         restore();
       }
@@ -206,11 +216,11 @@ describe('buildSandboxPayload', () => {
       }
     };
 
-    it('should default to lxc on Linux', () => {
+    it('should default to process containment on Linux (resolved by binary to lxc)', () => {
       mockLinux();
       try {
         const payload = buildSandboxPayload('echo hi', defaultPolicy);
-        assert.strictEqual(payload.containment, 'lxc');
+        assert.strictEqual(payload.containment, 'process');
         assert.strictEqual(payload.lxc!.destroyOnExit, true);
       } finally {
         restore();
@@ -254,7 +264,7 @@ describe('buildSandboxPayload', () => {
         const payload = buildSandboxPayload('print(42)', defaultPolicy, undefined, undefined, 'microvm');
         assert.strictEqual(payload.containment, 'microvm');
         assert.strictEqual(payload.filesystem, undefined);
-        assert.strictEqual(payload.appContainer, undefined);
+        assert.strictEqual(payload.processContainer, undefined);
       } finally {
         restore();
       }
@@ -290,7 +300,7 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should build appcontainer config on Windows with default process containment', () => {
+    it('should build processcontainer config on Windows with default process containment', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
@@ -298,8 +308,8 @@ describe('buildSandboxPayload', () => {
           network: { allowOutbound: true },
         };
         const payload = buildSandboxPayload('echo hi', policy);
-        assert.ok(payload.appContainer, 'appContainer section should be present');
-        assert.ok(payload.appContainer!.capabilities!.includes('internetClient'));
+        assert.ok(payload.processContainer, 'processContainer section should be present');
+        assert.ok(payload.processContainer!.capabilities!.includes('internetClient'));
       } finally {
         restore();
       }
@@ -375,9 +385,9 @@ describe('buildSandboxPayload', () => {
       assert.strictEqual(payload.experimental!.wslc!.image, 'alpine:latest');
     });
 
-    it('should not set appContainer or lxc config', () => {
+    it('should not set processContainer or lxc config', () => {
       const payload = buildSandboxPayload('echo hello', { version: '0.5.0-alpha' }, undefined, undefined, 'wslc');
-      assert.strictEqual(payload.appContainer, undefined);
+      assert.strictEqual(payload.processContainer, undefined);
       assert.strictEqual(payload.lxc, undefined);
     });
 
@@ -449,14 +459,14 @@ describe('createConfigFromPolicy', () => {
       }
     };
 
-    it('should set appContainer with UI defaults for process containment', () => {
+    it('should set processContainer with UI defaults for process containment', () => {
       mockWindows();
       try {
         const config = createConfigFromPolicy(defaultPolicy, 'process');
-        assert.ok(config.appContainer);
-        assert.deepStrictEqual(config.appContainer!.capabilities, []);
-        assert.strictEqual(config.appContainer!.ui!.isolation, 'container');
-        assert.strictEqual(config.appContainer!.ui!.desktopSystemControl, false);
+        assert.ok(config.processContainer);
+        assert.deepStrictEqual(config.processContainer!.capabilities, []);
+        assert.strictEqual(config.processContainer!.ui!.isolation, 'container');
+        assert.strictEqual(config.processContainer!.ui!.desktopSystemControl, false);
       } finally {
         restore();
       }
@@ -474,8 +484,8 @@ describe('createConfigFromPolicy', () => {
             blockedHosts: ['evil.com'],
           },
         });
-        assert.ok(config.appContainer!.capabilities!.includes('internetClient'));
-        assert.ok(config.appContainer!.capabilities!.includes('privateNetworkClientServer'));
+        assert.ok(config.processContainer!.capabilities!.includes('internetClient'));
+        assert.ok(config.processContainer!.capabilities!.includes('privateNetworkClientServer'));
         assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
         assert.deepStrictEqual(config.network!.blockedHosts, ['evil.com']);
       } finally {
@@ -517,11 +527,11 @@ describe('createConfigFromPolicy', () => {
       }
     };
 
-    it('should default to lxc containment', () => {
+    it('should default to process containment (resolved by binary to lxc on Linux)', () => {
       mockLinux();
       try {
         const config = createConfigFromPolicy(defaultPolicy);
-        assert.strictEqual(config.containment, 'lxc');
+        assert.strictEqual(config.containment, 'process');
         assert.strictEqual(config.lxc!.distribution, 'alpine');
         assert.strictEqual(config.lxc!.destroyOnExit, true);
       } finally {
@@ -605,9 +615,9 @@ describe('createConfigFromPolicy', () => {
       assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
     });
 
-    it('should not set appContainer config for wslc', () => {
+    it('should not set processContainer config for wslc', () => {
       const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'wslc');
-      assert.strictEqual(config.appContainer, undefined);
+      assert.strictEqual(config.processContainer, undefined);
     });
 
     it('should not set lxc config for wslc', () => {
@@ -659,5 +669,89 @@ describe('createConfigFromPolicy', () => {
         { message: /experimental mode/ },
       );
     });
+  });
+});
+
+describe('Schema 0.6.0 vocabulary', () => {
+  it('should accept isolation_session as a SandboxingMethod', () => {
+    const m: SandboxingMethod = 'isolation_session';
+    assert.strictEqual(m, 'isolation_session');
+  });
+
+  it('should accept isolation_session as a ContainerConfig.containment value', () => {
+    const c: ContainerConfig = {
+      version: '0.6.0-alpha',
+      containment: 'isolation_session',
+    };
+    assert.strictEqual(c.containment, 'isolation_session');
+  });
+});
+
+describe('resolveExecutableAndArgs (containment validation)', () => {
+  // Use the running node binary as a stand-in executable so the helper does
+  // not try to discover wxc-exec on disk. The helper does not actually exec
+  // anything; it just builds the path + args.
+  const fakeExe = process.execPath;
+
+  function makeConfig(containment: string): ContainerConfig {
+    return {
+      version: '0.5.0-alpha',
+      containment: containment as ContainerConfig['containment'],
+      process: { commandLine: 'echo hi' },
+    };
+  }
+
+  it('should accept the abstract intent "process" without throwing', () => {
+    // Regression guard: createConfigFromPolicy() defaults to "process" and
+    // the SDK no longer pre-resolves it to a concrete backend. The validator
+    // must accept abstract intents and let the native binary resolve them.
+    assert.doesNotThrow(() =>
+      resolveExecutableAndArgs(makeConfig('process'), { executablePath: fakeExe }),
+    );
+  });
+
+  it('should accept the abstract intent "microvm" with experimental flag (Windows only)', function (this: { skip: (reason?: string) => void }) {
+    if (process.platform !== 'win32') {
+      this.skip('microvm is Windows-only');
+      return;
+    }
+    assert.doesNotThrow(() =>
+      resolveExecutableAndArgs(makeConfig('microvm'), {
+        executablePath: fakeExe,
+        experimental: true,
+      }),
+    );
+  });
+
+  it('should not require experimental mode for the non-experimental "process" intent', () => {
+    // process is an abstract intent; only its concrete resolution may be
+    // experimental (e.g. seatbelt today). The intent itself does not
+    // require --experimental at the SDK boundary.
+    assert.doesNotThrow(() =>
+      resolveExecutableAndArgs(makeConfig('process'), { executablePath: fakeExe }),
+    );
+  });
+
+  it('should accept the abstract intent "vm" without throwing', () => {
+    // "vm" is a forward-looking ContainmentType intent. Even though no
+    // concrete VM backend resolves it yet, the SDK validator must let it
+    // pass — the binary owns the resolve/error step.
+    assert.doesNotThrow(() =>
+      resolveExecutableAndArgs(makeConfig('vm'), { executablePath: fakeExe }),
+    );
+  });
+
+  it('should still reject genuinely unknown containment values', () => {
+    assert.throws(
+      () => resolveExecutableAndArgs(makeConfig('bogus_backend'), { executablePath: fakeExe }),
+      { message: /not available on this platform/ },
+    );
+  });
+
+  it('should still require experimental mode for experimental backends like wslc', () => {
+    assert.throws(
+      () => resolveExecutableAndArgs(makeConfig('wslc'), { executablePath: fakeExe }),
+      { message: /experimental mode/ },
+    );
   });
 });

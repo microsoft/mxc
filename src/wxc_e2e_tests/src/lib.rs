@@ -168,6 +168,29 @@ pub fn has_nanvix_binaries() -> bool {
     present
 }
 
+/// Return whether the Hyperlight snapshot is installed at the default
+/// location (`%LOCALAPPDATA%\pyhl\snapshot.hls`).
+pub fn has_hyperlight_snapshot() -> bool {
+    let home = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(|v| PathBuf::from(v).join("AppData").join("Local"))
+                .unwrap_or_default()
+        });
+    let snapshot = home.join("pyhl").join("snapshot.hls");
+    if snapshot.is_file() {
+        println!("Using Hyperlight snapshot at {}", snapshot.display());
+        true
+    } else {
+        println!(
+            "SKIPPED: Hyperlight snapshot not found at {} — run --setup-hyperlight first",
+            snapshot.display()
+        );
+        false
+    }
+}
+
 /// Return whether the Windows Sandbox optional feature is enabled.
 pub fn has_windows_sandbox_feature() -> bool {
     let available = Command::new("dism")

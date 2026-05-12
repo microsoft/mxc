@@ -1,17 +1,15 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.5.0-dev.json",
+  "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.6.0-dev.json",
   "title": "MXC Configuration",
-  "description": "Configuration schema for MXC container execution engine. Defines the recommended config format. The parser also accepts legacy fields not listed here during the migration period.",
+  "description": "Configuration schema for MXC container execution engine. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. The parser also accepts legacy fields not listed here during the migration period.",
   "type": "object",
-
-  "required": ["process"],
 
   "properties": {
     "version": {
       "type": "string",
-      "description": "MXC config schema version (semver). Current stable: '0.4.0-alpha'. Configs using promoted or experimental features should use '0.5.0-alpha'.",
-      "examples": ["0.4.0-alpha"]
+      "description": "MXC config schema version (semver). Current stable: '0.4.0-alpha'. Configs using promoted or experimental features should use '0.6.0-alpha'. State-aware lifecycle requests use '0.6.0-alpha'.",
+      "examples": ["0.4.0-alpha", "0.6.0-alpha"]
     },
     "containerId": {
       "type": "string",
@@ -19,9 +17,19 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "macos_sandbox"],
-      "default": "appcontainer",
-      "description": "Containment backend to use for execution. Note: 'windows_sandbox', 'wslc', and 'macos_sandbox' are experimental and require the --experimental CLI flag."
+      "enum": ["process", "processcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "seatbelt", "isolation_session"],
+      "default": "processcontainer",
+      "description": "Containment value to use for execution. Accepts both abstract intents ('process', 'microvm') and concrete backends ('processcontainer', 'windows_sandbox', 'lxc', 'microvm', 'wslc', 'seatbelt', 'isolation_session'). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities. Note: 'windows_sandbox', 'wslc', 'seatbelt', and 'isolation_session' are experimental and require the --experimental CLI flag."
+    },
+
+    "phase": {
+      "type": "string",
+      "enum": ["provision", "start", "exec", "stop", "deprovision"],
+      "description": "State-aware lifecycle phase. When present, the request is a state-aware request: 'sandboxId' is required for non-provision phases, and 'process' is required only for the 'exec' phase. When absent, the request is a one-shot request and 'process' is required."
+    },
+    "sandboxId": {
+      "type": "string",
+      "description": "Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases ('start', 'exec', 'stop', 'deprovision')."
     },
 
     "lifecycle": {
@@ -43,7 +51,7 @@
 
     "process": {
       "type": "object",
-      "description": "Process execution settings.",
+      "description": "Process execution settings. Required for one-shot requests and for the state-aware 'exec' phase; omitted for non-exec state-aware phases.",
       "required": ["commandLine"],
       "properties": {
         "commandLine": {
@@ -95,6 +103,18 @@
       }
     },
 
+    "fallback": {
+      "type": "object",
+      "description": "Operator consent for host-impacting containment fallbacks. Each flag gates a specific fallback mechanism the runner may otherwise pick when the preferred primitive is unavailable. Defaults preserve the pre-fallback-section behavior (all permitted).",
+      "properties": {
+        "allowDaclMutation": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the BaseContainer API is absent and bfscfg.exe is unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). MODIFIES HOST FILESYSTEM SECURITY DESCRIPTORS — original DACLs are restored on exit. Set to false to refuse this fallback (the run will fail on machines that need Tier 3)."
+        }
+      }
+    },
+
     "network": {
       "type": "object",
       "description": "Network access policy. Shared across all backends.",
@@ -114,16 +134,16 @@
         "allowedHosts": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Enforced by 'lxc' and 'appcontainer' containment backends."
+          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Enforced by 'lxc' and 'processcontainer' containment backends."
         },
         "blockedHosts": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc' and 'appcontainer' containment backends."
+          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc' and 'processcontainer' containment backends."
         },
         "proxy": {
           "type": "object",
-          "description": "Proxy configuration. Only supported with appcontainer backend.",
+          "description": "Proxy configuration. Only supported with processcontainer backend.",
           "oneOf": [
             {
               "properties": {
@@ -176,9 +196,9 @@
       }
     },
 
-    "appContainer": {
+    "processContainer": {
       "type": "object",
-      "description": "AppContainer-specific settings. Used when containment is 'appcontainer'.",
+      "description": "ProcessContainer-specific settings. Used when containment is 'processcontainer'. The runner picks the legacy AppContainer implementation (which honors `capabilities` and `leastPrivilege`) or the newer BaseContainer implementation (which honors `ui`) at run time based on the host OS and the --experimental flag.",
       "properties": {
         "leastPrivilege": {
           "type": "boolean",
@@ -309,19 +329,81 @@
             }
           }
         },
-        "macos_sandbox": {
+        "seatbelt": {
           "type": "object",
-          "description": "macOS sandbox backend (experimental). Used when containment is 'macos_sandbox'.",
+          "description": "macOS sandbox backend (experimental). Used when containment is 'seatbelt'.",
           "properties": {
-            "mode": {
-              "type": "string",
-              "enum": ["exec", "inproc"],
-              "default": "exec",
-              "description": "How the sandbox profile is applied: 'exec' spawns /usr/bin/sandbox-exec; 'inproc' calls sandbox_init_with_parameters after fork (uses a private macOS API)."
-            },
             "profileOverride": {
               "type": "string",
               "description": "Optional override of the generated TinyScheme sandbox profile."
+            }
+          }
+        },
+        "isolation_session": {
+          "type": "object",
+          "description": "IsolationSession backend (experimental, Windows-only). Used when containment is 'isolation_session'. For one-shot requests, set 'configurationId' directly on this object. For state-aware requests, place per-phase configuration under 'provision', 'start', 'stop', or 'deprovision'.",
+          "properties": {
+            "configurationId": {
+              "type": "string",
+              "enum": ["small", "medium", "large", "composable"],
+              "default": "composable",
+              "description": "IsoSession configuration ID for one-shot requests. For state-aware requests, place this under 'start.configurationId' instead. Unknown values are accepted but warned and downgraded to 'composable'."
+            },
+            "provision": {
+              "type": "object",
+              "description": "State-aware: provision-phase configuration.",
+              "properties": {
+                "user": {
+                  "type": "object",
+                  "description": "Optional Entra credentials. When supplied, provisioning uses the Entra identity for the sandbox; the same 'user' must be supplied at start.",
+                  "required": ["upn", "wamToken"],
+                  "properties": {
+                    "upn": {
+                      "type": "string",
+                      "description": "User Principal Name (must contain '@' not at either boundary)."
+                    },
+                    "wamToken": {
+                      "type": "string",
+                      "description": "WAM token for the Entra identity. Treat as a secret."
+                    }
+                  }
+                }
+              }
+            },
+            "start": {
+              "type": "object",
+              "description": "State-aware: start-phase configuration.",
+              "properties": {
+                "configurationId": {
+                  "type": "string",
+                  "enum": ["small", "medium", "large", "composable"],
+                  "default": "composable",
+                  "description": "IsoSession configuration ID. Unknown values are accepted but warned and downgraded to 'composable'."
+                },
+                "user": {
+                  "type": "object",
+                  "description": "Required when the sandbox was provisioned with a 'user' bundle; rejected otherwise. When required, 'upn' must match the UPN supplied at provision (case-insensitive).",
+                  "required": ["upn", "wamToken"],
+                  "properties": {
+                    "upn": {
+                      "type": "string",
+                      "description": "User Principal Name (must contain '@' not at either boundary)."
+                    },
+                    "wamToken": {
+                      "type": "string",
+                      "description": "WAM token for the Entra identity. Treat as a secret."
+                    }
+                  }
+                }
+              }
+            },
+            "stop": {
+              "type": "object",
+              "description": "State-aware: stop-phase configuration. No fields defined yet."
+            },
+            "deprovision": {
+              "type": "object",
+              "description": "State-aware: deprovision-phase configuration. No fields defined yet."
             }
           }
         }

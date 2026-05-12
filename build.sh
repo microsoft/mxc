@@ -13,6 +13,8 @@ CLI_DIR="$SCRIPT_DIR/cli"
 BUILD_TYPE="release"
 BUILD_SDK=true
 
+WITH_HYPERLIGHT=false
+
 while [[ $# -gt 0 ]]; do
     case $1 in
         --debug)
@@ -23,13 +25,18 @@ while [[ $# -gt 0 ]]; do
             BUILD_SDK=false
             shift
             ;;
+        --with-hyperlight)
+            WITH_HYPERLIGHT=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: build.sh [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --debug       Build in debug mode (default: release)"
-            echo "  --rust-only   Only build Rust binaries, skip SDK/CLI"
-            echo "  -h, --help    Show this help message"
+            echo "  --debug             Build in debug mode (default: release)"
+            echo "  --rust-only         Only build Rust binaries, skip SDK/CLI"
+            echo "  --with-hyperlight   Build with Hyperlight (micro-VM) backend (x86_64 only)"
+            echo "  -h, --help          Show this help message"
             exit 0
             ;;
         *)
@@ -57,11 +64,22 @@ echo ""
 echo "=== Building Rust binaries ($BUILD_TYPE) ==="
 cd "$SRC_DIR"
 
-if [ "$BUILD_TYPE" = "release" ]; then
-    cargo build --release -p lxc
-else
-    cargo build -p lxc
+CARGO_FEATURES=""
+if [ "$WITH_HYPERLIGHT" = true ]; then
+    CARGO_FEATURES="--features hyperlight"
 fi
+
+if [ "$BUILD_TYPE" = "release" ]; then
+    cargo build --release -p lxc $CARGO_FEATURES
+else
+    cargo build -p lxc $CARGO_FEATURES
+fi
+
+echo "  Check formatting"
+cargo fmt --all -- --check
+
+echo "  Check linting"
+cargo clippy --workspace --all-targets -- -D warnings
 
 echo "Rust build complete."
 

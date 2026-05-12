@@ -1,0 +1,17 @@
+[package]
+name = "seatbelt_common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Provides CodexRequest, ContainerPolicy, SeatbeltConfig, Logger, and
+# the ScriptRunner trait that seatbelt_runner implements. Same dep that
+# lxc_common uses.
+wxc_common = { workspace = true }
+
+# tempfile is used by seatbelt_runner to materialize the generated `.sb`
+# profile so /usr/bin/sandbox-exec -f <path> can read it. macOS-only:
+# the runner module itself is `#[cfg(target_os = "macos")]`, so on other
+# hosts this dep is unused at link time.
+[target.'cfg(target_os = "macos")'.dependencies]
+tempfile = "3"

@@ -5,6 +5,8 @@
 pub mod config_parser;
 pub mod encoding;
 pub mod error;
+#[cfg(feature = "hyperlight")]
+pub mod hyperlight_runner;
 pub mod id;
 pub mod logger;
 #[cfg(target_os = "windows")]
@@ -17,6 +19,7 @@ pub mod script_runner;
 pub mod state_aware_backend;
 pub mod state_aware_dispatch;
 pub mod state_aware_request;
+pub mod ui_policy;
 pub mod validator;
 
 // Windows-specific modules
@@ -25,7 +28,11 @@ pub mod appcontainer_runner;
 #[cfg(target_os = "windows")]
 pub mod filesystem_bfs;
 #[cfg(target_os = "windows")]
+pub mod job_object;
+#[cfg(target_os = "windows")]
 pub mod network_manager;
+#[cfg(target_os = "windows")]
+pub mod process_mitigation;
 #[cfg(target_os = "windows")]
 pub mod process_util;
 #[cfg(target_os = "windows")]

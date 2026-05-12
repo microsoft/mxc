@@ -131,7 +131,7 @@ Execute your script with AppContainer in permissive learning mode:
 ```json
 {
   "script": "your_code_here",
-  "appContainer": {
+  "processContainer": {
     "capabilities": ["permissiveLearningMode"]
   }
 }

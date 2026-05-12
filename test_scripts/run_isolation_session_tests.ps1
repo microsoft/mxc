@@ -119,7 +119,8 @@ function Run-IsolationSessionTest {
     param(
         [string]$ConfigFile,
         [int]$ExpectedExit = 0,
-        [string[]]$OutputContains = @()
+        [string[]]$OutputContains = @(),
+        [string[]]$OutputLineNotEqual = @()
     )
 
     $configPath = Join-Path $ConfigDir $ConfigFile
@@ -160,6 +161,19 @@ function Run-IsolationSessionTest {
             if (-not $output.Contains($needle)) {
                 $pass = $false
                 $reason = "Output missing '$needle'"
+                break
+            }
+        }
+    }
+
+    if ($pass -and $OutputLineNotEqual) {
+        $lines = $output -split "`r?`n" | ForEach-Object { $_.Trim() }
+        foreach ($needle in $OutputLineNotEqual) {
+            $needleLower = $needle.ToLower()
+            $hit = $lines | Where-Object { $_.ToLower() -eq $needleLower } | Select-Object -First 1
+            if ($hit) {
+                $pass = $false
+                $reason = "Output has line equal to '$needle'"
                 break
             }
         }
@@ -214,12 +228,15 @@ try {
 Write-Host "--- Tests ---" -ForegroundColor Cyan
 # Setup for isolation_session_hello.json: cwd must exist before agent start.
 New-Item -Path 'C:\mxc_workdir_test' -ItemType Directory -Force | Out-Null
+$HostWhoami = (& whoami).Trim()
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
-    -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test", "-IEB-")))
+    -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test") `
+    -OutputLineNotEqual @($HostWhoami)))
 # Same shape as hello.json but with experimental.isolation_session.configurationId=medium.
 # Proves the Medium config-id end-to-ends through the one-shot path on the target build.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello_medium.json" `
-    -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test", "-IEB-")))
+    -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test") `
+    -OutputLineNotEqual @($HostWhoami)))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
 # stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
@@ -243,6 +260,13 @@ Setup-LockedDownTestDir $FsTestRoot
 $FsMarkerContent | Set-Content -Path (Join-Path $FsTestRoot 'marker.txt') -NoNewline
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_filesystem.json" `
     -OutputContains @($FsMarkerContent)))
+
+# One-shot rejection: experimental.isolation_session.user is only honored on
+# the state-aware path. validate_runner rejects any one-shot request that
+# carries the user bundle so callers do not silently get a non-Entra agent.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_user_rejected.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("user is not supported in one-shot mode")))
 
 } finally {
     Remove-Item -Recurse -Force $FsTestRoot -ErrorAction SilentlyContinue

@@ -30,6 +30,8 @@ export {
   SandboxPolicy,
   SandboxingMethod,
   ContainmentType,
+  ContainmentTypes,
+  ContainmentBackend,
   ExperimentalBackends,
   ContainerConfig,
   PlatformSupport,
@@ -58,3 +60,50 @@ export {
   FilesystemPolicyResult,
   ToolsPolicyOptions,
 } from './policy.js';
+
+// Export typed wire-format errors
+export {
+  ErrorCode,
+  MxcError,
+  mxcErrorFromCode,
+} from './errors.js';
+
+// Export state-aware lifecycle types
+export {
+  Phase,
+  StateAwareContainmentBackend,
+  SandboxId,
+  IsolationSessionUserConfig,
+  IsolationSessionProvisionConfig,
+  IsolationSessionStartConfig,
+  IsolationSessionExecConfig,
+  IsolationSessionStopConfig,
+  IsolationSessionDeprovisionConfig,
+  IsolationSessionProvisionMetadata,
+  ConfigsForBackend,
+  ProvisionConfigFor,
+  StartConfigFor,
+  ExecConfigFor,
+  StopConfigFor,
+  DeprovisionConfigFor,
+  StateAwareMetadata,
+  ProvisionMetadataFor,
+  StartMetadataFor,
+  StopMetadataFor,
+  DeprovisionMetadataFor,
+  ProvisionResult,
+  StartResult,
+  StopResult,
+  DeprovisionResult,
+  ExecResult,
+} from './state-aware-types.js';
+
+// Export state-aware lifecycle functions
+export {
+  provisionSandbox,
+  startSandbox,
+  execInSandbox,
+  execInSandboxAsync,
+  stopSandbox,
+  deprovisionSandbox,
+} from './state-aware.js';

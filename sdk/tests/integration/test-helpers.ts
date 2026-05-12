@@ -3,12 +3,20 @@
 
 import { spawn, ChildProcess, execSync } from 'child_process';
 import assert from 'node:assert';
+import type { TestContext } from 'node:test';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import semver from 'semver';
 import { createRequire } from 'node:module';
 import * as sdkNamespace from '@microsoft/mxc-sdk';
+import {
+  MxcError,
+  deprovisionSandbox,
+  provisionSandbox,
+  type SandboxId,
+  type StateAwareContainmentBackend,
+} from '@microsoft/mxc-sdk';
 
 const require = createRequire(import.meta.url);
 export const sdk = sdkNamespace;
@@ -17,7 +25,7 @@ export const sdk = sdkNamespace;
 
 export const supportedVersions = [
   new semver.SemVer('0.4.0-alpha'),
-  new semver.SemVer('0.5.0-dev'),
+  new semver.SemVer('0.5.0-alpha'),
 ];
 
 // SDK package location
@@ -151,6 +159,79 @@ const skipLxcNetworkTests = process.env.MXC_SKIP_LXC_NETWORK_TESTS === '1';
 export const lxcNetworkSkipReason = skipLxcNetworkTests
   ? 'Skipped: LXC network not available in this environment (MXC_SKIP_LXC_NETWORK_TESTS)'
   : undefined;
+
+// State-aware lifecycle helpers
+
+/**
+ * Wraps a state-aware SDK call, skipping the test (rather than failing) when
+ * the executor reports `backend_unavailable` or `unsupported_phase` — either
+ * indicates this environment cannot exercise the lifecycle. Other errors
+ * propagate.
+ */
+export async function runOrSkipIfBackendUnavailable<T>(
+  t: TestContext,
+  label: string,
+  fn: () => Promise<T>,
+): Promise<T | undefined> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof MxcError && err.code === 'backend_unavailable') {
+      t.skip(`${label}: state-aware backend runtime unavailable on this host`);
+      return undefined;
+    }
+    if (err instanceof MxcError && err.code === 'unsupported_phase') {
+      // wxc-exec was built without the backend's feature flag, so the
+      // state-aware dispatch path is compiled out. Same outcome from the
+      // test's perspective as a host without the runtime: cannot exercise
+      // the lifecycle, skip rather than fail.
+      t.skip(`${label}: wxc-exec lacks the backend feature; rebuild with the feature flag to run this test`);
+      return undefined;
+    }
+    throw err;
+  }
+}
+
+/** Deprovision a sandbox best-effort, swallowing errors so cleanup never masks the original failure. */
+export async function safeDeprovision<C extends StateAwareContainmentBackend>(
+  sandboxId: SandboxId<C>,
+): Promise<void> {
+  try {
+    await deprovisionSandbox(sandboxId, undefined, { experimental: true });
+  } catch (err) {
+    console.error(`Cleanup deprovision failed for ${sandboxId}: ${err}`);
+  }
+}
+
+/**
+ * Probes a state-aware backend's runtime by attempting a provision /
+ * deprovision cycle. Returns a skip-reason string when the runtime is
+ * unavailable (`backend_unavailable` or `unsupported_phase`), `undefined`
+ * when the backend can be exercised. Other errors propagate so genuine
+ * failures aren't masked as "skipped." Intended for one-shot probing at
+ * module load — pair the result with `describe`'s `{ skip }` option.
+ */
+export async function probeStateAwareRuntime<C extends StateAwareContainmentBackend>(
+  containment: C,
+): Promise<string | undefined> {
+  try {
+    const provisionResult = await provisionSandbox(
+      containment,
+      undefined,
+      { experimental: true },
+    );
+    await safeDeprovision(provisionResult.sandboxId);
+    return undefined;
+  } catch (err) {
+    if (err instanceof MxcError && err.code === 'backend_unavailable') {
+      return `${containment} runtime unavailable on this host`;
+    }
+    if (err instanceof MxcError && err.code === 'unsupported_phase') {
+      return `wxc-exec lacks the ${containment} feature; rebuild with --features ${containment} to run this test`;
+    }
+    throw err;
+  }
+}
 
 // Temp directory helpers
 
