@@ -637,9 +637,10 @@ fn convert_raw_config_inner(
             );
             ContainmentBackend::Seatbelt
         }
+        Some("hyperlight") => ContainmentBackend::Hyperlight,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm' or 'seatbelt')",
+                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', 'seatbelt', or 'hyperlight')",
                 other
             );
             logger.log_line(&msg);
