@@ -1,0 +1,12 @@
+{
+    "_comment": "End-to-end filesystem test. readwritePaths are exposed to the guest under /host/<basename>. Before running, create /tmp/hyperlight-fs-demo/ and drop a file in it (or let the script create one). After the run, /tmp/hyperlight-fs-demo/written.txt will exist with guest-written content.",
+
+    "process": {
+        "commandLine": "import os\n\nBASE = '/host/hyperlight-fs-demo'\nos.makedirs(BASE, exist_ok=True)\n\n# Write\npath = f'{BASE}/hello.txt'\nwith open(path, 'w') as f:\n    f.write('hello, filesystem!\\n')\n    f.write('line 2\\n')\nprint(f'wrote: {path}')\n\n# Read back\nwith open(path, 'r') as f:\n    print(f'read:\\n{f.read()}')\n\n# Append\nwith open(path, 'a') as f:\n    f.write('appended line\\n')\n\n# Stat\nst = os.stat(path)\nprint(f'size: {st.st_size} bytes')\n\n# Listdir\nprint(f'files in {BASE}: {sorted(os.listdir(BASE))}')\n\n# Write a marker so the host can verify\nwith open(f'{BASE}/written.txt', 'w') as f:\n    f.write('hyperlight was here\\n')\nprint('done')",
+        "timeout": 30000
+    },
+    "containment": "hyperlight",
+    "filesystem": {
+        "readwritePaths": ["../tmp/hyperlight-fs-demo"]
+    }
+}
