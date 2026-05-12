@@ -114,7 +114,7 @@ mxc/src/
 ├── wxc_windows_sandbox_guest/        # UNCHANGED
 └── wxc_windows_sandbox_daemon/       # UNCHANGED
 
-mxc/docs/
+mxc/docs/nanvix-microvm/
 └── nanvix-integration-plan.md        # NEW — this document
 
 mxc/test_configs/

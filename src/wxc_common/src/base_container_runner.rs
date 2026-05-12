@@ -24,7 +24,8 @@ use windows_core::PCWSTR;
 
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ScriptResponse,
+    BaseProcessUiConfig, ClipboardPolicy, CodexRequest, NetworkEnforcementMode, NetworkPolicy,
+    ProxyAddress, ScriptResponse, UiPolicy,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
@@ -81,6 +82,95 @@ impl BaseContainerRunner {
     /// the feature is disabled (e.g., via internal feature-enablement mechanisms).
     pub fn is_base_container_api_present() -> Result<(), String> {
         Self::load_api().map(|_| ())
+    }
+
+    /// JOB_OBJECT_UILIMIT_* flag constants (from base-process-container/UIPolicy_Schema.md).
+    const UILIMIT_HANDLES: u64 = 0x0001;
+    const UILIMIT_READCLIPBOARD: u64 = 0x0002;
+    const UILIMIT_WRITECLIPBOARD: u64 = 0x0004;
+    const UILIMIT_SYSTEMPARAMETERS: u64 = 0x0008;
+    const UILIMIT_DISPLAYSETTINGS: u64 = 0x0010;
+    const UILIMIT_GLOBALATOMS: u64 = 0x0020;
+    const UILIMIT_DESKTOP: u64 = 0x0040;
+    const UILIMIT_EXITWINDOWS: u64 = 0x0080;
+    const UILIMIT_IME: u64 = 0x0100;
+    const UILIMIT_INJECTION: u64 = 0x0200;
+
+    /// Build the JOB_OBJECT_UILIMIT_* bitmask from the cross-platform UI policy
+    /// and the BaseProcessContainer-specific UI config.
+    /// Mapping follows docs/base-process-container/UIPolicy_Schema.md.
+    fn ui_restrictions_bitmask(ui: &UiPolicy, base_proc_ui: &BaseProcessUiConfig) -> u64 {
+        // When UI is fully disabled: DisallowWin32kSystemCalls handles everything
+        // except atoms (NT executive syscalls, not Win32k). Only set GLOBALATOMS.
+        if ui.disable {
+            return Self::UILIMIT_GLOBALATOMS;
+        }
+
+        let mut mask: u64 = 0;
+
+        // Cross-platform: clipboard (default: "none" = block both)
+        match ui.clipboard {
+            ClipboardPolicy::All => {}
+            ClipboardPolicy::Read => {
+                mask |= Self::UILIMIT_WRITECLIPBOARD;
+            }
+            ClipboardPolicy::Write => {
+                mask |= Self::UILIMIT_READCLIPBOARD;
+            }
+            // "none" or unrecognized → default-deny: block both
+            _ => {
+                mask |= Self::UILIMIT_READCLIPBOARD | Self::UILIMIT_WRITECLIPBOARD;
+            }
+        }
+
+        // Cross-platform: input injection
+        if !ui.injection {
+            mask |= Self::UILIMIT_INJECTION;
+        }
+
+        // Backend-specific: isolation level (default: "container" = HANDLES + GLOBALATOMS)
+        match base_proc_ui.isolation.as_str() {
+            "desktop" => {
+                // No isolation flags
+            }
+            "handles" => {
+                mask |= Self::UILIMIT_HANDLES;
+            }
+            "atoms" => {
+                mask |= Self::UILIMIT_GLOBALATOMS;
+            }
+            // "container" or unrecognized → default-deny: full isolation
+            _ => {
+                mask |= Self::UILIMIT_HANDLES | Self::UILIMIT_GLOBALATOMS;
+            }
+        }
+
+        // Backend-specific: desktop system control
+        if !base_proc_ui.desktop_system_control {
+            mask |= Self::UILIMIT_DESKTOP | Self::UILIMIT_EXITWINDOWS;
+        }
+
+        // Backend-specific: system settings (default: "none" = block all)
+        match base_proc_ui.system_settings.as_str() {
+            "all" => {}
+            "parameters" => {
+                mask |= Self::UILIMIT_DISPLAYSETTINGS;
+            }
+            "display" => {
+                mask |= Self::UILIMIT_SYSTEMPARAMETERS;
+            }
+            // "none" or unrecognized → default-deny: block all
+            _ => {
+                mask |= Self::UILIMIT_SYSTEMPARAMETERS | Self::UILIMIT_DISPLAYSETTINGS;
+            }
+        }
+
+        // Backend-specific: IME
+        if !base_proc_ui.ime {
+            mask |= Self::UILIMIT_IME;
+        }
+
+        mask
     }
 
     /// Build a FlatBuffer `SandboxSpec` from the container policy in the request.
@@ -174,12 +264,8 @@ impl BaseContainerRunner {
         };
 
         // UI restrictions
-        let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
-            &crate::ui_policy::resolve_ui_restrictions(
-                &request.policy.ui,
-                &request.policy.base_process_ui,
-            ),
-        ) as u64;
+        let ui_restrictions =
+            Self::ui_restrictions_bitmask(&request.policy.ui, &request.policy.base_process_ui);
 
         let spec = SandboxSpec::create(
             &mut builder,
@@ -306,11 +392,8 @@ impl ScriptRunner for BaseContainerRunner {
             let _ = writeln!(logger, "proxy URL in spec: {}", addr.to_url());
         }
 
-        let restrictions = crate::ui_policy::resolve_ui_restrictions(
-            &request.policy.ui,
-            &request.policy.base_process_ui,
-        );
-        let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(&restrictions);
+        let ui_restrictions =
+            Self::ui_restrictions_bitmask(&request.policy.ui, &request.policy.base_process_ui);
         let _ = writeln!(
             logger,
             "sandbox spec built (version={}, {} bytes)",
@@ -340,16 +423,16 @@ impl ScriptRunner for BaseContainerRunner {
         let _ = writeln!(
             logger,
             "UILIMIT flags: HANDLES={} READCLIP={} WRITECLIP={} SYSPARAM={} DISPLAY={} ATOMS={} DESKTOP={} EXIT={} IME={} INJECT={}",
-            restrictions.block_external_ui_objects,
-            restrictions.block_clipboard_read,
-            restrictions.block_clipboard_write,
-            restrictions.block_system_parameter_changes,
-            restrictions.block_display_settings_changes,
-            restrictions.block_global_ui_namespace,
-            restrictions.block_desktop_switching,
-            restrictions.block_logoff_or_shutdown,
-            restrictions.block_input_method_changes,
-            restrictions.block_input_injection,
+            ui_restrictions & Self::UILIMIT_HANDLES != 0,
+            ui_restrictions & Self::UILIMIT_READCLIPBOARD != 0,
+            ui_restrictions & Self::UILIMIT_WRITECLIPBOARD != 0,
+            ui_restrictions & Self::UILIMIT_SYSTEMPARAMETERS != 0,
+            ui_restrictions & Self::UILIMIT_DISPLAYSETTINGS != 0,
+            ui_restrictions & Self::UILIMIT_GLOBALATOMS != 0,
+            ui_restrictions & Self::UILIMIT_DESKTOP != 0,
+            ui_restrictions & Self::UILIMIT_EXITWINDOWS != 0,
+            ui_restrictions & Self::UILIMIT_IME != 0,
+            ui_restrictions & Self::UILIMIT_INJECTION != 0,
         );
 
         let _ = writeln!(logger, "SECTION: Load API");
@@ -489,14 +572,8 @@ impl ScriptRunner for BaseContainerRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job_object::to_job_object_uilimit_mask;
-    use crate::models::{ClipboardPolicy, ProxyConfig, UiPolicy};
-    use crate::ui_policy::EffectiveUiRestrictions;
+    use crate::models::ProxyConfig;
     use sandbox_spec::base_container_layout;
-
-    fn expected_mask(r: EffectiveUiRestrictions) -> u64 {
-        to_job_object_uilimit_mask(&r) as u64
-    }
 
     #[test]
     fn build_sandbox_spec_produces_valid_flatbuffer() {
@@ -521,14 +598,10 @@ mod tests {
         assert!(spec.least_privilege());
         assert_eq!(spec.capabilities(), Some("internetClient,registryRead"));
         assert!(spec.disallow_win32k_system_calls());
-        // default: disable=true → only the global UI namespace bit
         assert_eq!(
             spec.ui_restrictions(),
-            expected_mask(EffectiveUiRestrictions {
-                block_global_ui_namespace: true,
-                ..Default::default()
-            })
-        );
+            BaseContainerRunner::UILIMIT_GLOBALATOMS
+        ); // default: disable=true → only GLOBALATOMS
 
         let rw = spec.fs_read_write().unwrap();
         assert_eq!(rw.len(), 1);
@@ -575,6 +648,8 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_ui_disabled() {
+        use crate::models::UiPolicy;
+
         let mut request = CodexRequest::default();
         request.policy.ui = UiPolicy {
             disable: true,
@@ -585,13 +660,10 @@ mod tests {
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
 
         assert!(spec.disallow_win32k_system_calls());
-        // disable=true → only the global UI namespace bit (Win32k disable handles the rest)
+        // disable=true → only GLOBALATOMS (Win32k disable handles the rest)
         assert_eq!(
             spec.ui_restrictions(),
-            expected_mask(EffectiveUiRestrictions {
-                block_global_ui_namespace: true,
-                ..Default::default()
-            })
+            BaseContainerRunner::UILIMIT_GLOBALATOMS
         );
     }
 
@@ -610,20 +682,15 @@ mod tests {
         assert!(!spec.disallow_win32k_system_calls());
         // WRITECLIPBOARD + backend defaults (isolation=container: HANDLES+GLOBALATOMS,
         // desktopSystemControl=false: DESKTOP+EXITWINDOWS, systemSettings=none: SYSTEMPARAMETERS+DISPLAYSETTINGS, ime=false: IME)
-        assert_eq!(
-            spec.ui_restrictions(),
-            expected_mask(EffectiveUiRestrictions {
-                block_clipboard_write: true,
-                block_external_ui_objects: true,
-                block_global_ui_namespace: true,
-                block_desktop_switching: true,
-                block_logoff_or_shutdown: true,
-                block_system_parameter_changes: true,
-                block_display_settings_changes: true,
-                block_input_method_changes: true,
-                ..Default::default()
-            })
-        );
+        let expected = BaseContainerRunner::UILIMIT_WRITECLIPBOARD
+            | BaseContainerRunner::UILIMIT_HANDLES
+            | BaseContainerRunner::UILIMIT_GLOBALATOMS
+            | BaseContainerRunner::UILIMIT_DESKTOP
+            | BaseContainerRunner::UILIMIT_EXITWINDOWS
+            | BaseContainerRunner::UILIMIT_SYSTEMPARAMETERS
+            | BaseContainerRunner::UILIMIT_DISPLAYSETTINGS
+            | BaseContainerRunner::UILIMIT_IME;
+        assert_eq!(spec.ui_restrictions(), expected);
     }
 
     #[test]
@@ -640,20 +707,15 @@ mod tests {
 
         assert!(!spec.disallow_win32k_system_calls());
         // INJECTION + backend defaults
-        assert_eq!(
-            spec.ui_restrictions(),
-            expected_mask(EffectiveUiRestrictions {
-                block_input_injection: true,
-                block_external_ui_objects: true,
-                block_global_ui_namespace: true,
-                block_desktop_switching: true,
-                block_logoff_or_shutdown: true,
-                block_system_parameter_changes: true,
-                block_display_settings_changes: true,
-                block_input_method_changes: true,
-                ..Default::default()
-            })
-        );
+        let expected = BaseContainerRunner::UILIMIT_INJECTION
+            | BaseContainerRunner::UILIMIT_HANDLES
+            | BaseContainerRunner::UILIMIT_GLOBALATOMS
+            | BaseContainerRunner::UILIMIT_DESKTOP
+            | BaseContainerRunner::UILIMIT_EXITWINDOWS
+            | BaseContainerRunner::UILIMIT_SYSTEMPARAMETERS
+            | BaseContainerRunner::UILIMIT_DISPLAYSETTINGS
+            | BaseContainerRunner::UILIMIT_IME;
+        assert_eq!(spec.ui_restrictions(), expected);
     }
 
     #[test]
@@ -681,5 +743,74 @@ mod tests {
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
         assert!(spec.network_policy().is_none());
+    }
+
+    #[test]
+    fn ui_bitmask_disabled() {
+        use crate::models::BaseProcessUiConfig;
+        let ui = UiPolicy {
+            disable: true,
+            ..Default::default()
+        };
+        let bp = BaseProcessUiConfig::default();
+        // disable=true → only GLOBALATOMS
+        assert_eq!(
+            BaseContainerRunner::ui_restrictions_bitmask(&ui, &bp),
+            BaseContainerRunner::UILIMIT_GLOBALATOMS
+        );
+    }
+
+    #[test]
+    fn ui_bitmask_default_deny() {
+        use crate::models::BaseProcessUiConfig;
+        // UiPolicy default: disable=true → only GLOBALATOMS
+        assert_eq!(
+            BaseContainerRunner::ui_restrictions_bitmask(
+                &UiPolicy::default(),
+                &BaseProcessUiConfig::default()
+            ),
+            BaseContainerRunner::UILIMIT_GLOBALATOMS
+        );
+    }
+
+    #[test]
+    fn ui_bitmask_clipboard_read_with_default_backend() {
+        use crate::models::BaseProcessUiConfig;
+        let ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::Read,
+            injection: true,
+        };
+        let bp = BaseProcessUiConfig::default(); // isolation=container, desktopSystemControl=false, systemSettings=none, ime=false
+        let expected = BaseContainerRunner::UILIMIT_WRITECLIPBOARD
+            | BaseContainerRunner::UILIMIT_HANDLES
+            | BaseContainerRunner::UILIMIT_GLOBALATOMS
+            | BaseContainerRunner::UILIMIT_DESKTOP
+            | BaseContainerRunner::UILIMIT_EXITWINDOWS
+            | BaseContainerRunner::UILIMIT_SYSTEMPARAMETERS
+            | BaseContainerRunner::UILIMIT_DISPLAYSETTINGS
+            | BaseContainerRunner::UILIMIT_IME;
+        assert_eq!(
+            BaseContainerRunner::ui_restrictions_bitmask(&ui, &bp),
+            expected
+        );
+    }
+
+    #[test]
+    fn ui_bitmask_no_backend_restrictions() {
+        use crate::models::BaseProcessUiConfig;
+        let ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::All,
+            injection: true,
+        };
+        let bp = BaseProcessUiConfig {
+            isolation: "desktop".to_string(),
+            desktop_system_control: true,
+            system_settings: "all".to_string(),
+            ime: true,
+        };
+        // No cross-platform restrictions + no backend restrictions = 0
+        assert_eq!(BaseContainerRunner::ui_restrictions_bitmask(&ui, &bp), 0);
     }
 }
