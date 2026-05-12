@@ -3,12 +3,14 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import { inspect } from 'node:util';
 import {
   ConfigsForBackend,
   DeprovisionConfigFor,
   ExecConfigFor,
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
+  IsolationSessionUserConfig,
   ProvisionResult,
   SandboxId,
   StopConfigFor,
@@ -57,6 +59,18 @@ describe('IsolationSessionProvisionConfig', () => {
     assert.ok(withNetwork);
     assert.ok(withUi);
   });
+
+  it('accepts user only as an IsolationSessionUserConfig instance', () => {
+    const ok: IsolationSessionProvisionConfig = {
+      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+    };
+    const bare: IsolationSessionProvisionConfig = {
+      // @ts-expect-error — user must be constructed via IsolationSessionUserConfig for wamToken redaction.
+      user: { upn: 'alice@contoso.com', wamToken: 'tok' },
+    };
+    assert.strictEqual(ok.user?.upn, 'alice@contoso.com');
+    assert.ok(bare);
+  });
 });
 
 describe('IsolationSessionStartConfig', () => {
@@ -77,6 +91,36 @@ describe('IsolationSessionStartConfig', () => {
       configurationId: 'xlarge',
     };
     assert.ok(bogus);
+  });
+
+  it('accepts user only as an IsolationSessionUserConfig instance', () => {
+    const ok: IsolationSessionStartConfig = {
+      configurationId: 'composable',
+      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+    };
+    const bare: IsolationSessionStartConfig = {
+      // @ts-expect-error — user must be constructed via IsolationSessionUserConfig for wamToken redaction.
+      user: { upn: 'alice@contoso.com', wamToken: 'tok' },
+    };
+    assert.strictEqual(ok.user?.wamToken, 'tok');
+    assert.ok(bare);
+  });
+});
+
+describe('IsolationSessionUserConfig', () => {
+  it('redacts wamToken under util.inspect', () => {
+    const user = new IsolationSessionUserConfig('alice@contoso.com', 'super-secret');
+    const inspected = inspect(user);
+    assert.ok(inspected.includes('alice@contoso.com'), `got: ${inspected}`);
+    assert.ok(inspected.includes('<redacted>'), `got: ${inspected}`);
+    assert.ok(!inspected.includes('super-secret'), `got: ${inspected}`);
+  });
+
+  it('JSON.stringify preserves both fields for wire serialisation', () => {
+    const user = new IsolationSessionUserConfig('alice@contoso.com', 'super-secret');
+    const json = JSON.parse(JSON.stringify(user));
+    assert.strictEqual(json.upn, 'alice@contoso.com');
+    assert.strictEqual(json.wamToken, 'super-secret');
   });
 });
 

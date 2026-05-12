@@ -187,7 +187,7 @@ read from the same source, eliminating drift.
 
 A second const, `const BACKEND_KEY: &'static str`, lives alongside `ID_PREFIX` on the
 trait (§9.2). It carries the wire-format `containment` value for the backend (e.g.,
-`"isolation_session"`) and matches the SDK's `StateAwareSandboxingMethod` member name.
+`"isolation_session"`) and matches the SDK's `StateAwareContainmentBackend` member name.
 The dispatcher uses it to navigate `experimental.<BACKEND_KEY>.<phase>` for typed-config
 deserialisation and to resolve `provision`-phase requests whose wire `containment`
 string maps to this backend. `ID_PREFIX` and `BACKEND_KEY` are deliberately distinct
@@ -199,7 +199,7 @@ are not forced to repeat that length in every persisted sandbox id.
 The SDK exposes the id as a branded TypeScript string parameterised by backend:
 
 ```typescript
-type SandboxId<C extends StateAwareSandboxingMethod> =
+type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 ```
 
@@ -243,12 +243,12 @@ directly on the per-(backend, phase) Configs introduced below.
 ### 6.1 Type definitions
 
 ```typescript
-type SandboxId<C extends StateAwareSandboxingMethod> =
+type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
 type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
 
-type StateAwareSandboxingMethod = Extract<ContainmentBackend, 'isolation_session'>;
+type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session'>;
 // extended as state-aware-capable backends are added
 
 // Per-(backend, phase) Configs. Each declares only the fields valid for that backend
@@ -289,7 +289,7 @@ interface IsolationSessionProvisionMetadata {
 // Backend Config bundle — outer keys are state-aware-capable backends; inner per-phase
 // entries carry the typed per-(backend, phase) Config. Used by the generic per-phase
 // helpers below.
-type ConfigsForBackend<C extends StateAwareSandboxingMethod> =
+type ConfigsForBackend<C extends StateAwareContainmentBackend> =
   C extends 'isolation_session' ? {
     provision: IsolationSessionProvisionConfig;
     start: IsolationSessionStartConfig;
@@ -298,15 +298,15 @@ type ConfigsForBackend<C extends StateAwareSandboxingMethod> =
     deprovision: IsolationSessionDeprovisionConfig;
   } : never;
 
-type ProvisionConfigFor<C extends StateAwareSandboxingMethod> =
+type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['provision'];
-type StartConfigFor<C extends StateAwareSandboxingMethod> =
+type StartConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['start'];
-type ExecConfigFor<C extends StateAwareSandboxingMethod> =
+type ExecConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['exec'];
-type StopConfigFor<C extends StateAwareSandboxingMethod> =
+type StopConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['stop'];
-type DeprovisionConfigFor<C extends StateAwareSandboxingMethod> =
+type DeprovisionConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['deprovision'];
 
 // Per-backend metadata bundle. Backends omit phases that return no metadata.
@@ -318,37 +318,37 @@ interface StateAwareMetadata {
   // future state-aware-capable backends add typed entries here
 }
 
-type ProvisionMetadataFor<C extends StateAwareSandboxingMethod> =
+type ProvisionMetadataFor<C extends StateAwareContainmentBackend> =
   'provision' extends keyof NonNullable<StateAwareMetadata[C]>
     ? NonNullable<StateAwareMetadata[C]>['provision']
     : undefined;
-type StartMetadataFor<C extends StateAwareSandboxingMethod> =
+type StartMetadataFor<C extends StateAwareContainmentBackend> =
   'start' extends keyof NonNullable<StateAwareMetadata[C]>
     ? NonNullable<StateAwareMetadata[C]>['start']
     : undefined;
-type StopMetadataFor<C extends StateAwareSandboxingMethod> =
+type StopMetadataFor<C extends StateAwareContainmentBackend> =
   'stop' extends keyof NonNullable<StateAwareMetadata[C]>
     ? NonNullable<StateAwareMetadata[C]>['stop']
     : undefined;
-type DeprovisionMetadataFor<C extends StateAwareSandboxingMethod> =
+type DeprovisionMetadataFor<C extends StateAwareContainmentBackend> =
   'deprovision' extends keyof NonNullable<StateAwareMetadata[C]>
     ? NonNullable<StateAwareMetadata[C]>['deprovision']
     : undefined;
 
-interface ProvisionResult<C extends StateAwareSandboxingMethod> {
+interface ProvisionResult<C extends StateAwareContainmentBackend> {
   sandboxId: SandboxId<C>;
   metadata?: ProvisionMetadataFor<C>;
 }
 
-interface StartResult<C extends StateAwareSandboxingMethod> {
+interface StartResult<C extends StateAwareContainmentBackend> {
   metadata?: StartMetadataFor<C>;
 }
 
-interface StopResult<C extends StateAwareSandboxingMethod> {
+interface StopResult<C extends StateAwareContainmentBackend> {
   metadata?: StopMetadataFor<C>;
 }
 
-interface DeprovisionResult<C extends StateAwareSandboxingMethod> {
+interface DeprovisionResult<C extends StateAwareContainmentBackend> {
   metadata?: DeprovisionMetadataFor<C>;
 }
 
@@ -373,7 +373,7 @@ system rejects callers passing those fields to start, exec, stop, or deprovision
 explains how the matrix lands at compile time on the SDK and at runtime in Rust).
 Phases with no backend-specific or cross-cutting fields declare a Config carrying only
 `version?` — explicit and minimal. Adding a future state-aware backend is a localised
-change: extend `StateAwareSandboxingMethod`, define five new `*Config` interfaces, and
+change: extend `StateAwareContainmentBackend`, define five new `*Config` interfaces, and
 add an arm to `ConfigsForBackend`.
 
 Each Config carries an optional `version?: string`. When omitted, the SDK fills in its
@@ -385,37 +385,37 @@ version when debugging or testing version negotiation.
 ### 6.2 Method signatures
 
 ```typescript
-function provisionSandbox<C extends StateAwareSandboxingMethod>(
+function provisionSandbox<C extends StateAwareContainmentBackend>(
   containment: C,
   config?: ProvisionConfigFor<C>,
   options?: SandboxSpawnOptions,
 ): Promise<ProvisionResult<C>>;
 
-function startSandbox<C extends StateAwareSandboxingMethod>(
+function startSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config?: StartConfigFor<C>,
   options?: SandboxSpawnOptions,
 ): Promise<StartResult<C>>;
 
-function execInSandbox<C extends StateAwareSandboxingMethod>(
+function execInSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options?: SandboxSpawnOptions,
 ): pty.IPty;
 
-function execInSandboxAsync<C extends StateAwareSandboxingMethod>(
+function execInSandboxAsync<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options?: SandboxSpawnOptions,
 ): Promise<ExecResult>;
 
-function stopSandbox<C extends StateAwareSandboxingMethod>(
+function stopSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config?: StopConfigFor<C>,
   options?: SandboxSpawnOptions,
 ): Promise<StopResult<C>>;
 
-function deprovisionSandbox<C extends StateAwareSandboxingMethod>(
+function deprovisionSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config?: DeprovisionConfigFor<C>,
   options?: SandboxSpawnOptions,
@@ -512,7 +512,7 @@ per-(backend, phase) Configs and does not involve `SandboxPolicy` at all. A back
 that participates in both modes can be invoked through either surface; a backend that
 participates in only one returns `unsupported_phase` from the other (§8).
 
-State-aware-capable backends extend `ContainmentBackend` and `StateAwareSandboxingMethod`
+State-aware-capable backends extend `ContainmentBackend` and `StateAwareContainmentBackend`
 the same way ephemeral backends extend `ContainmentBackend`. Cancellation via
 `AbortSignal` is supported on all state-aware methods (via `signal?: AbortSignal` on
 `SandboxSpawnOptions`). Detached / fire-and-forget exec (process outliving the SDK
@@ -561,7 +561,7 @@ interface OneShotRequest {
 interface ProvisionStateAwareRequest {
   phase: 'provision';                             // discriminator
   version?: string;
-  containment: StateAwareSandboxingMethod;
+  containment: StateAwareContainmentBackend;
   filesystem?: FilesystemConfig;                  // backend declares per-phase honor
   network?: NetworkConfig;                        // backend declares per-phase honor
   ui?: UiConfig;                                  // backend declares per-phase honor
@@ -571,7 +571,7 @@ interface ProvisionStateAwareRequest {
 interface NonProvisionStateAwareRequest {
   phase: 'start' | 'exec' | 'stop' | 'deprovision';  // discriminator
   version?: string;
-  sandboxId: SandboxId<StateAwareSandboxingMethod>;  // backend resolved from prefix
+  sandboxId: SandboxId<StateAwareContainmentBackend>;  // backend resolved from prefix
   process?: ProcessConfig;                            // exec only
   filesystem?: FilesystemConfig;                      // backend declares per-phase honor
   network?: NetworkConfig;                            // backend declares per-phase honor
@@ -641,7 +641,7 @@ interface ExperimentalStateAwareConfigs {
 
 | Layer | Wire shape | Constraint |
 |---|---|---|
-| Outer key | `StateAwareSandboxingMethod` member | Must be a state-aware-capable backend |
+| Outer key | `StateAwareContainmentBackend` member | Must be a state-aware-capable backend |
 | Inner key | A subset of `Phase` per backend's needs | Backends omit phases with no backend-specific config |
 | Innermost value | Backend-specific fields only (no cross-cutting, no `version`) | The SDK extracts these from the consumer's per-(backend, phase) Config |
 
@@ -1063,7 +1063,7 @@ pub trait StatefulSandboxBackend {
     const ID_PREFIX: &'static str;
 
     /// Wire-format `containment` value for this backend, matching the SDK's
-    /// `StateAwareSandboxingMethod` member name (e.g. `"isolation_session"`).
+    /// `StateAwareContainmentBackend` member name (e.g. `"isolation_session"`).
     /// The dispatcher uses it to navigate `experimental.<BACKEND_KEY>.<phase>`
     /// for typed-config deserialisation (§9.3), and to resolve `provision`-phase
     /// requests whose wire `containment` string maps to this backend.
@@ -1543,7 +1543,7 @@ The `StatefulSandboxBackend` trait signatures are in §9.2. Declare:
 - `const ID_PREFIX: &'static str` — the leading `<tag>:` segment for this backend's
   `sandbox_id` values; also used by the dispatcher for non-provision routing (§5).
 - `const BACKEND_KEY: &'static str` — the wire-format `containment` value for this
-  backend, matching the SDK's `StateAwareSandboxingMethod` member name (e.g.,
+  backend, matching the SDK's `StateAwareContainmentBackend` member name (e.g.,
   `"isolation_session"`). Used by the dispatcher to navigate
   `experimental.<BACKEND_KEY>.<phase>` for typed-config deserialisation and to resolve
   `provision`-phase requests (§5).
@@ -1591,7 +1591,7 @@ Add an arm to `ConfigsForBackend<C>` mapping the new backend's `ContainmentBacke
 member to its five phase Configs:
 
 ```typescript
-type ConfigsForBackend<C extends StateAwareSandboxingMethod> =
+type ConfigsForBackend<C extends StateAwareContainmentBackend> =
   C extends 'isolation_session' ? { /* IS phase Configs */ } :
   C extends 'my_backend' ? {
     provision: MyBackendProvisionConfig;
@@ -1603,7 +1603,7 @@ type ConfigsForBackend<C extends StateAwareSandboxingMethod> =
 ```
 
 If the backend was not previously SDK-exposed, also extend `ContainmentBackend` and add
-an entry to `StateAwareSandboxingMethod`.
+an entry to `StateAwareContainmentBackend`.
 
 ### 11.4 Register in the `ContainmentBackend` enum
 
