@@ -22,12 +22,6 @@ concurrency story, and error mapping.
 
 ### Out of scope (for this initial plan)
 
-- **TypeScript SDK exposure.** State-aware lands in `wxc-exec.exe` only.
-  SDK exposure (the `provisionSandbox` / `startSandbox` / `execInSandbox` /
-  etc. surface) is a separate work item — same staging as the original
-  IsolationSession bringup (one-shot wire-format first, SDK exposure later).
-  When SDK exposure lands, a companion plan doc covers the TypeScript layer
-  and its exception classes.
 - **Explicit `AbortSignal` plumbing.** v1 cancellation is OS-level: the
   caller kills `wxc-exec.exe`, the OS-side service's per-process timer or
   the existing 3-tier shutdown (close stdin → `SendCtrlClose` → `Terminate`)
@@ -270,6 +264,8 @@ single-sandbox-per-consumer model is the workaround.
 
 - [State-aware design (full)](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
 - [State-aware design (overview)](../state-aware-lifecycle/mxc-state-aware-sandbox-api-overview.md)
+- [TypeScript initial plan](state-aware-typescript-initial-plan.md) — SDK companion
+  to this doc; covers SDK API surface, types, and TS usage examples.
 - [Initial bringup plan (one-shot)](initial-bringup-plan.md) — the
   predecessor doc for IsolationSession's first integration; this doc
   covers state-aware on top of that foundation.

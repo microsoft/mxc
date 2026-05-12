@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+hyperlight = ["dep:hyperlight-unikraft-host"]
 isolation_session = [
     "dep:isolation_session_bindings",
     "dep:windows-future",
@@ -18,6 +19,9 @@ base64 = { workspace = true }
 url = { workspace = true }
 getrandom = { workspace = true }
 semver = "1"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+hyperlight-unikraft-host = { git = "https://github.com/hyperlight-dev/hyperlight-unikraft", branch = "main", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }

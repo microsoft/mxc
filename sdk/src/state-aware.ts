@@ -17,7 +17,7 @@ import {
   SandboxId,
   StartConfigFor,
   StartResult,
-  StateAwareSandboxingMethod,
+  StateAwareContainmentBackend,
   StopConfigFor,
   StopResult,
 } from './state-aware-types.js';
@@ -33,7 +33,7 @@ import {
  * Provisions a state-aware sandbox of the requested backend. Returns a
  * branded sandbox id and any provision-time metadata the backend produces.
  */
-export async function provisionSandbox<C extends StateAwareSandboxingMethod>(
+export async function provisionSandbox<C extends StateAwareContainmentBackend>(
   containment: C,
   config?: ProvisionConfigFor<C>,
   options: SandboxSpawnOptions = {},
@@ -58,7 +58,7 @@ export async function provisionSandbox<C extends StateAwareSandboxingMethod>(
  * Starts a previously provisioned sandbox. The backend is inferred from
  * the `sandboxId` prefix.
  */
-export async function startSandbox<C extends StateAwareSandboxingMethod>(
+export async function startSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config?: StartConfigFor<C>,
   options: SandboxSpawnOptions = {},
@@ -80,7 +80,7 @@ export async function startSandbox<C extends StateAwareSandboxingMethod>(
  * the SDK does not parse it here — callers consuming `IPty.onData` see the
  * raw bytes. Use `execInSandboxAsync` when typed-error throwing is needed.
  */
-export function execInSandbox<C extends StateAwareSandboxingMethod>(
+export function execInSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options: SandboxSpawnOptions = {},
@@ -120,7 +120,7 @@ export function execInSandbox<C extends StateAwareSandboxingMethod>(
  * field set) when the executor reports a dispatch failure (recognised by
  * exit != 0 and stdout being a complete `{error}` envelope).
  */
-export async function execInSandboxAsync<C extends StateAwareSandboxingMethod>(
+export async function execInSandboxAsync<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options: SandboxSpawnOptions = {},
@@ -149,7 +149,7 @@ export async function execInSandboxAsync<C extends StateAwareSandboxingMethod>(
  * Stops a started sandbox without releasing its provision-side resources.
  * The same sandbox can be started again via `startSandbox`.
  */
-export async function stopSandbox<C extends StateAwareSandboxingMethod>(
+export async function stopSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config?: StopConfigFor<C>,
   options: SandboxSpawnOptions = {},
@@ -168,7 +168,7 @@ export async function stopSandbox<C extends StateAwareSandboxingMethod>(
  * Releases all backend resources associated with a provisioned sandbox.
  * The id becomes invalid after this call returns successfully.
  */
-export async function deprovisionSandbox<C extends StateAwareSandboxingMethod>(
+export async function deprovisionSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config?: DeprovisionConfigFor<C>,
   options: SandboxSpawnOptions = {},

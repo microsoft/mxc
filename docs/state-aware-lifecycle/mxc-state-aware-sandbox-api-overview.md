@@ -69,9 +69,9 @@ definitions and worked types are in
 
 ```typescript
 type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
-type SandboxId<C extends StateAwareSandboxingMethod> =
+type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
-type StateAwareSandboxingMethod = Extract<ContainmentBackend, 'isolation_session'>;
+type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session'>;
 // extended as state-aware-capable backends are added
 
 interface ExecResult {
@@ -82,37 +82,37 @@ interface ExecResult {
 ```
 
 ```typescript
-function provisionSandbox<C extends StateAwareSandboxingMethod>(
+function provisionSandbox<C extends StateAwareContainmentBackend>(
   containment: C,
   config?: ProvisionConfigFor<C>,
   options?: SandboxSpawnOptions,
 ): Promise<ProvisionResult<C>>;
 
-function startSandbox<C extends StateAwareSandboxingMethod>(
+function startSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config?: StartConfigFor<C>,
   options?: SandboxSpawnOptions,
 ): Promise<StartResult<C>>;
 
-function execInSandbox<C extends StateAwareSandboxingMethod>(
+function execInSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options?: SandboxSpawnOptions,
 ): pty.IPty;
 
-function execInSandboxAsync<C extends StateAwareSandboxingMethod>(
+function execInSandboxAsync<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options?: SandboxSpawnOptions,
 ): Promise<ExecResult>;
 
-function stopSandbox<C extends StateAwareSandboxingMethod>(
+function stopSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config?: StopConfigFor<C>,
   options?: SandboxSpawnOptions,
 ): Promise<StopResult<C>>;
 
-function deprovisionSandbox<C extends StateAwareSandboxingMethod>(
+function deprovisionSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config?: DeprovisionConfigFor<C>,
   options?: SandboxSpawnOptions,
@@ -160,7 +160,7 @@ interface OneShotRequest {
 
 interface ProvisionStateAwareRequest {
   phase: 'provision';
-  containment: StateAwareSandboxingMethod;
+  containment: StateAwareContainmentBackend;
   filesystem?: FilesystemConfig;      // backend declares per-phase honor
   network?: NetworkConfig;
   ui?: UiConfig;
@@ -169,7 +169,7 @@ interface ProvisionStateAwareRequest {
 
 interface NonProvisionStateAwareRequest {
   phase: 'start' | 'exec' | 'stop' | 'deprovision';
-  sandboxId: SandboxId<StateAwareSandboxingMethod>;  // backend resolved from prefix
+  sandboxId: SandboxId<StateAwareContainmentBackend>;  // backend resolved from prefix
   process?: ProcessConfig;            // exec only
   filesystem?: FilesystemConfig;
   network?: NetworkConfig;
@@ -400,7 +400,7 @@ Reference §11 has the full guide. Operational checklist:
    use `()` for any phase that doesn't need them.
 3. Define typed per-(backend, phase) `*Config` interfaces in `@microsoft/mxc-sdk` and
    add an arm to `ConfigsForBackend<C>` mapping the backend to its five phase Configs.
-   If newly SDK-exposed, extend `ContainmentBackend` and `StateAwareSandboxingMethod`.
+   If newly SDK-exposed, extend `ContainmentBackend` and `StateAwareContainmentBackend`.
 4. Register a variant in the `ContainmentBackend` enum and declare two consts on the
    trait impl: `ID_PREFIX` (the sandbox-id tag, dispatcher's routing key for
    non-provision calls — pick a short distinct tag and treat it as permanent) and

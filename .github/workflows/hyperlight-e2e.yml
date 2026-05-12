@@ -1,0 +1,109 @@
+name: Hyperlight E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hyperlight-e2e:
+    name: WXC-Exec Hyperlight
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup update stable
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+
+      - name: Ensure surrogate build consistency
+        shell: pwsh
+        run: |
+          $hlsExe = "src\target\x86_64-pc-windows-msvc\debug\hls\x86_64-pc-windows-msvc\debug\hyperlight_surrogate.exe"
+          if (-not (Test-Path $hlsExe)) {
+            Write-Host "Surrogate missing — clearing hyperlight-host fingerprints to force rebuild"
+            Get-ChildItem "src\target\x86_64-pc-windows-msvc\debug\.fingerprint" -Filter "hyperlight-host-*" -Directory -ErrorAction SilentlyContinue |
+              Remove-Item -Recurse -Force
+          }
+
+      - name: Build with Hyperlight support
+        working-directory: src
+        run: cargo build --features hyperlight --target x86_64-pc-windows-msvc
+
+      - name: Diagnose hypervisor environment
+        shell: pwsh
+        run: ./scripts/ci/diagnose-whp.ps1
+
+      - name: Check Windows Hypervisor Platform
+        id: whp-check
+        shell: pwsh
+        run: ./scripts/ci/check-whp.ps1
+
+      - name: Install crane (OCI tool)
+        if: steps.whp-check.outputs.whp_available == 'true'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Windows_x86_64.tar.gz"
+          Invoke-WebRequest -Uri $url -OutFile crane.tar.gz -UseBasicParsing
+          tar -xzf crane.tar.gz crane.exe
+
+      - name: Download Hyperlight kernel and initrd
+        if: steps.whp-check.outputs.whp_available == 'true'
+        shell: pwsh
+        run: |
+          $pyhlHome = Join-Path $env:LOCALAPPDATA "pyhl"
+          New-Item -ItemType Directory -Force -Path $pyhlHome | Out-Null
+
+          .\crane.exe export ghcr.io/danbugs/hyperlight-unikraft/python-agent-driver-kernel:latest kernel.tar
+          tar -xf kernel.tar -C $pyhlHome kernel
+
+          .\crane.exe export ghcr.io/danbugs/hyperlight-unikraft/python-agent-driver-initrd:latest initrd.tar
+          tar -xf initrd.tar -C $pyhlHome initrd.cpio
+
+          Write-Host "Downloaded to ${pyhlHome}:"
+          Get-ChildItem $pyhlHome
+
+      - name: Warm Hyperlight snapshot
+        if: steps.whp-check.outputs.whp_available == 'true'
+        shell: pwsh
+        run: |
+          $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
+          $json = '{"process":{"commandLine":"print(\"snapshot warm\")"},"containment":"hyperlight"}'
+          $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+          & "$binDir\wxc-exec.exe" --experimental --config-base64 $b64 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Hyperlight snapshot warmup failed"
+            exit 1
+          }
+          Write-Host "Snapshot created:"
+          Get-ChildItem (Join-Path $env:LOCALAPPDATA "pyhl")
+
+      - name: Run Hyperlight E2E Tests
+        if: steps.whp-check.outputs.whp_available == 'true'
+        shell: pwsh
+        working-directory: src
+        run: |
+          cargo test -p wxc_e2e_tests --target x86_64-pc-windows-msvc test_hyperlight_suite -- --nocapture
+
+      - name: Upload logs on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v6
+        with:
+          name: hyperlight-e2e-logs-${{ github.event.pull_request.number || github.run_number }}
+          retention-days: 7
+          path: |
+            logs/
+            **/*.log

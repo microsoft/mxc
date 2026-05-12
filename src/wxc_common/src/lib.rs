@@ -5,6 +5,8 @@
 pub mod config_parser;
 pub mod encoding;
 pub mod error;
+#[cfg(feature = "hyperlight")]
+pub mod hyperlight_runner;
 pub mod id;
 pub mod logger;
 #[cfg(target_os = "windows")]
