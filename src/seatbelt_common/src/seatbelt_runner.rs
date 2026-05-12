@@ -4,25 +4,16 @@
 //! `SeatbeltScriptRunner` — executes scripts inside Apple's Seatbelt
 //! sandbox.
 //!
-//! Two execution modes are supported:
-//!
-//! 1. **`sandbox-exec` mode** (default) — spawns
-//!    `sandbox-exec -f <profile> /bin/sh -c <script>`. Reliable for CLI
-//!    commands but the child runs in a non-GUI Mach bootstrap namespace,
-//!    so GUI applications are killed on launch.
-//!
-//! 2. **`sandbox_init` mode** (when `guiAccess = true`) — applies the
-//!    seatbelt profile to the child via `sandbox_init()` inside
-//!    `Command::pre_exec`, then execs `/bin/sh` directly. The child
-//!    inherits the parent's bootstrap namespace so GUI Mach services
-//!    (WindowServer, CARenderServer, etc.) are reachable.
+//! The sandbox is applied via `sandbox_init()` inside `Command::pre_exec`,
+//! then `/bin/sh` is exec'd directly. The child inherits the parent's
+//! Mach bootstrap namespace so both CLI commands and GUI applications
+//! (when `guiAccess = true`) work correctly.
 //!
 //! Compiled only on macOS — the rest of the workspace continues to build
 //! on Windows / Linux unchanged.
 
 use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
-use std::io::Write as IoWrite;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -38,7 +29,7 @@ use crate::profile_builder::build_profile;
 //
 // `sandbox_init` is declared in <sandbox.h> and marked deprecated since
 // macOS 10.8, but is still shipped and used by first-party apps through
-// macOS 15+. We use it only in the `guiAccess` code path.
+// macOS 15+.
 // ---------------------------------------------------------------------------
 
 #[link(name = "sandbox")]
@@ -51,11 +42,6 @@ extern "C" {
 
     fn sandbox_free_error(errorbuf: *mut libc::c_char);
 }
-
-/// Path to the system-provided sandbox launcher. Present on every macOS
-/// release (deprecated in headers since 10.7 but still shipped through
-/// current versions).
-const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// Default shell used to execute `script_code`. `/bin/sh` is guaranteed
 /// to exist and is on the SIP-protected path so it's always reachable
@@ -102,23 +88,10 @@ impl ScriptRunner for SeatbeltScriptRunner {
         // 1. Build the Seatbelt profile from the policy.
         let profile = build_profile(request);
 
-        let gui_access = request
-            .experimental
-            .seatbelt
-            .as_ref()
-            .is_some_and(|c| c.gui_access);
-
-        // 2. Build the command — either via sandbox-exec or sandbox_init.
-        let mut command = if gui_access {
-            match build_sandbox_init_command(&profile, &request.script_code, logger) {
-                Ok(cmd) => cmd,
-                Err(resp) => return resp,
-            }
-        } else {
-            match build_sandbox_exec_command(&profile, &request.script_code, logger) {
-                Ok(cmd) => cmd,
-                Err(resp) => return resp,
-            }
+        // 2. Build the command via sandbox_init.
+        let mut command = match build_sandbox_command(&profile, &request.script_code, logger) {
+            Ok(cmd) => cmd,
+            Err(resp) => return resp,
         };
 
         // 3. Common setup: env, working directory, stdio.
@@ -196,30 +169,10 @@ impl ScriptRunner for SeatbeltScriptRunner {
     }
 }
 
-/// Build a `Command` that uses `sandbox-exec -f <profile>` to sandbox the
-/// child process. This is the default (non-GUI) path.
-fn build_sandbox_exec_command(
-    profile: &str,
-    script_code: &str,
-    logger: &mut Logger,
-) -> Result<Command, ScriptResponse> {
-    // Write profile to a tempfile so sandbox-exec can read it via -f.
-    let profile_path = write_profile_tempfile(profile, logger)?;
-
-    let mut command = Command::new(SANDBOX_EXEC);
-    command
-        .arg("-f")
-        .arg(profile_path)
-        .arg(DEFAULT_SHELL)
-        .arg("-c")
-        .arg(script_code);
-
-    Ok(command)
-}
-
 /// Build a `Command` that applies the sandbox via `sandbox_init()` in
-/// `pre_exec`. The child inherits the parent's Mach bootstrap namespace,
-/// allowing GUI applications to connect to WindowServer and friends.
+/// `pre_exec`, then execs `/bin/sh -c <script>`. The child inherits the
+/// parent's Mach bootstrap namespace, so both CLI and GUI applications
+/// work correctly under the sandbox.
 ///
 /// # Safety
 ///
@@ -227,7 +180,7 @@ fn build_sandbox_exec_command(
 /// inside it to a single FFI call (`sandbox_init`) with pre-allocated
 /// arguments. `sandbox_init` is not formally async-signal-safe but is
 /// used in this pattern by Chromium and other production macOS sandboxes.
-fn build_sandbox_init_command(
+fn build_sandbox_command(
     profile: &str,
     script_code: &str,
     logger: &mut Logger,
@@ -235,7 +188,7 @@ fn build_sandbox_init_command(
     let profile_cstr = CString::new(profile)
         .map_err(|e| error_response(format!("seatbelt profile contains embedded NUL byte: {e}")))?;
 
-    let _ = writeln!(logger, "Seatbelt: using sandbox_init (guiAccess mode)");
+    let _ = writeln!(logger, "Seatbelt: applying sandbox via sandbox_init");
 
     let mut command = Command::new(DEFAULT_SHELL);
     command.arg("-c").arg(script_code);
@@ -267,36 +220,6 @@ fn build_sandbox_init_command(
     }
 
     Ok(command)
-}
-
-/// Write the profile string to a named tempfile, returning the path.
-/// The tempfile is leaked (persisted) so that sandbox-exec can read it;
-/// the OS cleans up TMPDIR entries.
-fn write_profile_tempfile(
-    profile: &str,
-    logger: &mut Logger,
-) -> Result<std::path::PathBuf, ScriptResponse> {
-    let mut file = tempfile::Builder::new()
-        .prefix("mxc-seatbelt-")
-        .suffix(".sb")
-        .tempfile()
-        .map_err(|e| error_response(format!("failed to create profile tempfile: {e}")))?;
-
-    file.write_all(profile.as_bytes())
-        .map_err(|e| error_response(format!("failed to write profile: {e}")))?;
-
-    file.flush()
-        .map_err(|e| error_response(format!("failed to flush profile: {e}")))?;
-
-    let path = file.path().to_path_buf();
-    let _ = writeln!(logger, "Seatbelt: profile written to {}", path.display());
-
-    // Persist the tempfile so sandbox-exec can read it. The file remains
-    // on disk until the OS cleans TMPDIR.
-    let temp_path = file.into_temp_path();
-    let _ = temp_path.keep();
-
-    Ok(path)
 }
 
 fn error_response(message: String) -> ScriptResponse {

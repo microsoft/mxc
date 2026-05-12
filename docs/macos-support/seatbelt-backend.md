@@ -8,9 +8,14 @@ Mac App Store application.
 
 ## Overview
 
-On macOS, MXC executes scripts inside the macOS sandbox via the system
-binary `/usr/bin/sandbox-exec`, with a TinyScheme profile generated
-on-the-fly from the MXC policy. This provides:
+On macOS, MXC executes scripts inside the macOS sandbox via
+`sandbox_init()` — the same kernel-enforced Seatbelt framework that backs
+the App Sandbox used by every Mac App Store application. A TinyScheme
+profile is generated on-the-fly from the MXC policy and applied to the
+child process via `pre_exec`, which means the child inherits the parent's
+Mach bootstrap namespace. This enables both CLI commands and GUI
+applications (when `guiAccess` is enabled) to run under the sandbox. This
+provides:
 
 - **Filesystem isolation** via `(allow file-read*)` / `(allow file-write*)`
   rules over `subpath` literals, with deny rules layered on top so
@@ -29,15 +34,17 @@ LXC.
 
 ## Mechanism
 
-The sandbox spawns `/usr/bin/sandbox-exec -f <profile> /bin/sh -c <script>` with
-a generated Seatbelt (TinyScheme) profile. The profile is written to a temporary
-file and passed to `sandbox-exec`.
+The sandbox applies the generated Seatbelt (TinyScheme) profile to the
+child process via `sandbox_init()` inside `Command::pre_exec` (after
+`fork()`, before `exec()`). The profile string is passed directly to
+`sandbox_init` — no temporary files are needed. The child then execs
+`/bin/sh -c <script>` with the sandbox already active.
 
 ## Prerequisites
 
-- **macOS 11 or later** (Big Sur). `/usr/bin/sandbox-exec` ships with
+- **macOS 11 or later** (Big Sur). `sandbox_init()` ships with
   every macOS release; Apple has marked it deprecated in headers since
-  10.7 but continues to ship and use it.
+  10.8 but continues to ship and use it internally.
 - **Xcode Command Line Tools** for building from source (`xcode-select
   --install`). Not needed for `npm install` of pre-built binaries.
 
@@ -158,6 +165,7 @@ flag is required to enable the backend at runtime:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `experimental.seatbelt.profileOverride` | string | unset | Optional override of the generated TinyScheme sandbox profile. When set, the SDK-generated profile is replaced with this raw TinyScheme string verbatim — all `filesystem`/`network`/`ui` policy fields are ignored for profile generation (they are still type-checked). Use this only when the auto-generated profile is insufficient. |
+| `experimental.seatbelt.guiAccess` | boolean | `false` | When `true`, adds wildcard Mach service and IOKit rules so GUI applications can create windows and render via WindowServer. Requires `ui.disable: false`. Native AppKit apps (e.g. Terminal.app) work well; Electron-based apps may escape the sandbox via re-launch patterns. |
 
 ### Filesystem policy
 
@@ -295,8 +303,14 @@ environment.
 
   To deny all network access, use `defaultPolicy: "block"` instead.
 
-- **`sandbox-exec` is technically deprecated** in headers but remains
-  shipping and is the same code path the App Sandbox uses.
+- **`sandbox_init` is technically deprecated** in headers since macOS 10.8
+  but remains shipping and is used by Apple's own apps and Chromium.
+  It is the same Seatbelt framework that backs the App Sandbox.
+- **GUI support is limited to native apps.** AppKit-based apps like
+  Terminal.app work well under `guiAccess: true`. Electron-based apps
+  (VS Code, Spotify) may escape the sandbox by re-launching themselves
+  via helper processes. Some Apple system apps (Calculator, TextEdit)
+  are blocked by OS-level Launch Constraints unrelated to the sandbox.
 - **No container abstraction.** Unlike LXC, there is no persistent
   container to attach to or destroy — every invocation is a fresh
   process tree.
@@ -312,6 +326,6 @@ environment.
 | Startup time | Fast (~10 ms) | Medium (~1 s) | Fast (~10 ms) |
 | Filesystem | BFS policy | Bind mounts | Profile `subpath` rules |
 | Network | Windows Firewall | iptables/nftables | Profile `network-*` rules |
-| Privileges | Optional admin | Root (or unprivileged LXC) | None — `sandbox-exec` is unprivileged |
+| Privileges | Optional admin | Root (or unprivileged LXC) | None — `sandbox_init` is unprivileged |
 | Container lifecycle | Yes (named) | Yes (named) | No (per-process) |
 | Proxy support | Yes | No | No |
