@@ -37,6 +37,20 @@ These scripts are local helpers. Not every script is run by CI because several
 depend on local OS features such as Windows Sandbox, WHP, proxy setup, or stress
 test duration.
 
+### Downlevel-fallback (T3) harness and investigation
+
+These were added for the BaseContainer downlevel-fallback work (see
+`docs/downlevel-fallback-threat-model.md`). Run them from the repo root via
+`pwsh .\tests\scripts\<script>.ps1`.
+
+| Script | Description |
+|--------|-------------|
+| `Win25H2Safe-Tests.ps1` | End-to-end harness for the T3 fallback on Windows 11 25H2. Builds debug + release binaries (and the `wxc_ui_probe` crate), then runs phases covering `--probe`, T3 runs, filesystem access, UI mitigation, allowDaclMutation refusal, crash recovery, and cargo unit tests. Writes results/log files to `$env:TEMP` by default. |
+| `Test-PathEnumeration.ps1` | Empirically answers whether a T3-sandboxed child can enumerate host paths. Probes both stat-by-name (`if exist`) and directory enumeration (`dir /b`) against rw / ro / denied / control directories. |
+| `Investigate-T3Traverse.ps1` | Diagnostic for microsoft/mxc#304. Lets DaclManager apply its normal grants, then manually adds `FILE_TRAVERSE` ACEs on every user-writable ancestor of the policy path. Reports whether `dir` then works inside T3. |
+| `Investigate-T3ManualAcl.ps1` | Sharper diagnostic for microsoft/mxc#304. Bypasses DaclManager (empty filesystem policy) and applies ACEs we control: specific AppContainer SID `(F)` on the leaf + traverse on ancestors, then additionally grants the `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) SID. |
+| `Investigate-T3DriveTraverse.ps1` | Definitive test for microsoft/mxc#304 hypothesis (1). Requires a one-time admin `Set-Acl` grant of `ALL APPLICATION PACKAGES:(X)` on a chosen drive root (see script header), then reports `ENUMERABLE` vs `BLOCKED`. |
+
 ### Manual smoke tests
 
 Manual smokes are visual-inspection scripts for rendering and event-propagation
