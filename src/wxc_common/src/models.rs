@@ -277,7 +277,30 @@ impl Default for BaseProcessUiConfig {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+/// Operator consent for host-impacting containment fallbacks. Each flag gates
+/// a specific fallback the runner may otherwise pick when the preferred
+/// primitive is unavailable. Defaults preserve the pre-fallback-section
+/// behavior (all permitted).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FallbackPolicy {
+    /// When the BaseContainer API is absent and `bfscfg.exe` is unavailable,
+    /// allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). This
+    /// modifies host filesystem security descriptors; original DACLs are
+    /// restored on exit. Defaults to `true`. Set to `false` to refuse the
+    /// fallback (the run will fail on machines that require Tier 3).
+    pub allow_dacl_mutation: bool,
+}
+
+impl Default for FallbackPolicy {
+    fn default() -> Self {
+        Self {
+            allow_dacl_mutation: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContainerPolicy {
     pub least_privilege_mode: bool,
@@ -285,6 +308,7 @@ pub struct ContainerPolicy {
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
     pub denied_paths: Vec<String>,
+    pub fallback: FallbackPolicy,
     pub default_network_policy: NetworkPolicy,
     pub network_enforcement_mode: NetworkEnforcementMode,
     pub allowed_hosts: Vec<String>,
