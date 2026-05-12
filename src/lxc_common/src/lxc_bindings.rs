@@ -207,35 +207,146 @@ impl LxcContainer {
         ))
     }
 
-    /// Execute a command inside a running container using lxc-attach.
+    /// Execute a command inside a running container using lxc-attach, with
+    /// the inner process attached to a freshly-allocated pty.
     ///
-    /// Inherits the parent process's stdin/stdout/stderr so that the inner
-    /// process is wired straight to whatever drives lxc-exec — typically a
-    /// pty owned by node-pty on the host. This matches the AppContainer
-    /// runner on Windows, where the sandboxed child shares the parent's
-    /// ConPTY (see `wxc_common::appcontainer_runner`). Without this, the
-    /// inner process gets a closed stdin and exits immediately on EOF,
-    /// breaking interactive shells.
+    /// This bridges the host's stdin/stdout/stderr to the inner pty, but
+    /// **defers forwarding host stdin to the inner process until bash has
+    /// produced its first output byte**. That delay is essential: an
+    /// interactive shell calls `tcsetattr` on its stdin during readline
+    /// init, which can flush any bytes the parent buffered into the pty
+    /// before the shell got there. Without the delay, anything the CLI
+    /// pre-buffers (e.g. its shell-init wrapper) is silently swallowed.
     ///
-    /// Stdout/stderr are streamed live; the returned strings are always
-    /// empty. Callers that need captured output should run a self-contained
-    /// `commandLine` (e.g. `echo ... > file`) and read the file separately.
+    /// Stdout/stderr are streamed live via the master fd; the returned
+    /// strings are always empty. Callers needing captured output should run
+    /// a self-contained `commandLine` and read it back from a file.
     pub fn attach_run(
         &self,
         command: &str,
         _working_directory: &str,
     ) -> Result<(i32, String, String), String> {
+        use nix::pty::openpty;
+        use std::io::{Read, Write};
         use std::process::Stdio;
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        // Allocate an inner pty pair. The slave goes to lxc-attach (and thus
+        // bash inside the container) so the inner process sees a real tty;
+        // we keep the master and bridge it to our own stdio.
+        let pty_pair = openpty(None, None)
+            .map_err(|e| format!("openpty failed: {}", e))?;
+
+        // Three fd duplicates of the slave so each Stdio takes ownership of
+        // its own handle; otherwise std::process::Stdio::from would consume
+        // the single OwnedFd and the rest of the spawn calls would fail.
+        let slave_in: Stdio = pty_pair.slave.try_clone()
+            .map_err(|e| format!("dup slave for stdin: {}", e))?
+            .into();
+        let slave_out: Stdio = pty_pair.slave.try_clone()
+            .map_err(|e| format!("dup slave for stdout: {}", e))?
+            .into();
+        let slave_err: Stdio = pty_pair.slave.into();
 
         let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(["--", "/bin/sh", "-c", command]);
-        cmd.stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+        cmd.stdin(slave_in)
+            .stdout(slave_out)
+            .stderr(slave_err);
 
-        let status = cmd
-            .status()
-            .map_err(|e| format!("Failed to run lxc-attach: {}", e))?;
+        // Drop the inherited controlling terminal in the child and make the
+        // slave end of our pty its new controlling tty. Without this,
+        // lxc-attach detects that it has a controlling tty (the outer pty
+        // from node-pty) and forwards the inner pty's I/O to `/dev/tty`
+        // directly, bypassing the slave fds we wired into stdio. Our master
+        // would then see no data at all.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                // Become a new session leader, detaching from the inherited
+                // controlling terminal.
+                nix::unistd::setsid().map_err(std::io::Error::from)?;
+                // SAFETY: ioctl on fd 0 (the slave we just dup2'd in via
+                // stdin) to make it the new controlling tty. Errors are
+                // non-fatal because setsid above already cleared the ctty
+                // state, which is what actually matters for lxc-attach.
+                let _ = libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+                Ok(())
+            });
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn lxc-attach: {}", e))?;
+
+        // The child inherited all three slave handles and the parent's
+        // copies have been moved into Stdio. The slave will be fully closed
+        // when the child exits, which makes our master read return EOF.
+
+        // OwnedFd -> File via std::convert::From; no `unsafe` needed.
+        let master: std::fs::File = pty_pair.master.into();
+        let mut master_writer = master
+            .try_clone()
+            .map_err(|e| format!("dup master: {}", e))?;
+        let mut master_reader = master;
+
+        // Output forwarder: master -> host stdout. Signals "ready" on the
+        // first byte from inside the container — at that point bash has
+        // finished its readline/tcsetattr init and is safe to feed.
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let output_thread = thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut signaled = false;
+            let mut stdout = std::io::stdout();
+            loop {
+                match master_reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if !signaled {
+                            let _ = ready_tx.send(());
+                            signaled = true;
+                        }
+                        let _ = stdout.write_all(&buf[..n]);
+                        let _ = stdout.flush();
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // Wait for bash to print its first byte before forwarding host stdin.
+        // Cap the wait so a wedged container doesn't block forever; if the
+        // shell never produces output the caller's higher-level timeout
+        // catches it.
+        let _ = ready_rx.recv_timeout(Duration::from_secs(5));
+
+        // Input forwarder: host stdin -> master. Detached; exits when stdin
+        // closes (which happens when our parent process closes the pty).
+        thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut stdin = std::io::stdin();
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if master_writer.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let status = child
+            .wait()
+            .map_err(|e| format!("wait on lxc-attach: {}", e))?;
+
+        // Drain remaining output before returning. The slave fds are closed
+        // on child exit, so master_reader will hit EOF and the thread exits.
+        let _ = output_thread.join();
 
         Ok((status.code().unwrap_or(-1), String::new(), String::new()))
     }
