@@ -107,7 +107,6 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 ### TypeScript layers
 
 - **SDK** (`sdk/`, `@microsoft/mxc-sdk`) — the public API. The one-shot surface (`spawnSandbox` / `spawnSandboxFromConfig` / `spawnSandboxAsync`) builds a `ContainerConfig` from a `SandboxPolicy`, serialises to base64, and spawns the correct native binary (`wxc-exec.exe` or `lxc-exec`) via `node-pty`. The state-aware surface (`provisionSandbox` / `startSandbox` / `execInSandbox` / `execInSandboxAsync` / `stopSandbox` / `deprovisionSandbox`, in `sdk/src/state-aware.ts`) drives a sandbox through a multi-call lifecycle against `StateAwareContainmentBackend` backends; per-(backend, phase) typed `*Config` interfaces and a branded `SandboxId<C>` live in `sdk/src/state-aware-types.ts`. Typed wire-format errors live in `sdk/src/errors.ts` (closed `ErrorCode` union plus a single `MxcError` class carrying `code: ErrorCode`, mirroring the Rust `MxcError` shape). Platform detection is in `platform.ts`.
-- **CLI** (`cli/`, `mxc-cli`) — thin Commander.js wrapper around the SDK. Depends on `@microsoft/mxc-sdk` via `file:../sdk`.
 
 The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (npm-packaged) and `src/target/<target-triple>/{release,debug}/` (local dev). The `build.bat`/`build.sh` scripts copy binaries into the SDK bin directory.
 
@@ -120,16 +119,32 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 
 ### Key documentation (`docs/`)
 
+Core references:
+
 - `docs/schema.md` — full JSON configuration schema reference
 - `docs/versioning.md` — schema versioning design, experimental feature lifecycle, and promotion process
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
-- `docs/lxc-backend.md` — LXC container backend details
-- `docs/windows-sandbox.md` / `docs/windows-sandbox-reference.md` — Windows Sandbox backend
+- `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
+- `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
+- `docs/sandbox-policy/v1/policy.md` — sandbox policy v1 specification
+
+Per-backend guides:
+
+- `docs/base-process-container/guide.md` — process container (Windows AppContainer / BaseContainer)
+- `docs/base-process-container/UIPolicy_Schema.md` — UI policy schema (JOB_OBJECT_UILIMIT_* mappings)
+- `docs/lxc-support/lxc-backend.md` — LXC container backend (Linux)
+- `docs/macos-support/seatbelt-backend.md` — macOS Seatbelt backend (experimental)
+- `docs/windows-sandbox/windows-sandbox.md` / `docs/windows-sandbox/windows-sandbox-reference.md` — Windows Sandbox backend
+- `docs/wsl/wsl-container-getting-started.md` / `docs/wsl/wsl-container-support-plan.md` — WSL Container (WSLC SDK)
+- `docs/nanvix-microvm/nanvix.md` / `docs/nanvix-microvm/nanvix-integration-plan.md` — MicroVM via NanVix
+
+State-aware lifecycle:
+
 - `docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md` — state-aware sandbox lifecycle API (cross-backend wire format, Rust `StatefulSandboxBackend` trait, and dispatcher contract)
 - `docs/state-aware-lifecycle/mxc-state-aware-sandbox-api-overview.md` — companion overview to the full state-aware design
 - `docs/isolation-session/initial-bringup-plan.md` — IsolationSession backend, one-shot bringup (experimental, isolated user account per execution via the OS-side service)
-- `docs/isolation-session/state-aware-rust-initial-plan.md` — IsolationSession state-aware lifecycle, Rust-layer initial plan (per-phase config / metadata, policy honor matrix, idempotence, concurrency, error mapping)
-- `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
+- `docs/isolation-session/state-aware-rust-initial-plan.md` — IsolationSession state-aware lifecycle, Rust-layer plan (per-phase config / metadata, policy honor matrix, idempotence, concurrency, error mapping)
+- `docs/isolation-session/state-aware-typescript-initial-plan.md` — IsolationSession state-aware lifecycle, TypeScript SDK plan
 
 ## Key Conventions
 
@@ -174,7 +189,7 @@ When changing behavior covered by existing documentation, update the relevant do
 - **New experimental features** → follow `docs/authoring-a-new-feature.md`, which includes schema, Rust, and test config steps
 - **SDK API changes** (new exports, changed signatures, new options) → update `sdk/README.md` and the JSDoc in `sdk/src/index.ts`
 - **CLI command changes** → update `cli/README.md` and `cli/ARCHITECTURE.md`
-- **New containment backends or major backend changes** → update the relevant doc in `docs/` (e.g., `lxc-backend.md`, `windows-sandbox.md`)
+- **New containment backends or major backend changes** → update the relevant doc in `docs/` (e.g., `lxc-support/lxc-backend.md`, `windows-sandbox/windows-sandbox.md`)
 - **Versioning or promotion changes** → update `docs/versioning.md`
 
 ### Policy versioning
