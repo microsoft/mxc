@@ -19,9 +19,9 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "seatbelt"],
+      "enum": ["appcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "macos_sandbox"],
       "default": "appcontainer",
-      "description": "Containment backend to use for execution. Note: 'windows_sandbox', 'wslc', and 'seatbelt' are experimental and require the --experimental CLI flag."
+      "description": "Containment backend to use for execution. Note: 'windows_sandbox', 'wslc', and 'macos_sandbox' are experimental and require the --experimental CLI flag."
     },
 
     "lifecycle": {
@@ -285,7 +285,7 @@
             },
             "imageTarPath": {
               "type": "string",
-              "description": "Path to a local tar file to import as the container image. Supports both rootfs tars (from `docker export`) and Docker image archives (from `docker save`). When set, the image is imported from this file instead of pulling from a registry. The format is auto-detected: archives containing `manifest.json` are treated as Docker image format, archives with Linux root directories (bin/, etc/, usr/) are treated as rootfs tars, and unrecognized formats are rejected.",
+              "description": "Path to a local tar file to import as the container image. Supports both rootfs tars (from `docker export`) and Docker image archives (from `docker save`). When set, this overrides `image`.",
               "examples": ["C:\\images\\alpine.tar", "/home/user/images/alpine.tar"]
             },
             "cpuCount": {
@@ -309,9 +309,9 @@
             }
           }
         },
-        "seatbelt": {
+        "macos_sandbox": {
           "type": "object",
-          "description": "macOS sandbox backend (experimental). Used when containment is 'seatbelt'.",
+          "description": "macOS sandbox backend (experimental). Used when containment is 'macos_sandbox'.",
           "properties": {
             "mode": {
               "type": "string",
