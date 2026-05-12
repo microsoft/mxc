@@ -103,6 +103,26 @@ function buildLinuxProcessConfig(
 }
 
 /**
+ * Builds the macOS process container (seatbelt) portion of a ContainerConfig.
+ *
+ * The seatbelt backend's `sandbox-exec` reads a TinyScheme profile
+ * generated server-side by `seatbelt_common::profile_builder`, so the SDK
+ * only needs to set the containment type and the mode selector under the
+ * experimental block — the policy fields on `ContainerConfig` (filesystem /
+ * network / ui) drive the actual rules.
+ */
+function buildDarwinProcessConfig(
+    config: ContainerConfig,
+): ContainerConfig {
+    config.containment = 'seatbelt';
+    config.experimental = {
+        ...(config.experimental ?? {}),
+        seatbelt: {},
+    };
+    return config;
+}
+
+/**
  * Builds the Windows process container portion of a ContainerConfig.
  */
 function buildProcessBaseContainerConfig(
@@ -250,11 +270,15 @@ export function createConfigFromPolicy(
         if (policy.network.proxy && platform === 'linux') {
             throw new Error('Proxy configuration is not supported on Linux');
         }
+        if (policy.network.proxy && platform === 'darwin') {
+            throw new Error('Proxy configuration is not supported on macOS');
+        }
 
         // WSLC supports block + allowedHosts via iptables (Bridged networking
-        // with per-host filtering). Other backends require allowOutbound for
+        // with per-host filtering). macOS sandbox supports it natively via
+        // per-host Seatbelt rules. Other backends require allowOutbound for
         // host filtering since it maps to AppContainer capabilities.
-        if (containment !== 'wslc') {
+        if (containment !== 'wslc' && containment !== 'seatbelt') {
             if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
                 throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
             }
@@ -282,6 +306,12 @@ export function createConfigFromPolicy(
         if (platform === 'linux') {
             diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
             return buildLinuxProcessConfig(config, containerId);
+        }
+        if (platform === 'darwin') {
+            // The seatbelt backend has no container abstraction
+            // (per-process fork+exec sandbox), so containerId is intentionally
+            // not threaded through.
+            return buildDarwinProcessConfig(config);
         }
         diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
         return buildProcessBaseContainerConfig(config, policy, containerId);

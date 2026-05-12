@@ -324,13 +324,6 @@ export interface LxcConfig {
  */
 export interface SeatbeltConfig {
   /**
-   * Which sandbox entry point to use:
-   * - "exec" (default): spawn /usr/bin/sandbox-exec.
-   * - "inproc": call sandbox_init_with_parameters in the child after fork
-   *   (lower latency; relies on a private macOS API).
-   */
-  mode?: 'exec' | 'inproc';
-  /**
    * Optional override of the generated TinyScheme sandbox profile.
    */
   profileOverride?: string;

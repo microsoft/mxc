@@ -357,7 +357,7 @@ fn main() {
             process::exit(1);
         }
         ContainmentBackend::Seatbelt => {
-            eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-darwin)");
+            eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-mac)");
             process::exit(1);
         }
         ContainmentBackend::Vm => {

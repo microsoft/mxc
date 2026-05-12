@@ -104,7 +104,15 @@ export function getPlatformSupport(): PlatformSupport {
 
   // Non-Windows platforms
   if (platform === 'darwin') {
-    support.reason = 'MXC is not supported on macOS';
+    // seatbelt is the only containment backend on macOS.
+    // /usr/bin/sandbox-exec ships with every release of macOS so the check
+    // is effectively just confirming we're on a supported OS.
+    if (isSeatbeltAvailable()) {
+      support.isSupported = true;
+      support.availableMethods = ['seatbelt'];
+    } else {
+      support.reason = '/usr/bin/sandbox-exec not found; macOS install is incomplete';
+    }
     return support;
   }
 
@@ -148,6 +156,19 @@ function isLxcAvailable(): boolean {
 }
 
 /**
+ * Check if the macOS sandbox is available. `/usr/bin/sandbox-exec` is part
+ * of the macOS base install and present on every shipping version of macOS,
+ * so this is effectively a sanity check for a corrupted install.
+ */
+function isSeatbeltAvailable(): boolean {
+  try {
+    return fs.existsSync('/usr/bin/sandbox-exec');
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Get the simplified architecture name used for SDK bin directory layout.
  * @returns 'arm64' or 'x64'
  */
@@ -181,6 +202,14 @@ function getLinuxRustTargetTriple(): string {
     default:
       return 'x86_64-unknown-linux-gnu';
   }
+}
+
+/**
+ * Get the Rust target triple for the current macOS machine architecture.
+ */
+function getDarwinRustTargetTriple(): string {
+  const arch = os.arch();
+  return arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
 }
 
 /**
@@ -280,6 +309,46 @@ export function findLxcExecutable(): string | null {
   for (const lxcPath of possiblePaths) {
     if (verifyExecutable(lxcPath)) {
       return lxcPath;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Find the mxc-exec-mac executable on macOS.
+ * Searches in the SDK bin directory (npm install path) and Cargo build
+ * output directories (monorepo dev path).
+ * @returns Path to mxc-exec-mac if found, null otherwise
+ */
+export function findDarwinExecutable(): string | null {
+  // Allow override for bundled deployments (debugging/testing)
+  if (process.env.MXC_BIN_DIR) {
+    const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'mxc-exec-mac');
+    if (verifyExecutable(overridePath)) {
+      return overridePath;
+    }
+  }
+
+  const targetTriple = getDarwinRustTargetTriple();
+  const targetDir = path.join(__dirname, '..', '..', 'src', 'target');
+
+  const possiblePaths = [
+    // Bundled in the SDK package
+    path.join(__dirname, '..', 'bin', getSdkArch(), 'mxc-exec-mac'),
+    // Architecture-specific release build
+    path.join(targetDir, targetTriple, 'release', 'mxc-exec-mac'),
+    // Architecture-specific debug build
+    path.join(targetDir, targetTriple, 'debug', 'mxc-exec-mac'),
+    // Default Cargo release build
+    path.join(targetDir, 'release', 'mxc-exec-mac'),
+    // Default Cargo debug build
+    path.join(targetDir, 'debug', 'mxc-exec-mac'),
+  ];
+
+  for (const darwinPath of possiblePaths) {
+    if (verifyExecutable(darwinPath)) {
+      return darwinPath;
     }
   }
 

@@ -13,7 +13,7 @@ use crate::models::{
     ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
     IsolationSessionConfig, IsolationSessionUser, LifecycleConfig, LxcConfig,
     NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
-    SeatbeltMode, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -166,7 +166,6 @@ struct RawIsolationSession {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawSeatbelt {
-    mode: Option<String>,
     #[serde(rename = "profileOverride")]
     profile_override: Option<String>,
 }
@@ -856,22 +855,8 @@ fn convert_raw_config_inner(
             config.user = as_cfg.user;
             config
         });
-        let seatbelt = raw_exp.seatbelt.map(|raw_sb| {
-            let mode = match raw_sb.mode.as_deref() {
-                None | Some("exec") => SeatbeltMode::Exec,
-                Some("inproc") => SeatbeltMode::Inproc,
-                Some(other) => {
-                    logger.log_line(&format!(
-                        "Unknown seatbelt mode '{}', defaulting to 'exec'",
-                        other
-                    ));
-                    SeatbeltMode::Exec
-                }
-            };
-            SeatbeltConfig {
-                mode,
-                profile_override: raw_sb.profile_override,
-            }
+        let seatbelt = raw_exp.seatbelt.map(|raw_sb| SeatbeltConfig {
+            profile_override: raw_sb.profile_override,
         });
         ExperimentalConfig {
             test,
@@ -2410,34 +2395,6 @@ mod tests {
     }
 
     #[test]
-    fn seatbelt_config_inproc_mode() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"mode": "inproc"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("experimental.seatbelt should be populated");
-        assert_eq!(cfg.mode, crate::models::SeatbeltMode::Inproc);
-    }
-
-    #[test]
-    fn seatbelt_config_unknown_mode_defaults_to_exec() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"mode": "bogus"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("experimental.seatbelt should be populated");
-        assert_eq!(cfg.mode, crate::models::SeatbeltMode::Exec);
-    }
-
-    #[test]
     fn seatbelt_profile_override_passed_through() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"profileOverride": "(version 1)(deny default)"}}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -2508,7 +2465,7 @@ mod tests {
         let json = r#"{
             "process": {"commandLine": "echo hi"},
             "containment": "macos_sandbox",
-            "experimental": {"macos_sandbox": {"mode": "inproc"}}
+            "experimental": {"macos_sandbox": {"profileOverride": "(version 1)(allow default)"}}
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -2518,6 +2475,9 @@ mod tests {
             .experimental
             .seatbelt
             .expect("experimental.seatbelt should be populated (via macos_sandbox alias)");
-        assert_eq!(cfg.mode, crate::models::SeatbeltMode::Inproc);
+        assert_eq!(
+            cfg.profile_override.as_deref(),
+            Some("(version 1)(allow default)")
+        );
     }
 }
