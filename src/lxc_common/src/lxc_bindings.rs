@@ -51,15 +51,16 @@ where
 /// See [`resolve_lxcpath_with_env`] for the exact algorithm. This wrapper
 /// reads the real environment and effective UID.
 pub fn resolve_default_lxcpath() -> String {
-    // `geteuid` only exists on Unix; on other targets the function is never
-    // invoked in production (lxc-exec is Linux-only) but the crate still
-    // needs to compile workspace-wide, so fall back to a non-root EUID.
-    #[cfg(unix)]
+    // lxc-exec is Linux-only at runtime, but the crate has to compile
+    // workspace-wide (clippy runs on windows-latest, and macOS dev builds
+    // pull lxc_common in transitively). On non-Linux targets the function
+    // is never invoked in production, so fall back to a non-root EUID.
+    #[cfg(target_os = "linux")]
     // SAFETY: `geteuid` is a thread-safe, side-effect-free libc call.
     fn current_euid() -> u32 {
         unsafe { libc::geteuid() as u32 }
     }
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     fn current_euid() -> u32 {
         1
     }
@@ -222,12 +223,12 @@ impl LxcContainer {
     /// strings are always empty. Callers needing captured output should run
     /// a self-contained `commandLine` and read it back from a file.
     ///
-    /// Only available on Unix targets — the implementation depends on
-    /// `pre_exec`, `openpty`, and `TIOCSCTTY`, none of which exist on
-    /// Windows. The crate still has to compile workspace-wide on Windows
-    /// (the `wxc-exec-lint` CI job runs `cargo clippy --workspace` on
-    /// `windows-latest`), so a non-Unix stub is provided below.
-    #[cfg(unix)]
+    /// Only built on Linux — the implementation depends on `pre_exec`,
+    /// `openpty`, and `TIOCSCTTY`. The crate still has to compile
+    /// workspace-wide on Windows (the `wxc-exec-lint` CI job runs
+    /// `cargo clippy --workspace` on `windows-latest`) and on macOS dev
+    /// machines, so a stub is provided below for non-Linux targets.
+    #[cfg(target_os = "linux")]
     pub fn attach_run(
         &self,
         command: &str,
@@ -358,16 +359,16 @@ impl LxcContainer {
         Ok((status.code().unwrap_or(-1), String::new(), String::new()))
     }
 
-    /// Non-Unix stub. `lxc-exec` is Linux-only at runtime, but the workspace
-    /// is still built workspace-wide on Windows during clippy/CI, so this
-    /// signature has to exist on every target.
-    #[cfg(not(unix))]
+    /// Non-Linux stub. `lxc-exec` is Linux-only at runtime, but the
+    /// workspace still builds on Windows (clippy CI) and macOS (dev), so
+    /// the signature has to exist on every target.
+    #[cfg(not(target_os = "linux"))]
     pub fn attach_run(
         &self,
         _command: &str,
         _working_directory: &str,
     ) -> Result<(i32, String, String), String> {
-        Err("LxcContainer::attach_run is only supported on Unix targets".to_string())
+        Err("LxcContainer::attach_run is only supported on Linux".to_string())
     }
 
     /// Stop the container.
