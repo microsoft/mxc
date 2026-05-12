@@ -246,10 +246,14 @@ impl LxcContainer {
     }
 
     /// Destroy the container (removes rootfs and config).
+    ///
+    /// `lxc-destroy -f` already force-stops a running container; we used to
+    /// call `lxc-stop` first, but plain `lxc-stop` waits up to 60 s for a
+    /// graceful shutdown — fatal for distros with systemd as PID 1 in
+    /// unprivileged userns where init never cleanly responds to SIGPWR.
+    /// Forcing the stop via destroy keeps this fast for both alpine and
+    /// ubuntu-class images.
     pub fn destroy(&self) -> Result<(), String> {
-        if self.is_running() {
-            let _ = self.stop();
-        }
         let mut cmd = self.lxc_command("lxc-destroy");
         cmd.arg("-f");
         Self::run_status(cmd, "lxc-destroy")
