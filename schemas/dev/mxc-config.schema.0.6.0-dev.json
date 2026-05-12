@@ -324,6 +324,11 @@
             "profileOverride": {
               "type": "string",
               "description": "Optional override of the generated TinyScheme sandbox profile."
+            },
+            "guiAccess": {
+              "type": "boolean",
+              "default": false,
+              "description": "Allow the Mach IPC services that GUI applications need to draw windows, composite frames, resolve fonts, and register with the Dock. Without this, GUI apps are killed on launch."
             }
           }
         },

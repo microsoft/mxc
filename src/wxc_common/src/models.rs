@@ -43,6 +43,13 @@ pub struct SeatbeltConfig {
     /// Optional override of the generated TinyScheme profile.
     #[serde(rename = "profileOverride", skip_serializing_if = "Option::is_none")]
     pub profile_override: Option<String>,
+
+    /// Allow the Mach IPC services that GUI applications need to draw
+    /// windows, composite frames, resolve fonts, and register with the Dock.
+    /// When `false` (default), these services are blocked and GUI apps will
+    /// be killed by the system on launch.
+    #[serde(rename = "guiAccess", default)]
+    pub gui_access: bool,
 }
 
 /// Configuration specific to the Windows Sandbox backend.

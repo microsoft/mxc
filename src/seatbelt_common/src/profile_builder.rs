@@ -195,6 +195,11 @@ fn write_network_rules(out: &mut String, request: &CodexRequest) {
 
 fn write_ui_rules(out: &mut String, request: &CodexRequest) {
     let ui = &request.policy.ui;
+    let gui_access = request
+        .experimental
+        .seatbelt
+        .as_ref()
+        .is_some_and(|c| c.gui_access);
 
     // The baseline profile uses `(deny default)`, so services are blocked
     // unless explicitly allowed. When UI is enabled, we allow the mach
@@ -206,6 +211,30 @@ fn write_ui_rules(out: &mut String, request: &CodexRequest) {
         out.push_str("    (global-name \"com.apple.windowserver.active\")\n");
         out.push_str("    (global-name \"com.apple.windowserver.session\")\n");
         out.push_str("    (global-name \"com.apple.coreservices.launchservicesd\"))\n");
+
+        if gui_access {
+            // GUI apps need a broad set of Mach services to draw windows —
+            // WindowServer, CoreAnimation, fonts, Dock, accessibility,
+            // preferences, and many XPC helpers that vary across macOS
+            // versions. Rather than maintaining a fragile allowlist, we
+            // permit all mach-lookup when guiAccess is on. Filesystem and
+            // network policies still apply.
+            out.push_str(";; --- guiAccess: allow all Mach IPC for GUI applications ---\n");
+            out.push_str("(allow mach-lookup)\n");
+            // GUI apps must register their own Mach services (XPC listeners)
+            // to receive callbacks from WindowServer and other system agents.
+            out.push_str("(allow mach-register)\n");
+
+            // IOKit user-client access for GPU / Metal rendering
+            out.push_str(";; --- guiAccess: allow IOKit for GPU rendering ---\n");
+            out.push_str("(allow iokit-open)\n");
+
+            // Needed for app temp files, caches, GPU shader caches
+            out.push_str(";; --- guiAccess: allow writing to per-user temp/cache ---\n");
+            out.push_str("(allow file-read* file-write*\n");
+            out.push_str("    (subpath \"/private/tmp\")\n");
+            out.push_str("    (subpath \"/private/var/folders\"))\n");
+        }
     } else {
         out.push_str(";; --- ui.disable: deny WindowServer + related ---\n");
         out.push_str("(deny mach-lookup\n");
@@ -416,6 +445,7 @@ mod tests {
         r.policy.readonly_paths = vec!["/should/be/ignored".into()];
         r.experimental.seatbelt = Some(SeatbeltConfig {
             profile_override: Some("(version 1)(allow default)".into()),
+            gui_access: false,
         });
         let p = build_profile(&r);
         assert_eq!(p, "(version 1)(allow default)");
@@ -440,5 +470,70 @@ mod tests {
         assert!(p.contains("(deny default)"));
         // No empty `(allow file-read*\n)` block — that would be invalid Scheme.
         assert!(!p.contains("(allow file-read*\n)\n"));
+    }
+
+    #[test]
+    fn gui_access_adds_mach_services_for_gui_apps() {
+        let mut r = req();
+        r.policy.ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::None,
+            injection: true,
+        };
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            profile_override: None,
+            gui_access: true,
+        });
+        let p = build_profile(&r);
+        // Wildcard mach-lookup and mach-register for GUI apps
+        assert!(
+            p.contains("(allow mach-lookup)"),
+            "missing wildcard mach-lookup"
+        );
+        assert!(p.contains("(allow mach-register)"), "missing mach-register");
+        // IOKit for GPU
+        assert!(p.contains("(allow iokit-open)"), "missing iokit-open");
+        // Temp/cache write access
+        assert!(p.contains("/private/tmp"), "missing /private/tmp");
+        assert!(
+            p.contains("/private/var/folders"),
+            "missing /private/var/folders"
+        );
+    }
+
+    #[test]
+    fn gui_access_false_omits_gui_services() {
+        let mut r = req();
+        r.policy.ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::None,
+            injection: true,
+        };
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            profile_override: None,
+            gui_access: false,
+        });
+        let p = build_profile(&r);
+        // Basic UI services should be present
+        assert!(p.contains("com.apple.windowserver.active"));
+        // GUI-specific wildcard should NOT be present
+        assert!(!p.contains("(allow mach-lookup)\n"));
+        assert!(!p.contains("(allow iokit-open)"));
+    }
+
+    #[test]
+    fn gui_access_requires_ui_enabled() {
+        let mut r = req();
+        // ui.disable = true (default) but gui_access = true
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            profile_override: None,
+            gui_access: true,
+        });
+        let p = build_profile(&r);
+        // Should NOT emit GUI services when UI is disabled
+        assert!(!p.contains("com.apple.CARenderServer"));
+        assert!(!p.contains("(allow iokit-open)"));
+        // Should have the deny block instead
+        assert!(p.contains("ui.disable: deny WindowServer"));
     }
 }

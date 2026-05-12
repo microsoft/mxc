@@ -15,3 +15,4 @@ wxc_common = { workspace = true }
 # hosts this dep is unused at link time.
 [target.'cfg(target_os = "macos")'.dependencies]
 tempfile = "3"
+libc = { workspace = true }
