@@ -12,6 +12,7 @@ use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
 use lxc_common::lxc_runner::LxcScriptRunner;
+use lxc_common::signal_cleanup;
 
 #[derive(Parser)]
 #[command(name = "lxc-exec", about = "Linux Container Executor")]
@@ -90,6 +91,11 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
 }
 
 fn main() {
+    // Install before spawning any other threads so the signal mask propagates.
+    if let Err(e) = signal_cleanup::install() {
+        eprintln!("Warning: failed to install signal cleanup handler: {}", e);
+    }
+
     let cli = Cli::parse();
 
     // Determine config input

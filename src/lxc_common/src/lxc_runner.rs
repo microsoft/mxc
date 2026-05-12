@@ -18,6 +18,7 @@ use wxc_common::script_runner::ScriptRunner;
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
 use crate::network_iptables::NetworkIptablesManager;
+use crate::signal_cleanup;
 
 /// Script runner that executes commands inside an LXC container.
 pub struct LxcScriptRunner {
@@ -97,6 +98,9 @@ impl LxcScriptRunner {
         }
 
         let container_name = self.resolve_container_name();
+        // Make the name visible to the signal-cleanup watchdog so a fatal
+        // signal during create/start/attach still tears the container down.
+        signal_cleanup::set_active(&container_name);
         let _ = writeln!(logger, "Container name: {}", container_name);
         let _ = writeln!(
             logger,
