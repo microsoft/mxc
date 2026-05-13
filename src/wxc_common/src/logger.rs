@@ -260,10 +260,7 @@ impl Logger {
     /// encountered, flush the completed line(s) to the pipe sink.
     fn diag_accumulate(&mut self, text: &str) {
         #[cfg(target_os = "windows")]
-        {
-            if self.diag_pipe.is_none() {
-                return;
-            }
+        if self.diag_pipe.is_some() {
             self.diag_line_buf.push_str(text);
 
             // Flush each complete line.

@@ -79,7 +79,9 @@ echo "  Check formatting"
 cargo fmt --all -- --check
 
 echo "  Check linting"
-cargo clippy --workspace --all-targets -- -D warnings
+# Scope clippy to Linux-compatible crates only. --workspace includes Windows-only
+# crates (wxc, wslc_common, etc.) whose dependencies fail to compile on Linux.
+cargo clippy -p lxc -p lxc_common -p wxc_common --all-targets $CARGO_FEATURES -- -D warnings
 
 echo "Rust build complete."
 
