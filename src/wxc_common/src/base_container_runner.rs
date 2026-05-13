@@ -30,8 +30,8 @@ use crate::proxy_coordinator::ProxyCoordinator;
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::string_util;
 use sandbox_spec::base_container_layout::{
-    finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs, NetworkPolicy as FbsNetworkPolicy,
-    NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
+    finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs, IntegrityLevel,
+    NetworkPolicy as FbsNetworkPolicy, NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
 };
 
 /// Function pointer type matching `Experimental_CreateProcessInSandbox` from processmodel.dll.
@@ -260,7 +260,7 @@ impl ScriptRunner for BaseContainerRunner {
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let _ = writeln!(logger, "SECTION: Backend runner 'BaseContainer'");
+        let _ = writeln!(logger, "\u{25B6} SECTION: Backend runner 'BaseContainer'");
 
         let run_start = std::time::Instant::now();
 
@@ -296,21 +296,11 @@ impl ScriptRunner for BaseContainerRunner {
             );
         }
 
-        let _ = writeln!(logger, "SECTION: Build sandbox spec");
+        let _ = writeln!(logger, "\u{25B6} SECTION: Build sandbox spec");
 
         // 1. Build the FlatBuffer sandbox spec from the request policy.
         let spec_bytes = Self::build_sandbox_spec(&request);
 
-        // Print proxy URL in debug mode
-        if let Some(ref addr) = request.policy.network_proxy.address {
-            let _ = writeln!(logger, "proxy URL in spec: {}", addr.to_url());
-        }
-
-        let restrictions = crate::ui_policy::resolve_ui_restrictions(
-            &request.policy.ui,
-            &request.policy.base_process_ui,
-        );
-        let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(&restrictions);
         let _ = writeln!(
             logger,
             "sandbox spec built (version={}, {} bytes)",
@@ -318,41 +308,96 @@ impl ScriptRunner for BaseContainerRunner {
             spec_bytes.len()
         );
 
-        // Print flags in debug mode
-        let _ = writeln!(
-            logger,
-            "BaseContainer: disallow_win32k_system_calls={}, ui_restrictions=0x{:04X}",
-            request.policy.ui.disable, ui_restrictions
-        );
-        let _ = writeln!(
-            logger,
-            "ui.clipboard={:?}, ui.injection={}",
-            request.policy.ui.clipboard, request.policy.ui.injection
-        );
-        let _ = writeln!(
-            logger,
-            "base_process_ui: isolation={}, desktopSystemControl={}, systemSettings={}, ime={}",
-            request.policy.base_process_ui.isolation,
-            request.policy.base_process_ui.desktop_system_control,
-            request.policy.base_process_ui.system_settings,
-            request.policy.base_process_ui.ime
-        );
-        let _ = writeln!(
-            logger,
-            "UILIMIT flags: HANDLES={} READCLIP={} WRITECLIP={} SYSPARAM={} DISPLAY={} ATOMS={} DESKTOP={} EXIT={} IME={} INJECT={}",
-            restrictions.block_external_ui_objects,
-            restrictions.block_clipboard_read,
-            restrictions.block_clipboard_write,
-            restrictions.block_system_parameter_changes,
-            restrictions.block_display_settings_changes,
-            restrictions.block_global_ui_namespace,
-            restrictions.block_desktop_switching,
-            restrictions.block_logoff_or_shutdown,
-            restrictions.block_input_method_changes,
-            restrictions.block_input_injection,
-        );
+        // Read back all fields from the built FlatBuffer spec for debug verification
+        if let Ok(spec) = sandbox_spec::base_container_layout::root_as_sandbox_spec(&spec_bytes) {
 
-        let _ = writeln!(logger, "SECTION: Load API");
+            // Log Token
+            let _ = writeln!(logger, "[token]");
+            let integrity_emoji = if spec.integrity() == IntegrityLevel::system_default {
+                "\u{26AA}" // white circle (neutral)
+            } else {
+                "\u{26A0}" // warning sign
+            };
+            let _ = writeln!(
+                logger,
+                "  integrity:       {} {:?}",
+                integrity_emoji,
+                spec.integrity()
+            );
+            // Log AppContainer-ness
+            let app_container_emoji = if spec.app_container() {
+                "\u{26AA}" // white circle (neutral)
+            } else {
+                "\u{26A0}" // warning sign
+            };
+            let _ = writeln!(
+                logger,
+                "  app_container:   {} {} (least_privilege: {})",
+                app_container_emoji,
+                if spec.app_container() { "on" } else { "off" },
+                if spec.least_privilege() { "on" } else { "off" }
+            );
+            if let Some(caps) = spec.capabilities() {
+                let _ = writeln!(
+                    logger,
+                    "  capabilities:    {}", caps);
+            }
+
+            // Log network access
+            let _ = writeln!(logger, "[network]");
+            if let Some(np) = spec.network_policy() {
+                if let Some(proxy) = np.proxy() {
+                    if let Some(url) = proxy.url() {
+                        let _ = writeln!(logger, "  network_policy.proxy.url: {}", url);
+                    }
+                }
+            } else {
+                let _ = writeln!(logger, "  <unspecified>");
+            }
+
+            // Log UI restrictions (in a human-readable way)
+            let _ = writeln!(logger, "[ui subsystem]");
+            let _ = writeln!(
+                logger,
+                "  win32k_system_calls: {}",
+                if spec.disallow_win32k_system_calls() {
+                    "\u{274C} blocked"
+                } else {
+                    "\u{2705} allowed"
+                }
+            );
+            let r = spec.ui_restrictions();
+            let flags: &[(&str, u64)] = &[
+                ("handles", 0x0001),
+                ("read_clip", 0x0002),
+                ("write_clip", 0x0004),
+                ("sys_params", 0x0008),
+                ("display", 0x0010),
+                ("atoms", 0x0020),
+                ("desktop", 0x0040),
+                ("exit_windows", 0x0080),
+                ("ime", 0x0100),
+                ("injection", 0x0200),
+            ];
+            let allowed: Vec<&str> = flags
+                .iter()
+                .filter(|(_, bit)| r & bit == 0)
+                .map(|(name, _)| *name)
+                .collect();
+            let blocked: Vec<&str> = flags
+                .iter()
+                .filter(|(_, bit)| r & bit != 0)
+                .map(|(name, _)| *name)
+                .collect();
+            let allowed_str = if allowed.is_empty() { "<none>".to_string() } else { allowed.join(", ") };
+            let blocked_str = if blocked.is_empty() { "<none>".to_string() } else { blocked.join(", ") };
+            let _ = writeln!(logger, "  uilimits allowed \u{2705}: {}", allowed_str);
+            let _ = writeln!(logger, "  uilimits blocked \u{274C}: {} (0x{:04X})",
+                blocked_str,
+                spec.ui_restrictions());
+        }
+
+        let _ = writeln!(logger, "\u{25B6} SECTION: Load API");
 
         // 2. Dynamically load the API from processmodel.dll.
         let create_process_in_sandbox = match Self::load_api() {
@@ -364,7 +409,7 @@ impl ScriptRunner for BaseContainerRunner {
             "loaded Experimental_CreateProcessInSandbox from processmodel.dll"
         );
 
-        let _ = writeln!(logger, "SECTION: Launch process");
+        let _ = writeln!(logger, "\u{25B6} SECTION: Launch process");
 
         // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
         let mut cmd_wide = string_util::to_wide(&request.script_code);
@@ -441,7 +486,7 @@ impl ScriptRunner for BaseContainerRunner {
 
         let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
 
-        let _ = writeln!(logger, "SECTION: Wait for exit");
+        let _ = writeln!(logger, "\u{25B6} SECTION: Wait for exit");
 
         // 5. Wait for the child process to exit.
         let timeout_ms = get_timeout_milliseconds(request.script_timeout);
@@ -470,7 +515,7 @@ impl ScriptRunner for BaseContainerRunner {
 
         let _ = writeln!(
             logger,
-            "SECTION: Done ({:.3}s)",
+            "\u{25B6} SECTION: Done ({:.3}s)",
             run_start.elapsed().as_secs_f64()
         );
 
@@ -521,12 +566,20 @@ mod tests {
         assert!(spec.least_privilege());
         assert_eq!(spec.capabilities(), Some("internetClient,registryRead"));
         assert!(spec.disallow_win32k_system_calls());
-        // default: disable=true → only the global UI namespace bit
+        // disable=true sets all non-IME restrictions; ime=false (default) adds IME
         assert_eq!(
             spec.ui_restrictions(),
             expected_mask(EffectiveUiRestrictions {
+                block_clipboard_read: true,
+                block_clipboard_write: true,
+                block_input_injection: true,
+                block_input_method_changes: true,
+                block_external_ui_objects: true,
                 block_global_ui_namespace: true,
-                ..Default::default()
+                block_desktop_switching: true,
+                block_logoff_or_shutdown: true,
+                block_system_parameter_changes: true,
+                block_display_settings_changes: true,
             })
         );
 
@@ -585,12 +638,20 @@ mod tests {
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
 
         assert!(spec.disallow_win32k_system_calls());
-        // disable=true → only the global UI namespace bit (Win32k disable handles the rest)
+        // disable=true sets all non-IME restrictions; ime=false (default) adds IME
         assert_eq!(
             spec.ui_restrictions(),
             expected_mask(EffectiveUiRestrictions {
+                block_clipboard_read: true,
+                block_clipboard_write: true,
+                block_input_injection: true,
+                block_input_method_changes: true,
+                block_external_ui_objects: true,
                 block_global_ui_namespace: true,
-                ..Default::default()
+                block_desktop_switching: true,
+                block_logoff_or_shutdown: true,
+                block_system_parameter_changes: true,
+                block_display_settings_changes: true,
             })
         );
     }
