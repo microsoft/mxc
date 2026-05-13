@@ -5,7 +5,7 @@
 pub mod config_parser;
 pub mod encoding;
 pub mod error;
-#[cfg(feature = "hyperlight")]
+#[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 pub mod hyperlight_runner;
 pub mod id;
 pub mod logger;

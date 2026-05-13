@@ -4,6 +4,13 @@
 import { EventEmitter } from 'events';
 import { Readable } from 'stream';
 import { SandboxSpawnOptions } from '../../src/sandbox.js';
+import { getPlatformSupport } from '../../src/platform.js';
+
+// Skip marker for describes that hit the binary resolver: undefined when MXC
+// is supported on this host, an error string when it isn't.
+export const platformSkip: string | false = !getPlatformSupport().isSupported
+  ? 'MXC not supported on this machine'
+  : false;
 
 /**
  * Spawn-options preset for unit tests that drive the real binary-resolver

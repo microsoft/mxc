@@ -12,8 +12,7 @@ use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
 use lxc_common::lxc_runner::LxcScriptRunner;
-use lxc_common::signal_cleanup;
-#[cfg(feature = "hyperlight")]
+#[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use wxc_common::hyperlight_runner::HyperlightScriptRunner;
 
 #[derive(Parser)]
@@ -119,7 +118,7 @@ fn main() {
     // before config parsing so the user doesn't need a JSON file on
     // disk just to install.
     if cli.setup_hyperlight {
-        #[cfg(feature = "hyperlight")]
+        #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
         {
             let mut logger = Logger::new(if cli.debug {
                 Mode::Console
@@ -137,7 +136,7 @@ fn main() {
                 }
             }
         }
-        #[cfg(not(feature = "hyperlight"))]
+        #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
         {
             eprintln!("Error: --setup-hyperlight requires x86_64 (Hyperlight needs KVM or WHP)");
             process::exit(1);
@@ -202,7 +201,7 @@ fn main() {
     // Hyperlight is the new embedded Hyperlight+Unikraft micro-VM.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::Hyperlight => {
-            #[cfg(feature = "hyperlight")]
+            #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
             {
                 if !request.experimental_enabled {
                     eprintln!(
@@ -213,7 +212,7 @@ fn main() {
                 }
                 Box::new(HyperlightScriptRunner::new())
             }
-            #[cfg(not(feature = "hyperlight"))]
+            #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
             {
                 eprintln!(
                     "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
