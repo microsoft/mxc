@@ -1,0 +1,77 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Builds mxc-exec-mac (the macOS sandbox executor) on an ARM64 macOS
+# Microsoft-hosted agent and publishes the binary as a pipeline artifact
+# so the Package.NpmSdk and SDK.Integration.Test stages can consume it.
+#
+# This template intentionally uses rustup + plain cargo instead of the
+# 1ES.Build.Rust.* tasks because the 1ES Rust toolchain feed is not
+# available on macOS pools. The Microsoft-hosted "Azure Pipelines" pool
+# works with 1ES Pipeline Templates out of the box.
+
+parameters:
+- name: triplet
+  type: string
+  default: aarch64-apple-darwin
+
+jobs:
+- job: 'build_arm64_MAC'
+  displayName: 'Build (arm64 MAC)'
+
+  pool:
+    name: Azure Pipelines
+    vmImage: macOS-latest
+    os: macOS
+
+  variables:
+    CARGO_TARGET_DIR: $(Agent.TempDirectory)/target
+    targetTriple: ${{ parameters.triplet }}
+    targetTripleDir: $(CARGO_TARGET_DIR)/$(targetTriple)/release
+    outputDirectory: $(Build.SourcesDirectory)/out
+    artifactBaseName: mxc-binaries-$(targetTriple)
+    workingDirectory: $(Build.SourcesDirectory)/src
+
+  steps:
+    - checkout: self
+
+    - script: |
+        set -euo pipefail
+        rustup update stable
+        rustup component add rustfmt clippy
+        rustup target add $(targetTriple)
+      displayName: Setup Rust toolchain
+
+    - script: cargo fmt --all -- --check
+      displayName: Check formatting
+      workingDirectory: $(workingDirectory)
+
+    # Clippy is scoped to the macOS-specific crates because the full
+    # workspace includes Windows-only crates that do not compile on macOS.
+    # wxc_common (a workspace dependency) has Windows-only diagnostic code
+    # that produces warnings on macOS; allow those specific warnings here
+    # to avoid false failures. The Windows CI lints the full workspace.
+    - script: cargo clippy -p mxc_darwin -p seatbelt_common --all-targets -- -D warnings -A unreachable-code -A unused-variables
+      displayName: Clippy
+      workingDirectory: $(workingDirectory)
+
+    - script: cargo build --release --target $(targetTriple) -p mxc_darwin
+      displayName: Build release
+      workingDirectory: $(workingDirectory)
+
+    - script: cargo test --release --target $(targetTriple) -p mxc_darwin -p seatbelt_common -p wxc_common
+      displayName: Run tests
+      workingDirectory: $(workingDirectory)
+
+    - task: CopyFiles@2
+      displayName: Copy binary
+      inputs:
+        sourceFolder: $(targetTripleDir)
+        contents: mxc-exec-mac
+        targetFolder: $(outputDirectory)/$(targetTriple)
+
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: Publish
+      inputs:
+        path: '$(outputDirectory)/$(targetTriple)'
+        artifactName: $(artifactBaseName)

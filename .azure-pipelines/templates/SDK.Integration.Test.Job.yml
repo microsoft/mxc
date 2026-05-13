@@ -29,6 +29,13 @@ jobs:
       ${{ if eq(target.os, 'linux') }}:
         image: ubuntu-latest
         os: linux
+      ${{ if eq(target.os, 'macos') }}:
+        # macOS is not available on the 1ES shared pool; use the
+        # Microsoft-hosted Azure Pipelines pool (works with 1ES PT
+        # out of the box).
+        name: Azure Pipelines
+        vmImage: macOS-latest
+        os: macOS
 
     variables:
       integrationDirectory: $(Build.SourcesDirectory)/sdk/tests/integration
@@ -88,3 +95,19 @@ jobs:
           env:
             MXC_DEBUG: ${{ parameters.debug }}
             MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
+
+      - ${{ if eq(target.os, 'macos') }}:
+        # Restore execute bit on the mac binary; pipeline artifact
+        # downloads (via npm pack/unpack) drop Unix execute permissions.
+        - script: |
+            set -euo pipefail
+            BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
+            if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found in installed package" && exit 1; fi
+          workingDirectory: $(integrationDirectory)
+          displayName: Restore execute permission on mxc-exec-mac
+
+        - script: node --test dist/macos-seatbelt.test.js
+          workingDirectory: $(integrationDirectory)
+          displayName: Run seatbelt integration tests
+          env:
+            MXC_DEBUG: ${{ parameters.debug }}

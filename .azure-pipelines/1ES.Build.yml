@@ -86,6 +86,12 @@ extends:
 
             ESRPInfo: ${{ parameters.ESRPInfo }}
 
+        # macOS uses a separate template because it runs on a different
+        # pool (Microsoft-hosted) and skips ESRP signing / cross-compile
+        # plumbing. The produced artifact name follows the same scheme
+        # (mxc-binaries-<triplet>) so Package_MXC_NPM_SDK can consume it.
+        - template: .azure-pipelines/templates/Mac.Build.Job.yml@self
+
     - stage: Package_MXC_NPM_SDK
       displayName: 'Package Npm Sdk'
       dependsOn: Build_Binaries
@@ -100,6 +106,8 @@ extends:
             - artifact: lxc-binaries-x86_64-unknown-linux-gnu
               sdkArch: x64
             - artifact: lxc-binaries-aarch64-unknown-linux-gnu
+              sdkArch: arm64
+            - artifact: mxc-binaries-aarch64-apple-darwin
               sdkArch: arm64
 
           ESRPInfo: ${{ parameters.ESRPInfo }}
@@ -119,3 +127,10 @@ extends:
       - template: .azure-pipelines/templates/SDK.Integration.Test.Job.yml@self
         parameters:
           debug: ${{ parameters.debug }}
+          targets:
+            - name: windows
+              os: windows
+            - name: linux
+              os: linux
+            - name: macos
+              os: macos
