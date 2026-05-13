@@ -214,6 +214,13 @@ impl BaseContainerRunner {
             Err(_) => return,
         };
 
+        let _ = writeln!(
+            logger,
+            "sandbox spec built (version={}, {} bytes)",
+            spec.version(),
+            spec_bytes.len()
+        );
+
         // Token
         let _ = writeln!(logger, "[token]");
         let integrity_emoji = if spec.integrity() == IntegrityLevel::system_default {
@@ -404,13 +411,6 @@ impl ScriptRunner for BaseContainerRunner {
 
         // 1. Build the FlatBuffer sandbox spec from the request policy.
         let spec_bytes = Self::build_sandbox_spec(&request);
-
-        let _ = writeln!(
-            logger,
-            "sandbox spec built (version={}, {} bytes)",
-            SANDBOX_SPEC_VERSION,
-            spec_bytes.len()
-        );
 
         Self::log_sandbox_spec(&spec_bytes, logger);
 
