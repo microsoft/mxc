@@ -596,6 +596,12 @@ fn hyperlight_suite() {
             expected_exit: 0,
             output_contains: Some("'x':"),
         },
+        HyperlightCase {
+            config: "hyperlight_exit_code.json",
+            description: "sys.exit(42) propagates exit code",
+            expected_exit: 42,
+            output_contains: None,
+        },
     ];
 
     let mut failures = Vec::new();
