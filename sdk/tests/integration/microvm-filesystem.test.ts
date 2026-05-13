@@ -325,4 +325,144 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
       fs.rmSync(testDir, { recursive: true, force: true });
     }
   });
+
+  it('should generate a dark-themed 3-slide PPTX about MXC and NanVix using python-pptx', async () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-microvm-pptx-dark-'));
+    const rwDir = path.join(testDir, 'output');
+    fs.mkdirSync(rwDir);
+
+    try {
+      const rwDirPy = pyEscape(rwDir);
+      const config = {
+        version: '0.5.0-alpha',
+        containment: 'microvm' as const,
+        process: {
+          commandLine: [
+            // site-packages isn't on sys.path by default in this NanVix build
+            "import sys; sys.path.insert(0, '/sysroot/lib/python3.12/site-packages')",
+            "import os",
+            "from pptx import Presentation",
+            "from pptx.util import Inches, Pt, Emu",
+            "from pptx.dml.color import RGBColor",
+            "from pptx.enum.text import PP_ALIGN",
+            "",
+            "prs = Presentation()",
+            "prs.slide_width = Emu(12192000)",
+            "prs.slide_height = Emu(6858000)",
+            "",
+            "BG = RGBColor(0x1B, 0x1B, 0x2F)",
+            "WHITE = RGBColor(0xFF, 0xFF, 0xFF)",
+            "BLUE = RGBColor(0x56, 0x9C, 0xD6)",
+            "TEAL = RGBColor(0x4E, 0xC9, 0xB0)",
+            "GRAY = RGBColor(0xD4, 0xD4, 0xD4)",
+            "",
+            "def set_bg(slide):",
+            "    bg = slide.background",
+            "    fill = bg.fill",
+            "    fill.solid()",
+            "    fill.fore_color.rgb = BG",
+            "",
+            "def add_text(slide, left, top, width, height, text, font_size, color, bold=False, alignment=PP_ALIGN.LEFT):",
+            "    txBox = slide.shapes.add_textbox(left, top, width, height)",
+            "    tf = txBox.text_frame",
+            "    tf.word_wrap = True",
+            "    p = tf.paragraphs[0]",
+            "    p.text = text",
+            "    p.font.size = Pt(font_size)",
+            "    p.font.color.rgb = color",
+            "    p.font.bold = bold",
+            "    p.alignment = alignment",
+            "    return tf",
+            "",
+            "def add_para(tf, text, font_size, color, bold=False):",
+            "    p = tf.add_paragraph()",
+            "    p.text = text",
+            "    p.font.size = Pt(font_size)",
+            "    p.font.color.rgb = color",
+            "    p.font.bold = bold",
+            "    return tf",
+            "",
+            "# --- Slide 1: Title ---",
+            "blank = prs.slide_layouts[6]",
+            "s1 = prs.slides.add_slide(blank)",
+            "set_bg(s1)",
+            "add_text(s1, Inches(0.8), Inches(1.8), Inches(10), Inches(1.2),",
+            "    '\\U0001f680 MXC \\u00d7 NanVix', 44, WHITE, bold=True, alignment=PP_ALIGN.CENTER)",
+            "tf1 = add_text(s1, Inches(0.8), Inches(3.2), Inches(10), Inches(1.5),",
+            "    'Sandboxed Code Execution with Micro-VM Isolation', 24, BLUE, alignment=PP_ALIGN.CENTER)",
+            "add_para(tf1, '', 12, WHITE)",
+            "add_para(tf1, '\\U0001f512 Secure  \\u2022  \\u26a1 Fast  \\u2022  \\U0001f30d Cross-Platform', 20, TEAL)",
+            "tf1.paragraphs[-1].alignment = PP_ALIGN.CENTER",
+            "",
+            "# --- Slide 2: Architecture ---",
+            "s2 = prs.slides.add_slide(blank)",
+            "set_bg(s2)",
+            "add_text(s2, Inches(0.8), Inches(0.4), Inches(10), Inches(0.8),",
+            "    '\\U0001f527 How It Works', 32, WHITE, bold=True)",
+            "tf2 = add_text(s2, Inches(0.8), Inches(1.4), Inches(10), Inches(5),",
+            "    '\\U0001f4e6 MXC (Microsoft eXecution Container)', 20, BLUE, bold=True)",
+            "add_para(tf2, 'Orchestrates sandboxed execution across backends', 16, GRAY)",
+            "add_para(tf2, '', 12, GRAY)",
+            "add_para(tf2, '\\U0001f5a5 NanVix Micro-VM Backend', 20, BLUE, bold=True)",
+            "add_para(tf2, 'Lightweight hypervisor isolation via WHP', 16, GRAY)",
+            "add_para(tf2, 'CPython 3.12 inside a minimal microkernel', 16, GRAY)",
+            "add_para(tf2, '', 12, GRAY)",
+            "add_para(tf2, '\\U0001f504 The Flow', 20, BLUE, bold=True)",
+            "add_para(tf2, 'SDK \\u2192 wxc-exec \\u2192 nanvixd \\u2192 kernel.elf \\u2192 Python \\U0001f40d', 16, TEAL)",
+            "",
+            "# --- Slide 3: What's Next ---",
+            "s3 = prs.slides.add_slide(blank)",
+            "set_bg(s3)",
+            "add_text(s3, Inches(0.8), Inches(0.4), Inches(10), Inches(0.8),",
+            "    '\\u2728 What\\'s Next', 32, WHITE, bold=True)",
+            "tf3 = add_text(s3, Inches(0.8), Inches(1.4), Inches(10), Inches(5),",
+            "    '\\u2705 Filesystem sharing via readwritePaths', 18, GRAY)",
+            "add_para(tf3, '\\u2705 Stdout/stderr streaming back to host', 18, GRAY)",
+            "add_para(tf3, '\\u2705 Exit code propagation', 18, GRAY)",
+            "add_para(tf3, '\\U0001f6a7 Network isolation & proxy support', 18, GRAY)",
+            "add_para(tf3, '\\U0001f6a7 Multi-language guest support', 18, GRAY)",
+            "add_para(tf3, '\\U0001f6a7 GPU passthrough for AI workloads', 18, GRAY)",
+            "add_para(tf3, '', 12, GRAY)",
+            "add_para(tf3, '\\U0001f4ac \"Run untrusted code safely, at VM speed\"', 20, TEAL, bold=True)",
+            "",
+            `pptx_path = os.path.join('${rwDirPy}', 'mxc-nanvix.pptx')`,
+            "prs.save(pptx_path)",
+            "size = os.path.getsize(pptx_path)",
+            "print(f'PPTX created: {size} bytes, 3 slides')",
+            "print(f'Output: {pptx_path}')",
+          ].join('\n'),
+          timeout: 60000,
+        },
+        filesystem: {
+          readwritePaths: [rwDir],
+        },
+      };
+
+      const { stdout, stderr, exitCode } = await runMicrovm(config);
+      const combined = stdout + stderr;
+
+      assert.strictEqual(exitCode, 0, `Expected exit code 0.\nstdout: ${stdout}\nstderr: ${stderr}`);
+      assert.ok(combined.includes('PPTX created:'), `Expected creation message in output:\n${combined}`);
+      assert.ok(combined.includes('3 slides'), `Expected 3 slides in output:\n${combined}`);
+
+      // Verify the PPTX was copied back to the host.
+      const pptxPath = path.join(rwDir, 'mxc-nanvix.pptx');
+      assert.ok(fs.existsSync(pptxPath), `Expected mxc-nanvix.pptx at ${pptxPath}`);
+      const size = fs.statSync(pptxPath).size;
+      assert.ok(size > 10000, `Expected substantial PPTX from python-pptx, got ${size} bytes`);
+
+      // Verify valid zip with PK header.
+      const header = Buffer.alloc(4);
+      const fd = fs.openSync(pptxPath, 'r');
+      fs.readSync(fd, header, 0, 4, 0);
+      fs.closeSync(fd);
+      assert.strictEqual(header[0], 0x50, 'Expected PK zip header byte 1');
+      assert.strictEqual(header[1], 0x4B, 'Expected PK zip header byte 2');
+
+      console.log(`Dark PPTX output: ${pptxPath} (${size} bytes)`);
+    } finally {
+      // Keep output for manual inspection — open in PowerPoint to verify.
+      console.log(`Dark PPTX test dir persisted at: ${testDir}`);
+    }
+  });
 });

@@ -224,12 +224,24 @@ function Setup-LockedDownTestDir {
 
 # Sends a state-aware provision request and surfaces a `backend_unavailable`
 # envelope as a SKIP. This catches feature-flag-off builds without raising
-# false test failures.
+# false test failures. On a healthy build the probe successfully creates an
+# agent user, so we immediately deprovision the throwaway sandbox -- without
+# this, every test run would leak one local agent user.
 $probe = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
 $probeEnv = Parse-Envelope -Stdout $probe.Stdout
 if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
     Write-Host "SKIPPED: wxc-exec reports backend_unavailable (likely built without --features isolation_session)" -ForegroundColor Yellow
     exit 0
+}
+if ($null -ne $probeEnv -and $null -ne $probeEnv.result -and $null -ne $probeEnv.result.sandboxId) {
+    $probeSandboxId = [string]$probeEnv.result.sandboxId
+    $probeAgent = if ($probeEnv.result.metadata) { [string]$probeEnv.result.metadata.agentUserName } else { '<absent>' }
+    Write-Host "Backend probe: provisioned $probeSandboxId (agentUserName=$probeAgent), deprovisioning ..." -ForegroundColor DarkGray
+    $probeDeprov = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $probeSandboxId -Experimental
+    if ($probeDeprov.ExitCode -ne 0) {
+        Write-Host "WARN: probe deprovision returned exit $($probeDeprov.ExitCode); local user $probeAgent may persist" -ForegroundColor Yellow
+        Write-Host "  Stdout: $($probeDeprov.Stdout)" -ForegroundColor Gray
+    }
 }
 
 # ---------------- Tests ----------------
@@ -688,6 +700,8 @@ try {
             $script:fsSandboxId = $envObj.result.sandboxId
             Assert-True ($script:fsSandboxId -match '^iso:wxc-[0-9a-f]{8}$') `
                 "sandbox_id matches iso:wxc-<8-hex> ($script:fsSandboxId)"
+            $agentUserName = if ($envObj.result.metadata) { [string]$envObj.result.metadata.agentUserName } else { '<absent>' }
+            Write-Host "  filesystem provisioned: agentUserName=$agentUserName" -ForegroundColor DarkGray
         }
     }
 
@@ -818,6 +832,8 @@ try {
             $script:mediumSandboxId = $envObj.result.sandboxId
             Assert-True ($script:mediumSandboxId -match '^iso:wxc-[0-9a-f]{8}$') `
                 "sandbox_id matches iso:wxc-<8-hex> ($script:mediumSandboxId)"
+            $agentUserName = if ($envObj.result.metadata) { [string]$envObj.result.metadata.agentUserName } else { '<absent>' }
+            Write-Host "  Medium provisioned: agentUserName=$agentUserName" -ForegroundColor DarkGray
         }
     } | Out-Null
 
@@ -956,6 +972,255 @@ Run-StateAwareTest "start (user.upn mismatches sandboxId)" {
     Assert-True ($msg.Contains('does not match sandboxId')) "error.message mentions sandboxId mismatch (got '$msg')"
 } | Out-Null
 
+# ---------------- Lifecycle E: Simultaneous isolation-session sandboxes ----------------
+#
+# Three concurrently-provisioned sandboxes (A, B, C) verify that
+# deprovisioning one does not tear down the others. The runner does not
+# call UnregisterAppAsync (see IsolationSessionManager::unregister_client)
+# so the per-user hardcoded `regid` registration survives a deprovision of
+# any individual sandbox. Without that property the first deprovision
+# would break every still-running concurrent sandbox.
+#
+# Per-agent state isolation is verified by having each sandbox write a
+# unique marker file into its agent's %TEMP% and asserting that each
+# sandbox sees only its own marker.
+
+$script:saSandboxA = $null
+$script:saSandboxB = $null
+$script:saSandboxC = $null
+$script:saSandboxD = $null
+$saADeprov = $false
+$saBDeprov = $false
+$saCDeprov = $false
+$saDDeprov = $false
+
+# Helper: provision a fresh sandbox; returns the sandboxId on success, $null on
+# failure. Also logs the OS-assigned agentUserName so post-run inspection of
+# leftover local users can be correlated back to a specific test.
+function Provision-LifecycleESandbox {
+    param([string]$Label)
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    if ((Envelope-Arm $envObj) -ne 'result') {
+        Write-Host "  $Label provision returned arm: $(Envelope-Arm $envObj)" -ForegroundColor Red
+        Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+        return $null
+    }
+    $sandboxId = $envObj.result.sandboxId
+    $agentUserName = if ($envObj.result.metadata) { [string]$envObj.result.metadata.agentUserName } else { '<absent>' }
+    Write-Host "  $Label provisioned: sandboxId=$sandboxId agentUserName=$agentUserName" -ForegroundColor DarkGray
+    return $sandboxId
+}
+
+# Helper: exec a marker-write command inside the given sandbox.
+function Exec-LifecycleEWriteMarker {
+    param([string]$SandboxId, [string]$Marker)
+    $req = @{
+        phase     = 'exec'
+        sandboxId = $SandboxId
+        process   = @{
+            commandLine = "cmd /c `"echo $Marker-content > %TEMP%\$Marker.txt`""
+            timeout     = 30000
+        }
+    }
+    Invoke-StateAware -Request $req -Experimental
+}
+
+# Helper: exec a "list all markers" command inside the given sandbox.
+function Exec-LifecycleEListMarkers {
+    param([string]$SandboxId)
+    $req = @{
+        phase     = 'exec'
+        sandboxId = $SandboxId
+        process   = @{
+            commandLine = 'cmd /c "dir /b %TEMP%\marker_*.txt 2>nul"'
+            timeout     = 30000
+        }
+    }
+    Invoke-StateAware -Request $req -Experimental
+}
+
+try {
+    # E1: Provision A, B, C (three distinct sandbox_ids).
+    Run-StateAwareTest "Lifecycle E: provision A" {
+        $script:saSandboxA = Provision-LifecycleESandbox -Label "A"
+        Assert-True ($null -ne $script:saSandboxA) "saSandboxA is non-null"
+        if ($null -ne $script:saSandboxA) {
+            Assert-True ($script:saSandboxA -match '^iso:wxc-[0-9a-f]{8}$') "saSandboxA matches expected format ($script:saSandboxA)"
+        }
+    } | Out-Null
+    Run-StateAwareTest "Lifecycle E: provision B" {
+        $script:saSandboxB = Provision-LifecycleESandbox -Label "B"
+        Assert-True ($null -ne $script:saSandboxB) "saSandboxB is non-null"
+        if ($null -ne $script:saSandboxB) {
+            Assert-True ($script:saSandboxB -ne $script:saSandboxA) "saSandboxB differs from saSandboxA"
+        }
+    } | Out-Null
+    Run-StateAwareTest "Lifecycle E: provision C" {
+        $script:saSandboxC = Provision-LifecycleESandbox -Label "C"
+        Assert-True ($null -ne $script:saSandboxC) "saSandboxC is non-null"
+        if ($null -ne $script:saSandboxC) {
+            Assert-True ($script:saSandboxC -ne $script:saSandboxA) "saSandboxC differs from saSandboxA"
+            Assert-True ($script:saSandboxC -ne $script:saSandboxB) "saSandboxC differs from saSandboxB"
+        }
+    } | Out-Null
+
+    $allProvisioned = $null -ne $script:saSandboxA -and $null -ne $script:saSandboxB -and $null -ne $script:saSandboxC
+
+    if ($allProvisioned) {
+        # E2: Start A, B, C.
+        Run-StateAwareTest "Lifecycle E: start A" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:saSandboxA -Experimental
+            Assert-True ($r.ExitCode -eq 0) "start A exit 0"
+        } | Out-Null
+        Run-StateAwareTest "Lifecycle E: start B" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:saSandboxB -Experimental
+            Assert-True ($r.ExitCode -eq 0) "start B exit 0"
+        } | Out-Null
+        Run-StateAwareTest "Lifecycle E: start C" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:saSandboxC -Experimental
+            Assert-True ($r.ExitCode -eq 0) "start C exit 0"
+        } | Out-Null
+
+        # E3: Each agent writes its own marker into its %TEMP%.
+        Run-StateAwareTest "Lifecycle E: A writes marker_A" {
+            $r = Exec-LifecycleEWriteMarker -SandboxId $script:saSandboxA -Marker "marker_A"
+            Assert-True ($r.ExitCode -eq 0) "exec write marker_A exit 0"
+        } | Out-Null
+        Run-StateAwareTest "Lifecycle E: B writes marker_B" {
+            $r = Exec-LifecycleEWriteMarker -SandboxId $script:saSandboxB -Marker "marker_B"
+            Assert-True ($r.ExitCode -eq 0) "exec write marker_B exit 0"
+        } | Out-Null
+        Run-StateAwareTest "Lifecycle E: C writes marker_C" {
+            $r = Exec-LifecycleEWriteMarker -SandboxId $script:saSandboxC -Marker "marker_C"
+            Assert-True ($r.ExitCode -eq 0) "exec write marker_C exit 0"
+        } | Out-Null
+
+        # E4: Each agent's %TEMP% lists only its own marker.
+        Run-StateAwareTest "Lifecycle E: A sees only its own marker" {
+            $r = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxA
+            $out = [string]$r.Stdout
+            Assert-True ($r.ExitCode -eq 0) "list exit 0"
+            Assert-True ($out.Contains("marker_A.txt")) "A sees marker_A.txt"
+            Assert-True (-not $out.Contains("marker_B.txt")) "A does not see marker_B.txt"
+            Assert-True (-not $out.Contains("marker_C.txt")) "A does not see marker_C.txt"
+        } | Out-Null
+        Run-StateAwareTest "Lifecycle E: B sees only its own marker" {
+            $r = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxB
+            $out = [string]$r.Stdout
+            Assert-True ($r.ExitCode -eq 0) "list exit 0"
+            Assert-True ($out.Contains("marker_B.txt")) "B sees marker_B.txt"
+            Assert-True (-not $out.Contains("marker_A.txt")) "B does not see marker_A.txt"
+            Assert-True (-not $out.Contains("marker_C.txt")) "B does not see marker_C.txt"
+        } | Out-Null
+        Run-StateAwareTest "Lifecycle E: C sees only its own marker" {
+            $r = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxC
+            $out = [string]$r.Stdout
+            Assert-True ($r.ExitCode -eq 0) "list exit 0"
+            Assert-True ($out.Contains("marker_C.txt")) "C sees marker_C.txt"
+            Assert-True (-not $out.Contains("marker_A.txt")) "C does not see marker_A.txt"
+            Assert-True (-not $out.Contains("marker_B.txt")) "C does not see marker_B.txt"
+        } | Out-Null
+
+        # E5: Stop + deprovision B. The regid leak means the registration
+        # survives B's deprovision and A / C remain functional.
+        Run-StateAwareTest "Lifecycle E: stop B" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:saSandboxB -Experimental
+            Assert-True ($r.ExitCode -eq 0) "stop B exit 0"
+        } | Out-Null
+        $bDeprovPassed = Run-StateAwareTest "Lifecycle E: deprovision B" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:saSandboxB -Experimental
+            Assert-True ($r.ExitCode -eq 0) "deprovision B exit 0"
+        }
+        if ($bDeprovPassed) { $saBDeprov = $true }
+
+        # E6: Regression check -- A and C remain functional after B
+        # deprovisioned. Would fail without the regid leak.
+        Run-StateAwareTest "Lifecycle E: A still functional after B deprov" {
+            $r = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxA
+            $out = [string]$r.Stdout
+            Assert-True ($r.ExitCode -eq 0) "list exit 0 (regid not torn down by B's deprovision)"
+            Assert-True ($out.Contains("marker_A.txt")) "A still sees marker_A.txt"
+        } | Out-Null
+        Run-StateAwareTest "Lifecycle E: C still functional after B deprov" {
+            $r = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxC
+            $out = [string]$r.Stdout
+            Assert-True ($r.ExitCode -eq 0) "list exit 0 (regid not torn down by B's deprovision)"
+            Assert-True ($out.Contains("marker_C.txt")) "C still sees marker_C.txt"
+        } | Out-Null
+
+        # E7: Stop + deprovision A.
+        Run-StateAwareTest "Lifecycle E: stop A" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:saSandboxA -Experimental
+            Assert-True ($r.ExitCode -eq 0) "stop A exit 0"
+        } | Out-Null
+        $aDeprovPassed = Run-StateAwareTest "Lifecycle E: deprovision A" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:saSandboxA -Experimental
+            Assert-True ($r.ExitCode -eq 0) "deprovision A exit 0"
+        }
+        if ($aDeprovPassed) { $saADeprov = $true }
+
+        # E8: Regression check -- C remains functional after A deprovisioned.
+        Run-StateAwareTest "Lifecycle E: C still functional after A deprov" {
+            $r = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxC
+            $out = [string]$r.Stdout
+            Assert-True ($r.ExitCode -eq 0) "list exit 0"
+            Assert-True ($out.Contains("marker_C.txt")) "C still sees marker_C.txt"
+        } | Out-Null
+
+        # E9: Stop + deprovision C.
+        Run-StateAwareTest "Lifecycle E: stop C" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:saSandboxC -Experimental
+            Assert-True ($r.ExitCode -eq 0) "stop C exit 0"
+        } | Out-Null
+        $cDeprovPassed = Run-StateAwareTest "Lifecycle E: deprovision C" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:saSandboxC -Experimental
+            Assert-True ($r.ExitCode -eq 0) "deprovision C exit 0"
+        }
+        if ($cDeprovPassed) { $saCDeprov = $true }
+    }
+
+    # E10: Fresh provision D after all three torn down -- the leaked regid
+    # must not poison new sandboxes either.
+    Run-StateAwareTest "Lifecycle E: provision D after all torn down" {
+        $script:saSandboxD = Provision-LifecycleESandbox -Label "D"
+        Assert-True ($null -ne $script:saSandboxD) "saSandboxD is non-null"
+    } | Out-Null
+    if ($null -ne $script:saSandboxD) {
+        $dBundlePassed = Run-StateAwareTest "Lifecycle E: D start + exec + stop + deprovision" {
+            $rs = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:saSandboxD -Experimental
+            Assert-True ($rs.ExitCode -eq 0) "start D exit 0"
+            $rw = Exec-LifecycleEWriteMarker -SandboxId $script:saSandboxD -Marker "marker_D"
+            Assert-True ($rw.ExitCode -eq 0) "exec write marker_D exit 0"
+            $rl = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxD
+            $out = [string]$rl.Stdout
+            Assert-True ($out.Contains("marker_D.txt")) "D sees marker_D.txt"
+            $rst = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:saSandboxD -Experimental
+            Assert-True ($rst.ExitCode -eq 0) "stop D exit 0"
+            $rd = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:saSandboxD -Experimental
+            Assert-True ($rd.ExitCode -eq 0) "deprovision D exit 0"
+        }
+        if ($dBundlePassed) { $saDDeprov = $true }
+    }
+} finally {
+    # Best-effort deprovision of any sandbox left provisioned (e.g., due
+    # to a mid-flow test failure).
+    foreach ($entry in @(
+            @{ id = $script:saSandboxA; done = $saADeprov; label = 'A' },
+            @{ id = $script:saSandboxB; done = $saBDeprov; label = 'B' },
+            @{ id = $script:saSandboxC; done = $saCDeprov; label = 'C' },
+            @{ id = $script:saSandboxD; done = $saDDeprov; label = 'D' }
+        )) {
+        if ($null -ne $entry.id -and -not $entry.done) {
+            Write-Host ""
+            Write-Host "[cleanup] best-effort deprovision of Lifecycle E sandbox $($entry.label) ($($entry.id))" -ForegroundColor DarkGray
+            try {
+                $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $entry.id -Experimental
+            } catch { }
+        }
+    }
+}
+
 } finally {
     # Outer-try finally: remove the locked-down test tree. Runs even if a
     # test panics so we don't leak the directory between runs.
@@ -965,7 +1230,11 @@ Run-StateAwareTest "start (user.upn mismatches sandboxId)" {
 # ---------------- Summary ----------------
 
 $total  = $script:TestResults.Count
-$failed = ($script:TestResults | Where-Object { -not $_.Passed }).Count
+# @(...) forces array context so a single failure doesn't get unwrapped to
+# the bare result object, where .Count would return the property/key count
+# instead of 1. PSCustomObject happens to do the right thing today, but
+# the wrap makes the count robust regardless of the result-object type.
+$failed = @($script:TestResults | Where-Object { -not $_.Passed }).Count
 $passed = $total - $failed
 
 Write-Host ""

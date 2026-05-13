@@ -1,0 +1,12 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "isolation-session-concurrent-B",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\mxc_concurrent_log\\B.ps1",
+    "timeout": 30000
+  },
+  "policy": {
+    "readwritePaths": ["C:\\mxc_concurrent_log"]
+  }
+}

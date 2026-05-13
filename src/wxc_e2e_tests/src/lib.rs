@@ -157,8 +157,8 @@ pub fn has_nanvix_binaries() -> bool {
     let present = [
         "nanvixd.exe",
         "kernel.elf",
-        "python.elf",
-        "cpython-ramfs.img",
+        "python3.12",
+        "nanvix_rootfs.img",
     ]
     .iter()
     .all(|name| bin_dir.join(name).exists());
