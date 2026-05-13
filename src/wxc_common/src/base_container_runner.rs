@@ -204,6 +204,107 @@ impl BaseContainerRunner {
         builder.finished_data().to_vec()
     }
 
+    /// Log the contents of a built sandbox spec FlatBuffer for debug verification.
+    ///
+    /// Reads back token, network, and UI restriction fields from the serialised
+    /// spec and writes a structured summary to the logger.
+    fn log_sandbox_spec(spec_bytes: &[u8], logger: &mut Logger) {
+        let spec = match sandbox_spec::base_container_layout::root_as_sandbox_spec(spec_bytes) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // Token
+        let _ = writeln!(logger, "[token]");
+        let integrity_emoji = if spec.integrity() == IntegrityLevel::system_default {
+            EMOJI_NEUTRAL
+        } else {
+            EMOJI_WARNING
+        };
+        let _ = writeln!(
+            logger,
+            "  integrity:       {} {:?}",
+            integrity_emoji,
+            spec.integrity()
+        );
+        let app_container_emoji = if spec.app_container() {
+            EMOJI_NEUTRAL
+        } else {
+            EMOJI_WARNING
+        };
+        let _ = writeln!(
+            logger,
+            "  app_container:   {} {} (least_privilege: {})",
+            app_container_emoji,
+            if spec.app_container() { "on" } else { "off" },
+            if spec.least_privilege() { "on" } else { "off" }
+        );
+        if let Some(caps) = spec.capabilities() {
+            let _ = writeln!(logger, "  capabilities:    {}", caps);
+        }
+
+        // Network
+        let _ = writeln!(logger, "[network]");
+        let proxy_url = spec
+            .network_policy()
+            .and_then(|np| np.proxy())
+            .and_then(|proxy| proxy.url());
+        if let Some(url) = proxy_url {
+            let _ = writeln!(logger, "  network_policy.proxy.url: {}", url);
+        } else {
+            let _ = writeln!(logger, "  <unspecified>");
+        }
+
+        // UI restrictions
+        let _ = writeln!(logger, "[ui subsystem]");
+        let _ = writeln!(
+            logger,
+            "  win32k_system_calls: {} {}",
+            if spec.disallow_win32k_system_calls() { EMOJI_BLOCKED } else { EMOJI_ALLOWED },
+            if spec.disallow_win32k_system_calls() { "blocked" } else { "allowed" }
+        );
+        let r = spec.ui_restrictions();
+        let flags: &[(&str, u64)] = &[
+            ("handles", 0x0001),
+            ("read_clip", 0x0002),
+            ("write_clip", 0x0004),
+            ("sys_params", 0x0008),
+            ("display", 0x0010),
+            ("atoms", 0x0020),
+            ("desktop", 0x0040),
+            ("exit_windows", 0x0080),
+            ("ime", 0x0100),
+            ("injection", 0x0200),
+        ];
+        let allowed: Vec<&str> = flags
+            .iter()
+            .filter(|(_, bit)| r & bit == 0)
+            .map(|(name, _)| *name)
+            .collect();
+        let blocked: Vec<&str> = flags
+            .iter()
+            .filter(|(_, bit)| r & bit != 0)
+            .map(|(name, _)| *name)
+            .collect();
+        let allowed_str = if allowed.is_empty() {
+            "<none>".to_string()
+        } else {
+            allowed.join(", ")
+        };
+        let blocked_str = if blocked.is_empty() {
+            "<none>".to_string()
+        } else {
+            blocked.join(", ")
+        };
+        let _ = writeln!(logger, "  uilimits allowed {EMOJI_ALLOWED}: {}", allowed_str);
+        let _ = writeln!(
+            logger,
+            "  uilimits blocked {EMOJI_BLOCKED}: {} (0x{:04X})",
+            blocked_str,
+            spec.ui_restrictions()
+        );
+    }
+
     /// Load `processmodel.dll` and resolve the `Experimental_CreateProcessInSandbox` export.
     fn load_api() -> Result<PfnCreateProcessInSandbox, String> {
         let dll_name = string_util::to_wide("processmodel.dll");
@@ -311,90 +412,7 @@ impl ScriptRunner for BaseContainerRunner {
             spec_bytes.len()
         );
 
-        // Read back all fields from the built FlatBuffer spec for debug verification
-        if let Ok(spec) = sandbox_spec::base_container_layout::root_as_sandbox_spec(&spec_bytes) {
-
-            // Log Token
-            let _ = writeln!(logger, "[token]");
-            let integrity_emoji = if spec.integrity() == IntegrityLevel::system_default {
-                EMOJI_NEUTRAL
-            } else {
-                EMOJI_WARNING
-            };
-            let _ = writeln!(
-                logger,
-                "  integrity:       {} {:?}",
-                integrity_emoji,
-                spec.integrity()
-            );
-            // Log AppContainer-ness
-            let app_container_emoji = if spec.app_container() {
-                EMOJI_NEUTRAL
-            } else {
-                EMOJI_WARNING
-            };
-            let _ = writeln!(
-                logger,
-                "  app_container:   {} {} (least_privilege: {})",
-                app_container_emoji,
-                if spec.app_container() { "on" } else { "off" },
-                if spec.least_privilege() { "on" } else { "off" }
-            );
-            if let Some(caps) = spec.capabilities() {
-                let _ = writeln!(
-                    logger,
-                    "  capabilities:    {}", caps);
-            }
-
-            // Log network access
-            let _ = writeln!(logger, "[network]");
-            let proxy_url = spec.network_policy()
-                .and_then(|np| np.proxy())
-                .and_then(|proxy| proxy.url());
-            if let Some(url) = proxy_url {
-                let _ = writeln!(logger, "  network_policy.proxy.url: {}", url);
-            } else {
-                let _ = writeln!(logger, "  <unspecified>");
-            }
-
-            // Log UI restrictions (in a human-readable way)
-            let _ = writeln!(logger, "[ui subsystem]");
-            let _ = writeln!(
-                logger,
-                "  win32k_system_calls: {} {}",
-                if spec.disallow_win32k_system_calls() { EMOJI_BLOCKED } else { EMOJI_ALLOWED },
-                if spec.disallow_win32k_system_calls() { "blocked" } else { "allowed" }
-            );
-            let r = spec.ui_restrictions();
-            let flags: &[(&str, u64)] = &[
-                ("handles", 0x0001),
-                ("read_clip", 0x0002),
-                ("write_clip", 0x0004),
-                ("sys_params", 0x0008),
-                ("display", 0x0010),
-                ("atoms", 0x0020),
-                ("desktop", 0x0040),
-                ("exit_windows", 0x0080),
-                ("ime", 0x0100),
-                ("injection", 0x0200),
-            ];
-            let allowed: Vec<&str> = flags
-                .iter()
-                .filter(|(_, bit)| r & bit == 0)
-                .map(|(name, _)| *name)
-                .collect();
-            let blocked: Vec<&str> = flags
-                .iter()
-                .filter(|(_, bit)| r & bit != 0)
-                .map(|(name, _)| *name)
-                .collect();
-            let allowed_str = if allowed.is_empty() { "<none>".to_string() } else { allowed.join(", ") };
-            let blocked_str = if blocked.is_empty() { "<none>".to_string() } else { blocked.join(", ") };
-            let _ = writeln!(logger, "  uilimits allowed {EMOJI_ALLOWED}: {}", allowed_str);
-            let _ = writeln!(logger, "  uilimits blocked {EMOJI_BLOCKED}: {} (0x{:04X})",
-                blocked_str,
-                spec.ui_restrictions());
-        }
+        Self::log_sandbox_spec(&spec_bytes, logger);
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Load API");
 
