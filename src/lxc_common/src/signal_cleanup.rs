@@ -26,6 +26,7 @@ use nix::sys::signal::{SigSet, Signal};
 use crate::lxc_bindings::LxcContainer;
 
 static ACTIVE_CONTAINER: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static INSTALLED: OnceLock<()> = OnceLock::new();
 
 fn lock_slot() -> std::sync::MutexGuard<'static, Option<String>> {
     ACTIVE_CONTAINER
@@ -51,6 +52,9 @@ pub fn set_active(name: &str) {
 /// the kernel may deliver them there instead of to the watchdog.
 #[cfg(target_os = "linux")]
 pub fn install() -> Result<(), String> {
+    if INSTALLED.set(()).is_err() {
+        return Ok(());
+    }
     let mut mask = SigSet::empty();
     mask.add(Signal::SIGHUP);
     mask.add(Signal::SIGTERM);
@@ -61,7 +65,7 @@ pub fn install() -> Result<(), String> {
     thread::Builder::new()
         .name("lxc-signal-cleanup".into())
         .spawn(move || run_watchdog(mask))
-        .expect("spawn lxc-signal-cleanup thread");
+        .map_err(|err| format!("spawn lxc-signal-cleanup thread: {err}"))?;
     Ok(())
 }
 
