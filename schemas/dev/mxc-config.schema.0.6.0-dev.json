@@ -103,6 +103,18 @@
       }
     },
 
+    "fallback": {
+      "type": "object",
+      "description": "Operator consent for host-impacting containment fallbacks. Each flag gates a specific fallback mechanism the runner may otherwise pick when the preferred primitive is unavailable. Defaults preserve the pre-fallback-section behavior (all permitted).",
+      "properties": {
+        "allowDaclMutation": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the BaseContainer API is absent and bfscfg.exe is unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). MODIFIES HOST FILESYSTEM SECURITY DESCRIPTORS — original DACLs are restored on exit. Set to false to refuse this fallback (the run will fail on machines that need Tier 3)."
+        }
+      }
+    },
+
     "network": {
       "type": "object",
       "description": "Network access policy. Shared across all backends.",

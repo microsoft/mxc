@@ -157,8 +157,8 @@ pub fn has_nanvix_binaries() -> bool {
     let present = [
         "nanvixd.exe",
         "kernel.elf",
-        "python.elf",
-        "cpython-ramfs.img",
+        "python3.12",
+        "nanvix_rootfs.img",
     ]
     .iter()
     .all(|name| bin_dir.join(name).exists());
@@ -166,6 +166,29 @@ pub fn has_nanvix_binaries() -> bool {
         println!("SKIPPED: NanVix binaries not found next to wxc-exec.exe");
     }
     present
+}
+
+/// Return whether the Hyperlight snapshot is installed at the default
+/// location (`%LOCALAPPDATA%\pyhl\snapshot.hls`).
+pub fn has_hyperlight_snapshot() -> bool {
+    let home = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(|v| PathBuf::from(v).join("AppData").join("Local"))
+                .unwrap_or_default()
+        });
+    let snapshot = home.join("pyhl").join("snapshot.hls");
+    if snapshot.is_file() {
+        println!("Using Hyperlight snapshot at {}", snapshot.display());
+        true
+    } else {
+        println!(
+            "SKIPPED: Hyperlight snapshot not found at {} — run --setup-hyperlight first",
+            snapshot.display()
+        );
+        false
+    }
 }
 
 /// Return whether the Windows Sandbox optional feature is enabled.

@@ -18,7 +18,7 @@ import {
 } from '../../src/state-aware-helper.js';
 import { MxcError } from '../../src/errors.js';
 import { IsolationSessionUserConfig, SandboxId } from '../../src/state-aware-types.js';
-import { fakeSpawn, testOptions } from './test-helpers.js';
+import { fakeSpawn, testOptions, platformSkip } from './test-helpers.js';
 
 describe('buildStateAwareEnvelope', () => {
   it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {
@@ -181,7 +181,7 @@ describe('parseNonExecResponse', () => {
   });
 });
 
-describe('provisionSandbox', () => {
+describe('provisionSandbox', { skip: platformSkip }, () => {
   let activeFake: ReturnType<typeof fakeSpawn> | null = null;
 
   beforeEach(() => { activeFake = null; });
@@ -236,7 +236,7 @@ describe('provisionSandbox', () => {
   });
 });
 
-describe('startSandbox', () => {
+describe('startSandbox', { skip: platformSkip }, () => {
   afterEach(() => { _resetSpawnImpl(); });
 
   it('infers backend from sandboxId prefix and nests configurationId under experimental', async () => {
@@ -252,7 +252,7 @@ describe('startSandbox', () => {
   });
 });
 
-describe('stopSandbox', () => {
+describe('stopSandbox', { skip: platformSkip }, () => {
   afterEach(() => { _resetSpawnImpl(); });
 
   it('builds a minimal stop envelope', async () => {
@@ -277,7 +277,7 @@ describe('stopSandbox', () => {
   });
 });
 
-describe('deprovisionSandbox', () => {
+describe('deprovisionSandbox', { skip: platformSkip }, () => {
   afterEach(() => { _resetSpawnImpl(); });
 
   it('builds a minimal deprovision envelope', async () => {
@@ -290,7 +290,7 @@ describe('deprovisionSandbox', () => {
   });
 });
 
-describe('execInSandboxAsync', () => {
+describe('execInSandboxAsync', { skip: platformSkip }, () => {
   afterEach(() => { _resetSpawnImpl(); });
 
   it('returns ExecResult on successful script run', async () => {

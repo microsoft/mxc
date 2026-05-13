@@ -7,6 +7,9 @@ edition = "2021"
 name = "lxc-exec"
 path = "src/main.rs"
 
+[features]
+hyperlight = ["wxc_common/hyperlight"]
+
 [dependencies]
 wxc_common = { workspace = true }
 lxc_common = { workspace = true }

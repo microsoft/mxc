@@ -77,6 +77,8 @@ jobs:
           version: 'ms-prod-1.93'
           additionalTargets: $(triplet)
         workingDirectory: $(workingDirectory)
+        cacheOptions:
+          enableTargetCache: true
 
     steps:
       - checkout: self
@@ -103,12 +105,20 @@ jobs:
           profile: release
           target: $(triplet)
           testCondition: "eq(variables['isX64'], 'true')" # 1ES nested template takes this as a string
-          enableTests: $(isX64)
-          publishTestResults: $(isX64)
-          enableClippy: $(isX64)
-          useNextest: $(isX64)
+          enableTest: $(isX64)
+          publishTestResults: false
+          enableClippy: false
+          useNextest: false
           testAllTargets: false
           buildAllTargets: false
+
+      # Run clippy via plain cargo so the 1ES Setup task doesn't have to
+      # source-install clippy-sarif (~8 min). The toolchain ships clippy
+      # itself; `-D warnings` keeps the build gated.
+      - script: cargo clippy --locked --all-targets --all-features --target $(triplet) --release -- -D warnings
+        displayName: Clippy
+        condition: and(succeeded(), eq(variables['isX64'], 'true'))
+        workingDirectory: $(workingDirectory)
 
       - task: EsrpCodeSigning@5
         displayName: Code Sign
