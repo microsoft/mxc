@@ -75,6 +75,12 @@ else
     cargo build -p lxc $CARGO_FEATURES
 fi
 
+echo "  Check formatting"
+cargo fmt --all -- --check
+
+echo "  Check linting"
+cargo clippy --workspace --all-targets -- -D warnings
+
 echo "Rust build complete."
 
 # Copy binaries to SDK bin directory

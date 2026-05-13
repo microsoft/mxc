@@ -71,6 +71,13 @@ struct RawFilesystem {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct RawFallback {
+    #[serde(rename = "allowDaclMutation")]
+    allow_dacl_mutation: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RawNetwork {
     #[serde(rename = "defaultPolicy")]
     default_policy: Option<String>,
@@ -205,6 +212,7 @@ struct RawConfig {
     process_container: Option<RawProcessContainer>,
     lxc: Option<RawLxc>,
     filesystem: Option<RawFilesystem>,
+    fallback: Option<RawFallback>,
     network: Option<RawNetwork>,
     ui: Option<RawUi>,
     experimental: Option<RawExperimental>,
@@ -229,6 +237,8 @@ struct RawStateAwareRequest {
     process: Option<RawProcess>,
     #[serde(default)]
     filesystem: Option<RawFilesystem>,
+    #[serde(default)]
+    fallback: Option<RawFallback>,
     #[serde(default)]
     network: Option<RawNetwork>,
     #[serde(default)]
@@ -728,6 +738,13 @@ fn convert_raw_config_inner(
     }
     validate_filesystem_paths(&policy, logger)?;
 
+    // Fallback section
+    if let Some(fbcfg) = raw.fallback {
+        if let Some(v) = fbcfg.allow_dacl_mutation {
+            policy.fallback.allow_dacl_mutation = v;
+        }
+    }
+
     // Network section
     if let Some(net) = raw.network {
         if let Some(proxy_value) = net.proxy {
@@ -930,6 +947,7 @@ fn convert_raw_state_aware(
         process_container: None,
         lxc: None,
         filesystem: raw.filesystem,
+        fallback: raw.fallback,
         network: raw.network,
         ui: raw.ui,
         // The state-aware experimental block has a different shape from the
@@ -1517,6 +1535,39 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_timeout, 0);
+    }
+
+    #[test]
+    fn allow_dacl_mutation_default_true() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.fallback.allow_dacl_mutation);
+    }
+
+    #[test]
+    fn allow_dacl_mutation_explicit_false() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "fallback": {"allowDaclMutation": false}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.fallback.allow_dacl_mutation);
+    }
+
+    #[test]
+    fn allow_dacl_mutation_explicit_true() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "fallback": {"allowDaclMutation": true}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.fallback.allow_dacl_mutation);
     }
 
     // ====== Containment backend selection tests ======
