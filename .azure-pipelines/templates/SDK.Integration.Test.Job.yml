@@ -22,11 +22,12 @@ jobs:
     displayName: 'Test MXC SDK Integration (${{ target.name }})'
 
     pool:
-      name: Azure-Pipelines-1ESPT-ExDShared
       ${{ if eq(target.os, 'windows') }}:
+        name: Azure-Pipelines-1ESPT-ExDShared
         image: windows-latest
         os: windows
       ${{ if eq(target.os, 'linux') }}:
+        name: Azure-Pipelines-1ESPT-ExDShared
         image: ubuntu-latest
         os: linux
       ${{ if eq(target.os, 'macos') }}:
