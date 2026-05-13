@@ -689,6 +689,7 @@ mod tests {
     fn policy_rejects_denied_overlapping_allow() {
         let mut r = runner();
         let request = CodexRequest {
+            script_code: "print('x')".to_string(),
             policy: ContainerPolicy {
                 readwrite_paths: vec!["/tmp/x".to_string()],
                 denied_paths: vec!["/tmp/x".to_string()],
@@ -706,6 +707,7 @@ mod tests {
     fn policy_rejects_network_rules() {
         let mut r = runner();
         let request = CodexRequest {
+            script_code: "print('x')".to_string(),
             policy: ContainerPolicy {
                 allowed_hosts: vec!["example.com".to_string()],
                 ..Default::default()
@@ -722,6 +724,7 @@ mod tests {
     fn policy_rejects_block_default_network() {
         let mut r = runner();
         let request = CodexRequest {
+            script_code: "print('x')".to_string(),
             policy: ContainerPolicy {
                 default_network_policy: NetworkPolicy::Block,
                 ..Default::default()
@@ -738,6 +741,7 @@ mod tests {
     fn policy_rejects_working_directory() {
         let mut r = runner();
         let request = CodexRequest {
+            script_code: "print('x')".to_string(),
             working_directory: "C:/tmp".to_string(),
             ..Default::default()
         };
