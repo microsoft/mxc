@@ -26,6 +26,7 @@ use nix::sys::signal::{SigSet, Signal};
 use crate::lxc_bindings::LxcContainer;
 
 static ACTIVE_CONTAINER: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+#[cfg(target_os = "linux")]
 static INSTALLED: OnceLock<()> = OnceLock::new();
 
 fn lock_slot() -> std::sync::MutexGuard<'static, Option<String>> {
