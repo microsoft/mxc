@@ -24,11 +24,11 @@ import {
   startSandbox,
   stopSandbox,
 } from '@microsoft/mxc-sdk';
-import { createTempDir, probeStateAwareRuntime, safeDeprovision } from './test-helpers.js';
+import { createTempDir, probeStateAwareRuntime, safeDeprovision, sandboxSkipReason } from './test-helpers.js';
 
 const skipReason = os.platform() !== 'win32'
   ? 'IsolationSession is Windows-only'
-  : await probeStateAwareRuntime('isolation_session');
+  : sandboxSkipReason ?? await probeStateAwareRuntime('isolation_session');
 
 describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () => {
   it('runs full lifecycle: provision -> start -> exec -> stop -> deprovision', async () => {

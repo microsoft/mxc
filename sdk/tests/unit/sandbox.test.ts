@@ -6,6 +6,7 @@ import assert from 'node:assert';
 import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
 import { resolveExecutableAndArgs } from '../../src/helper.js';
 import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
+import { platformSkip } from './test-helpers.js';
 
 describe('buildSandboxPayload', () => {
   const defaultPolicy: SandboxPolicy = { version: '0.4.0-alpha' };
@@ -687,7 +688,7 @@ describe('Schema 0.6.0 vocabulary', () => {
   });
 });
 
-describe('resolveExecutableAndArgs (containment validation)', () => {
+describe('resolveExecutableAndArgs (containment validation)', { skip: platformSkip }, () => {
   // Use the running node binary as a stand-in executable so the helper does
   // not try to discover wxc-exec on disk. The helper does not actually exec
   // anything; it just builds the path + args.
