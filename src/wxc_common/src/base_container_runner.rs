@@ -348,12 +348,11 @@ impl ScriptRunner for BaseContainerRunner {
 
             // Log network access
             let _ = writeln!(logger, "[network]");
-            if let Some(np) = spec.network_policy() {
-                if let Some(proxy) = np.proxy() {
-                    if let Some(url) = proxy.url() {
-                        let _ = writeln!(logger, "  network_policy.proxy.url: {}", url);
-                    }
-                }
+            let proxy_url = spec.network_policy()
+                .and_then(|np| np.proxy())
+                .and_then(|proxy| proxy.url());
+            if let Some(url) = proxy_url {
+                let _ = writeln!(logger, "  network_policy.proxy.url: {}", url);
             } else {
                 let _ = writeln!(logger, "  <unspecified>");
             }
