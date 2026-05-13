@@ -13,7 +13,7 @@ use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::{is_base_container_version, load_mxc_request, ParseError};
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::filesystem_bfs::FileSystemBfsManager;
-#[cfg(feature = "hyperlight")]
+#[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use wxc_common::hyperlight_runner::HyperlightScriptRunner;
 #[cfg(feature = "isolation_session")]
 use wxc_common::isolation_session_runner::IsolationSessionRunner;
@@ -193,7 +193,7 @@ fn main() {
     // config parsing so the user doesn't need a JSON file on disk
     // just to install.
     if cli.setup_hyperlight {
-        #[cfg(feature = "hyperlight")]
+        #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
         {
             let mut logger = Logger::new(if cli.debug {
                 Mode::Console
@@ -211,7 +211,7 @@ fn main() {
                 }
             }
         }
-        #[cfg(not(feature = "hyperlight"))]
+        #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
         {
             eprintln!("Error: --setup-hyperlight requires x86_64 (Hyperlight needs KVM or WHP)");
             process::exit(1);
@@ -418,7 +418,7 @@ fn main() {
             Box::new(NanVixScriptRunner::new())
         }
         ContainmentBackend::Hyperlight => {
-            #[cfg(feature = "hyperlight")]
+            #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
             {
                 if !request.experimental_enabled {
                     eprintln!(
@@ -429,7 +429,7 @@ fn main() {
                 }
                 Box::new(HyperlightScriptRunner::new())
             }
-            #[cfg(not(feature = "hyperlight"))]
+            #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
             {
                 eprintln!(
                     "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
