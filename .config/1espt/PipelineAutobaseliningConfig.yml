@@ -15,3 +15,14 @@ pipelines:
           lastModifiedDate: 2026-04-01
         spotbugs:
           lastModifiedDate: 2026-04-01
+  192146:
+    usedNonDefaultBranch: true
+    retail:
+      source:
+        eslint:
+          lastModifiedDate: 2026-05-13
+        armory:
+          lastModifiedDate: 2026-05-13
+      binary:
+        binskim:
+          lastModifiedDate: 2026-05-13
