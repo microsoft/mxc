@@ -28,6 +28,17 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 ./build.sh --rust-only     # Only Rust binaries, skip SDK/CLI
 ```
 
+### Full build (macOS)
+
+```
+./build-mac.sh             # Release build for native architecture (seatbelt backend)
+./build-mac.sh --debug     # Debug build
+./build-mac.sh --all       # Build for both aarch64 and x86_64
+./build-mac.sh --rust-only # Only Rust binaries, skip SDK
+```
+
+Requires Xcode Command Line Tools and Rust. Produces an unsigned `mxc-exec-mac` binary (codesigning + notarization happen at release time). Schema `0.6.0-dev` or later required for macOS/Seatbelt backend.
+
 ### Individual components
 
 ```
@@ -35,6 +46,7 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 cargo build --release --target x86_64-pc-windows-msvc
 cargo build --release --target aarch64-pc-windows-msvc
 cargo build --release -p lxc          # Linux only — builds lxc-exec
+cargo build --release -p mxc_darwin --target aarch64-apple-darwin  # macOS only — builds mxc-exec-mac
 
 # SDK (from sdk/)
 npm install && npm run build
@@ -95,8 +107,10 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 | BaseContainer (OS sandbox API) | `wxc-exec.exe` | Windows | `base_container_runner.rs` — calls `Experimental_CreateProcessInSandbox` via FlatBuffer |
 | Windows Sandbox | `wxc-exec.exe` | Windows | `windows_sandbox_runner.rs` |
 | MicroVM (NanVix) | `wxc-exec.exe` | Windows | `nanvix_runner.rs` — feature-gated behind `microvm` |
+| Hyperlight | `wxc-exec.exe` | Windows | `hyperlight_runner.rs` — Hyperlight + Unikraft micro-VM backend |
 | IsolationSession | `wxc-exec.exe` | Windows | `isolation_session_runner.rs` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Supports both one-shot (single-invocation lifecycle, via `ScriptRunner`) and state-aware (multi-invocation provision/start/exec/stop/deprovision, via `StatefulSandboxBackend`) modes. Honors `readwritePaths` and `readonlyPaths` at provision via `ShareFolderBatchAsync` (rejects `deniedPaths` since the API has no Deny ACE primitive); filesystem policy is immutable post-provision and rejected at later phases. State-aware additionally accepts an optional `user` bundle (`upn`, `wamToken`) at provision and start to provision Entra cloud-agent sandboxes; one-shot rejects the bundle, and hosts that don't support Entra agents surface `backend_unavailable`. Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
 | LXC | `lxc-exec` | Linux | `lxc/src/main.rs` + `lxc_common/` |
+| Seatbelt | `mxc-exec-mac` | macOS | `mxc_darwin/src/main.rs` + `seatbelt_common/` — uses macOS App Sandbox (Seatbelt) profiles for process containment. Requires schema `0.6.0-dev`+. See `docs/macos-support/seatbelt-backend.md`. |
 
 ### Config flow
 
@@ -106,9 +120,9 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 
 ### TypeScript layers
 
-- **SDK** (`sdk/`, `@microsoft/mxc-sdk`) — the public API. The one-shot surface (`spawnSandbox` / `spawnSandboxFromConfig` / `spawnSandboxAsync`) builds a `ContainerConfig` from a `SandboxPolicy`, serialises to base64, and spawns the correct native binary (`wxc-exec.exe` or `lxc-exec`) via `node-pty`. The state-aware surface (`provisionSandbox` / `startSandbox` / `execInSandbox` / `execInSandboxAsync` / `stopSandbox` / `deprovisionSandbox`, in `sdk/src/state-aware.ts`) drives a sandbox through a multi-call lifecycle against `StateAwareContainmentBackend` backends; per-(backend, phase) typed `*Config` interfaces and a branded `SandboxId<C>` live in `sdk/src/state-aware-types.ts`. Typed wire-format errors live in `sdk/src/errors.ts` (closed `ErrorCode` union plus a single `MxcError` class carrying `code: ErrorCode`, mirroring the Rust `MxcError` shape). Platform detection is in `platform.ts`.
+- **SDK** (`sdk/`, `@microsoft/mxc-sdk`) — the public API. The one-shot surface (`spawnSandbox` / `spawnSandboxFromConfig` / `spawnSandboxAsync`) builds a `ContainerConfig` from a `SandboxPolicy`, serialises to base64, and spawns the correct native binary (`wxc-exec.exe`, `lxc-exec`, or `mxc-exec-mac`) via `node-pty`. The state-aware surface (`provisionSandbox` / `startSandbox` / `execInSandbox` / `execInSandboxAsync` / `stopSandbox` / `deprovisionSandbox`, in `sdk/src/state-aware.ts`) drives a sandbox through a multi-call lifecycle against `StateAwareContainmentBackend` backends; per-(backend, phase) typed `*Config` interfaces and a branded `SandboxId<C>` live in `sdk/src/state-aware-types.ts`. Typed wire-format errors live in `sdk/src/errors.ts` (closed `ErrorCode` union plus a single `MxcError` class carrying `code: ErrorCode`, mirroring the Rust `MxcError` shape). Platform detection is in `platform.ts`.
 
-The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (npm-packaged) and `src/target/<target-triple>/{release,debug}/` (local dev). The `build.bat`/`build.sh` scripts copy binaries into the SDK bin directory.
+The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (npm-packaged) and `src/target/<target-triple>/{release,debug}/` (local dev). The `build.bat`/`build.sh`/`build-mac.sh` scripts copy binaries into the SDK bin directory.
 
 ### Schema system
 
