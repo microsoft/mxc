@@ -9,17 +9,23 @@
 //! Mach bootstrap namespace so both CLI commands and GUI applications
 //! (when `guiAccess = true`) work correctly.
 //!
+//! For apps that require LaunchServices (`launchMethod: "open"`), the runner
+//! writes a sandbox helper script and launches the target app via `open -n -W`,
+//! applying the sandbox to the command running inside the app.
+//!
 //! Compiled only on macOS — the rest of the workspace continues to build
 //! on Windows / Linux unchanged.
 
 use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, ScriptResponse};
+use wxc_common::models::{CodexRequest, LaunchMethod, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 
 use crate::profile_builder::build_profile;
@@ -88,13 +94,44 @@ impl ScriptRunner for SeatbeltScriptRunner {
         // 1. Build the Seatbelt profile from the policy.
         let profile = build_profile(request);
 
-        // 2. Build the command via sandbox_init.
-        let mut command = match build_sandbox_command(&profile, &request.script_code, logger) {
+        // Determine launch method from seatbelt config.
+        let launch_method = request
+            .experimental
+            .seatbelt
+            .as_ref()
+            .map(|s| s.launch_method.clone())
+            .unwrap_or_default();
+
+        let gui_access = request
+            .experimental
+            .seatbelt
+            .as_ref()
+            .map(|s| s.gui_access)
+            .unwrap_or(false);
+
+        match launch_method {
+            LaunchMethod::Exec => self.execute_exec(&profile, request, gui_access, logger),
+            LaunchMethod::Open => self.execute_open(&profile, request, logger),
+        }
+    }
+}
+
+impl SeatbeltScriptRunner {
+    /// Standard execution path: fork → sandbox_init → exec.
+    /// When `gui_access` is true, stdio is inherited for GUI app compatibility.
+    fn execute_exec(
+        &self,
+        profile: &str,
+        request: &CodexRequest,
+        gui_access: bool,
+        logger: &mut Logger,
+    ) -> ScriptResponse {
+        let mut command = match build_sandbox_command(profile, &request.script_code, logger) {
             Ok(cmd) => cmd,
             Err(resp) => return resp,
         };
 
-        // 3. Common setup: env, working directory, stdio.
+        // Environment setup.
         if !request.env.is_empty() {
             command.env_clear();
             for kv in &request.env {
@@ -108,12 +145,20 @@ impl ScriptRunner for SeatbeltScriptRunner {
             command.current_dir(&request.working_directory);
         }
 
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        if gui_access {
+            // GUI apps need inherited stdio for PTY/window interaction.
+            command
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit());
+        } else {
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        }
 
-        // 4. Spawn.
+        // Spawn.
         let mut child = match command.spawn() {
             Ok(process) => process,
             Err(error) => {
@@ -121,51 +166,206 @@ impl ScriptRunner for SeatbeltScriptRunner {
             }
         };
 
-        // 5. Drain stdout/stderr in background threads to avoid deadlock
-        //    if the child fills the OS pipe buffer (~64KB on macOS).
-        let stdout_handle = child
-            .stdout
-            .take()
-            .map(|reader| std::thread::spawn(move || read_to_string(reader)));
-        let stderr_handle = child
-            .stderr
-            .take()
-            .map(|reader| std::thread::spawn(move || read_to_string(reader)));
+        if gui_access {
+            // GUI mode: no output capture, just wait for exit.
+            let timeout = if request.script_timeout == 0 {
+                None
+            } else {
+                Some(Duration::from_millis(u64::from(request.script_timeout)))
+            };
 
-        // 6. Wait with timeout. `script_timeout == 0` means infinite.
+            match wait_with_timeout(&mut child, timeout) {
+                Ok(status) => ScriptResponse {
+                    exit_code: status.code().unwrap_or(-1),
+                    standard_out: String::new(),
+                    standard_err: String::new(),
+                    error_message: String::new(),
+                },
+                Err(WaitError::Timeout) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    ScriptResponse {
+                        exit_code: -1,
+                        standard_out: String::new(),
+                        standard_err: String::new(),
+                        error_message: format!(
+                            "Seatbelt: process timed out after {}ms",
+                            request.script_timeout
+                        ),
+                    }
+                }
+                Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
+            }
+        } else {
+            // CLI mode: capture stdout/stderr.
+            let stdout_handle = child
+                .stdout
+                .take()
+                .map(|reader| std::thread::spawn(move || read_to_string(reader)));
+            let stderr_handle = child
+                .stderr
+                .take()
+                .map(|reader| std::thread::spawn(move || read_to_string(reader)));
+
+            let timeout = if request.script_timeout == 0 {
+                None
+            } else {
+                Some(Duration::from_millis(u64::from(request.script_timeout)))
+            };
+
+            let exit_status = match wait_with_timeout(&mut child, timeout) {
+                Ok(status) => status,
+                Err(WaitError::Timeout) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return ScriptResponse {
+                        exit_code: -1,
+                        standard_out: join_reader("stdout", stdout_handle),
+                        standard_err: join_reader("stderr", stderr_handle),
+                        error_message: format!(
+                            "Seatbelt: script timed out after {}ms",
+                            request.script_timeout
+                        ),
+                    };
+                }
+                Err(WaitError::Io(error)) => {
+                    return error_response(format!("wait failed: {error}"))
+                }
+            };
+
+            let stdout = join_reader("stdout", stdout_handle);
+            let stderr = join_reader("stderr", stderr_handle);
+
+            ScriptResponse {
+                exit_code: exit_status.code().unwrap_or(-1),
+                standard_out: stdout,
+                standard_err: stderr,
+                error_message: String::new(),
+            }
+        }
+    }
+
+    /// LaunchServices execution path: write a sandbox helper, launch via
+    /// `open -n -W`. Required for Apple system apps with Launch Constraints
+    /// (e.g. Terminal.app).
+    fn execute_open(
+        &self,
+        profile: &str,
+        request: &CodexRequest,
+        logger: &mut Logger,
+    ) -> ScriptResponse {
+        let _ = writeln!(
+            logger,
+            "Seatbelt: using LaunchServices (open) launch method"
+        );
+
+        // 1. Write the profile to a secure temp file.
+        let profile_path = match write_secure_temp_file("mxc_sb_profile_", profile, 0o600) {
+            Ok(p) => p,
+            Err(e) => return error_response(format!("failed to write profile: {e}")),
+        };
+
+        // 2. Build environment exports for the helper script.
+        let mut env_exports = String::new();
+        for kv in &request.env {
+            if let Some((key, value)) = kv.split_once('=') {
+                // Shell-escape the value.
+                let escaped = value.replace('\'', "'\\''");
+                let _ = writeln!(env_exports, "export {key}='{escaped}'");
+            }
+        }
+
+        // 3. Create the sandbox helper script.
+        // This script is executed inside the terminal app. It:
+        //   a) Calls sandbox-exec with the profile file to sandbox the shell
+        //   b) Execs the user's command inside the sandbox
+        let script_code = &request.script_code;
+        let helper_content = format!(
+            "#!/bin/sh\n\
+             # MXC Seatbelt sandbox helper — auto-generated, do not edit.\n\
+             {env_exports}\
+             exec sandbox-exec -f '{profile_path}' /bin/sh -c 'clear; {script_escaped}'\n",
+            profile_path = profile_path,
+            script_escaped = script_code.replace('\'', "'\\''"),
+        );
+
+        let helper_path = match write_secure_temp_file("mxc_sb_helper_", &helper_content, 0o700) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = fs::remove_file(&profile_path);
+                return error_response(format!("failed to write helper script: {e}"));
+            }
+        };
+
+        // 4. Create the .command file that Terminal will execute.
+        let command_content = format!("#!/bin/sh\nexec '{}'\n", helper_path);
+        let command_path = match write_secure_temp_file("mxc_sb_launch_", &command_content, 0o700) {
+            Ok(mut p) => {
+                // Rename to .command extension so Terminal recognizes it.
+                let new_path = format!("{p}.command");
+                if fs::rename(&p, &new_path).is_ok() {
+                    p = new_path;
+                }
+                p
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&profile_path);
+                let _ = fs::remove_file(&helper_path);
+                return error_response(format!("failed to write .command file: {e}"));
+            }
+        };
+
+        let _ = writeln!(logger, "Seatbelt: launching via: open -n -W {command_path}");
+
+        // 5. Launch via `open -n -W`.
+        let mut child = match Command::new("open")
+            .args(["-n", "-W", "-a", "Terminal", &command_path])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                cleanup_files(&[&profile_path, &helper_path, &command_path]);
+                return error_response(format!("failed to launch via open: {e}"));
+            }
+        };
+
+        // 6. Wait for the terminal to close.
         let timeout = if request.script_timeout == 0 {
             None
         } else {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
 
-        let exit_status = match wait_with_timeout(&mut child, timeout) {
-            Ok(status) => status,
+        let result = match wait_with_timeout(&mut child, timeout) {
+            Ok(status) => ScriptResponse {
+                exit_code: status.code().unwrap_or(-1),
+                standard_out: String::new(),
+                standard_err: String::new(),
+                error_message: String::new(),
+            },
             Err(WaitError::Timeout) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return ScriptResponse {
+                ScriptResponse {
                     exit_code: -1,
-                    standard_out: join_reader("stdout", stdout_handle),
-                    standard_err: join_reader("stderr", stderr_handle),
+                    standard_out: String::new(),
+                    standard_err: String::new(),
                     error_message: format!(
-                        "Seatbelt: script timed out after {}ms",
+                        "Seatbelt: terminal timed out after {}ms",
                         request.script_timeout
                     ),
-                };
+                }
             }
-            Err(WaitError::Io(error)) => return error_response(format!("wait failed: {error}")),
+            Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
         };
 
-        let stdout = join_reader("stdout", stdout_handle);
-        let stderr = join_reader("stderr", stderr_handle);
+        // 7. Cleanup temp files.
+        cleanup_files(&[&profile_path, &helper_path, &command_path]);
 
-        ScriptResponse {
-            exit_code: exit_status.code().unwrap_or(-1),
-            standard_out: stdout,
-            standard_err: stderr,
-            error_message: String::new(),
-        }
+        result
     }
 }
 
@@ -291,6 +491,38 @@ fn wait_with_timeout(
             }
             Err(error) => return Err(WaitError::Io(error)),
         }
+    }
+}
+
+/// Write `content` to a temp file with randomized name and the given
+/// permissions mode. Returns the absolute path on success.
+fn write_secure_temp_file(
+    prefix: &str,
+    content: &str,
+    mode: u32,
+) -> Result<String, std::io::Error> {
+    use std::io::Write;
+
+    let dir = std::env::temp_dir();
+    let random: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64
+        ^ std::process::id() as u64;
+    let path = dir.join(format!("{prefix}{random:016x}"));
+    let path_str = path.to_string_lossy().to_string();
+
+    let mut file = fs::File::create(&path)?;
+    file.write_all(content.as_bytes())?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
+
+    Ok(path_str)
+}
+
+/// Remove a list of temp files, ignoring errors.
+fn cleanup_files(paths: &[&str]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
     }
 }
 

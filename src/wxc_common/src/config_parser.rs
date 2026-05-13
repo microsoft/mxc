@@ -170,6 +170,8 @@ struct RawSeatbelt {
     profile_override: Option<String>,
     #[serde(rename = "guiAccess")]
     gui_access: Option<bool>,
+    #[serde(rename = "launchMethod")]
+    launch_method: Option<crate::models::LaunchMethod>,
 }
 
 #[derive(Deserialize, Default)]
@@ -860,6 +862,7 @@ fn convert_raw_config_inner(
         let seatbelt = raw_exp.seatbelt.map(|raw_sb| SeatbeltConfig {
             profile_override: raw_sb.profile_override,
             gui_access: raw_sb.gui_access.unwrap_or(false),
+            launch_method: raw_sb.launch_method.unwrap_or_default(),
         });
         ExperimentalConfig {
             test,

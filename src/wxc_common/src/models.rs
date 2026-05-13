@@ -50,6 +50,31 @@ pub struct SeatbeltConfig {
     /// be killed by the system on launch.
     #[serde(rename = "guiAccess", default)]
     pub gui_access: bool,
+
+    /// How to launch the sandboxed process.
+    ///
+    /// - `"exec"` (default): fork → sandbox_init() → exec. Stdio is inherited
+    ///   when `guiAccess` is true, piped otherwise. Works for most
+    ///   third-party GUI apps and all CLI commands.
+    /// - `"open"`: launch via macOS LaunchServices (`open -n -W`). Required
+    ///   for Apple system apps (e.g. Terminal.app) that have Launch
+    ///   Constraints preventing direct exec from third-party processes.
+    ///   The sandbox is applied to the shell/command running *inside* the
+    ///   launched app via the `sandbox-exec` CLI tool, not to the app itself.
+    #[serde(rename = "launchMethod", default)]
+    pub launch_method: LaunchMethod,
+}
+
+/// How to launch the sandboxed process in the Seatbelt backend.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaunchMethod {
+    /// Direct fork → sandbox_init() → exec (default).
+    #[default]
+    Exec,
+    /// Launch via macOS LaunchServices (`open`). The sandbox is applied to
+    /// the command running inside the launched terminal app via sandbox-exec.
+    Open,
 }
 
 /// Configuration specific to the Windows Sandbox backend.

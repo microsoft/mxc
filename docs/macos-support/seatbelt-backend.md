@@ -166,6 +166,7 @@ flag is required to enable the backend at runtime:
 |---|---|---|---|
 | `experimental.seatbelt.profileOverride` | string | unset | Optional override of the generated TinyScheme sandbox profile. When set, the SDK-generated profile is replaced with this raw TinyScheme string verbatim — all `filesystem`/`network`/`ui` policy fields are ignored for profile generation (they are still type-checked). Use this only when the auto-generated profile is insufficient. |
 | `experimental.seatbelt.guiAccess` | boolean | `false` | When `true`, adds wildcard Mach service and IOKit rules so GUI applications can create windows and render via WindowServer. Requires `ui.disable: false`. Native AppKit apps (e.g. Terminal.app) work well; Electron-based apps may escape the sandbox via re-launch patterns. |
+| `experimental.seatbelt.launchMethod` | `"exec"` \| `"open"` | `"exec"` | How to launch the sandboxed process. `"exec"` (default) uses the `sandbox_init()` API in `pre_exec` then execs the command directly — works for third-party GUI apps (Alacritty, etc.) and all CLI commands. `"open"` launches Terminal.app via LaunchServices (`open -n -W -a Terminal`) then applies the sandbox to the inner shell via the `sandbox-exec` CLI tool. This is required because Terminal.app enforces Apple Launch Constraints that kill it when exec'd by unauthorized parents. Currently only Terminal.app is supported with the `"open"` method — other Apple system apps (Calculator, TextEdit) cannot be sandboxed due to Launch Constraints and lack of an inner shell to constrain. |
 
 ### Filesystem policy
 
@@ -306,11 +307,16 @@ environment.
 - **`sandbox_init` is technically deprecated** in headers since macOS 10.8
   but remains shipping and is used by Apple's own apps and Chromium.
   It is the same Seatbelt framework that backs the App Sandbox.
-- **GUI support is limited to native apps.** AppKit-based apps like
-  Terminal.app work well under `guiAccess: true`. Electron-based apps
+- **GUI support is limited to native apps.** Third-party AppKit-based
+  apps (e.g. Alacritty) work with `guiAccess: true` and the default
+  `launchMethod: "exec"` (uses `sandbox_init()` API). Terminal.app
+  requires `launchMethod: "open"` which uses `sandbox-exec` on the
+  inner shell — Apple Launch Constraints kill Terminal when exec'd by
+  unauthorized parents. Other Apple system apps (Calculator, TextEdit)
+  cannot currently be sandboxed — they are killed by Launch Constraints
+  and lack an inner shell for the `"open"` path. Electron-based apps
   (VS Code, Spotify) may escape the sandbox by re-launching themselves
-  via helper processes. Some Apple system apps (Calculator, TextEdit)
-  are blocked by OS-level Launch Constraints unrelated to the sandbox.
+  via helper processes.
 - **No container abstraction.** Unlike LXC, there is no persistent
   container to attach to or destroy — every invocation is a fresh
   process tree.

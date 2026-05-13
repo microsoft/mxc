@@ -120,7 +120,8 @@ fn write_filesystem_allow(out: &mut String, request: &CodexRequest) {
         out.push_str(";; --- policy.readonlyPaths ---\n");
         out.push_str("(allow file-read*\n");
         for p in &policy.readonly_paths {
-            let _ = writeln!(out, "    (subpath {})", quote_scheme(p));
+            let expanded = expand_tilde(p);
+            let _ = writeln!(out, "    (subpath {})", quote_scheme(&expanded));
         }
         out.push_str(")\n");
     }
@@ -129,7 +130,8 @@ fn write_filesystem_allow(out: &mut String, request: &CodexRequest) {
         out.push_str(";; --- policy.readwritePaths ---\n");
         out.push_str("(allow file-read* file-write*\n");
         for p in &policy.readwrite_paths {
-            let _ = writeln!(out, "    (subpath {})", quote_scheme(p));
+            let expanded = expand_tilde(p);
+            let _ = writeln!(out, "    (subpath {})", quote_scheme(&expanded));
         }
         out.push_str(")\n");
     }
@@ -142,7 +144,8 @@ fn write_filesystem_deny(out: &mut String, request: &CodexRequest) {
         out.push_str(";; --- policy.deniedPaths (override broader allow rules) ---\n");
         out.push_str("(deny file-read* file-write*\n");
         for p in &policy.denied_paths {
-            let _ = writeln!(out, "    (subpath {})", quote_scheme(p));
+            let expanded = expand_tilde(p);
+            let _ = writeln!(out, "    (subpath {})", quote_scheme(&expanded));
         }
         out.push_str(")\n");
     }
@@ -234,6 +237,19 @@ fn write_ui_rules(out: &mut String, request: &CodexRequest) {
             out.push_str("(allow file-read* file-write*\n");
             out.push_str("    (subpath \"/private/tmp\")\n");
             out.push_str("    (subpath \"/private/var/folders\"))\n");
+
+            // Pseudo-TTY support — Terminal.app and other GUI apps that
+            // spawn shell sessions need to open, grant, and use PTY devices.
+            out.push_str(";; --- guiAccess: allow pseudo-TTY for shell sessions ---\n");
+            out.push_str("(allow pseudo-tty)\n");
+            out.push_str("(allow file-read* file-write* file-ioctl\n");
+            out.push_str("    (regex #\"/dev/ttys[0-9]+\")\n");
+            out.push_str("    (regex #\"/dev/ptmx\"))\n");
+
+            // POSIX shared memory and IPC — required by Terminal.app and
+            // other apps that use notification center or shared memory.
+            out.push_str(";; --- guiAccess: allow POSIX IPC for GUI apps ---\n");
+            out.push_str("(allow ipc-posix-shm-read-data ipc-posix-shm-write-data ipc-posix-shm-write-create)\n");
         }
     } else {
         out.push_str(";; --- ui.disable: deny WindowServer + related ---\n");
@@ -258,6 +274,21 @@ fn write_ui_rules(out: &mut String, request: &CodexRequest) {
     if !ui.injection {
         out.push_str(";; --- ui.injection=false: deny HID iokit access ---\n");
         out.push_str("(deny iokit-open (iokit-user-client-class \"IOHIDLibUserClient\"))\n");
+    }
+}
+
+/// Expand a leading `~` or `~/` to the current user's home directory.
+/// Passes through paths that don't start with `~` unchanged.
+fn expand_tilde(path: &str) -> String {
+    if path == "~" {
+        std::env::var("HOME").unwrap_or_else(|_| "~".to_string())
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        match std::env::var("HOME") {
+            Ok(home) => format!("{home}/{rest}"),
+            Err(_) => path.to_string(),
+        }
+    } else {
+        path.to_string()
     }
 }
 
@@ -446,6 +477,7 @@ mod tests {
         r.experimental.seatbelt = Some(SeatbeltConfig {
             profile_override: Some("(version 1)(allow default)".into()),
             gui_access: false,
+            ..Default::default()
         });
         let p = build_profile(&r);
         assert_eq!(p, "(version 1)(allow default)");
@@ -483,6 +515,7 @@ mod tests {
         r.experimental.seatbelt = Some(SeatbeltConfig {
             profile_override: None,
             gui_access: true,
+            ..Default::default()
         });
         let p = build_profile(&r);
         // Wildcard mach-lookup and mach-register for GUI apps
@@ -512,6 +545,7 @@ mod tests {
         r.experimental.seatbelt = Some(SeatbeltConfig {
             profile_override: None,
             gui_access: false,
+            ..Default::default()
         });
         let p = build_profile(&r);
         // Basic UI services should be present
@@ -528,6 +562,7 @@ mod tests {
         r.experimental.seatbelt = Some(SeatbeltConfig {
             profile_override: None,
             gui_access: true,
+            ..Default::default()
         });
         let p = build_profile(&r);
         // Should NOT emit GUI services when UI is disabled
