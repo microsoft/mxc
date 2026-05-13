@@ -33,9 +33,10 @@ jobs:
       ${{ if eq(target.os, 'macos') }}:
         # macOS is not available on the 1ES shared pool; use the
         # Microsoft-hosted Azure Pipelines pool (works with 1ES PT
-        # out of the box).
+        # out of the box). macOS-14+ is Apple Silicon (arm64), which
+        # matches the aarch64-apple-darwin binary in the SDK package.
         name: Azure Pipelines
-        vmImage: macOS-latest
+        vmImage: macOS-14
         os: macOS
 
     variables:
