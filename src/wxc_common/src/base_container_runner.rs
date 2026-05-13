@@ -22,6 +22,9 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
+use crate::log_symbols::{
+    EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
+};
 use crate::logger::Logger;
 use crate::models::{
     CodexRequest, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ScriptResponse,
@@ -260,7 +263,7 @@ impl ScriptRunner for BaseContainerRunner {
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let _ = writeln!(logger, "\u{25B6} SECTION: Backend runner 'BaseContainer'");
+        let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'");
 
         let run_start = std::time::Instant::now();
 
@@ -296,7 +299,7 @@ impl ScriptRunner for BaseContainerRunner {
             );
         }
 
-        let _ = writeln!(logger, "\u{25B6} SECTION: Build sandbox spec");
+        let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Build sandbox spec");
 
         // 1. Build the FlatBuffer sandbox spec from the request policy.
         let spec_bytes = Self::build_sandbox_spec(&request);
@@ -314,9 +317,9 @@ impl ScriptRunner for BaseContainerRunner {
             // Log Token
             let _ = writeln!(logger, "[token]");
             let integrity_emoji = if spec.integrity() == IntegrityLevel::system_default {
-                "\u{26AA}" // white circle (neutral)
+                EMOJI_NEUTRAL
             } else {
-                "\u{26A0}" // warning sign
+                EMOJI_WARNING
             };
             let _ = writeln!(
                 logger,
@@ -326,9 +329,9 @@ impl ScriptRunner for BaseContainerRunner {
             );
             // Log AppContainer-ness
             let app_container_emoji = if spec.app_container() {
-                "\u{26AA}" // white circle (neutral)
+                EMOJI_NEUTRAL
             } else {
-                "\u{26A0}" // warning sign
+                EMOJI_WARNING
             };
             let _ = writeln!(
                 logger,
@@ -359,12 +362,9 @@ impl ScriptRunner for BaseContainerRunner {
             let _ = writeln!(logger, "[ui subsystem]");
             let _ = writeln!(
                 logger,
-                "  win32k_system_calls: {}",
-                if spec.disallow_win32k_system_calls() {
-                    "\u{274C} blocked"
-                } else {
-                    "\u{2705} allowed"
-                }
+                "  win32k_system_calls: {} {}",
+                if spec.disallow_win32k_system_calls() { EMOJI_BLOCKED } else { EMOJI_ALLOWED },
+                if spec.disallow_win32k_system_calls() { "blocked" } else { "allowed" }
             );
             let r = spec.ui_restrictions();
             let flags: &[(&str, u64)] = &[
@@ -391,13 +391,13 @@ impl ScriptRunner for BaseContainerRunner {
                 .collect();
             let allowed_str = if allowed.is_empty() { "<none>".to_string() } else { allowed.join(", ") };
             let blocked_str = if blocked.is_empty() { "<none>".to_string() } else { blocked.join(", ") };
-            let _ = writeln!(logger, "  uilimits allowed \u{2705}: {}", allowed_str);
-            let _ = writeln!(logger, "  uilimits blocked \u{274C}: {} (0x{:04X})",
+            let _ = writeln!(logger, "  uilimits allowed {EMOJI_ALLOWED}: {}", allowed_str);
+            let _ = writeln!(logger, "  uilimits blocked {EMOJI_BLOCKED}: {} (0x{:04X})",
                 blocked_str,
                 spec.ui_restrictions());
         }
 
-        let _ = writeln!(logger, "\u{25B6} SECTION: Load API");
+        let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Load API");
 
         // 2. Dynamically load the API from processmodel.dll.
         let create_process_in_sandbox = match Self::load_api() {
@@ -409,7 +409,7 @@ impl ScriptRunner for BaseContainerRunner {
             "loaded Experimental_CreateProcessInSandbox from processmodel.dll"
         );
 
-        let _ = writeln!(logger, "\u{25B6} SECTION: Launch process");
+        let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Launch process");
 
         // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
         let mut cmd_wide = string_util::to_wide(&request.script_code);
@@ -486,7 +486,7 @@ impl ScriptRunner for BaseContainerRunner {
 
         let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
 
-        let _ = writeln!(logger, "\u{25B6} SECTION: Wait for exit");
+        let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Wait for exit");
 
         // 5. Wait for the child process to exit.
         let timeout_ms = get_timeout_milliseconds(request.script_timeout);
@@ -515,7 +515,7 @@ impl ScriptRunner for BaseContainerRunner {
 
         let _ = writeln!(
             logger,
-            "\u{25B6} SECTION: Done ({:.3}s)",
+            "{EMOJI_SECTION} SECTION: Done ({:.3}s)",
             run_start.elapsed().as_secs_f64()
         );
 
