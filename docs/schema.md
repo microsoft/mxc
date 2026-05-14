@@ -36,7 +36,13 @@ production configs and the dev schema when working on experimental features:
         "commandLine": "python app.py",    // Required: command to execute
         "cwd": "C:\\workspace",            // Working directory
         "env": ["MY_VAR=value"],           // Environment variables as KEY=VALUE
-        "timeout": 30000                   // Timeout in ms (0 = no timeout)
+        "timeout": 30000,                  // Timeout in ms (0 = no timeout)
+        "resourceLimits": {                // Optional resource caps (Job Object on Windows)
+            "memoryMb": 512,               //   Memory cap in MiB (0 = no limit)
+            "maxProcesses": 16,            //   Max active processes (0 = no limit)
+            "cpuRatePercent": 50,          //   CPU cap as percentage 0..100 (0 = no limit)
+            "allowChildProcesses": true    //   Allow spawning children (default true)
+        }
     },
 
     "filesystem": {
@@ -90,6 +96,47 @@ The `filesystem` section defines path access policy shared across backends:
 | `readwritePaths` | string[] | `[]` | Paths the process can read and write. |
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
+
+### Resource Limits
+
+The optional `process.resourceLimits` section caps the resources consumed by
+the sandboxed process and **all of its descendants**. On the Windows
+processcontainer / AppContainer backends this is enforced via a Windows Job
+Object.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `memoryMb` | integer | `0` | Maximum committed memory in MiB across all processes in the job. `0` = no limit. |
+| `maxProcesses` | integer | `0` | Maximum number of concurrent active processes (fork-bomb protection). `0` = no limit. |
+| `cpuRatePercent` | integer | `0` | CPU rate cap as a percentage `0..=100`. `0` = no limit. Values outside this range are rejected at parse time. |
+| `allowChildProcesses` | boolean | `true` | When `false`, the OS blocks the sandboxed process from spawning child processes (`PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED`). |
+
+#### Process tree cleanup
+
+Even when `resourceLimits` is omitted entirely, the AppContainer runner still
+creates a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. This guarantees
+that any descendant processes spawned by the sandboxed command — including
+detached children created via `start /b`, `DETACHED_PROCESS`, or
+`CREATE_NEW_CONSOLE` — are terminated when execution ends. Without this
+behavior, an orphaned child could outlive the sandbox indefinitely while still
+constrained by the AppContainer token.
+
+#### Backend support
+
+| Backend | `memoryMb` / `maxProcesses` / `cpuRatePercent` | `allowChildProcesses` | Orphan cleanup |
+|---------|------------------------------------------------|------------------------|----------------|
+| `processcontainer` (AppContainer, legacy) | enforced via Job Object | enforced via `PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY` | always on |
+| `processcontainer` (BaseContainer) | not yet enforced (see note below) | not yet enforced | inherits from OS sandbox |
+| `lxc` / `wslc` | not yet enforced (future: cgroups) | not yet enforced | not yet enforced |
+| `windows_sandbox` / `microvm` / `isolation_session` | governed by the VM/session, not Job Object | n/a | governed by the VM/session |
+| `seatbelt` | not yet enforced (future: `RLIMIT_*`) | not yet enforced | not yet enforced |
+
+**BaseContainer gap.** The BaseContainer `SandboxSpec` FlatBuffer
+(`external/windows-sdk/BaseContainerSpecification.fbs`) does not currently
+expose resource-limit fields. As a follow-up, the BaseContainer runner can
+externally wrap the process handle returned by
+`Experimental_CreateProcessInSandbox` in its own Job Object (Windows 8+
+supports nested jobs) to apply the same caps.
 
 ### Fallback Policy
 
