@@ -154,9 +154,7 @@ impl ScriptRunner for SeatbeltScriptRunner {
                 let _ = writeln!(logger, "{msg}");
                 error_response(msg)
             }
-            Err(error) => error_response(format!(
-                "failed to spawn {SANDBOX_EXEC}: {error}; ensure sandbox-exec exists"
-            )),
+            Err(error) => error_response(format!("Seatbelt: {error}")),
         }
     }
 }
