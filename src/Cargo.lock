@@ -1182,6 +1182,7 @@ name = "lxc_common"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "mxc_pty",
  "nix",
  "serde",
  "serde_json",
@@ -1308,6 +1309,14 @@ dependencies = [
  "windows",
  "windows-core",
  "wxc_common",
+]
+
+[[package]]
+name = "mxc_pty"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nix",
 ]
 
 [[package]]
@@ -1708,6 +1717,7 @@ dependencies = [
 name = "seatbelt_common"
 version = "0.1.0"
 dependencies = [
+ "mxc_pty",
  "tempfile",
  "wxc_common",
 ]
