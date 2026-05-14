@@ -76,7 +76,7 @@ use crate::models::{CodexRequest, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 
 use hyperlight_unikraft::pyhl;
-use hyperlight_unikraft::{AllowList, Preopen};
+use hyperlight_unikraft::{AllowList, BlockList, Preopen};
 
 // -- Error classification ----------------------------------------------------
 
@@ -280,6 +280,11 @@ impl HyperlightScriptRunner {
         if !request.working_directory.is_empty() {
             return Err(PyhlError::Preflight(ERR_WORKDIR.to_string()));
         }
+        if !request.policy.allowed_hosts.is_empty() && !request.policy.blocked_hosts.is_empty() {
+            return Err(PyhlError::Preflight(
+                "allowedHosts and blockedHosts are mutually exclusive".to_string(),
+            ));
+        }
 
         // Denied paths: block early if any appears in the allow lists.
         // Also reject a config that only specifies denies — there's no
@@ -309,7 +314,8 @@ impl HyperlightScriptRunner {
     ///
     /// - `default_network_policy == Block` → `None` (networking disabled)
     /// - `allowed_hosts` non-empty → `AllowList` (only listed hosts reachable)
-    /// - `default_network_policy == Allow`, no `allowed_hosts` → `AllowAll`
+    /// - `blocked_hosts` non-empty → `BlockList` (listed hosts denied, rest allowed)
+    /// - `default_network_policy == Allow`, no host lists → `AllowAll`
     fn network_policy_from_request(
         request: &CodexRequest,
     ) -> Result<Option<hyperlight_unikraft::NetworkPolicy>, PyhlError> {
@@ -321,6 +327,13 @@ impl HyperlightScriptRunner {
                 .map_err(|e| PyhlError::Preflight(format!("resolve allowed_hosts: {e:#}")))?;
             return Ok(Some(hyperlight_unikraft::NetworkPolicy::AllowList(
                 allow_list,
+            )));
+        }
+        if !request.policy.blocked_hosts.is_empty() {
+            let block_list = BlockList::from_hosts(&request.policy.blocked_hosts)
+                .map_err(|e| PyhlError::Preflight(format!("resolve blocked_hosts: {e:#}")))?;
+            return Ok(Some(hyperlight_unikraft::NetworkPolicy::BlockList(
+                block_list,
             )));
         }
         Ok(Some(hyperlight_unikraft::NetworkPolicy::AllowAll))
@@ -499,11 +512,16 @@ impl ScriptRunner for HyperlightScriptRunner {
             }
         };
 
+        let network_hosts = if !request.policy.allowed_hosts.is_empty() {
+            &request.policy.allowed_hosts
+        } else {
+            &request.policy.blocked_hosts
+        };
         let rt = match self.ensure_runtime(
             &home,
             preopens,
             network,
-            &request.policy.allowed_hosts,
+            network_hosts,
             request.policy.default_network_policy.clone(),
             logger,
         ) {
@@ -783,6 +801,40 @@ mod tests {
         };
         let policy = HyperlightScriptRunner::network_policy_from_request(&request).unwrap();
         assert!(policy.is_none());
+    }
+
+    #[test]
+    fn network_policy_blocklist_from_blocked_hosts() {
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                blocked_hosts: vec!["127.0.0.1".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let policy = HyperlightScriptRunner::network_policy_from_request(&request).unwrap();
+        assert!(matches!(
+            policy,
+            Some(hyperlight_unikraft::NetworkPolicy::BlockList(_))
+        ));
+    }
+
+    #[test]
+    fn policy_rejects_allowed_and_blocked_hosts() {
+        let mut r = runner();
+        let request = CodexRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                allowed_hosts: vec!["a.com".to_string()],
+                blocked_hosts: vec!["b.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let resp = r.run(&request, &mut logger);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert!(resp.error_message.contains("mutually exclusive"));
     }
 
     #[test]
