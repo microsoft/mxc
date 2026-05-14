@@ -19,6 +19,12 @@ members = [
 ]
 resolver = "3"
 
+# Full debug info so we can analyse customer crash dumps in WinDbg until we
+# publish to a symbol server.
+[profile.release]
+debug = "full"
+split-debuginfo = "packed"
+
 [workspace.package]
 edition = "2021"
 

@@ -175,14 +175,12 @@ jobs:
           contents: wslcsdk.dll
           targetFolder: $(outputDirectory)/$(targetTriple)
 
-      # Copy wxc-exec.pdb so consumers can symbolicate crashes (Windows only).
-      - task: CopyFiles@2
+      # Copy wxc_exec.pdb (rustc names pdbs after the crate, underscored) and
+      # rename it to wxc-exec.pdb to match the exe.
+      - powershell: |
+          Copy-Item -Force "$(targetTripleDir)/wxc_exec.pdb" "$(outputDirectory)/$(targetTriple)/wxc-exec.pdb"
         displayName: Copy wxc-exec.pdb
         condition: and(succeeded(), eq('${{ item.os }}', 'windows'))
-        inputs:
-          sourceFolder: $(targetTripleDir)
-          contents: wxc-exec.pdb
-          targetFolder: $(outputDirectory)/$(targetTriple)
 
       - task: 1ES.PublishPipelineArtifact@1
         displayName: Publish

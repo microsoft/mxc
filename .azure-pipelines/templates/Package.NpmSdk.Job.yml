@@ -42,6 +42,27 @@ jobs:
     - script: chmod +x $(sdkDirectory)/bin/*/lxc-exec
       displayName: Restore execute permission on lxc-exec
 
+    # Archive sdk/bin (x64/ + arm64/, executables + wxc_exec.pdb) for upload
+    # to the GitHub Release page, until we publish to a symbol server.
+    - task: ArchiveFiles@2
+      displayName: Archive mxc-release-binaries.zip
+      inputs:
+        rootFolderOrFile: '$(sdkDirectory)/bin'
+        includeRootFolder: false
+        archiveType: zip
+        archiveFile: '$(outputDirectory)/release-binaries/mxc-release-binaries.zip'
+        replaceExistingArchive: true
+
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: Publish mxc-release-binaries artifact
+      inputs:
+        path: '$(outputDirectory)/release-binaries'
+        artifactName: mxc-release-binaries
+
+    # Strip pdbs before npm pack — symbols ship via mxc-release-binaries.zip.
+    - script: rm -f $(sdkDirectory)/bin/*/*.pdb
+      displayName: Strip pdbs from npm package
+
     # Copy .npmrc to the SDK directory so Azure artifacts feed is used for npm install.
     - task: CopyFiles@2
       displayName: Copy .npmrc to SDK
