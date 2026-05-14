@@ -99,8 +99,13 @@ impl LxcScriptRunner {
 
         let container_name = self.resolve_container_name();
         // Make the name visible to the signal-cleanup watchdog so a fatal
-        // signal during create/start/attach still tears the container down.
-        signal_cleanup::set_active(&container_name);
+        // signal during create/start/attach still tears the container down —
+        // but only when the caller actually wants the container destroyed at
+        // exit. With `destroyOnExit = false` the normal completion path
+        // preserves the container, so the signal path must too.
+        if self.destroy_on_exit {
+            signal_cleanup::set_active(&container_name);
+        }
         let _ = writeln!(logger, "Container name: {}", container_name);
         let _ = writeln!(
             logger,
