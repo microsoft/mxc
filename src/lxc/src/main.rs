@@ -11,6 +11,7 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
+use bwrap_common::bwrap_runner::BubblewrapScriptRunner;
 use lxc_common::lxc_runner::LxcScriptRunner;
 use lxc_common::signal_cleanup;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
@@ -204,7 +205,8 @@ fn main() {
     log_request(&request, &mut logger);
 
     // Dispatch by containment backend. LXC is the default on Linux;
-    // Hyperlight is the new embedded Hyperlight+Unikraft micro-VM.
+    // Hyperlight is the embedded Hyperlight+Unikraft micro-VM;
+    // Bubblewrap is the unprivileged namespace sandbox (experimental).
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::Hyperlight => {
             #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
@@ -226,6 +228,7 @@ fn main() {
                 process::exit(1);
             }
         }
+        ContainmentBackend::Bubblewrap => Box::new(BubblewrapScriptRunner::new()),
         ContainmentBackend::Lxc => Box::new(LxcScriptRunner::new(
             &request.lxc_config,
             &request.container_id,

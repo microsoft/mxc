@@ -87,6 +87,7 @@ test_scripts\run_basicac_test.ps1            # Single AppContainer test
 test_scripts\run_isolation_session_tests.ps1                # IsolationSession one-shot E2E (requires host with the OS-side IsoSessionOps service)
 test_scripts\run_isolation_session_state_aware_tests.ps1    # IsolationSession state-aware lifecycle E2E (multi-invocation provision/start/exec/stop/deprovision, same host requirements)
 test_scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
+test_scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap)
 
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
@@ -111,6 +112,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 | IsolationSession | `wxc-exec.exe` | Windows | `isolation_session_runner.rs` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Supports both one-shot (single-invocation lifecycle, via `ScriptRunner`) and state-aware (multi-invocation provision/start/exec/stop/deprovision, via `StatefulSandboxBackend`) modes. Honors `readwritePaths` and `readonlyPaths` at provision via `ShareFolderBatchAsync` (rejects `deniedPaths` since the API has no Deny ACE primitive); filesystem policy is immutable post-provision and rejected at later phases. State-aware additionally accepts an optional `user` bundle (`upn`, `wamToken`) at provision and start to provision Entra cloud-agent sandboxes; one-shot rejects the bundle, and hosts that don't support Entra agents surface `backend_unavailable`. Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
 | LXC | `lxc-exec` | Linux | `lxc/src/main.rs` + `lxc_common/` |
 | Seatbelt | `mxc-exec-mac` | macOS | `mxc_darwin/src/main.rs` + `seatbelt_common/` — uses macOS App Sandbox (Seatbelt) profiles for process containment. Requires schema `0.6.0-dev`+. See `docs/macos-support/seatbelt-backend.md`. |
+| Bubblewrap | `lxc-exec` | Linux | `bwrap_common/src/bwrap_runner.rs` — unprivileged sandboxing via Linux user namespaces and `bwrap`. Experimental — requires `--experimental`. Uses shared filesystem/network policy fields; per-host network filtering via `NetworkIptablesManager` from `lxc_common`. See `docs/bwrap-support/bubblewrap-backend.md`. |
 
 ### Config flow
 

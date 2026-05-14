@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'node:url';
-import { PlatformSupport } from './types.js';
+import { ContainmentBackend, PlatformSupport } from './types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -117,12 +117,16 @@ export function getPlatformSupport(): PlatformSupport {
   }
 
   if (platform === 'linux') {
-    // LXC is the only containment backend on Linux
-    if (isLxcAvailable()) {
+    // LXC and Bubblewrap are both supported on Linux. Report whichever
+    // are installed; callers pick via the containment field.
+    const methods: ContainmentBackend[] = [];
+    if (isLxcAvailable()) methods.push('lxc');
+    if (isBubblewrapAvailable()) methods.push('bubblewrap');
+    if (methods.length > 0) {
       support.isSupported = true;
-      support.availableMethods = ['lxc'];
+      support.availableMethods = methods;
     } else {
-      support.reason = 'LXC is not installed or not available on this system';
+      support.reason = 'Neither LXC nor Bubblewrap is available on this system';
     }
     return support;
   }
@@ -149,6 +153,18 @@ export function getPlatformSupport(): PlatformSupport {
 function isLxcAvailable(): boolean {
   try {
     execSync('lxc-ls --version', { encoding: 'utf-8', stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if Bubblewrap (bwrap) is available on the system
+ */
+function isBubblewrapAvailable(): boolean {
+  try {
+    execSync('bwrap --version', { encoding: 'utf-8', stdio: 'pipe' });
     return true;
   } catch {
     return false;

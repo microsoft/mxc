@@ -38,6 +38,11 @@ pub enum ContainmentBackend {
     /// internal codename for the App Sandbox / `sandbox-exec` machinery
     /// is "Seatbelt"); selected on the wire as `"seatbelt"`.
     Seatbelt,
+    /// Bubblewrap — unprivileged Linux sandboxing via user namespaces.
+    /// Experimental — requires `--experimental` flag. Uses `bwrap` to
+    /// create namespace-isolated processes without root privileges.
+    /// Selected on the wire as `"bubblewrap"`.
+    Bubblewrap,
 }
 
 /// Configuration specific to the Seatbelt backend (experimental).

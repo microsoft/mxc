@@ -124,6 +124,7 @@ force a particular backend.
 | `"lxc"` | Native LXC container isolation |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt; experimental) |
+| `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces (experimental) |
 
 Only the backend section matching the selected `containment` value is used;
 other backend sections are ignored.

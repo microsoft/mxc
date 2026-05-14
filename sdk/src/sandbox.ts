@@ -86,6 +86,27 @@ function buildWslcContainerConfig(
 }
 
 /**
+ * Builds the Bubblewrap (bwrap) portion of a ContainerConfig.
+ * Bubblewrap is Linux-only and uses shared cross-backend fields only —
+ * no backend-specific config block. Network enforcement via iptables
+ * reuses the same approach as LXC.
+ */
+function buildBubblewrapConfig(
+    config: ContainerConfig,
+): ContainerConfig {
+    config.containment = 'bubblewrap';
+
+    // Network enforcement: use firewall when host filtering is needed
+    if (config.network) {
+        if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
+            config.network.enforcementMode = 'firewall';
+        }
+    }
+
+    return config;
+}
+
+/**
  * Builds the Linux process container (LXC) portion of a ContainerConfig.
  */
 function buildLinuxProcessConfig(
@@ -276,9 +297,10 @@ export function createConfigFromPolicy(
 
         // WSLC supports block + allowedHosts via iptables (Bridged networking
         // with per-host filtering). macOS sandbox supports it natively via
-        // per-host Seatbelt rules. Other backends require allowOutbound for
-        // host filtering since it maps to AppContainer capabilities.
-        if (containment !== 'wslc' && containment !== 'seatbelt') {
+        // per-host Seatbelt rules. Bubblewrap supports it via iptables.
+        // Other backends require allowOutbound for host filtering since it
+        // maps to AppContainer capabilities.
+        if (containment !== 'wslc' && containment !== 'seatbelt' && containment !== 'bubblewrap') {
             if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
                 throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
             }
@@ -299,6 +321,11 @@ export function createConfigFromPolicy(
     // Backend-specific config based on containment type
     if (containment === 'wslc') {
         return buildWslcContainerConfig(config, policy, containerId);
+    }
+
+    if (containment === 'bubblewrap') {
+        diagLog(`createConfigFromPolicy: containment=bubblewrap, id=${containerId}`);
+        return buildBubblewrapConfig(config);
     }
 
     if (containment === 'process') {
