@@ -60,6 +60,13 @@ pub fn build_profile(request: &CodexRequest) -> String {
     // Filesystem — read-only system paths every process needs.
     out.push_str(SYSTEM_READ_ALLOW);
 
+    // Pseudo-terminal access — the seatbelt runner attaches the inner
+    // shell to a freshly-allocated pty (see `seatbelt_runner::spawn_with_pty`)
+    // so callers can stream output and the shell sees a real TTY. Without
+    // these rules, `isatty()` / `tcgetattr()` / `ttyname()` fail with EPERM
+    // because the kernel calls block on the slave fd.
+    out.push_str(TTY_ALLOW);
+
     // Policy-derived allow rules.
     write_filesystem_allow(&mut out, request);
     write_network_rules(&mut out, request);
@@ -111,6 +118,19 @@ const SYSTEM_READ_ALLOW: &str = "\
     (literal \"/dev/zero\")
     (literal \"/dev/random\")
     (literal \"/dev/urandom\"))
+";
+
+/// Pseudo-terminal device access required by the inner shell when the
+/// runner attaches it to a pty. The slave fd we hand the child as
+/// stdin/stdout/stderr lives at `/dev/ttysNNN`, and the shell calls
+/// `isatty()` (→ `tcgetattr` → ioctl) plus `ttyname()` against it. We
+/// also need read access to `/dev/tty` because most shells re-open it
+/// at startup. Allowing `(subpath "/dev")` keeps the rule short and
+/// covers the supporting `/dev` entries (`/dev/fd`, `/dev/stdout`, …)
+/// that callers occasionally exercise from inside a sandboxed shell.
+const TTY_ALLOW: &str = "\
+;; --- pseudo-terminal access (pty bridge in seatbelt_runner) ---
+(allow file-read* file-write* file-ioctl (subpath \"/dev\"))
 ";
 
 fn write_filesystem_allow(out: &mut String, request: &CodexRequest) {
