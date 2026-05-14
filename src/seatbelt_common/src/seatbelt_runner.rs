@@ -94,7 +94,17 @@ impl ScriptRunner for SeatbeltScriptRunner {
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         // 1. Build the Seatbelt profile from the policy.
-        let profile = build_profile(request);
+        let profile = match build_profile(request) {
+            Ok(p) => p,
+            Err(e) => {
+                return ScriptResponse {
+                    exit_code: -1,
+                    standard_out: String::new(),
+                    standard_err: String::new(),
+                    error_message: e,
+                }
+            }
+        };
 
         // Determine launch method from seatbelt config.
         let launch_method = request
