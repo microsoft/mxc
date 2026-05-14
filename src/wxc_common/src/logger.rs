@@ -125,14 +125,10 @@ impl Logger {
                     }
                 }
             }
-            Err(e) => {
-                eprintln!(
-                    "[MXC Diagnostics] Could not connect to diagnostic console at {pipe_path}: {e}"
-                );
-                eprintln!(
-                    "[MXC Diagnostics] Hint: Start mxc-diagnostic-console.exe first, \
-                     or disable console logging."
-                );
+            Err(_) => {
+                // Diagnostic console is not running -- this is fine; continue silently.
+                // The user asked for console output (MXC_DIAG_CONSOLE=1) but the
+                // console process hasn't been started yet.
             }
         }
 

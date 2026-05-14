@@ -269,12 +269,12 @@ fn main() {
         Ok(()) => {
             println!("\x1b[93m[ETW]\x1b[0m Listening for providers:");
             println!(
-                "\x1b[93m[ETW]\x1b[0m   Tessera     \
-                 {{f6ec123e-314e-400b-9e0a-151365e23083}}"
+                "\x1b[93m[ETW]\x1b[0m   ProcessModel \
+                 {{f6ec123e-314e-400b-9e0a-151365e23083}} (Sandboxing)"
             );
             println!(
                 "\x1b[93m[ETW]\x1b[0m   Kernel-General \
-                 {{a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}} (AccessCheckLog only)"
+                 {{a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}} (Learning Mode messages)"
             );
         }
         Err(e) => {
