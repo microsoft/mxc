@@ -267,8 +267,16 @@ impl BaseContainerRunner {
         let _ = writeln!(
             logger,
             "  win32k_system_calls: {} {}",
-            if spec.disallow_win32k_system_calls() { EMOJI_BLOCKED } else { EMOJI_ALLOWED },
-            if spec.disallow_win32k_system_calls() { "blocked" } else { "allowed" }
+            if spec.disallow_win32k_system_calls() {
+                EMOJI_BLOCKED
+            } else {
+                EMOJI_ALLOWED
+            },
+            if spec.disallow_win32k_system_calls() {
+                "blocked"
+            } else {
+                "allowed"
+            }
         );
         let r = spec.ui_restrictions();
         let flags: &[(&str, u64)] = &[
@@ -303,7 +311,11 @@ impl BaseContainerRunner {
         } else {
             blocked.join(", ")
         };
-        let _ = writeln!(logger, "  uilimits allowed {EMOJI_ALLOWED}: {}", allowed_str);
+        let _ = writeln!(
+            logger,
+            "  uilimits allowed {EMOJI_ALLOWED}: {}",
+            allowed_str
+        );
         let _ = writeln!(
             logger,
             "  uilimits blocked {EMOJI_BLOCKED}: {} (0x{:04X})",
@@ -371,7 +383,10 @@ impl ScriptRunner for BaseContainerRunner {
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'");
+        let _ = writeln!(
+            logger,
+            "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
+        );
 
         let run_start = std::time::Instant::now();
 
