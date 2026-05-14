@@ -210,6 +210,55 @@ Open the schema file matching your `policy.version` (e.g. `mxc-config.schema.0.5
 
 </details>
 
+## Policy
+
+`SandboxPolicy` describes cross-platform sandbox intent. Key fields include:
+
+```typescript
+type SandboxPolicy = {
+  version: string;
+  filesystem?: {
+    readwritePaths?: string[];
+    readonlyPaths?: string[];
+    deniedPaths?: string[];
+    clearPolicyOnExit?: boolean;
+  };
+  network?: {
+    allowOutbound?: boolean;
+    allowLocalNetwork?: boolean;
+    allowedHosts?: string[];
+    blockedHosts?: string[];
+    proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
+  };
+  ui?: {
+    allowWindows?: boolean;
+    clipboard?: 'none' | 'read' | 'write' | 'all';
+    allowInputInjection?: boolean;
+  };
+  timeoutMs?: number;
+  resourceLimits?: {
+    memoryMb?: number;
+    maxProcesses?: number;
+    cpuRatePercent?: number;
+    allowChildProcesses?: boolean;
+  };
+};
+```
+
+### Resource Limits
+
+Use `resourceLimits` to cap process-level resources for the sandboxed process and its descendants. Numeric caps use `0` or omission for no limit; `allowChildProcesses` defaults to `true`.
+
+```typescript
+const config = createConfigFromPolicy({
+  version: '0.6.0-dev',
+  resourceLimits: {
+    memoryMb: 512,
+    allowChildProcesses: false,
+  },
+});
+```
+
 ## State-Aware Sandboxes
 
 <details>

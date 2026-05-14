@@ -446,6 +446,73 @@ describe('createConfigFromPolicy', () => {
     assert.strictEqual(config.process!.timeout, 30000);
   });
 
+  describe('resourceLimits', () => {
+    it('should omit process.resourceLimits when policy omits resourceLimits', () => {
+      const config = createConfigFromPolicy(defaultPolicy);
+      assert.strictEqual(config.process!.resourceLimits, undefined);
+    });
+
+    it('should propagate all resourceLimits fields faithfully', () => {
+      const resourceLimits = {
+        memoryMb: 512,
+        maxProcesses: 16,
+        cpuRatePercent: 50,
+        allowChildProcesses: true,
+      };
+      const config = createConfigFromPolicy({
+        version: '0.6.0-alpha',
+        resourceLimits,
+      });
+      assert.deepStrictEqual(config.process!.resourceLimits, resourceLimits);
+    });
+
+    it('should reject cpuRatePercent greater than 100', () => {
+      assert.throws(
+        () => createConfigFromPolicy({
+          version: '0.6.0-alpha',
+          resourceLimits: { cpuRatePercent: 101 },
+        }),
+        { message: /resourceLimits\.cpuRatePercent must be between 0 and 100/ },
+      );
+    });
+
+    it('should reject negative memoryMb and maxProcesses', () => {
+      assert.throws(
+        () => createConfigFromPolicy({
+          version: '0.6.0-alpha',
+          resourceLimits: { memoryMb: -1 },
+        }),
+        { message: /resourceLimits\.memoryMb must be greater than or equal to 0/ },
+      );
+
+      assert.throws(
+        () => createConfigFromPolicy({
+          version: '0.6.0-alpha',
+          resourceLimits: { maxProcesses: -1 },
+        }),
+        { message: /resourceLimits\.maxProcesses must be greater than or equal to 0/ },
+      );
+    });
+
+    it('should reject non-integer numeric caps', () => {
+      assert.throws(
+        () => createConfigFromPolicy({
+          version: '0.6.0-alpha',
+          resourceLimits: { memoryMb: 1.5 },
+        }),
+        { message: /resourceLimits\.memoryMb must be an integer/ },
+      );
+    });
+
+    it('should accept allowChildProcesses false and include it in output', () => {
+      const config = createConfigFromPolicy({
+        version: '0.6.0-alpha',
+        resourceLimits: { allowChildProcesses: false },
+      });
+      assert.deepStrictEqual(config.process!.resourceLimits, { allowChildProcesses: false });
+    });
+  });
+
   describe('Windows', () => {
     let originalPlatform: PropertyDescriptor | undefined;
 
