@@ -290,6 +290,8 @@ impl LxcContainer {
             .spawn()
             .map_err(|e| format!("Failed to spawn lxc-attach: {}", e))?;
 
+        drop(cmd);
+
         // The child inherited all three slave handles and the parent's
         // copies have been moved into Stdio. The slave will be fully closed
         // when the child exits, which makes our master read return EOF.
