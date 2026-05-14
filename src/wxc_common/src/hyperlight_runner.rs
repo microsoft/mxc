@@ -149,6 +149,7 @@ pub struct HyperlightScriptRunner {
     active_home: Option<PathBuf>,
     active_preopens: Vec<Preopen>,
     active_network_hosts: Vec<String>,
+    active_network_default: NetworkPolicy,
 }
 
 impl Default for HyperlightScriptRunner {
@@ -219,6 +220,7 @@ impl HyperlightScriptRunner {
             active_home: None,
             active_preopens: Vec::new(),
             active_network_hosts: Vec::new(),
+            active_network_default: NetworkPolicy::default(),
         }
     }
 
@@ -408,11 +410,16 @@ impl HyperlightScriptRunner {
         preopens: Vec<Preopen>,
         network: Option<hyperlight_unikraft::NetworkPolicy>,
         network_hosts: &[String],
+        network_default: NetworkPolicy,
         logger: &mut Logger,
     ) -> Result<&mut pyhl::Runtime, PyhlError> {
         let same_home = self.active_home.as_deref() == Some(home);
         let same_mounts = preopens_equal(&self.active_preopens, &preopens);
-        let same_network = self.active_network_hosts == network_hosts;
+        let mut sorted_hosts = network_hosts.to_vec();
+        sorted_hosts.sort();
+        sorted_hosts.dedup();
+        let same_network = self.active_network_hosts == sorted_hosts
+            && self.active_network_default == network_default;
         // `if let Some(rt) = self.runtime.as_mut()` trips the borrow
         // checker because a later branch reassigns `self.runtime`.
         #[allow(clippy::unnecessary_unwrap)]
@@ -458,7 +465,8 @@ impl HyperlightScriptRunner {
         self.runtime = Some(rt);
         self.active_home = Some(home.to_path_buf());
         self.active_preopens = preopens;
-        self.active_network_hosts = network_hosts.to_vec();
+        self.active_network_hosts = sorted_hosts;
+        self.active_network_default = network_default;
         Ok(self.runtime.as_mut().unwrap())
     }
 }
@@ -496,6 +504,7 @@ impl ScriptRunner for HyperlightScriptRunner {
             preopens,
             network,
             &request.policy.allowed_hosts,
+            request.policy.default_network_policy.clone(),
             logger,
         ) {
             Ok(rt) => rt,
