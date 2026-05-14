@@ -149,7 +149,11 @@ export const isLinuxRoot = os.platform() === 'linux' && process.getuid?.() === 0
 // When MXC_DEBUG=true, integration tests pass { debug: true } to spawn options
 // so wxc-exec / lxc-exec emit verbose output. Enable via pipeline parameter or locally.
 const debugMode = process.env.MXC_DEBUG === 'true';
-export const debugSpawnOptions = debugMode ? { debug: true } : {};
+const experimentalMode = os.platform() === 'darwin';
+export const debugSpawnOptions = {
+  ...(debugMode ? { debug: true } : {}),
+  ...(experimentalMode ? { experimental: true } : {}),
+};
 
 // Network test endpoint reachable from both CI (Azure DevOps agents block
 // external traffic but allow Azure Artifacts feeds) and local builds.
