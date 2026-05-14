@@ -637,7 +637,7 @@ fn main() {
         }
     };
 
-    let mut request= request;
+    let mut request = request;
     request.experimental_enabled = cli.experimental;
     request.dry_run = cli.dry_run;
 
