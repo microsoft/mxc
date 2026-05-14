@@ -63,8 +63,10 @@
 //!
 //! ## Exit codes
 //!
-//! 0 on clean `run_code` completion, -1 on any error (preflight, install,
-//! runtime, guest crash). The specific failure mode is in `error_message`.
+//! Guest exit code on clean `run_code` completion (0 for normal exit,
+//! non-zero for `sys.exit(N)` or unhandled exceptions), -1 on any
+//! runner error (preflight, install, runtime, guest crash). The specific
+//! failure mode is in `error_message`.
 
 use std::path::{Path, PathBuf};
 
@@ -474,11 +476,11 @@ impl ScriptRunner for HyperlightScriptRunner {
         match rt.run_code(&request.script_code) {
             Ok(timing) => {
                 logger.log_line(&format!(
-                    "hyperlight: run ok (restore={:.1}ms call={:.1}ms)",
-                    timing.restore_ms, timing.call_ms
+                    "hyperlight: run ok (restore={:.1}ms call={:.1}ms exit={})",
+                    timing.restore_ms, timing.call_ms, timing.exit_code
                 ));
                 ScriptResponse {
-                    exit_code: 0,
+                    exit_code: timing.exit_code,
                     ..Default::default()
                 }
             }
