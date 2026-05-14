@@ -18,8 +18,8 @@ parameters:
   default: {}
 
 jobs:
-- job: package_mxc_npm_sdk
-  displayName: Package Mxc Npm Sdk
+- job: package_npm_sdk
+  displayName: Package Npm Sdk
   pool:
     name: Azure-Pipelines-1ESPT-ExDShared
     image: ubuntu-latest
