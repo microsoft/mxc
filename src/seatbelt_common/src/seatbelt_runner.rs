@@ -19,7 +19,6 @@
 use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -162,7 +161,15 @@ impl SeatbeltScriptRunner {
         let mut child = match command.spawn() {
             Ok(process) => process,
             Err(error) => {
-                return error_response(format!("failed to spawn sandboxed process: {error}"))
+                let msg = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    format!(
+                        "failed to spawn sandboxed process (sandbox_init likely rejected \
+                         the profile — check stderr for details): {error}"
+                    )
+                } else {
+                    format!("failed to spawn sandboxed process: {error}")
+                };
+                return error_response(msg);
             }
         };
 
@@ -269,6 +276,13 @@ impl SeatbeltScriptRunner {
         let mut env_exports = String::new();
         for kv in &request.env {
             if let Some((key, value)) = kv.split_once('=') {
+                // Validate key is a safe shell identifier to prevent injection.
+                if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    || key.is_empty()
+                    || key.starts_with(|c: char| c.is_ascii_digit())
+                {
+                    continue; // Skip invalid env var names
+                }
                 // Shell-escape the value.
                 let escaped = value.replace('\'', "'\\''");
                 let _ = writeln!(env_exports, "export {key}='{escaped}'");
@@ -284,7 +298,7 @@ impl SeatbeltScriptRunner {
             "#!/bin/sh\n\
              # MXC Seatbelt sandbox helper — auto-generated, do not edit.\n\
              {env_exports}\
-             exec sandbox-exec -f '{profile_path}' /bin/sh -c 'clear; {script_escaped}'\n",
+             exec /usr/bin/sandbox-exec -f '{profile_path}' /bin/sh -c 'clear; {script_escaped}'\n",
             profile_path = profile_path,
             script_escaped = script_code.replace('\'', "'\\''"),
         );
@@ -300,13 +314,16 @@ impl SeatbeltScriptRunner {
         // 4. Create the .command file that Terminal will execute.
         let command_content = format!("#!/bin/sh\nexec '{}'\n", helper_path);
         let command_path = match write_secure_temp_file("mxc_sb_launch_", &command_content, 0o700) {
-            Ok(mut p) => {
+            Ok(p) => {
                 // Rename to .command extension so Terminal recognizes it.
                 let new_path = format!("{p}.command");
-                if fs::rename(&p, &new_path).is_ok() {
-                    p = new_path;
+                if let Err(e) = fs::rename(&p, &new_path) {
+                    let _ = fs::remove_file(&p);
+                    let _ = fs::remove_file(&profile_path);
+                    let _ = fs::remove_file(&helper_path);
+                    return error_response(format!("failed to rename to .command: {e}"));
                 }
-                p
+                new_path
             }
             Err(e) => {
                 let _ = fs::remove_file(&profile_path);
@@ -321,8 +338,8 @@ impl SeatbeltScriptRunner {
         let mut child = match Command::new("open")
             .args(["-n", "-W", "-a", "Terminal", &command_path])
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
         {
             Ok(c) => c,
@@ -494,29 +511,50 @@ fn wait_with_timeout(
     }
 }
 
-/// Write `content` to a temp file with randomized name and the given
-/// permissions mode. Returns the absolute path on success.
+/// Write `content` to a temp file with a cryptographically random name and the
+/// given permissions mode. Uses `O_CREAT | O_EXCL` (create_new) to avoid
+/// symlink-following and collisions, and sets permissions immediately after
+/// creation on the open file descriptor to close the TOCTOU window.
 fn write_secure_temp_file(
     prefix: &str,
     content: &str,
     mode: u32,
 ) -> Result<String, std::io::Error> {
     use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
 
     let dir = std::env::temp_dir();
-    let random: u64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as u64
-        ^ std::process::id() as u64;
-    let path = dir.join(format!("{prefix}{random:016x}"));
-    let path_str = path.to_string_lossy().to_string();
 
-    let mut file = fs::File::create(&path)?;
-    file.write_all(content.as_bytes())?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
+    // Retry loop in case of (unlikely) collision with create_new.
+    for _ in 0..8 {
+        let random: u64 = {
+            // Use /dev/urandom for unpredictable temp names.
+            let mut buf = [0u8; 8];
+            let mut f = fs::File::open("/dev/urandom")?;
+            std::io::Read::read_exact(&mut f, &mut buf)?;
+            u64::from_ne_bytes(buf)
+        };
+        let path = dir.join(format!("{prefix}{random:016x}"));
 
-    Ok(path_str)
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true) // O_EXCL: fail if exists, no symlink follow
+            .mode(mode) // Set permissions atomically at creation
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(content.as_bytes())?;
+                return Ok(path.to_string_lossy().to_string());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "failed to create unique temp file after 8 attempts",
+    ))
 }
 
 /// Remove a list of temp files, ignoring errors.
@@ -531,6 +569,7 @@ mod tests {
     use super::*;
     use wxc_common::models::{CodexRequest, SeatbeltConfig};
 
+    #[allow(clippy::field_reassign_with_default)]
     fn base_request() -> CodexRequest {
         let mut request = CodexRequest::default();
         request.experimental_enabled = true;
@@ -547,5 +586,31 @@ mod tests {
         assert_eq!(response.exit_code, -1);
         assert!(response.error_message.contains("blockedHosts"));
         assert!(response.error_message.contains("cannot be enforced"));
+    }
+
+    #[test]
+    fn write_secure_temp_file_sets_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = write_secure_temp_file("mxc_test_", "hello", 0o700).unwrap();
+        let meta = fs::metadata(&path).unwrap();
+        // Verify permissions (mask with 0o777 to ignore setuid/sticky bits)
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        // Verify content
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn write_secure_temp_file_no_collisions() {
+        let mut paths = Vec::new();
+        for _ in 0..10 {
+            let path = write_secure_temp_file("mxc_collision_test_", "data", 0o600).unwrap();
+            assert!(!paths.contains(&path), "collision detected: {path}");
+            paths.push(path);
+        }
+        for p in &paths {
+            let _ = fs::remove_file(p);
+        }
     }
 }
