@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 parameters:
-- name: Targets
+- name: targets
   type: object
   default:
     - artifact: wxc-binaries-x86_64-pc-windows-msvc
