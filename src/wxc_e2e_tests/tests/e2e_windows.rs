@@ -602,6 +602,12 @@ fn hyperlight_suite() {
             expected_exit: 42,
             output_contains: None,
         },
+        HyperlightCase {
+            config: "hyperlight_networking.json",
+            description: "HTTP GET with allowedHosts network policy",
+            expected_exit: 0,
+            output_contains: Some("200"),
+        },
     ];
 
     let mut failures = Vec::new();

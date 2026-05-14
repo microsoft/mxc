@@ -12,6 +12,7 @@
 //! | Script delivery     | Direct `Runtime::run_code(&str)`                          |
 //! | Cold start          | Snapshot restore (~50–60 ms)                              |
 //! | Filesystem          | Host dir mounts via `Preopen`                             |
+//! | Networking          | Host-proxied sockets via `NetworkPolicy`                  |
 //! | Script I/O          | Host's stdout/stderr (host_print)                         |
 //! | stdlib coverage     | Full CPython + preloaded ML stack (numpy, pandas, etc.)   |
 //!
@@ -75,7 +76,7 @@ use crate::models::{CodexRequest, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 
 use hyperlight_unikraft::pyhl;
-use hyperlight_unikraft::Preopen;
+use hyperlight_unikraft::{AllowList, Preopen};
 
 // -- Error classification ----------------------------------------------------
 
@@ -126,10 +127,7 @@ const KERNEL_FILE: &str = "kernel";
 const INITRD_FILE: &str = "initrd.cpio";
 const SNAPSHOT_FILE: &str = "snapshot.hls";
 
-const ERR_NETWORK_POLICY: &str =
-    "network policy is not supported by the hyperlight backend -- guest has no network stack";
-const ERR_PROXY_POLICY: &str =
-    "network proxy is not supported by the hyperlight backend -- guest has no network stack";
+const ERR_PROXY_POLICY: &str = "network proxy is not supported by the hyperlight backend";
 const ERR_WORKDIR: &str =
     "workingDirectory is not supported by the hyperlight backend -- guest has its own filesystem namespace";
 const ERR_NO_INSTALL_SOURCE: &str =
@@ -150,6 +148,7 @@ pub struct HyperlightScriptRunner {
     runtime: Option<pyhl::Runtime>,
     active_home: Option<PathBuf>,
     active_preopens: Vec<Preopen>,
+    active_network_hosts: Vec<String>,
 }
 
 impl Default for HyperlightScriptRunner {
@@ -202,6 +201,7 @@ pub fn setup(force: bool, logger: &mut Logger) -> Result<PathBuf, String> {
         home: &home,
         source: pyhl::InstallSource::Ghcr,
         mounts: &[],
+        network: None,
         force,
     };
     let report = pyhl::install(&opts).map_err(|e| format!("hyperlight install: {e:#}"))?;
@@ -218,6 +218,7 @@ impl HyperlightScriptRunner {
             runtime: None,
             active_home: None,
             active_preopens: Vec::new(),
+            active_network_hosts: Vec::new(),
         }
     }
 
@@ -269,14 +270,8 @@ impl HyperlightScriptRunner {
     }
 
     /// Reject only policies that the hyperlight backend genuinely cannot honor.
-    /// Filesystem mounts ARE supported — translated to Preopens below.
+    /// Filesystem mounts and network policies ARE supported.
     fn validate_policies(request: &CodexRequest) -> Result<(), PyhlError> {
-        if !request.policy.allowed_hosts.is_empty()
-            || !request.policy.blocked_hosts.is_empty()
-            || request.policy.default_network_policy != NetworkPolicy::Allow
-        {
-            return Err(PyhlError::Preflight(ERR_NETWORK_POLICY.to_string()));
-        }
         if request.policy.network_proxy.is_enabled() {
             return Err(PyhlError::Preflight(ERR_PROXY_POLICY.to_string()));
         }
@@ -306,6 +301,27 @@ impl HyperlightScriptRunner {
         }
 
         Ok(())
+    }
+
+    /// Translate MXC's network policy fields into a pyhl `NetworkPolicy`.
+    ///
+    /// - `default_network_policy == Block` → `None` (networking disabled)
+    /// - `allowed_hosts` non-empty → `AllowList` (only listed hosts reachable)
+    /// - `default_network_policy == Allow`, no `allowed_hosts` → `AllowAll`
+    fn network_policy_from_request(
+        request: &CodexRequest,
+    ) -> Result<Option<hyperlight_unikraft::NetworkPolicy>, PyhlError> {
+        if request.policy.default_network_policy == NetworkPolicy::Block {
+            return Ok(None);
+        }
+        if !request.policy.allowed_hosts.is_empty() {
+            let allow_list = AllowList::from_hosts(&request.policy.allowed_hosts)
+                .map_err(|e| PyhlError::Preflight(format!("resolve allowed_hosts: {e:#}")))?;
+            return Ok(Some(hyperlight_unikraft::NetworkPolicy::AllowList(
+                allow_list,
+            )));
+        }
+        Ok(Some(hyperlight_unikraft::NetworkPolicy::AllowAll))
     }
 
     /// Translate `ContainerPolicy.{readwrite,readonly}Paths` into
@@ -390,14 +406,17 @@ impl HyperlightScriptRunner {
         &mut self,
         home: &Path,
         preopens: Vec<Preopen>,
+        network: Option<hyperlight_unikraft::NetworkPolicy>,
+        network_hosts: &[String],
         logger: &mut Logger,
     ) -> Result<&mut pyhl::Runtime, PyhlError> {
         let same_home = self.active_home.as_deref() == Some(home);
         let same_mounts = preopens_equal(&self.active_preopens, &preopens);
+        let same_network = self.active_network_hosts == network_hosts;
         // `if let Some(rt) = self.runtime.as_mut()` trips the borrow
         // checker because a later branch reassigns `self.runtime`.
         #[allow(clippy::unnecessary_unwrap)]
-        if same_home && same_mounts && self.runtime.is_some() {
+        if same_home && same_mounts && same_network && self.runtime.is_some() {
             return Ok(self.runtime.as_mut().unwrap());
         }
         // Drop any prior runtime before rebuilding against new state.
@@ -413,8 +432,6 @@ impl HyperlightScriptRunner {
                 "hyperlight: no snapshot at {:?}; auto-installing from kernel + initrd",
                 home.join(SNAPSHOT_FILE)
             ));
-            // Use `Explicit` to point at the files we know are present;
-            // avoids a scan and works regardless of surrounding layout.
             let kernel = home.join(KERNEL_FILE);
             let initrd = home.join(INITRD_FILE);
             let opts = pyhl::InstallOptions {
@@ -424,6 +441,7 @@ impl HyperlightScriptRunner {
                     initrd: &initrd,
                 },
                 mounts: &preopens,
+                network: network.as_ref(),
                 force: false,
             };
             let report = pyhl::install(&opts)
@@ -435,11 +453,12 @@ impl HyperlightScriptRunner {
         }
 
         logger.log_line(&format!("hyperlight: using image home {home:?}"));
-        let rt = pyhl::Runtime::new(home, &preopens)
+        let rt = pyhl::Runtime::new(home, &preopens, network.as_ref())
             .map_err(|e| PyhlError::Runtime(format!("open hyperlight runtime: {e:#}")))?;
         self.runtime = Some(rt);
         self.active_home = Some(home.to_path_buf());
         self.active_preopens = preopens;
+        self.active_network_hosts = network_hosts.to_vec();
         Ok(self.runtime.as_mut().unwrap())
     }
 }
@@ -464,8 +483,21 @@ impl ScriptRunner for HyperlightScriptRunner {
                 return e.to_response();
             }
         };
+        let network = match Self::network_policy_from_request(request) {
+            Ok(n) => n,
+            Err(e) => {
+                logger.log_line(&e.to_string());
+                return e.to_response();
+            }
+        };
 
-        let rt = match self.ensure_runtime(&home, preopens, logger) {
+        let rt = match self.ensure_runtime(
+            &home,
+            preopens,
+            network,
+            &request.policy.allowed_hosts,
+            logger,
+        ) {
             Ok(rt) => rt,
             Err(e) => {
                 logger.log_line(&e.to_string());
@@ -706,37 +738,42 @@ mod tests {
     }
 
     #[test]
-    fn policy_rejects_network_rules() {
-        let mut r = runner();
+    fn network_policy_allow_all_when_default_allow() {
+        let request = CodexRequest::default();
+        let policy = HyperlightScriptRunner::network_policy_from_request(&request).unwrap();
+        assert!(matches!(
+            policy,
+            Some(hyperlight_unikraft::NetworkPolicy::AllowAll)
+        ));
+    }
+
+    #[test]
+    fn network_policy_allowlist_from_allowed_hosts() {
         let request = CodexRequest {
-            script_code: "print('x')".to_string(),
             policy: ContainerPolicy {
-                allowed_hosts: vec!["example.com".to_string()],
+                allowed_hosts: vec!["127.0.0.1".to_string()],
                 ..Default::default()
             },
             ..Default::default()
         };
-        let mut logger = Logger::new(Mode::Buffer);
-        let resp = r.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_NETWORK_POLICY));
+        let policy = HyperlightScriptRunner::network_policy_from_request(&request).unwrap();
+        assert!(matches!(
+            policy,
+            Some(hyperlight_unikraft::NetworkPolicy::AllowList(_))
+        ));
     }
 
     #[test]
-    fn policy_rejects_block_default_network() {
-        let mut r = runner();
+    fn network_policy_none_when_blocked() {
         let request = CodexRequest {
-            script_code: "print('x')".to_string(),
             policy: ContainerPolicy {
                 default_network_policy: NetworkPolicy::Block,
                 ..Default::default()
             },
             ..Default::default()
         };
-        let mut logger = Logger::new(Mode::Buffer);
-        let resp = r.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_NETWORK_POLICY));
+        let policy = HyperlightScriptRunner::network_policy_from_request(&request).unwrap();
+        assert!(policy.is_none());
     }
 
     #[test]
