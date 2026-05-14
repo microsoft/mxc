@@ -116,7 +116,7 @@ schemas/            JSON schemas (stable + dev)
 
 ### Building MXC
 
-MXC has a Rust core (under `src/`) and a TypeScript SDK (under `sdk/`). The full project layout and commands are documented in the [Readme](./Readme.md). The short version:
+MXC has a Rust core (under `src/`) and a TypeScript SDK (under `sdk/`). The full project layout and commands are documented in the [README](./README.md). The short version:
 
 **Windows** — `build.bat`:
 
@@ -191,7 +191,7 @@ cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
 cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests
 ```
 
-PowerShell and shell helper scripts that drive the executor end-to-end live under `test_scripts/` and require a local build. See the [Readme](./Readme.md) and the [SDK README](./sdk/README.md) for more.
+PowerShell and shell helper scripts that drive the executor end-to-end live under `test_scripts/` and require a local build. See the [README](./README.md) and the [SDK README](./sdk/README.md) for more.
 
 ### Code review
 
