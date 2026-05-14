@@ -387,6 +387,62 @@ impl DaclManager {
         Ok(())
     }
 
+    /// Grant `FILE_TRAVERSE` (non-inheriting) to the AppContainer SID
+    /// on every user-owned ancestor of each policy path.
+    ///
+    /// Directory enumeration inside an AppContainer requires an
+    /// AppContainer-recognized traverse ACE on every ancestor of the
+    /// leaf, not just on the leaf itself. These ancestor grants are
+    /// persistent by design: they are not tracked in this manager's
+    /// state file and are not removed on `Drop`, because non-inheriting
+    /// traverse grants are idempotent, cheap to re-check, and avoid
+    /// paying a filesystem tree walk on every sandbox invocation.
+    pub fn grant_ancestor_traverse(
+        &mut self,
+        appcontainer_sid_str: &str,
+        policy_paths: &[PathBuf],
+    ) -> Result<(), DaclError> {
+        use crate::install_acls::{self, InstallAclError, FILE_TRAVERSE_MASK};
+
+        let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
+        for p in policy_paths {
+            let canonical = canonicalize_local(p)?;
+            let mut current = canonical.parent();
+            while let Some(ancestor) = current {
+                let ancestor_buf = ancestor.to_path_buf();
+                if !visited.insert(ancestor_buf.clone()) {
+                    break;
+                }
+                match install_acls::add_grant(
+                    &ancestor_buf,
+                    appcontainer_sid_str,
+                    FILE_TRAVERSE_MASK,
+                ) {
+                    Ok(_added) => {}
+                    Err(InstallAclError::AccessDenied { path }) => {
+                        self.warnings.push(format!(
+                            "ancestor traverse: WRITE_DAC unavailable on {} -- \
+                             enumeration inside the sandbox will fail unless an admin \
+                             has run `wxc-exec --adjustacls` to cover this and higher \
+                             ancestors. See microsoft/mxc#304.",
+                            path
+                        ));
+                        break;
+                    }
+                    Err(e) => {
+                        return Err(DaclError::Win32 {
+                            path: ancestor_buf,
+                            reason: format!("install_acls::add_grant: {e}"),
+                        });
+                    }
+                }
+                current = ancestor.parent();
+            }
+        }
+        Ok(())
+    }
+
     /// Idempotently remove every ACE this manager has applied. Per-path
     /// errors are recorded into [`warnings`](Self::warnings); only fatal
     /// state-file I/O surfaces as a `Result::Err`.

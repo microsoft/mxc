@@ -388,17 +388,22 @@ fn select_backend_with_fallback(
             // ACE on a system path the user doesn't own. Denied paths
             // are not filtered — DENY ACEs are about subtracting
             // access, which well-known group grants can't do.
-            let readwrite = filter_paths_needing_grant(
-                paths_to_pathbufs(&request.policy.readwrite_paths),
-                RW_MASK,
-            );
-            let readonly = filter_paths_needing_grant(
-                paths_to_pathbufs(&request.policy.readonly_paths),
-                RO_MASK,
-            );
+            let readwrite_all = paths_to_pathbufs(&request.policy.readwrite_paths);
+            let readonly_all = paths_to_pathbufs(&request.policy.readonly_paths);
+            let readwrite = filter_paths_needing_grant(readwrite_all.clone(), RW_MASK);
+            let readonly = filter_paths_needing_grant(readonly_all.clone(), RO_MASK);
             let denied = paths_to_pathbufs(&request.policy.denied_paths);
             let sid = derive_sid_string(&container_name(request)).map_err(DispatchError::Sid)?;
-            let mgr = build_t3_dacl(&sid, &readwrite, &readonly, &denied)?;
+            let mut mgr = build_t3_dacl(&sid, &readwrite, &readonly, &denied)?;
+            let mut ancestor_paths = Vec::new();
+            ancestor_paths.extend(readwrite_all);
+            ancestor_paths.extend(readonly_all);
+            ancestor_paths.extend(denied.iter().cloned());
+            if !ancestor_paths.is_empty() {
+                if let Err(e) = mgr.grant_ancestor_traverse(&sid, &ancestor_paths) {
+                    return Err(dacl_err(&mgr, e));
+                }
+            }
             (
                 SelectedBackend::AppContainer(
                     AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
