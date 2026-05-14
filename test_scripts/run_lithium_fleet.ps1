@@ -98,8 +98,8 @@ function Get-AadToken {
         [Parameter(Mandatory)] [string] $Scope,
         [string] $TenantId
     )
-    $resource = ($Scope -replace '/\.default$', '')
-    $tokenArgs = @('account', 'get-access-token', '--resource', $resource, '--query', 'accessToken', '-o', 'tsv')
+    #$resource = ($Scope -replace '/\.default$', '')
+    $tokenArgs = @('account', 'get-access-token', '--scope', $Scope, '--query', 'accessToken', '-o', 'tsv')
     if ($TenantId) { $tokenArgs += @('--tenant', $TenantId) }
     $tok = & az @tokenArgs
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tok)) {
