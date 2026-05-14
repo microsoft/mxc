@@ -48,80 +48,86 @@ pub fn resolve_ui_restrictions(
     ui: &UiPolicy,
     base_proc_ui: &BaseProcessUiConfig,
 ) -> EffectiveUiRestrictions {
-    // When UI is fully disabled: on Windows, DisallowWin32kSystemCalls
-    // handles every UI surface except the global namespace (which is an
-    // NT-executive concern, not Win32k). Block only that here.
-    if ui.disable {
-        return EffectiveUiRestrictions {
-            block_global_ui_namespace: true,
-            ..Default::default()
-        };
-    }
-
     let mut r = EffectiveUiRestrictions::default();
 
-    // Clipboard (default: "none" = block both)
-    match ui.clipboard {
-        ClipboardPolicy::All => {}
-        ClipboardPolicy::Read => {
-            r.block_clipboard_write = true;
-        }
-        ClipboardPolicy::Write => {
-            r.block_clipboard_read = true;
-        }
-        // "none" or unrecognized → default-deny: block both
-        _ => {
-            r.block_clipboard_read = true;
-            r.block_clipboard_write = true;
-        }
-    }
-
-    // Input injection
-    if !ui.injection {
+    if ui.disable {
+        // When UI is fully disabled: DisallowWin32kSystemCalls blocks most
+        // Win32k functionality, but we still set all restriction flags so the
+        // sandbox spec accurately reflects the desired policy to the OS service.
+        r.block_clipboard_read = true;
+        r.block_clipboard_write = true;
         r.block_input_injection = true;
-    }
-
-    // UI-object isolation level (default: "container" = external objects + global namespace)
-    match base_proc_ui.isolation.as_str() {
-        "desktop" => {
-            // No isolation restrictions
-        }
-        "handles" => {
-            r.block_external_ui_objects = true;
-        }
-        "atoms" => {
-            r.block_global_ui_namespace = true;
-        }
-        // "container" or unrecognized → default-deny: full isolation
-        _ => {
-            r.block_external_ui_objects = true;
-            r.block_global_ui_namespace = true;
-        }
-    }
-
-    // Desktop system control: blocks switching desktops and ending the session
-    if !base_proc_ui.desktop_system_control {
+        r.block_external_ui_objects = true;
+        r.block_global_ui_namespace = true;
         r.block_desktop_switching = true;
         r.block_logoff_or_shutdown = true;
+        r.block_system_parameter_changes = true;
+        r.block_display_settings_changes = true;
+    } else {
+        // Clipboard (default: "none" = block both)
+        match ui.clipboard {
+            ClipboardPolicy::All => {}
+            ClipboardPolicy::Read => {
+                r.block_clipboard_write = true;
+            }
+            ClipboardPolicy::Write => {
+                r.block_clipboard_read = true;
+            }
+            // "none" or unrecognized → default-deny: block both
+            _ => {
+                r.block_clipboard_read = true;
+                r.block_clipboard_write = true;
+            }
+        }
+
+        // Input injection
+        if !ui.injection {
+            r.block_input_injection = true;
+        }
+
+        // UI-object isolation level (default: "container" = external objects + global namespace)
+        match base_proc_ui.isolation.as_str() {
+            "desktop" => {
+                // No isolation restrictions
+            }
+            "handles" => {
+                r.block_external_ui_objects = true;
+            }
+            "atoms" => {
+                r.block_global_ui_namespace = true;
+            }
+            // "container" or unrecognized → default-deny: full isolation
+            _ => {
+                r.block_external_ui_objects = true;
+                r.block_global_ui_namespace = true;
+            }
+        }
+
+        // Desktop system control: blocks switching desktops and ending the session
+        if !base_proc_ui.desktop_system_control {
+            r.block_desktop_switching = true;
+            r.block_logoff_or_shutdown = true;
+        }
+
+        // System settings (default: "none" = block all)
+        match base_proc_ui.system_settings.as_str() {
+            "all" => {}
+            "parameters" => {
+                r.block_display_settings_changes = true;
+            }
+            "display" => {
+                r.block_system_parameter_changes = true;
+            }
+            // "none" or unrecognized → default-deny: block all
+            _ => {
+                r.block_system_parameter_changes = true;
+                r.block_display_settings_changes = true;
+            }
+        }
     }
 
-    // System settings (default: "none" = block all)
-    match base_proc_ui.system_settings.as_str() {
-        "all" => {}
-        "parameters" => {
-            r.block_display_settings_changes = true;
-        }
-        "display" => {
-            r.block_system_parameter_changes = true;
-        }
-        // "none" or unrecognized → default-deny: block all
-        _ => {
-            r.block_system_parameter_changes = true;
-            r.block_display_settings_changes = true;
-        }
-    }
-
-    // Input method changes
+    // IME is always evaluated independently since the OS service enforces
+    // it separately from DisallowWin32kSystemCalls.
     if !base_proc_ui.ime {
         r.block_input_method_changes = true;
     }
@@ -135,31 +141,48 @@ mod tests {
     use crate::models::{BaseProcessUiConfig, ClipboardPolicy, UiPolicy};
 
     #[test]
-    fn disabled_blocks_only_global_ui_namespace() {
+    fn disabled_blocks_all_restrictions() {
         let ui = UiPolicy {
             disable: true,
             ..Default::default()
         };
         let bp = BaseProcessUiConfig::default();
         let r = resolve_ui_restrictions(&ui, &bp);
+        // disable=true sets all non-IME restrictions; ime=false (default) adds IME
         assert_eq!(
             r,
             EffectiveUiRestrictions {
+                block_clipboard_read: true,
+                block_clipboard_write: true,
+                block_input_injection: true,
+                block_input_method_changes: true,
+                block_external_ui_objects: true,
                 block_global_ui_namespace: true,
-                ..Default::default()
+                block_desktop_switching: true,
+                block_logoff_or_shutdown: true,
+                block_system_parameter_changes: true,
+                block_display_settings_changes: true,
             }
         );
     }
 
     #[test]
-    fn default_policy_blocks_only_global_ui_namespace() {
-        // UiPolicy::default has disable=true → only the global namespace.
+    fn default_policy_blocks_all_restrictions() {
+        // UiPolicy::default has disable=true + ime=false → all restrictions set
         let r = resolve_ui_restrictions(&UiPolicy::default(), &BaseProcessUiConfig::default());
         assert_eq!(
             r,
             EffectiveUiRestrictions {
+                block_clipboard_read: true,
+                block_clipboard_write: true,
+                block_input_injection: true,
+                block_input_method_changes: true,
+                block_external_ui_objects: true,
                 block_global_ui_namespace: true,
-                ..Default::default()
+                block_desktop_switching: true,
+                block_logoff_or_shutdown: true,
+                block_system_parameter_changes: true,
+                block_display_settings_changes: true,
             }
         );
     }

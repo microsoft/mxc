@@ -1,505 +1,382 @@
-# MXC SDK
+# `@microsoft/mxc-sdk`
 
-> **Status: Public Preview** - MXC is experimental and in active development.
+> Node.js / TypeScript SDK for **MXC** (Microsoft eXecution Containers) — a policy-driven sandbox for running untrusted code (model output, plugins, tools) on Windows, Linux, and macOS.
 
-## Overview
-
-The MXC SDK provides a Node.js interface for creating and managing policy-based containers. It exposes APIs for:
-
-- Defining container policies (filesystem, network)
-- Discovering host tools and helpers for building the policy
-- Spawning containerized processes with full interactive I/O via node-pty
-
-## Features
-
-- **Platform Detection**: Check if MXC is supported on the current system
-- **Policy-Driven Configuration**: Define what the container can access using a `SandboxPolicy`
-- **Policy Discovery**: Automatically discover host tools, user profile paths, and temp directories to build the policy
-- **Interactive Process Spawning**: Spawn containerized processes with full PTY I/O using node-pty
-- **Cross-Platform**: Process containment for Windows and Linux
-- **TypeScript Support**: Full type definitions for all public APIs
-
-## Installation
-
-### From a tarball
+> **Status: Public Preview.** Schemas and APIs may change between minor versions until 1.0.
 
 ```bash
-npm install @microsoft/mxc-sdk-<version>.tgz
+npm install @microsoft/mxc-sdk
 ```
 
-### From source
+```typescript
+import {
+  spawnSandboxFromConfig, createConfigFromPolicy,
+  getAvailableToolsPolicy, getTemporaryFilesPolicy,
+  getPlatformSupport,
+} from '@microsoft/mxc-sdk';
 
-```bash
-cd sdk
-npm install
-npm run build
+if (!getPlatformSupport().isSupported) {
+  throw new Error('MXC not available on this host');
+}
+
+// Discover host tools (python, node, etc.) and a writable temp dir.
+const tools = getAvailableToolsPolicy(process.env);
+const temp  = getTemporaryFilesPolicy();
+
+const config = createConfigFromPolicy({
+  version: '0.5.0-alpha',
+  filesystem: {
+    readonlyPaths:  tools.readonlyPaths,    // PATH, PYTHONPATH, JAVA_HOME, …
+    readwritePaths: temp.readwritePaths,    // %TEMP% / $TMPDIR
+  },
+  network: { allowOutbound: false },
+  timeoutMs: 30_000,
+});
+config.process!.commandLine = 'python -c "print(\'hello from sandbox\')"';
+
+const child = spawnSandboxFromConfig(config, { usePty: false });
+child.stdout!.on('data', (d) => process.stdout.write(d));
+child.on('close', (code) => console.log('exit:', code));
 ```
 
-Then reference it from your project (e.g., via `npm link` or a relative path in `package.json`).
+---
 
-**Requirements**:
-- **Windows**: Windows 11 build 26100+ with UBR ≥ 7965 (for builds 26100–26500)
-- **Linux**: LXC must be installed and available
+## Compatibility
 
-**Platform Support**:
-- ✅ Windows x64
-- ✅ Windows ARM64
-- ✅ Linux x64
-- ✅ Linux ARM64
-- ❌ macOS (not supported)
+<!--
+  Keep this section in sync with:
+    - sdk/src/sandbox.ts          (SUPPORTED_VERSION / MIN_VERSION)
+    - sdk/src/platform.ts         (availableMethods per platform)
+    - schemas/{stable,dev}/*.json (supported policy.version values)
+  When a new schema graduates or a new backend ships, update only this block.
+-->
 
-> **Note**: The SDK automatically detects the platform and architecture.
+**Policy / config schema versions:**
 
-> **Note**: Use `getPlatformSupport()` to check if your system meets all requirements before attempting to create containers.
+| Version | Status | Schema file |
+| --- | --- | --- |
+| `0.4.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.4.0-alpha.json) |
+| `0.5.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.5.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.5.0-alpha.json) |
+| `0.6.0-dev` | Dev (latest features: macOS / Seatbelt, etc.) | [`schemas/dev/mxc-config.schema.0.6.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.6.0-dev.json) |
 
-## Quick Start
+Pick `0.5.0-alpha` for new code targeting Windows / Linux; pick `0.6.0-dev` if you need macOS or the newest experimental features. Full model: [`docs/versioning.md`](https://github.com/microsoft/mxc/blob/main/docs/versioning.md).
+
+> **Heads-up for `0.4.0-alpha` on Windows:** firewall network enforcement (`network.blockedHosts` — the only one currently wired through on `0.4.0-alpha`; `allowedHosts` is not effective) and `network.proxy` both require the host process to be elevated (Administrator) — they hit Windows APIs that need it and may surface a UAC prompt. Hosts must be specified as IP addresses (DNS-based filtering isn't supported on `0.4.0-alpha`). `0.5.0-alpha`+ moved proxy handling in-OS, so the elevation requirement is gone there (firewall enforcement on `0.5.0-alpha`+ is not yet implemented). All other policy fields work unelevated on every schema version.
+
+**Platforms:**
+
+| Platform | Default backend | Other backends |
+| --- | --- | --- |
+| Windows 11 build 26100+ (UBR ≥ 7965) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` |
+| Linux x64 / ARM64 | `lxc` | — |
+| macOS x64 / ARM64 (schema `0.6.0-dev`+) | `seatbelt` | — |
+
+The default `processcontainer` and `lxc` backends work out of the box. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `seatbelt`, `isolation_session`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
+
+**Node.js:** ≥ 18.
+
+---
+
+## Three Ways to Spawn
+
+The SDK provides three entry points. **Prefer the config-based path** (`createConfigFromPolicy` + `spawnSandboxFromConfig`) — it gives you backend selection, backend-specific tuning, and (with `usePty: false`) separated stdout/stderr.
+
+### 1. Config-based — recommended
+
+```typescript
+import {
+  createConfigFromPolicy, spawnSandboxFromConfig,
+  getAvailableToolsPolicy, getTemporaryFilesPolicy,
+} from '@microsoft/mxc-sdk';
+
+const tools = getAvailableToolsPolicy(process.env);
+const temp  = getTemporaryFilesPolicy();
+
+const config = createConfigFromPolicy(
+  {
+    version: '0.5.0-alpha',
+    filesystem: {
+      readonlyPaths:  tools.readonlyPaths,
+      readwritePaths: temp.readwritePaths,
+    },
+    network: { allowOutbound: true },
+    timeoutMs: 30_000,
+  },
+  'process', // intent: "process" | "vm" | "microvm"
+);
+
+// Add the script and any backend-specific runtime settings on the returned config.
+config.process!.commandLine = 'python script.py';
+
+// PTY mode (default) — IPty, merged stdout+stderr
+const pty = spawnSandboxFromConfig(config);
+pty.onData((d) => process.stdout.write(d));
+pty.onExit(({ exitCode }) => console.log('exit:', exitCode));
+
+// Pipe mode — ChildProcess with separated stdout/stderr + reliable exit codes
+const child = spawnSandboxFromConfig(config, { usePty: false });
+child.stdout!.on('data', (d) => process.stdout.write(d));
+child.stderr!.on('data', (d) => process.stderr.write(d));
+child.on('close', (code) => console.log('exit:', code));
+```
+
+### 2. `spawnSandbox(script, policy, ...)` — convenience
+
+Quick path for **process-isolation only** (`processcontainer` on Windows, `lxc` on Linux, `seatbelt` on macOS). Returns a `node-pty` `IPty` with merged stdout/stderr.
 
 ```typescript
 import {
   spawnSandbox,
-  SandboxPolicy,
-  getPlatformSupport,
-  getAvailableToolsPolicy,
-  getTemporaryFilesPolicy,
+  getAvailableToolsPolicy, getTemporaryFilesPolicy,
 } from '@microsoft/mxc-sdk';
 
-// Check platform support
-const support = getPlatformSupport();
-if (!support.isSupported) {
-  console.error('MXC is not supported:', support.reason);
-  process.exit(1);
-}
-
-// Discover host tools and temp directories
 const tools = getAvailableToolsPolicy(process.env);
-const temp = getTemporaryFilesPolicy();
+const temp  = getTemporaryFilesPolicy();
 
-// Define a sandbox policy
-const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
+const pty = spawnSandbox('python script.py', {
+  version: '0.5.0-alpha',
   filesystem: {
-    readonlyPaths: tools.readonlyPaths,
+    readonlyPaths:  tools.readonlyPaths,
     readwritePaths: temp.readwritePaths,
   },
-  network: {
-    allowOutbound: true,
-  },
-};
-
-// Spawn a sandboxed payload
-const ptyProcess = spawnSandbox('python -c "print(\'Hello from sandbox!\')"', policy);
-
-// Handle output
-ptyProcess.onData((data: string) => {
-  process.stdout.write(data);
+  timeoutMs: 30_000,
 });
-
-// Handle exit
-ptyProcess.onExit((event: { exitCode: number }) => {
-  console.log(`Process exited with code ${event.exitCode}`);
-});
+pty.onData((d) => process.stdout.write(d));
+pty.onExit(({ exitCode }) => console.log('exit:', exitCode));
 ```
 
-## API Reference
+### 3. `spawnSandboxAsync(script, policy, ...)` — promise-style
 
-### Platform Detection
-
-#### Containment values: intent vs. backend
-
-The SDK distinguishes two layers of containment values:
-
-- **`ContainmentType`** — abstract intent (what *kind* of isolation you want).
-  Currently `"process"`, `"vm"`, and `"microvm"`. The native binary resolves
-  these to a concrete backend per host. Prefer these in policy code so the
-  same policy works across hosts with different capabilities.
-- **`ContainmentBackend`** — concrete backend (a specific runner). Currently
-  `"processcontainer"`, `"windows_sandbox"`, `"wslc"`, `"lxc"`, `"microvm"`,
-  `"seatbelt"`. Use these to force a particular backend.
-
-`ContainerConfig.containment` accepts either layer. The deprecated
-`SandboxingMethod` alias is the union of both and is retained for backward
-compatibility.
-
-#### `getPlatformSupport(): PlatformSupport`
-
-Returns platform support information including whether MXC is supported.
+The `await`-friendly version of `spawnSandbox`. Same arguments, same restriction (process-isolation only), but resolves with `{ stdout, stderr, exitCode }` instead of returning an `IPty`. `stderr` is always `''` because the underlying PTY merges streams.
 
 ```typescript
-import { getPlatformSupport } from '@microsoft/mxc-sdk';
-
-const support = getPlatformSupport();
-console.log('Supported:', support.isSupported);
-console.log('Available methods:', support.availableMethods);
-
-if (support.reason) {
-  console.log('Reason:', support.reason);
-}
-```
-
-**Return type**:
-
-```typescript
-interface PlatformSupport {
-  isSupported: boolean;
-  reason?: string;
-  availableMethods: ContainmentBackend[];
-}
-```
-
-**Example outputs**:
-
-Supported system:
-```
-Supported: true
-Available methods: ['processcontainer']
-```
-
-Unsupported system:
-```
-Supported: false
-Reason: MXC is not supported on macOS
-Available methods: []
-```
-
-### Sandbox Spawning
-
-#### `spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?): IPty`
-
-Spawns a containerized process and returns a node-pty `IPty` object for interactive I/O.
-
-**Parameters**:
-- `script` (`string`): The command line to execute inside the container
-- `policy` (`SandboxPolicy`): The sandbox policy defining container permissions
-- `options` (`SandboxSpawnOptions`, optional): Spawn options
-  - `debug`: Enable debug output (default: `false`)
-  - `ptyOptions`: node-pty options (cols, rows, etc.)
-- `workingDirectory` (`string`, optional): Working directory for the process
-- `containerName` (`string`, optional): Container name (auto-generated if omitted)
-- `env` (`object`, optional): Environment variables to pass to the container
-
-**Returns**: `IPty` object for interacting with the containerized process
-
-**Throws**: Error if platform is not supported
-
-```typescript
-import { spawnSandbox, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft/mxc-sdk';
+import {
+  spawnSandboxAsync,
+  getAvailableToolsPolicy, getTemporaryFilesPolicy,
+} from '@microsoft/mxc-sdk';
 
 const tools = getAvailableToolsPolicy(process.env);
-
-const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
-  filesystem: { readonlyPaths: tools.readonlyPaths },
-  network: { allowOutbound: true },
-};
-
-const ptyProcess = spawnSandbox(
-  'python -c "print(\'Hello!\')"',
-  policy,
-  { debug: true, ptyOptions: { cols: 120, rows: 40 } },
-);
-
-ptyProcess.onData((data) => console.log(data));
-ptyProcess.onExit((event) => console.log('Exit code:', event.exitCode));
-```
-
-#### `spawnSandboxAsync(script, policy, options?, workingDirectory?, containerName?): Promise<...>`
-
-Spawns a containerized process and returns a promise that resolves with the collected output. Convenience wrapper for non-interactive use cases.
-
-**Returns**: `Promise<{ stdout: string; stderr: string; exitCode: number }>`
-
-```typescript
-import { spawnSandboxAsync, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft/mxc-sdk';
-
-const tools = getAvailableToolsPolicy(process.env);
-
-const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
-  filesystem: { readonlyPaths: tools.readonlyPaths },
-};
+const temp  = getTemporaryFilesPolicy();
 
 const result = await spawnSandboxAsync(
   'python -c "import sys; print(sys.version)"',
-  policy,
-);
-
-console.log('Output:', result.stdout);
-console.log('Exit code:', result.exitCode);
-```
-
-### Policy Discovery
-
-These functions examine the host environment and return `FilesystemPolicyResult` fragments that can be merged into a `SandboxPolicy`.
-
-```typescript
-interface FilesystemPolicyResult {
-  readonlyPaths: string[];
-  readwritePaths: string[];
-}
-```
-
-#### `getAvailableToolsPolicy(env?, options?): FilesystemPolicyResult`
-
-Discovers tool and SDK directories from `PATH` and well-known environment variables (e.g., `PYTHONPATH`, `JAVA_HOME`, `CARGO_HOME`, `GOPATH`, etc.) and returns them as read-only policy paths.
-
-Filters out non-existent directories and system-critical paths (e.g., under `%WINDIR%`).
-
-```typescript
-import { getAvailableToolsPolicy } from '@microsoft/mxc-sdk';
-
-const toolsPolicy = getAvailableToolsPolicy(process.env);
-console.log('Read-only tool paths:', toolsPolicy.readonlyPaths);
-```
-
-#### `getUserProfilePolicy(): FilesystemPolicyResult`
-
-Returns read-only policy paths for user profile application data. On Windows, enumerates subdirectories under `%LOCALAPPDATA%\Programs`. On Linux, includes `~/.local/bin` and `~/.local/lib`.
-
-```typescript
-import { getUserProfilePolicy } from '@microsoft/mxc-sdk';
-
-const profilePolicy = getUserProfilePolicy();
-console.log('User profile paths:', profilePolicy.readonlyPaths);
-```
-
-#### `getTemporaryFilesPolicy(env?): FilesystemPolicyResult`
-
-Returns a read-write policy path for the system temporary directory (`%TEMP%` on Windows, `$TMPDIR` or `/tmp` on Linux).
-
-```typescript
-import { getTemporaryFilesPolicy } from '@microsoft/mxc-sdk';
-
-const tempPolicy = getTemporaryFilesPolicy();
-console.log('Temp paths:', tempPolicy.readwritePaths);
-```
-
-## Policy
-
-### SandboxPolicy
-
-The `SandboxPolicy` type is the public interface for defining what a sandboxed payload is allowed to do. Policy describes *what* the caller wants restricted — cross-platform, no OS-specific content. Omitted fields default to most restrictive (default-deny). The SDK translates this into the internal container configuration automatically via `createConfigFromPolicy()`.
-
-```typescript
-type SandboxPolicy = {
-  version: string;
-
-  filesystem?: {
-    readwritePaths?: string[];
-    readonlyPaths?: string[];
-    deniedPaths?: string[];
-    clearPolicyOnExit?: boolean;
-  };
-
-  network?: {
-    allowOutbound?: boolean;
-    allowLocalNetwork?: boolean;
-    allowedHosts?: string[];
-    blockedHosts?: string[];
-    proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
-  };
-
-  ui?: {
-    allowWindows?: boolean;
-    clipboard?: "none" | "read" | "write" | "all";
-    allowInputInjection?: boolean;
-  };
-
-  timeoutMs?: number;
-};
-```
-
-> **Note**: Low-level container options are managed internally by the SDK based on the policy and platform. Use the advanced path (`createConfigFromPolicy()` → modify → `spawnSandboxFromConfig()`) if you need to tweak backend-specific settings.
-
-### Merging Policy Fragments
-
-Combine the policy discovery functions to build a complete policy:
-
-```typescript
-import {
-  SandboxPolicy,
-  getAvailableToolsPolicy,
-  getUserProfilePolicy,
-  getTemporaryFilesPolicy,
-  spawnSandbox,
-} from '@microsoft/mxc-sdk';
-
-const tools = getAvailableToolsPolicy(process.env);
-const profile = getUserProfilePolicy();
-const temp = getTemporaryFilesPolicy();
-
-const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
-  filesystem: {
-    readonlyPaths: [...tools.readonlyPaths, ...profile.readonlyPaths],
-    readwritePaths: [...temp.readwritePaths, 'C:\\workspace\\output'],
-    deniedPaths: ['C:\\secrets'],
+  {
+    version: '0.5.0-alpha',
+    filesystem: {
+      readonlyPaths:  tools.readonlyPaths,
+      readwritePaths: temp.readwritePaths,
+    },
+    timeoutMs: 30_000,
   },
-  network: {
-    allowOutbound: true,
-  },
-};
-
-const ptyProcess = spawnSandbox('python script.py', policy, {}, 'C:\\workspace');
-```
-
-## Examples
-
-### Minimal — Run a Command
-
-```typescript
-import { spawnSandbox, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft/mxc-sdk';
-
-const tools = getAvailableToolsPolicy(process.env);
-
-const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
-  filesystem: { readonlyPaths: tools.readonlyPaths },
-};
-
-const ptyProcess = spawnSandbox('python -c "print(\'Hello World\')"', policy);
-
-ptyProcess.onData((data) => process.stdout.write(data));
-ptyProcess.onExit(() => console.log('Done!'));
-```
-
-### Network — Allow Outbound Access
-
-```typescript
-import { spawnSandboxAsync, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft/mxc-sdk';
-
-const tools = getAvailableToolsPolicy(process.env);
-
-const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
-  filesystem: { readonlyPaths: tools.readonlyPaths },
-  network: { allowOutbound: true },
-};
-
-const result = await spawnSandboxAsync(
-  'python -c "import urllib.request; print(urllib.request.urlopen(\'https://api.github.com\').read())"',
-  policy,
 );
 console.log(result.stdout);
 ```
 
-### Filesystem — Restrict Access
+> **Tip:** for agentic workloads, prefer **multiple narrow sandboxes** (one policy per task step) over a single broad policy. Add task-specific paths on top of the discovered base (e.g. a scoped output directory in `readwritePaths`, a project source tree in `readonlyPaths`, secrets in `deniedPaths`).
+
+---
+
+## Choosing a Backend
+
+<details>
+<summary>Table of all backends and links to per-backend guides — click to expand.</summary>
+
+`SandboxPolicy` is cross-platform. The backend is selected by the second argument to `createConfigFromPolicy(policy, containment)`. Pass an **abstract intent** (`"process"`, `"vm"`, `"microvm"`) whenever possible — the SDK and native binary resolve it to the right concrete backend for the host. Pass a **concrete backend name** when you need a specific runner.
+
+| Backend | Intent | Platforms | Stable? | Guide |
+| --- | --- | --- | --- | --- |
+| `processcontainer` | `process` | Windows | ✅ | [`docs/base-process-container/guide.md`](https://github.com/microsoft/mxc/blob/main/docs/base-process-container/guide.md) |
+| `lxc` | `process` | Linux | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
+| `seatbelt` | `process` | macOS | Experimental (schema `0.6.0-dev`+) | [`docs/macos-support/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/macos-support/seatbelt-backend.md) |
+| `windows_sandbox` | `vm` | Windows | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
+| `microvm` | `microvm` | Windows | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
+| `wslc` | (concrete only) | Windows | Experimental | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
+| `isolation_session` | (concrete only) | Windows | Experimental | [`docs/isolation-session/initial-bringup-plan.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/initial-bringup-plan.md) |
+
+Experimental backends require `{ experimental: true }` in `SandboxSpawnOptions`:
 
 ```typescript
-import { spawnSandbox, SandboxPolicy, getAvailableToolsPolicy } from '@microsoft/mxc-sdk';
-
-const tools = getAvailableToolsPolicy(process.env);
-
-const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
-  filesystem: {
-    readonlyPaths: [...tools.readonlyPaths, 'C:\\projects\\myapp\\config'],
-    readwritePaths: ['C:\\projects\\myapp\\data'],
-    deniedPaths: ['C:\\Windows\\System32'],
-  },
-};
-
-const ptyProcess = spawnSandbox('python script.py', policy, {}, 'C:\\projects\\myapp');
+const config = createConfigFromPolicy(policy, 'vm'); // → windows_sandbox on Windows
+config.process!.commandLine = 'cmd /c whoami';
+const pty = spawnSandboxFromConfig(config, { experimental: true });
 ```
 
-### Combined — Fetch from Web and Write to Disk
+Backend-specific tuning lives on the returned `ContainerConfig`. The full set of fields per backend is in the JSON schemas — they're the source of truth:
 
-```typescript
-import {
-  SandboxPolicy,
-  getAvailableToolsPolicy,
-  getTemporaryFilesPolicy,
-  spawnSandboxAsync,
-} from '@microsoft/mxc-sdk';
+- Stable backends: [`schemas/stable/`](https://github.com/microsoft/mxc/tree/main/schemas/stable/)
+- Experimental backends: [`schemas/dev/`](https://github.com/microsoft/mxc/tree/main/schemas/dev/)
 
-const tools = getAvailableToolsPolicy(process.env);
-const temp = getTemporaryFilesPolicy();
+Open the schema file matching your `policy.version` (e.g. `mxc-config.schema.0.5.0-alpha.json`) and look up `processContainer`, `lxc`, `experimental.wslc`, `experimental.windows_sandbox`, etc.
 
-const policy: SandboxPolicy = {
-  version: '0.4.0-alpha',
-  filesystem: {
-    readonlyPaths: tools.readonlyPaths,
-    readwritePaths: [...temp.readwritePaths, 'C:\\workspace\\output'],
-  },
-  network: { allowOutbound: true },
-};
+</details>
 
-// Python script that fetches JSON from an API and writes it to a local file
-const script = `python -c "
-import urllib.request, json, os
+## State-Aware Sandboxes
 
-url = 'https://api.github.com/zen'
-response = urllib.request.urlopen(url)
-wisdom = response.read().decode('utf-8')
+<details>
+<summary>Provision once, exec many, tear down (long-lived workflows) — click to expand.</summary>
 
-output_dir = r'C:\\workspace\\output'
-os.makedirs(output_dir, exist_ok=True)
-output_path = os.path.join(output_dir, 'zen.txt')
+For long-lived sandboxes where you provision once, exec many times, and tear down at the end (e.g. agentic loops), use the state-aware lifecycle.
 
-with open(output_path, 'w') as f:
-    f.write(wisdom)
-
-print(f'Wrote GitHub zen to {output_path}: {wisdom}')
-"`;
-
-const result = await spawnSandboxAsync(script, policy, {}, 'C:\\workspace');
-
-console.log('Output:', result.stdout);
-console.log('Exit code:', result.exitCode);
-```
-
-## TypeScript Support
-
-The package includes full TypeScript definitions. All public types are exported from the main entry point:
+> **Backend support:** the state-aware lifecycle is currently only implemented for `isolation_session` (Windows). The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported path for every other backend.
 
 ```typescript
 import {
-  // Types
-  SandboxPolicy,
-  ContainmentType,
-  ContainmentBackend,
-  SandboxingMethod, // deprecated alias for ContainmentType | ContainmentBackend
-  PlatformSupport,
-
-  // Platform detection
-  getPlatformSupport,
-
-  // Sandbox spawning
-  spawnSandbox,
-  spawnSandboxAsync,
-  SandboxSpawnOptions,
-
-  // Policy discovery
-  getAvailableToolsPolicy,
-  getUserProfilePolicy,
-  getTemporaryFilesPolicy,
-  FilesystemPolicyResult,
-  ToolsPolicyOptions,
+  provisionSandbox, startSandbox, execInSandboxAsync,
+  stopSandbox, deprovisionSandbox,
 } from '@microsoft/mxc-sdk';
+
+const { sandboxId } = await provisionSandbox('isolation_session');
+await startSandbox(sandboxId);
+
+const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } });
+const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } });
+
+await stopSandbox(sandboxId);
+await deprovisionSandbox(sandboxId);
 ```
 
-## Development
+Full design and API: [`docs/state-aware-lifecycle/`](https://github.com/microsoft/mxc/tree/main/docs/state-aware-lifecycle/).
 
-```bash
-# Install dependencies
-npm install
+</details>
 
-# Build
-npm run build
+## Policy Discovery Helpers
 
-# Run tests
-npm test
+<details>
+<summary>Auto-enumerate host tools, profile, and temp dirs — click to expand.</summary>
 
-# Watch mode
-npm run watch
+The SDK ships helpers that enumerate the host environment so your policy stays portable:
 
-# Clean build artifacts
-npm run clean
+```typescript
+import {
+  getAvailableToolsPolicy, getUserProfilePolicy, getTemporaryFilesPolicy,
+} from '@microsoft/mxc-sdk';
+
+const tools   = getAvailableToolsPolicy(process.env); // PATH, PYTHONPATH, JAVA_HOME, …
+const profile = getUserProfilePolicy();               // %LOCALAPPDATA%\Programs, ~/.local/*
+const tmp     = getTemporaryFilesPolicy();            // %TEMP% / $TMPDIR
+
+const policy = {
+  version: '0.5.0-alpha',
+  filesystem: {
+    readonlyPaths: [...tools.readonlyPaths, ...profile.readonlyPaths],
+    readwritePaths: tmp.readwritePaths,
+  },
+  network: { allowOutbound: false },
+};
 ```
+
+Each helper returns `{ readonlyPaths, readwritePaths }` — merge what you want into `SandboxPolicy.filesystem`.
+
+</details>
+
+---
+
+## Common Pitfalls
+
+### UI is blocked by default on 0.5.0+ — some shells need it
+
+The `policy.ui` block is enforced starting with schema `0.5.0-alpha` (it has no effect on `0.4.0-alpha`). When you use `0.5.0-alpha` or `0.6.0-dev`, `policy.ui.allowWindows` defaults to `false`. Most non-interactive command-line tools work fine, but on Windows some shells make win32k system calls during startup and fail without UI access. **All versions of PowerShell are affected** — both Windows PowerShell 5.1 (`powershell.exe`) and PowerShell 7 (`pwsh.exe`). Set `ui.allowWindows: true` when launching a shell:
+
+```typescript
+import { spawnSandboxFromConfig, createConfigFromPolicy } from '@microsoft/mxc-sdk';
+
+const config = createConfigFromPolicy({
+  version: '0.5.0-alpha',
+  ui: { allowWindows: true },     // ← required for powershell.exe to start
+});
+config.process!.commandLine = 'powershell.exe -NoProfile -Command "Get-Date"';
+
+const child = spawnSandboxFromConfig(config, { usePty: false });
+```
+
+### PTY APIs merge stdout and stderr
+
+`spawnSandbox` and `spawnSandboxAsync` use a PTY, so `stderr` is always empty in their result. Use `spawnSandboxFromConfig(config, { usePty: false })` for separated streams.
+
+### `createConfigFromPolicy` leaves `commandLine` empty
+
+You must set `config.process!.commandLine = '…'` before calling `spawnSandboxFromConfig`.
+
+### Default-deny applies to everything
+
+No `network` field → no network. No `readwritePaths` → process can't write `%TEMP%`. No `ui` → no GUI. Use the discovery helpers to compose a sensible baseline.
+
+### `process.cwd` doesn't grant filesystem access
+
+Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to the policy. Add it to `readonlyPaths` / `readwritePaths` explicitly.
+
+---
+
+## Troubleshooting
+
+<details>
+<summary>Common errors and what they mean — click to expand.</summary>
+
+| Error | Cause | Fix |
+| --- | --- | --- |
+| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Windows: build < 26100 or UBR < 7965. On Linux: `lxc-ls` not on PATH. macOS: schema version < `0.6.0-dev`. | Update the OS, install LXC, or switch to schema `0.6.0-dev`. |
+| `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
+| `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
+| `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `microvm` / `seatbelt` / `isolation_session` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
+| `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
+| `Experimental_CreateProcessInSandbox failed: WIN32_ERROR(...)` | Native sandbox API returned an OS-level error. Codes vary: `120` = call not implemented (BaseContainer disabled — use schema `0.4.0-alpha`), `448` = device feature not supported (Windows build / WIP feature not enabled). | Check the Windows build / WIP requirements, or fall back to schema `0.4.0-alpha`. |
+| Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
+| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.4.0-alpha`, `0.5.0-alpha`, or `0.6.0-dev`. See [Compatibility](#compatibility). |
+
+For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
+
+</details>
+
+---
+
+## API Surface
+
+<details>
+<summary>Every export at a glance — click to expand.</summary>
+
+```typescript
+// Spawn — config-based (recommended)
+createConfigFromPolicy(policy, containment?, containerName?) → ContainerConfig
+spawnSandboxFromConfig(config, options?, workingDirectory?, env?) → IPty | ChildProcess
+
+// Spawn — convenience (process containment only)
+spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) → IPty
+spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
+
+// State-aware lifecycle (currently only `isolation_session` on Windows)
+provisionSandbox(containment, config?, options?) → Promise<ProvisionResult>
+startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
+execInSandbox(sandboxId, config, options?)       → IPty             // streaming
+execInSandboxAsync(sandboxId, config, options?)  → Promise<ExecResult>
+stopSandbox(sandboxId, config?, options?)        → Promise<StopResult>
+deprovisionSandbox(sandboxId, config?, options?) → Promise<DeprovisionResult>
+
+// Platform & policy discovery
+getPlatformSupport() → PlatformSupport
+getAvailableToolsPolicy(env?, options?) → FilesystemPolicyResult
+getUserProfilePolicy()                  → FilesystemPolicyResult
+getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
+
+// Errors (typed wire-format errors from wxc-exec)
+ErrorCode, MxcError, mxcErrorFromCode(code)
+```
+
+Full TypeScript definitions ship with the package (`dist/index.d.ts`). All exports are named exports from `@microsoft/mxc-sdk`.
+
+</details>
+
+---
+
+## Further Reading
+
+- [`docs/schema.md`](https://github.com/microsoft/mxc/blob/main/docs/schema.md) — full configuration schema reference
+- [`docs/versioning.md`](https://github.com/microsoft/mxc/blob/main/docs/versioning.md) — schema versioning model and experimental-feature lifecycle
+- [`docs/examples.md`](https://github.com/microsoft/mxc/blob/main/docs/examples.md) — annotated configuration examples
+- [`docs/sandbox-policy/v1/policy.md`](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/v1/policy.md) — policy specification
+- Backend-specific guides linked in the [Choosing a Backend](#choosing-a-backend) section above.
+
+---
 
 ## License
 
-See the [LICENSE](../LICENSE.md) file for details.
-
-## Contributing
-
-Contributions are welcome! Please see the main MXC project repository for contribution guidelines.
+[MIT](https://github.com/microsoft/mxc/blob/main/sdk/LICENSE.md). Contributions welcome — see the main [MXC repository](https://github.com/microsoft/mxc).
