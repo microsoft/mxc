@@ -260,7 +260,14 @@ export function findWxcExecutable(): string | null {
  */
 function verifyExecutable(execPath: string): boolean {
   try {
-    return fs.existsSync(execPath) && fs.statSync(execPath).isFile();
+    if (!fs.existsSync(execPath) || !fs.statSync(execPath).isFile()) {
+      return false;
+    }
+    // On non-Windows platforms, also verify execute permission
+    if (process.platform !== 'win32') {
+      fs.accessSync(execPath, fs.constants.X_OK);
+    }
+    return true;
   } catch {
     return false;
   }

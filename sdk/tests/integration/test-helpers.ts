@@ -56,6 +56,10 @@ export const EXPECTED_LINUX_BINARIES = [
   'lxc-exec',
 ];
 
+export const EXPECTED_MACOS_BINARIES = [
+  'mxc-exec-mac',
+];
+
 // Binaries that are optional (feature-gated or only present in certain builds)
 // but still legitimate if found in the package.
 const OPTIONAL_BINARIES = [
@@ -68,6 +72,7 @@ const OPTIONAL_BINARIES = [
 export const ALL_KNOWN_BINARIES = [
   ...EXPECTED_WINDOWS_BINARIES,
   ...EXPECTED_LINUX_BINARIES,
+  ...EXPECTED_MACOS_BINARIES,
   ...OPTIONAL_BINARIES,
 ];
 

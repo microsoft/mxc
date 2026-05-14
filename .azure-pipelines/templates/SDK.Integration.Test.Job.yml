@@ -15,6 +15,8 @@ parameters:
       os: windows
     - name: linux
       os: linux
+    - name: macos
+      os: macos
 
 jobs:
 - ${{ each target in parameters.targets }}:
@@ -31,10 +33,10 @@ jobs:
         image: ubuntu-latest
         os: linux
       ${{ if eq(target.os, 'macos') }}:
-        # macOS is not available on the 1ES shared pool; use the
-        # Microsoft-hosted Azure Pipelines pool (works with 1ES PT
-        # out of the box). macOS-14-arm64+ is Apple Silicon (arm64), which
-        # matches the aarch64-apple-darwin binary in the SDK package.
+        # macOS is not available on the 1ES managed pool
+        # (Azure-Pipelines-1ESPT-ExDShared does not offer macOS images).
+        # Use the Microsoft-hosted 'Azure Pipelines' pool instead which
+        # uses 'vmImage' (not 'image') per ADO hosted-pool schema.
         name: Azure Pipelines
         vmImage: macOS-14-arm64
         os: macOS
@@ -108,8 +110,9 @@ jobs:
           workingDirectory: $(integrationDirectory)
           displayName: Restore execute permission on mxc-exec-mac
 
-        - script: node --test dist/macos-seatbelt.test.js
+        - script: npm test
           workingDirectory: $(integrationDirectory)
-          displayName: Run seatbelt integration tests
+          displayName: npm test
           env:
             MXC_DEBUG: ${{ parameters.debug }}
+            MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'

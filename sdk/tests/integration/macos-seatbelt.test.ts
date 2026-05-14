@@ -217,7 +217,7 @@ describe('macOS Seatbelt Container', {
     assert.notStrictEqual(result.exitCode, 0, 'Expected non-zero exit for timed-out script');
   });
 
-  it('should apply profile override from experimental config', async () => {
+  it('should apply profile override from experimental config', { timeout: 30_000 }, async () => {
     // Build a config with a custom seatbelt profile that allows everything
     const config = sdk.createConfigFromPolicy({ version: schemaVersion });
     config.process = { commandLine: "echo 'profile override works'" };
@@ -226,11 +226,13 @@ describe('macOS Seatbelt Container', {
     };
     config.containerId = 'seatbelt-profile-override';
 
-    const result = await new Promise<{ exitCode: number; stdout: string }>((resolve) => {
+    const result = await new Promise<{ exitCode: number; stdout: string }>((resolve, reject) => {
       const ptyProcess = sdk.spawnSandboxFromConfig(config, seatbeltSpawnOptions);
       let stdout = '';
+      const timer = setTimeout(() => reject(new Error('Test timed out waiting for onExit')), 25_000);
       ptyProcess.onData((data: string) => { stdout += data; });
       ptyProcess.onExit((event: { exitCode: number }) => {
+        clearTimeout(timer);
         resolve({ exitCode: event.exitCode, stdout });
       });
     });

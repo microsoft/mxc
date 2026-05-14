@@ -127,10 +127,3 @@ extends:
       - template: .azure-pipelines/templates/SDK.Integration.Test.Job.yml@self
         parameters:
           debug: ${{ parameters.debug }}
-          targets:
-            - name: windows
-              os: windows
-            - name: linux
-              os: linux
-            - name: macos
-              os: macos

@@ -5,10 +5,11 @@
 # Microsoft-hosted agent and publishes the binary as a pipeline artifact
 # so the Package.NpmSdk and SDK.Integration.Test stages can consume it.
 #
-# This template intentionally uses rustup + plain cargo instead of the
-# 1ES.Build.Rust.* tasks because the 1ES Rust toolchain feed is not
-# available on macOS pools. The Microsoft-hosted "Azure Pipelines" pool
-# works with 1ES Pipeline Templates out of the box.
+# This template uses rustup + plain cargo instead of the 1ES.Build.Rust.*
+# tasks because the Microsoft Rust toolchain (NuGet-based) is not available
+# on macOS pools. Crate downloads still go through the centralized Azure
+# Artifacts feed (appended via .azure-pipelines/.cargo/config.toml) to
+# satisfy SFI supply-chain requirements.
 
 parameters:
 - name: triplet
@@ -45,26 +46,50 @@ jobs:
         rustup target add $(targetTriple)
       displayName: Setup Rust toolchain
 
+    # Append pipeline-specific Cargo settings (centralized registry) to
+    # the workspace config so crates are pulled from the Azure Artifacts
+    # feed (SFI compliance). Authentication is provided via env var on
+    # each cargo step since 1ES.Build.Rust.Setup is not available on macOS.
+    # The append is guarded: skip if the registry block is already present
+    # (e.g., if the workspace config gains these settings in the future).
+    - script: |
+        set -euo pipefail
+        CONFIG="$(Build.SourcesDirectory)/.cargo/config.toml"
+        if ! grep -q '\[registries\]' "$CONFIG" 2>/dev/null; then
+          cat "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml" >> "$CONFIG"
+        fi
+        if ! grep -q 'global-credential-providers' "$CONFIG" 2>/dev/null; then
+          echo '' >> "$CONFIG"
+          echo '[registry]' >> "$CONFIG"
+          echo 'global-credential-providers = ["cargo:token"]' >> "$CONFIG"
+        fi
+      displayName: Setup Cargo Config
+
     - script: cargo fmt --all -- --check
       displayName: Check formatting
       workingDirectory: $(workingDirectory)
+      env:
+        CARGO_REGISTRIES_MXC_AZURE_FEED_TOKEN: Bearer $(System.AccessToken)
 
     # Clippy is scoped to the macOS-specific crates because the full
     # workspace includes Windows-only crates that do not compile on macOS.
-    # wxc_common (a workspace dependency) has Windows-only diagnostic code
-    # that produces warnings on macOS; allow those specific warnings here
-    # to avoid false failures. The Windows CI lints the full workspace.
-    - script: cargo clippy -p mxc_darwin -p seatbelt_common --all-targets -- -D warnings -A unreachable-code -A unused-variables
+    - script: cargo clippy -p mxc_darwin -p seatbelt_common --all-targets -- -D warnings
       displayName: Clippy
       workingDirectory: $(workingDirectory)
+      env:
+        CARGO_REGISTRIES_MXC_AZURE_FEED_TOKEN: Bearer $(System.AccessToken)
 
     - script: cargo build --release --target $(targetTriple) -p mxc_darwin
       displayName: Build release
       workingDirectory: $(workingDirectory)
+      env:
+        CARGO_REGISTRIES_MXC_AZURE_FEED_TOKEN: Bearer $(System.AccessToken)
 
     - script: cargo test --release --target $(targetTriple) -p mxc_darwin -p seatbelt_common -p wxc_common
       displayName: Run tests
       workingDirectory: $(workingDirectory)
+      env:
+        CARGO_REGISTRIES_MXC_AZURE_FEED_TOKEN: Bearer $(System.AccessToken)
 
     - task: CopyFiles@2
       displayName: Copy binary
