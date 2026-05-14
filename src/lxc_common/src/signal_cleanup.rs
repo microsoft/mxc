@@ -53,7 +53,7 @@ pub fn set_active(name: &str) {
 /// the kernel may deliver them there instead of to the watchdog.
 #[cfg(target_os = "linux")]
 pub fn install() -> Result<(), String> {
-    if INSTALLED.set(()).is_err() {
+    if INSTALLED.get().is_some() {
         return Ok(());
     }
     let mut mask = SigSet::empty();
@@ -63,11 +63,24 @@ pub fn install() -> Result<(), String> {
     mask.thread_block()
         .map_err(|e| format!("pthread_sigmask: {}", e))?;
 
-    thread::Builder::new()
+    match thread::Builder::new()
         .name("lxc-signal-cleanup".into())
         .spawn(move || run_watchdog(mask))
-        .map_err(|err| format!("spawn lxc-signal-cleanup thread: {err}"))?;
-    Ok(())
+    {
+        Ok(_) => {
+            // Only mark INSTALLED after the watchdog is actually running, so
+            // a retry after a transient spawn failure can re-attempt install.
+            let _ = INSTALLED.set(());
+            Ok(())
+        }
+        Err(err) => {
+            // The watchdog never started, so leaving the signals blocked
+            // would make the whole process unkillable by SIGHUP/SIGTERM/SIGINT.
+            // Restore the original mask before bubbling up the error.
+            let _ = mask.thread_unblock();
+            Err(format!("spawn lxc-signal-cleanup thread: {err}"))
+        }
+    }
 }
 
 /// Non-Linux stub. `lxc-exec` is Linux-only at runtime, but the workspace

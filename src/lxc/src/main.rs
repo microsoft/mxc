@@ -109,8 +109,13 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
 
 fn main() {
     // Install before spawning any other threads so the signal mask propagates.
+    // Failure here is fatal: install() either succeeds with the watchdog
+    // running, or restores the original signal mask and returns Err. We
+    // refuse to continue without it because containers leaked on SIGTERM/INT
+    // are exactly the failure mode this code exists to prevent.
     if let Err(e) = signal_cleanup::install() {
-        eprintln!("Warning: failed to install signal cleanup handler: {}", e);
+        eprintln!("Error: failed to install signal cleanup handler: {}", e);
+        process::exit(1);
     }
 
     let cli = Cli::parse();
