@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use core::ffi::c_void;
+use std::mem::size_of;
 use std::ptr;
 
 use windows::Win32::Foundation::{
@@ -10,17 +12,27 @@ use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::PSID;
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectCpuRateControlInformation,
+    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
+    JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
-    STARTUPINFOEXW, STARTUPINFOW,
+    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForSingleObject, CREATE_SUSPENDED, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS,
+    PROCESS_INFORMATION, STARTUPINFOEXW, STARTUPINFOW,
 };
 use windows_core::{PCWSTR, PWSTR};
 
 use crate::error::WxcError;
 use crate::logger::Logger;
-use crate::models::{CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
+use crate::models::{
+    CodexRequest, NetworkEnforcementMode, NetworkPolicy, ResourceLimits, ScriptResponse,
+};
 use crate::process_util::{get_capability_sid_from_name, OwnedHandle, SidAndAttributes};
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::string_util;
@@ -28,7 +40,9 @@ use crate::string_util;
 // Attribute list constants (not always exported by the windows crate)
 const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES: usize = 0x0002_0009;
 const PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY: usize = 0x0002_000F;
+const PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY: usize = 0x0002_000E;
 const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
+const PROCESS_CREATION_CHILD_PROCESS_RESTRICTED: u32 = 0x01;
 const EXTENDED_STARTUPINFO_PRESENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0008_0000);
 const CREATE_UNICODE_ENVIRONMENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0000_0400);
 
@@ -77,6 +91,77 @@ fn build_proxy_env_block(address: &crate::models::ProxyAddress) -> Vec<u16> {
     }
     block.push(0);
     block
+}
+
+fn build_job_extended_limit_information(
+    resource_limits: &ResourceLimits,
+) -> JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+    if resource_limits.memory_mb > 0 {
+        info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+        info.JobMemoryLimit = resource_limits
+            .memory_mb
+            .saturating_mul(1024)
+            .saturating_mul(1024) as usize;
+    }
+
+    if resource_limits.max_processes > 0 {
+        info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        info.BasicLimitInformation.ActiveProcessLimit = resource_limits.max_processes;
+    }
+
+    info
+}
+
+fn build_job_cpu_rate_information(
+    resource_limits: &ResourceLimits,
+) -> Option<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION> {
+    if resource_limits.cpu_rate_percent == 0 {
+        return None;
+    }
+
+    Some(JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
+        ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+        Anonymous: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0 {
+            CpuRate: u32::from(resource_limits.cpu_rate_percent) * 100,
+        },
+    })
+}
+
+fn create_appcontainer_job_object(
+    resource_limits: &ResourceLimits,
+) -> Result<OwnedHandle, WxcError> {
+    let job_handle = OwnedHandle::new(
+        unsafe { CreateJobObjectW(None, PCWSTR::null()) }
+            .map_err(|e| WxcError::Process(format!("CreateJobObjectW failed: {e}")))?,
+    );
+
+    let extended_info = build_job_extended_limit_information(resource_limits);
+    unsafe {
+        SetInformationJobObject(
+            job_handle.get(),
+            JobObjectExtendedLimitInformation,
+            &extended_info as *const _ as *const c_void,
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    }
+    .map_err(|e| WxcError::Process(format!("SetInformationJobObject(extended) failed: {e}")))?;
+
+    if let Some(cpu_info) = build_job_cpu_rate_information(resource_limits) {
+        unsafe {
+            SetInformationJobObject(
+                job_handle.get(),
+                JobObjectCpuRateControlInformation,
+                &cpu_info as *const _ as *const c_void,
+                size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+            )
+        }
+        .map_err(|e| WxcError::Process(format!("SetInformationJobObject(cpu) failed: {e}")))?;
+    }
+
+    Ok(job_handle)
 }
 
 /// RAII guard that frees capability SID pointers via `LocalFree` on drop.
@@ -239,11 +324,13 @@ impl AppContainerScriptRunner {
         };
 
         // --- Allocate and initialize attribute list ---
-        let attr_count = if request.policy.least_privilege_mode {
-            2u32
-        } else {
-            1u32
-        };
+        let mut attr_count = 1u32;
+        if request.policy.least_privilege_mode {
+            attr_count += 1;
+        }
+        if request.resource_limits.child_processes_blocked() {
+            attr_count += 1;
+        }
         let mut attr_list_size: usize = 0;
 
         // First call to get the required buffer size.
@@ -318,6 +405,28 @@ impl AppContainerScriptRunner {
             }
         }
 
+        // 3. CHILD_PROCESS_POLICY (block child process creation)
+        let child_process_policy = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
+        if request.resource_limits.child_processes_blocked() {
+            unsafe {
+                UpdateProcThreadAttribute(
+                    attr_list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
+                    Some(&child_process_policy as *const u32 as *const c_void),
+                    size_of::<u32>(),
+                    None,
+                    None,
+                )
+                .map_err(|e| {
+                    WxcError::Process(format!(
+                        "UpdateProcThreadAttribute(CHILD_PROCESS_POLICY): {}",
+                        e
+                    ))
+                })?;
+            }
+        }
+
         // --- Setup STARTUPINFOEXW ---
         let mut desktop_wide = string_util::to_wide("winsta0\\default");
 
@@ -350,10 +459,14 @@ impl AppContainerScriptRunner {
             .map(|block| block.as_ptr() as *const core::ffi::c_void);
 
         let creation_flags = if env_block.is_some() {
-            PROCESS_CREATION_FLAGS(EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_UNICODE_ENVIRONMENT.0)
+            PROCESS_CREATION_FLAGS(
+                EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_UNICODE_ENVIRONMENT.0 | CREATE_SUSPENDED.0,
+            )
         } else {
-            EXTENDED_STARTUPINFO_PRESENT
+            PROCESS_CREATION_FLAGS(EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0)
         };
+
+        let job_handle = create_appcontainer_job_object(&request.resource_limits)?;
 
         // --- Create process (console inheritance) ---
         //
@@ -414,7 +527,29 @@ impl AppContainerScriptRunner {
         ));
 
         let process_handle = OwnedHandle::new(pi.hProcess);
-        let _thread_handle = OwnedHandle::new(pi.hThread);
+        let thread_handle = OwnedHandle::new(pi.hThread);
+
+        if let Err(err) =
+            unsafe { AssignProcessToJobObject(job_handle.get(), process_handle.get()) }
+        {
+            unsafe {
+                let _ = TerminateProcess(process_handle.get(), u32::MAX);
+                let _ = WaitForSingleObject(process_handle.get(), u32::MAX);
+            }
+            return Err(WxcError::Process(format!(
+                "AssignProcessToJobObject failed: {}",
+                err
+            )));
+        }
+
+        if unsafe { ResumeThread(thread_handle.get()) } == u32::MAX {
+            let err = unsafe { GetLastError() };
+            unsafe {
+                let _ = TerminateJobObject(job_handle.get(), u32::MAX);
+                let _ = WaitForSingleObject(process_handle.get(), u32::MAX);
+            }
+            return Err(WxcError::Process(format!("ResumeThread failed: {:?}", err)));
+        }
 
         // --- Wait for child process to exit ---
         // No relay threads needed — child shares our console directly.
@@ -425,7 +560,7 @@ impl AppContainerScriptRunner {
         match wait_result {
             WAIT_OBJECT_0 => {}
             WAIT_TIMEOUT => unsafe {
-                let _ = TerminateProcess(process_handle.get(), u32::MAX);
+                let _ = TerminateJobObject(job_handle.get(), u32::MAX);
                 let _ = WaitForSingleObject(process_handle.get(), u32::MAX);
             },
             WAIT_FAILED => {
@@ -561,5 +696,171 @@ impl Drop for AppContainerScriptRunner {
             }
             self.app_container_sid = PSID(ptr::null_mut());
         }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
+
+    struct TestProcess {
+        process: OwnedHandle,
+        thread: OwnedHandle,
+        pid: u32,
+    }
+
+    fn spawn_test_process(command_line: &str, flags: PROCESS_CREATION_FLAGS) -> TestProcess {
+        let mut command_line_wide = string_util::to_wide(command_line);
+        let si = STARTUPINFOW {
+            cb: size_of::<STARTUPINFOW>() as u32,
+            ..Default::default()
+        };
+        let mut pi = PROCESS_INFORMATION::default();
+
+        unsafe {
+            CreateProcessW(
+                PCWSTR::null(),
+                Some(PWSTR(command_line_wide.as_mut_ptr())),
+                None,
+                None,
+                false,
+                flags,
+                None,
+                PCWSTR::null(),
+                &si,
+                &mut pi,
+            )
+        }
+        .expect("CreateProcessW");
+
+        TestProcess {
+            process: OwnedHandle::new(pi.hProcess),
+            thread: OwnedHandle::new(pi.hThread),
+            pid: pi.dwProcessId,
+        }
+    }
+
+    fn assert_process_exits(process_handle: windows::Win32::Foundation::HANDLE) {
+        let wait_result = unsafe { WaitForSingleObject(process_handle, 5_000) };
+        assert_eq!(wait_result, WAIT_OBJECT_0, "process did not exit in time");
+    }
+
+    fn open_process_for_wait(pid: u32) -> Option<OwnedHandle> {
+        unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, false, pid) }
+            .ok()
+            .map(OwnedHandle::new)
+    }
+
+    fn find_child_process(parent_pid: u32) -> Option<u32> {
+        let snapshot = OwnedHandle::new(unsafe {
+            CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).expect("process snapshot")
+        });
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+
+        if unsafe { Process32FirstW(snapshot.get(), &mut entry) }.is_err() {
+            return None;
+        }
+
+        loop {
+            if entry.th32ParentProcessID == parent_pid {
+                return Some(entry.th32ProcessID);
+            }
+            if unsafe { Process32NextW(snapshot.get(), &mut entry) }.is_err() {
+                return None;
+            }
+        }
+    }
+
+    fn wait_for_child_process(parent_pid: u32) -> Option<(u32, OwnedHandle)> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Some(pid) = find_child_process(parent_pid) {
+                if let Some(handle) = open_process_for_wait(pid) {
+                    return Some((pid, handle));
+                }
+            }
+            sleep(Duration::from_millis(100));
+        }
+        None
+    }
+
+    #[test]
+    fn job_limit_info_uses_request_resource_limits() {
+        let limits = ResourceLimits {
+            memory_mb: 128,
+            max_processes: 7,
+            cpu_rate_percent: 50,
+            allow_child_processes: false,
+        };
+
+        let extended = build_job_extended_limit_information(&limits);
+        assert!(extended
+            .BasicLimitInformation
+            .LimitFlags
+            .contains(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE));
+        assert!(extended
+            .BasicLimitInformation
+            .LimitFlags
+            .contains(JOB_OBJECT_LIMIT_JOB_MEMORY));
+        assert!(extended
+            .BasicLimitInformation
+            .LimitFlags
+            .contains(JOB_OBJECT_LIMIT_ACTIVE_PROCESS));
+        assert_eq!(extended.JobMemoryLimit, 128 * 1024 * 1024);
+        assert_eq!(extended.BasicLimitInformation.ActiveProcessLimit, 7);
+
+        let cpu = build_job_cpu_rate_information(&limits).expect("cpu cap");
+        assert!(cpu
+            .ControlFlags
+            .contains(JOB_OBJECT_CPU_RATE_CONTROL_ENABLE));
+        assert!(cpu
+            .ControlFlags
+            .contains(JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP));
+        assert_eq!(unsafe { cpu.Anonymous.CpuRate }, 5_000);
+        assert!(limits.child_processes_blocked());
+    }
+
+    #[test]
+    fn job_object_kills_orphans_on_drop() {
+        let job = create_appcontainer_job_object(&ResourceLimits::permissive()).expect("job");
+        let child =
+            spawn_test_process("cmd.exe /c ping -n 30 127.0.0.1", PROCESS_CREATION_FLAGS(0));
+
+        unsafe { AssignProcessToJobObject(job.get(), child.process.get()) }.expect("assign");
+        drop(job);
+
+        assert_process_exits(child.process.get());
+    }
+
+    #[test]
+    fn job_object_terminates_tree() {
+        let job = create_appcontainer_job_object(&ResourceLimits::permissive()).expect("job");
+        let parent = spawn_test_process(
+            "cmd.exe /c start /b cmd.exe /c ping -n 30 127.0.0.1 & ping -n 30 127.0.0.1",
+            CREATE_SUSPENDED,
+        );
+
+        unsafe { AssignProcessToJobObject(job.get(), parent.process.get()) }.expect("assign");
+        assert_ne!(unsafe { ResumeThread(parent.thread.get()) }, u32::MAX);
+
+        let (child_pid, child) = wait_for_child_process(parent.pid).expect("child process");
+        let (_grandchild_pid, grandchild) =
+            wait_for_child_process(child_pid).expect("grandchild process");
+        unsafe { TerminateJobObject(job.get(), u32::MAX) }.expect("terminate job");
+
+        assert_process_exits(parent.process.get());
+        assert_process_exits(child.get());
+        assert_process_exits(grandchild.get());
     }
 }
