@@ -183,6 +183,11 @@ impl LxcScriptRunner {
         if let Some(veth) = NetworkIptablesManager::discover_veth_interface(&container_name) {
             let _ = writeln!(logger, "Discovered veth interface: {}", veth);
             fw_manager.set_veth_interface(&veth);
+            if self.destroy_on_exit {
+                // Tell the watchdog about the veth so signal-time cleanup
+                // can also remove the FORWARD hook, not just the chain.
+                signal_cleanup::set_active_veth(&veth);
+            }
         }
 
         match fw_manager.apply_firewall_rules(&request.policy, logger) {

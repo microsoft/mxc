@@ -24,22 +24,50 @@ use nix::sys::signal::{SigSet, Signal};
 
 #[cfg(target_os = "linux")]
 use crate::lxc_bindings::LxcContainer;
+#[cfg(target_os = "linux")]
+use crate::network_iptables::NetworkIptablesManager;
+#[cfg(target_os = "linux")]
+use wxc_common::logger::{Logger, Mode};
 
-static ACTIVE_CONTAINER: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+/// What the watchdog needs to roll back on a fatal signal: the container
+/// name (so we can `lxc-destroy` it) plus, when known, the host-side veth
+/// interface (so we can also remove the iptables FORWARD hook the runner
+/// installed against it).
+#[derive(Default)]
+struct ActiveSandbox {
+    name: Option<String>,
+    veth: Option<String>,
+}
+
+static ACTIVE_CONTAINER: OnceLock<Mutex<ActiveSandbox>> = OnceLock::new();
 #[cfg(target_os = "linux")]
 static INSTALLED: OnceLock<()> = OnceLock::new();
 
-fn lock_slot() -> std::sync::MutexGuard<'static, Option<String>> {
+fn lock_slot() -> std::sync::MutexGuard<'static, ActiveSandbox> {
     ACTIVE_CONTAINER
-        .get_or_init(|| Mutex::new(None))
+        .get_or_init(|| Mutex::new(ActiveSandbox::default()))
         .lock()
         .unwrap_or_else(|p| p.into_inner())
 }
 
 /// Records `name` as the currently active container so the cleanup watchdog
-/// can destroy it if a fatal signal arrives. Replaces any previous value.
+/// can destroy it if a fatal signal arrives. Replaces any previous value
+/// (including any previously registered veth, since the new container has
+/// not had its veth discovered yet).
 pub fn set_active(name: &str) {
-    *lock_slot() = Some(name.to_owned());
+    let mut slot = lock_slot();
+    slot.name = Some(name.to_owned());
+    slot.veth = None;
+}
+
+/// Records the host-side veth interface for the active container so the
+/// watchdog can also remove the iptables FORWARD hook on a fatal signal.
+/// No-op if no container is currently registered.
+pub fn set_active_veth(veth: &str) {
+    let mut slot = lock_slot();
+    if slot.name.is_some() {
+        slot.veth = Some(veth.to_owned());
+    }
 }
 
 /// Block SIGHUP/SIGTERM/SIGINT in the calling thread and spawn a watchdog
@@ -98,7 +126,16 @@ fn run_watchdog(mask: SigSet) -> ! {
     loop {
         // sigwait isn't normally interruptible; on the unlikely failure, retry.
         let Ok(sig) = mask.wait() else { continue };
-        if let Some(name) = lock_slot().take() {
+        let active = std::mem::take(&mut *lock_slot());
+        if let Some(name) = active.name {
+            // Remove iptables rules first so the FORWARD hook and chain
+            // don't outlive the container. The veth disappears once the
+            // container is destroyed below; cleaning up first avoids a
+            // dangling reference. Best-effort with a buffered logger so
+            // signal-time output doesn't interleave with whatever else
+            // might still be writing to the host's stdio.
+            let mut buf_logger = Logger::new(Mode::Buffer);
+            NetworkIptablesManager::force_cleanup(&name, active.veth.as_deref(), &mut buf_logger);
             let _ = LxcContainer::new(&name, None).destroy();
         }
         std::process::exit(128 + sig as i32);

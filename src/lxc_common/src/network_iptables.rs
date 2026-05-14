@@ -256,6 +256,24 @@ impl NetworkIptablesManager {
         self.rules_applied = false;
         Ok(())
     }
+
+    /// Best-effort cleanup of any iptables state the runner may have
+    /// installed for a container, used when the original
+    /// `NetworkIptablesManager` instance isn't reachable (e.g. signal-time
+    /// cleanup from the watchdog thread). Builds a fresh manager pointed at
+    /// the same chain name so `remove_firewall_rules` does its work
+    /// regardless of whether rules were actually installed; iptables itself
+    /// is the source of truth.
+    pub fn force_cleanup(container_name: &str, veth_interface: Option<&str>, logger: &mut Logger) {
+        let mut mgr = Self::new(container_name);
+        if let Some(v) = veth_interface {
+            mgr.set_veth_interface(v);
+        }
+        // Bypass the rules_applied gate; if there's nothing to remove the
+        // iptables `-D`/`-F`/`-X` calls just no-op.
+        mgr.rules_applied = true;
+        let _ = mgr.remove_firewall_rules(logger);
+    }
 }
 
 impl Drop for NetworkIptablesManager {
