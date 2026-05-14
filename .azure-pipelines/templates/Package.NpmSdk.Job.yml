@@ -4,7 +4,15 @@
 parameters:
 - name: Targets
   type: object
-  default: []   # list of { artifact, path, sdkArch }
+  default:
+    - artifact: wxc-binaries-x86_64-pc-windows-msvc
+      sdkArch: x64
+    - artifact: wxc-binaries-aarch64-pc-windows-msvc
+      sdkArch: arm64
+    - artifact: lxc-binaries-x86_64-unknown-linux-gnu
+      sdkArch: x64
+    - artifact: lxc-binaries-aarch64-unknown-linux-gnu
+      sdkArch: arm64
 - name: ESRPInfo
   type: object
   default: {}
@@ -42,24 +50,8 @@ jobs:
     - script: chmod +x $(sdkDirectory)/bin/*/lxc-exec
       displayName: Restore execute permission on lxc-exec
 
-    # Archive sdk/bin (x64/ + arm64/, executables + symbol files) for upload
-    # to the GitHub Release page, until we publish to a symbol server.
-    - task: ArchiveFiles@2
-      displayName: Archive mxc-release-binaries.zip
-      inputs:
-        rootFolderOrFile: '$(sdkDirectory)/bin'
-        includeRootFolder: false
-        archiveType: zip
-        archiveFile: '$(outputDirectory)/release-binaries/mxc-release-binaries.zip'
-        replaceExistingArchive: true
-
-    - task: 1ES.PublishPipelineArtifact@1
-      displayName: Publish mxc-release-binaries artifact
-      inputs:
-        path: '$(outputDirectory)/release-binaries'
-        artifactName: mxc-release-binaries
-
-    # Strip symbol files before npm pack — symbols ship via mxc-release-binaries.zip.
+    # Strip symbol files before npm pack — they ship via the separate
+    # mxc-release-binaries artifact (see Mxc.Binary.Packaging.Job.yml).
     - script: rm -f $(sdkDirectory)/bin/*/*.pdb $(sdkDirectory)/bin/*/*.dwp
       displayName: Strip symbol files from npm package
 
