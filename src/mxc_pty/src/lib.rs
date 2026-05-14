@@ -195,10 +195,21 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
         }
     });
 
-    // Cap the wait so a wedged shell doesn't block the stdin forwarder
-    // forever; the child itself still runs to completion below.
-    if !options.ready_wait.is_zero() {
-        let _ = ready_rx.recv_timeout(options.ready_wait);
+    // The overall timeout starts the moment the child is spawned, not
+    // after the readiness wait completes; otherwise a 5s ready_wait on
+    // a 5s-timeout job would silently double the budget.
+    let deadline = options.timeout.map(|t| Instant::now() + t);
+
+    // Cap the readiness wait at whatever's left in the deadline so we
+    // don't sleep past it for a child that never prints anything.
+    let ready_budget = match deadline {
+        Some(d) => options
+            .ready_wait
+            .min(d.saturating_duration_since(Instant::now())),
+        None => options.ready_wait,
+    };
+    if !ready_budget.is_zero() {
+        let _ = ready_rx.recv_timeout(ready_budget);
     }
 
     // Input forwarder: host stdin -> master. Detached; exits when stdin
@@ -219,32 +230,29 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
         }
     });
 
-    let outcome = match options.timeout {
+    let outcome = match deadline {
         None => {
             let status = child.wait().map_err(|e| format!("wait: {}", e))?;
             PtyOutcome::Exited(status)
         }
-        Some(timeout) => {
-            let deadline = Instant::now() + timeout;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => break PtyOutcome::Exited(status),
-                    Ok(None) => {
-                        if Instant::now() >= deadline {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            break PtyOutcome::TimedOut;
-                        }
-                        thread::sleep(PtyOptions::POLL_INTERVAL);
-                    }
-                    Err(e) => {
+        Some(deadline) => loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break PtyOutcome::Exited(status),
+                Ok(None) => {
+                    if Instant::now() >= deadline {
                         let _ = child.kill();
                         let _ = child.wait();
-                        return Err(format!("try_wait: {}", e));
+                        break PtyOutcome::TimedOut;
                     }
+                    thread::sleep(PtyOptions::POLL_INTERVAL);
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("try_wait: {}", e));
                 }
             }
-        }
+        },
     };
 
     // Drain remaining output before returning. The slave fds are closed
