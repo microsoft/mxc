@@ -1717,8 +1717,8 @@ dependencies = [
 name = "seatbelt_common"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "mxc_pty",
- "tempfile",
  "wxc_common",
 ]
 

@@ -336,6 +336,17 @@
             "profileOverride": {
               "type": "string",
               "description": "Optional override of the generated TinyScheme sandbox profile."
+            },
+            "guiAccess": {
+              "type": "boolean",
+              "default": false,
+              "description": "Allow the Mach IPC services that GUI applications need to draw windows, composite frames, resolve fonts, and register with the Dock. Without this, GUI apps are killed on launch."
+            },
+            "launchMethod": {
+              "type": "string",
+              "enum": ["exec", "open"],
+              "default": "exec",
+              "description": "How to launch the sandboxed process. 'exec' (default) uses sandbox_init + exec and works for third-party GUI apps (e.g. Alacritty). 'open' uses LaunchServices ('open -n -W -a Terminal') to satisfy Apple Launch Constraints, then applies the sandbox to the inner shell via sandbox-exec. Required for system apps like Terminal.app that enforce launch constraints."
             }
           }
         },

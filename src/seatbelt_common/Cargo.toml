@@ -9,12 +9,8 @@ edition = "2021"
 # lxc_common uses.
 wxc_common = { workspace = true }
 
-# tempfile is used by seatbelt_runner to materialize the generated `.sb`
-# profile so /usr/bin/sandbox-exec -f <path> can read it. macOS-only:
-# the runner module itself is `#[cfg(target_os = "macos")]`, so on other
-# hosts this dep is unused at link time.
 [target.'cfg(target_os = "macos")'.dependencies]
-tempfile = "3"
+libc = { workspace = true }
 # Pty bridge is shared with the LXC backend via mxc_pty; that crate owns
 # the openpty + pre_exec (setsid + TIOCSCTTY) plumbing and the libc/nix
 # deps that go with it.

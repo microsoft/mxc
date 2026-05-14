@@ -1,0 +1,26 @@
+{
+  "$schema": "../schemas/dev/mxc-config.schema.0.6.0-dev.json",
+  "version": "0.6.0-dev",
+  "containment": "seatbelt",
+  "process": {
+    "commandLine": "/bin/zsh -i",
+    "env": ["ZDOTDIR=/tmp/.mxc_zsh_empty", "HISTFILE=/tmp/.mxc_zsh_history", "SHELL_SESSIONS_DISABLE=1"]
+  },
+  "ui": {
+    "disable": false,
+    "clipboard": "all"
+  },
+  "filesystem": {
+    "readwritePaths": ["/tmp", "~/.zsh_history"],
+    "readonlyPaths": ["~"]
+  },
+  "network": {
+    "defaultPolicy": "block"
+  },
+  "experimental": {
+    "seatbelt": {
+      "guiAccess": true,
+      "launchMethod": "open"
+    }
+  }
+}
