@@ -151,6 +151,34 @@ xperf -stop
 xperf -merge user.etl kernel.etl merged.etl
 ```
 
+### `--audit` Flag
+
+The `wxc` CLI supports an `--audit` flag that automates the start/stop tracing flow above using the `Application Capability Profiler (ACP)` module, via the PowerShell helpers in [`src/learning_mode/`](src/learning_mode/readme.md).
+
+When `--audit` is passed:
+
+1. `permissiveLearningMode` is appended to the container's capability list, so the AppContainer runs in audit (non-blocking) mode and the profiler can observe all file accesses.
+2. **Before** the runner starts, `wxc` invokes `start_plm_logging.ps1` to begin an ACP profiling session.
+3. The script/container runs as usual.
+4. **After** the runner completes, `wxc` invokes `stop_plm_logging.ps1 -FilePath <config-path>`, where `<config-path>` is the JSON config that was passed to `wxc`. The stop script:
+   - Writes the ETL trace, `results.csv`, `summary.txt`, and `manifest.xml` to a timestamped folder under `logs\`.
+   - Parses `summary.txt` for observed file accesses.
+   - Emits an `Adjusted_<config-name>.json` next to the original config, with the observed paths merged into `filesystem.readwritePaths`.
+
+Example:
+
+```powershell
+wxc --audit --config-path C:\path\to\my-config.json
+```
+
+After the run, `Adjusted_my-config.json` will sit next to `my-config.json`, ready to be used as a tightened (or expanded) policy that reflects what the workload actually touched.
+
+> NOTE: `wxc` currently shells out to a hard-coded helper path (`C:\Users\AdminUser\Desktop\MXC\start_plm_logging.ps1` / `stop_plm_logging.ps1`). The helpers themselves live in [`src/learning_mode/`](src/learning_mode/readme.md) — see that readme for the full parameter list (`-LogDir`, `-FilePath`, and the stubbed `-OutputConfigPath` / `-InPlaceEdit` / `-AcpPath` parameters).
+
+ACP needs to be swapped out for XPERF
+Code in main.rs should be moved to another files (LearningMode.rs?)
+Finalize paths for output, and output structure
+
 ## Linux Support (LXC)
 
 MXC also supports Linux via [LXC (Linux Containers)](https://linuxcontainers.org/lxc/). On Linux, the `lxc-exec` binary provides container-based isolation using Linux namespaces, bind mounts for filesystem policy, and iptables/nftables for network policy.
