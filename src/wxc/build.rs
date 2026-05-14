@@ -1,14 +1,68 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script for wxc — copies NanVix binaries next to the output executable.
+//! Build script for wxc — copies NanVix binaries and learning-mode PowerShell
+//! helpers next to the output executable.
 
 fn main() {
     #[cfg(all(windows, feature = "microvm"))]
     copy_nanvix_binaries();
 
+    #[cfg(all(windows, debug_assertions))]
+    copy_learning_mode_scripts();
+
     // Always emit rerun-if-changed so Cargo doesn't re-run unnecessarily.
     println!("cargo:rerun-if-changed=build.rs");
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn copy_learning_mode_scripts() {
+    use std::fs;
+    use std::path::Path;
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let src_dir = Path::new(&manifest_dir).join("..").join("learning_mode");
+
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let target_dir = Path::new(&out_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent());
+
+    let target_dir = match target_dir {
+        Some(d) => d,
+        None => {
+            eprintln!("wxc build.rs: could not determine target dir from OUT_DIR");
+            return;
+        }
+    };
+
+    for name in &["start_plm_logging.ps1", "stop_plm_logging.ps1"] {
+        let src = src_dir.join(name);
+        let dst = target_dir.join(name);
+
+        println!("cargo:rerun-if-changed={}", src.display());
+
+        if !src.exists() {
+            eprintln!(
+                "wxc build.rs: WARNING: {} not found, skipping",
+                src.display()
+            );
+            continue;
+        }
+
+        if !dst.exists() || is_newer(&src, &dst) {
+            eprintln!(
+                "wxc build.rs: copying {} -> {}",
+                src.display(),
+                dst.display()
+            );
+            if let Err(e) = fs::copy(&src, &dst) {
+                let _ = fs::remove_file(&dst);
+                eprintln!("wxc build.rs: WARNING: failed to copy {}: {}", name, e);
+            }
+        }
+    }
 }
 
 #[cfg(all(windows, feature = "microvm"))]
@@ -63,7 +117,7 @@ fn copy_nanvix_binaries() {
     println!("cargo:rerun-if-env-changed=DEP_NANVIX_BINARIES_BIN_DIR");
 }
 
-#[cfg(all(windows, feature = "microvm"))]
+#[cfg(windows)]
 fn is_newer(src: &std::path::Path, dst: &std::path::Path) -> bool {
     let src_time = src.metadata().and_then(|m| m.modified()).ok();
     let dst_time = dst.metadata().and_then(|m| m.modified()).ok();

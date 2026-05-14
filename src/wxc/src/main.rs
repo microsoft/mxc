@@ -79,6 +79,10 @@ struct Cli {
     /// the new bits. Requires --setup-hyperlight.
     #[arg(long, requires = "setup_hyperlight")]
     force: bool,
+
+    /// Enable Audit mode for AppContainers
+    #[arg(long = "audit")]
+    audit: bool,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
@@ -278,9 +282,16 @@ fn main() {
         }
     };
 
-    let mut request = request;
+    let mut request: CodexRequest = request;
     request.experimental_enabled = cli.experimental;
     request.dry_run = cli.dry_run;
+
+    if cli.audit {
+        request
+            .policy
+            .capabilities
+            .push("permissiveLearningMode".to_string());
+    }
 
     // Inject learningModeLogging capability when diagnostic console is enabled.
     let learning_mode_injected = if DiagnosticConfig::force_learning_mode()
@@ -353,6 +364,22 @@ fn main() {
         "{}",
         wxc_common::diagnostic::redacted_request_json(&request)
     );
+
+    // // If permissiveLearningMode is enabled, require explicit user confirmation before proceeding.
+    // if request
+    //     .policy
+    //     .capabilities
+    //     .iter()
+    //     .any(|c| c == "permissiveLearningMode")
+    // {
+    //     #[cfg(debug_assertions)]
+    //     eprintln!(
+    //         "WARNING: permissiveLearningMode is enabled. \
+    //          Container restrictions will NOT be enforced."
+    //     );
+    //     eprintln!("Press Enter to continue...");
+    //     let _ = std::io::stdin().read_line(&mut String::new());
+    // }
 
     // Run script in selected containment backend.
     // BaseContainer is used when --experimental is passed or schema version >= 0.5.
@@ -473,6 +500,23 @@ fn main() {
         }
     };
 
+    if cli.audit {
+        match std::process::Command::new("pwsh.exe")
+            .args([
+                "-command",
+                "C:\\Users\\AdminUser\\Desktop\\MXC\\start_plm_logging.ps1",
+            ])
+            .status()
+        {
+            Ok(status) => {
+                let _ = writeln!(logger, "start_plm_logging.ps1 start exited with {}", status);
+            }
+            Err(e) => {
+                let _ = writeln!(logger, "Failed to start start_plm_logging.ps1: {}", e);
+            }
+        }
+    }
+
     let run_start = Instant::now();
     let response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
@@ -495,5 +539,25 @@ fn main() {
     if !response.standard_err.is_empty() {
         eprint!("{}", response.standard_err);
     }
+
+    if cli.audit {
+        match std::process::Command::new("pwsh.exe")
+            .args([
+                "-command",
+                "C:\\Users\\AdminUser\\Desktop\\MXC\\stop_plm_logging.ps1",
+                "-FilePath",
+                &cli.config_path.unwrap_or_default(),
+            ])
+            .status()
+        {
+            Ok(status) => {
+                let _ = writeln!(logger, "stop_plm_logging.ps1 stop exited with {}", status);
+            }
+            Err(e) => {
+                let _ = writeln!(logger, "Failed to stop stop_plm_logging.ps1: {}", e);
+            }
+        }
+    }
+
     process::exit(response.exit_code);
 }
