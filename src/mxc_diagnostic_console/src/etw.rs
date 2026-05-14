@@ -472,10 +472,7 @@ fn format_learning_mode_violation(props: &[(String, String)], mode: DisplayMode)
             if k == "Category" {
                 let raw = v.trim_matches('"');
                 let name = learning_mode_category_name(raw);
-                (
-                    k.clone(),
-                    format!("{orange}{name}{reset}"),
-                )
+                (k.clone(), format!("{orange}{name}{reset}"))
             } else {
                 (k.clone(), v.clone())
             }
