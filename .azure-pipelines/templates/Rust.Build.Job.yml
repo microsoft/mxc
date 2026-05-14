@@ -175,6 +175,15 @@ jobs:
           contents: wslcsdk.dll
           targetFolder: $(outputDirectory)/$(targetTriple)
 
+      # Copy wxc-exec.pdb so consumers can symbolicate crashes (Windows only).
+      - task: CopyFiles@2
+        displayName: Copy wxc-exec.pdb
+        condition: and(succeeded(), eq('${{ item.os }}', 'windows'))
+        inputs:
+          sourceFolder: $(targetTripleDir)
+          contents: wxc-exec.pdb
+          targetFolder: $(outputDirectory)/$(targetTriple)
+
       - task: 1ES.PublishPipelineArtifact@1
         displayName: Publish
         inputs:

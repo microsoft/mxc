@@ -74,6 +74,8 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         if not exist "sdk\bin\!SDK_ARCH!" mkdir "sdk\bin\!SDK_ARCH!"
         copy /Y "!BIN_DIR!\wxc-exec.exe" "sdk\bin\!SDK_ARCH!\" >nul
         echo   Copied !SDK_ARCH!\wxc-exec.exe
+        copy /Y "!BIN_DIR!\wxc-exec.pdb" "sdk\bin\!SDK_ARCH!\" >nul
+        echo   Copied !SDK_ARCH!\wxc-exec.pdb
         if exist "!BIN_DIR!\wxc-windows-sandbox-guest.exe" (
             copy /Y "!BIN_DIR!\wxc-windows-sandbox-guest.exe" "sdk\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-windows-sandbox-guest.exe
