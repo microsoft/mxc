@@ -8,6 +8,7 @@ pub mod error;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 pub mod hyperlight_runner;
 pub mod id;
+pub mod log_symbols;
 pub mod logger;
 #[cfg(target_os = "windows")]
 pub mod microvm_staging;

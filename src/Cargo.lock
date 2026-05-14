@@ -844,15 +844,17 @@ dependencies = [
 [[package]]
 name = "hyperlight-unikraft-host"
 version = "0.1.0"
-source = "git+https://github.com/hyperlight-dev/hyperlight-unikraft?branch=main#a72768132b699176ac348f5d2d1765f3ed62a061"
+source = "git+https://github.com/hyperlight-dev/hyperlight-unikraft?branch=main#8affbccb1f7a2f9aa0c8e0aea08c82f76b45bbe5"
 dependencies = [
  "anyhow",
  "base64",
  "clap",
  "hyperlight-host",
+ "libc",
  "memmap2",
  "nix",
  "serde_json",
+ "windows-sys",
 ]
 
 [[package]]

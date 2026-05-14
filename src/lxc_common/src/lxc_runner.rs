@@ -18,6 +18,7 @@ use wxc_common::script_runner::ScriptRunner;
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
 use crate::network_iptables::NetworkIptablesManager;
+use crate::signal_cleanup;
 
 /// Script runner that executes commands inside an LXC container.
 pub struct LxcScriptRunner {
@@ -97,6 +98,14 @@ impl LxcScriptRunner {
         }
 
         let container_name = self.resolve_container_name();
+        // Make the name visible to the signal-cleanup watchdog so a fatal
+        // signal during create/start/attach still tears the container down —
+        // but only when the caller actually wants the container destroyed at
+        // exit. With `destroyOnExit = false` the normal completion path
+        // preserves the container, so the signal path must too.
+        if self.destroy_on_exit {
+            signal_cleanup::set_active(&container_name);
+        }
         let _ = writeln!(logger, "Container name: {}", container_name);
         let _ = writeln!(
             logger,
@@ -174,6 +183,11 @@ impl LxcScriptRunner {
         if let Some(veth) = NetworkIptablesManager::discover_veth_interface(&container_name) {
             let _ = writeln!(logger, "Discovered veth interface: {}", veth);
             fw_manager.set_veth_interface(&veth);
+            if self.destroy_on_exit {
+                // Tell the watchdog about the veth so signal-time cleanup
+                // can also remove the FORWARD hook, not just the chain.
+                signal_cleanup::set_active_veth(&veth);
+            }
         }
 
         match fw_manager.apply_firewall_rules(&request.policy, logger) {
