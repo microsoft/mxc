@@ -139,6 +139,65 @@ struct Cli {
     #[arg(long)]
     audit_verbose: bool,
 
+    /// One-time admin step: grant `FILE_TRAVERSE` to an AppContainer-recognized
+    /// SID on each listed PATH. Required by T3 directory enumeration for
+    /// system-owned ancestors (`C:\`, `C:\Users\`, drive roots) that a
+    /// non-admin MXC run can't modify. PATH may be a drive letter
+    /// shorthand (`C`, `C:`, `C:\`) or a full path. Use with `--acl-sid`
+    /// or `--acl-all-app-packages` to pick the SID (default: ALL
+    /// APPLICATION PACKAGES). Requires elevation. See
+    /// `docs/downlevel-fallback-threat-model.md` and microsoft/mxc#304.
+    #[arg(
+        long = "adjustacls",
+        value_name = "PATH",
+        num_args = 1..,
+        conflicts_with_all = ["remove_acls", "check_acls"],
+    )]
+    adjust_acls: Option<Vec<String>>,
+
+    /// Undo a prior `--adjustacls` on the same paths and SID.
+    /// Removes only the specific non-inheriting Allow ACE we added;
+    /// other ACEs on the path (inherited, broader, etc.) are preserved.
+    /// Requires elevation.
+    #[arg(
+        long = "remove-acls",
+        value_name = "PATH",
+        num_args = 1..,
+        conflicts_with_all = ["adjust_acls", "check_acls"],
+    )]
+    remove_acls: Option<Vec<String>>,
+
+    /// Read-only diagnosis: report whether each PATH already has a
+    /// non-inheriting Allow ACE for the chosen SID covering
+    /// `FILE_TRAVERSE`. Does not modify anything. No elevation needed.
+    /// Exit code 0 if all paths are present, 1 if any are missing.
+    #[arg(
+        long = "check-acls",
+        value_name = "PATH",
+        num_args = 1..,
+        conflicts_with_all = ["adjust_acls", "remove_acls"],
+    )]
+    check_acls: Option<Vec<String>>,
+
+    /// SID string (e.g. `S-1-15-2-XXX`) targeted by `--adjustacls` /
+    /// `--remove-acls` / `--check-acls`. Mutually exclusive with
+    /// `--acl-all-app-packages`. If neither is given, defaults to ALL
+    /// APPLICATION PACKAGES.
+    #[arg(
+        long = "acl-sid",
+        value_name = "SID",
+        conflicts_with = "acl_all_app_packages"
+    )]
+    acl_sid: Option<String>,
+
+    /// Use the well-known ALL APPLICATION PACKAGES SID (`S-1-15-2-1`)
+    /// — the umbrella covering every AppContainer process on this
+    /// host. This is the default when neither this flag nor
+    /// `--acl-sid` is given; spelling it explicitly is useful for
+    /// scripted invocations where intent matters.
+    #[arg(long = "acl-all-app-packages")]
+    acl_all_app_packages: bool,
+
     /// Command to run inside the container, overriding `process.commandLine`
     /// from the policy. The command must follow a `--` separator so normal
     /// CLI flags remain usable after the config path. Examples:
@@ -183,6 +242,136 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
     let _ = writeln!(logger, "Exit code: {} (0x{:08X})", code, code as u32);
     if !response.error_message.is_empty() {
         let _ = writeln!(logger, "Error: {}", response.error_message);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AclMode {
+    Adjust,
+    Remove,
+    Check,
+}
+
+/// Normalize a user-supplied path token. Accepts `C`, `C:`, `C:\` for
+/// drive-letter shorthand; otherwise returns the path as-is. The
+/// install_acls layer canonicalizes against the filesystem.
+fn normalize_acl_path(input: &str) -> String {
+    let s = input.trim();
+    if s.len() == 1 && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return format!("{}:\\", s.to_uppercase());
+    }
+    if s.len() == 2
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && s.chars().nth(1) == Some(':')
+    {
+        let mut out = s.to_uppercase();
+        out.push('\\');
+        return out;
+    }
+    s.to_string()
+}
+
+/// Driver for `--adjustacls` / `--remove-acls` / `--check-acls`.
+fn run_adjust_acls_mode(cli: &Cli) -> i32 {
+    use std::path::PathBuf;
+    use wxc_common::install_acls::{self, FILE_TRAVERSE_MASK};
+
+    let (mode, paths) = if let Some(p) = cli.adjust_acls.as_ref() {
+        (AclMode::Adjust, p.clone())
+    } else if let Some(p) = cli.remove_acls.as_ref() {
+        (AclMode::Remove, p.clone())
+    } else if let Some(p) = cli.check_acls.as_ref() {
+        (AclMode::Check, p.clone())
+    } else {
+        return 1;
+    };
+
+    let sid = cli
+        .acl_sid
+        .clone()
+        .unwrap_or_else(|| install_acls::ALL_APPLICATION_PACKAGES_SID.to_string());
+
+    eprintln!("Mode: {mode:?}; SID: {sid}");
+    if cli.dry_run {
+        eprintln!("(--dry-run: previewing only)");
+    }
+    eprintln!();
+
+    let mut any_failure = false;
+    let mut any_missing = false;
+    for raw in &paths {
+        let normalized = normalize_acl_path(raw);
+        let path = PathBuf::from(&normalized);
+        match mode {
+            AclMode::Check => match install_acls::check_grant(&path, &sid, FILE_TRAVERSE_MASK) {
+                Ok(true) => println!("[OK]   {normalized}  (granted)"),
+                Ok(false) => {
+                    println!("[MISS] {normalized}  (no matching grant)");
+                    any_missing = true;
+                }
+                Err(e) => {
+                    println!("[ERR]  {normalized}  {e}");
+                    any_failure = true;
+                }
+            },
+            AclMode::Adjust => {
+                if cli.dry_run {
+                    match install_acls::check_grant(&path, &sid, FILE_TRAVERSE_MASK) {
+                        Ok(true) => println!("[=]    {normalized}  (already granted; would skip)"),
+                        Ok(false) => println!("[+]    {normalized}  (would add traverse grant)"),
+                        Err(e) => {
+                            println!("[ERR]  {normalized}  {e}");
+                            any_failure = true;
+                        }
+                    }
+                } else {
+                    match install_acls::add_grant(&path, &sid, FILE_TRAVERSE_MASK) {
+                        Ok(true) => println!("[+]    {normalized}  (added)"),
+                        Ok(false) => println!("[=]    {normalized}  (already present; no change)"),
+                        Err(e) => {
+                            println!("[ERR]  {normalized}  {e}");
+                            any_failure = true;
+                        }
+                    }
+                }
+            }
+            AclMode::Remove => {
+                if cli.dry_run {
+                    match install_acls::check_grant(&path, &sid, FILE_TRAVERSE_MASK) {
+                        Ok(true) => {
+                            println!("[-]    {normalized}  (would remove traverse grant)")
+                        }
+                        Ok(false) => println!("[=]    {normalized}  (not present; would skip)"),
+                        Err(e) => {
+                            println!("[ERR]  {normalized}  {e}");
+                            any_failure = true;
+                        }
+                    }
+                } else {
+                    match install_acls::remove_grant(&path, &sid, FILE_TRAVERSE_MASK) {
+                        Ok(true) => println!("[-]    {normalized}  (removed)"),
+                        Ok(false) => {
+                            println!("[=]    {normalized}  (no matching grant; no change)")
+                        }
+                        Err(e) => {
+                            println!("[ERR]  {normalized}  {e}");
+                            any_failure = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!();
+    if any_failure {
+        eprintln!("One or more paths failed. See [ERR] lines above.");
+        1
+    } else if mode == AclMode::Check && any_missing {
+        eprintln!("At least one path is missing the grant.");
+        1
+    } else {
+        0
     }
 }
 
@@ -730,6 +919,14 @@ fn main() {
             }
         }
         Err(e) => eprintln!("DACL recovery failed: {e}"),
+    }
+
+    // --adjustacls / --remove-acls / --check-acls: one-time admin step
+    // for FILE_TRAVERSE ACEs needed by T3 directory enumeration on
+    // system-owned ancestors.
+    if cli.adjust_acls.is_some() || cli.remove_acls.is_some() || cli.check_acls.is_some() {
+        let exit_code = run_adjust_acls_mode(&cli);
+        process::exit(exit_code);
     }
 
     // --probe is a detection-only fast path used by SDK

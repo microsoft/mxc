@@ -46,6 +46,8 @@ pub mod diagnostic;
 #[cfg(target_os = "windows")]
 pub mod filesystem_dacl;
 #[cfg(target_os = "windows")]
+pub mod install_acls;
+#[cfg(target_os = "windows")]
 pub mod process_util;
 #[cfg(target_os = "windows")]
 pub mod string_util;
