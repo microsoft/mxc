@@ -61,10 +61,10 @@ pub fn build_profile(request: &CodexRequest) -> String {
     out.push_str(SYSTEM_READ_ALLOW);
 
     // Pseudo-terminal access — the seatbelt runner attaches the inner
-    // shell to a freshly-allocated pty (see `seatbelt_runner::spawn_with_pty`)
-    // so callers can stream output and the shell sees a real TTY. Without
-    // these rules, `isatty()` / `tcgetattr()` / `ttyname()` fail with EPERM
-    // because the kernel calls block on the slave fd.
+    // shell to a freshly-allocated pty (see `mxc_pty::run_with_pty`) so
+    // callers can stream output and the shell sees a real TTY. Without
+    // these rules, `isatty()` / `tcgetattr()` / `ttyname()` fail with
+    // EPERM because the kernel calls block on the slave fd.
     out.push_str(TTY_ALLOW);
 
     // Policy-derived allow rules.
@@ -125,12 +125,14 @@ const SYSTEM_READ_ALLOW: &str = "\
 /// stdin/stdout/stderr lives at `/dev/ttysNNN`, and the shell calls
 /// `isatty()` (→ `tcgetattr` → ioctl) plus `ttyname()` against it. We
 /// also need read access to `/dev/tty` because most shells re-open it
-/// at startup. Allowing `(subpath "/dev")` keeps the rule short and
-/// covers the supporting `/dev` entries (`/dev/fd`, `/dev/stdout`, …)
-/// that callers occasionally exercise from inside a sandboxed shell.
+/// at startup, and read access to `/dev/fd` for the `/dev/stdout` etc.
+/// indirection some tools use.
 const TTY_ALLOW: &str = "\
-;; --- pseudo-terminal access (pty bridge in seatbelt_runner) ---
-(allow file-read* file-write* file-ioctl (subpath \"/dev\"))
+;; --- pseudo-terminal access (pty bridge in mxc_pty::run_with_pty) ---
+(allow file-read* file-write* file-ioctl
+    (literal \"/dev/tty\")
+    (regex #\"^/dev/ttys[0-9]+$\"))
+(allow file-read* (subpath \"/dev/fd\"))
 ";
 
 fn write_filesystem_allow(out: &mut String, request: &CodexRequest) {
