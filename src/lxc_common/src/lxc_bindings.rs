@@ -223,12 +223,6 @@ impl LxcContainer {
     /// Stdout/stderr are streamed live via the master fd; the returned
     /// strings are always empty. Callers needing captured output should run
     /// a self-contained `commandLine` and read it back from a file.
-    ///
-    /// Only built on Linux — `lxc-attach` doesn't exist on other targets.
-    /// The crate still has to compile workspace-wide on Windows
-    /// (the `wxc-exec-lint` CI job runs `cargo clippy --workspace`
-    /// on `windows-latest`) and on macOS dev machines, so a stub is
-    /// provided below for non-Linux targets.
     #[cfg(target_os = "linux")]
     pub fn attach_run(
         &self,
@@ -260,9 +254,7 @@ impl LxcContainer {
         }
     }
 
-    /// Non-Linux stub. `lxc-exec` is Linux-only at runtime, but the
-    /// workspace still builds on Windows (clippy CI) and macOS (dev), so
-    /// the signature has to exist on every target.
+    /// Stub for the workspace-wide clippy lane that runs on Windows.
     #[cfg(not(target_os = "linux"))]
     pub fn attach_run(
         &self,

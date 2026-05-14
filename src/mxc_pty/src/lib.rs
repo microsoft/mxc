@@ -9,9 +9,6 @@
 //! shell sees a real TTY (`isatty(0/1/2) -> true`) and the host can stream
 //! output as it arrives. The two implementations were ~95% the same code;
 //! this crate is the deduplicated home for that pty plumbing.
-//!
-//! On non-unix targets the crate still builds (the workspace clippy CI lane
-//! runs on Windows) but [`run_with_pty`] returns an error.
 
 use std::process::Command;
 use std::time::Duration;
@@ -92,10 +89,6 @@ pub enum PtyOutcome {
 /// streamed to the host stdio by the time this function returns;
 /// callers needing captured output should write it to a file in cwd
 /// and read it back from there.
-///
-/// On non-unix targets this is a stub that returns `Err` immediately —
-/// the workspace builds on Windows for clippy CI, but at runtime the
-/// pty bridge is only meaningful on Linux and macOS.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutcome, String> {
     use std::io::{Read, Write};
@@ -261,8 +254,7 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
     Ok(outcome)
 }
 
-/// Non-unix stub. The workspace builds on Windows for clippy CI but
-/// the pty bridge has no meaningful implementation there.
+/// Stub for the workspace-wide clippy lane that runs on Windows.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn run_with_pty(_command: Command, _options: PtyOptions) -> Result<PtyOutcome, String> {
     Err("mxc_pty::run_with_pty is only supported on Linux and macOS".to_string())
