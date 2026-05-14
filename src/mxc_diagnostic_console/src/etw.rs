@@ -24,7 +24,7 @@ use windows::Win32::System::Diagnostics::Etw::{
     TRACE_EVENT_INFO, TRACE_LEVEL_VERBOSE, WNODE_FLAG_TRACED_GUID,
 };
 
-use super::{display_mode, DisplayEvent, DisplayMode};
+use super::{collect_mode, display_mode, DisplayEvent, DisplayMode};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -309,36 +309,62 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
     }
 
     let tx = unsafe { &*(event.UserContext as *const mpsc::Sender<DisplayEvent>) };
-    let text = match decode_event(event_record) {
-        Some(t) => t,
-        None => return, // Suppressed by display mode filtering.
-    };
-    let _ = tx.send(DisplayEvent::EtwEvent {
-        pid: event.EventHeader.ProcessId,
-        text,
-    });
+    let pid = event.EventHeader.ProcessId;
+    let collecting = collect_mode();
+    let current_mode = display_mode();
+
+    if let Some(parts) = decode_event_parts(event_record) {
+        let console_text = format_event_output(&parts, current_mode);
+
+        let (verbose_text, minified_text) = if collecting {
+            let verbose = format_event_output(&parts, DisplayMode::Full)
+                .unwrap_or_else(|| fallback_event_text(event_record));
+            let minified = format_event_output(&parts, DisplayMode::Minified);
+            (Some(verbose), Some(minified))
+        } else {
+            (None, None)
+        };
+
+        // In collect mode, send even if console_text is None (suppressed) since
+        // the verbose log still wants this event.
+        if console_text.is_some() || collecting {
+            let _ = tx.send(DisplayEvent::EtwEvent {
+                pid,
+                text: console_text.unwrap_or_else(|| fallback_event_text(event_record)),
+                verbose_text,
+                minified_text,
+            });
+        }
+    } else {
+        let fallback = fallback_event_text(event_record);
+        let (verbose_text, minified_text) = if collecting {
+            (Some(fallback.clone()), Some(Some(fallback.clone())))
+        } else {
+            (None, None)
+        };
+        let _ = tx.send(DisplayEvent::EtwEvent {
+            pid,
+            text: fallback,
+            verbose_text,
+            minified_text,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Event decoding
 // ---------------------------------------------------------------------------
 
-fn decode_event(event_record: *mut EVENT_RECORD) -> Option<String> {
-    match decode_with_tdh(event_record) {
-        Some(s) => Some(s),
-        None => {
-            let event = unsafe { &*event_record };
-            Some(format!(
-                "Event(Id={}, Level={}, DataLen={})",
-                event.EventHeader.EventDescriptor.Id,
-                event.EventHeader.EventDescriptor.Level,
-                event.UserDataLength,
-            ))
-        }
-    }
+/// Decoded ETW event parts (expensive TDH call done once, formatting done separately).
+struct DecodedEventParts {
+    event_name: Option<String>,
+    level_tag: &'static str,
+    props: Vec<(String, String)>,
 }
 
-fn decode_with_tdh(event_record: *mut EVENT_RECORD) -> Option<String> {
+/// Decode the raw event record via TDH into reusable parts.
+/// Returns `None` only when TDH decoding fails entirely.
+fn decode_event_parts(event_record: *mut EVENT_RECORD) -> Option<DecodedEventParts> {
     let mut buf_size: u32 = 0;
     let status = unsafe { TdhGetEventInformation(event_record, None, None, &mut buf_size) };
 
@@ -358,14 +384,12 @@ fn decode_with_tdh(event_record: *mut EVENT_RECORD) -> Option<String> {
 
     let info = unsafe { &*info_ptr };
 
-    // EventNameOffset is in Anonymous1 (union with ActivityIDNameOffset).
     let event_name_offset = unsafe { info.Anonymous1.EventNameOffset };
     let event_name = wide_str_at(&buffer, event_name_offset)
         .or_else(|| wide_str_at(&buffer, info.TaskNameOffset))
         .unwrap_or_default();
 
     let event_name = if event_name.is_empty() {
-        // No name available; don't synthesize a noisy "Event#N" label.
         None
     } else {
         Some(event_name)
@@ -383,7 +407,17 @@ fn decode_with_tdh(event_record: *mut EVENT_RECORD) -> Option<String> {
 
     let props = decode_properties(&buffer, info, event_record);
 
-    let props = minify_access_check_props(props)?;
+    Some(DecodedEventParts {
+        event_name,
+        level_tag,
+        props,
+    })
+}
+
+/// Format decoded event parts into a display string for the given mode.
+/// Returns `None` when the event should be suppressed (e.g. empty ObjectType in minified mode).
+fn format_event_output(parts: &DecodedEventParts, mode: DisplayMode) -> Option<String> {
+    let props = minify_access_check_props(parts.props.clone(), mode)?;
 
     let props_str = if props.is_empty() {
         String::new()
@@ -392,14 +426,25 @@ fn decode_with_tdh(event_record: *mut EVENT_RECORD) -> Option<String> {
         format!(" {{ {} }}", joined.join(", "))
     };
 
-    let name_part = event_name.as_deref().unwrap_or("");
+    let name_part = parts.event_name.as_deref().unwrap_or("");
 
-    match (level_tag.is_empty(), name_part.is_empty()) {
+    match (parts.level_tag.is_empty(), name_part.is_empty()) {
         (true, true) => Some(props_str.trim_start().to_string()),
         (true, false) => Some(format!("{name_part}{props_str}")),
-        (false, true) => Some(format!("[{level_tag}]{props_str}")),
-        (false, false) => Some(format!("[{level_tag}] {name_part}{props_str}")),
+        (false, true) => Some(format!("[{}]{props_str}", parts.level_tag)),
+        (false, false) => Some(format!("[{}] {name_part}{props_str}", parts.level_tag)),
     }
+}
+
+/// Produce a generic fallback string for events that TDH cannot decode.
+fn fallback_event_text(event_record: *mut EVENT_RECORD) -> String {
+    let event = unsafe { &*event_record };
+    format!(
+        "Event(Id={}, Level={}, DataLen={})",
+        event.EventHeader.EventDescriptor.Id,
+        event.EventHeader.EventDescriptor.Level,
+        event.UserDataLength,
+    )
 }
 
 fn decode_properties(
@@ -462,8 +507,11 @@ const MINIFIED_FILE_FIELDS: &[&str] = &["LowBoxNumber", "ProcessName", "ObjectNa
 /// In minified mode, reduce AccessCheckLog File/Key events to a useful subset
 /// of properties and strip ProcessName to just the executable name.
 /// Returns `None` to suppress the event entirely (e.g. empty ObjectType).
-fn minify_access_check_props(props: Vec<(String, String)>) -> Option<Vec<(String, String)>> {
-    if display_mode() != DisplayMode::Minified {
+fn minify_access_check_props(
+    props: Vec<(String, String)>,
+    mode: DisplayMode,
+) -> Option<Vec<(String, String)>> {
+    if mode != DisplayMode::Minified {
         return Some(props);
     }
 
