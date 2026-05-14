@@ -12,6 +12,7 @@ use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
 use lxc_common::lxc_runner::LxcScriptRunner;
+use lxc_common::signal_cleanup;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use wxc_common::hyperlight_runner::HyperlightScriptRunner;
 
@@ -107,6 +108,16 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
 }
 
 fn main() {
+    // Install before spawning any other threads so the signal mask propagates.
+    // Failure here is fatal: install() either succeeds with the watchdog
+    // running, or restores the original signal mask and returns Err. We
+    // refuse to continue without it because containers leaked on SIGTERM/INT
+    // are exactly the failure mode this code exists to prevent.
+    if let Err(e) = signal_cleanup::install() {
+        eprintln!("Error: failed to install signal cleanup handler: {}", e);
+        process::exit(1);
+    }
+
     let cli = Cli::parse();
 
     // --setup-hyperlight: eagerly warm up the snapshot and exit. Runs
