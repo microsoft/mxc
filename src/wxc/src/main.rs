@@ -282,7 +282,7 @@ fn main() {
         }
     };
 
-    let mut request: CodexRequest = request;
+    let mut request= request;
     request.experimental_enabled = cli.experimental;
     request.dry_run = cli.dry_run;
 
@@ -364,22 +364,6 @@ fn main() {
         "{}",
         wxc_common::diagnostic::redacted_request_json(&request)
     );
-
-    // // If permissiveLearningMode is enabled, require explicit user confirmation before proceeding.
-    // if request
-    //     .policy
-    //     .capabilities
-    //     .iter()
-    //     .any(|c| c == "permissiveLearningMode")
-    // {
-    //     #[cfg(debug_assertions)]
-    //     eprintln!(
-    //         "WARNING: permissiveLearningMode is enabled. \
-    //          Container restrictions will NOT be enforced."
-    //     );
-    //     eprintln!("Press Enter to continue...");
-    //     let _ = std::io::stdin().read_line(&mut String::new());
-    // }
 
     // Run script in selected containment backend.
     // BaseContainer is used when --experimental is passed or schema version >= 0.5.
