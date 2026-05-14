@@ -482,7 +482,7 @@ fn display_loop(rx: mpsc::Receiver<DisplayEvent>) {
                 for line in text.lines() {
                     if line.starts_with("WARNING:") {
                         println!("{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;33m{line}\x1b[0m");
-                    } else if line.starts_with("SECTION:") {
+                    } else if line.contains("SECTION:") {
                         println!("{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;36m{line}\x1b[0m");
                     } else if line.starts_with("ERROR:") || line.starts_with("Error:") {
                         println!("{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;31m{line}\x1b[0m");
