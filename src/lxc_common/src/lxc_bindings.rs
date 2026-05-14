@@ -271,6 +271,12 @@ impl LxcContainer {
         // from node-pty) and forwards the inner pty's I/O to `/dev/tty`
         // directly, bypassing the slave fds we wired into stdio. Our master
         // would then see no data at all.
+        //
+        // Also unblock SIGHUP/SIGTERM/SIGINT in the child: `signal_cleanup::install`
+        // blocks them in this process so the watchdog thread can sigwait on
+        // them, but that mask is inherited across fork+exec. Without this
+        // reset the inner shell (and anything it spawns) would silently
+        // ignore Ctrl-C and termination signals.
         unsafe {
             use std::os::unix::process::CommandExt;
             cmd.pre_exec(|| {
@@ -282,6 +288,14 @@ impl LxcContainer {
                 // non-fatal because setsid above already cleared the ctty
                 // state, which is what actually matters for lxc-attach.
                 let _ = libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+
+                // Restore the default signal mask so the inner process
+                // doesn't inherit signal_cleanup's blocked set.
+                let mut empty = nix::sys::signal::SigSet::empty();
+                empty.add(nix::sys::signal::Signal::SIGHUP);
+                empty.add(nix::sys::signal::Signal::SIGTERM);
+                empty.add(nix::sys::signal::Signal::SIGINT);
+                empty.thread_unblock().map_err(std::io::Error::from)?;
                 Ok(())
             });
         }
@@ -328,9 +342,10 @@ impl LxcContainer {
         });
 
         // Wait for bash to print its first byte before forwarding host stdin.
-        // Cap the wait so a wedged container doesn't block forever; if the
-        // shell never produces output the caller's higher-level timeout
-        // catches it.
+        // Cap the wait so a wedged shell doesn't block the stdin forwarder
+        // forever; the inner process itself still runs to completion below
+        // (request.script_timeout is not yet enforced — see the TODO in
+        // lxc_runner::run_internal where attach_run is called).
         let _ = ready_rx.recv_timeout(Duration::from_secs(5));
 
         // Input forwarder: host stdin -> master. Detached; exits when stdin
