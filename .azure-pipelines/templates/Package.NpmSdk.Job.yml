@@ -42,8 +42,8 @@ jobs:
     - script: chmod +x $(sdkDirectory)/bin/*/lxc-exec
       displayName: Restore execute permission on lxc-exec
 
-    # Archive sdk/bin (x64/ + arm64/, executables + wxc_exec.pdb) for upload
-    # to the GitHub Release page, until we publish to a symbol server.
+    # Archive sdk/bin (x64/ + arm64/, executables + pdbs) for upload to the
+    # GitHub Release page, until we publish to a symbol server.
     - task: ArchiveFiles@2
       displayName: Archive mxc-release-binaries.zip
       inputs:

@@ -175,12 +175,16 @@ jobs:
           contents: wslcsdk.dll
           targetFolder: $(outputDirectory)/$(targetTriple)
 
-      # Copy wxc_exec.pdb (rustc names pdbs after the crate, underscored) and
-      # rename it to wxc-exec.pdb to match the exe.
-      - powershell: |
-          Copy-Item -Force "$(targetTripleDir)/wxc_exec.pdb" "$(outputDirectory)/$(targetTriple)/wxc-exec.pdb"
-        displayName: Copy wxc-exec.pdb
-        condition: and(succeeded(), eq('${{ item.os }}', 'windows'))
+      # Copy all symbol files alongside the binaries: .pdb on Windows (MSVC),
+      # .dwp on Linux (DWARF package from split-debuginfo = "packed").
+      - task: CopyFiles@2
+        displayName: Copy symbol files
+        inputs:
+          sourceFolder: $(targetTripleDir)
+          contents: |
+            *.pdb
+            *.dwp
+          targetFolder: $(outputDirectory)/$(targetTriple)
 
       - task: 1ES.PublishPipelineArtifact@1
         displayName: Publish
