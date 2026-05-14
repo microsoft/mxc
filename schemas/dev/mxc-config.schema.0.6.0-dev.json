@@ -74,6 +74,36 @@
           "minimum": 0,
           "default": 0,
           "description": "Execution timeout in milliseconds. 0 = no timeout (infinite)."
+        },
+        "resourceLimits": {
+          "type": "object",
+          "description": "Resource caps enforced on the sandboxed process and all of its descendants. Implemented via a Windows Job Object on the AppContainer / processcontainer backends. When this section is omitted the runner still creates a Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE so that descendant processes are terminated when execution ends — preventing orphan processes from outliving the sandbox.",
+          "properties": {
+            "memoryMb": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "Maximum committed memory in MiB across all processes in the job. 0 = no limit. Maps to JOB_OBJECT_LIMIT_JOB_MEMORY."
+            },
+            "maxProcesses": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "Maximum number of concurrent active processes in the job (fork-bomb protection). 0 = no limit. Maps to JOB_OBJECT_LIMIT_ACTIVE_PROCESS."
+            },
+            "cpuRatePercent": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100,
+              "default": 0,
+              "description": "CPU rate cap as a percentage of total CPU across all logical processors. 0 = no limit. Maps to JOBOBJECT_CPU_RATE_CONTROL_INFORMATION."
+            },
+            "allowChildProcesses": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether the sandboxed process may spawn child processes. When false, sets PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED. Note: certain Windows subsystems (e.g. Windows Error Reporting) may still be able to spawn helpers via documented OS overrides; this flag is a hardening control, not a hard boundary."
+            }
+          }
         }
       }
     },

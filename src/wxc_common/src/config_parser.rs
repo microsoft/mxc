@@ -12,8 +12,8 @@ use crate::logger::Logger;
 use crate::models::{
     ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
     IsolationSessionConfig, IsolationSessionUser, LifecycleConfig, LxcConfig,
-    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
-    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, ResourceLimits,
+    SeatbeltConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -145,6 +145,21 @@ struct RawProcess {
     cwd: Option<String>,
     env: Option<Vec<String>>,
     timeout: Option<u32>,
+    #[serde(rename = "resourceLimits")]
+    resource_limits: Option<RawResourceLimits>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawResourceLimits {
+    #[serde(rename = "memoryMb")]
+    memory_mb: Option<u64>,
+    #[serde(rename = "maxProcesses")]
+    max_processes: Option<u32>,
+    #[serde(rename = "cpuRatePercent")]
+    cpu_rate_percent: Option<u8>,
+    #[serde(rename = "allowChildProcesses")]
+    allow_child_processes: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -515,6 +530,39 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
 
 // ---------- Conversion from raw JSON to domain model ----------
 
+/// Convert a raw `resourceLimits` block into the validated `ResourceLimits`
+/// model. Validation:
+/// - `cpu_rate_percent` must be in `0..=100`.
+/// - Other caps are unbounded (a value of `0` means "no limit").
+///
+/// When `raw` is `None`, returns `ResourceLimits::permissive()` — matching the
+/// schema default for an omitted section.
+fn convert_resource_limits(
+    raw: Option<RawResourceLimits>,
+    logger: &mut Logger,
+) -> Result<ResourceLimits, WxcError> {
+    let Some(raw) = raw else {
+        return Ok(ResourceLimits::permissive());
+    };
+
+    let cpu_rate_percent = raw.cpu_rate_percent.unwrap_or(0);
+    if cpu_rate_percent > 100 {
+        let msg = format!(
+            "process.resourceLimits.cpuRatePercent must be in 0..=100, got {}",
+            cpu_rate_percent
+        );
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
+
+    Ok(ResourceLimits {
+        memory_mb: raw.memory_mb.unwrap_or(0),
+        max_processes: raw.max_processes.unwrap_or(0),
+        cpu_rate_percent,
+        allow_child_processes: raw.allow_child_processes.unwrap_or(true),
+    })
+}
+
 fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
     convert_raw_config_inner(raw, logger, true)
 }
@@ -534,7 +582,7 @@ fn convert_raw_config_inner(
 
     // Process section: required for one-shot and for state-aware exec; absent
     // is allowed for state-aware non-exec phases (require_process == false).
-    let (script_code, working_directory, script_timeout, env) = match raw.process {
+    let (script_code, working_directory, script_timeout, env, resource_limits) = match raw.process {
         Some(process) => {
             let script_code = match process.command_line {
                 Some(s) if !s.is_empty() => s,
@@ -561,11 +609,14 @@ fn convert_raw_config_inner(
                 ));
             }
 
+            let resource_limits = convert_resource_limits(process.resource_limits, logger)?;
+
             (
                 script_code,
                 process.cwd.unwrap_or_default(),
                 process.timeout.unwrap_or(0),
                 process.env.unwrap_or_default(),
+                resource_limits,
             )
         }
         None if require_process => {
@@ -573,7 +624,13 @@ fn convert_raw_config_inner(
                 "'process' section is required".into(),
             ));
         }
-        None => (String::new(), String::new(), 0, Vec::new()),
+        None => (
+            String::new(),
+            String::new(),
+            0,
+            Vec::new(),
+            ResourceLimits::default(),
+        ),
     };
 
     // Containment backend selection.
@@ -910,6 +967,7 @@ fn convert_raw_config_inner(
         script_code,
         working_directory,
         script_timeout,
+        resource_limits,
         containment,
         lifecycle,
         policy,
@@ -1953,6 +2011,98 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_timeout, 9000);
+    }
+
+    #[test]
+    fn resource_limits_omitted_uses_permissive_defaults() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.resource_limits, ResourceLimits::permissive());
+        assert!(req.resource_limits.allow_child_processes);
+        assert!(!req.resource_limits.has_explicit_caps());
+        assert!(!req.resource_limits.child_processes_blocked());
+    }
+
+    #[test]
+    fn resource_limits_all_fields_parsed() {
+        let json = r#"{
+            "process": {
+                "commandLine": "echo hi",
+                "resourceLimits": {
+                    "memoryMb": 512,
+                    "maxProcesses": 16,
+                    "cpuRatePercent": 50,
+                    "allowChildProcesses": false
+                }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.resource_limits.memory_mb, 512);
+        assert_eq!(req.resource_limits.max_processes, 16);
+        assert_eq!(req.resource_limits.cpu_rate_percent, 50);
+        assert!(!req.resource_limits.allow_child_processes);
+        assert!(req.resource_limits.has_explicit_caps());
+        assert!(req.resource_limits.child_processes_blocked());
+    }
+
+    #[test]
+    fn resource_limits_partial_fields_use_per_field_defaults() {
+        let json = r#"{
+            "process": {
+                "commandLine": "echo hi",
+                "resourceLimits": { "memoryMb": 256 }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.resource_limits.memory_mb, 256);
+        assert_eq!(req.resource_limits.max_processes, 0);
+        assert_eq!(req.resource_limits.cpu_rate_percent, 0);
+        // Omitted allowChildProcesses must default to true (matches schema).
+        assert!(req.resource_limits.allow_child_processes);
+    }
+
+    #[test]
+    fn resource_limits_cpu_rate_out_of_range_rejected() {
+        let json = r#"{
+            "process": {
+                "commandLine": "echo hi",
+                "resourceLimits": { "cpuRatePercent": 150 }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err(), "cpuRatePercent > 100 must be rejected");
+    }
+
+    #[test]
+    fn resource_limits_zero_values_treated_as_unlimited() {
+        let json = r#"{
+            "process": {
+                "commandLine": "echo hi",
+                "resourceLimits": {
+                    "memoryMb": 0,
+                    "maxProcesses": 0,
+                    "cpuRatePercent": 0
+                }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.resource_limits.has_explicit_caps());
+        assert!(req.resource_limits.allow_child_processes);
     }
 
     #[test]

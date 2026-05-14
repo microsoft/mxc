@@ -390,6 +390,66 @@ impl Default for LifecycleConfig {
     }
 }
 
+/// Process-level resource caps applied to the sandboxed process and all of
+/// its descendants. On Windows these are enforced via a Job Object created by
+/// the runner; on other platforms they are accepted by the parser and
+/// currently ignored (future backends may map them to cgroups or rlimits).
+///
+/// A value of `0` for any cap means "no limit". Even when every field is `0`,
+/// the AppContainer runner still creates a Job Object with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` so descendant processes cannot outlive
+/// the sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ResourceLimits {
+    /// Maximum committed memory in MiB across all processes in the job.
+    /// 0 = no limit. Maps to `JOBOBJECT_EXTENDED_LIMIT_INFORMATION::JobMemoryLimit`.
+    pub memory_mb: u64,
+    /// Maximum number of concurrent active processes in the job. 0 = no limit.
+    /// Fork-bomb protection. Maps to `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`.
+    pub max_processes: u32,
+    /// CPU rate cap as a percentage (0-100) of total CPU across all logical
+    /// processors. 0 = no limit. Maps to
+    /// `JOBOBJECT_CPU_RATE_CONTROL_INFORMATION` with weight-based hard cap.
+    pub cpu_rate_percent: u8,
+    /// Whether the sandboxed process may spawn child processes.
+    /// `false` sets `PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY` to
+    /// `PROCESS_CREATION_CHILD_PROCESS_RESTRICTED` at process-creation time.
+    /// Defaults to `true` to preserve existing behaviour.
+    pub allow_child_processes: bool,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self::permissive()
+    }
+}
+
+impl ResourceLimits {
+    /// Permissive defaults: no caps, child processes allowed.
+    /// Matches the schema default for an omitted `resourceLimits` section.
+    pub fn permissive() -> Self {
+        Self {
+            memory_mb: 0,
+            max_processes: 0,
+            cpu_rate_percent: 0,
+            allow_child_processes: true,
+        }
+    }
+
+    /// True if any explicit cap is configured (memory, processes, or CPU).
+    /// The child-process policy is tracked separately via
+    /// `child_processes_blocked`.
+    pub fn has_explicit_caps(&self) -> bool {
+        self.memory_mb > 0 || self.max_processes > 0 || self.cpu_rate_percent > 0
+    }
+
+    /// True if `allow_child_processes` is explicitly false.
+    pub fn child_processes_blocked(&self) -> bool {
+        !self.allow_child_processes
+    }
+}
+
 /// Placeholder experimental feature for testing the experimental infrastructure.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -438,6 +498,9 @@ pub struct CodexRequest {
     pub script_code: String,
     pub working_directory: String,
     pub script_timeout: u32,
+    /// Process-level resource caps (memory, process count, CPU, child-process policy).
+    /// Enforced by a Windows Job Object on the AppContainer/processcontainer backends.
+    pub resource_limits: ResourceLimits,
     /// Which containment backend to use. Default: ProcessContainer.
     pub containment: ContainmentBackend,
     /// Shared lifecycle settings.
@@ -465,6 +528,7 @@ impl Default for CodexRequest {
             script_code: String::new(),
             working_directory: String::new(),
             script_timeout: 0,
+            resource_limits: ResourceLimits::default(),
             containment: ContainmentBackend::default(),
             lifecycle: LifecycleConfig::default(),
             policy: ContainerPolicy::default(),
