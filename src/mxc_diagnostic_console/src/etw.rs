@@ -5,7 +5,8 @@
 //!
 //! Listens for events from:
 //! - **Tessera** TraceLogging provider (all events)
-//! - **Microsoft-Windows-Kernel-General** (learning-mode AccessCheckLog only, event ID 0xe)
+//! - **Microsoft-Windows-Kernel-General** (all events -- AccessCheckLog, AppContainerTokenCheckLog,
+//!   TokenSidManagementLog, learning-mode violations, etc.)
 //!
 //! Starts a trace session, enables the providers, and delivers decoded events
 //! to the diagnostic console's display channel. Requires administrator privileges.
@@ -39,16 +40,14 @@ const TESSERA_PROVIDER: GUID = GUID {
 };
 
 /// Microsoft-Windows-Kernel-General provider GUID: {a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}
-/// Used to capture learning-mode access check events (event ID 0xe / 14).
+/// Used to capture learning-mode diagnostics (AccessCheckLog, AppContainerTokenCheckLog,
+/// TokenSidManagementLog, learning-mode violations, etc.).
 const KERNEL_GENERAL_PROVIDER: GUID = GUID {
     data1: 0xa68ca8b7,
     data2: 0x004f,
     data3: 0xd7b6,
     data4: [0xa6, 0x98, 0x07, 0xe2, 0xde, 0x0f, 0x1f, 0x5d],
 };
-
-/// Event ID for SepAccessCheck learning-mode log (AccessCheckLog).
-const ACCESS_CHECK_LOG_EVENT_ID: u16 = 0xe;
 
 const SESSION_NAME: &str = "MXC-Diagnostics-ETW";
 
@@ -87,7 +86,7 @@ unsafe impl Send for SendPtr {}
 /// Start the ETW listener for diagnostic providers.
 ///
 /// Enables the Tessera TraceLogging provider and the Kernel-General provider
-/// (filtered to AccessCheckLog events for learning-mode diagnostics).
+/// (all events for learning-mode diagnostics).
 /// Spawns a background thread that calls `ProcessTrace` (blocking). Returns
 /// immediately on success. Events are delivered via `tx`.
 pub fn start_etw_listener(tx: mpsc::Sender<DisplayEvent>) -> Result<(), String> {
@@ -197,7 +196,7 @@ fn enable_provider(session_handle: u64) -> Result<(), String> {
         ));
     }
 
-    // Enable the Kernel-General provider for learning-mode access check events.
+    // Enable the Kernel-General provider for learning-mode diagnostic events.
     let status = unsafe {
         EnableTraceEx2(
             h,
@@ -300,10 +299,8 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
     if provider == TESSERA_PROVIDER {
         // Tessera: accept all events.
     } else if provider == KERNEL_GENERAL_PROVIDER {
-        // Kernel-General: only accept AccessCheckLog (event ID 0xe).
-        if event.EventHeader.EventDescriptor.Id != ACCESS_CHECK_LOG_EVENT_ID {
-            return;
-        }
+        // Kernel-General: accept all events (AccessCheckLog, AppContainerTokenCheckLog,
+        // TokenSidManagementLog, learning-mode violations, etc.).
     } else {
         return;
     }
@@ -417,7 +414,7 @@ fn decode_event_parts(event_record: *mut EVENT_RECORD) -> Option<DecodedEventPar
 /// Format decoded event parts into a display string for the given mode.
 /// Returns `None` when the event should be suppressed (e.g. empty ObjectType in minified mode).
 fn format_event_output(parts: &DecodedEventParts, mode: DisplayMode) -> Option<String> {
-    let props = minify_access_check_props(parts.props.clone(), mode)?;
+    let props = minify_kernel_general_props(parts.props.clone(), mode)?;
 
     let props_str = if props.is_empty() {
         String::new()
@@ -504,10 +501,11 @@ fn decode_properties(
 /// ObjectType="File" or ObjectType="Key", in the order they should appear.
 const MINIFIED_FILE_FIELDS: &[&str] = &["LowBoxNumber", "ProcessName", "ObjectName"];
 
-/// In minified mode, reduce AccessCheckLog File/Key events to a useful subset
-/// of properties and strip ProcessName to just the executable name.
-/// Returns `None` to suppress the event entirely (e.g. empty ObjectType).
-fn minify_access_check_props(
+/// In minified mode, reduce Kernel-General events to a useful subset of properties.
+/// For AccessCheckLog File/Key events: strip to LowBoxNumber, ProcessName, ObjectName.
+/// For other events: pass all properties through unmodified.
+/// Returns `None` to suppress the event entirely (e.g. empty ObjectType in AccessCheckLog).
+fn minify_kernel_general_props(
     props: Vec<(String, String)>,
     mode: DisplayMode,
 ) -> Option<Vec<(String, String)>> {
