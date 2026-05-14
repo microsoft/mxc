@@ -30,6 +30,7 @@ use crate::models::{
     CodexRequest, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ScriptResponse,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
+use crate::sandbox_tracking::{self, TrackingEntry};
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::string_util;
 use sandbox_spec::base_container_layout::{
@@ -67,6 +68,18 @@ const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 
 /// SandboxSpec FlatBuffer schema version embedded in every spec payload.
 const SANDBOX_SPEC_VERSION: &str = "0.1.0";
+
+/// Best-effort sandbox cleanup: deletes the AppContainer profile and tracking
+/// entry unless a network proxy is configured (proxy state can't be torn down
+/// yet, so the tracking entry is retained with a deferral marker).
+fn run_sandbox_cleanup(identity: &str, sid_string: &str, proxy_enabled: bool, logger: &mut Logger) {
+    let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Lifecycle cleanup");
+    if !proxy_enabled {
+        sandbox_tracking::cleanup_sandbox(identity, sid_string, logger);
+    } else {
+        sandbox_tracking::mark_cleanup_deferred(sid_string, "network proxy configured", logger);
+    }
+}
 
 impl BaseContainerRunner {
     pub fn new() -> Self {
@@ -455,11 +468,62 @@ impl ScriptRunner for BaseContainerRunner {
             cwd_wide.as_ptr()
         };
 
-        // Identity -- used by the sandbox engine to name the AppContainer profile.
-        let identity = if request.container_id.is_empty() {
-            "MxcBaseContainer".to_string()
+        // Identity: when destroy_on_exit is true we generate a random ephemeral
+        // identity so each sandbox gets a unique, cleanable AppContainer profile.
+        // Otherwise we honour whatever the caller passed in (or the default).
+        let (identity, sid_string, tracking_written) = if request.lifecycle.destroy_on_exit {
+            let ephemeral = sandbox_tracking::generate_sandbox_identity();
+            let _ = writeln!(
+                logger,
+                "{EMOJI_WARNING} destroy_on_exit=true: overriding caller identity '{}' -> '{}' for ephemeral cleanup",
+                request.container_id, ephemeral
+            );
+
+            // Derive the AppContainer SID for registry tracking.
+            // This is deterministic and does not require the profile to exist yet.
+            let sid = match sandbox_tracking::derive_sid_string(&ephemeral) {
+                Ok(s) => {
+                    let _ = writeln!(logger, "derived SID: {}", s);
+                    s
+                }
+                Err(e) => {
+                    let _ = writeln!(logger, "warning: could not derive SID: {}", e);
+                    String::new()
+                }
+            };
+
+            // Write registry tracking entry before launch so it survives crashes.
+            let written = if !sid.is_empty() {
+                let entry = TrackingEntry {
+                    identity: ephemeral.clone(),
+                    sid_string: sid.clone(),
+                    destroy_on_exit: true,
+                    requested_identity: request.container_id.clone(),
+                };
+                match sandbox_tracking::write_tracking_entry(&entry, logger) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        let _ = writeln!(logger, "warning: tracking entry write failed: {}", e);
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+
+            (ephemeral, sid, written)
         } else {
-            request.container_id.clone()
+            let id = if request.container_id.is_empty() {
+                sandbox_tracking::generate_sandbox_identity()
+            } else {
+                request.container_id.clone()
+            };
+            let _ = writeln!(
+                logger,
+                "destroy_on_exit=false; using identity '{}', no tracking",
+                id
+            );
+            (id, String::new(), false)
         };
         let identity_wide = string_util::to_wide(&identity);
 
@@ -502,6 +566,16 @@ impl ScriptRunner for BaseContainerRunner {
                     let _ = CloseHandle(pi.hThread);
                 }
             }
+            // The OS may have created the AppContainer profile before failing,
+            // so run the same cleanup logic used on normal exit.
+            if tracking_written {
+                run_sandbox_cleanup(
+                    &identity,
+                    &sid_string,
+                    request.policy.network_proxy.is_enabled(),
+                    logger,
+                );
+            }
             let err = unsafe { GetLastError() };
             if err.0 == ERROR_CALL_NOT_IMPLEMENTED {
                 return ScriptResponse::error(
@@ -517,6 +591,16 @@ impl ScriptRunner for BaseContainerRunner {
         }
 
         let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
+
+        // Register Ctrl+C handler so cleanup runs if wxc-exec is interrupted
+        // while waiting for the child process.
+        if tracking_written {
+            sandbox_tracking::register_ctrl_c_cleanup(
+                &identity,
+                &sid_string,
+                request.policy.network_proxy.is_enabled(),
+            );
+        }
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Wait for exit");
 
@@ -544,6 +628,20 @@ impl ScriptRunner for BaseContainerRunner {
         }
 
         let _ = writeln!(logger, "process exited with code {exit_code}");
+
+        // 6. Sandbox cleanup: delete AppContainer profile and tracking entry.
+        //    Only runs when tracking was written (i.e., destroy_on_exit was true).
+        //    Deferred if a network proxy is configured (proxy state can't be cleaned up yet).
+        if tracking_written {
+            run_sandbox_cleanup(
+                &identity,
+                &sid_string,
+                request.policy.network_proxy.is_enabled(),
+                logger,
+            );
+            // Unregister so a late Ctrl+C doesn't double-cleanup.
+            sandbox_tracking::unregister_ctrl_c_cleanup();
+        }
 
         let _ = writeln!(
             logger,
