@@ -144,25 +144,15 @@ impl ScriptRunner for SeatbeltScriptRunner {
         match run_with_pty(command, options) {
             Ok(PtyOutcome::Exited(status)) => ScriptResponse {
                 exit_code: status.code().unwrap_or(-1),
-                standard_out: String::new(),
-                standard_err: String::new(),
-                error_message: String::new(),
+                ..Default::default()
             },
             Ok(PtyOutcome::TimedOut) => {
-                let _ = writeln!(
-                    logger,
+                let msg = format!(
                     "Seatbelt: script timed out after {}ms",
                     request.script_timeout
                 );
-                ScriptResponse {
-                    exit_code: -1,
-                    standard_out: String::new(),
-                    standard_err: String::new(),
-                    error_message: format!(
-                        "Seatbelt: script timed out after {}ms",
-                        request.script_timeout
-                    ),
-                }
+                let _ = writeln!(logger, "{msg}");
+                error_response(msg)
             }
             Err(error) => error_response(format!(
                 "failed to spawn {SANDBOX_EXEC}: {error}; ensure sandbox-exec exists"
@@ -173,10 +163,8 @@ impl ScriptRunner for SeatbeltScriptRunner {
 
 fn error_response(message: String) -> ScriptResponse {
     ScriptResponse {
-        exit_code: -1,
-        standard_out: String::new(),
-        standard_err: String::new(),
         error_message: message,
+        ..Default::default()
     }
 }
 
