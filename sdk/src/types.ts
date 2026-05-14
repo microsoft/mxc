@@ -19,6 +19,27 @@ export interface ProcessConfig {
   env?: string[];
   /** Execution timeout in milliseconds (default: 0 = no timeout) */
   timeout?: number;
+  /** Process-level resource caps. Enforced via Job Object on Windows backends. */
+  resourceLimits?: ResourceLimits;
+}
+
+/**
+ * Process-level resource caps enforced on the sandboxed process and all of its
+ * descendants. On Windows backends these are implemented via a Job Object.
+ *
+ * A value of 0 (the default for each numeric cap) means "no limit". When
+ * resourceLimits is omitted entirely, the executor still creates a Job Object
+ * with KILL_ON_JOB_CLOSE so descendant processes cannot outlive the sandbox.
+ */
+export interface ResourceLimits {
+  /** Maximum committed memory in MiB across all processes in the job. 0 = no limit. */
+  memoryMb?: number;
+  /** Maximum concurrent active processes (fork-bomb protection). 0 = no limit. */
+  maxProcesses?: number;
+  /** CPU rate cap as a percentage 0..=100. 0 = no limit. */
+  cpuRatePercent?: number;
+  /** Whether the sandboxed process may spawn child processes. Defaults to true. */
+  allowChildProcesses?: boolean;
 }
 
 /**
@@ -302,6 +323,8 @@ export type SandboxPolicy = {
   };
   /** Execution timeout in milliseconds. Omitted = no timeout. */
   timeoutMs?: number;
+  /** Process-level resource caps (memory, process count, CPU, child-process policy). */
+  resourceLimits?: ResourceLimits;
 }
 
 /**

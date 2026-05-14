@@ -59,6 +59,34 @@ function validatePolicyVersion(version: string): void {
     }
 }
 
+function validateResourceLimits(policy: SandboxPolicy): void {
+    const limits = policy.resourceLimits;
+    if (!limits) {
+        return;
+    }
+
+    const numericCaps: Array<[string, number | undefined]> = [
+        ['memoryMb', limits.memoryMb],
+        ['maxProcesses', limits.maxProcesses],
+        ['cpuRatePercent', limits.cpuRatePercent],
+    ];
+
+    for (const [name, value] of numericCaps) {
+        if (value === undefined) {
+            continue;
+        }
+        if (!Number.isInteger(value)) {
+            throw new Error(`resourceLimits.${name} must be an integer`);
+        }
+        if (value < 0) {
+            throw new Error(`resourceLimits.${name} must be greater than or equal to 0`);
+        }
+    }
+
+    if (limits.cpuRatePercent !== undefined && limits.cpuRatePercent > 100) {
+        throw new Error('resourceLimits.cpuRatePercent must be between 0 and 100');
+    }
+}
 
 /**
  * Builds the WSLC (WSL Container) portion of a ContainerConfig.
@@ -228,6 +256,7 @@ export function createConfigFromPolicy(
 ): ContainerConfig {
     diagLogVersion();
     validatePolicyVersion(policy.version);
+    validateResourceLimits(policy);
 
     const platform = os.platform();
     const containerId = containerName ?? generateRandomContainerName();
@@ -243,6 +272,7 @@ export function createConfigFromPolicy(
         process: {
             commandLine: '',
             timeout: policy.timeoutMs ?? 0,
+            ...(policy.resourceLimits ? { resourceLimits: policy.resourceLimits } : {}),
         },
     };
 

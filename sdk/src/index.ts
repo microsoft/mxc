@@ -35,6 +35,7 @@ export {
   ExperimentalBackends,
   ContainerConfig,
   PlatformSupport,
+  ResourceLimits,
 } from './types.js';
 
 // Export platform detection functions
