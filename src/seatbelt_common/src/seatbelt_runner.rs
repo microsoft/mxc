@@ -7,7 +7,9 @@
 //! The sandbox is applied via `sandbox_init()` inside `Command::pre_exec`,
 //! then `/bin/sh` is exec'd directly. The child inherits the parent's
 //! Mach bootstrap namespace so both CLI commands and GUI applications
-//! (when `guiAccess = true`) work correctly.
+//! (when `guiAccess = true`) work correctly. The exec path uses
+//! [`mxc_pty::run_with_pty`] so the inner shell sees a real TTY and the
+//! host can stream its output as it arrives.
 //!
 //! For apps that require LaunchServices (`launchMethod: "open"`), the runner
 //! writes a sandbox helper script and launches the target app via `open -n -W`,
@@ -23,6 +25,7 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome};
 use wxc_common::logger::Logger;
 use wxc_common::models::{CodexRequest, LaunchMethod, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
@@ -145,36 +148,28 @@ impl SeatbeltScriptRunner {
         }
 
         if gui_access {
-            // GUI apps need inherited stdio for PTY/window interaction.
+            // GUI apps need inherited stdio for window interaction.
             command
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit());
-        } else {
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-        }
 
-        // Spawn.
-        let mut child = match command.spawn() {
-            Ok(process) => process,
-            Err(error) => {
-                let msg = if error.kind() == std::io::ErrorKind::PermissionDenied {
-                    format!(
-                        "failed to spawn sandboxed process (sandbox_init likely rejected \
-                         the profile — check stderr for details): {error}"
-                    )
-                } else {
-                    format!("failed to spawn sandboxed process: {error}")
-                };
-                return error_response(msg);
-            }
-        };
+            // Spawn manually — run_with_pty is not appropriate for GUI mode.
+            let mut child = match command.spawn() {
+                Ok(process) => process,
+                Err(error) => {
+                    let msg = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                        format!(
+                            "failed to spawn sandboxed process (sandbox_init likely rejected \
+                             the profile — check stderr for details): {error}"
+                        )
+                    } else {
+                        format!("failed to spawn sandboxed process: {error}")
+                    };
+                    return error_response(msg);
+                }
+            };
 
-        if gui_access {
-            // GUI mode: no output capture, just wait for exit.
             let timeout = if request.script_timeout == 0 {
                 None
             } else {
@@ -184,70 +179,50 @@ impl SeatbeltScriptRunner {
             match wait_with_timeout(&mut child, timeout) {
                 Ok(status) => ScriptResponse {
                     exit_code: status.code().unwrap_or(-1),
-                    standard_out: String::new(),
-                    standard_err: String::new(),
-                    error_message: String::new(),
+                    ..Default::default()
                 },
                 Err(WaitError::Timeout) => {
                     let _ = child.kill();
                     let _ = child.wait();
                     ScriptResponse {
                         exit_code: -1,
-                        standard_out: String::new(),
-                        standard_err: String::new(),
                         error_message: format!(
                             "Seatbelt: process timed out after {}ms",
                             request.script_timeout
                         ),
+                        ..Default::default()
                     }
                 }
                 Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
             }
         } else {
-            // CLI mode: capture stdout/stderr.
-            let stdout_handle = child
-                .stdout
-                .take()
-                .map(|reader| std::thread::spawn(move || read_to_string(reader)));
-            let stderr_handle = child
-                .stderr
-                .take()
-                .map(|reader| std::thread::spawn(move || read_to_string(reader)));
-
+            // CLI mode: hand off to the shared PTY bridge so the inner shell
+            // sees a real TTY and the host can stream output as it arrives.
             let timeout = if request.script_timeout == 0 {
                 None
             } else {
                 Some(Duration::from_millis(u64::from(request.script_timeout)))
             };
 
-            let exit_status = match wait_with_timeout(&mut child, timeout) {
-                Ok(status) => status,
-                Err(WaitError::Timeout) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return ScriptResponse {
-                        exit_code: -1,
-                        standard_out: join_reader("stdout", stdout_handle),
-                        standard_err: join_reader("stderr", stderr_handle),
-                        error_message: format!(
-                            "Seatbelt: script timed out after {}ms",
-                            request.script_timeout
-                        ),
-                    };
-                }
-                Err(WaitError::Io(error)) => {
-                    return error_response(format!("wait failed: {error}"))
-                }
+            let options = PtyOptions {
+                timeout,
+                ..PtyOptions::default()
             };
 
-            let stdout = join_reader("stdout", stdout_handle);
-            let stderr = join_reader("stderr", stderr_handle);
-
-            ScriptResponse {
-                exit_code: exit_status.code().unwrap_or(-1),
-                standard_out: stdout,
-                standard_err: stderr,
-                error_message: String::new(),
+            match run_with_pty(command, options) {
+                Ok(PtyOutcome::Exited(status)) => ScriptResponse {
+                    exit_code: status.code().unwrap_or(-1),
+                    ..Default::default()
+                },
+                Ok(PtyOutcome::TimedOut) => {
+                    let msg = format!(
+                        "Seatbelt: script timed out after {}ms",
+                        request.script_timeout
+                    );
+                    let _ = writeln!(logger, "{msg}");
+                    error_response(msg)
+                }
+                Err(error) => error_response(format!("Seatbelt: {error}")),
             }
         }
     }
@@ -445,39 +420,6 @@ fn error_response(message: String) -> ScriptResponse {
         standard_out: String::new(),
         standard_err: String::new(),
         error_message: message,
-    }
-}
-
-/// Reads all bytes from `r` into a String. Returns whatever was captured
-/// even if the read fails partway (e.g. broken pipe from a killed child).
-fn read_to_string<R: std::io::Read>(mut reader: R) -> (String, Option<std::io::Error>) {
-    let mut buffer = String::new();
-    match reader.read_to_string(&mut buffer) {
-        Ok(_) => (buffer, None),
-        Err(error) => (buffer, Some(error)),
-    }
-}
-
-fn join_reader(
-    name: &str,
-    handle: Option<std::thread::JoinHandle<(String, Option<std::io::Error>)>>,
-) -> String {
-    match handle {
-        Some(h) => match h.join() {
-            Ok((output, None)) => output,
-            Ok((output, Some(error))) => {
-                eprintln!(
-                    "Seatbelt: warning: failed to read child {}: {}",
-                    name, error
-                );
-                output
-            }
-            Err(_) => {
-                eprintln!("Seatbelt: warning: child {} reader thread panicked", name);
-                String::new()
-            }
-        },
-        None => String::new(),
     }
 }
 

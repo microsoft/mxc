@@ -19,9 +19,19 @@ import * as os from 'os';
 /**
  * Compute the per-user pipe name (includes current user's SID).
  * Falls back to the base name if the SID cannot be determined.
+ *
+ * Windows-only — the diagnostic console only runs on Windows. On other
+ * platforms this returns the base name (which is never used because
+ * `ensurePipe` short-circuits below) without spawning `whoami`. The
+ * `whoami /user /fo csv /nh` invocation uses Windows-only flags that
+ * cause GNU/BSD `whoami` to print "usage: whoami" on stderr — visible
+ * to any caller that inherits our stdio (e.g. mxc-exec-mac under a pty).
  */
 function getDiagnosticPipeName(): string {
     const baseName = '\\\\.\\pipe\\mxc-diagnostics';
+    if (os.platform() !== 'win32') {
+        return baseName;
+    }
     try {
         const output = execSync('whoami /user /fo csv /nh', {
             encoding: 'utf8',
