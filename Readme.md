@@ -156,7 +156,7 @@ xperf -merge user.etl kernel.etl merged.etl
 
 MXC also supports Linux via [LXC (Linux Containers)](https://linuxcontainers.org/lxc/). On Linux, the `lxc-exec` binary provides container-based isolation using Linux namespaces, bind mounts for filesystem policy, and iptables/nftables for network policy.
 
-For full details on the LXC backend, see [docs/lxc-backend.md](docs/lxc-backend.md).
+For full details on the LXC backend, see [docs/lxc-support/lxc-backend.md](docs/lxc-support/lxc-backend.md).
 
 ### Building on Linux
 
