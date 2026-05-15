@@ -1,0 +1,117 @@
+{
+  "$comment": "OneFuzz job manifest for the mxc_fuzz crate. Validated by the OIP tool in the Fuzz pipeline. SDL work item: 62294501.",
+  "ConfigVersion": 3,
+  "Entries": [
+    {
+      "JobNotificationEmail": "TODO-wxc-common-owner@microsoft.com",
+      "FuzzerProperties": {
+        "Fuzzer": {
+          "$type": "libfuzzer"
+        },
+        "FuzzerExe": "config_parser.exe",
+        "JobDependencies": [
+          "clang_rt.asan_dynamic-x86_64.dll"
+        ],
+        "Seeds": [
+          {
+            "Path": "corpus\\config_parser"
+          }
+        ]
+      },
+      "OneFuzzJobs": [
+        {
+          "ProjectName": "MXC",
+          "TargetName": "config_parser",
+          "EnableMicrosoftTelemetry": true
+        }
+      ],
+      "AdoTemplate": {
+        "Org": "microsoft",
+        "Project": "TODO-ADO-project",
+        "AreaPath": "TODO\\Area\\Path",
+        "IterationPath": "TODO\\Iteration\\Path",
+        "AssignedTo": "TODO-wxc-common-owner@microsoft.com",
+        "TemplateName": "Bug"
+      },
+      "CodeReviewers": {
+        "Required": ["TODO-wxc-common-owner@microsoft.com"],
+        "Optional": []
+      },
+      "SdlTaskId": 62294501
+    },
+    {
+      "JobNotificationEmail": "TODO-wxc-common-owner@microsoft.com",
+      "FuzzerProperties": {
+        "Fuzzer": {
+          "$type": "libfuzzer"
+        },
+        "FuzzerExe": "base64_decode.exe",
+        "JobDependencies": [
+          "clang_rt.asan_dynamic-x86_64.dll"
+        ],
+        "Seeds": [
+          {
+            "Path": "corpus\\base64_decode"
+          }
+        ]
+      },
+      "OneFuzzJobs": [
+        {
+          "ProjectName": "MXC",
+          "TargetName": "base64_decode",
+          "EnableMicrosoftTelemetry": true
+        }
+      ],
+      "AdoTemplate": {
+        "Org": "microsoft",
+        "Project": "TODO-ADO-project",
+        "AreaPath": "TODO\\Area\\Path",
+        "IterationPath": "TODO\\Iteration\\Path",
+        "AssignedTo": "TODO-wxc-common-owner@microsoft.com",
+        "TemplateName": "Bug"
+      },
+      "CodeReviewers": {
+        "Required": ["TODO-wxc-common-owner@microsoft.com"],
+        "Optional": []
+      },
+      "SdlTaskId": 62294501
+    },
+    {
+      "JobNotificationEmail": "TODO-wxc-common-owner@microsoft.com",
+      "FuzzerProperties": {
+        "Fuzzer": {
+          "$type": "libfuzzer"
+        },
+        "FuzzerExe": "validator.exe",
+        "JobDependencies": [
+          "clang_rt.asan_dynamic-x86_64.dll"
+        ],
+        "Seeds": [
+          {
+            "Path": "corpus\\validator"
+          }
+        ]
+      },
+      "OneFuzzJobs": [
+        {
+          "ProjectName": "MXC",
+          "TargetName": "validator",
+          "EnableMicrosoftTelemetry": true
+        }
+      ],
+      "AdoTemplate": {
+        "Org": "microsoft",
+        "Project": "TODO-ADO-project",
+        "AreaPath": "TODO\\Area\\Path",
+        "IterationPath": "TODO\\Iteration\\Path",
+        "AssignedTo": "TODO-wxc-common-owner@microsoft.com",
+        "TemplateName": "Bug"
+      },
+      "CodeReviewers": {
+        "Required": ["TODO-wxc-common-owner@microsoft.com"],
+        "Optional": []
+      },
+      "SdlTaskId": 62294501
+    }
+  ]
+}
