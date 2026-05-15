@@ -14,6 +14,7 @@ members = [
     "isolation_session_bindings",
     "seatbelt_common",
     "mxc_darwin",
+    "mxc_pty",
     "generated/base_container_specification",
     "mxc_diagnostic_console",
 ]
@@ -73,6 +74,7 @@ nix = { version = "0.29", features = ["mount", "sched", "signal", "net", "proces
 lxc_common = { path = "lxc_common" }
 wslc_common = { path = "wslc_common" }
 isolation_session_bindings = { path = "isolation_session_bindings" }
+mxc_pty = { path = "mxc_pty" }
 flatbuffers = "25"
 sandbox_spec = { path = "generated/base_container_specification" }
 widestring = "1"

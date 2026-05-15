@@ -12,18 +12,19 @@ use windows::Win32::Security::Isolation::{
 use windows::Win32::Security::PSID;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
+    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
-    STARTUPINFOEXW, STARTUPINFOW,
+    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, STARTUPINFOEXW, STARTUPINFOW,
 };
 use windows_core::{PCWSTR, PWSTR};
 
 use crate::error::WxcError;
+use crate::job_object::UiJobObject;
 use crate::logger::Logger;
 use crate::models::{CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
 use crate::process_util::{get_capability_sid_from_name, OwnedHandle, SidAndAttributes};
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
-use crate::string_util;
+use crate::{process_mitigation, string_util, ui_policy};
 
 // Attribute list constants (not always exported by the windows crate)
 const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES: usize = 0x0002_0009;
@@ -31,6 +32,7 @@ const PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY: usize = 0x0002_000F
 const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
 const EXTENDED_STARTUPINFO_PRESENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0008_0000);
 const CREATE_UNICODE_ENVIRONMENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0000_0400);
+const CREATE_SUSPENDED: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0000_0004);
 
 /// SE_GROUP_ENABLED attribute value for SID_AND_ATTRIBUTES.
 const SE_GROUP_ENABLED: u32 = 0x0000_0004;
@@ -110,6 +112,23 @@ struct SecurityCapabilities {
     capabilities: *mut SidAndAttributes,
     capability_count: u32,
     reserved: u32,
+}
+
+/// Compute the number of `PROC_THREAD_ATTRIBUTE_*` entries the attribute
+/// list will hold for a given policy.
+///
+/// Always at least 1 (`SECURITY_CAPABILITIES`). LPAC adds one
+/// (`ALL_APPLICATION_PACKAGES_POLICY`); UI-disable adds one
+/// (`MITIGATION_POLICY` for Win32k disable).
+fn compute_attr_count(least_privilege_mode: bool, ui_disable: bool) -> u32 {
+    let mut n = 1;
+    if least_privilege_mode {
+        n += 1;
+    }
+    if ui_disable {
+        n += 1;
+    }
+    n
 }
 
 /// Script runner that executes commands inside a Windows AppContainer.
@@ -239,11 +258,15 @@ impl AppContainerScriptRunner {
         };
 
         // --- Allocate and initialize attribute list ---
-        let attr_count = if request.policy.least_privilege_mode {
-            2u32
-        } else {
-            1u32
-        };
+        let attr_count = compute_attr_count(
+            request.policy.least_privilege_mode,
+            request.policy.ui.disable,
+        );
+
+        // Lifetime spans the attribute list and CreateProcessW:
+        // PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY stores a pointer into this u64.
+        let mitigation_value: u64 = process_mitigation::win32k_disable_value();
+
         let mut attr_list_size: usize = 0;
 
         // First call to get the required buffer size.
@@ -318,6 +341,29 @@ impl AppContainerScriptRunner {
             }
         }
 
+        // 3. MITIGATION_POLICY (Win32k syscall disable) — applied by the kernel
+        // before the child runs any user-mode code, so there is no race window.
+        if request.policy.ui.disable {
+            unsafe {
+                UpdateProcThreadAttribute(
+                    attr_list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY as usize,
+                    Some(&mitigation_value as *const u64 as *const core::ffi::c_void),
+                    std::mem::size_of::<u64>(),
+                    None,
+                    None,
+                )
+                .map_err(|e| {
+                    WxcError::Process(format!(
+                        "UpdateProcThreadAttribute(MITIGATION_POLICY): {}",
+                        e
+                    ))
+                })?;
+            }
+            logger.log_line("Win32k mitigation applied to child process");
+        }
+
         // --- Setup STARTUPINFOEXW ---
         let mut desktop_wide = string_util::to_wide("winsta0\\default");
 
@@ -350,9 +396,11 @@ impl AppContainerScriptRunner {
             .map(|block| block.as_ptr() as *const core::ffi::c_void);
 
         let creation_flags = if env_block.is_some() {
-            PROCESS_CREATION_FLAGS(EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_UNICODE_ENVIRONMENT.0)
+            PROCESS_CREATION_FLAGS(
+                EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_UNICODE_ENVIRONMENT.0 | CREATE_SUSPENDED.0,
+            )
         } else {
-            EXTENDED_STARTUPINFO_PRESENT
+            PROCESS_CREATION_FLAGS(EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0)
         };
 
         // --- Create process (console inheritance) ---
@@ -414,7 +462,43 @@ impl AppContainerScriptRunner {
         ));
 
         let process_handle = OwnedHandle::new(pi.hProcess);
-        let _thread_handle = OwnedHandle::new(pi.hThread);
+        let thread_handle = OwnedHandle::new(pi.hThread);
+
+        // CRITICAL: child was created with CREATE_SUSPENDED. We must either
+        // successfully attach the Job Object and ResumeThread, OR TerminateProcess.
+        // Anything that returns an error in this block must terminate first.
+        let _job = match (|| -> Result<UiJobObject, WxcError> {
+            let job = UiJobObject::new()?;
+            let restrictions = ui_policy::resolve_ui_restrictions(
+                &request.policy.ui,
+                &request.policy.base_process_ui,
+            );
+            job.set_ui_limits(&restrictions)?;
+            job.assign_process(process_handle.get())?;
+            Ok(job)
+        })() {
+            Ok(job) => {
+                logger.log_line("UI Job Object assigned to child process");
+                job
+            }
+            Err(e) => {
+                unsafe {
+                    let _ = TerminateProcess(process_handle.get(), u32::MAX);
+                }
+                return Err(e);
+            }
+        };
+
+        // Resume the child now that UI restrictions are in place.
+        // ResumeThread returns the previous suspend count (or u32::MAX on failure).
+        let resume_result = unsafe { ResumeThread(thread_handle.get()) };
+        if resume_result == u32::MAX {
+            let err = unsafe { GetLastError() };
+            unsafe {
+                let _ = TerminateProcess(process_handle.get(), u32::MAX);
+            }
+            return Err(WxcError::Process(format!("ResumeThread failed: {:?}", err)));
+        }
 
         // --- Wait for child process to exit ---
         // No relay threads needed — child shares our console directly.
@@ -513,6 +597,7 @@ impl ScriptRunner for AppContainerScriptRunner {
         }
 
         let principal_id = self.get_principal_id();
+        logger.log_line(&format!("AppContainerSID: {principal_id}"));
 
         let mut bfs_manager = FileSystemBfsManager::new(self.app_container_name.clone());
         if let Err(e) = bfs_manager.configure(&request.policy, logger) {
@@ -561,5 +646,28 @@ impl Drop for AppContainerScriptRunner {
             }
             self.app_container_sid = PSID(ptr::null_mut());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn attr_count_neither() {
+        assert_eq!(super::compute_attr_count(false, false), 1);
+    }
+
+    #[test]
+    fn attr_count_lpac_only() {
+        assert_eq!(super::compute_attr_count(true, false), 2);
+    }
+
+    #[test]
+    fn attr_count_ui_disable_only() {
+        assert_eq!(super::compute_attr_count(false, true), 2);
+    }
+
+    #[test]
+    fn attr_count_both() {
+        assert_eq!(super::compute_attr_count(true, true), 3);
     }
 }

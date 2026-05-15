@@ -1,0 +1,13 @@
+[package]
+name = "mxc_pty"
+version = "0.1.0"
+edition = "2021"
+
+# Unix-only at runtime: mxc_pty wraps `openpty` + `pre_exec` (TIOCSCTTY,
+# setsid) + sigwait-style helpers, none of which have a sensible Windows
+# equivalent. The crate still compiles workspace-wide because `lxc_common`
+# (which depends on it) builds on Windows for the `cargo clippy --workspace`
+# CI lane; non-unix targets get a stub `run_with_pty` that returns an error.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+nix = { workspace = true }
+libc = { workspace = true }
