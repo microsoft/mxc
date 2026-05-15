@@ -29,9 +29,9 @@ use windows::Win32::Security::Isolation::{
     DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::{FreeSid, PSID};
+use windows_core::PCWSTR;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_OPTION_VOLATILE};
 use winreg::RegKey;
-use windows_core::PCWSTR;
 
 use crate::logger::Logger;
 use crate::string_util;
