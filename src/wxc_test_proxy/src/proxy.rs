@@ -50,9 +50,7 @@ pub async fn start() -> u16 {
     port
 }
 
-async fn handle_request(
-    req: Request<Incoming>,
-) -> Result<Response<Full<Bytes>>, BoxError> {
+async fn handle_request(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, BoxError> {
     if req.method() == Method::CONNECT {
         return handle_connect(req).await;
     }
@@ -61,9 +59,7 @@ async fn handle_request(
     handle_forward(req).await
 }
 
-async fn handle_connect(
-    req: Request<Incoming>,
-) -> Result<Response<Full<Bytes>>, BoxError> {
+async fn handle_connect(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, BoxError> {
     let authority = req
         .uri()
         .authority()
@@ -102,9 +98,7 @@ async fn handle_connect(
     Ok(empty_response(StatusCode::OK))
 }
 
-async fn handle_forward(
-    req: Request<Incoming>,
-) -> Result<Response<Full<Bytes>>, BoxError> {
+async fn handle_forward(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, BoxError> {
     let uri = req.uri().clone();
     let method = req.method().clone();
 
@@ -117,7 +111,10 @@ async fn handle_forward(
 
     // Connect to target
     let stream = TcpStream::connect(&addr).await.map_err(|err| {
-        eprintln!("[wxc-test-proxy] forward connect error for {}: {}", addr, err);
+        eprintln!(
+            "[wxc-test-proxy] forward connect error for {}: {}",
+            addr, err
+        );
         err
     })?;
 
@@ -131,10 +128,7 @@ async fn handle_forward(
     });
 
     // Build the forwarded request with a relative URI (path + query only)
-    let path = uri
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
+    let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
     let mut forward_req = Request::builder()
         .method(method)
@@ -165,7 +159,9 @@ async fn handle_forward(
 
     eprintln!(
         "[wxc-test-proxy] forwarded {} → {} ({} bytes)",
-        uri, status, resp_body.len()
+        uri,
+        status,
+        resp_body.len()
     );
 
     Ok(response.body(Full::new(resp_body))?)

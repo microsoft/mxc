@@ -157,8 +157,7 @@ async fn execute_request(
 
     // Reconnect data streams for the next execution. The guest will
     // re-accept 3 new data connections and signal StreamsReady.
-    if let Err(err) =
-        tcp_bridge::reconnect_data_streams(conn, addr, result.control_residual).await
+    if let Err(err) = tcp_bridge::reconnect_data_streams(conn, addr, result.control_residual).await
     {
         eprintln!("[daemon] failed to reconnect data streams: {:#}", err);
         // Full reset so the next request tears down and relaunches
