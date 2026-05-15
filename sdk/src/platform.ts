@@ -260,6 +260,10 @@ export function findWxcExecutable(): string | null {
  */
 function verifyExecutable(execPath: string): boolean {
   try {
+    // Paths inside Electron's app.asar exist to fs but can't be executed
+    if (execPath.includes('.asar')) {
+      return false;
+    }
     if (!fs.existsSync(execPath) || !fs.statSync(execPath).isFile()) {
       return false;
     }
