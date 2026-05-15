@@ -233,7 +233,7 @@ Tier 4's `validate_runner` enforces:
 | `readwritePaths` / `readonlyPaths` | Honored via `DaclManager` ACEs on **leaf paths only**, granting the Restricted Code SID (`S-1-5-12`) the corresponding access. No ancestor ACEs. |
 | `deniedPaths` | Honored via `DaclManager::add_deny_aces` against the Restricted Code SID. |
 | `network.defaultPolicy` / `allowedHosts` / `blockedHosts` | **Proxy only.** Built-in test proxy supported via `ProxyCoordinator`. Firewall-based modes are rejected. |
-| `network_enforcement_mode = Capabilities` or `Both` | **Rejected** in `validate_runner`. Tier 4 has no AppContainer principal to key firewall rules to. |
+| `network_enforcement_mode = Capabilities` or `Both` | **Accepted** but only the proxy honors the policy. The presence of capability-keyed enforcement is detected via `policy.capabilities` (see below); without capability SIDs there is nothing to key firewall rules to, so the mode field alone carries no enforcement intent. |
 | `policy.ui.*` (clipboard, injection, desktop) | Honored via `UiJobObject::set_ui_limits` (same module as Tiers 1–3). |
 | `policy.ui.disable` (Win32k lockdown) | Honored via `PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY` on `CreateProcessAsUserW`. |
 | `policy.least_privilege_mode` (LPAC) | **Rejected** in `validate_runner`. LPAC is an AppContainer-only construct. |
@@ -242,6 +242,39 @@ Tier 4's `validate_runner` enforces:
 Rejections are surfaced as actionable errors that name Tier 4
 explicitly, e.g. "Tier 4 rejects `leastPrivilegeMode = true`: LPAC is
 an AppContainer-only construct."
+
+## Caller privilege requirements (operational)
+
+Tier 4 spawns the child via `CreateProcessAsUserW`, which requires
+the **calling** process to hold `SeIncreaseQuotaPrivilege` (the
+"Adjust memory quotas for a process" privilege; `0x80070522` /
+`ERROR_PRIVILEGE_NOT_HELD` is raised when missing). On Windows
+this privilege is granted by default to:
+
+- Members of the Administrators group (elevated processes).
+- Service identities: `LocalSystem`, `LocalService`, `NetworkService`.
+- Users explicitly assigned the privilege via Local Security Policy.
+
+Standard interactive users running an unelevated shell **do not**
+have this privilege and Tier 4 spawn will fail at
+`CreateProcessAsUserW`. This is the same elevation requirement as
+Tier 1 (BaseContainer) and the path-augmentation half of Tier 3
+(`DaclManager` write-DAC). Only Tier 2 (AppContainer + BFS) is
+fully usable from a non-privileged shell.
+
+`maybe_enable_quota_privilege()` in the runner attempts to enable
+the privilege if it is present-but-disabled in the calling token
+(a common case for elevated processes whose privileges are inactive
+until `AdjustTokenPrivileges` is called). It is best-effort: if the
+privilege is not present at all, the spawn fails with a clear error
+message that names the missing privilege.
+
+Switching to `CreateProcessWithTokenW` would relax the requirement
+to `SeImpersonatePrivilege`, which standard interactive users also
+do not have by default — so it is not a meaningful improvement
+without a broker. A future iteration may introduce a small
+elevated/service-context broker that fronts Tier 4 spawns for
+unelevated callers; that is out of scope for this proposal.
 
 ## Threat model
 
