@@ -274,12 +274,17 @@ impl RestrictedTokenRunner {
         // the calling token (and would otherwise also require
         // `SeAssignPrimaryTokenPrivilege`, but the latter is waived
         // because our token is a restricted derivative of the caller's
-        // primary token). The kernel auto-enables privileges that are
-        // present-but-disabled, but if the privilege isn't in the token
-        // at all, the spawn fails with `ERROR_PRIVILEGE_NOT_HELD`. We
-        // best-effort enable it here; if the privilege is absent we let
-        // the `CreateProcessAsUserW` call surface a clear error.
-        let _ = maybe_enable_quota_privilege();
+        // primary token). `CreateProcessAsUserW` does NOT auto-enable
+        // privileges that are present-but-disabled; the caller must
+        // enable them via `AdjustTokenPrivileges` first. If the
+        // privilege isn't in the token at all, the spawn fails with
+        // `ERROR_PRIVILEGE_NOT_HELD` — we let that surface as-is so the
+        // operator gets a clear signal.
+        let quota_ok = maybe_enable_quota_privilege();
+        logger.log_line(&format!(
+            "SeIncreaseQuotaPrivilege enable: {}",
+            if quota_ok { "OK" } else { "FAILED" }
+        ));
 
         // ── Attribute list ────────────────────────────────────────
         //
@@ -736,11 +741,18 @@ impl ScriptRunner for RestrictedTokenRunner {
 /// subsequent `CreateProcessAsUserW` call will surface a clear
 /// `ERROR_PRIVILEGE_NOT_HELD` if the privilege is genuinely missing.
 fn maybe_enable_quota_privilege() -> bool {
-    set_privilege_enabled(w_str("SeIncreaseQuotaPrivilege"))
-        // SeAssignPrimaryTokenPrivilege isn't strictly required for
-        // restricted derivatives of the caller's token, but enable it
-        // anyway when present so admin/system callers don't surprise.
-        | set_privilege_enabled(w_str("SeAssignPrimaryTokenPrivilege"))
+    // Only the Quota privilege determines whether we can spawn — the
+    // Primary-Token privilege is waived for restricted derivatives of
+    // the caller's own token. Attempting to enable a privilege that
+    // isn't in the token sets `ERROR_NOT_ALL_ASSIGNED` and would
+    // contaminate the success signal, so we only attempt the one that
+    // matters.
+    let ok = set_privilege_enabled(w_str("SeIncreaseQuotaPrivilege"));
+    eprintln!(
+        "[tier4] maybe_enable_quota_privilege: SeIncreaseQuotaPrivilege -> {}",
+        if ok { "enabled" } else { "FAILED" }
+    );
+    ok
 }
 
 fn w_str(s: &str) -> Vec<u16> {
@@ -750,19 +762,20 @@ fn w_str(s: &str) -> Vec<u16> {
 fn set_privilege_enabled(name_wide: Vec<u16>) -> bool {
     unsafe {
         let mut token = HANDLE::default();
-        if OpenProcessToken(
+        if let Err(e) = OpenProcessToken(
             GetCurrentProcess(),
             TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
             &mut token,
-        )
-        .is_err()
-        {
+        ) {
+            eprintln!("[tier4]   OpenProcessToken failed: {e}");
             return false;
         }
         let token = OwnedHandle::new(token);
 
         let mut luid = LUID::default();
-        if LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(name_wide.as_ptr()), &mut luid).is_err() {
+        if let Err(e) = LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(name_wide.as_ptr()), &mut luid)
+        {
+            eprintln!("[tier4]   LookupPrivilegeValueW failed: {e}");
             return false;
         }
 
@@ -774,10 +787,28 @@ fn set_privilege_enabled(name_wide: Vec<u16>) -> bool {
             }],
         };
 
-        let _ = AdjustTokenPrivileges(token.get(), false, Some(&tp), 0, None, None);
-        // AdjustTokenPrivileges returns success even if the privilege
-        // is not held — check GetLastError for ERROR_NOT_ALL_ASSIGNED.
-        GetLastError().is_ok()
+        // `AdjustTokenPrivileges` returns success (BOOL=TRUE) even when
+        // the privilege isn't held — in that case it sets the last
+        // error to `ERROR_NOT_ALL_ASSIGNED`. Capture both the Result and
+        // the last error so we can distinguish "API call failed
+        // outright" from "privilege not assignable".
+        let adjust_result =
+            AdjustTokenPrivileges(token.get(), false, Some(&tp), 0, None, None);
+        let last_err = GetLastError();
+        match adjust_result {
+            Ok(()) if last_err.is_ok() => true,
+            Ok(()) => {
+                eprintln!(
+                    "[tier4]   AdjustTokenPrivileges Ok but GetLastError={:?} (privilege likely not in token)",
+                    last_err
+                );
+                false
+            }
+            Err(e) => {
+                eprintln!("[tier4]   AdjustTokenPrivileges failed: {e}");
+                false
+            }
+        }
     }
 }
 
