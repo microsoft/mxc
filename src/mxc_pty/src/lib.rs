@@ -339,6 +339,20 @@ fn spawn_sigwinch_forwarder(
     // Closing them would race the signal handler.
     std::mem::forget(read_end);
     std::mem::forget(write_end);
+
+    // Make the write end non-blocking so the signal handler can't
+    // deadlock on a full pipe (the comment on `sigwinch_handler` already
+    // assumes EAGAIN-on-full, but without O_NONBLOCK write(2) would
+    // actually block inside the handler instead of dropping the wakeup).
+    // Best-effort: if fcntl fails we stay in blocking mode — same as the
+    // previous behavior, no regression.
+    unsafe {
+        let flags = libc::fcntl(write_fd, libc::F_GETFL);
+        if flags >= 0 {
+            let _ = libc::fcntl(write_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+
     SIGWINCH_PIPE_WRITE_FD.store(write_fd, std::sync::atomic::Ordering::Release);
 
     // SIGWINCH's default action is "ignore", so without an installed
