@@ -210,18 +210,11 @@ pub fn cleanup_sandbox(identity: &str, sid_string: &str, logger: &mut Logger) {
     delete_tracking_key(sid_string, logger);
 }
 
-/// Remove the registry tracking key and its Active subkey.
+/// Remove the registry tracking key and all its subkeys (including Active).
 fn delete_tracking_key(sid_string: &str, logger: &mut Logger) {
     let key_path = format!("{}\\{}", TRACKING_BASE, sid_string);
-
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-
-    // Delete Active subkey first (registry requires no child keys for deletion).
-    let active_path = format!("{}\\Active", key_path);
-    let _ = hkcu.delete_subkey(&active_path);
-
-    // Delete the tracking key itself.
-    match hkcu.delete_subkey(&key_path) {
+    match hkcu.delete_subkey_all(&key_path) {
         Ok(()) => {
             let _ = writeln!(logger, "deleted tracking key: {}", key_path);
         }
