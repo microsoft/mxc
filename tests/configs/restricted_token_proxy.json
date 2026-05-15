@@ -1,0 +1,14 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "CLI-Tier4-Proxy",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd.exe /c if defined HTTP_PROXY (exit 11) else (exit 22)"
+  },
+  "ui": {
+    "disable": false
+  },
+  "networkProxy": {
+    "builtinTestServer": true
+  }
+}
