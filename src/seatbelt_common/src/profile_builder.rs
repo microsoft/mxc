@@ -835,6 +835,11 @@ mod tests {
         assert!(!p.contains("/private/var/db/mds"));
     }
 
+    // Keychain rules expand `~/Library/Keychains` from $HOME at build
+    // time, so the tests that exercise `keychain_access: true` are gated
+    // to macOS (the only OS where this code path is actually used and
+    // where $HOME is reliably set in CI).
+    #[cfg(target_os = "macos")]
     #[test]
     fn keychain_access_true_allows_securityd_mach_services() {
         let mut r = req();
@@ -852,6 +857,7 @@ mod tests {
         assert!(p.contains("(global-name-regex #\"^com\\.apple\\.lsd\\.\")"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn keychain_access_true_allows_filesystem_paths() {
         let mut r = req();
@@ -873,6 +879,7 @@ mod tests {
         assert!(p.contains("(subpath \"/private/var/folders\")"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn keychain_access_true_allows_iokit_open() {
         // Verify keychainAccess emits iokit-open even when nestedPty is off,
@@ -887,6 +894,7 @@ mod tests {
         assert!(p.contains("(allow iokit-open)"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn keychain_access_iokit_allow_does_not_undo_hid_deny() {
         // Same last-match-wins concern as nested_pty: keychain emits
