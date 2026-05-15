@@ -5,11 +5,11 @@
 # Microsoft-hosted agent and publishes the binary as a pipeline artifact
 # so the Package.NpmSdk and SDK.Integration.Test stages can consume it.
 #
-# This template uses rustup + plain cargo instead of the 1ES.Build.Rust.*
-# tasks because the Microsoft Rust toolchain (NuGet-based) is not available
-# on macOS pools. Crate downloads still go through the centralized Azure
-# Artifacts feed (appended via .azure-pipelines/.cargo/config.toml) to
-# satisfy SFI supply-chain requirements.
+# This template uses the Microsoft Rust toolchain installer (msrustup) from
+# the Azure Artifacts NuGet feed instead of the 1ES.Build.Rust.* tasks, which
+# are not available on the Microsoft-hosted macOS pool. Crate downloads still
+# go through the centralized Azure Artifacts feed (appended via
+# .azure-pipelines/.cargo/config.toml) to satisfy SFI supply-chain requirements.
 
 parameters:
 - name: triplet
@@ -39,13 +39,6 @@ jobs:
   steps:
     - checkout: self
 
-    - script: |
-        set -euo pipefail
-        rustup update stable
-        rustup component add rustfmt clippy
-        rustup target add $(targetTriple)
-      displayName: Setup Rust toolchain
-
     # Append pipeline-specific Cargo settings (centralized registry) to
     # the workspace config so crates are pulled from the Azure Artifacts
     # feed (SFI compliance). Authentication is provided via env var on
@@ -53,43 +46,41 @@ jobs:
     # The append is guarded: skip if the registry block is already present
     # (e.g., if the workspace config gains these settings in the future).
     - script: |
-        set -euo pipefail
-        CONFIG="$(Build.SourcesDirectory)/.cargo/config.toml"
-        if ! grep -q '\[registries\]' "$CONFIG" 2>/dev/null; then
-          cat "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml" >> "$CONFIG"
-        fi
-        if ! grep -q 'global-credential-providers' "$CONFIG" 2>/dev/null; then
-          echo '' >> "$CONFIG"
-          echo '[registry]' >> "$CONFIG"
-          echo 'global-credential-providers = ["cargo:token"]' >> "$CONFIG"
-        fi
+        echo "" >> "$(Build.SourcesDirectory)/.cargo/config.toml"
+        cat "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml" >> "$(Build.SourcesDirectory)/.cargo/config.toml"
       displayName: Setup Cargo Config
+
+    # Install the Microsoft Rust toolchain from the NuGet feed instead of
+    # plain rustup. This satisfies 1ES supply-chain requirements by using
+    # the same centralized feed (Mxc-Azure-Feed) as Windows/Linux builds.
+    - task: RustInstaller@1
+      inputs:
+        toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+        rustVersion: 'ms-prod-1.93'
+        cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/Cargo/index/
+      displayName: Install Rust toolchain
+
+    - task: CargoAuthenticate@0
+      inputs:
+        configFile: '$(Build.SourcesDirectory)/.cargo/config.toml'
 
     - script: cargo fmt --all -- --check
       displayName: Check formatting
       workingDirectory: $(workingDirectory)
-      env:
-        CARGO_REGISTRIES_MXC_AZURE_FEED_TOKEN: Bearer $(System.AccessToken)
 
     # Clippy is scoped to the macOS-specific crates because the full
     # workspace includes Windows-only crates that do not compile on macOS.
-    - script: cargo clippy -p mxc_darwin -p seatbelt_common --all-targets -- -D warnings
+    - script: cargo clippy -p mxc_darwin -p seatbelt_common --target $(targetTriple) -- -D warnings
       displayName: Clippy
       workingDirectory: $(workingDirectory)
-      env:
-        CARGO_REGISTRIES_MXC_AZURE_FEED_TOKEN: Bearer $(System.AccessToken)
 
     - script: cargo build --release --target $(targetTriple) -p mxc_darwin
       displayName: Build release
       workingDirectory: $(workingDirectory)
-      env:
-        CARGO_REGISTRIES_MXC_AZURE_FEED_TOKEN: Bearer $(System.AccessToken)
 
     - script: cargo test --release --target $(targetTriple) -p mxc_darwin -p seatbelt_common -p wxc_common
       displayName: Run tests
       workingDirectory: $(workingDirectory)
-      env:
-        CARGO_REGISTRIES_MXC_AZURE_FEED_TOKEN: Bearer $(System.AccessToken)
 
     - task: CopyFiles@2
       displayName: Copy binary
