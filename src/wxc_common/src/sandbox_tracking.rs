@@ -23,16 +23,14 @@
 
 use std::fmt::Write;
 
-use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+use windows::Win32::Foundation::{LocalFree, HLOCAL};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
     DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::{FreeSid, PSID};
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-    KEY_ALL_ACCESS, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_OPTION_VOLATILE, REG_QWORD, REG_SZ,
-};
+use winreg::enums::{HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_OPTION_VOLATILE};
+use winreg::RegKey;
 use windows_core::PCWSTR;
 
 use crate::logger::Logger;
@@ -121,86 +119,33 @@ pub struct TrackingEntry {
 /// Returns `Ok(())` on success. Errors are non-fatal (logged but not blocking).
 pub fn write_tracking_entry(entry: &TrackingEntry, logger: &mut Logger) -> Result<(), String> {
     let key_path = format!("{}\\{}", TRACKING_BASE, entry.sid_string);
-    let wide_path = string_util::to_wide(&key_path);
 
-    // Create or open the tracking key.
-    let mut hkey = HKEY::default();
-    // SAFETY: `wide_path` is a valid null-terminated wide string. We create/open
-    // a registry key under HKCU which is always writable for the current user.
-    let status = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(wide_path.as_ptr()),
-            None,
-            PCWSTR::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_ALL_ACCESS,
-            None,
-            &mut hkey,
-            None,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Err(format!(
-            "RegCreateKeyExW(tracking key) failed: {:?}",
-            status
-        ));
-    }
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _) = hkcu
+        .create_subkey(&key_path)
+        .map_err(|e| format!("create tracking key failed: {e}"))?;
 
-    // Write Identity value.
-    set_reg_sz(hkey, "Identity", &entry.identity)?;
-
-    // Write AppContainerSID value.
-    set_reg_sz(hkey, "AppContainerSID", &entry.sid_string)?;
-
-    // Write DestroyOnExit value (DWORD).
+    key.set_value("Identity", &entry.identity)
+        .map_err(|e| format!("set Identity failed: {e}"))?;
+    key.set_value("AppContainerSID", &entry.sid_string)
+        .map_err(|e| format!("set AppContainerSID failed: {e}"))?;
     let dword_val: u32 = if entry.destroy_on_exit { 1 } else { 0 };
-    set_reg_dword(hkey, "DestroyOnExit", dword_val)?;
-
-    // Write RequestedIdentity (the caller-provided container_id, if any).
+    key.set_value("DestroyOnExit", &dword_val)
+        .map_err(|e| format!("set DestroyOnExit failed: {e}"))?;
     if !entry.requested_identity.is_empty() {
-        set_reg_sz(hkey, "RequestedIdentity", &entry.requested_identity)?;
+        key.set_value("RequestedIdentity", &entry.requested_identity)
+            .map_err(|e| format!("set RequestedIdentity failed: {e}"))?;
     }
+    key.set_value("Origin", &"mxc")
+        .map_err(|e| format!("set Origin failed: {e}"))?;
 
-    // Write Origin to distinguish MXC-created entries from OS-created ones.
-    set_reg_sz(hkey, "Origin", "mxc")?;
-
-    // Write CreatedTime (QWORD as FILETIME).
     let filetime = get_current_filetime();
-    set_reg_qword(hkey, "CreatedTime", filetime)?;
+    key.set_value("CreatedTime", &filetime)
+        .map_err(|e| format!("set CreatedTime failed: {e}"))?;
 
     // Create volatile Active subkey (auto-deleted on reboot for crash detection).
-    let mut active_key = HKEY::default();
-    // SAFETY: `hkey` is a valid open key.
-    let active_status = unsafe {
-        RegCreateKeyExW(
-            hkey,
-            PCWSTR(string_util::to_wide("Active").as_ptr()),
-            None,
-            PCWSTR::null(),
-            REG_OPTION_VOLATILE,
-            KEY_ALL_ACCESS,
-            None,
-            &mut active_key,
-            None,
-        )
-    };
-    if active_status != ERROR_SUCCESS {
-        // SAFETY: close the parent key before returning.
-        unsafe {
-            let _ = RegCloseKey(hkey);
-        }
-        return Err(format!(
-            "RegCreateKeyExW(Active volatile) failed: {:?}",
-            active_status
-        ));
-    }
-
-    // SAFETY: close both keys.
-    unsafe {
-        let _ = RegCloseKey(active_key);
-        let _ = RegCloseKey(hkey);
-    }
+    key.create_subkey_with_flags("Active", KEY_ALL_ACCESS | REG_OPTION_VOLATILE)
+        .map_err(|e| format!("create Active volatile subkey failed: {e}"))?;
 
     let _ = writeln!(
         logger,
@@ -216,35 +161,19 @@ pub fn write_tracking_entry(entry: &TrackingEntry, logger: &mut Logger) -> Resul
 /// Adds a `CleanupDeferred` REG_SZ value to the existing tracking key.
 pub fn mark_cleanup_deferred(sid_string: &str, reason: &str, logger: &mut Logger) {
     let key_path = format!("{}\\{}", TRACKING_BASE, sid_string);
-    let wide_path = string_util::to_wide(&key_path);
 
-    let mut hkey = HKEY::default();
-    // SAFETY: valid null-terminated path string, opening existing key.
-    let status = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(wide_path.as_ptr()),
-            None,
-            PCWSTR::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_ALL_ACCESS,
-            None,
-            &mut hkey,
-            None,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        let _ = writeln!(
-            logger,
-            "warning: could not open tracking key to mark deferred"
-        );
-        return;
-    }
-
-    let _ = set_reg_sz(hkey, "CleanupDeferred", reason);
-    // SAFETY: close the key.
-    unsafe {
-        let _ = RegCloseKey(hkey);
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    match hkcu.create_subkey(&key_path) {
+        Ok((key, _)) => {
+            let _ = key.set_value("CleanupDeferred", &reason);
+        }
+        Err(_) => {
+            let _ = writeln!(
+                logger,
+                "warning: could not open tracking key to mark deferred"
+            );
+            return;
+        }
     }
 
     let _ = writeln!(logger, "cleanup deferred: {}", reason);
@@ -285,93 +214,28 @@ pub fn cleanup_sandbox(identity: &str, sid_string: &str, logger: &mut Logger) {
 fn delete_tracking_key(sid_string: &str, logger: &mut Logger) {
     let key_path = format!("{}\\{}", TRACKING_BASE, sid_string);
 
-    // Delete Active subkey first (RegDeleteKeyW requires no subkeys).
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+
+    // Delete Active subkey first (registry requires no child keys for deletion).
     let active_path = format!("{}\\Active", key_path);
-    let wide_active = string_util::to_wide(&active_path);
-    // SAFETY: valid null-terminated path for deletion.
-    unsafe {
-        let _ = RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(wide_active.as_ptr()));
-    }
+    let _ = hkcu.delete_subkey(&active_path);
 
     // Delete the tracking key itself.
-    let wide_key = string_util::to_wide(&key_path);
-    // SAFETY: valid null-terminated path for deletion.
-    let result = unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(wide_key.as_ptr())) };
-    if result == ERROR_SUCCESS {
-        let _ = writeln!(logger, "deleted tracking key: {}", key_path);
-    } else {
-        let _ = writeln!(
-            logger,
-            "warning: could not delete tracking key '{}': {:?}",
-            key_path, result
-        );
+    match hkcu.delete_subkey(&key_path) {
+        Ok(()) => {
+            let _ = writeln!(logger, "deleted tracking key: {}", key_path);
+        }
+        Err(e) => {
+            let _ = writeln!(
+                logger,
+                "warning: could not delete tracking key '{}': {}",
+                key_path, e
+            );
+        }
     }
 }
 
-// --- Registry helper functions ---
-
-fn set_reg_sz(hkey: HKEY, name: &str, value: &str) -> Result<(), String> {
-    let wide_name = string_util::to_wide(name);
-    let wide_value = string_util::to_wide(value);
-    // REG_SZ data includes the null terminator, in bytes.
-    let byte_len = wide_value.len() * 2;
-    // SAFETY: `hkey` is a valid open key, `wide_name` and `wide_value` are valid
-    // null-terminated wide strings. Data length includes the null terminator.
-    let status = unsafe {
-        RegSetValueExW(
-            hkey,
-            PCWSTR(wide_name.as_ptr()),
-            None,
-            REG_SZ,
-            Some(std::slice::from_raw_parts(
-                wide_value.as_ptr() as *const u8,
-                byte_len,
-            )),
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Err(format!("RegSetValueExW({name}) failed: {:?}", status));
-    }
-    Ok(())
-}
-
-fn set_reg_dword(hkey: HKEY, name: &str, value: u32) -> Result<(), String> {
-    let wide_name = string_util::to_wide(name);
-    let bytes = value.to_le_bytes();
-    // SAFETY: `hkey` is a valid open key, writing 4 bytes of DWORD data.
-    let status = unsafe {
-        RegSetValueExW(
-            hkey,
-            PCWSTR(wide_name.as_ptr()),
-            None,
-            REG_DWORD,
-            Some(&bytes),
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Err(format!("RegSetValueExW({name}) failed: {:?}", status));
-    }
-    Ok(())
-}
-
-fn set_reg_qword(hkey: HKEY, name: &str, value: u64) -> Result<(), String> {
-    let wide_name = string_util::to_wide(name);
-    let bytes = value.to_le_bytes();
-    // SAFETY: `hkey` is a valid open key, writing 8 bytes of QWORD data.
-    let status = unsafe {
-        RegSetValueExW(
-            hkey,
-            PCWSTR(wide_name.as_ptr()),
-            None,
-            REG_QWORD,
-            Some(&bytes),
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Err(format!("RegSetValueExW({name}) failed: {:?}", status));
-    }
-    Ok(())
-}
+// --- Time helper ---
 
 /// Get the current time as a FILETIME u64 value.
 /// Uses `std::time::SystemTime` to avoid needing `Win32_System_SystemInformation` feature.
