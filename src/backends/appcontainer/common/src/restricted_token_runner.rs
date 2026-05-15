@@ -15,14 +15,17 @@
 //! - **Phase 1:** Token construction, happy-path
 //!   `CreateProcessAsUserW` spawn, validation rejections, and unit
 //!   tests for the token shape.
-//! - **Phase 2 (this commit):** UI Job Object attachment and Win32k
-//!   mitigation. The runner now honors `policy.ui.*` and
-//!   `policy.ui.disable` using the same shared infrastructure
-//!   (`UiJobObject`, `process_mitigation`, `ui_policy`) as the
-//!   AppContainer runner.
-//! - Phase 3 layers in proxy + env-block injection; Phase 4 wires
-//!   the DACL manager into the dispatcher; Phase 5 handles
-//!   docs/telemetry/E2E.
+//! - **Phase 2:** UI Job Object attachment and Win32k mitigation —
+//!   honors `policy.ui.*` and `policy.ui.disable` using the shared
+//!   `UiJobObject`, `process_mitigation`, and `ui_policy` infra.
+//! - **Phase 3 (this commit):** Proxy + environment injection. The
+//!   runner owns a `ProxyCoordinator`, launches the builtin test
+//!   proxy when requested, and injects HTTP_PROXY/HTTPS_PROXY into
+//!   a fresh `CREATE_UNICODE_ENVIRONMENT` block via the shared
+//!   `child_env::build_proxy_env_block` helper. Tier 4 is
+//!   proxy-only per v1's policy-satisfiability matrix.
+//! - Phase 4 wires the DACL manager into the dispatcher; Phase 5
+//!   handles docs/telemetry/E2E.
 //!
 //! # Restricting SID set
 //!
@@ -47,17 +50,19 @@ use windows::Win32::Security::{
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
     InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, STARTUPINFOEXW, STARTUPINFOW,
+    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
+    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS,
+    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, STARTUPINFOEXW, STARTUPINFOW,
 };
 use windows_core::{PCWSTR, PWSTR};
 
 use crate::job_object::UiJobObject;
 use crate::process_mitigation;
+use crate::proxy_coordinator::ProxyCoordinator;
+use wxc_common::child_env::build_proxy_env_block;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ProxyAddress, ScriptResponse};
 use wxc_common::process_util::OwnedHandle;
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use wxc_common::{string_util, ui_policy};
@@ -218,26 +223,46 @@ fn set_low_integrity(token: HANDLE) -> Result<(), WxcError> {
 /// Script runner that executes commands inside a Win32 restricted
 /// primary token with Low integrity. See module docs for the full
 /// design.
+#[derive(Default)]
 pub struct RestrictedTokenRunner {
-    // Reserved for Phase 3 (proxy + env-block injection).
-    #[allow(dead_code)]
-    proxy_address: Option<wxc_common::models::ProxyAddress>,
+    proxy_coordinator: ProxyCoordinator,
 }
 
 impl RestrictedTokenRunner {
     pub fn new() -> Self {
-        Self {
-            proxy_address: None,
-        }
+        Self::default()
     }
 
     /// Core implementation, returning `Result` so error paths are
     /// concise. Translated to a `ScriptResponse` by [`Self::execute`].
     fn run_internal_impl(
-        &self,
+        &mut self,
         request: &ExecutionRequest,
         logger: &mut Logger,
     ) -> Result<ScriptResponse, WxcError> {
+        // ── Builtin test proxy (Phase 3) ─────────────────────────
+        //
+        // If the policy asks for the builtin test proxy, launch it
+        // first so we know the address before constructing the env
+        // block. Mirrors `BaseContainerRunner::execute`. Then any
+        // configured proxy address is honored — Tier 4 is proxy-only
+        // per v1's policy-satisfiability matrix.
+        let mut request = request.clone();
+        if request.policy.network_proxy.builtin_test_server {
+            match self.proxy_coordinator.launch_test_proxy(logger) {
+                Ok(port) => {
+                    let addr = ProxyAddress::new("127.0.0.1".to_string(), port);
+                    request.policy.network_proxy.address = Some(addr);
+                }
+                Err(e) => {
+                    return Err(WxcError::Process(format!(
+                        "Failed to start builtin test proxy: {e}"
+                    )));
+                }
+            }
+        }
+        let proxy_address: Option<ProxyAddress> = request.policy.network_proxy.address.clone();
+
         let token = build_restricted_token()?;
         logger.log_line("Restricted token built (Low IL, DISABLE_MAX_PRIVILEGE)");
 
@@ -330,8 +355,35 @@ impl RestrictedTokenRunner {
             PCWSTR(working_dir_wide.as_ptr())
         };
 
-        let creation_flags =
-            PROCESS_CREATION_FLAGS(EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0);
+        // ── Environment block (Phase 3) ──────────────────────────
+        //
+        // When a proxy is configured (either by user or by the
+        // builtin test server we just launched), inject
+        // HTTP_PROXY/HTTPS_PROXY/NO_PROXY into a fresh env block via
+        // the shared `build_proxy_env_block` helper. This avoids
+        // mutating process-global env vars (not thread-safe).
+        //
+        // `build_proxy_env_block` sources the base entries from
+        // `CreateEnvironmentBlock(bInherit=FALSE)` so the parent
+        // process's env is never inherited into the sandboxed child;
+        // a transient failure to query the user profile env is
+        // surfaced as a `WxcError::Process` rather than silently
+        // falling back to an empty/leaky block.
+        let env_block: Option<Vec<u16>> = proxy_address
+            .as_ref()
+            .map(build_proxy_env_block)
+            .transpose()?;
+        let env_ptr = env_block
+            .as_ref()
+            .map(|block| block.as_ptr() as *const core::ffi::c_void);
+
+        let creation_flags = if env_block.is_some() {
+            PROCESS_CREATION_FLAGS(
+                EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_UNICODE_ENVIRONMENT.0 | CREATE_SUSPENDED.0,
+            )
+        } else {
+            PROCESS_CREATION_FLAGS(EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0)
+        };
 
         let mut pi = PROCESS_INFORMATION::default();
         unsafe {
@@ -343,7 +395,7 @@ impl RestrictedTokenRunner {
                 None,
                 false,
                 creation_flags,
-                None,
+                env_ptr,
                 working_dir_pcwstr,
                 &si_ex.StartupInfo as *const STARTUPINFOW,
                 &mut pi,
@@ -438,12 +490,6 @@ impl RestrictedTokenRunner {
     }
 }
 
-impl Default for RestrictedTokenRunner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ScriptRunner for RestrictedTokenRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // LPAC is an AppContainer-only construct; there is no
@@ -479,7 +525,11 @@ impl ScriptRunner for RestrictedTokenRunner {
     }
 
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        match self.run_internal_impl(request, logger) {
+        let result = self.run_internal_impl(request, logger);
+        // Always stop the builtin test proxy if we launched it,
+        // regardless of success or failure.
+        self.proxy_coordinator.stop(logger);
+        match result {
             Ok(response) => response,
             Err(e) => ScriptResponse::error(&e.to_string()),
         }
@@ -665,7 +715,7 @@ mod tests {
             return;
         }
 
-        let runner = RestrictedTokenRunner::new();
+        let mut runner = RestrictedTokenRunner::new();
         let req = ExecutionRequest {
             script_code: "cmd.exe /c exit 42".to_string(),
             script_timeout: 30_000,
@@ -698,7 +748,7 @@ mod tests {
             return;
         }
 
-        let runner = RestrictedTokenRunner::new();
+        let mut runner = RestrictedTokenRunner::new();
         let req = ExecutionRequest {
             script_code: "cmd.exe /c exit 0".to_string(),
             script_timeout: 30_000,
@@ -745,7 +795,7 @@ mod tests {
             return;
         }
 
-        let runner = RestrictedTokenRunner::new();
+        let mut runner = RestrictedTokenRunner::new();
         let req = ExecutionRequest {
             script_code: "cmd.exe /c exit 7".to_string(),
             script_timeout: 30_000,
@@ -755,5 +805,49 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run_internal_impl(&req, &mut logger).unwrap();
         assert_eq!(resp.exit_code, 7, "exit code mismatch; resp={:?}", resp);
+    }
+
+    /// Phase 3: when a proxy address is configured, the child's
+    /// environment must include HTTP_PROXY / HTTPS_PROXY pointing to
+    /// that address. We verify by spawning `cmd /c set HTTP_PROXY`
+    /// and… actually `cmd /c set ...` writes to stdout, which the
+    /// runner doesn't capture in Phase 1. Instead we drive the
+    /// exit-code channel via `cmd /c if defined HTTP_PROXY (exit 11)
+    /// else (exit 22)` — the script returns 11 when the env block
+    /// reached the child, 22 otherwise. Skipped when privileges are
+    /// unavailable.
+    #[test]
+    fn restricted_token_injects_proxy_env_when_configured() {
+        use wxc_common::logger::Mode;
+        use wxc_common::models::{ContainerPolicy, ProxyAddress, ProxyConfig};
+
+        if !maybe_enable_quota_privilege() {
+            eprintln!(
+                "restricted_token_injects_proxy_env_when_configured: skipped \
+                 — caller lacks SeIncreaseQuotaPrivilege"
+            );
+            return;
+        }
+
+        let mut runner = RestrictedTokenRunner::new();
+        let req = ExecutionRequest {
+            script_code: "cmd.exe /c if defined HTTP_PROXY (exit 11) else (exit 22)".to_string(),
+            script_timeout: 30_000,
+            policy: ContainerPolicy {
+                network_proxy: ProxyConfig {
+                    address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let resp = runner.run_internal_impl(&req, &mut logger).unwrap();
+        assert_eq!(
+            resp.exit_code, 11,
+            "HTTP_PROXY not visible in child env; resp={:?}",
+            resp
+        );
     }
 }
