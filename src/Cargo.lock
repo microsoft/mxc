@@ -1295,7 +1295,6 @@ name = "mxc_darwin"
 version = "0.1.0"
 dependencies = [
  "clap",
- "libc",
  "seatbelt_common",
  "wxc_common",
 ]

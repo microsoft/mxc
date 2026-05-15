@@ -75,19 +75,6 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
 fn main() {
     let cli = Cli::parse();
 
-    // Raise RLIMIT_NOFILE to the hard cap. macOS' default 256-soft cap
-    // is too low for Node / agent runtimes that open many fds (sockets,
-    // ptys, file watchers); without this they hit EMFILE under load.
-    // Best-effort: ignore failures.
-    #[cfg(unix)]
-    unsafe {
-        let mut rlim: libc::rlimit = std::mem::zeroed();
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
-            rlim.rlim_cur = rlim.rlim_max;
-            let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
-        }
-    }
-
     // Determine config input.
     let (config_data, is_base64) = if let Some(ref b64) = cli.config_base64 {
         (b64.clone(), true)
