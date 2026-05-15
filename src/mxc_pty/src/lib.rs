@@ -217,9 +217,15 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
     // delivers SIGWINCH to us (because our fd 0 is the outer pty
     // slave). Read the new size off fd 0 and push it to the inner pty
     // master via TIOCSWINSZ — that delivers SIGWINCH to the inner
-    // child, so TUIs reflow correctly.
-    let master_fd_for_winch = master_writer.as_raw_fd();
-    let _winch_thread = spawn_sigwinch_forwarder(master_fd_for_winch);
+    // child, so TUIs reflow correctly. Hand the forwarder its own
+    // dup of the master so the resize fd isn't tied to the lifetime
+    // of `master_writer` (which the input-forwarder thread can drop
+    // mid-session); the forwarder leaks its dup for the rest of the
+    // process, the same lifetime as the signal handler that targets it.
+    let winch_master = master_writer
+        .try_clone()
+        .map_err(|e| format!("dup master for sigwinch forwarder: {}", e))?;
+    let _winch_thread = spawn_sigwinch_forwarder(winch_master);
 
     // Output forwarder: master -> host stdout. Signals "ready" on the
     // first byte from inside the child so the input forwarder doesn't
@@ -327,18 +333,20 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
 /// Best-effort: if any of the setup steps fail we just skip resize
 /// propagation and the inner stays at its initial size.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn spawn_sigwinch_forwarder(
-    master_fd: std::os::unix::io::RawFd,
-) -> Option<std::thread::JoinHandle<()>> {
+fn spawn_sigwinch_forwarder(master: std::fs::File) -> Option<std::thread::JoinHandle<()>> {
     use std::os::unix::io::AsRawFd;
 
     let (read_end, write_end) = nix::unistd::pipe().ok()?;
     let read_fd = read_end.as_raw_fd();
     let write_fd = write_end.as_raw_fd();
-    // Leak the OwnedFds — they live for the rest of the process.
-    // Closing them would race the signal handler.
+    let master_fd = master.as_raw_fd();
+    // Leak so the fds outlive every reader/writer in the process. The
+    // signal handler targets `write_fd` for the rest of the process,
+    // and `master_fd` is what we ioctl into on every resize — closing
+    // either would race.
     std::mem::forget(read_end);
     std::mem::forget(write_end);
+    std::mem::forget(master);
 
     // Make the write end non-blocking so the signal handler can't
     // deadlock on a full pipe (the comment on `sigwinch_handler` already
