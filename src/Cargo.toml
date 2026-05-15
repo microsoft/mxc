@@ -18,6 +18,7 @@ members = [
     "generated/base_container_specification",
     "mxc_diagnostic_console",
 ]
+exclude = ["fuzz"]
 resolver = "3"
 
 [workspace.package]

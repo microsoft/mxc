@@ -1,0 +1,4 @@
+{
+    "phase": "provision",
+    "containment": "isolation_session"
+}

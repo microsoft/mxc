@@ -1,0 +1,20 @@
+{
+  "version": "0.4.0-alpha",
+  "containerId": "CLI-LPAC-Test",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"print('import sys; Testing LPAC (Least Privilege AppContainer) mode'); print(f'Python: {sys.version}')\"",
+    "timeout": 30000
+  },
+  "processContainer": {
+    "leastPrivilege": true
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\Users\\AdminUser\\AppData\\Local\\Programs"
+    ]
+  },
+  "ui": {
+    "disable": false
+  }
+}

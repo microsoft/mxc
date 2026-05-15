@@ -1,0 +1,38 @@
+[package]
+name = "mxc_fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Excluded from the parent workspace (see ../Cargo.toml `exclude`) so that
+# `cargo-fuzz`-managed Cargo.lock / target directories don't interfere with
+# normal builds and so the nightly-only `libfuzzer-sys` dependency is only
+# pulled in when explicitly fuzzing.
+
+[dependencies]
+libfuzzer-sys = "0.4"
+wxc_common = { path = "../wxc_common" }
+
+[[bin]]
+name = "config_parser"
+path = "fuzz_targets/config_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "base64_decode"
+path = "fuzz_targets/base64_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validator"
+path = "fuzz_targets/validator.rs"
+test = false
+doc = false
+bench = false
