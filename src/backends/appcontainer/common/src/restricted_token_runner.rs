@@ -12,11 +12,17 @@
 //!
 //! # Phase status
 //!
-//! - **Phase 1 (this commit):** Token construction, happy-path
+//! - **Phase 1:** Token construction, happy-path
 //!   `CreateProcessAsUserW` spawn, validation rejections, and unit
-//!   tests for the token shape. No UI Job Object, no Win32k
-//!   mitigation, no proxy, no DACL integration yet — those layer on
-//!   in later phases.
+//!   tests for the token shape.
+//! - **Phase 2 (this commit):** UI Job Object attachment and Win32k
+//!   mitigation. The runner now honors `policy.ui.*` and
+//!   `policy.ui.disable` using the same shared infrastructure
+//!   (`UiJobObject`, `process_mitigation`, `ui_policy`) as the
+//!   AppContainer runner.
+//! - Phase 3 layers in proxy + env-block injection; Phase 4 wires
+//!   the DACL manager into the dispatcher; Phase 5 handles
+//!   docs/telemetry/E2E.
 //!
 //! # Restricting SID set
 //!
@@ -39,18 +45,22 @@ use windows::Win32::Security::{
     TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken, ResumeThread,
-    TerminateProcess, WaitForSingleObject, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
-    STARTUPINFOW,
+    CreateProcessAsUserW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, STARTUPINFOEXW, STARTUPINFOW,
 };
 use windows_core::{PCWSTR, PWSTR};
 
+use crate::job_object::UiJobObject;
+use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
 use wxc_common::process_util::OwnedHandle;
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
-use wxc_common::string_util;
+use wxc_common::{string_util, ui_policy};
 
 const CREATE_SUSPENDED: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0000_0004);
 
@@ -242,14 +252,74 @@ impl RestrictedTokenRunner {
         // the `CreateProcessAsUserW` call surface a clear error.
         let _ = maybe_enable_quota_privilege();
 
-        // STARTUPINFOW — no STARTF_USESTDHANDLES; the child shares our
-        // console. Phase 1 has no attribute list, no UI Job Object, no
-        // proxy env block.
+        // ── Attribute list ────────────────────────────────────────
+        //
+        // Tier 4 only ever needs one entry: PROC_THREAD_ATTRIBUTE_
+        // MITIGATION_POLICY when `policy.ui.disable` is set. Unlike
+        // AppContainer there is no SECURITY_CAPABILITIES or LPAC
+        // attribute. When the policy doesn't request the Win32k
+        // mitigation, we skip the extended startup info entirely.
+        let mitigation_value: u64 = process_mitigation::win32k_disable_value();
+        let use_attr_list = request.policy.ui.disable;
+
+        let (mut _attr_list_buf, attr_list): (Vec<u8>, Option<LPPROC_THREAD_ATTRIBUTE_LIST>) =
+            if use_attr_list {
+                let mut size: usize = 0;
+                unsafe {
+                    let _ = InitializeProcThreadAttributeList(None, 1, None, &mut size);
+                }
+                let mut buf = vec![0u8; size];
+                let list = LPPROC_THREAD_ATTRIBUTE_LIST(buf.as_mut_ptr() as *mut _);
+                unsafe {
+                    InitializeProcThreadAttributeList(Some(list), 1, None, &mut size).map_err(
+                        |e| WxcError::Process(format!("InitializeProcThreadAttributeList: {e}")),
+                    )?;
+                    UpdateProcThreadAttribute(
+                        list,
+                        0,
+                        PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY as usize,
+                        Some(&mitigation_value as *const u64 as *const core::ffi::c_void),
+                        std::mem::size_of::<u64>(),
+                        None,
+                        None,
+                    )
+                    .map_err(|e| {
+                        WxcError::Process(format!(
+                            "UpdateProcThreadAttribute(MITIGATION_POLICY): {e}"
+                        ))
+                    })?;
+                }
+                logger.log_line("Win32k mitigation queued for child process");
+                (buf, Some(list))
+            } else {
+                (Vec::new(), None)
+            };
+
+        // RAII guard so DeleteProcThreadAttributeList runs on every
+        // exit path (success, validation error, terminate, panic).
+        struct AttrListGuard(Option<LPPROC_THREAD_ATTRIBUTE_LIST>);
+        impl Drop for AttrListGuard {
+            fn drop(&mut self) {
+                if let Some(list) = self.0 {
+                    unsafe { DeleteProcThreadAttributeList(list) };
+                }
+            }
+        }
+        let _attr_guard = AttrListGuard(attr_list);
+
+        // ── STARTUPINFO[EX]W ─────────────────────────────────────
+        //
+        // Use STARTUPINFOEXW unconditionally so the size matches what
+        // EXTENDED_STARTUPINFO_PRESENT advertises; lpAttributeList is
+        // optional (null when `use_attr_list == false`).
         let mut desktop_wide = string_util::to_wide("winsta0\\default");
-        let si = STARTUPINFOW {
-            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
-            lpDesktop: PWSTR(desktop_wide.as_mut_ptr()),
-            ..Default::default()
+        let si_ex = STARTUPINFOEXW {
+            StartupInfo: STARTUPINFOW {
+                cb: std::mem::size_of::<STARTUPINFOEXW>() as u32,
+                lpDesktop: PWSTR(desktop_wide.as_mut_ptr()),
+                ..Default::default()
+            },
+            lpAttributeList: attr_list.unwrap_or(LPPROC_THREAD_ATTRIBUTE_LIST(ptr::null_mut())),
         };
 
         let mut cmd_line_wide = string_util::to_wide(&request.script_code);
@@ -260,7 +330,8 @@ impl RestrictedTokenRunner {
             PCWSTR(working_dir_wide.as_ptr())
         };
 
-        let creation_flags = CREATE_SUSPENDED;
+        let creation_flags =
+            PROCESS_CREATION_FLAGS(EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0);
 
         let mut pi = PROCESS_INFORMATION::default();
         unsafe {
@@ -274,7 +345,7 @@ impl RestrictedTokenRunner {
                 creation_flags,
                 None,
                 working_dir_pcwstr,
-                &si,
+                &si_ex.StartupInfo as *const STARTUPINFOW,
                 &mut pi,
             )
         }
@@ -288,7 +359,37 @@ impl RestrictedTokenRunner {
         let process_handle = OwnedHandle::new(pi.hProcess);
         let thread_handle = OwnedHandle::new(pi.hThread);
 
-        // Resume now. Phase 2 will assign a UiJobObject before this.
+        // ── UI Job Object ────────────────────────────────────────
+        //
+        // CRITICAL: child was created with CREATE_SUSPENDED. We must
+        // either successfully attach the Job Object and ResumeThread,
+        // or TerminateProcess. Anything that returns an error in this
+        // block must terminate first. Mirrors the AppContainer runner
+        // sequencing verbatim — the token model doesn't affect Job
+        // Object attachment.
+        let _job = match (|| -> Result<UiJobObject, WxcError> {
+            let job = UiJobObject::new()?;
+            let restrictions = ui_policy::resolve_ui_restrictions(
+                &request.policy.ui,
+                &request.policy.base_process_ui,
+            );
+            job.set_ui_limits(&restrictions)?;
+            job.assign_process(process_handle.get())?;
+            Ok(job)
+        })() {
+            Ok(job) => {
+                logger.log_line("UI Job Object assigned to child process");
+                job
+            }
+            Err(e) => {
+                unsafe {
+                    let _ = TerminateProcess(process_handle.get(), u32::MAX);
+                }
+                return Err(e);
+            }
+        };
+
+        // Resume the child now that UI restrictions are in place.
         let resumed = unsafe { ResumeThread(thread_handle.get()) };
         if resumed == u32::MAX {
             let err = unsafe { GetLastError() };
@@ -574,5 +675,85 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run_internal_impl(&req, &mut logger).unwrap();
         assert_eq!(resp.exit_code, 42, "exit code mismatch; resp={:?}", resp);
+    }
+
+    /// Phase 2: with `policy.ui.disable = true`, the attribute list
+    /// must be allocated and the Win32k mitigation attribute must
+    /// install without error. We don't have a portable way to assert
+    /// the bit is set on the child from a unit test, so we exercise
+    /// the same code path end-to-end via `cmd /c exit 0` and rely on
+    /// `UpdateProcThreadAttribute` returning success to confirm the
+    /// attribute layout is valid. Skipped when privileges are
+    /// unavailable.
+    #[test]
+    fn restricted_token_attaches_win32k_mitigation_when_ui_disabled() {
+        use wxc_common::logger::Mode;
+        use wxc_common::models::{ContainerPolicy, UiPolicy};
+
+        if !maybe_enable_quota_privilege() {
+            eprintln!(
+                "restricted_token_attaches_win32k_mitigation_when_ui_disabled: \
+                 skipped — caller lacks SeIncreaseQuotaPrivilege"
+            );
+            return;
+        }
+
+        let runner = RestrictedTokenRunner::new();
+        let req = ExecutionRequest {
+            script_code: "cmd.exe /c exit 0".to_string(),
+            script_timeout: 30_000,
+            policy: ContainerPolicy {
+                ui: UiPolicy {
+                    disable: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let resp = runner.run_internal_impl(&req, &mut logger).unwrap();
+        assert_eq!(resp.exit_code, 0, "exit code mismatch; resp={:?}", resp);
+    }
+
+    /// Phase 2: the child must be assigned to our `UiJobObject`
+    /// before `ResumeThread`. We verify the contract by spawning the
+    /// child and asserting it is in the calling process's job set
+    /// via `IsProcessInJob(child, NULL)`, which returns TRUE only
+    /// when the calling process is a member of *any* job the target
+    /// also belongs to. (We pass `NULL` for the job handle to mean
+    /// "the caller's job"; in this test, the test process is not in
+    /// any job, so we instead use `OpenProcess` and the job handle
+    /// owned by the runner via observable side-effect of the spawn
+    /// succeeding under CREATE_SUSPENDED + assign + ResumeThread.)
+    ///
+    /// Practical check: if the Job Object attach fails, the runner
+    /// terminates the child and returns an `Err`. A successful
+    /// `Ok` return with the expected exit code is therefore proof
+    /// the Job Object was assigned. Skipped when privileges are
+    /// unavailable.
+    #[test]
+    fn restricted_token_assigns_ui_job_object() {
+        use wxc_common::logger::Mode;
+        use wxc_common::models::ContainerPolicy;
+
+        if !maybe_enable_quota_privilege() {
+            eprintln!(
+                "restricted_token_assigns_ui_job_object: skipped — caller \
+                 lacks SeIncreaseQuotaPrivilege"
+            );
+            return;
+        }
+
+        let runner = RestrictedTokenRunner::new();
+        let req = ExecutionRequest {
+            script_code: "cmd.exe /c exit 7".to_string(),
+            script_timeout: 30_000,
+            policy: ContainerPolicy::default(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let resp = runner.run_internal_impl(&req, &mut logger).unwrap();
+        assert_eq!(resp.exit_code, 7, "exit code mismatch; resp={:?}", resp);
     }
 }

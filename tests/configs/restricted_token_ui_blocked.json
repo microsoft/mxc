@@ -1,0 +1,13 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "CLI-Tier4-UI-Blocked",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd.exe /c exit 0"
+  },
+  "ui": {
+    "disable": true,
+    "clipboard": "none",
+    "injection": false
+  }
+}
