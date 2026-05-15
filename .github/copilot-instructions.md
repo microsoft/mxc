@@ -108,6 +108,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 |---------|--------|----------|--------|
 | AppContainer | `wxc-exec.exe` | Windows | `backends/appcontainer/common/src/appcontainer_runner.rs` |
 | BaseContainer (OS sandbox API) | `wxc-exec.exe` | Windows | `backends/appcontainer/common/src/base_container_runner.rs` — calls `Experimental_CreateProcessInSandbox` via FlatBuffer |
+| RestrictedToken (Tier 4 fallback) | `wxc-exec.exe` | Windows | `backends/appcontainer/common/src/restricted_token_runner.rs` — bottom rung under `processcontainer`. Win32 `CreateRestrictedToken` + Low integrity + leaf-only DACLs keyed on `S-1-5-12`. Selected by `fallback_detector` when Tiers 1–3 are unavailable (or via `MXC_FORCE_TIER=t4`). Honors `readwritePaths` / `readonlyPaths` / `deniedPaths` (DACLs), `policy.ui.*` (UiJobObject), and `policy.ui.disable` (Win32k mitigation). Network is **proxy-only**. See `docs/proposals/downlevel_support/tier4-restricted-token.md`. |
 | Windows Sandbox | `wxc-exec.exe` | Windows | `backends/windows_sandbox/common/src/windows_sandbox_runner.rs` |
 | MicroVM (NanVix) | `wxc-exec.exe` | Windows | `backends/nanvix/runner/src/lib.rs` — feature-gated behind `microvm` |
 | Hyperlight | `wxc-exec.exe` | Windows | `backends/hyperlight/common/src/lib.rs` — Hyperlight + Unikraft micro-VM backend |
