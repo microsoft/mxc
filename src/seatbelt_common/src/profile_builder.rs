@@ -373,6 +373,12 @@ fn write_keychain_rules(out: &mut String, request: &CodexRequest) -> Result<(), 
     if !enabled {
         return Ok(());
     }
+    // Seatbelt only applies on macOS. On other hosts the option is a
+    // no-op so workspace clippy / cross-platform tests don't have to
+    // care about `$HOME` (Windows CI doesn't set it).
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
 
     out.push_str(";; --- keychainAccess: Mach IPC for Keychain (securityd, prefs, XPC, LS) ---\n");
     out.push_str("(allow mach-lookup\n");
