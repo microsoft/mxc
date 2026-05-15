@@ -471,7 +471,7 @@ impl ScriptRunner for BaseContainerRunner {
         // Identity: when destroy_on_exit is true we generate a random ephemeral
         // identity so each sandbox gets a unique, cleanable AppContainer profile.
         // Otherwise we honour whatever the caller passed in (or the default).
-        let (identity, sid_string, tracking_written) = if request.lifecycle.destroy_on_exit {
+        let (identity, sid_string) = if request.lifecycle.destroy_on_exit {
             let ephemeral = sandbox_tracking::generate_sandbox_identity();
             let _ = writeln!(
                 logger,
@@ -493,25 +493,19 @@ impl ScriptRunner for BaseContainerRunner {
             };
 
             // Write registry tracking entry before launch so it survives crashes.
-            let written = if !sid.is_empty() {
+            if !sid.is_empty() {
                 let entry = TrackingEntry {
                     identity: ephemeral.clone(),
                     sid_string: sid.clone(),
                     destroy_on_exit: true,
                     requested_identity: request.container_id.clone(),
                 };
-                match sandbox_tracking::write_tracking_entry(&entry, logger) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        let _ = writeln!(logger, "warning: tracking entry write failed: {}", e);
-                        false
-                    }
+                if let Err(e) = sandbox_tracking::write_tracking_entry(&entry, logger) {
+                    let _ = writeln!(logger, "warning: tracking entry write failed: {}", e);
                 }
-            } else {
-                false
-            };
+            }
 
-            (ephemeral, sid, written)
+            (ephemeral, sid)
         } else {
             let id = if request.container_id.is_empty() {
                 sandbox_tracking::generate_sandbox_identity()
@@ -523,7 +517,7 @@ impl ScriptRunner for BaseContainerRunner {
                 "destroy_on_exit=false; using identity '{}', no tracking",
                 id
             );
-            (id, String::new(), false)
+            (id, String::new())
         };
         let identity_wide = string_util::to_wide(&identity);
 
@@ -568,7 +562,7 @@ impl ScriptRunner for BaseContainerRunner {
             }
             // The OS may have created the AppContainer profile before failing,
             // so run the same cleanup logic used on normal exit.
-            if tracking_written {
+            if request.lifecycle.destroy_on_exit {
                 run_sandbox_cleanup(
                     &identity,
                     &sid_string,
@@ -594,7 +588,7 @@ impl ScriptRunner for BaseContainerRunner {
 
         // Register Ctrl+C handler so cleanup runs if wxc-exec is interrupted
         // while waiting for the child process.
-        if tracking_written {
+        if request.lifecycle.destroy_on_exit {
             sandbox_tracking::register_ctrl_c_cleanup(
                 &identity,
                 &sid_string,
@@ -630,9 +624,8 @@ impl ScriptRunner for BaseContainerRunner {
         let _ = writeln!(logger, "process exited with code {exit_code}");
 
         // 6. Sandbox cleanup: delete AppContainer profile and tracking entry.
-        //    Only runs when tracking was written (i.e., destroy_on_exit was true).
         //    Deferred if a network proxy is configured (proxy state can't be cleaned up yet).
-        if tracking_written {
+        if request.lifecycle.destroy_on_exit {
             run_sandbox_cleanup(
                 &identity,
                 &sid_string,
