@@ -70,10 +70,6 @@ pub fn build_profile(request: &CodexRequest) -> Result<String, String> {
     // Policy-derived allow rules.
     write_filesystem_allow(&mut out, request)?;
     write_network_rules(&mut out, request);
-    // nestedPty must come BEFORE write_ui_rules so the HID `iokit-open`
-    // deny it emits (when ui.injection=false) wins on Seatbelt's
-    // last-match-wins semantics over the broad `(allow iokit-open)` we
-    // grant for posix_openpt.
     write_nested_pty_rules(&mut out, request);
     write_keychain_rules(&mut out, request)?;
     write_ui_rules(&mut out, request);
@@ -332,10 +328,6 @@ fn write_nested_pty_rules(out: &mut String, request: &CodexRequest) {
     // /dev/ttysNNN (the slave side).
     out.push_str("(allow file-read* file-write* file-ioctl\n");
     out.push_str("    (literal \"/dev/ptmx\"))\n");
-    // posix_openpt → grantpt → ioctls bottom out in IOKit user-clients
-    // (IOSerialBSDClient and friends). Without iokit-open the kernel
-    // returns EPERM and the master fd is unusable.
-    out.push_str("(allow iokit-open)\n");
 }
 
 /// Emit rules so `Security.framework` / `keytar` can reach `securityd`
@@ -346,24 +338,21 @@ fn write_nested_pty_rules(out: &mut String, request: &CodexRequest) {
 /// minimum we need:
 ///
 /// * `securityd` / `SecurityServer` — the actual Keychain server.
+/// * `trustd` / `ocspd` — TLS trust evaluation; without them every
+///   handshake logs "failed to copy trust settings".
 /// * `cfprefsd.daemon` — `Security.framework` reads preferences for
 ///   trust settings, ACL prompts, etc.
 /// * `xpcd` + `lsd.*` — XPC bootstrapper and LaunchServices, used to
 ///   resolve helper bundles when the keychain is unlocked.
 ///
-/// On the filesystem side, the keychain DB lives under
+/// On the filesystem side, the user's keychain DB lives under
 /// `~/Library/Keychains` (read+write — keytar creates new entries),
-/// system keychains under `/Library/Keychains` (read-only from the
-/// client; securityd does the writes), and `/private/var/db/mds`
-/// (Spotlight/MDS metadata, read-only). XPC cache and per-user
-/// container dirs live under `/private/var/folders` (read+write).
-///
-/// `(allow iokit-open)` covers crypto accelerators. It's redundant when
-/// `nestedPty` is on (the default), but emitting it again here keeps
-/// `keychainAccess` self-contained for callers who set
-/// `nestedPty: false`. Seatbelt is fine with duplicate allow rules and
-/// the HID iokit deny from `write_ui_rules` still wins on last-match
-/// because we run before `write_ui_rules`.
+/// `/private/var/db/mds` is Spotlight/MDS metadata that
+/// `Security.framework` consults (read-only), and per-user XPC caches
+/// live under `/private/var/folders` (read+write). The system keychain
+/// stores under `/Library/Keychains` and `/System/Library/Keychains`
+/// are already covered by the baseline `/Library` and `/System`
+/// read-only allows, so we don't re-add them here.
 fn write_keychain_rules(out: &mut String, request: &CodexRequest) -> Result<(), String> {
     let enabled = request
         .experimental
@@ -398,10 +387,8 @@ fn write_keychain_rules(out: &mut String, request: &CodexRequest) -> Result<(), 
     // `com.apple.lsd.` so we don't accidentally match unrelated services.
     out.push_str("    (global-name-regex #\"^com\\.apple\\.lsd\\.\"))\n");
 
-    out.push_str(";; --- keychainAccess: read system + MDS keychain stores ---\n");
+    out.push_str(";; --- keychainAccess: MDS keychain metadata + trustd protected store ---\n");
     out.push_str("(allow file-read*\n");
-    out.push_str("    (subpath \"/Library/Keychains\")\n");
-    out.push_str("    (subpath \"/System/Library/Keychains\")\n");
     // trustd's protected store of trust settings + revocation data.
     out.push_str("    (subpath \"/private/var/protected/trustd\")\n");
     out.push_str("    (subpath \"/private/var/db/mds\"))\n");
@@ -415,9 +402,6 @@ fn write_keychain_rules(out: &mut String, request: &CodexRequest) -> Result<(), 
     out.push_str("(allow file-read* file-write*\n");
     let _ = writeln!(out, "    (subpath {})", quote_scheme(&user_keychains));
     out.push_str("    (subpath \"/private/var/folders\"))\n");
-
-    out.push_str(";; --- keychainAccess: iokit-open for crypto accelerators ---\n");
-    out.push_str("(allow iokit-open)\n");
     Ok(())
 }
 
@@ -734,7 +718,6 @@ mod tests {
         assert!(p.contains("nestedPty"), "nestedPty comment missing");
         assert!(p.contains("(allow pseudo-tty)"));
         assert!(p.contains("(literal \"/dev/ptmx\")"));
-        assert!(p.contains("(allow iokit-open)"));
     }
 
     #[test]
@@ -747,7 +730,6 @@ mod tests {
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(allow pseudo-tty)"));
         assert!(p.contains("(literal \"/dev/ptmx\")"));
-        assert!(p.contains("(allow iokit-open)"));
     }
 
     #[test]
@@ -760,7 +742,6 @@ mod tests {
         let p = build_profile(&r).unwrap();
         assert!(!p.contains("nestedPty"));
         assert!(!p.contains("/dev/ptmx"));
-        assert!(!p.contains("(allow iokit-open)"));
         // pseudo-tty allow should also not be present.
         assert!(!p.contains("(allow pseudo-tty)"));
     }
@@ -809,26 +790,6 @@ mod tests {
     }
 
     #[test]
-    fn nested_pty_iokit_allow_does_not_undo_hid_deny() {
-        // Default ui.injection=false emits an HID iokit deny. With
-        // last-match-wins semantics that deny must come AFTER our broad
-        // (allow iokit-open).
-        let r = req();
-        assert!(!r.policy.ui.injection);
-        let p = build_profile(&r).unwrap();
-        let allow_idx = p
-            .find("(allow iokit-open)")
-            .expect("nested_pty should emit broad iokit-open allow by default");
-        let deny_idx = p
-            .find("(deny iokit-open (iokit-user-client-class \"IOHIDLibUserClient\"))")
-            .expect("HID deny must be emitted when ui.injection=false");
-        assert!(
-            deny_idx > allow_idx,
-            "HID iokit deny must follow the broad iokit-open allow so last-match-wins keeps HID denied"
-        );
-    }
-
-    #[test]
     fn keychain_access_default_off_omits_security_services() {
         let r = req();
         let p = build_profile(&r).unwrap();
@@ -872,8 +833,9 @@ mod tests {
             ..Default::default()
         });
         let p = build_profile(&r).unwrap();
-        // Read-only stores
-        assert!(p.contains("(subpath \"/Library/Keychains\")"));
+        // /Library/Keychains and /System/Library/Keychains are read via
+        // the baseline /Library and /System read-only allows; we don't
+        // re-emit them here.
         assert!(p.contains("(subpath \"/private/var/db/mds\")"));
         // Read+write surfaces
         let home = std::env::var("HOME").expect("HOME must be set in test env");
@@ -883,46 +845,5 @@ mod tests {
             "missing user keychain subpath"
         );
         assert!(p.contains("(subpath \"/private/var/folders\")"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn keychain_access_true_allows_iokit_open() {
-        // Verify keychainAccess emits iokit-open even when nestedPty is off,
-        // so it's self-contained.
-        let mut r = req();
-        r.experimental.seatbelt = Some(SeatbeltConfig {
-            keychain_access: true,
-            nested_pty: false,
-            ..Default::default()
-        });
-        let p = build_profile(&r).unwrap();
-        assert!(p.contains("(allow iokit-open)"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn keychain_access_iokit_allow_does_not_undo_hid_deny() {
-        // Same last-match-wins concern as nested_pty: keychain emits
-        // iokit-open before write_ui_rules, so the HID deny still wins.
-        let mut r = req();
-        r.experimental.seatbelt = Some(SeatbeltConfig {
-            keychain_access: true,
-            // Pin nested_pty off so the only iokit-open allow comes from
-            // keychainAccess and the test isolates that path.
-            nested_pty: false,
-            ..Default::default()
-        });
-        let p = build_profile(&r).unwrap();
-        let allow_idx = p
-            .find("(allow iokit-open)")
-            .expect("keychainAccess should emit iokit-open");
-        let deny_idx = p
-            .find("(deny iokit-open (iokit-user-client-class \"IOHIDLibUserClient\"))")
-            .expect("HID deny should still be emitted (default ui.injection=false)");
-        assert!(
-            deny_idx > allow_idx,
-            "HID iokit deny must follow keychainAccess's iokit-open allow"
-        );
     }
 }
