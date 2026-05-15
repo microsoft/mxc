@@ -62,7 +62,7 @@ use crate::proxy_coordinator::ProxyCoordinator;
 use wxc_common::child_env::build_proxy_env_block;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ProxyAddress, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, ProxyAddress, ScriptResponse};
 use wxc_common::process_util::OwnedHandle;
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use wxc_common::{string_util, ui_policy};
@@ -502,22 +502,22 @@ impl ScriptRunner for RestrictedTokenRunner {
 
         // Capability SIDs require an AppContainer principal; firewall
         // rules cannot be cleanly keyed to a non-AppContainer
-        // principal either.
+        // principal either. When the operator has configured
+        // capability SIDs we cannot honor them under Tier 4, so we
+        // surface a clear error rather than silently dropping the
+        // intent.
+        //
+        // `network_enforcement_mode` alone is *not* a rejection
+        // criterion: its default value is `Capabilities`, so any
+        // config that doesn't explicitly set it would otherwise
+        // fail validation unconditionally. Without configured
+        // capability SIDs there is nothing to enforce regardless
+        // of mode, so we accept the request and let the operator
+        // rely on the proxy (Tier 4 is proxy-only for network).
         if !request.policy.capabilities.is_empty() {
             return Err(ScriptResponse::error(
                 "Tier 4 rejects non-empty capabilities: capability SIDs require an \
-                 AppContainer principal",
-            ));
-        }
-
-        if matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both,
-        ) {
-            return Err(ScriptResponse::error(
-                "Tier 4 rejects network_enforcement_mode={Capabilities, Both}: Tier 4 is \
-                 proxy-only because firewall COM rules cannot key to a non-AppContainer \
-                 principal",
+                 AppContainer principal (Tier 4 is proxy-only for network)",
             ));
         }
 
