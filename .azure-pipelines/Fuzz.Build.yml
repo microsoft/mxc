@@ -13,7 +13,14 @@
 
 pr: none
 
-trigger: none
+# TODO(pre-merge): revert to `trigger: none` before merging to main. Daily
+# cron is the steady-state trigger; this branch-trigger only exists so we
+# can validate the pipeline during initial bring-up without manually
+# queuing each run from the ADO UI.
+trigger:
+  branches:
+    include:
+      - user/saulg/Fuzzer
 
 schedules:
   - cron: "0 0 * * *"
