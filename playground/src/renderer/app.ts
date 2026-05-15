@@ -18,6 +18,7 @@ interface Scenario {
   script: string;
   policy: any;
   shell: 'cmd' | 'ps51' | 'ps7' | 'python';
+  containment?: 'appcontainer' | 'windows_sandbox';
   requiresV05?: boolean;
   /** If set, output must contain this string for a PASS verdict */
   successMarker?: string;
@@ -27,7 +28,7 @@ interface Scenario {
   testScript?: { file: string; shell: string; args?: string };
 }
 
-// Shell detection ΓÇö cached after init
+// Shell detection — cached after init
 var shellAvailability: Record<string, boolean> = {
   cmd: true,
   ps51: true,
@@ -39,17 +40,17 @@ var shellAvailability: Record<string, boolean> = {
 var shellPaths: Record<string, { exe?: string; rootDir?: string; needsAcl?: boolean; msixPackageDir?: string }> = {};
 
 var SHELL_BADGES: Record<string, string> = {
-  cmd: '≡ƒƒó',
-  ps51: '≡ƒö╡',
-  ps7: '≡ƒƒú',
-  python: '≡ƒÉì',
+  cmd: '🟢',
+  ps51: '🔵',
+  ps7: '🟣',
+  python: '🐍',
 };
 
 var SHELL_LABELS: Record<string, string> = {
-  cmd: 'Γ¼¢ cmd.exe',
-  ps51: '≡ƒö╖ PowerShell 5.1',
-  ps7: '≡ƒƒª PowerShell 7+',
-  python: '≡ƒÉì Python',
+  cmd: '⬛ cmd.exe',
+  ps51: '🔷 PowerShell 5.1',
+  ps7: '🟦 PowerShell 7+',
+  python: '🐍 Python',
 };
 
 var SHELL_SHORT: Record<string, string> = {
@@ -62,7 +63,7 @@ var SHELL_SHORT: Record<string, string> = {
 function updateRunAllLabel(): void {
   var shell = $sel('shellSelect').value;
   var name = SHELL_SHORT[shell] || shell;
-  $('btnRunAll').textContent = 'Γû╢Γû╢ Run All ' + name + ' Tests';
+  $('btnRunAll').textContent = '▶▶ Run All ' + name + ' Tests';
 }
 
 function updatePythonAclWarning(): void {
@@ -78,16 +79,16 @@ function updatePythonAclWarning(): void {
   if (!isInstalled) {
     if (shell === 'python') {
       $('pythonAclWarning').innerHTML =
-        '<div>ΓÜá∩╕Å ' + name + ' is not installed.</div>' +
+        '<div>⚠️ ' + name + ' is not installed.</div>' +
         '<div style="font-size:11px; margin-top:6px;">Install via terminal:</div>' +
         '<code style="display:block; margin:4px 0; padding:4px 8px; background:var(--bg-input); border-radius:4px; font-size:11px; user-select:all;">winget install Python.Python.3.14</code>' +
-        '<div style="font-size:11px; color:var(--text-muted); margin-top:6px;">Click ≡ƒöä after installation to refresh.</div>';
+        '<div style="font-size:11px; color:var(--text-muted); margin-top:6px;">Click 🔄 after installation to refresh.</div>';
     } else {
       $('pythonAclWarning').innerHTML =
-        '<div>ΓÜá∩╕Å ' + name + ' is not installed.</div>' +
-        '<div style="font-size:11px; margin-top:6px;"><a href="https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows?view=powershell-7.6#install-the-msi-package" target="_blank" style="color:var(--accent);">Install the MSI package ΓåÆ</a></div>' +
-        '<div style="font-size:11px; color:var(--text-dim); margin-top:4px;">Γä╣∩╕Å Only MSI-installed PowerShell 7+ is supported. MSIX and Microsoft Store versions are not yet supported.</div>' +
-        '<div style="font-size:11px; color:var(--text-muted); margin-top:6px;">Click ≡ƒöä after installation to refresh.</div>';
+        '<div>⚠️ ' + name + ' is not installed.</div>' +
+        '<div style="font-size:11px; margin-top:6px;"><a href="https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows?view=powershell-7.6#install-the-msi-package" target="_blank" style="color:var(--accent);">Install the MSI package →</a></div>' +
+        '<div style="font-size:11px; color:var(--text-dim); margin-top:4px;">ℹ️ Only MSI-installed PowerShell 7+ is supported. MSIX and Microsoft Store versions are not yet supported.</div>' +
+        '<div style="font-size:11px; color:var(--text-muted); margin-top:6px;">Click 🔄 after installation to refresh.</div>';
     }
     $('pythonAclWarning').classList.remove('hidden');
     return;
@@ -111,55 +112,55 @@ function updateShellDropdown(): void {
 
 var SCENARIOS: Scenario[] = [
   // ========== cmd.exe ==========
-  { id: 'cmd-hello', name: 'Echo Hello', category: 'Quick Tests', categoryIcon: '≡ƒÄ»', shell: 'cmd',
+  { id: 'cmd-hello', name: 'Echo Hello', category: 'Quick Tests', categoryIcon: '🎯', shell: 'cmd',
     description: 'Runs a simple echo command to verify basic execution.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'cmd.exe /c echo Hello from sandbox!',
     policy: { ui: { allowWindows: true } }, successMarker: 'Hello from sandbox!' },
-  { id: 'cmd-fs-read', name: 'Read system file', category: 'File Access Tests', categoryIcon: '≡ƒôü', shell: 'cmd',
+  { id: 'cmd-fs-read', name: 'Read system file', category: 'File Access Tests', categoryIcon: '📁', shell: 'cmd',
     description: 'Reads the hosts file using read-only access.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'cmd.exe /c type C:\\Windows\\System32\\drivers\\etc\\hosts',
     policy: { filesystem: { readonlyPaths: ['C:\\Windows\\System32\\drivers\\etc'] }, ui: { allowWindows: true } },
     successMarker: 'sample HOSTS file' },
-  { id: 'cmd-fs-read-blocked', name: 'Read without permission', category: 'File Access Tests', categoryIcon: '≡ƒôü', shell: 'cmd',
+  { id: 'cmd-fs-read-blocked', name: 'Read without permission', category: 'File Access Tests', categoryIcon: '📁', shell: 'cmd',
     description: 'Tries to read from a user directory without filesystem access. Should be denied.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should be blocked',
     script: 'cmd.exe /c type "%USERPROFILE%\\NTUSER.DAT"',
     policy: { ui: { allowWindows: true } } },
-  { id: 'cmd-fs-write-spaces', name: 'Write to path with spaces', category: 'File Access Tests', categoryIcon: '≡ƒôü', shell: 'cmd',
+  { id: 'cmd-fs-write-spaces', name: 'Write to path with spaces', category: 'File Access Tests', categoryIcon: '📁', shell: 'cmd',
     description: 'Writes to a path containing spaces.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'cmd.exe /c echo SUCCESS > "C:\\Users\\Public\\mxc bfs test\\test_output.txt" && type "C:\\Users\\Public\\mxc bfs test\\test_output.txt"',
     policy: { filesystem: { readwritePaths: ['C:\\Users\\Public\\mxc bfs test'] } },
     requiresV05: true, successMarker: 'SUCCESS' },
-  { id: 'cmd-net-ok', name: 'Internet allowed', category: 'Network Tests', categoryIcon: '≡ƒîÉ', shell: 'cmd',
+  { id: 'cmd-net-ok', name: 'Internet allowed', category: 'Network Tests', categoryIcon: '🌐', shell: 'cmd',
     description: 'Makes an HTTPS request with outbound network enabled.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'curl.exe -s --max-time 10 https://www.example.com',
     policy: { network: { allowOutbound: true }, ui: { allowWindows: true } },
     successMarker: 'Example Domain' },
-  { id: 'cmd-net-blocked', name: 'Internet blocked', category: 'Network Tests', categoryIcon: '≡ƒîÉ', shell: 'cmd',
+  { id: 'cmd-net-blocked', name: 'Internet blocked', category: 'Network Tests', categoryIcon: '🌐', shell: 'cmd',
     description: 'Tries to reach example.com with no network access. Should fail.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should be blocked',
     script: 'curl.exe -s --max-time 5 https://www.example.com',
     policy: { ui: { allowWindows: true } }, failureMarker: 'Example Domain' },
-  { id: 'cmd-win32k-off', name: 'Win32k disabled', category: 'Desktop & UI Tests', categoryIcon: '≡ƒûÑ∩╕Å', shell: 'cmd',
+  { id: 'cmd-win32k-off', name: 'Win32k disabled', category: 'Desktop & UI Tests', categoryIcon: '🖥️', shell: 'cmd',
     description: 'Runs with Win32k disabled. cmd.exe does not need Win32k so it should still work.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'cmd.exe /c echo PASS: Win32k disabled', policy: { ui: { allowWindows: false } },
     requiresV05: true, successMarker: 'PASS:' },
-  { id: 'cmd-timeout', name: 'Timeout', category: 'Error Cases', categoryIcon: 'ΓÜá∩╕Å', shell: 'cmd',
+  { id: 'cmd-timeout', name: 'Timeout', category: 'Error Cases', categoryIcon: '⚠️', shell: 'cmd',
     description: 'Runs a command that waits 30 seconds with a 5-second timeout.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should be terminated',
     script: 'cmd.exe /c ping -n 30 127.0.0.1',
     policy: { ui: { allowWindows: true }, timeoutMs: 5000 } },
-  { id: 'cmd-bad-exe', name: 'Non-existent executable', category: 'Error Cases', categoryIcon: 'ΓÜá∩╕Å', shell: 'cmd',
+  { id: 'cmd-bad-exe', name: 'Non-existent executable', category: 'Error Cases', categoryIcon: '⚠️', shell: 'cmd',
     description: 'Tries to run an executable that does not exist.',
     expectedOutcome: 'show-error', expectedLabel: 'Should fail',
     script: 'this-command-does-not-exist-12345',
     policy: { ui: { allowWindows: true } } },
-  { id: 'cmd-full-access', name: 'Full access', category: 'Combined Tests', categoryIcon: '≡ƒöä', shell: 'cmd',
+  { id: 'cmd-full-access', name: 'Full access', category: 'Combined Tests', categoryIcon: '🔄', shell: 'cmd',
     description: 'Writes a file and reads it back. Exercises filesystem + desktop together.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'cmd.exe /c echo CMD_WRITE_OK > C:\\temp\\mxc-full-test\\cmd-result.txt && type C:\\temp\\mxc-full-test\\cmd-result.txt && echo ALL_OK',
@@ -167,55 +168,55 @@ var SCENARIOS: Scenario[] = [
     successMarker: 'ALL_OK' },
 
   // ========== PowerShell 5.1 ==========
-  { id: 'ps51-hello', name: 'Echo Hello', category: 'Quick Tests', categoryIcon: '≡ƒÄ»', shell: 'ps51',
+  { id: 'ps51-hello', name: 'Echo Hello', category: 'Quick Tests', categoryIcon: '🎯', shell: 'ps51',
     description: 'Runs Write-Output to verify PowerShell works inside the sandbox.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'powershell.exe -Command "Write-Output \'Hello from PowerShell\'"',
     policy: { ui: { allowWindows: true } }, successMarker: 'Hello from PowerShell' },
-  { id: 'ps51-version', name: 'Version info', category: 'Quick Tests', categoryIcon: '≡ƒÄ»', shell: 'ps51',
+  { id: 'ps51-version', name: 'Version info', category: 'Quick Tests', categoryIcon: '🎯', shell: 'ps51',
     description: 'Displays the PowerShell version table.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'powershell.exe -Command "$PSVersionTable"',
     policy: { ui: { allowWindows: true } }, successMarker: 'PSVersion' },
-  { id: 'ps51-fs-write', name: 'Write to allowed folder', category: 'File Access Tests', categoryIcon: '≡ƒôü', shell: 'ps51',
+  { id: 'ps51-fs-write', name: 'Write to allowed folder', category: 'File Access Tests', categoryIcon: '📁', shell: 'ps51',
     description: 'Writes a file to a brokered temp directory.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'powershell.exe -NoProfile -Command "Set-Content -Path C:\\temp\\mxc-write-test\\ps-output.txt -Value hello; Write-Output WRITE_OK"',
     policy: { filesystem: { readwritePaths: ['C:\\temp\\mxc-write-test'] }, ui: { allowWindows: true } },
     successMarker: 'WRITE_OK' },
-  { id: 'ps51-fs-write-blocked', name: 'Write without permission', category: 'File Access Tests', categoryIcon: '≡ƒôü', shell: 'ps51',
+  { id: 'ps51-fs-write-blocked', name: 'Write without permission', category: 'File Access Tests', categoryIcon: '📁', shell: 'ps51',
     description: 'Tries to write to C:\\Windows. Access should be denied.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should be blocked',
     script: 'powershell.exe -Command "try { Set-Content -Path \\"C:\\Windows\\mxc-test.txt\\" -Value \\"test\\" -ErrorAction Stop; Write-Output \\"UNEXPECTED\\" } catch { Write-Output \\"EXPECTED: $_\\" }"',
     policy: { ui: { allowWindows: true } }, failureMarker: 'UNEXPECTED' },
-  { id: 'ps51-fs-read-root', name: 'Read from C:\\ root', category: 'File Access Tests', categoryIcon: '≡ƒôü', shell: 'ps51',
+  { id: 'ps51-fs-read-root', name: 'Read from C:\\ root', category: 'File Access Tests', categoryIcon: '📁', shell: 'ps51',
     description: 'Lists C:\\ as a read-only path. Tests trailing backslash handling.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'powershell.exe -NoProfile -Command "Get-ChildItem C:\\ | Select-Object -First 3 | ForEach-Object { Write-Output $_.Name }; Write-Output READ_ROOT_OK"',
     policy: { filesystem: { readonlyPaths: ['C:\\'] }, ui: { allowWindows: true } },
     requiresV05: true, successMarker: 'READ_ROOT_OK' },
-  { id: 'ps51-net-ok', name: 'Internet allowed', category: 'Network Tests', categoryIcon: '≡ƒîÉ', shell: 'ps51',
+  { id: 'ps51-net-ok', name: 'Internet allowed', category: 'Network Tests', categoryIcon: '🌐', shell: 'ps51',
     description: 'Makes an HTTPS request with outbound network enabled.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'powershell.exe -NoProfile -Command "$ProgressPreference=\'SilentlyContinue\'; (Invoke-WebRequest -Uri \'https://www.example.com\' -UseBasicParsing -TimeoutSec 10).Content"',
     policy: { network: { allowOutbound: true }, ui: { allowWindows: true } },
     successMarker: 'Example Domain' },
-  { id: 'ps51-net-blocked',name: 'Internet blocked', category: 'Network Tests', categoryIcon: '≡ƒîÉ', shell: 'ps51',
+  { id: 'ps51-net-blocked',name: 'Internet blocked', category: 'Network Tests', categoryIcon: '🌐', shell: 'ps51',
     description: 'Tries to make an HTTPS request with no network access. Should fail.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should be blocked',
     script: 'powershell.exe -NoProfile -Command "try { $h=New-Object -ComObject WinHttp.WinHttpRequest.5.1; $h.Open(\'GET\',\'https://www.example.com\',$false); $h.Send(); Write-Output $h.ResponseText } catch { Write-Output \'BLOCKED\' }"',
     policy: { ui: { allowWindows: true } }, failureMarker: 'Example Domain' },
-  { id: 'ps51-win32k-off', name: 'Win32k disabled', category: 'Desktop & UI Tests', categoryIcon: '≡ƒûÑ∩╕Å', shell: 'ps51',
+  { id: 'ps51-win32k-off', name: 'Win32k disabled', category: 'Desktop & UI Tests', categoryIcon: '🖥️', shell: 'ps51',
     description: 'Runs with Win32k disabled. PowerShell needs Win32k and should fail.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should fail (needs Win32k)',
     script: 'powershell.exe -NoProfile -Command "Write-Output PS_OK"',
     policy: { ui: { allowWindows: false } }, requiresV05: true },
-  { id: 'ps51-timeout', name: 'Timeout', category: 'Error Cases', categoryIcon: 'ΓÜá∩╕Å', shell: 'ps51',
+  { id: 'ps51-timeout', name: 'Timeout', category: 'Error Cases', categoryIcon: '⚠️', shell: 'ps51',
     description: 'Runs a sleep with a 5-second timeout.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should be terminated',
     script: 'powershell.exe -NoProfile -Command Start-Sleep -Seconds 30',
     policy: { ui: { allowWindows: true }, timeoutMs: 5000 } },
-  { id: 'ps51-full-access', name: 'Full access', category: 'Combined Tests', categoryIcon: '≡ƒöä', shell: 'ps51',
+  { id: 'ps51-full-access', name: 'Full access', category: 'Combined Tests', categoryIcon: '🔄', shell: 'ps51',
     description: 'Writes a file, reads it back, reports environment info.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'powershell.exe -NoProfile -Command "Set-Content -Path C:\\temp\\mxc-full-test\\result.txt -Value \'STEP1_OK\'; $c=Get-Content C:\\temp\\mxc-full-test\\result.txt; Write-Output $c; Write-Output (\'User: \' + $env:USERNAME); Write-Output \'ALL_OK\'"',
@@ -223,55 +224,55 @@ var SCENARIOS: Scenario[] = [
     successMarker: 'ALL_OK' },
 
   // ========== PowerShell 7 ==========
-  { id: 'ps7-hello', name: 'Echo Hello', category: 'Quick Tests', categoryIcon: '≡ƒÄ»', shell: 'ps7',
+  { id: 'ps7-hello', name: 'Echo Hello', category: 'Quick Tests', categoryIcon: '🎯', shell: 'ps7',
     description: 'Runs a hello world in PowerShell 7+.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'pwsh.exe -NoProfile -Command "Write-Output \'Hello from PowerShell 7\'"',
     policy: { ui: { allowWindows: true } }, successMarker: 'Hello from PowerShell 7' },
-  { id: 'ps7-version', name: 'Version info', category: 'Quick Tests', categoryIcon: '≡ƒÄ»', shell: 'ps7',
+  { id: 'ps7-version', name: 'Version info', category: 'Quick Tests', categoryIcon: '🎯', shell: 'ps7',
     description: 'Gets PowerShell 7 version table.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'pwsh.exe -NoProfile -Command $PSVersionTable',
     policy: { ui: { allowWindows: true } }, successMarker: 'PSVersion' },
-  { id: 'ps7-fs-write', name: 'Write to allowed folder', category: 'File Access Tests', categoryIcon: '≡ƒôü', shell: 'ps7',
+  { id: 'ps7-fs-write', name: 'Write to allowed folder', category: 'File Access Tests', categoryIcon: '📁', shell: 'ps7',
     description: 'Writes a file to a brokered path.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'pwsh.exe -NoProfile -Command "Set-Content -Path C:\\temp\\mxc-write-test\\ps7-output.txt -Value hello; Write-Output WRITE_OK"',
     policy: { ui: { allowWindows: true }, filesystem: { readwritePaths: ['C:\\temp\\mxc-write-test'] } },
     successMarker: 'WRITE_OK' },
-  { id: 'ps7-fs-read', name: 'Read system file', category: 'File Access Tests', categoryIcon: '≡ƒôü', shell: 'ps7',
+  { id: 'ps7-fs-read', name: 'Read system file', category: 'File Access Tests', categoryIcon: '📁', shell: 'ps7',
     description: 'Reads the hosts file from a brokered read-only path.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'pwsh.exe -NoProfile -Command Get-Content C:\\Windows\\System32\\drivers\\etc\\hosts',
     policy: { ui: { allowWindows: true }, filesystem: { readonlyPaths: ['C:\\Windows\\System32\\drivers\\etc'] } },
     successMarker: 'sample HOSTS file' },
-  { id: 'ps7-fs-write-blocked', name: 'Write without permission', category: 'File Access Tests', categoryIcon: '≡ƒôü', shell: 'ps7',
+  { id: 'ps7-fs-write-blocked', name: 'Write without permission', category: 'File Access Tests', categoryIcon: '📁', shell: 'ps7',
     description: 'Tries to write to a system directory. Should be denied.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should be blocked',
     script: 'pwsh.exe -NoProfile -Command "try { Set-Content C:\\Windows\\test.txt -Value fail -ErrorAction Stop; exit 1 } catch { Write-Output BLOCKED; exit 0 }"',
     policy: { ui: { allowWindows: true } } },
-  { id: 'ps7-net-ok', name: 'Internet allowed', category: 'Network Tests', categoryIcon: '≡ƒîÉ', shell: 'ps7',
+  { id: 'ps7-net-ok', name: 'Internet allowed', category: 'Network Tests', categoryIcon: '🌐', shell: 'ps7',
     description: 'Makes an HTTPS request with outbound network enabled.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'pwsh.exe -NoProfile -Command "(Invoke-WebRequest -Uri \'https://www.example.com\' -UseBasicParsing -TimeoutSec 10).Content"',
     policy: { network: { allowOutbound: true }, ui: { allowWindows: true } },
     successMarker: 'Example Domain' },
-  { id: 'ps7-net-blocked', name: 'Internet blocked', category: 'Network Tests', categoryIcon: '≡ƒîÉ', shell: 'ps7',
+  { id: 'ps7-net-blocked', name: 'Internet blocked', category: 'Network Tests', categoryIcon: '🌐', shell: 'ps7',
     description: 'Tries to make an HTTPS request with no network access. Should fail.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should be blocked',
     script: 'pwsh.exe -NoProfile -Command "try { (Invoke-WebRequest -Uri \'https://www.example.com\' -UseBasicParsing -TimeoutSec 5).Content } catch { Write-Output \'BLOCKED\' }"',
     policy: { ui: { allowWindows: true } }, failureMarker: 'Example Domain' },
-  { id: 'ps7-win32k-off', name: 'Win32k disabled', category: 'Desktop & UI Tests', categoryIcon: '≡ƒûÑ∩╕Å', shell: 'ps7',
+  { id: 'ps7-win32k-off', name: 'Win32k disabled', category: 'Desktop & UI Tests', categoryIcon: '🖥️', shell: 'ps7',
     description: 'Runs with Win32k disabled. PowerShell 7 needs Win32k and should fail.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should fail (needs Win32k)',
     script: 'pwsh.exe -NoProfile -Command "Write-Output PS7_OK"',
     policy: { ui: { allowWindows: false } }, requiresV05: true },
-  { id: 'ps7-timeout', name: 'Timeout', category: 'Error Cases', categoryIcon: 'ΓÜá∩╕Å', shell: 'ps7',
+  { id: 'ps7-timeout', name: 'Timeout', category: 'Error Cases', categoryIcon: '⚠️', shell: 'ps7',
     description: 'Runs a sleep with a 5-second timeout.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should be terminated',
     script: 'pwsh.exe -NoProfile -Command Start-Sleep -Seconds 30',
     policy: { ui: { allowWindows: true }, timeoutMs: 5000 } },
-  { id: 'ps7-full-access', name: 'Full access', category: 'Combined Tests', categoryIcon: '≡ƒöä', shell: 'ps7',
+  { id: 'ps7-full-access', name: 'Full access', category: 'Combined Tests', categoryIcon: '🔄', shell: 'ps7',
     description: 'Writes a file, reads it back, reports environment info.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'pwsh.exe -NoProfile -Command "Set-Content -Path C:\\temp\\mxc-full-test\\ps7-result.txt -Value \'STEP1_OK\'; $c=Get-Content C:\\temp\\mxc-full-test\\ps7-result.txt; Write-Output $c; Write-Output (\'User: \' + $env:USERNAME); Write-Output \'ALL_OK\'"',
@@ -279,50 +280,94 @@ var SCENARIOS: Scenario[] = [
     successMarker: 'ALL_OK' },
 
   // ========== Python ==========
-  { id: 'py-hello', name: 'Echo Hello', category: 'Quick Tests', categoryIcon: '≡ƒÄ»', shell: 'python',
+  { id: 'py-hello', name: 'Echo Hello', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
     description: 'Runs a hello world in Python.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'python -c "print(\'Hello from Python\')"',
     policy: { ui: { allowWindows: true } }, successMarker: 'Hello from Python' },
-  { id: 'py-version', name: 'Version info', category: 'Quick Tests', categoryIcon: '≡ƒÄ»', shell: 'python',
+  { id: 'py-version', name: 'Version info', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
     description: 'Gets Python version.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'python -c "import sys; print(f\'Python {sys.version}\')"',
     policy: { ui: { allowWindows: true } }, successMarker: 'Python' },
-  { id: 'py-fs-write', name: 'Write to allowed folder', category: 'File Access Tests', categoryIcon: '≡ƒôü', shell: 'python',
+  { id: 'py-fs-write', name: 'Write to allowed folder', category: 'File Access Tests', categoryIcon: '📁', shell: 'python',
     description: 'Writes a file to a brokered read-write path.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'python -c "f=open(r\'C:\\temp\\mxc-write-test\\py-output.txt\',\'w\'); f.write(\'hello\'); f.close(); print(\'WRITE_OK\')"',
     policy: { ui: { allowWindows: true }, filesystem: { readwritePaths: ['C:\\temp\\mxc-write-test'] } },
     successMarker: 'WRITE_OK' },
-  { id: 'py-fs-read', name: 'Read system file', category: 'File Access Tests', categoryIcon: '≡ƒôü', shell: 'python',
+  { id: 'py-fs-read', name: 'Read system file', category: 'File Access Tests', categoryIcon: '📁', shell: 'python',
     description: 'Reads the hosts file from a brokered read-only path.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'python -c "print(open(r\'C:\\Windows\\System32\\drivers\\etc\\hosts\').read()[:200])"',
     policy: { ui: { allowWindows: true }, filesystem: { readonlyPaths: ['C:\\Windows\\System32\\drivers\\etc'] } },
     successMarker: 'sample HOSTS file' },
-  { id: 'py-net-ok', name: 'Internet allowed', category: 'Network Tests', categoryIcon: '≡ƒîÉ', shell: 'python',
+  { id: 'py-net-ok', name: 'Internet allowed', category: 'Network Tests', categoryIcon: '🌐', shell: 'python',
     description: 'Makes an HTTPS request with outbound network enabled.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'python -c "import urllib.request; print(urllib.request.urlopen(\'https://www.example.com\',timeout=10).read().decode()[:200])"',
     policy: { network: { allowOutbound: true }, ui: { allowWindows: true } },
     successMarker: 'Example Domain' },
-  { id: 'py-net-blocked', name: 'Internet blocked', category: 'Network Tests', categoryIcon: '≡ƒîÉ', shell: 'python',
+  { id: 'py-net-blocked', name: 'Internet blocked', category: 'Network Tests', categoryIcon: '🌐', shell: 'python',
     description: 'Tries to make an HTTPS request with no network access. Should fail.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should be blocked',
     script: 'python -c "import urllib.request; print(urllib.request.urlopen(\'https://www.example.com\',timeout=5).read().decode())"',
     policy: { ui: { allowWindows: true } }, failureMarker: 'Example Domain' },
-  { id: 'py-timeout', name: 'Timeout', category: 'Error Cases', categoryIcon: 'ΓÜá∩╕Å', shell: 'python',
+  { id: 'py-timeout', name: 'Timeout', category: 'Error Cases', categoryIcon: '⚠️', shell: 'python',
     description: 'Runs a sleep with a 5-second timeout.',
     expectedOutcome: 'be-blocked', expectedLabel: 'Should be terminated',
     script: 'python -c "import time; time.sleep(30)"',
     policy: { ui: { allowWindows: true }, timeoutMs: 5000 } },
-  { id: 'py-full-access', name: 'Full access', category: 'Combined Tests', categoryIcon: '≡ƒöä', shell: 'python',
+  { id: 'py-full-access', name: 'Full access', category: 'Combined Tests', categoryIcon: '🔄', shell: 'python',
     description: 'Writes a file, reads it back using Python.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'python -c "f=open(r\'C:\\temp\\mxc-full-test\\py-result.txt\',\'w\'); f.write(\'STEP1_OK\'); f.close(); c=open(r\'C:\\temp\\mxc-full-test\\py-result.txt\').read(); print(c); print(\'ALL_OK\')"',
     policy: { filesystem: { readwritePaths: ['C:\\temp\\mxc-full-test'] }, ui: { allowWindows: true } },
     successMarker: 'ALL_OK' },
+
+  // ========== Windows Sandbox ==========
+  { id: 'ws-echo', name: 'Echo Hello', category: 'Quick Tests', categoryIcon: '🎯', shell: 'cmd',
+    containment: 'windows_sandbox',
+    description: 'Runs a simple echo command inside the Windows Sandbox VM.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: 'echo Hello from sandbox!',
+    policy: {}, successMarker: 'Hello from sandbox!' },
+  { id: 'ws-python', name: 'Python version', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
+    containment: 'windows_sandbox',
+    description: 'Runs Python inside the sandbox to verify the mapped host Python works.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: 'python -S -B -c "import sys; print(\'Hello from Windows Sandbox!\'); print(f\'Python version: {sys.version}\'); print(\'Script executed successfully in sandbox isolation\')"',
+    policy: {}, successMarker: 'executed successfully' },
+  { id: 'ws-powershell', name: 'PowerShell hello', category: 'Quick Tests', categoryIcon: '🎯', shell: 'ps51',
+    containment: 'windows_sandbox',
+    description: 'Runs PowerShell inside the sandbox and prints version info.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: 'powershell -NoProfile -Command "Write-Output \'PowerShell works\'; $PSVersionTable.PSVersion.ToString()"',
+    policy: {}, successMarker: 'PowerShell works' },
+  { id: 'ws-ps-env', name: 'PowerShell environment', category: 'Quick Tests', categoryIcon: '🎯', shell: 'ps51',
+    containment: 'windows_sandbox',
+    description: 'Shows environment info (computer name, user, process count) inside the sandbox.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: 'powershell -NoProfile -Command "Write-Output (\'ComputerName=\' + $env:COMPUTERNAME); Write-Output (\'User=\' + $env:USERNAME); Write-Output (\'ProcessCount=\' + (Get-Process | Measure-Object).Count)"',
+    policy: {}, successMarker: 'ComputerName=' },
+  { id: 'ws-stderr', name: 'Stdout & stderr', category: 'Quick Tests', categoryIcon: '🎯', shell: 'cmd',
+    containment: 'windows_sandbox',
+    description: 'Writes to both stdout and stderr. Both should be captured.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: 'echo stdout-message && echo stderr-message 1>&2',
+    policy: {}, successMarker: 'stdout-message' },
+  { id: 'ws-exit-code', name: 'Exit code', category: 'Error Cases', categoryIcon: '⚠️', shell: 'cmd',
+    containment: 'windows_sandbox',
+    description: 'Exits with code 42. Verifies exit codes are propagated from the sandbox.',
+    expectedOutcome: 'show-error', expectedLabel: 'Should exit 42',
+    script: 'exit /b 42',
+    policy: {} },
+  { id: 'ws-timeout', name: 'Timeout', category: 'Error Cases', categoryIcon: '⚠️', shell: 'cmd',
+    containment: 'windows_sandbox',
+    description: 'Runs a long ping with a 5-second timeout. Should be terminated.',
+    expectedOutcome: 'be-blocked', expectedLabel: 'Should be terminated',
+    script: 'ping -n 30 127.0.0.1',
+    policy: { timeoutMs: 5000 } },
 ];
 
 // ============================================================
@@ -542,7 +587,9 @@ function getCurrentScript(): string {
   }
 
   // Replace bare 'python' with resolved full path for BaseContainer compatibility
-  if (shellPaths.python?.exe && script.match(/^python\s/)) {
+  // (skip for Windows Sandbox — it uses mapped Python from the host)
+  var containment = $sel('containmentSelect').value;
+  if (containment !== 'windows_sandbox' && shellPaths.python?.exe && script.match(/^python\s/)) {
     script = '"' + shellPaths.python.exe + '"' + script.substring(6);
   }
 
@@ -570,7 +617,7 @@ function updateContainmentDropdown(): void {
   for (var i = 0; i < select.options.length; i++) {
     var opt = select.options[i];
     if (opt.value === 'appcontainer') {
-      opt.textContent = isV05 ? '≡ƒ¢í∩╕Å Base Process Container' : '≡ƒ¢í∩╕Å AppContainer';
+      opt.textContent = isV05 ? '🛡️ Base Process Container' : '🛡️ AppContainer';
     } else {
       // Experimental types only on 0.5.0+
       opt.disabled = !isV05;
@@ -597,15 +644,15 @@ function getPermsSummary(): string {
   var fs = state.fsEnabled ? 'limited' : 'off';
   var net = state.netEnabled ? 'on' : 'off';
   var ui = state.uiAllowWindows ? 'on' : 'off';
-  return 'Files: ' + fs + ' ┬╖ Internet: ' + net + ' ┬╖ Desktop: ' + ui;
+  return 'Files: ' + fs + ' · Internet: ' + net + ' · Desktop: ' + ui;
 }
 
 function updatePermsSummary(): void {
   var summary = getPermsSummary();
   $('permissionsSummaryLine').textContent = summary;
   $('runSummary').textContent = 'Internet: ' + (state.netEnabled ? 'on' : 'off') +
-    ' ┬╖ Files: ' + (state.fsEnabled ? 'limited' : 'off') +
-    ' ┬╖ Desktop: ' + (state.uiAllowWindows ? 'on' : 'off');
+    ' · Files: ' + (state.fsEnabled ? 'limited' : 'off') +
+    ' · Desktop: ' + (state.uiAllowWindows ? 'on' : 'off');
 }
 
 // ============================================================
@@ -634,7 +681,7 @@ function renderPathList(containerId: string, paths: string[], onRemove: (index: 
 
     var removeBtn = document.createElement('button');
     removeBtn.className = 'path-remove';
-    removeBtn.textContent = '├ù';
+    removeBtn.textContent = '×';
     removeBtn.title = 'Remove';
     removeBtn.addEventListener('click', function() {
       onRemove(i);
@@ -665,7 +712,7 @@ function refreshPathLists(): void {
 function setResultIdle(): void {
   var card = $('resultCard');
   card.className = 'result-card result-idle';
-  $('resultIcon').textContent = '≡ƒÆí';
+  $('resultIcon').textContent = '💡';
   $('resultTitle').textContent = 'Select a scenario and click Run in Sandbox';
   $('resultDetail').textContent = '';
   $('resultActions').classList.add('hidden');
@@ -675,8 +722,8 @@ function setResultIdle(): void {
 function setResultRunning(): void {
   var card = $('resultCard');
   card.className = 'result-card result-running';
-  $('resultIcon').textContent = 'ΓÅ│';
-  $('resultTitle').textContent = 'RunningΓÇª';
+  $('resultIcon').textContent = '⏳';
+  $('resultTitle').textContent = 'Running…';
   $('resultDetail').textContent = 'Script is executing inside the sandbox';
   $('resultActions').classList.add('hidden');
 }
@@ -684,7 +731,7 @@ function setResultRunning(): void {
 function setResultSuccess(exitCode: number): void {
   var card = $('resultCard');
   card.className = 'result-card result-success';
-  $('resultIcon').textContent = 'Γ£à';
+  $('resultIcon').textContent = '✅';
   $('resultTitle').textContent = 'Script completed successfully (exit code ' + formatExitCode(exitCode) + ')';
   $('resultDetail').textContent = '';
   showResultActions('success');
@@ -693,9 +740,9 @@ function setResultSuccess(exitCode: number): void {
 function setResultError(exitCode: number): void {
   var card = $('resultCard');
   card.className = 'result-card result-error';
-  $('resultIcon').textContent = 'Γ¥î';
+  $('resultIcon').textContent = '❌';
   if (exitCode === -1) {
-    $('resultTitle').textContent = 'Script was blocked ΓÇö access denied';
+    $('resultTitle').textContent = 'Script was blocked — access denied';
   } else {
     $('resultTitle').textContent = 'Script failed (exit code ' + formatExitCode(exitCode) + ')';
   }
@@ -713,7 +760,7 @@ function showResultActions(type: string): void {
   if (type === 'error') {
     if (!state.netEnabled) {
       suggestions.push({
-        label: '≡ƒîÉ Try with internet enabled',
+        label: '🌐 Try with internet enabled',
         action: function() {
           $chk('netToggle').checked = true;
           state.netEnabled = true;
@@ -724,7 +771,7 @@ function showResultActions(type: string): void {
     }
     if (!state.fsEnabled) {
       suggestions.push({
-        label: '≡ƒôü Try with file access',
+        label: '📁 Try with file access',
         action: function() {
           $chk('fsToggle').checked = true;
           state.fsEnabled = true;
@@ -800,7 +847,13 @@ function populateScenarios(): void {
   var select = $sel('scenarioSelect');
   select.innerHTML = '';
 
-  var filtered = SCENARIOS.filter(function(s) { return s.shell === shell; });
+  var containment = $sel('containmentSelect').value;
+  var isWS = containment === 'windows_sandbox';
+  var filtered = SCENARIOS.filter(function(s) {
+    if (s.shell !== shell) return false;
+    if (isWS) return s.containment === 'windows_sandbox';
+    return !s.containment || s.containment === 'appcontainer';
+  });
 
   // Group by category
   var categories: string[] = [];
@@ -821,7 +874,7 @@ function populateScenarios(): void {
       if (s.requiresV05 && state.version !== '0.5.0-dev') { return; }
       var opt = document.createElement('option');
       opt.value = s.id;
-      var marker = s.expectedOutcome === 'succeed' ? 'Γ£ô' : 'Γ£ù';
+      var marker = s.expectedOutcome === 'succeed' ? '✓' : '✗';
       opt.textContent = marker + ' ' + s.name;
       group.appendChild(opt);
     });
@@ -859,7 +912,7 @@ function loadScenario(id: string): void {
   $('scenarioOutcome').className = 'outcome-badge ' + scenario.expectedOutcome;
 
   if (!shellAvail) {
-    $('scenarioDesc').textContent = 'ΓÜá∩╕Å ' + scenario.shell + ' is not installed. ' + scenario.description;
+    $('scenarioDesc').textContent = '⚠️ ' + scenario.shell + ' is not installed. ' + scenario.description;
   }
 
   // Collapse script section for presets
@@ -914,7 +967,7 @@ function loadScenario(id: string): void {
   $chk('uiInjection').checked = state.uiInjection;
   updateUiDetails();
 
-  // Include helpers ΓÇö default ON for scenarios
+  // Include helpers — default ON for scenarios
   state.fsIncludeTools = true;
   state.fsIncludeTemp = true;
   $chk('fsIncludeTools').checked = true;
@@ -948,7 +1001,7 @@ function loadScenario(id: string): void {
 async function runSandbox(): Promise<void> {
   if (state.running) return;
 
-  // Raw JSON Config mode ΓÇö bypass policy builder entirely
+  // Raw JSON Config mode — bypass policy builder entirely
   var currentShell = $sel('shellSelect').value;
   if (currentShell === 'rawjson') {
     var rawJson = ($('rawJsonText') as HTMLTextAreaElement).value.trim();
@@ -982,6 +1035,53 @@ async function runSandbox(): Promise<void> {
     return;
   }
 
+  // Windows Sandbox mode — build raw wxc-exec JSON config and use runSandboxRaw
+  var currentContainment = $sel('containmentSelect').value;
+  if (currentContainment === 'windows_sandbox') {
+    var wsScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
+    if (!wsScript) {
+      termError('No script specified');
+      return;
+    }
+
+    var wsTimeout = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
+    var wsConfig: any = {
+      containment: 'windows_sandbox',
+      process: {
+        commandLine: wsScript,
+        timeout: wsTimeout,
+      },
+    };
+
+    state.running = true;
+    if (!runAllInProgress) {
+      ($('btnRun') as HTMLButtonElement).disabled = true;
+      $('btnKill').classList.remove('hidden');
+      $('btnRun').classList.add('hidden');
+      setResultRunning();
+      termClear();
+    }
+    terminalFullText = '';
+
+    termInfo('[Playground] Running via Windows Sandbox');
+    if (state.selectedScenario) {
+      termInfo('[Playground] Scenario: ' + state.selectedScenario.name + ' (' + state.selectedScenario.id + ')');
+    }
+    termInfo('[Playground] Script: ' + wsScript);
+    termInfo('[MXC] API: spawnSandboxFromConfig (raw config)');
+    termDim('[MXC] Note: First run may take 3-5 minutes while the sandbox VM boots.');
+
+    var wsDebug = (document.getElementById('debugToggle') as HTMLInputElement).checked;
+    var wsResult = await mxc.runSandboxRaw(JSON.stringify(wsConfig), wsDebug, true);
+    if (!wsResult.success) {
+      termError('[MXC] Failed to start sandbox: ' + wsResult.error);
+      onSandboxExit(-1);
+    } else {
+      termDim('[MXC] Config accepted');
+    }
+    return;
+  }
+
   var script = getCurrentScript();
 
   // Resolve test script file if scenario uses one
@@ -992,7 +1092,7 @@ async function runSandbox(): Promise<void> {
       script = ts.shell + ' -NoProfile -ExecutionPolicy Bypass -File "' + scriptInfo.path + '"' + (ts.args ? ' ' + ts.args : '');
       termDim('[Playground] Using test script: ' + scriptInfo.path);
     } else {
-      termError('[Playground] Could not find test script: ' + ts.file + ' ΓÇö ' + scriptInfo.error);
+      termError('[Playground] Could not find test script: ' + ts.file + ' — ' + scriptInfo.error);
       return;
     }
   }
@@ -1005,7 +1105,7 @@ async function runSandbox(): Promise<void> {
   // Warn and trim leading/trailing whitespace
   if (script !== script.trim()) {
     script = script.trim();
-    termDim('[Playground] ΓÜá Trimmed leading/trailing whitespace from script');
+    termDim('[Playground] ⚠ Trimmed leading/trailing whitespace from script');
   }
 
   state.running = true;
@@ -1026,7 +1126,7 @@ async function runSandbox(): Promise<void> {
     var currentSnapshot = JSON.stringify(policy);
     if (currentSnapshot !== state.scenarioPolicySnapshot) {
       scenarioModified = true;
-      termDim('[Playground] ΓÜá Note: You modified settings from the original scenario. Verdict may not match the expected outcome.');
+      termDim('[Playground] ⚠ Note: You modified settings from the original scenario. Verdict may not match the expected outcome.');
     }
   }
 
@@ -1066,7 +1166,7 @@ async function runSandbox(): Promise<void> {
   // Ensure write directories exist before running
   var allWritePaths = policy.filesystem?.readwritePaths || [];
   if (allWritePaths.length > 0) {
-    termDim('[Playground] Setup: ensuring directories exist ΓÇö ' + allWritePaths.join(', '));
+    termDim('[Playground] Setup: ensuring directories exist — ' + allWritePaths.join(', '));
     await mxc.ensureDirs(allWritePaths);
   }
 
@@ -1080,7 +1180,7 @@ async function runSandbox(): Promise<void> {
   }
   termInfo('[Playground] Script: ' + script);
   if (useAdvanced) {
-    termInfo('[MXC] API: createConfigFromPolicy ΓåÆ spawnSandboxFromConfig');
+    termInfo('[MXC] API: createConfigFromPolicy → spawnSandboxFromConfig');
   } else {
     termInfo('[MXC] API: spawnSandbox()');
   }
@@ -1107,7 +1207,7 @@ async function runSandbox(): Promise<void> {
 }
 
 async function killSandbox(): Promise<void> {
-  termInfo('[Playground] Stopping sandboxΓÇª');
+  termInfo('[Playground] Stopping sandbox…');
   await mxc.killSandbox();
   onSandboxExit(-1);
 }
@@ -1124,15 +1224,19 @@ async function runAllScenarios(): Promise<void> {
   runAllInProgress = true;
   ($('btnRun') as HTMLButtonElement).disabled = true;
   ($('btnRunAll') as HTMLButtonElement).disabled = true;
-  $('btnRunAll').textContent = 'ΓÅ│ RunningΓÇª';
+  $('btnRunAll').textContent = '⏳ Running…';
 
   var debugEnabled = (document.getElementById('debugToggle') as HTMLInputElement).checked;
   var version = state.version;
   var currentShell = $sel('shellSelect').value;
 
-  // Filter scenarios: current shell, available runtimes, version-appropriate
+  // Filter scenarios: current shell, containment, available runtimes, version-appropriate
+  var currentContainment = $sel('containmentSelect').value;
+  var isWS = currentContainment === 'windows_sandbox';
   var scenariosToRun = SCENARIOS.filter(function(s) {
     if (s.shell !== currentShell) { return false; }
+    if (isWS) { if (s.containment !== 'windows_sandbox') return false; }
+    else { if (s.containment === 'windows_sandbox') return false; }
     if (s.shell === 'ps7' && !shellAvailability['ps7']) { return false; }
     if (s.shell === 'python' && !shellAvailability['python']) { return false; }
     if (s.requiresV05 && version !== '0.5.0-dev') { return false; }
@@ -1145,7 +1249,7 @@ async function runAllScenarios(): Promise<void> {
   var total = scenariosToRun.length;
   var results: { scenario: Scenario; verdict: string; pass: boolean; exitCode: number }[] = [];
 
-  logLines.push('=== MXC Playground ΓÇö Run All Results ===');
+  logLines.push('=== MXC Playground — Run All Results ===');
   logLines.push('Date: ' + new Date().toISOString());
   logLines.push('Schema: ' + version);
   logLines.push('Runtime: ' + currentShell);
@@ -1155,12 +1259,12 @@ async function runAllScenarios(): Promise<void> {
 
   // Show running state in result card
   $('resultCard').className = 'result-card result-running';
-  $('resultIcon').textContent = 'ΓÅ│';
-  $('resultTitle').textContent = 'Running all ' + total + ' testsΓÇª';
+  $('resultIcon').textContent = '⏳';
+  $('resultTitle').textContent = 'Running all ' + total + ' tests…';
   $('resultDetail').textContent = '0/' + total + ' complete';
 
   termClear();
-  termInfo('[Playground] Γû╢Γû╢ Running all ' + total + ' tests for ' + currentShell + 'ΓÇª');
+  termInfo('[Playground] ▶▶ Running all ' + total + ' tests for ' + currentShell + '…');
   termInfo('');
 
   for (var i = 0; i < scenariosToRun.length; i++) {
@@ -1168,7 +1272,7 @@ async function runAllScenarios(): Promise<void> {
     logLines.push('--- [' + (i + 1) + '/' + total + '] ' + scenario.name + ' (' + scenario.id + ') ---');
 
     // Update progress
-    $('resultDetail').textContent = (i) + '/' + total + ' complete ΓÇö running: ' + scenario.name;
+    $('resultDetail').textContent = (i) + '/' + total + ' complete — running: ' + scenario.name;
 
     // Load the scenario into state
     loadScenario(scenario.id);
@@ -1187,7 +1291,7 @@ async function runAllScenarios(): Promise<void> {
     // Wait for it to finish
     var result = await resultPromise;
 
-    var verdict = result.pass ? 'Γ£à PASS' : 'Γ¥î FAIL';
+    var verdict = result.pass ? '✅ PASS' : '❌ FAIL';
     if (result.pass) { passed++; } else { failed++; }
     results.push({ scenario, verdict, pass: result.pass, exitCode: result.exitCode });
 
@@ -1201,7 +1305,7 @@ async function runAllScenarios(): Promise<void> {
     logLines.push('--- End ---');
     logLines.push('');
 
-    termInfo('[Playground] [' + (i + 1) + '/' + total + '] ' + verdict + ' ΓÇö ' + scenario.name);
+    termInfo('[Playground] [' + (i + 1) + '/' + total + '] ' + verdict + ' — ' + scenario.name);
   }
 
   // Summary
@@ -1212,47 +1316,47 @@ async function runAllScenarios(): Promise<void> {
   termInfo('');
 
   // Render test report in terminal
-  termWrite('ΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöü', 'line-info');
-  termWrite('  TEST REPORT ΓÇö ' + currentShell.toUpperCase() + '  (' + new Date().toLocaleString() + ')', 'line-info');
-  termWrite('ΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöü', 'line-info');
+  termWrite('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'line-info');
+  termWrite('  TEST REPORT — ' + currentShell.toUpperCase() + '  (' + new Date().toLocaleString() + ')', 'line-info');
+  termWrite('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'line-info');
   termWrite('', 'line-info');
 
   for (var r = 0; r < results.length; r++) {
     var res = results[r];
-    var icon = res.pass ? 'Γ£à' : 'Γ¥î';
+    var icon = res.pass ? '✅' : '❌';
     var label = res.scenario.name;
     var exitStr = res.exitCode === 0 ? '' : '  (exit ' + res.exitCode + ')';
     termWrite('  ' + icon + '  ' + label + exitStr, res.pass ? 'line-success' : 'line-error');
   }
 
   termWrite('', 'line-info');
-  var summaryLine = '  ' + passed + ' passed, ' + failed + ' failed ΓÇö ' + total + ' total';
+  var summaryLine = '  ' + passed + ' passed, ' + failed + ' failed — ' + total + ' total';
   if (failed === 0) {
-    termWrite('  Γ£à ALL TESTS PASSED', 'line-success');
+    termWrite('  ✅ ALL TESTS PASSED', 'line-success');
   } else {
-    termWrite('  Γ¥î ' + failed + ' TEST(S) FAILED', 'line-error');
+    termWrite('  ❌ ' + failed + ' TEST(S) FAILED', 'line-error');
   }
   termWrite(summaryLine, 'line-info');
-  termWrite('ΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöü', 'line-info');
+  termWrite('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'line-info');
 
   // Update result card
   if (failed === 0) {
     $('resultCard').className = 'result-card result-success';
-    $('resultIcon').textContent = 'Γ£à';
+    $('resultIcon').textContent = '✅';
     $('resultTitle').textContent = 'All ' + total + ' tests passed';
   } else {
     $('resultCard').className = 'result-card result-error';
-    $('resultIcon').textContent = 'Γ¥î';
+    $('resultIcon').textContent = '❌';
     $('resultTitle').textContent = passed + ' passed, ' + failed + ' failed';
   }
-  $('resultDetail').textContent = currentShell + ' ┬╖ ' + version + ' ┬╖ ' + new Date().toLocaleTimeString();
+  $('resultDetail').textContent = currentShell + ' · ' + version + ' · ' + new Date().toLocaleTimeString();
 
   // Offer optional save via a link in the terminal
   var logContent = logLines.join('\n');
   termWrite('', 'line-info');
   var saveLink = document.createElement('div');
   saveLink.className = 'line-info';
-  saveLink.innerHTML = '<a href="#" id="saveReportLink" style="color:var(--accent); cursor:pointer; text-decoration:underline;">≡ƒÆ╛ Save report to fileΓÇª</a>';
+  saveLink.innerHTML = '<a href="#" id="saveReportLink" style="color:var(--accent); cursor:pointer; text-decoration:underline;">💾 Save report to file…</a>';
   $('terminal').appendChild(saveLink);
   $('terminal').scrollTop = $('terminal').scrollHeight;
   document.getElementById('saveReportLink')!.addEventListener('click', async function(e) {
@@ -1281,24 +1385,24 @@ function onSandboxExit(exitCode: number): void {
   var scenario = state.selectedScenario;
   var isCustomMode = !scenario || $sel('shellSelect').value === 'custom' || $sel('shellSelect').value === 'rawjson';
 
-  // For custom/raw JSON: no expected outcome ΓÇö show neutral result
+  // For custom/raw JSON: no expected outcome — show neutral result
   if (isCustomMode) {
     var analysis = exitCode !== 0 ? analyzeOutput(terminalFullText, exitCode) : null;
     if (exitCode === 0) {
-      termDim('[Playground] ΓÜá Completed (exit code 0) ΓÇö inspect output to verify the result');
+      termDim('[Playground] ⚠ Completed (exit code 0) — inspect output to verify the result');
       var card = $('resultCard');
       card.className = 'result-card result-neutral';
-      $('resultIcon').textContent = 'ΓÜá';
-      $('resultTitle').textContent = 'Completed ΓÇö exit code 0';
+      $('resultIcon').textContent = '⚠';
+      $('resultTitle').textContent = 'Completed — exit code 0';
       $('resultDetail').textContent = 'Custom script finished. Review the output above to confirm it worked as expected.';
       showResultActions('success');
     } else {
-      termError('[Playground] ΓÜá Completed with exit code ' + formatExitCode(exitCode) + ' ΓÇö inspect output');
+      termError('[Playground] ⚠ Completed with exit code ' + formatExitCode(exitCode) + ' — inspect output');
       var card = $('resultCard');
       card.className = 'result-card result-neutral';
-      $('resultIcon').textContent = 'ΓÜá';
-      $('resultTitle').textContent = 'Completed ΓÇö exit code ' + formatExitCode(exitCode);
-      $('resultDetail').textContent = analysis ? analysis.explanation + ' ≡ƒÆí ' + analysis.suggestion : 'Non-zero exit code. Review the output above.';
+      $('resultIcon').textContent = '⚠';
+      $('resultTitle').textContent = 'Completed — exit code ' + formatExitCode(exitCode);
+      $('resultDetail').textContent = analysis ? analysis.explanation + ' 💡 ' + analysis.suggestion : 'Non-zero exit code. Review the output above.';
       showResultActions('error');
     }
 
@@ -1318,12 +1422,12 @@ function onSandboxExit(exitCode: number): void {
   var outputOverride = false;
   if (scenario && exitCode === 0) {
     if (scenario.failureMarker && terminalFullText.includes(scenario.failureMarker)) {
-      // Script printed its own failure marker ΓÇö the operation didn't actually work
+      // Script printed its own failure marker — the operation didn't actually work
       actualOutcome = 'be-blocked';
       outputOverride = true;
       termDim('[Playground] Output contains failure marker: "' + scenario.failureMarker + '"');
     } else if (scenario.successMarker && !terminalFullText.includes(scenario.successMarker)) {
-      // Script didn't print expected success marker ΓÇö something went wrong
+      // Script didn't print expected success marker — something went wrong
       actualOutcome = 'be-blocked';
       outputOverride = true;
       termDim('[Playground] Output missing expected marker: "' + scenario.successMarker + '"');
@@ -1346,34 +1450,34 @@ function onSandboxExit(exitCode: number): void {
   var analysis = exitCode !== 0 ? analyzeOutput(terminalFullText, exitCode) : null;
 
   if (verdictPass && exitCode === 0) {
-    termSuccess('[Playground] Γ£à PASS ΓÇö Script succeeded as expected (exit code 0)');
+    termSuccess('[Playground] ✅ PASS — Script succeeded as expected (exit code 0)');
     setResultSuccess(exitCode);
     $('resultDetail').textContent = scenario ? 'Expected: ' + scenario.expectedLabel : '';
   } else if (verdictPass && exitCode !== 0) {
-    // Expected failure ΓÇö this is a PASS
+    // Expected failure — this is a PASS
     var card = $('resultCard');
     card.className = 'result-card result-success';
-    $('resultIcon').textContent = 'Γ£à';
-    $('resultTitle').textContent = 'PASS ΓÇö Script was blocked as expected (exit code ' + formatExitCode(exitCode) + ')';
+    $('resultIcon').textContent = '✅';
+    $('resultTitle').textContent = 'PASS — Script was blocked as expected (exit code ' + formatExitCode(exitCode) + ')';
     $('resultDetail').textContent = analysis ? analysis.explanation : (scenario ? scenario.expectedLabel : '');
-    termSuccess('[Playground] Γ£à PASS ΓÇö Blocked as expected (exit code ' + formatExitCode(exitCode) + ')');
+    termSuccess('[Playground] ✅ PASS — Blocked as expected (exit code ' + formatExitCode(exitCode) + ')');
     showResultActions('success');
   } else if (!verdictPass && exitCode === 0) {
-    // Expected failure but it succeeded ΓÇö unexpected
+    // Expected failure but it succeeded — unexpected
     var card = $('resultCard');
     card.className = 'result-card result-error';
-    $('resultIcon').textContent = 'ΓÜá∩╕Å';
-    $('resultTitle').textContent = 'UNEXPECTED ΓÇö Script succeeded but was expected to be blocked';
+    $('resultIcon').textContent = '⚠️';
+    $('resultTitle').textContent = 'UNEXPECTED — Script succeeded but was expected to be blocked';
     $('resultDetail').textContent = 'The sandbox may not be enforcing the expected restriction.';
-    termError('[Playground] ΓÜá∩╕Å UNEXPECTED ΓÇö Succeeded but expected: ' + (scenario?.expectedLabel || 'blocked'));
+    termError('[Playground] ⚠️ UNEXPECTED — Succeeded but expected: ' + (scenario?.expectedLabel || 'blocked'));
     showResultActions('error');
   } else {
     // Unexpected failure
-    termError('[Playground] Γ¥î FAIL ΓÇö exit code ' + formatExitCode(exitCode));
+    termError('[Playground] ❌ FAIL — exit code ' + formatExitCode(exitCode));
     setResultError(exitCode);
     if (analysis) {
       $('resultTitle').textContent = analysis.title;
-      $('resultDetail').textContent = analysis.explanation + ' ≡ƒÆí ' + analysis.suggestion;
+      $('resultDetail').textContent = analysis.explanation + ' 💡 ' + analysis.suggestion;
     }
   }
 
@@ -1405,12 +1509,12 @@ var ERROR_PATTERNS = [
   { pattern: 'is not recognized', title: 'Command not found', explanation: 'The command was not found inside the sandbox. PATH directories may not be accessible.', suggestion: 'Enable "Include common tools" in File Access to add PATH directories.' },
   { pattern: 'The remote name could not be resolved', title: 'DNS resolution failed', explanation: 'The script could not resolve a hostname. Internet access may be blocked.', suggestion: 'Enable Internet access in the Policy section.' },
   { pattern: 'network is not available', title: 'Network blocked', explanation: 'Outbound network connections are blocked by the sandbox policy.', suggestion: 'Enable "Allow internet access" in Policy.' },
-  { pattern: 'version is required', title: 'Missing version', explanation: 'The sandbox policy requires a version field.', suggestion: 'This is a bug in the playground ΓÇö please report it.' },
+  { pattern: 'version is required', title: 'Missing version', explanation: 'The sandbox policy requires a version field.', suggestion: 'This is a bug in the playground — please report it.' },
   { pattern: 'newer than supported', title: 'Version too new', explanation: 'The schema version is newer than what the SDK supports.', suggestion: 'Use version 0.4.0-alpha or 0.5.0-dev.' },
   { pattern: 'The system cannot find the file', title: 'File not found', explanation: 'The executable or file was not found. It may not be accessible from inside the container.', suggestion: 'Add the file\'s directory to read-only paths in File Access.' },
   { pattern: 'PermissionError', title: 'Permission denied (Python)', explanation: 'Python could not access a file or directory due to sandbox restrictions.', suggestion: 'Add the path to read-write or read-only paths in File Access.' },
   { pattern: 'script is required', title: 'No script provided', explanation: 'No command was provided to run.', suggestion: 'Enter a script command or select a scenario.' },
-  { pattern: 'WIN32_ERROR(1920)', title: 'File cannot be accessed', explanation: 'The executable cannot be loaded by the sandbox. The install directory may not be accessible to the container process.', suggestion: 'The runtime may need its install directory added to File Access. Try clicking ≡ƒöä refresh and running again.' },
+  { pattern: 'WIN32_ERROR(1920)', title: 'File cannot be accessed', explanation: 'The executable cannot be loaded by the sandbox. The install directory may not be accessible to the container process.', suggestion: 'The runtime may need its install directory added to File Access. Try clicking 🔄 refresh and running again.' },
 ];
 
 var EXIT_CODE_PATTERNS: Record<number, { title: string; explanation: string; suggestion: string }> = {};
@@ -1426,7 +1530,7 @@ EXIT_CODE_PATTERNS[1920] = { // ERROR_FILE_CANNOT_BE_ACCESSED
 };
 
 function analyzeOutput(terminalText: string, exitCode: number): { title: string; explanation: string; suggestion: string } | null {
-  // Check exit code first ΓÇö with dynamic paths
+  // Check exit code first — with dynamic paths
   if (exitCode === -1073741790) { // 0xC0000022 STATUS_ACCESS_DENIED
     var aclPath = shellPaths.python?.rootDir || '';
     var isPerUser = aclPath.includes('AppData');
@@ -1490,19 +1594,48 @@ function showJsonPanel(tab: string): void {
   $('jsonPanel').classList.remove('hidden');
 
   if (tab === 'policy') {
-    var policyStr = JSON.stringify(buildPolicy(), null, 2);
-    $('jsonContent').innerHTML = highlightJson(escapeHtml(policyStr));
+    var containment = $sel('containmentSelect').value;
+    if (containment === 'windows_sandbox') {
+      var wsScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
+      var wsTimeout = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
+      var wsConfig = {
+        containment: 'windows_sandbox',
+        process: {
+          commandLine: wsScript || '(no script)',
+          timeout: wsTimeout,
+        },
+      };
+      $('jsonContent').innerHTML = highlightJson(escapeHtml(JSON.stringify(wsConfig, null, 2)));
+    } else {
+      var policyStr = JSON.stringify(buildPolicy(), null, 2);
+      $('jsonContent').innerHTML = highlightJson(escapeHtml(policyStr));
+    }
   } else {
-    $('jsonContent').innerHTML = '<span class="line-dim">Loading configΓÇª</span>';
-    var policyJson = JSON.stringify(buildPolicy());
-    mxc.validatePolicy(policyJson).then(function(result: any) {
-      if (result.valid) {
-        var formatted = JSON.stringify(JSON.parse(result.config), null, 2);
-        $('jsonContent').innerHTML = highlightJson(escapeHtml(formatted));
-      } else {
-        $('jsonContent').innerHTML = '<span class="line-error">Error: ' + escapeHtml(result.error) + '</span>';
-      }
-    });
+    var containment2 = $sel('containmentSelect').value;
+    if (containment2 === 'windows_sandbox') {
+      // WS Config tab — show the same raw config (no SDK policy validation)
+      var wsScript2 = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
+      var wsTimeout2 = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
+      var wsConfig2 = {
+        containment: 'windows_sandbox',
+        process: {
+          commandLine: wsScript2 || '(no script)',
+          timeout: wsTimeout2,
+        },
+      };
+      $('jsonContent').innerHTML = highlightJson(escapeHtml(JSON.stringify(wsConfig2, null, 2)));
+    } else {
+      $('jsonContent').innerHTML = '<span class="line-dim">Loading config…</span>';
+      var policyJson = JSON.stringify(buildPolicy());
+      mxc.validatePolicy(policyJson).then(function(result: any) {
+        if (result.valid) {
+          var formatted = JSON.stringify(JSON.parse(result.config), null, 2);
+          $('jsonContent').innerHTML = highlightJson(escapeHtml(formatted));
+        } else {
+          $('jsonContent').innerHTML = '<span class="line-error">Error: ' + escapeHtml(result.error) + '</span>';
+        }
+      });
+    }
   }
 }
 
@@ -1530,10 +1663,27 @@ function updateDevSidebar(): void {
   if ($('devSidebar').classList.contains('hidden')) return;
 
   var currentShell = $sel('shellSelect').value;
+  var currentContainment = $sel('containmentSelect').value;
 
-  // Raw JSON mode ΓÇö show only the raw config, no policy
+  // Windows Sandbox mode — show the raw WS config
+  if (currentContainment === 'windows_sandbox' && currentShell !== 'rawjson') {
+    var wsScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
+    var wsTimeout = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
+    var wsConfig = {
+      containment: 'windows_sandbox',
+      process: {
+        commandLine: wsScript || '(no script)',
+        timeout: wsTimeout,
+      },
+    };
+    $('devPolicyJson').innerHTML = '<span class="line-dim">N/A — Windows Sandbox bypasses policy generation</span>';
+    $('devConfigJson').innerHTML = highlightJson(escapeHtml(JSON.stringify(wsConfig, null, 2)));
+    return;
+  }
+
+  // Raw JSON mode — show only the raw config, no policy
   if (currentShell === 'rawjson') {
-    $('devPolicyJson').innerHTML = '<span class="line-dim">N/A ΓÇö MXC JSON mode skips policy generation</span>';
+    $('devPolicyJson').innerHTML = '<span class="line-dim">N/A — MXC JSON mode skips policy generation</span>';
     var rawText = ($('rawJsonText') as HTMLTextAreaElement).value.trim();
     if (rawText) {
       try {
@@ -1553,7 +1703,7 @@ function updateDevSidebar(): void {
   var policyStr = JSON.stringify(policy, null, 2);
   $('devPolicyJson').innerHTML = highlightJson(escapeHtml(policyStr));
 
-  $('devConfigJson').innerHTML = '<span class="line-dim">LoadingΓÇª</span>';
+  $('devConfigJson').innerHTML = '<span class="line-dim">Loading…</span>';
   var policyJson = JSON.stringify(policy);
   mxc.validatePolicy(policyJson).then(function(result: any) {
     if (result.valid) {
@@ -1622,8 +1772,8 @@ function init(): void {
   // Platform check
   mxc.getPlatformSupport().then(function(info: any) {
     $('platformBadge').textContent = info.isSupported
-      ? 'Γ£ô Platform supported'
-      : 'Γ£ù ' + (info.reason || 'Not supported');
+      ? '✓ Platform supported'
+      : '✗ ' + (info.reason || 'Not supported');
   });
 
   // === Welcome view buttons ===
@@ -1664,7 +1814,7 @@ function init(): void {
   // === Refresh shells ===
   $('btnRefreshShells').addEventListener('click', function() {
     var btn = $('btnRefreshShells');
-    btn.textContent = 'ΓÅ│';
+    btn.textContent = '⏳';
     btn.setAttribute('disabled', 'true');
     mxc.detectShells().then(function(shells: Record<string, any>) {
       var found: string[] = [];
@@ -1684,18 +1834,18 @@ function init(): void {
       }
       updateShellDropdown();
       populateScenarios();
-      btn.textContent = '≡ƒöä';
+      btn.textContent = '🔄';
       btn.removeAttribute('disabled');
       // Show summary in scenario description area
-      var msg = 'Γ£à Found: ' + (found.length > 0 ? found.join(', ') : 'none');
-      if (notFound.length > 0) { msg += '\nΓ¥î Not found: ' + notFound.join(', '); }
+      var msg = '✅ Found: ' + (found.length > 0 ? found.join(', ') : 'none');
+      if (notFound.length > 0) { msg += '\n❌ Not found: ' + notFound.join(', '); }
       $('refreshStatus').classList.remove('hidden');
       $('refreshStatusText').innerText = msg;
       // Re-trigger shell change to update button visibility
       $sel('shellSelect').dispatchEvent(new Event('change'));
       updatePythonAclWarning();
     }).catch(function() {
-      btn.textContent = '≡ƒöä';
+      btn.textContent = '🔄';
       btn.removeAttribute('disabled');
     });
   });
@@ -1707,21 +1857,43 @@ function init(): void {
   // === Containment select ===
   $sel('containmentSelect').addEventListener('change', function() {
     var containment = $sel('containmentSelect').value;
-    if (containment !== 'appcontainer') {
-      // Experimental containment ΓÇö hide runtime, force MXC JSON mode
-      $('runtimeRow').classList.add('hidden');
-      $('categoryRow').classList.add('hidden');
-      $sel('shellSelect').value = 'rawjson';
-      $sel('shellSelect').dispatchEvent(new Event('change'));
-      $('experimentalCaution').classList.remove('hidden');
-    } else {
-      // Process Container ΓÇö show runtime
+    if (containment === 'windows_sandbox') {
+      // Windows Sandbox — show runtime/scenarios, auto-enable experimental
       $('runtimeRow').classList.remove('hidden');
       $sel('shellSelect').disabled = false;
       $('experimentalCaution').classList.add('hidden');
+      // Hide policy controls — WS ignores filesystem/network/UI policies
+      $('policySectionWrapper').classList.add('hidden');
+      // Auto-enable experimental (WS requires it) and lock the toggle
+      ($('experimentalToggle') as HTMLInputElement).checked = true;
+      ($('experimentalToggle') as HTMLInputElement).disabled = true;
       if ($sel('shellSelect').value === 'rawjson') {
         $sel('shellSelect').value = 'cmd';
         $sel('shellSelect').dispatchEvent(new Event('change'));
+      } else {
+        populateScenarios();
+      }
+    } else if (containment !== 'appcontainer') {
+      // Other experimental containment — hide runtime, force MXC JSON mode
+      $('runtimeRow').classList.add('hidden');
+      $('categoryRow').classList.add('hidden');
+      $('policySectionWrapper').classList.remove('hidden');
+      $sel('shellSelect').value = 'rawjson';
+      $sel('shellSelect').dispatchEvent(new Event('change'));
+      $('experimentalCaution').classList.remove('hidden');
+      ($('experimentalToggle') as HTMLInputElement).disabled = false;
+    } else {
+      // Process Container — show runtime
+      $('runtimeRow').classList.remove('hidden');
+      $sel('shellSelect').disabled = false;
+      $('experimentalCaution').classList.add('hidden');
+      $('policySectionWrapper').classList.remove('hidden');
+      ($('experimentalToggle') as HTMLInputElement).disabled = false;
+      if ($sel('shellSelect').value === 'rawjson') {
+        $sel('shellSelect').value = 'cmd';
+        $sel('shellSelect').dispatchEvent(new Event('change'));
+      } else {
+        populateScenarios();
       }
     }
     updateContainmentDropdown();
@@ -1735,7 +1907,9 @@ function init(): void {
       $('categoryRow').classList.add('hidden');
       $('scriptSection').classList.remove('hidden');
       $('rawJsonSection').classList.add('hidden');
-      $('policySectionWrapper').classList.remove('hidden');
+      if ($sel('containmentSelect').value !== 'windows_sandbox') {
+        $('policySectionWrapper').classList.remove('hidden');
+      }
       $('btnRun').classList.remove('hidden');
       $('btnRunAll').classList.add('hidden');
       updateUiDetails();
@@ -1755,7 +1929,7 @@ function init(): void {
       $('btnRun').classList.remove('hidden');
       $('btnRunAll').classList.add('hidden');
       state.selectedScenario = null;
-      $('scenarioDesc').textContent = 'Paste a ContainerConfig JSON. Runs via spawnSandboxFromConfig ΓÇö no policy generation step.';
+      $('scenarioDesc').textContent = 'Paste a ContainerConfig JSON. Runs via spawnSandboxFromConfig — no policy generation step.';
       $('scenarioOutcome').textContent = '';
       $('scenarioOutcome').className = 'outcome-badge';
       $chk('experimentalToggle').checked = true;
@@ -1768,7 +1942,9 @@ function init(): void {
         populateScenarios();
         $('btnRun').classList.remove('hidden');
         $('btnRunAll').classList.remove('hidden');
-        $('policySectionWrapper').classList.remove('hidden');
+        if ($sel('containmentSelect').value !== 'windows_sandbox') {
+          $('policySectionWrapper').classList.remove('hidden');
+        }
         if (document.getElementById('advancedSectionWrapper')) {
           $('advancedSectionWrapper').classList.remove('hidden');
         }
@@ -1835,13 +2011,13 @@ function init(): void {
         updateContainmentDropdown();
       }
 
-      var info = '<span style="color:#4ec9b0;">Γ£ô Valid JSON</span>';
-      if (parsed.version) { info += ' ┬╖ version: ' + parsed.version; }
-      if (parsed.process?.commandLine) { info += ' ┬╖ <code>' + escapeHtml(parsed.process.commandLine) + '</code>'; }
-      if (parsed.containment) { info += ' ┬╖ containment: ' + parsed.containment; }
+      var info = '<span style="color:#4ec9b0;">✓ Valid JSON</span>';
+      if (parsed.version) { info += ' · version: ' + parsed.version; }
+      if (parsed.process?.commandLine) { info += ' · <code>' + escapeHtml(parsed.process.commandLine) + '</code>'; }
+      if (parsed.containment) { info += ' · containment: ' + parsed.containment; }
       $('jsonEditorPreview').innerHTML = info;
     } catch (e: any) {
-      $('jsonEditorPreview').innerHTML = '<span class="line-error">Γ£ù ' + escapeHtml(e.message) + '</span>';
+      $('jsonEditorPreview').innerHTML = '<span class="line-error">✗ ' + escapeHtml(e.message) + '</span>';
     }
   }
 
@@ -2084,15 +2260,15 @@ function init(): void {
   // === Copy buttons in dev sidebar ===
   $('copyPolicy').addEventListener('click', function() {
     navigator.clipboard.writeText($('devPolicyJson').textContent || '');
-    (this as HTMLElement).textContent = 'Γ£à';
+    (this as HTMLElement).textContent = '✅';
     var btn = this as HTMLElement;
-    setTimeout(function() { btn.textContent = '≡ƒôï'; }, 1000);
+    setTimeout(function() { btn.textContent = '📋'; }, 1000);
   });
   $('copyConfig').addEventListener('click', function() {
     navigator.clipboard.writeText($('devConfigJson').textContent || '');
-    (this as HTMLElement).textContent = 'Γ£à';
+    (this as HTMLElement).textContent = '✅';
     var btn = this as HTMLElement;
-    setTimeout(function() { btn.textContent = '≡ƒôï'; }, 1000);
+    setTimeout(function() { btn.textContent = '📋'; }, 1000);
   });
 
   // === Dev mode toggle ===
