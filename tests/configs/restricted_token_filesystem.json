@@ -1,0 +1,20 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "CLI-Tier4-Filesystem",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd.exe /c exit 0"
+  },
+  "ui": {
+    "disable": false
+  },
+  "readwritePaths": [
+    "C:\\Temp\\mxc-tier4-rw"
+  ],
+  "readonlyPaths": [
+    "C:\\Temp\\mxc-tier4-ro"
+  ],
+  "deniedPaths": [
+    "C:\\Temp\\mxc-tier4-deny"
+  ]
+}

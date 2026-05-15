@@ -63,7 +63,8 @@ use wxc_common::child_env::build_proxy_env_block;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ProxyAddress, ScriptResponse};
-use wxc_common::process_util::OwnedHandle;
+use wxc_common::process_util::{OwnedHandle, SendOwnedHandle};
+use wxc_common::sandbox_process::{SandboxBackend, SandboxProcess, StdioMode};
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use wxc_common::{string_util, ui_policy};
 
@@ -233,13 +234,16 @@ impl RestrictedTokenRunner {
         Self::default()
     }
 
-    /// Core implementation, returning `Result` so error paths are
-    /// concise. Translated to a `ScriptResponse` by [`Self::execute`].
-    fn run_internal_impl(
+    /// Spawn the child under a restricted token and hand back a live
+    /// [`RestrictedTokenChild`] (process/thread handles, UI job object,
+    /// pid, and resolved timeout) *before* it is waited on. Shared by the
+    /// run-to-completion helper ([`Self::run_internal_impl`]) and the
+    /// streaming [`SandboxBackend::spawn`] surface.
+    fn spawn_child(
         &mut self,
         request: &ExecutionRequest,
         logger: &mut Logger,
-    ) -> Result<ScriptResponse, WxcError> {
+    ) -> Result<RestrictedTokenChild, WxcError> {
         // ── Builtin test proxy (Phase 3) ─────────────────────────
         //
         // If the policy asks for the builtin test proxy, launch it
@@ -419,7 +423,7 @@ impl RestrictedTokenRunner {
         // block must terminate first. Mirrors the AppContainer runner
         // sequencing verbatim — the token model doesn't affect Job
         // Object attachment.
-        let _job = match (|| -> Result<UiJobObject, WxcError> {
+        let job = match (|| -> Result<UiJobObject, WxcError> {
             let job = UiJobObject::new()?;
             let restrictions = ui_policy::resolve_ui_restrictions(
                 &request.policy.ui,
@@ -453,12 +457,32 @@ impl RestrictedTokenRunner {
 
         // Wait + collect exit code.
         let timeout_ms = get_timeout_milliseconds(request.script_timeout);
-        let wait_result = unsafe { WaitForSingleObject(process_handle.get(), timeout_ms) };
+        Ok(RestrictedTokenChild {
+            process: process_handle,
+            _thread: thread_handle,
+            job,
+            pid: pi.dwProcessId,
+            timeout_ms,
+        })
+    }
+
+    /// Run the sandboxed command to completion under a restricted token,
+    /// returning its exit code. Spawns via [`Self::spawn_child`] and then
+    /// waits (terminating the child on timeout). Used by the [`ScriptRunner`]
+    /// surface and the unit tests; the streaming [`SandboxBackend`] surface
+    /// waits via [`RestrictedTokenSandboxProcess`] instead.
+    fn run_internal_impl(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> Result<ScriptResponse, WxcError> {
+        let child = self.spawn_child(request, logger)?;
+        let wait_result = unsafe { WaitForSingleObject(child.process.get(), child.timeout_ms) };
         match wait_result {
             WAIT_OBJECT_0 => {}
             WAIT_TIMEOUT => unsafe {
-                let _ = TerminateProcess(process_handle.get(), u32::MAX);
-                let _ = WaitForSingleObject(process_handle.get(), u32::MAX);
+                let _ = TerminateProcess(child.process.get(), u32::MAX);
+                let _ = WaitForSingleObject(child.process.get(), u32::MAX);
             },
             WAIT_FAILED => {
                 let err = unsafe { GetLastError() };
@@ -476,17 +500,182 @@ impl RestrictedTokenRunner {
 
         let mut exit_code: u32 = 0;
         unsafe {
-            GetExitCodeProcess(process_handle.get(), &mut exit_code)
+            GetExitCodeProcess(child.process.get(), &mut exit_code)
                 .map_err(|_| WxcError::Process("GetExitCodeProcess failed".into()))?;
         }
 
         Ok(ScriptResponse {
             exit_code: exit_code as i32,
-            standard_out: String::new(),
-            standard_err: String::new(),
-            error_message: String::new(),
             ..Default::default()
         })
+    }
+}
+
+/// A live child spawned under a restricted token, before it is waited on.
+/// Produced by [`RestrictedTokenRunner::spawn_child`] and consumed either by
+/// the run-to-completion helper or the streaming
+/// [`RestrictedTokenSandboxProcess`].
+struct RestrictedTokenChild {
+    process: OwnedHandle,
+    _thread: OwnedHandle,
+    job: UiJobObject,
+    pid: u32,
+    timeout_ms: u32,
+}
+
+impl SandboxBackend for RestrictedTokenRunner {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        // Tier 4 honors the same policy-satisfiability constraints on either
+        // surface; reuse the run-to-completion checks.
+        ScriptRunner::validate_runner(self, request)
+    }
+
+    fn spawn(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        _stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        use wxc_common::validator::validate_common;
+
+        validate_common(request)?;
+        self.validate(request)?;
+
+        // Tier 4 does not capture child stdio: the child inherits the
+        // executor's own std handles regardless of `stdio` (a TTY when the
+        // binary runs under a pty), matching the pre-unification behavior.
+        // Streaming callers therefore observe an exit code but no piped output.
+        let child = self
+            .spawn_child(request, logger)
+            .map_err(|e| ScriptResponse::error(&e.to_string()))?;
+        let proxy_coordinator = std::mem::take(&mut self.proxy_coordinator);
+        Ok(Box::new(RestrictedTokenSandboxProcess::new(
+            child,
+            proxy_coordinator,
+        )))
+    }
+}
+
+/// A running restricted-token (Tier 4) process exposed as a [`SandboxProcess`].
+/// Owns the process handle, the UI job object, and the per-run proxy state,
+/// which it tears down once the child exits. Tier 4 does not capture stdio, so
+/// the `take_std*` accessors return `None`.
+struct RestrictedTokenSandboxProcess {
+    process: SendOwnedHandle,
+    _thread: SendOwnedHandle,
+    job: UiJobObject,
+    pid: u32,
+    timeout_ms: u32,
+    proxy_coordinator: ProxyCoordinator,
+    teardown_done: bool,
+}
+
+// SAFETY: mirrors the AppContainer / BaseContainer sandbox processes. The only
+// thread-affine state is the Windows process HANDLE, wrapped in
+// `SendOwnedHandle`; it is process-global and owned exclusively by this handle,
+// so moving it (and the owned job / proxy state) across threads is sound.
+unsafe impl Send for RestrictedTokenSandboxProcess {}
+
+impl RestrictedTokenSandboxProcess {
+    fn new(mut child: RestrictedTokenChild, proxy_coordinator: ProxyCoordinator) -> Self {
+        let process = SendOwnedHandle::take(&mut child.process);
+        let thread = SendOwnedHandle::take(&mut child._thread);
+        Self {
+            process,
+            _thread: thread,
+            job: child.job,
+            pid: child.pid,
+            timeout_ms: child.timeout_ms,
+            proxy_coordinator,
+            teardown_done: false,
+        }
+    }
+
+    fn run_teardown(&mut self) {
+        if self.teardown_done {
+            return;
+        }
+        self.teardown_done = true;
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        self.proxy_coordinator.stop(&mut logger);
+    }
+}
+
+impl SandboxProcess for RestrictedTokenSandboxProcess {
+    fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+        None
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        None
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        None
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        match unsafe { WaitForSingleObject(self.process.get(), 0) } {
+            WAIT_OBJECT_0 => {
+                let mut code: u32 = 0;
+                if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
+                    return Err(std::io::Error::other("GetExitCodeProcess failed"));
+                }
+                Ok(Some(code as i32))
+            }
+            WAIT_TIMEOUT => Ok(None),
+            _ => Err(std::io::Error::other("WaitForSingleObject failed")),
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.pid
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        // Tree-kill the job: the child and every descendant assigned to it die
+        // together.
+        self.job.terminate(u32::MAX);
+        Ok(())
+    }
+
+    fn wait(&mut self) -> std::io::Result<i32> {
+        let result = match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
+            WAIT_OBJECT_0 => {
+                let mut code: u32 = 0;
+                if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
+                    Err(std::io::Error::other("GetExitCodeProcess failed"))
+                } else {
+                    Ok(code as i32)
+                }
+            }
+            WAIT_TIMEOUT => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("script timed out after {}ms", self.timeout_ms),
+            )),
+            _ => Err(std::io::Error::other("WaitForSingleObject failed")),
+        };
+
+        // Tree-kill so any backgrounded descendant dies before teardown removes
+        // the proxy enforcement, then reap the root before stopping the proxy.
+        let _ = self.kill();
+        unsafe {
+            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        }
+        self.run_teardown();
+        result
+    }
+}
+
+impl Drop for RestrictedTokenSandboxProcess {
+    fn drop(&mut self) {
+        // Kill and reap before tearing down proxy state so an abandoned-but-
+        // running sandbox cannot outlive its enforcement (or leak as an orphan).
+        let _ = self.kill();
+        unsafe {
+            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        }
+        self.run_teardown();
     }
 }
 

@@ -3,12 +3,13 @@
 
 //! BaseContainer-fallback tier dispatcher.
 //!
-//! Wires Phases 0–3 (telemetry, fallback detector, AppContainer modes,
-//! DACL manager) into a single entrypoint. Given an [`ExecutionRequest`], the
-//! dispatcher consults [`crate::fallback_detector::detect`] to choose
-//! between Tier 1 (BaseContainer), Tier 2 (AppContainer + BFS), or Tier 3
-//! (AppContainer + DACL), constructs the appropriate runner, and applies
-//! [`DaclManager`] augmentation when the chosen tier requires it.
+//! Wires the downlevel containment ladder into a single entrypoint.
+//! Given an [`ExecutionRequest`], the dispatcher consults
+//! [`crate::fallback_detector::detect`] to choose between Tier 1
+//! (BaseContainer), Tier 2 (AppContainer + BFS), Tier 3 (AppContainer
+//! \+ DACL), or Tier 4 (RestrictedToken + DACL), constructs the
+//! appropriate runner, and applies [`DaclManager`] augmentation when
+//! the chosen tier requires it.
 //!
 //! Filesystem-policy enforcement under T1 is delegated entirely to
 //! BaseContainer's own `Experimental_CreateProcessInSandbox` API
@@ -18,6 +19,9 @@
 //! a denied-paths policy never reaches T1 (the detector falls through to
 //! the AppContainer tiers, which stamp the deny DACLs). So T1 has no
 //! deny ACEs to apply either way.
+//!
+//! See `docs/proposals/downlevel_support/basecontainer-fallback-plan-v2.md`
+//! and `docs/proposals/downlevel_support/tier4-restricted-token.md`.
 //!
 //! # Why T2 (BFS) also gets DACL deny augmentation
 //!
@@ -268,6 +272,39 @@ fn build_t3_dacl(
     Ok(mgr)
 }
 
+/// Build the (optional) grant + (optional) deny DACL manager used by T4.
+/// Unlike T3, T4 returns `Ok(None)` when **all three** path lists are
+/// empty — the restricted token alone provides containment and no
+/// host-DACL augmentation is required. When any list is non-empty,
+/// allocates a `DaclManager` and stamps the requested ACEs (grants
+/// first so deny landings happen on the canonical-order'd DACL); the
+/// manager's `Drop` rolls back grants on a later deny failure.
+fn build_t4_dacl(
+    sid: &str,
+    readwrite: &[PathBuf],
+    readonly: &[PathBuf],
+    denied: &[PathBuf],
+) -> Result<Option<DaclManager>, DispatchError> {
+    if readwrite.is_empty() && readonly.is_empty() && denied.is_empty() {
+        return Ok(None);
+    }
+    let mut mgr = DaclManager::new().map_err(|e| DispatchError::Dacl {
+        error: e,
+        warnings: Vec::new(),
+    })?;
+    if !readwrite.is_empty() || !readonly.is_empty() {
+        if let Err(e) = mgr.grant_principal_access(sid, readwrite, readonly) {
+            return Err(dacl_err(&mgr, e));
+        }
+    }
+    if !denied.is_empty() {
+        if let Err(e) = mgr.add_deny_aces(sid, denied) {
+            return Err(dacl_err(&mgr, e));
+        }
+    }
+    Ok(Some(mgr))
+}
+
 /// The concrete Windows backend chosen by the fallback dispatcher, before it is
 /// adapted to either the run-to-completion surface (wrapped in [`Runner`] →
 /// [`ScriptRunner`], via [`dispatch_with_fallback`]) or the streaming surface
@@ -280,6 +317,7 @@ fn build_t3_dacl(
 enum SelectedBackend {
     BaseContainer(BaseContainerRunner),
     AppContainer(AppContainerScriptRunner),
+    RestrictedToken(RestrictedTokenRunner),
 }
 
 impl SandboxBackend for SelectedBackend {
@@ -287,6 +325,7 @@ impl SandboxBackend for SelectedBackend {
         match self {
             SelectedBackend::BaseContainer(b) => b.validate(request),
             SelectedBackend::AppContainer(a) => a.validate(request),
+            SelectedBackend::RestrictedToken(r) => r.validate(request),
         }
     }
 
@@ -299,6 +338,7 @@ impl SandboxBackend for SelectedBackend {
         match self {
             SelectedBackend::BaseContainer(b) => b.spawn(request, logger, stdio),
             SelectedBackend::AppContainer(a) => a.spawn(request, logger, stdio),
+            SelectedBackend::RestrictedToken(r) => r.spawn(request, logger, stdio),
         }
     }
 
@@ -306,6 +346,7 @@ impl SandboxBackend for SelectedBackend {
         match self {
             SelectedBackend::BaseContainer(b) => b.diagnose_exit(request, exit_code),
             SelectedBackend::AppContainer(a) => a.diagnose_exit(request, exit_code),
+            SelectedBackend::RestrictedToken(r) => r.diagnose_exit(request, exit_code),
         }
     }
 }
@@ -411,11 +452,28 @@ fn select_backend_with_fallback(
             )
         }
         IsolationTier::RestrictedToken => {
-            // Phase 1: minimal arm — runner only, no DACL integration
-            // yet. Phase 4 wires up the leaf-only DACL setup against
-            // the Restricted Code SID (S-1-5-12).
-            let runner: Box<dyn ScriptRunner> = Box::new(RestrictedTokenRunner::new());
-            (runner, None)
+            // Tier 4 — DACL keyed on the Restricted Code SID (S-1-5-12),
+            // which is baked into the restricted primary token by
+            // `CreateRestrictedToken`. We add ACEs ONLY on the leaf
+            // paths named in the policy: ancestor traversal of `C:\`
+            // etc. is already granted via the `Users` SID that lives
+            // in the restricting set. This is the whole reason Tier 4
+            // exists — see
+            // `docs/proposals/downlevel_support/tier4-restricted-token.md`.
+            //
+            // Unlike T3, grants are *not* mandatory: a Tier 4 workload
+            // that needs no extra host-path access (e.g. one that only
+            // reads paths the `Users` SID already covers) is dispatched
+            // without a `DaclManager` at all.
+            const SID_RESTRICTED_CODE: &str = "S-1-5-12";
+            let readwrite = paths_to_pathbufs(&request.policy.readwrite_paths);
+            let readonly = paths_to_pathbufs(&request.policy.readonly_paths);
+            let denied = paths_to_pathbufs(&request.policy.denied_paths);
+            let mgr = build_t4_dacl(SID_RESTRICTED_CODE, &readwrite, &readonly, &denied)?;
+            (
+                SelectedBackend::RestrictedToken(RestrictedTokenRunner::new()),
+                mgr,
+            )
         }
     };
 
@@ -677,6 +735,44 @@ mod tests {
             "T3 always requires DaclManager (grants applied)"
         );
     }
+    #[test]
+    fn dispatch_t4_no_paths_no_dacl() {
+        let _g = ForceTierGuard::set("restricted-token");
+        let req = test_request(empty_policy());
+        let d = dispatch_with_fallback(&req).expect("T4 dispatch should succeed");
+        assert!(matches!(d.tier, IsolationTier::RestrictedToken));
+        assert!(
+            d.dacl_manager.is_none(),
+            "T4 with no readwrite/readonly/denied paths should not allocate DaclManager"
+        );
+    }
+
+    #[test]
+    fn dispatch_t4_with_rw_paths_has_dacl() {
+        let _g = ForceTierGuard::set("restricted-token");
+        let (policy, _tmp) = policy_with_rw_temp();
+        let req = test_request(policy);
+        let d = dispatch_with_fallback(&req).expect("T4 dispatch should succeed");
+        assert!(matches!(d.tier, IsolationTier::RestrictedToken));
+        assert!(
+            d.dacl_manager.is_some(),
+            "T4 with readwrite paths should attach DaclManager for grants (S-1-5-12)"
+        );
+    }
+
+    #[test]
+    fn dispatch_t4_with_denied_paths_has_dacl() {
+        let _g = ForceTierGuard::set("restricted-token");
+        let (policy, _tmp) = policy_with_denied_temp();
+        let req = test_request(policy);
+        let d = dispatch_with_fallback(&req).expect("T4+deny dispatch should succeed");
+        assert!(matches!(d.tier, IsolationTier::RestrictedToken));
+        assert!(
+            d.dacl_manager.is_some(),
+            "T4 with denied paths should attach DaclManager for deny ACEs"
+        );
+    }
+
     #[test]
     fn dispatch_fallback_disabled_errors() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
