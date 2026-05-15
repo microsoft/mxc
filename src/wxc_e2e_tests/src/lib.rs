@@ -217,6 +217,80 @@ pub fn has_windows_sandbox_feature() -> bool {
     available
 }
 
+/// Check whether `python.exe` is available and NOT only a Windows Store App
+/// Execution Alias. Store aliases are reparse points under `WindowsApps`
+/// that cannot be launched inside AppContainer/BaseContainer sandboxes.
+///
+/// Panics with a clear remediation message when Python is missing or
+/// only exists as a Store alias.
+pub fn assert_python() {
+    let output = Command::new("where.exe").arg("python.exe").output().ok();
+
+    let Some(output) = output else {
+        panic!(
+            "python.exe not found.\n\
+             E2E tests require a system-wide Python install.\n\
+             Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install Python system-wide \
+             (winget install Python.Python.3.12 --scope machine)"
+        );
+    };
+
+    if !output.status.success() {
+        panic!(
+            "python.exe not found.\n\
+             E2E tests require a system-wide Python install.\n\
+             Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install Python system-wide \
+             (winget install Python.Python.3.12 --scope machine)"
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let has_real_python = stdout.lines().any(|p| !p.contains("WindowsApps"));
+    if !has_real_python {
+        panic!(
+            "python.exe only exists as a Windows Store alias.\n\
+             Store aliases cannot be launched inside sandbox containers.\n\
+             Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or disable App Execution Aliases for Python"
+        );
+    }
+}
+
+/// Check whether `pwsh.exe` (PowerShell 7) is available via a real install
+/// path, not a Windows Store App Execution Alias.
+///
+/// Panics with a clear remediation message when pwsh is missing.
+/// Since the test config uses a fully qualified path, this only checks
+/// that a real (non-Store) pwsh.exe exists somewhere on the system.
+pub fn assert_pwsh() {
+    let output = Command::new("where.exe").arg("pwsh.exe").output().ok();
+
+    let Some(output) = output else {
+        panic!(
+            "pwsh.exe not found.\n\
+             PowerShell 7 sandbox tests require a system-wide install.\n\
+             Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install PowerShell 7"
+        );
+    };
+
+    if !output.status.success() {
+        panic!(
+            "pwsh.exe not found.\n\
+             PowerShell 7 sandbox tests require a system-wide install.\n\
+             Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install PowerShell 7"
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let has_real_pwsh = stdout.lines().any(|p| !p.contains("WindowsApps"));
+    if !has_real_pwsh {
+        panic!(
+            "pwsh.exe only exists as a Windows Store alias.\n\
+             Store aliases cannot be launched inside sandbox containers.\n\
+             Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install PowerShell 7 system-wide"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Direct process execution
 // ---------------------------------------------------------------------------
