@@ -1,0 +1,14 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "CLI-Tier4-Enumeration",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd.exe /c dir C:\\Temp\\mxc-tier4-workspace"
+  },
+  "ui": {
+    "disable": false
+  },
+  "readwritePaths": [
+    "C:\\Temp\\mxc-tier4-workspace"
+  ]
+}
