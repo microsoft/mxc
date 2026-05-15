@@ -750,10 +750,12 @@ impl ScriptRunner for RestrictedTokenRunner {
 /// enable the Quota privilege here.
 fn maybe_enable_quota_privilege() -> bool {
     let ok = set_privilege_enabled(w_str("SeIncreaseQuotaPrivilege"));
-    eprintln!(
-        "[tier4] maybe_enable_quota_privilege: SeIncreaseQuotaPrivilege -> {}",
-        if ok { "enabled" } else { "FAILED" }
-    );
+    if !ok {
+        eprintln!(
+            "[tier4] failed to enable SeIncreaseQuotaPrivilege — \
+             CreateProcessAsUserW will fail with ERROR_PRIVILEGE_NOT_HELD"
+        );
+    }
     ok
 }
 
