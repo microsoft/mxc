@@ -179,6 +179,10 @@ struct RawSeatbelt {
     gui_access: Option<bool>,
     #[serde(rename = "launchMethod")]
     launch_method: Option<crate::models::LaunchMethod>,
+    #[serde(rename = "nestedPty")]
+    nested_pty: Option<bool>,
+    #[serde(rename = "keychainAccess")]
+    keychain_access: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -881,6 +885,8 @@ fn convert_raw_config_inner(
             profile_override: raw_sb.profile_override,
             gui_access: raw_sb.gui_access.unwrap_or(false),
             launch_method: raw_sb.launch_method.unwrap_or_default(),
+            nested_pty: raw_sb.nested_pty.unwrap_or(true),
+            keychain_access: raw_sb.keychain_access.unwrap_or(false),
         });
         ExperimentalConfig {
             test,
@@ -2467,6 +2473,38 @@ mod tests {
             cfg.profile_override.as_deref(),
             Some("(version 1)(deny default)")
         );
+    }
+
+    #[test]
+    fn seatbelt_nested_pty_defaults_to_true_when_block_present_but_field_absent() {
+        // experimental.seatbelt is present but nestedPty is not specified;
+        // the parser should fill in true to match the schema default.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req
+            .experimental
+            .seatbelt
+            .expect("experimental.seatbelt should be populated");
+        assert!(cfg.nested_pty);
+        assert!(!cfg.keychain_access);
+    }
+
+    #[test]
+    fn seatbelt_nested_pty_and_keychain_access_pass_through() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"nestedPty": false, "keychainAccess": true}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req
+            .experimental
+            .seatbelt
+            .expect("experimental.seatbelt should be populated");
+        assert!(!cfg.nested_pty);
+        assert!(cfg.keychain_access);
     }
 
     // Legacy wire-name aliases. The parser accepts the pre-0.6 wire vocabulary
