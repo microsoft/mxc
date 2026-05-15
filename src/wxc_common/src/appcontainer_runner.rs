@@ -597,6 +597,7 @@ impl ScriptRunner for AppContainerScriptRunner {
         }
 
         let principal_id = self.get_principal_id();
+        logger.log_line(&format!("AppContainerSID: {principal_id}"));
 
         let mut bfs_manager = FileSystemBfsManager::new(self.app_container_name.clone());
         if let Err(e) = bfs_manager.configure(&request.policy, logger) {
