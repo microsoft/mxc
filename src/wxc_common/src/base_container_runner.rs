@@ -521,6 +521,16 @@ impl ScriptRunner for BaseContainerRunner {
         };
         let identity_wide = string_util::to_wide(&identity);
 
+        // Register Ctrl+C handler early so cleanup runs if wxc-exec is interrupted
+        // during or after the create call.
+        if request.lifecycle.destroy_on_exit {
+            sandbox_tracking::register_ctrl_c_cleanup(
+                &identity,
+                &sid_string,
+                request.policy.network_proxy.is_enabled(),
+            );
+        }
+
         // STARTUPINFOW -- minimal, no handle inheritance (not yet supported by the API).
         let si = STARTUPINFOW {
             cb: std::mem::size_of::<STARTUPINFOW>() as u32,
@@ -585,16 +595,6 @@ impl ScriptRunner for BaseContainerRunner {
         }
 
         let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
-
-        // Register Ctrl+C handler so cleanup runs if wxc-exec is interrupted
-        // while waiting for the child process.
-        if request.lifecycle.destroy_on_exit {
-            sandbox_tracking::register_ctrl_c_cleanup(
-                &identity,
-                &sid_string,
-                request.policy.network_proxy.is_enabled(),
-            );
-        }
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Wait for exit");
 
