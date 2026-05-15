@@ -320,13 +320,22 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> windows_core::BOOL {
                 .take()
         };
         if let Some(state) = active {
-            // Best-effort cleanup with a minimal logger (buffer mode; output
-            // may not be visible since we're in a signal-like context).
             let mut logger = crate::logger::Logger::new(crate::logger::Mode::Buffer);
-            if !state.proxy_enabled {
+            if state.proxy_enabled {
+                mark_cleanup_deferred(&state.sid_string, "network proxy configured", &mut logger);
+            } else if ctrl_type == CTRL_CLOSE_EVENT {
+                // CTRL_CLOSE_EVENT has a ~5s time budget before the OS kills us.
+                // Mark deferred first so the entry is recoverable if we're terminated
+                // mid-cleanup, then attempt best-effort cleanup anyway.
+                mark_cleanup_deferred(
+                    &state.sid_string,
+                    "console closed (best-effort cleanup attempted)",
+                    &mut logger,
+                );
                 cleanup_sandbox(&state.identity, &state.sid_string, &mut logger);
             } else {
-                mark_cleanup_deferred(&state.sid_string, "network proxy configured", &mut logger);
+                // CTRL_C_EVENT -- no time pressure, full cleanup.
+                cleanup_sandbox(&state.identity, &state.sid_string, &mut logger);
             }
         }
     }
