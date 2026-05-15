@@ -245,15 +245,26 @@ an AppContainer-only construct."
 
 ## Caller privilege requirements (operational)
 
-Tier 4 spawns the child via `CreateProcessAsUserW`, which requires
-the **calling** process to hold `SeIncreaseQuotaPrivilege` (the
-"Adjust memory quotas for a process" privilege; `0x80070522` /
-`ERROR_PRIVILEGE_NOT_HELD` is raised when missing). On Windows
-this privilege is granted by default to:
+Tier 4 spawns the child via `CreateProcessAsUserW`. The kernel
+unconditionally checks the **calling** process for
+`SeIncreaseQuotaPrivilege` (the "Adjust memory quotas for a process"
+privilege; `0x80070522` / `ERROR_PRIVILEGE_NOT_HELD` is raised when
+missing). It additionally checks for `SeAssignPrimaryTokenPrivilege`
+**unless** the supplied token is recognised as a *restricted
+derivative of the caller's own primary token*. Our token construction
+deliberately satisfies that latter check — `build_restricted_token`
+calls `CreateRestrictedToken` directly on the handle returned from
+`OpenProcessToken(GetCurrentProcess(), …)`, with no intermediate
+`DuplicateTokenEx`, preserving the kernel-visible lineage
+`caller-primary → restricted`. As a result, Tier 4 only requires
+`SeIncreaseQuotaPrivilege` on the caller.
+
+On Windows this privilege is granted by default to:
 
 - Members of the Administrators group (elevated processes).
 - Service identities: `LocalSystem`, `LocalService`, `NetworkService`.
-- Users explicitly assigned the privilege via Local Security Policy.
+- Users explicitly assigned the privilege via Local Security Policy
+  ("Adjust memory quotas for a process" / `SeIncreaseQuotaPrivilege`).
 
 Standard interactive users running an unelevated shell **do not**
 have this privilege and Tier 4 spawn will fail at
@@ -268,6 +279,16 @@ the privilege if it is present-but-disabled in the calling token
 until `AdjustTokenPrivileges` is called). It is best-effort: if the
 privilege is not present at all, the spawn fails with a clear error
 message that names the missing privilege.
+
+> **Implementation note.** Earlier iterations of this design went
+> `OpenProcessToken → DuplicateTokenEx → CreateRestrictedToken`. The
+> intermediate `DuplicateTokenEx` broke the kernel's "restricted
+> derivative of the caller's primary token" check, which then
+> demanded `SeAssignPrimaryTokenPrivilege` on top of
+> `SeIncreaseQuotaPrivilege`. Removing the duplicate restored the
+> lineage and brought us back to the documented single-privilege
+> requirement. The process token is already a primary token, so
+> the duplicate adds no value — it only obscures lineage.
 
 Switching to `CreateProcessWithTokenW` would relax the requirement
 to `SeImpersonatePrivilege`, which standard interactive users also
