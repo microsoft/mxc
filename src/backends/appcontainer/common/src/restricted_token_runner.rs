@@ -41,11 +41,11 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Security::Authorization::ConvertStringSidToSidW;
 use windows::Win32::Security::{
-    AdjustTokenPrivileges, CreateRestrictedToken, DuplicateTokenEx, IsValidSid,
-    LookupPrivilegeValueW, SecurityImpersonation, SetTokenInformation, TokenIntegrityLevel,
-    TokenPrimary, CREATE_RESTRICTED_TOKEN_FLAGS, DISABLE_MAX_PRIVILEGE, LUID_AND_ATTRIBUTES, PSID,
-    SE_PRIVILEGE_ENABLED, SID_AND_ATTRIBUTES, TOKEN_ADJUST_PRIVILEGES, TOKEN_ALL_ACCESS,
-    TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    AdjustTokenPrivileges, CreateRestrictedToken, IsValidSid, LookupPrivilegeValueW,
+    SetTokenInformation, TokenIntegrityLevel, CREATE_RESTRICTED_TOKEN_FLAGS,
+    DISABLE_MAX_PRIVILEGE, LUID_AND_ATTRIBUTES, PSID, SE_PRIVILEGE_ENABLED, SID_AND_ATTRIBUTES,
+    TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
+    TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
@@ -122,35 +122,33 @@ impl Drop for OwnedSid {
 ///   load-bearing.
 /// - Mandatory integrity level set to **Low**.
 fn build_restricted_token() -> Result<OwnedHandle, WxcError> {
-    // 1. Open current process token.
+    // 1. Open current process token with the access rights we'll need
+    //    on the resulting restricted-token handle. `CreateRestrictedToken`
+    //    preserves the caller's access mask onto its output handle, so we
+    //    must open the process token with:
+    //      - TOKEN_DUPLICATE      → required by `CreateRestrictedToken`.
+    //      - TOKEN_QUERY          → introspection (tests, logging).
+    //      - TOKEN_ADJUST_DEFAULT → `SetTokenInformation(TokenIntegrityLevel)`.
+    //      - TOKEN_ASSIGN_PRIMARY → `CreateProcessAsUserW` assignability.
+    //    All four are normally granted to the process owner by the
+    //    process token's DACL and do not require any privilege to obtain.
+    //    Going *directly* to `CreateRestrictedToken` (no intermediate
+    //    `DuplicateTokenEx`) preserves the kernel-visible lineage
+    //    `caller-primary → restricted` rather than
+    //    `caller-primary → duplicate → restricted`; the former satisfies
+    //    `CreateProcessAsUserW`'s "restricted derivative of caller's
+    //    primary token" check, which waives the
+    //    `SE_ASSIGNPRIMARYTOKEN_NAME` requirement that would otherwise
+    //    be demanded alongside `SE_INCREASE_QUOTA_NAME`.
     let current_proc = unsafe { GetCurrentProcess() };
     let mut process_token = HANDLE::default();
-    unsafe {
-        OpenProcessToken(
-            current_proc,
-            TOKEN_DUPLICATE | TOKEN_QUERY,
-            &mut process_token,
-        )
-    }
-    .map_err(|e| WxcError::Initialization(format!("OpenProcessToken failed: {e}")))?;
+    let open_access =
+        TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ASSIGN_PRIMARY;
+    unsafe { OpenProcessToken(current_proc, open_access, &mut process_token) }
+        .map_err(|e| WxcError::Initialization(format!("OpenProcessToken failed: {e}")))?;
     let process_token = OwnedHandle::new(process_token);
 
-    // 2. Duplicate it into a primary token we can modify.
-    let mut primary_token = HANDLE::default();
-    unsafe {
-        DuplicateTokenEx(
-            process_token.get(),
-            TOKEN_ALL_ACCESS,
-            None,
-            SecurityImpersonation,
-            TokenPrimary,
-            &mut primary_token,
-        )
-    }
-    .map_err(|e| WxcError::Initialization(format!("DuplicateTokenEx failed: {e}")))?;
-    let primary_token = OwnedHandle::new(primary_token);
-
-    // 3. Build the restricting-SID list. Each `OwnedSid` keeps its SID
+    // 2. Build the restricting-SID list. Each `OwnedSid` keeps its SID
     //    buffer alive for the duration of this function; the kernel
     //    copies the SIDs into the new token during the
     //    `CreateRestrictedToken` call.
@@ -173,11 +171,17 @@ fn build_restricted_token() -> Result<OwnedHandle, WxcError> {
         },
     ];
 
-    // 4. CreateRestrictedToken.
+    // 3. CreateRestrictedToken directly on the caller's primary token.
+    //    The resulting handle is granted TOKEN_ALL_ACCESS-equivalent
+    //    rights (TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
+    //    TOKEN_IMPERSONATE, TOKEN_QUERY, TOKEN_ADJUST_PRIVILEGES,
+    //    TOKEN_ADJUST_GROUPS, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID)
+    //    per MSDN, which is sufficient for the subsequent
+    //    `SetTokenInformation(TokenIntegrityLevel, …)` call.
     let mut restricted_token = HANDLE::default();
     unsafe {
         CreateRestrictedToken(
-            primary_token.get(),
+            process_token.get(),
             CREATE_RESTRICTED_TOKEN_FLAGS(DISABLE_MAX_PRIVILEGE.0),
             None,
             None,
@@ -188,7 +192,7 @@ fn build_restricted_token() -> Result<OwnedHandle, WxcError> {
     .map_err(|e| WxcError::Initialization(format!("CreateRestrictedToken failed: {e}")))?;
     let restricted_token = OwnedHandle::new(restricted_token);
 
-    // 5. Drop integrity level to Low.
+    // 4. Drop integrity level to Low.
     set_low_integrity(restricted_token.get())?;
 
     Ok(restricted_token)
@@ -547,17 +551,15 @@ impl ScriptRunner for RestrictedTokenRunner {
 
 /// Try to enable `SeIncreaseQuotaPrivilege` on the current process
 /// token. Returns `true` if the privilege is now enabled (or was
-/// already), `false` if it isn't present in the token at all. This is
-/// best-effort: a `false` return doesn't fail the spawn here, the
-/// subsequent `CreateProcessAsUserW` call will surface a clear
-/// `ERROR_PRIVILEGE_NOT_HELD` if the privilege is genuinely missing.
+/// already), `false` if it isn't present in the token at all.
+///
+/// `CreateProcessAsUserW` always requires `SeIncreaseQuotaPrivilege`.
+/// It would also require `SeAssignPrimaryTokenPrivilege` if the new
+/// token were not a "restricted derivative of the caller's primary
+/// token" — but `build_restricted_token` deliberately preserves that
+/// lineage (no intermediate `DuplicateTokenEx`), so we only need to
+/// enable the Quota privilege here.
 fn maybe_enable_quota_privilege() -> bool {
-    // Only the Quota privilege determines whether we can spawn — the
-    // Primary-Token privilege is waived for restricted derivatives of
-    // the caller's own token. Attempting to enable a privilege that
-    // isn't in the token sets `ERROR_NOT_ALL_ASSIGNED` and would
-    // contaminate the success signal, so we only attempt the one that
-    // matters.
     let ok = set_privilege_enabled(w_str("SeIncreaseQuotaPrivilege"));
     eprintln!(
         "[tier4] maybe_enable_quota_privilege: SeIncreaseQuotaPrivilege -> {}",
