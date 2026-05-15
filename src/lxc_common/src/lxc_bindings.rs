@@ -209,177 +209,52 @@ impl LxcContainer {
     }
 
     /// Execute a command inside a running container using lxc-attach, with
-    /// the inner process attached to a freshly-allocated pty.
+    /// the inner process attached to a freshly-allocated pty via
+    /// [`mxc_pty::run_with_pty`]. See that crate for the full pty-bridge
+    /// contract (output streamed live to host stdio, stdin forwarded after
+    /// first byte arrives from inner shell, etc.).
     ///
-    /// This bridges the host's stdin/stdout/stderr to the inner pty, but
-    /// **defers forwarding host stdin to the inner process until bash has
-    /// produced its first output byte**. That delay is essential: an
-    /// interactive shell calls `tcsetattr` on its stdin during readline
-    /// init, which can flush any bytes the parent buffered into the pty
-    /// before the shell got there. Without the delay, anything the CLI
-    /// pre-buffers (e.g. its shell-init wrapper) is silently swallowed.
+    /// We pass `unblock_signals = [SIGHUP, SIGTERM, SIGINT]` because
+    /// [`crate::signal_cleanup::install`] blocks them in this process so
+    /// its watchdog thread can `sigwait` on them; that mask is inherited
+    /// across `fork`+`exec` and would otherwise make the inner shell
+    /// silently ignore Ctrl-C / termination.
     ///
     /// Stdout/stderr are streamed live via the master fd; the returned
     /// strings are always empty. Callers needing captured output should run
     /// a self-contained `commandLine` and read it back from a file.
-    ///
-    /// Only built on Linux — the implementation depends on `pre_exec`,
-    /// `openpty`, and `TIOCSCTTY`. The crate still has to compile
-    /// workspace-wide on Windows (the `wxc-exec-lint` CI job runs
-    /// `cargo clippy --workspace` on `windows-latest`) and on macOS dev
-    /// machines, so a stub is provided below for non-Linux targets.
     #[cfg(target_os = "linux")]
     pub fn attach_run(
         &self,
         command: &str,
         _working_directory: &str,
     ) -> Result<(i32, String, String), String> {
-        use nix::pty::openpty;
-        use std::io::{Read, Write};
-        use std::process::Stdio;
-        use std::sync::mpsc;
-        use std::thread;
-        use std::time::Duration;
+        use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
 
-        // Allocate an inner pty pair. The slave goes to lxc-attach (and thus
-        // bash inside the container) so the inner process sees a real tty;
-        // we keep the master and bridge it to our own stdio.
-        let pty_pair = openpty(None, None).map_err(|e| format!("openpty failed: {}", e))?;
-
-        // Three fd duplicates of the slave so each Stdio takes ownership of
-        // its own handle; otherwise std::process::Stdio::from would consume
-        // the single OwnedFd and the rest of the spawn calls would fail.
-        let slave_in: Stdio = pty_pair
-            .slave
-            .try_clone()
-            .map_err(|e| format!("dup slave for stdin: {}", e))?
-            .into();
-        let slave_out: Stdio = pty_pair
-            .slave
-            .try_clone()
-            .map_err(|e| format!("dup slave for stdout: {}", e))?
-            .into();
-        let slave_err: Stdio = pty_pair.slave.into();
+        const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
         let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(["--", "/bin/sh", "-c", command]);
-        cmd.stdin(slave_in).stdout(slave_out).stderr(slave_err);
 
-        // Drop the inherited controlling terminal in the child and make the
-        // slave end of our pty its new controlling tty. Without this,
-        // lxc-attach detects that it has a controlling tty (the outer pty
-        // from node-pty) and forwards the inner pty's I/O to `/dev/tty`
-        // directly, bypassing the slave fds we wired into stdio. Our master
-        // would then see no data at all.
-        //
-        // Also unblock SIGHUP/SIGTERM/SIGINT in the child: `signal_cleanup::install`
-        // blocks them in this process so the watchdog thread can sigwait on
-        // them, but that mask is inherited across fork+exec. Without this
-        // reset the inner shell (and anything it spawns) would silently
-        // ignore Ctrl-C and termination signals.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                // Become a new session leader, detaching from the inherited
-                // controlling terminal.
-                nix::unistd::setsid().map_err(std::io::Error::from)?;
-                // SAFETY: ioctl on fd 0 (the slave we just dup2'd in via
-                // stdin) to make it the new controlling tty. Errors are
-                // non-fatal because setsid above already cleared the ctty
-                // state, which is what actually matters for lxc-attach.
-                let _ = libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+        let options = PtyOptions {
+            unblock_signals: UNBLOCK,
+            // TODO: thread request.script_timeout through to here so the
+            // LXC backend can enforce script-level timeouts the same way
+            // the Seatbelt backend already does.
+            ..PtyOptions::default()
+        };
 
-                // Restore the default signal mask so the inner process
-                // doesn't inherit signal_cleanup's blocked set.
-                let mut empty = nix::sys::signal::SigSet::empty();
-                empty.add(nix::sys::signal::Signal::SIGHUP);
-                empty.add(nix::sys::signal::Signal::SIGTERM);
-                empty.add(nix::sys::signal::Signal::SIGINT);
-                empty.thread_unblock().map_err(std::io::Error::from)?;
-                Ok(())
-            });
+        match run_with_pty(cmd, options)? {
+            PtyOutcome::Exited(status) => {
+                Ok((status.code().unwrap_or(-1), String::new(), String::new()))
+            }
+            // Unreachable today because we pass `timeout: None`, but cover
+            // it explicitly so the compiler catches future changes.
+            PtyOutcome::TimedOut => Err("lxc-attach timed out".to_string()),
         }
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("Failed to spawn lxc-attach: {}", e))?;
-
-        drop(cmd);
-
-        // The child inherited all three slave handles and the parent's
-        // copies have been moved into Stdio. The slave will be fully closed
-        // when the child exits, which makes our master read return EOF.
-
-        // OwnedFd -> File via std::convert::From; no `unsafe` needed.
-        let master: std::fs::File = pty_pair.master.into();
-        let mut master_writer = master
-            .try_clone()
-            .map_err(|e| format!("dup master: {}", e))?;
-        let mut master_reader = master;
-
-        // Output forwarder: master -> host stdout. Signals "ready" on the
-        // first byte from inside the container — at that point bash has
-        // finished its readline/tcsetattr init and is safe to feed.
-        let (ready_tx, ready_rx) = mpsc::channel::<()>();
-        let output_thread = thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            let mut signaled = false;
-            let mut stdout = std::io::stdout();
-            loop {
-                match master_reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if !signaled {
-                            let _ = ready_tx.send(());
-                            signaled = true;
-                        }
-                        let _ = stdout.write_all(&buf[..n]);
-                        let _ = stdout.flush();
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        // Wait for bash to print its first byte before forwarding host stdin.
-        // Cap the wait so a wedged shell doesn't block the stdin forwarder
-        // forever; the inner process itself still runs to completion below
-        // (request.script_timeout is not yet enforced — see the TODO in
-        // lxc_runner::run_internal where attach_run is called).
-        let _ = ready_rx.recv_timeout(Duration::from_secs(5));
-
-        // Input forwarder: host stdin -> master. Detached; exits when stdin
-        // closes (which happens when our parent process closes the pty).
-        thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            let mut stdin = std::io::stdin();
-            loop {
-                match stdin.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if master_writer.write_all(&buf[..n]).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        let status = child
-            .wait()
-            .map_err(|e| format!("wait on lxc-attach: {}", e))?;
-
-        // Drain remaining output before returning. The slave fds are closed
-        // on child exit, so master_reader will hit EOF and the thread exits.
-        let _ = output_thread.join();
-
-        Ok((status.code().unwrap_or(-1), String::new(), String::new()))
     }
 
-    /// Non-Linux stub. `lxc-exec` is Linux-only at runtime, but the
-    /// workspace still builds on Windows (clippy CI) and macOS (dev), so
-    /// the signature has to exist on every target.
+    /// Stub for the workspace-wide clippy lane that runs on Windows.
     #[cfg(not(target_os = "linux"))]
     pub fn attach_run(
         &self,

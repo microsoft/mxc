@@ -602,6 +602,18 @@ fn hyperlight_suite() {
             expected_exit: 42,
             output_contains: None,
         },
+        HyperlightCase {
+            config: "hyperlight_networking.json",
+            description: "HTTP GET with allowedHosts network policy",
+            expected_exit: 0,
+            output_contains: Some("200"),
+        },
+        HyperlightCase {
+            config: "hyperlight_networking_blocked.json",
+            description: "HTTP GET to unlisted host is blocked by allowedHosts",
+            expected_exit: 0,
+            output_contains: Some("BLOCKED"),
+        },
     ];
 
     let mut failures = Vec::new();

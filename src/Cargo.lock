@@ -844,7 +844,7 @@ dependencies = [
 [[package]]
 name = "hyperlight-unikraft-host"
 version = "0.1.0"
-source = "git+https://github.com/hyperlight-dev/hyperlight-unikraft?branch=main#8affbccb1f7a2f9aa0c8e0aea08c82f76b45bbe5"
+source = "git+https://github.com/hyperlight-dev/hyperlight-unikraft?branch=main#0eb9887fbccf338208efe37101b04e7ffa204424"
 dependencies = [
  "anyhow",
  "base64",
@@ -854,6 +854,7 @@ dependencies = [
  "memmap2",
  "nix",
  "serde_json",
+ "socket2 0.5.10",
  "windows-sys 0.61.2",
 ]
 
@@ -1181,6 +1182,7 @@ name = "lxc_common"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "mxc_pty",
  "nix",
  "serde",
  "serde_json",
@@ -1307,6 +1309,14 @@ dependencies = [
  "windows",
  "windows-core",
  "wxc_common",
+]
+
+[[package]]
+name = "mxc_pty"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nix",
 ]
 
 [[package]]
@@ -1707,7 +1717,8 @@ dependencies = [
 name = "seatbelt_common"
 version = "0.1.0"
 dependencies = [
- "tempfile",
+ "libc",
+ "mxc_pty",
  "wxc_common",
 ]
 
@@ -1818,6 +1829,16 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "socket2"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
+]
 
 [[package]]
 name = "socket2"
@@ -1972,7 +1993,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2",
+ "socket2 0.6.3",
  "tokio-macros",
  "windows-sys 0.61.2",
 ]
@@ -2377,6 +2398,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+dependencies = [
+ "windows-targets",
 ]
 
 [[package]]

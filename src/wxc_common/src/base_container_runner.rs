@@ -541,6 +541,10 @@ impl ScriptRunner for BaseContainerRunner {
         let _ = writeln!(logger, "launching: {}", request.script_code);
         let _ = writeln!(logger, "identity: {identity}");
 
+        // Log the derived AppContainerSID for diagnostic correlation.
+        let ac_sid_str = derive_sid_string_from_name(&identity);
+        let _ = writeln!(logger, "AppContainerSID: {ac_sid_str}");
+
         // 4. Call Experimental_CreateProcessInSandbox.
         let success = unsafe {
             create_process_in_sandbox(
@@ -651,6 +655,29 @@ impl ScriptRunner for BaseContainerRunner {
             standard_err: String::new(),
             error_message: String::new(),
         }
+    }
+}
+
+/// Derive the AppContainer SID string from a container identity name.
+/// Best-effort: returns a placeholder if derivation fails.
+fn derive_sid_string_from_name(name: &str) -> String {
+    use windows::Win32::Security::FreeSid;
+    use windows::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
+
+    let wide_name = string_util::to_wide(name);
+    let pcwstr_name = PCWSTR(wide_name.as_ptr());
+
+    match unsafe { DeriveAppContainerSidFromAppContainerName(pcwstr_name) } {
+        Ok(sid) => {
+            let s = unsafe { string_util::sid_to_string(sid.0, "unknown-sid") };
+            // SAFETY: SID returned by DeriveAppContainerSidFromAppContainerName
+            // must be freed with FreeSid.
+            unsafe {
+                FreeSid(sid);
+            }
+            s
+        }
+        Err(_) => "unknown-sid".to_string(),
     }
 }
 
