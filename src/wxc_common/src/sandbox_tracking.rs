@@ -23,12 +23,10 @@
 
 use std::fmt::Write;
 
-use windows::Win32::Foundation::{LocalFree, HLOCAL};
-use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows::Win32::Security::FreeSid;
 use windows::Win32::Security::Isolation::{
     DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
-use windows::Win32::Security::{FreeSid, PSID};
 use windows_core::PCWSTR;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_OPTION_VOLATILE};
 use winreg::RegKey;
@@ -66,33 +64,16 @@ pub fn derive_sid_string(identity: &str) -> Result<String, String> {
             .map_err(|e| format!("DeriveAppContainerSidFromAppContainerName failed: {e}"))?
     };
 
-    let sid_string = sid_to_sddl(psid);
+    // Reuse the shared SID-to-string helper from string_util.
+    let result = unsafe { string_util::sid_to_string(psid.0, "") };
 
     // SAFETY: SID was allocated by the OS and must be freed with FreeSid.
     unsafe {
         FreeSid(psid);
     }
 
-    sid_string
-}
-
-/// Convert a PSID to its SDDL string representation.
-fn sid_to_sddl(psid: PSID) -> Result<String, String> {
-    let mut string_sid = windows_core::PWSTR::null();
-
-    // SAFETY: `psid` is a valid SID pointer returned by the OS.
-    unsafe {
-        ConvertSidToStringSidW(psid, &mut string_sid)
-            .map_err(|e| format!("ConvertSidToStringSidW failed: {e}"))?;
-    }
-
-    // SAFETY: `string_sid` is a valid OS-allocated wide string.
-    let result = unsafe { string_sid.to_string() }
-        .map_err(|e| format!("SID string conversion failed: {e}"))?;
-
-    // SAFETY: Free the OS-allocated string buffer.
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(string_sid.0 as *mut std::ffi::c_void)));
+    if result.is_empty() {
+        return Err("ConvertSidToStringSidW failed".into());
     }
 
     Ok(result)
@@ -190,10 +171,16 @@ pub fn cleanup_sandbox(identity: &str, sid_string: &str, logger: &mut Logger) {
     crate::filesystem_bfs::FileSystemBfsManager::clear_policy(identity, logger);
 
     // Step 2: Delete the AppContainer profile.
-    let wide_identity: Vec<u16> = identity.encode_utf16().chain(std::iter::once(0)).collect();
-    let hstring = windows::core::HSTRING::from_wide(&wide_identity[..wide_identity.len() - 1]);
-    // SAFETY: `hstring` contains the identity used to create the profile.
-    match unsafe { DeleteAppContainerProfile(&hstring) } {
+    let Ok(wide_identity) = widestring::U16CString::from_str(identity) else {
+        let _ = writeln!(
+            logger,
+            "warning: failed to convert AppContainer identity to UTF-16: {}",
+            identity
+        );
+        return;
+    };
+    // SAFETY: `wide_identity` is a valid null-terminated UTF-16 string.
+    match unsafe { DeleteAppContainerProfile(PCWSTR(wide_identity.as_ptr())) } {
         Ok(()) => {
             let _ = writeln!(logger, "deleted AppContainer profile: {}", identity);
         }
@@ -231,18 +218,12 @@ fn delete_tracking_key(sid_string: &str, logger: &mut Logger) {
 // --- Time helper ---
 
 /// Get the current time as a FILETIME u64 value.
-/// Uses `std::time::SystemTime` to avoid needing `Win32_System_SystemInformation` feature.
 fn get_current_filetime() -> u64 {
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    // FILETIME epoch is 1601-01-01; UNIX epoch is 1970-01-01.
-    // Difference: 11644473600 seconds.
-    const FILETIME_UNIX_DIFF: u64 = 11_644_473_600;
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
-    let secs = duration.as_secs() + FILETIME_UNIX_DIFF;
-    let nanos_100 = (duration.subsec_nanos() as u64) / 100;
-    secs * 10_000_000 + nanos_100
+    use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
+
+    // SAFETY: no preconditions; returns the current system time as FILETIME.
+    let ft = unsafe { GetSystemTimeAsFileTime() };
+    ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64)
 }
 
 // --- Ctrl+C / console close cleanup handler ---

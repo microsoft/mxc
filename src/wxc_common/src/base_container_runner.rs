@@ -74,7 +74,12 @@ const SANDBOX_SPEC_VERSION: &str = "0.1.0";
 /// wxc-exec only tracks the main AppContainer process handle -- child processes
 /// may still be running when we reach this point. The tracking entry and
 /// ephemeral identity features remain active for diagnostics and future use.
-fn run_sandbox_cleanup(_identity: &str, _sid_string: &str, _proxy_enabled: bool, logger: &mut Logger) {
+fn run_sandbox_cleanup(
+    _identity: &str,
+    _sid_string: &str,
+    _proxy_enabled: bool,
+    logger: &mut Logger,
+) {
     let _ = writeln!(
         logger,
         "{EMOJI_SECTION} SECTION: Lifecycle cleanup (skipping -- child process tracking not yet implemented)"
