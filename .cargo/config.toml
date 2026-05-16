@@ -1,12 +1,16 @@
 
-# Hardening flags for Windows targets:
-# - target-feature=+crt-static — static CRT so vcruntime DLLs aren't needed at runtime
+# Hardening flags for Windows targets. Most flags apply to both arches;
+# /CETCOMPAT is x86/x64 only (Intel Control-flow Enforcement Technology;
+# ARM64 uses Pointer Authentication / BTI instead).
+#
+# Shared flags:
 # - control-flow-guard (rustc) + /guard:cf (linker) — Control Flow Guard
+# - target-feature=+crt-static — static CRT so vcruntime DLLs aren't needed at runtime
 # - /DYNAMICBASE — ASLR
-# - /CETCOMPAT — Intel CET shadow stack opt-in
 # - /LTCG — link-time codegen (pairs best with profile-level lto = "thin"|"fat")
 # - -D warnings — make warnings fatal at compile time
-[target.'cfg(target_os = "windows")']
+
+[target.x86_64-pc-windows-msvc]
 rustflags = [
   "-C",
   "control-flow-guard",
@@ -14,6 +18,18 @@ rustflags = [
   "target-feature=+crt-static",
   "-C",
   "link-args=/guard:cf /DYNAMICBASE /CETCOMPAT /LTCG",
+  "-D",
+  "warnings",
+]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = [
+  "-C",
+  "control-flow-guard",
+  "-C",
+  "target-feature=+crt-static",
+  "-C",
+  "link-args=/guard:cf /DYNAMICBASE /LTCG",
   "-D",
   "warnings",
 ]
