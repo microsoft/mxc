@@ -318,6 +318,7 @@ function Run-StateAwareTest {
 # the control test would not actually demonstrate that share_folders is
 # what enables access in Lifecycle B.
 $script:TestRoot = 'C:\mxc_share_test'
+$script:FilterTestRoot = 'C:\mxc_filter_test'
 $script:RoMarkerContent = 'readonly-marker-content'
 $script:RestrictedMarkerContent = 'restricted-marker-content'
 Setup-LockedDownTestDir $script:TestRoot
@@ -326,6 +327,8 @@ New-Item -Path "$script:TestRoot\ro" -ItemType Directory -Force | Out-Null
 New-Item -Path "$script:TestRoot\restricted" -ItemType Directory -Force | Out-Null
 $script:RoMarkerContent | Set-Content -Path "$script:TestRoot\ro\marker.txt" -NoNewline
 $script:RestrictedMarkerContent | Set-Content -Path "$script:TestRoot\restricted\marker.txt" -NoNewline
+Setup-LockedDownTestDir $script:FilterTestRoot
+New-Item -Path "$script:FilterTestRoot\rw" -ItemType Directory -Force | Out-Null
 
 # Outer try-finally: ensures the host directory tree is removed even if a
 # test panics. The summary at the end runs after the cleanup.
@@ -807,6 +810,128 @@ try {
     }
 }
 
+# ---------------- Lifecycle BF: filesystem-policy path filter ----------------
+#
+# Verifies the wxc-exec filesystem-policy path filter (MXC issue #330).
+# Provisions with a mix of protected (drive root, C:\Windows) and
+# non-protected (C:\mxc_filter_test\rw) paths in readwritePaths. Expected:
+# provision succeeds (the filter is silent -- no error returned, no
+# filter-specific metadata field added), the protected paths get NO new
+# agent ACE (filter dropped them before ShareFolderBatchAsync), and the
+# non-protected path receives the agent's ACE as normal (positive control:
+# legitimate path not accidentally dropped).
+#
+# Test-dir setup happens at file scope alongside $script:TestRoot so the
+# outer try-finally can clean both up between runs; without that cleanup
+# a stale $script:FilterTestRoot from a prior run causes Setup-LockedDownTestDir
+# to fail with SeSecurityPrivilege (Set-Acl on an existing
+# inheritance-disabled directory writes the SACL slot, which non-elevated
+# admins cannot do).
+
+# Translates a local-account name to its SID. Returns $null if the
+# translation fails (e.g., the user no longer exists).
+function Get-LocalAccountSid {
+    param([string]$Name)
+    try {
+        $nt = New-Object System.Security.Principal.NTAccount($Name)
+        $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        $null
+    }
+}
+
+# Returns $true if the ACL on $Path has any access rule whose
+# IdentityReference translates to $TargetSid.
+function Test-AclContainsSid {
+    param([string]$Path, [string]$TargetSid)
+    $acl = Get-Acl $Path
+    foreach ($ace in $acl.Access) {
+        try {
+            $aceSid = $ace.IdentityReference.Translate(
+                [System.Security.Principal.SecurityIdentifier]).Value
+            if ($aceSid -eq $TargetSid) { return $true }
+        } catch {
+            # IdentityReference may be untranslatable (orphan SID etc.); skip.
+        }
+    }
+    $false
+}
+
+$script:filterSandboxId = $null
+$script:filterAgentUserName = $null
+$filterDeprovisionedOk = $false
+try {
+    $filterProvisionedOk = Run-StateAwareTest "filter: provision (protected + non-protected paths)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_with_filter.json' -Experimental
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $arm = Envelope-Arm $envObj
+        if ($arm -ne 'result') {
+            Write-Host "  Envelope arm: $arm" -ForegroundColor Red
+            Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+            Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+            Assert-True $false "filter provision returned a result envelope (filter is silent -- no error expected)"
+        } else {
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0 (filter dropped protected paths silently)"
+            $script:filterSandboxId = $envObj.result.sandboxId
+            Assert-True ($script:filterSandboxId -match '^iso:wxc-[0-9a-f]{8}$') `
+                "sandbox_id matches iso:wxc-<8-hex> ($script:filterSandboxId)"
+            $script:filterAgentUserName = if ($envObj.result.metadata) { [string]$envObj.result.metadata.agentUserName } else { '<absent>' }
+            Write-Host "  filter test provisioned: agentUserName=$($script:filterAgentUserName)" -ForegroundColor DarkGray
+        }
+    }
+
+    if ($filterProvisionedOk -and $script:filterAgentUserName -and $script:filterAgentUserName -ne '<absent>') {
+        $filterAgentSid = Get-LocalAccountSid -Name $script:filterAgentUserName
+
+        Run-StateAwareTest "filter: agent user name translates to SID" {
+            Assert-True ($null -ne $filterAgentSid) `
+                "translated '$($script:filterAgentUserName)' to SID ($filterAgentSid)"
+        } | Out-Null
+
+        if ($null -ne $filterAgentSid) {
+            Run-StateAwareTest "filter: protected drive root receives no agent ACE" {
+                Assert-True (-not (Test-AclContainsSid -Path 'C:\' -TargetSid $filterAgentSid)) `
+                    "agent SID is NOT in ACL of C:\ (drive root filter dropped the entry)"
+            } | Out-Null
+
+            Run-StateAwareTest "filter: protected SystemRoot receives no agent ACE" {
+                Assert-True (-not (Test-AclContainsSid -Path 'C:\Windows' -TargetSid $filterAgentSid)) `
+                    "agent SID is NOT in ACL of C:\Windows (SystemRoot filter dropped the entry)"
+            } | Out-Null
+
+            Run-StateAwareTest "filter: non-protected path receives agent ACE (positive control)" {
+                $nonProtected = Join-Path $script:FilterTestRoot 'rw'
+                Assert-True (Test-AclContainsSid -Path $nonProtected -TargetSid $filterAgentSid) `
+                    "agent SID IS in ACL of $nonProtected (filter passed legitimate path through)"
+            } | Out-Null
+        }
+    }
+
+    if ($filterProvisionedOk) {
+        $filterDeprovPassed = Run-StateAwareTest "filter: deprovision" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:filterSandboxId -Experimental
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $arm = Envelope-Arm $envObj
+            if ($arm -ne 'result') {
+                Assert-True $false "filter deprovision returned a result envelope (got $arm)"
+            } else {
+                Assert-True ($r.ExitCode -eq 0) "exit code = 0"
+            }
+        }
+        if ($filterDeprovPassed) { $filterDeprovisionedOk = $true }
+    }
+} finally {
+    if ($null -ne $script:filterSandboxId -and -not $filterDeprovisionedOk) {
+        Write-Host ""
+        Write-Host "[cleanup] best-effort deprovision of $script:filterSandboxId" -ForegroundColor DarkGray
+        try {
+            $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:filterSandboxId -Experimental
+        } catch {
+            Write-Host "  cleanup deprovision threw: $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+    }
+}
+
 # ---------------- Lifecycle C: Medium configurationId ----------------
 
 # A separate, throwaway sandbox that exercises the Medium config-id end-to-end.
@@ -1222,9 +1347,13 @@ try {
 }
 
 } finally {
-    # Outer-try finally: remove the locked-down test tree. Runs even if a
-    # test panics so we don't leak the directory between runs.
+    # Outer-try finally: remove the locked-down test trees. Runs even if a
+    # test panics so we don't leak the directories between runs. Cleanup is
+    # necessary: re-running Setup-LockedDownTestDir on an existing locked-down
+    # directory fails non-elevated because Set-Acl tries to write the SACL
+    # slot, which requires SeSecurityPrivilege.
     Remove-Item -Recurse -Force $script:TestRoot -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $script:FilterTestRoot -ErrorAction SilentlyContinue
 }
 
 # ---------------- Summary ----------------
