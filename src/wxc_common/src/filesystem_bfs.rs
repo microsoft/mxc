@@ -27,6 +27,18 @@ impl FileSystemBfsManager {
         self.configured
     }
 
+    /// Unconditionally clear BFS policy entries for an AppContainer identity.
+    ///
+    /// Unlike `remove_configuration`, this does not check whether `configure()`
+    /// was called first -- it always runs `bfscfg.exe --clearpolicy`. Use this
+    /// for cleanup of externally-created sandboxes (e.g., BaseContainer profiles
+    /// created by the OS via `CreateProcessInSandbox`).
+    pub fn clear_policy(app_container_name: &str, logger: &mut Logger) {
+        let mut mgr = Self::new(app_container_name.to_string());
+        mgr.configured = true;
+        mgr.remove_configuration(logger);
+    }
+
     pub fn configure(
         &mut self,
         policy: &ContainerPolicy,

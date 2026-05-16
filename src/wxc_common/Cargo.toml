@@ -29,6 +29,7 @@ windows-core = { workspace = true }
 flatbuffers = { workspace = true }
 sandbox_spec = { workspace = true }
 widestring = { workspace = true }
+winreg = { workspace = true }
 isolation_session_bindings = { workspace = true, optional = true }
 windows-future = { version = "0.3", optional = true }
 uuid = { workspace = true }
