@@ -92,8 +92,8 @@ extends:
         # (mxc-binaries-<triplet>) so Package_MXC_NPM_SDK can consume it.
         - template: .azure-pipelines/templates/Mac.Build.Job.yml@self
 
-    - stage: Package_MXC_NPM_SDK
-      displayName: 'Package Npm Sdk'
+    - stage: Package_MXC
+      displayName: 'Package MXC'
       dependsOn: Build_Binaries
       jobs:
       - template: .azure-pipelines/templates/Package.NpmSdk.Job.yml@self
@@ -112,6 +112,8 @@ extends:
 
           ESRPInfo: ${{ parameters.ESRPInfo }}
 
+      - template: .azure-pipelines/templates/Mxc.Binary.Packaging.Job.yml@self
+
     - stage: SDK_Unit_Tests
       displayName: 'SDK Unit Tests'
       dependsOn: []
@@ -122,7 +124,7 @@ extends:
 
     - stage: SDK_Integration_Tests
       displayName: 'SDK Integration Tests'
-      dependsOn: Package_MXC_NPM_SDK
+      dependsOn: Package_MXC
       jobs:
       - template: .azure-pipelines/templates/SDK.Integration.Test.Job.yml@self
         parameters:
