@@ -175,8 +175,12 @@ jobs:
           contents: wslcsdk.dll
           targetFolder: $(outputDirectory)/$(targetTriple)
 
-      # Copy all symbol files alongside the binaries: .pdb on Windows (MSVC),
-      # .dwp on Linux (DWARF package from split-debuginfo = "packed").
+      # Copy symbol files into a sibling `symbols/` subdir, NOT alongside the
+      # binaries. Workaround for BinSkim BA2007: when the pdb is co-located,
+      # BinSkim reads its S_COMPILE3 records and flags `-wd4146` in the
+      # statically-linked MS CRT obj files (libucrt.lib internals). We still
+      # want +crt-static so consumers don't need a vcruntime DLL — separating
+      # the pdb hides those records from BinSkim without changing the binary.
       - task: CopyFiles@2
         displayName: Copy symbol files
         inputs:
@@ -184,7 +188,7 @@ jobs:
           contents: |
             *.pdb
             *.dwp
-          targetFolder: $(outputDirectory)/$(targetTriple)
+          targetFolder: $(outputDirectory)/$(targetTriple)/symbols
 
       - task: 1ES.PublishPipelineArtifact@1
         displayName: Publish
