@@ -251,6 +251,9 @@ use std::sync::{Mutex, OnceLock};
 
 /// State captured so the console-ctrl handler can run cleanup on Ctrl+C or
 /// console close without any context pointer (Win32 handler is a bare fn).
+/// Fields are currently unused because cleanup is disabled, but retained for
+/// when child process tracking is implemented.
+#[allow(dead_code)]
 struct ActiveCleanup {
     identity: String,
     sid_string: String,
@@ -312,24 +315,15 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> windows_core::BOOL {
                 .unwrap_or_else(|p| p.into_inner())
                 .take()
         };
-        if let Some(state) = active {
+        if let Some(_state) = active {
+            // Cleanup is currently disabled (child process tracking not yet
+            // implemented), so the Ctrl+C handler is a no-op beyond consuming
+            // the active slot to prevent double-fire.
             let mut logger = crate::logger::Logger::new(crate::logger::Mode::Buffer);
-            if state.proxy_enabled {
-                mark_cleanup_deferred(&state.sid_string, "network proxy configured", &mut logger);
-            } else if ctrl_type == CTRL_CLOSE_EVENT {
-                // CTRL_CLOSE_EVENT has a ~5s time budget before the OS kills us.
-                // Mark deferred first so the entry is recoverable if we're terminated
-                // mid-cleanup, then attempt best-effort cleanup anyway.
-                mark_cleanup_deferred(
-                    &state.sid_string,
-                    "console closed (best-effort cleanup attempted)",
-                    &mut logger,
-                );
-                cleanup_sandbox(&state.identity, &state.sid_string, &mut logger);
-            } else {
-                // CTRL_C_EVENT -- no time pressure, full cleanup.
-                cleanup_sandbox(&state.identity, &state.sid_string, &mut logger);
-            }
+            let _ = std::fmt::Write::write_str(
+                &mut logger,
+                "ctrl handler: skipping cleanup (child process tracking not yet implemented)\n",
+            );
         }
     }
     // Return FALSE so the default handler terminates the process.

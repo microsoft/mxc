@@ -69,16 +69,16 @@ const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 /// SandboxSpec FlatBuffer schema version embedded in every spec payload.
 const SANDBOX_SPEC_VERSION: &str = "0.1.0";
 
-/// Best-effort sandbox cleanup: deletes the AppContainer profile and tracking
-/// entry unless a network proxy is configured (proxy state can't be torn down
-/// yet, so the tracking entry is retained with a deferral marker).
-fn run_sandbox_cleanup(identity: &str, sid_string: &str, proxy_enabled: bool, logger: &mut Logger) {
-    let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Lifecycle cleanup");
-    if !proxy_enabled {
-        sandbox_tracking::cleanup_sandbox(identity, sid_string, logger);
-    } else {
-        sandbox_tracking::mark_cleanup_deferred(sid_string, "network proxy configured", logger);
-    }
+/// Sandbox cleanup stub. The actual cleanup (DeleteAppContainerProfile, BFS
+/// policy removal, registry tracking deletion) is currently disabled because
+/// wxc-exec only tracks the main AppContainer process handle -- child processes
+/// may still be running when we reach this point. The tracking entry and
+/// ephemeral identity features remain active for diagnostics and future use.
+fn run_sandbox_cleanup(_identity: &str, _sid_string: &str, _proxy_enabled: bool, logger: &mut Logger) {
+    let _ = writeln!(
+        logger,
+        "{EMOJI_SECTION} SECTION: Lifecycle cleanup (skipping -- child process tracking not yet implemented)"
+    );
 }
 
 impl BaseContainerRunner {
