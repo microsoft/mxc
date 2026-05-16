@@ -18,6 +18,8 @@ parameters:
       sdkArch: x64
     - artifact: lxc-binaries-aarch64-unknown-linux-gnu
       sdkArch: arm64
+    - artifact: mxc-binaries-aarch64-apple-darwin
+      sdkArch: arm64
 
 jobs:
 - job: package_mxc_release_binaries
