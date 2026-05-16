@@ -1,8 +1,19 @@
 
-# Use static CRT for Windows targets so vcruntime DLLs don't need to be
-# pre-installed on the machine.
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
-
-[target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+# Hardening flags for Windows targets:
+# - target-feature=+crt-static — static CRT so vcruntime DLLs aren't needed at runtime
+# - control-flow-guard (rustc) + /guard:cf (linker) — Control Flow Guard
+# - /DYNAMICBASE — ASLR
+# - /CETCOMPAT — Intel CET shadow stack opt-in
+# - /LTCG — link-time codegen (pairs best with profile-level lto = "thin"|"fat")
+# - -D warnings — make warnings fatal at compile time
+[target.'cfg(target_os = "windows")']
+rustflags = [
+  "-C",
+  "control-flow-guard",
+  "-C",
+  "target-feature=+crt-static",
+  "-C",
+  "link-args=/guard:cf /DYNAMICBASE /CETCOMPAT /LTCG",
+  "-D",
+  "warnings",
+]
