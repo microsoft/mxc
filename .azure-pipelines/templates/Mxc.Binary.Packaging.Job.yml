@@ -45,17 +45,6 @@ jobs:
           artifact: ${{ target.artifact }}
           path: $(stagingDirectory)/${{ target.sdkArch }}
 
-    # Flatten symbols/ subdirs back into each arch root.
-    - pwsh: |
-        Get-ChildItem -Path "$(stagingDirectory)" -Directory | ForEach-Object {
-          $symbols = Join-Path $_.FullName 'symbols'
-          if (Test-Path $symbols) {
-            Get-ChildItem -Path $symbols -File | Move-Item -Destination $_.FullName -Force -Verbose
-            Remove-Item -Path $symbols -Force
-          }
-        }
-      displayName: Flatten symbols/ into arch dirs
-
     - task: ArchiveFiles@2
       displayName: Archive mxc-release-binaries.zip
       inputs:
