@@ -50,10 +50,9 @@ jobs:
     - script: chmod +x $(sdkDirectory)/bin/*/lxc-exec
       displayName: Restore execute permission on lxc-exec
 
-    # Strip symbol files before npm pack — they ship via the separate
-    # mxc-release-binaries artifact (see Mxc.Binary.Packaging.Job.yml).
-    - script: rm -f $(sdkDirectory)/bin/*/*.pdb $(sdkDirectory)/bin/*/*.dwp
-      displayName: Strip symbol files from npm package
+    # Drop symbol files from the npm package — symbols ship separately.
+    - script: rm -rf $(sdkDirectory)/bin/*/symbols
+      displayName: Strip symbols/ from npm package
 
     - script: |
         set -euo pipefail
