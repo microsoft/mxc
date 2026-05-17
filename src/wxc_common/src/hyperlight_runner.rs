@@ -201,7 +201,7 @@ pub fn setup(force: bool, logger: &mut Logger) -> Result<PathBuf, String> {
     let opts = pyhl::InstallOptions {
         home: &home,
         source: pyhl::InstallSource::Ghcr {
-            tag: Some("v0.4.0"),
+            tag: Some("v0.5.0"),
         },
         mounts: &[],
         network: None,
