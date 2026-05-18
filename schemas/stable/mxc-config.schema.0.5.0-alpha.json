@@ -147,6 +147,16 @@
               },
               "required": ["builtinTestServer"],
               "additionalProperties": false
+            },
+            {
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "description": "Full proxy URL including port (e.g., http://proxy.example.com:8080)."
+                }
+              },
+              "required": ["url"],
+              "additionalProperties": false
             }
           ]
         }

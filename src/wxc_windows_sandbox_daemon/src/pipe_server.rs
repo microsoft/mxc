@@ -21,7 +21,8 @@ const MAX_LAUNCH_ATTEMPTS: u32 = 3;
 const LAUNCH_BACKOFF_SECS: [u64; 3] = [0, 10, 20];
 
 /// Maximum time (seconds) to wait for the guest agent's rendezvous file.
-const RENDEZVOUS_TIMEOUT_SECS: u64 = 120;
+/// First VM boot can take 3-5+ minutes; 360s covers worst-case cold starts.
+const RENDEZVOUS_TIMEOUT_SECS: u64 = 360;
 
 /// Polling interval (milliseconds) when checking for the rendezvous file.
 const RENDEZVOUS_POLL_INTERVAL_MS: u64 = 500;
@@ -132,44 +133,40 @@ async fn execute_request(
         locked.last_activity = std::time::Instant::now();
     }
 
-    // Execute on the guest.
-    let result = {
-        let mut locked = state.lock().await;
-        let conn = locked
-            .guest_connection
-            .as_mut()
-            .context("no guest connection")?;
+    // Execute on the guest and reconnect data streams for the next
+    // execution.  Both operations must run under a single lock acquisition
+    // so that a concurrent client cannot send a new EXEC (or consume the
+    // StreamsReady message) while we are between execute and reconnect.
+    let mut locked = state.lock().await;
+    let addr = locked.guest_addr.context("no guest address")?;
+    let conn = locked
+        .guest_connection
+        .as_mut()
+        .context("no guest connection")?;
 
-        let exec_id = uuid::Uuid::new_v4().to_string();
-        tcp_bridge::execute_on_guest(
-            conn,
-            &exec_id,
-            &req.script_code,
-            &req.working_directory,
-            req.timeout_ms,
-            &[],
-        )
-        .await?
-    };
+    let exec_id = uuid::Uuid::new_v4().to_string();
+    let result = tcp_bridge::execute_on_guest(
+        conn,
+        &exec_id,
+        &req.script_code,
+        &req.working_directory,
+        req.timeout_ms,
+        &[],
+    )
+    .await?;
 
-    // Reconnect data streams for the next execution. The agent will
+    // Reconnect data streams for the next execution. The guest will
     // re-accept 3 new data connections and signal StreamsReady.
+    if let Err(err) = tcp_bridge::reconnect_data_streams(conn, addr, result.control_residual).await
     {
-        let mut locked = state.lock().await;
-        let addr = locked.guest_addr.context("no guest address")?;
-        if let Some(conn) = locked.guest_connection.as_mut() {
-            if let Err(err) =
-                tcp_bridge::reconnect_data_streams(conn, addr, result.control_residual).await
-            {
-                eprintln!("[daemon] failed to reconnect data streams: {:#}", err);
-                // Full reset so the next request tears down and relaunches
-                // rather than waiting for a rendezvous that won't appear.
-                locked.guest_connection = None;
-                locked.guest_addr = None;
-                locked.sandbox_running = false;
-            }
-        }
+        eprintln!("[daemon] failed to reconnect data streams: {:#}", err);
+        // Full reset so the next request tears down and relaunches
+        // rather than waiting for a rendezvous that won't appear.
+        locked.guest_connection = None;
+        locked.guest_addr = None;
+        locked.sandbox_running = false;
     }
+    drop(locked);
 
     Ok(DaemonResult {
         exit_code: result.exit_code,
@@ -183,9 +180,13 @@ async fn execute_request(
 /// Ensure the sandbox VM is running and we have a guest connection.
 ///
 /// Retries once on failure — tears down the sandbox and relaunches.
+///
+/// Updates `last_activity` before starting work so the idle watchdog
+/// does not fire during the multi-minute VM boot + rendezvous.
 async fn ensure_sandbox_ready(state: &Arc<Mutex<DaemonState>>) -> Result<()> {
     {
-        let s = state.lock().await;
+        let mut s = state.lock().await;
+        s.last_activity = std::time::Instant::now();
         if s.guest_connection.is_some() {
             return Ok(());
         }
@@ -279,7 +280,13 @@ async fn try_launch_and_connect(
         }
     }
 
-    // Poll for rendezvous without holding the lock (can take 15-60s).
+    // Poll for rendezvous without holding the lock (can take 2-5+ minutes
+    // for the first VM boot).  Refresh last_activity so the idle watchdog
+    // does not fire while we wait.
+    {
+        let mut s = state.lock().await;
+        s.last_activity = std::time::Instant::now();
+    }
     let guest_addr = rendezvous::wait_for_rendezvous(
         rendezvous_dir,
         std::time::Duration::from_secs(RENDEZVOUS_TIMEOUT_SECS),
@@ -288,7 +295,8 @@ async fn try_launch_and_connect(
     .await
     .context("rendezvous failed")?;
 
-    // Connect to the guest agent.
+    // Connect to the guest agent.  Refresh activity again after the
+    // potentially long rendezvous wait.
     let conn = tcp_bridge::connect_to_guest(
         guest_addr,
         std::time::Duration::from_secs(GUEST_CONNECT_TIMEOUT_SECS),
@@ -299,6 +307,7 @@ async fn try_launch_and_connect(
     let mut locked = state.lock().await;
     locked.guest_connection = Some(conn);
     locked.guest_addr = Some(guest_addr);
+    locked.last_activity = std::time::Instant::now();
 
     Ok(())
 }
