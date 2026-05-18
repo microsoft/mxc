@@ -21,6 +21,14 @@ parameters:
 - name: ESRPInfo
   type: object
   default: {}
+- name: AppleSigningInfo
+  type: object
+  default:
+    keyVaultServiceConnection: ''
+    keyVaultName: ''
+    certSecret: 'AppleDeveloperIdCert'
+    certPasswordSecret: 'AppleDeveloperIdCertPassword'
+    signingIdentity: 'Developer ID Application: Microsoft Corporation'
 
 jobs:
 - job: 'build_arm64_MAC'
@@ -89,17 +97,61 @@ jobs:
       workingDirectory: $(workingDirectory)
 
     # --- macOS Code Signing & Notarization (official builds only) ---
-    # Uses ESRP with Microsoft's Developer ID Application certificate
-    # (CP-401337-Apple) to codesign with hardened runtime, then submits
-    # to Apple's notary service. This mirrors the Windows signing pattern
-    # in Rust.Build.Job.yml but uses Apple-specific operations.
+    # Flow: Import cert from Key Vault → codesign with Developer ID →
+    # ESRP hardening (runtime flag) → ESRP notarization (Apple notary service).
     #
     # Note: Stapling is intentionally omitted. Apple does not support
     # stapling tickets to standalone Mach-O binaries — only .app bundles,
     # .pkg installers, and .dmg disk images. Gatekeeper verifies the
     # notarization ticket online for standalone binaries instead.
+
+    # Step 1: Fetch the Developer ID Application certificate from Key Vault
+    - task: AzureKeyVault@2
+      displayName: 'Fetch Apple signing cert from Key Vault'
+      condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
+      inputs:
+        azureSubscription: ${{ parameters.AppleSigningInfo.keyVaultServiceConnection }}
+        KeyVaultName: ${{ parameters.AppleSigningInfo.keyVaultName }}
+        SecretsFilter: '${{ parameters.AppleSigningInfo.certSecret }},${{ parameters.AppleSigningInfo.certPasswordSecret }}'
+        RunAsPreJob: false
+
+    # Step 2: Import cert into a temporary keychain and codesign the binary
+    - script: |
+        set -euo pipefail
+        KEYCHAIN_PATH="$(Agent.TempDirectory)/build.keychain"
+        KEYCHAIN_PASSWORD="$(Agent.TempDirectory)"
+
+        # Create and configure temporary keychain
+        security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        security default-keychain -s "$KEYCHAIN_PATH"
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        security set-keychain-settings -t 3600 "$KEYCHAIN_PATH"
+
+        # Import the Developer ID certificate
+        echo "$(${{ parameters.AppleSigningInfo.certSecret }})" | base64 -d > "$(Agent.TempDirectory)/cert.p12"
+        security import "$(Agent.TempDirectory)/cert.p12" \
+          -k "$KEYCHAIN_PATH" \
+          -P "$(${{ parameters.AppleSigningInfo.certPasswordSecret }})" \
+          -T /usr/bin/codesign
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+        # Codesign the binary with Developer ID and entitlements
+        codesign --sign "${{ parameters.AppleSigningInfo.signingIdentity }}" \
+          --entitlements "$(Build.SourcesDirectory)/.azure-pipelines/mac-entitlements.plist" \
+          --timestamp --force \
+          "$(targetTripleDir)/mxc-exec-mac"
+
+        # Verify the signature
+        codesign --verify --verbose=2 "$(targetTripleDir)/mxc-exec-mac"
+
+        # Cleanup cert file
+        rm -f "$(Agent.TempDirectory)/cert.p12"
+      displayName: 'Codesign binary (Developer ID)'
+      condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
+
+    # Step 3: ESRP hardening (adds hardened runtime flag)
     - task: EsrpCodeSigning@5
-      displayName: 'Code Sign (macOS)'
+      displayName: 'Harden runtime (ESRP)'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
       inputs:
         ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
@@ -125,8 +177,9 @@ jobs:
             }
           ]
 
+    # Step 4: ESRP notarization (submits to Apple notary service)
     - task: EsrpCodeSigning@5
-      displayName: 'Notarize (macOS)'
+      displayName: 'Notarize (ESRP)'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
       inputs:
         ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}

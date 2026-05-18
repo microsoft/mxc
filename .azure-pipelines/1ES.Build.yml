@@ -41,6 +41,16 @@ parameters:
     type: boolean
     default: false
 
+  - name: AppleSigningInfo
+    displayName: Apple Developer ID signing configuration
+    type: object
+    default:
+      keyVaultServiceConnection: ''
+      keyVaultName: ''
+      certSecret: 'AppleDeveloperIdCert'
+      certPasswordSecret: 'AppleDeveloperIdCertPassword'
+      signingIdentity: 'Developer ID Application: Microsoft Corporation'
+
 variables:
   # Prevents failure when no Rust tests are found; pipeline runs will still fail if present
   # tests do not pass.
@@ -93,6 +103,7 @@ extends:
           parameters:
             isOfficialBuild: ${{ eq(parameters.officialBuild, 'Official') }}
             ESRPInfo: ${{ parameters.ESRPInfo }}
+            AppleSigningInfo: ${{ parameters.AppleSigningInfo }}
 
     - stage: Package_MXC
       displayName: 'Package MXC'
