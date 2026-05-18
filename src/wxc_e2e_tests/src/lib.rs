@@ -217,12 +217,14 @@ pub fn has_windows_sandbox_feature() -> bool {
     available
 }
 
-/// Check whether `python.exe` is available and NOT only a Windows Store App
-/// Execution Alias. Store aliases are reparse points under `WindowsApps`
-/// that cannot be launched inside AppContainer/BaseContainer sandboxes.
+/// Check whether `python.exe` is available and the *first* match in PATH
+/// is NOT a Windows Store App Execution Alias. Store aliases are reparse
+/// points under `WindowsApps` that cannot be launched inside
+/// AppContainer/BaseContainer sandboxes. Even when a real Python exists
+/// later in PATH, the sandbox will try to launch the first match and fail.
 ///
 /// Panics with a clear remediation message when Python is missing or
-/// only exists as a Store alias.
+/// the first PATH match is a Store alias.
 pub fn assert_python() {
     let output = Command::new("where.exe").arg("python.exe").output().ok();
 
@@ -245,51 +247,30 @@ pub fn assert_python() {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let has_real_python = stdout
-        .lines()
-        .any(|p| !p.to_ascii_lowercase().contains("windowsapps"));
-    if !has_real_python {
+    let first_path = stdout.lines().next().unwrap_or("");
+    if first_path.to_ascii_lowercase().contains("windowsapps") {
         panic!(
-            "python.exe only exists as a Windows Store alias.\n\
-             Store aliases cannot be launched inside sandbox containers.\n\
+            "python.exe first resolves to a Windows Store alias ({first_path}).\n\
+             Store aliases shadow real installs and cannot be launched inside sandbox containers.\n\
              Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or disable App Execution Aliases for Python"
         );
     }
 }
 
-/// Check whether `pwsh.exe` (PowerShell 7) is available via a real install
-/// path, not a Windows Store App Execution Alias.
+/// The hardcoded path used by `pwsh_setlocation.json`.
+const PWSH_PATH: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
+
+/// Check whether PowerShell 7 is available at the expected path.
+/// The test config `pwsh_setlocation.json` uses a hardcoded fully-qualified
+/// path, so we validate that specific path exists rather than relying on
+/// PATH resolution.
 ///
 /// Panics with a clear remediation message when pwsh is missing.
-/// Since the test config uses a fully qualified path, this only checks
-/// that a real (non-Store) pwsh.exe exists somewhere on the system.
 pub fn assert_pwsh() {
-    let output = Command::new("where.exe").arg("pwsh.exe").output().ok();
-
-    let Some(output) = output else {
+    if !std::path::Path::new(PWSH_PATH).exists() {
         panic!(
-            "pwsh.exe not found.\n\
-             PowerShell 7 sandbox tests require a system-wide install.\n\
-             Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install PowerShell 7"
-        );
-    };
-
-    if !output.status.success() {
-        panic!(
-            "pwsh.exe not found.\n\
-             PowerShell 7 sandbox tests require a system-wide install.\n\
-             Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install PowerShell 7"
-        );
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let has_real_pwsh = stdout
-        .lines()
-        .any(|p| !p.to_ascii_lowercase().contains("windowsapps"));
-    if !has_real_pwsh {
-        panic!(
-            "pwsh.exe only exists as a Windows Store alias.\n\
-             Store aliases cannot be launched inside sandbox containers.\n\
+            "PowerShell 7 not found at {PWSH_PATH}.\n\
+             The pwsh_setlocation test requires PowerShell 7 installed at this path.\n\
              Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install PowerShell 7 system-wide"
         );
     }

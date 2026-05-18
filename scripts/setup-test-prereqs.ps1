@@ -68,11 +68,16 @@ function Disable-StoreAlias {
 }
 
 function Test-SystemPython {
-    $cmd = Get-Command python.exe -ErrorAction SilentlyContinue
-    if (-not $cmd) { return $false }
-    $path = $cmd.Source
-    # System-wide installs are NOT under Users\*\AppData
-    return ($path -notlike "*WindowsApps*") -and ($path -notlike "*AppData*")
+    $commands = Get-Command python.exe -All -ErrorAction SilentlyContinue
+    if (-not $commands) { return $false }
+    # Satisfied if ANY match is a real system-wide install (not Store/AppData)
+    foreach ($cmd in $commands) {
+        $path = $cmd.Source
+        if (($path -notlike "*WindowsApps*") -and ($path -notlike "*AppData*")) {
+            return $true
+        }
+    }
+    return $false
 }
 
 # --- Main ---
@@ -158,21 +163,30 @@ Write-Host ""
 
 # Fix: Install Python system-wide
 if (-not (Test-SystemPython)) {
-    Write-Host "Installing Python 3.12 system-wide via winget..." -ForegroundColor Cyan
-    $result = winget install Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements 2>&1
-    Write-Host $result
-    
-    # Refresh PATH for current session
-    $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
-    $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-    $env:PATH = "$machinePath;$userPath"
-
-    if (Test-SystemPython) {
-        $ver = & python.exe --version 2>&1
-        Write-Host "Python installed successfully ($ver)" -ForegroundColor Green
+    $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
+    if (-not $wingetCmd) {
+        Write-Host "ERROR: winget is not available. Install Python 3.12 manually from https://python.org" -ForegroundColor Red
+        Write-Host "       Choose 'Install for all users' during setup." -ForegroundColor Yellow
     } else {
-        Write-Host "WARNING: Python install completed but python.exe not found in PATH." -ForegroundColor Yellow
-        Write-Host "         You may need to restart your terminal." -ForegroundColor Yellow
+        Write-Host "Installing Python 3.12 system-wide via winget..." -ForegroundColor Cyan
+        winget install Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: winget install failed (exit code $LASTEXITCODE)." -ForegroundColor Red
+            Write-Host "       Install Python 3.12 manually from https://python.org (choose 'Install for all users')." -ForegroundColor Yellow
+        } else {
+            # Refresh PATH for current session
+            $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+            $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+            $env:PATH = "$machinePath;$userPath"
+
+            if (Test-SystemPython) {
+                $ver = & python.exe --version 2>&1
+                Write-Host "Python installed successfully ($ver)" -ForegroundColor Green
+            } else {
+                Write-Host "WARNING: Python install completed but python.exe not found in PATH." -ForegroundColor Yellow
+                Write-Host "         You may need to restart your terminal." -ForegroundColor Yellow
+            }
+        }
     }
 }
 
