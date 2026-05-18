@@ -3,18 +3,18 @@
   "ConfigVersion": 3,
   "Entries": [
     {
-      "JobNotificationEmail": "TODO-wxc-common-owner@microsoft.com",
+      "JobNotificationEmail": "anisk@microsoft.com",
       "FuzzerProperties": {
         "Fuzzer": {
           "$type": "libfuzzer"
         },
-        "FuzzerExe": "config_parser.exe",
+        "FuzzerExe": "config_parser\\config_parser.exe",
         "JobDependencies": [
-          "clang_rt.asan_dynamic-x86_64.dll"
+          "config_parser\\clang_rt.asan_dynamic-x86_64.dll"
         ],
         "Seeds": [
           {
-            "Path": "corpus\\config_parser"
+            "Path": "config_parser\\corpus"
           }
         ]
       },
@@ -27,31 +27,31 @@
       ],
       "AdoTemplate": {
         "Org": "microsoft",
-        "Project": "TODO-ADO-project",
-        "AreaPath": "TODO\\Area\\Path",
-        "IterationPath": "TODO\\Iteration\\Path",
-        "AssignedTo": "TODO-wxc-common-owner@microsoft.com",
+        "Project": "OS",
+        "AreaPath": "OS\\Windows Client and Services\\WinPD\\AgOS-Agentic Platform\\Agent Runtime\\Tessera",
+        "IterationPath": "OS\\Future",
+        "AssignedTo": "anisk@microsoft.com",
         "TemplateName": "Bug"
       },
       "CodeReviewers": {
-        "Required": ["TODO-wxc-common-owner@microsoft.com"],
+        "Required": ["anisk@microsoft.com"],
         "Optional": []
       },
       "SdlTaskId": 62294501
     },
     {
-      "JobNotificationEmail": "TODO-wxc-common-owner@microsoft.com",
+      "JobNotificationEmail": "anisk@microsoft.com",
       "FuzzerProperties": {
         "Fuzzer": {
           "$type": "libfuzzer"
         },
-        "FuzzerExe": "base64_decode.exe",
+        "FuzzerExe": "base64_decode\\base64_decode.exe",
         "JobDependencies": [
-          "clang_rt.asan_dynamic-x86_64.dll"
+          "base64_decode\\clang_rt.asan_dynamic-x86_64.dll"
         ],
         "Seeds": [
           {
-            "Path": "corpus\\base64_decode"
+            "Path": "base64_decode\\corpus"
           }
         ]
       },
@@ -64,31 +64,31 @@
       ],
       "AdoTemplate": {
         "Org": "microsoft",
-        "Project": "TODO-ADO-project",
-        "AreaPath": "TODO\\Area\\Path",
-        "IterationPath": "TODO\\Iteration\\Path",
-        "AssignedTo": "TODO-wxc-common-owner@microsoft.com",
+        "Project": "OS",
+        "AreaPath": "OS\\Windows Client and Services\\WinPD\\AgOS-Agentic Platform\\Agent Runtime\\Tessera",
+        "IterationPath": "OS\\Future",
+        "AssignedTo": "anisk@microsoft.com",
         "TemplateName": "Bug"
       },
       "CodeReviewers": {
-        "Required": ["TODO-wxc-common-owner@microsoft.com"],
+        "Required": ["anisk@microsoft.com"],
         "Optional": []
       },
       "SdlTaskId": 62294501
     },
     {
-      "JobNotificationEmail": "TODO-wxc-common-owner@microsoft.com",
+      "JobNotificationEmail": "anisk@microsoft.com",
       "FuzzerProperties": {
         "Fuzzer": {
           "$type": "libfuzzer"
         },
-        "FuzzerExe": "validator.exe",
+        "FuzzerExe": "validator\\validator.exe",
         "JobDependencies": [
-          "clang_rt.asan_dynamic-x86_64.dll"
+          "validator\\clang_rt.asan_dynamic-x86_64.dll"
         ],
         "Seeds": [
           {
-            "Path": "corpus\\validator"
+            "Path": "validator\\corpus"
           }
         ]
       },
@@ -101,14 +101,14 @@
       ],
       "AdoTemplate": {
         "Org": "microsoft",
-        "Project": "TODO-ADO-project",
-        "AreaPath": "TODO\\Area\\Path",
-        "IterationPath": "TODO\\Iteration\\Path",
-        "AssignedTo": "TODO-wxc-common-owner@microsoft.com",
+        "Project": "OS",
+        "AreaPath": "OS\\Windows Client and Services\\WinPD\\AgOS-Agentic Platform\\Agent Runtime\\Tessera",
+        "IterationPath": "OS\\Future",
+        "AssignedTo": "anisk@microsoft.com",
         "TemplateName": "Bug"
       },
       "CodeReviewers": {
-        "Required": ["TODO-wxc-common-owner@microsoft.com"],
+        "Required": ["anisk@microsoft.com"],
         "Optional": []
       },
       "SdlTaskId": 62294501

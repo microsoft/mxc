@@ -48,11 +48,11 @@ cd src\fuzz
 cargo +nightly fuzz run config_parser -- -max_total_time=30
 ```
 
-Discovered crashes are written to `src/fuzz/artifacts/<target>/` and printed
-to the console. Re-run a single input with:
+Discovered crashes are written to `artifacts/<target>/` (relative to `src/fuzz/`)
+and printed to the console. Re-run a single input with:
 
 ```pwsh
-cargo +nightly fuzz run config_parser src\fuzz\artifacts\config_parser\crash-<hash>
+cargo +nightly fuzz run config_parser artifacts\config_parser\crash-<hash>
 ```
 
 ## Minimizing the seed corpus

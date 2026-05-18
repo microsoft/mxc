@@ -29,10 +29,10 @@ cd src\fuzz
 cargo +nightly fuzz run config_parser -- -max_total_time=30
 ```
 
-Findings are written to `src/fuzz/artifacts/<target>/`. Reproduce a finding with:
+Findings are written to `artifacts/<target>/`. Reproduce a finding with:
 
 ```pwsh
-cargo +nightly fuzz run config_parser src\fuzz\artifacts\config_parser\crash-<hash>
+cargo +nightly fuzz run config_parser artifacts\config_parser\crash-<hash>
 ```
 
 ## Minimizing the corpus
@@ -48,9 +48,8 @@ Only the resulting set should be committed.
 ## OneFuzzConfig.json
 
 `OneFuzzConfig.json` ships in the OneFuzz drop directory alongside the fuzzer
-binaries. **Required fields tagged `TODO-*` must be filled in before the first
-daily run will route bugs correctly.** Validate locally with the OIP tool:
+binaries. Validate locally with the OIP tool:
 
 ```pwsh
-oip.exe validate src\fuzz\OneFuzzConfig.json
+oip.exe validate OneFuzzConfig.json
 ```
