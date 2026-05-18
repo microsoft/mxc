@@ -151,8 +151,23 @@ fn print_error_envelope(error: &MxcError) {
 }
 
 fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
-    // Clear BFS policy first
-    let mut bfs = FileSystemBfsManager::new(name.to_string());
+    // Clear BFS policy first. We need an absolute path to `bfscfg.exe`
+    // here for the same security reason as the runner — pass an
+    // authoritative path to `CreateProcessW` rather than a bare name.
+    // If resolution fails (rare; only on hosts where
+    // `GetWindowsDirectoryW` itself returns 0), we log and skip the BFS
+    // clearing step; deleting the AppContainer profile below is still
+    // worth attempting.
+    let bfscfg_path = match wxc_common::fallback_detector::find_bfscfg_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            logger.log_line(&format!(
+                "Skipping BFS policy clear: could not resolve bfscfg.exe ({e})"
+            ));
+            None
+        }
+    };
+    let mut bfs = FileSystemBfsManager::new(name.to_string(), bfscfg_path);
     bfs.remove_configuration(logger);
 
     // Delete the AppContainer profile

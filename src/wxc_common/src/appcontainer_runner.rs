@@ -599,7 +599,20 @@ impl ScriptRunner for AppContainerScriptRunner {
         let principal_id = self.get_principal_id();
         logger.log_line(&format!("AppContainerSID: {principal_id}"));
 
-        let mut bfs_manager = FileSystemBfsManager::new(self.app_container_name.clone());
+        // Resolve `bfscfg.exe` by absolute path so probe and execution
+        // agree on the binary — defeats executable-search-order
+        // hijacking (see `fallback_detector::find_bfscfg_exe`). On
+        // hosts where SystemRoot itself cannot be resolved (a
+        // pathological state on any healthy Windows install) we surface
+        // the resolution error rather than silently demoting to a
+        // weaker isolation tier.
+        let bfscfg_path = match crate::fallback_detector::find_bfscfg_exe() {
+            Ok(p) => p,
+            Err(e) => return ScriptResponse::error(&e.to_string()),
+        };
+
+        let mut bfs_manager =
+            FileSystemBfsManager::new(self.app_container_name.clone(), bfscfg_path);
         if let Err(e) = bfs_manager.configure(&request.policy, logger) {
             return ScriptResponse::error(&e.to_string());
         }
