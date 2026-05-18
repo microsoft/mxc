@@ -18,7 +18,7 @@ interface Scenario {
   script: string;
   policy: any;
   shell: 'cmd' | 'ps51' | 'ps7' | 'python';
-  containment?: 'appcontainer' | 'windows_sandbox';
+  containment?: 'appcontainer' | 'windows_sandbox' | 'microvm';
   requiresV05?: boolean;
   /** If set, output must contain this string for a PASS verdict */
   successMarker?: string;
@@ -368,6 +368,50 @@ var SCENARIOS: Scenario[] = [
     expectedOutcome: 'be-blocked', expectedLabel: 'Should be terminated',
     script: 'ping -n 30 127.0.0.1',
     policy: { timeoutMs: 5000 } },
+
+  // ========== MicroVM (NanVix) ==========
+  { id: 'mv-hello', name: 'Hello from MicroVM', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
+    containment: 'microvm',
+    description: 'Runs a simple Python script inside the NanVix micro-VM.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "x = 42\ny = 58\nprint('Hello from MicroVM! sum=%d' % (x + y))",
+    policy: {}, successMarker: 'Hello from MicroVM!' },
+  { id: 'mv-stdlib', name: 'Stdlib (json, math, hashlib)', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
+    containment: 'microvm',
+    description: 'Imports json, math, hashlib to verify the CPython stdlib is available.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "import json, math, hashlib\ndata = {'pi': math.pi, 'e': math.e, 'hash': hashlib.sha256(b'nanvix').hexdigest()[:16]}\nprint(json.dumps(data))",
+    policy: {}, successMarker: 'pi' },
+  { id: 'mv-multiline', name: 'Fibonacci (multiline)', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
+    containment: 'microvm',
+    description: 'Runs a multi-line Fibonacci function to verify complex scripts work.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n\nfor i in range(10):\n    print(f'fib({i}) = {fib(i)}')",
+    policy: {}, successMarker: 'fib(9) = 34' },
+  { id: 'mv-large-output', name: 'Large output (1000 lines)', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
+    containment: 'microvm',
+    description: 'Prints 1000 lines to verify large output streaming works.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "for i in range(1000):\n    print(f'line {i}: ' + 'x' * 80)",
+    policy: {}, successMarker: 'line 999' },
+  { id: 'mv-exit-code', name: 'Exit code 42', category: 'Error Cases', categoryIcon: '⚠️', shell: 'python',
+    containment: 'microvm',
+    description: 'Exits with code 42. Verifies exit codes propagate from the micro-VM.',
+    expectedOutcome: 'show-error', expectedLabel: 'Should exit 42',
+    script: 'import sys; sys.exit(42)',
+    policy: {} },
+  { id: 'mv-error', name: 'Python error', category: 'Error Cases', categoryIcon: '⚠️', shell: 'python',
+    containment: 'microvm',
+    description: 'Raises a ValueError. Verifies stderr capture from the micro-VM.',
+    expectedOutcome: 'show-error', expectedLabel: 'Should show error',
+    script: "raise ValueError('intentional test error')",
+    policy: {} },
+  { id: 'mv-timeout', name: 'Timeout', category: 'Error Cases', categoryIcon: '⚠️', shell: 'python',
+    containment: 'microvm',
+    description: 'Sleeps for 120s with a 5s timeout. MicroVM adds 60s boot grace, so actual ~65s.',
+    expectedOutcome: 'be-blocked', expectedLabel: 'Should be terminated',
+    script: "import time; time.sleep(120); print('should not reach here')",
+    policy: { timeoutMs: 5000 } },
 ];
 
 // ============================================================
@@ -589,7 +633,7 @@ function getCurrentScript(): string {
   // Replace bare 'python' with resolved full path for BaseContainer compatibility
   // (skip for Windows Sandbox — it uses mapped Python from the host)
   var containment = $sel('containmentSelect').value;
-  if (containment !== 'windows_sandbox' && shellPaths.python?.exe && script.match(/^python\s/)) {
+  if (containment !== 'windows_sandbox' && containment !== 'microvm' && shellPaths.python?.exe && script.match(/^python\s/)) {
     script = '"' + shellPaths.python.exe + '"' + script.substring(6);
   }
 
@@ -848,10 +892,10 @@ function populateScenarios(): void {
   select.innerHTML = '';
 
   var containment = $sel('containmentSelect').value;
-  var isWS = containment === 'windows_sandbox';
+  var isRawBackend = containment === 'windows_sandbox' || containment === 'microvm';
   var filtered = SCENARIOS.filter(function(s) {
     if (s.shell !== shell) return false;
-    if (isWS) return s.containment === 'windows_sandbox';
+    if (isRawBackend) return s.containment === containment;
     return !s.containment || s.containment === 'appcontainer';
   });
 
@@ -1035,23 +1079,21 @@ async function runSandbox(): Promise<void> {
     return;
   }
 
-  // Windows Sandbox mode — build raw wxc-exec JSON config and use runSandboxRaw
+  // Windows Sandbox / MicroVM mode — build raw wxc-exec JSON config and use runSandboxRaw
   var currentContainment = $sel('containmentSelect').value;
-  console.log('[renderer] runSandbox: containment =', currentContainment, 'shell =', currentShell);
-  if (currentContainment === 'windows_sandbox') {
-    var wsScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
-    console.log('[renderer] WS path: script =', wsScript, 'scenario =', state.selectedScenario?.id);
-    if (!wsScript) {
+  if (currentContainment === 'windows_sandbox' || currentContainment === 'microvm') {
+    var rawScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
+    if (!rawScript) {
       termError('No script specified');
       return;
     }
 
-    var wsTimeout = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
-    var wsConfig: any = {
-      containment: 'windows_sandbox',
+    var rawTimeout = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
+    var rawConfig: any = {
+      containment: currentContainment,
       process: {
-        commandLine: wsScript,
-        timeout: wsTimeout,
+        commandLine: rawScript,
+        timeout: rawTimeout,
       },
     };
 
@@ -1065,20 +1107,23 @@ async function runSandbox(): Promise<void> {
     }
     terminalFullText = '';
 
-    termInfo('[Playground] Running via Windows Sandbox');
+    var backendLabel = currentContainment === 'microvm' ? 'MicroVM (NanVix)' : 'Windows Sandbox';
+    termInfo('[Playground] Running via ' + backendLabel);
     if (state.selectedScenario) {
       termInfo('[Playground] Scenario: ' + state.selectedScenario.name + ' (' + state.selectedScenario.id + ')');
     }
-    termInfo('[Playground] Script: ' + wsScript);
+    termInfo('[Playground] Script: ' + rawScript);
     termInfo('[MXC] API: spawnSandboxFromConfig (raw config)');
-    termDim('[MXC] Note: First run may take 3-5 minutes while the sandbox VM boots.');
+    if (currentContainment === 'windows_sandbox') {
+      termDim('[MXC] Note: First run may take 3-5 minutes while the sandbox VM boots.');
+    } else {
+      termDim('[MXC] Note: MicroVM boot adds ~60s grace period to the script timeout.');
+    }
 
-    var wsDebug = (document.getElementById('debugToggle') as HTMLInputElement).checked;
-    console.log('[renderer] WS: calling runSandboxRaw with config:', JSON.stringify(wsConfig));
-    var wsResult = await mxc.runSandboxRaw(JSON.stringify(wsConfig), wsDebug, true);
-    console.log('[renderer] WS: runSandboxRaw returned:', JSON.stringify(wsResult));
-    if (!wsResult.success) {
-      termError('[MXC] Failed to start sandbox: ' + wsResult.error);
+    var rawDebug = (document.getElementById('debugToggle') as HTMLInputElement).checked;
+    var rawResult = await mxc.runSandboxRaw(JSON.stringify(rawConfig), rawDebug, true);
+    if (!rawResult.success) {
+      termError('[MXC] Failed to start sandbox: ' + rawResult.error);
       onSandboxExit(-1);
     } else {
       termDim('[MXC] Config accepted');
@@ -1236,11 +1281,11 @@ async function runAllScenarios(): Promise<void> {
 
   // Filter scenarios: current shell, containment, available runtimes, version-appropriate
   var currentContainment = $sel('containmentSelect').value;
-  var isWS = currentContainment === 'windows_sandbox';
+  var isRawBackend = currentContainment === 'windows_sandbox' || currentContainment === 'microvm';
   var scenariosToRun = SCENARIOS.filter(function(s) {
     if (s.shell !== currentShell) { return false; }
-    if (isWS) { if (s.containment !== 'windows_sandbox') return false; }
-    else { if (s.containment === 'windows_sandbox') return false; }
+    if (isRawBackend) { if (s.containment !== currentContainment) return false; }
+    else { if (s.containment === 'windows_sandbox' || s.containment === 'microvm') return false; }
     if (s.shell === 'ps7' && !shellAvailability['ps7']) { return false; }
     if (s.shell === 'python' && !shellAvailability['python']) { return false; }
     if (s.requiresV05 && version !== '0.5.0-dev') { return false; }
@@ -1599,35 +1644,34 @@ function showJsonPanel(tab: string): void {
 
   if (tab === 'policy') {
     var containment = $sel('containmentSelect').value;
-    if (containment === 'windows_sandbox') {
-      var wsScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
-      var wsTimeout = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
-      var wsConfig = {
-        containment: 'windows_sandbox',
+    if (containment === 'windows_sandbox' || containment === 'microvm') {
+      var rawScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
+      var rawTimeout = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
+      var rawConfig = {
+        containment: containment,
         process: {
-          commandLine: wsScript || '(no script)',
-          timeout: wsTimeout,
+          commandLine: rawScript || '(no script)',
+          timeout: rawTimeout,
         },
       };
-      $('jsonContent').innerHTML = highlightJson(escapeHtml(JSON.stringify(wsConfig, null, 2)));
+      $('jsonContent').innerHTML = highlightJson(escapeHtml(JSON.stringify(rawConfig, null, 2)));
     } else {
       var policyStr = JSON.stringify(buildPolicy(), null, 2);
       $('jsonContent').innerHTML = highlightJson(escapeHtml(policyStr));
     }
   } else {
     var containment2 = $sel('containmentSelect').value;
-    if (containment2 === 'windows_sandbox') {
-      // WS Config tab — show the same raw config (no SDK policy validation)
-      var wsScript2 = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
-      var wsTimeout2 = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
-      var wsConfig2 = {
-        containment: 'windows_sandbox',
+    if (containment2 === 'windows_sandbox' || containment2 === 'microvm') {
+      var rawScript2 = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
+      var rawTimeout2 = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
+      var rawConfig2 = {
+        containment: containment2,
         process: {
-          commandLine: wsScript2 || '(no script)',
-          timeout: wsTimeout2,
+          commandLine: rawScript2 || '(no script)',
+          timeout: rawTimeout2,
         },
       };
-      $('jsonContent').innerHTML = highlightJson(escapeHtml(JSON.stringify(wsConfig2, null, 2)));
+      $('jsonContent').innerHTML = highlightJson(escapeHtml(JSON.stringify(rawConfig2, null, 2)));
     } else {
       $('jsonContent').innerHTML = '<span class="line-dim">Loading config…</span>';
       var policyJson = JSON.stringify(buildPolicy());
@@ -1669,19 +1713,20 @@ function updateDevSidebar(): void {
   var currentShell = $sel('shellSelect').value;
   var currentContainment = $sel('containmentSelect').value;
 
-  // Windows Sandbox mode — show the raw WS config
-  if (currentContainment === 'windows_sandbox' && currentShell !== 'rawjson') {
-    var wsScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
-    var wsTimeout = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
-    var wsConfig = {
-      containment: 'windows_sandbox',
+  // Windows Sandbox / MicroVM mode — show the raw config
+  if ((currentContainment === 'windows_sandbox' || currentContainment === 'microvm') && currentShell !== 'rawjson') {
+    var rawScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
+    var rawTimeout = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
+    var rawConfig = {
+      containment: currentContainment,
       process: {
-        commandLine: wsScript || '(no script)',
-        timeout: wsTimeout,
+        commandLine: rawScript || '(no script)',
+        timeout: rawTimeout,
       },
     };
-    $('devPolicyJson').innerHTML = '<span class="line-dim">N/A — Windows Sandbox bypasses policy generation</span>';
-    $('devConfigJson').innerHTML = highlightJson(escapeHtml(JSON.stringify(wsConfig, null, 2)));
+    var backendName = currentContainment === 'microvm' ? 'MicroVM' : 'Windows Sandbox';
+    $('devPolicyJson').innerHTML = '<span class="line-dim">N/A — ' + backendName + ' bypasses policy generation</span>';
+    $('devConfigJson').innerHTML = highlightJson(escapeHtml(JSON.stringify(rawConfig, null, 2)));
     return;
   }
 
@@ -1884,6 +1929,22 @@ function init(): void {
       } else {
         populateScenarios();
       }
+    } else if (containment === 'microvm') {
+      // MicroVM (NanVix) — Python only, no filesystem/network policies
+      $('runtimeRow').classList.remove('hidden');
+      $sel('shellSelect').disabled = false;
+      $('experimentalCaution').classList.add('hidden');
+      $('policySectionWrapper').classList.add('hidden');
+      ($('experimentalToggle') as HTMLInputElement).checked = true;
+      ($('experimentalToggle') as HTMLInputElement).disabled = true;
+      // MicroVM only supports Python — hide all other runtimes
+      var mvOpts = $sel('shellSelect').options;
+      for (var mi = 0; mi < mvOpts.length; mi++) {
+        var v = mvOpts[mi].value;
+        (mvOpts[mi] as HTMLOptionElement).hidden = (v !== 'python' && v !== 'custom' && v !== 'rawjson');
+      }
+      $sel('shellSelect').value = 'python';
+      $sel('shellSelect').dispatchEvent(new Event('change'));
     } else if (containment !== 'appcontainer') {
       // Other experimental containment — hide runtime, force MXC JSON mode
       $('runtimeRow').classList.add('hidden');
@@ -1928,7 +1989,7 @@ function init(): void {
       $('categoryRow').classList.add('hidden');
       $('scriptSection').classList.remove('hidden');
       $('rawJsonSection').classList.add('hidden');
-      if ($sel('containmentSelect').value !== 'windows_sandbox') {
+      if ($sel('containmentSelect').value !== 'windows_sandbox' && $sel('containmentSelect').value !== 'microvm') {
         $('policySectionWrapper').classList.remove('hidden');
       }
       $('btnRun').classList.remove('hidden');
@@ -1963,7 +2024,7 @@ function init(): void {
         populateScenarios();
         $('btnRun').classList.remove('hidden');
         $('btnRunAll').classList.remove('hidden');
-        if ($sel('containmentSelect').value !== 'windows_sandbox') {
+        if ($sel('containmentSelect').value !== 'windows_sandbox' && $sel('containmentSelect').value !== 'microvm') {
           $('policySectionWrapper').classList.remove('hidden');
         }
         if (document.getElementById('advancedSectionWrapper')) {
