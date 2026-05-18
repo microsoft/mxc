@@ -61,6 +61,7 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Time",
     "Win32_System_SystemServices",
+    "Win32_System_SystemInformation",
     "Win32_System_JobObjects",
 ] }
 windows-core = "0.62"
