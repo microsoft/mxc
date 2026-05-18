@@ -95,6 +95,22 @@ function checkWindowsBuildVersion(): boolean {
 }
 
 /**
+ * Check if Windows Sandbox feature is enabled via DISM.
+ * @returns true if the Containers-DisposableClientVM feature is enabled
+ */
+function isWindowsSandboxAvailable(): boolean {
+  try {
+    const output = execSync(
+      'dism /online /get-featureinfo /featurename:Containers-DisposableClientVM',
+      { encoding: 'utf-8', stdio: 'pipe', timeout: 10000 },
+    );
+    return /State\s*:\s*Enabled/i.test(output);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Get platform support information
  * @returns Platform support details including available sandboxing methods
  */
@@ -136,6 +152,9 @@ export function getPlatformSupport(): PlatformSupport {
   if (buildSupported) {
     support.isSupported = true;
     support.availableMethods = ['processcontainer'];
+    if (isWindowsSandboxAvailable()) {
+      support.availableMethods.push('windows_sandbox');
+    }
     return support;
   }
 

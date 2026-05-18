@@ -338,7 +338,7 @@ var SCENARIOS: Scenario[] = [
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: 'python -S -B -c "import sys; print(\'Hello from Windows Sandbox!\'); print(f\'Python version: {sys.version}\'); print(\'Script executed successfully in sandbox isolation\')"',
     policy: {}, successMarker: 'executed successfully' },
-  { id: 'ws-powershell', name: 'PowerShell hello', category: 'Quick Tests', categoryIcon: '🎯', shell: 'ps51',
+  { id: 'ws-ps-hello', name: 'PowerShell hello', category: 'Quick Tests', categoryIcon: '🎯', shell: 'ps51',
     containment: 'windows_sandbox',
     description: 'Runs PowerShell inside the sandbox and prints version info.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
@@ -1037,8 +1037,10 @@ async function runSandbox(): Promise<void> {
 
   // Windows Sandbox mode — build raw wxc-exec JSON config and use runSandboxRaw
   var currentContainment = $sel('containmentSelect').value;
+  console.log('[renderer] runSandbox: containment =', currentContainment, 'shell =', currentShell);
   if (currentContainment === 'windows_sandbox') {
     var wsScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
+    console.log('[renderer] WS path: script =', wsScript, 'scenario =', state.selectedScenario?.id);
     if (!wsScript) {
       termError('No script specified');
       return;
@@ -1072,7 +1074,9 @@ async function runSandbox(): Promise<void> {
     termDim('[MXC] Note: First run may take 3-5 minutes while the sandbox VM boots.');
 
     var wsDebug = (document.getElementById('debugToggle') as HTMLInputElement).checked;
+    console.log('[renderer] WS: calling runSandboxRaw with config:', JSON.stringify(wsConfig));
     var wsResult = await mxc.runSandboxRaw(JSON.stringify(wsConfig), wsDebug, true);
+    console.log('[renderer] WS: runSandboxRaw returned:', JSON.stringify(wsResult));
     if (!wsResult.success) {
       termError('[MXC] Failed to start sandbox: ' + wsResult.error);
       onSandboxExit(-1);
@@ -1867,7 +1871,14 @@ function init(): void {
       // Auto-enable experimental (WS requires it) and lock the toggle
       ($('experimentalToggle') as HTMLInputElement).checked = true;
       ($('experimentalToggle') as HTMLInputElement).disabled = true;
-      if ($sel('shellSelect').value === 'rawjson') {
+      // Hide PowerShell 7+ runtime — not available in WS VM
+      var shellOpts = $sel('shellSelect').options;
+      for (var i = 0; i < shellOpts.length; i++) {
+        if (shellOpts[i].value === 'ps7') {
+          (shellOpts[i] as HTMLOptionElement).hidden = true;
+        }
+      }
+      if ($sel('shellSelect').value === 'rawjson' || $sel('shellSelect').value === 'ps7') {
         $sel('shellSelect').value = 'cmd';
         $sel('shellSelect').dispatchEvent(new Event('change'));
       } else {
@@ -1878,6 +1889,11 @@ function init(): void {
       $('runtimeRow').classList.add('hidden');
       $('categoryRow').classList.add('hidden');
       $('policySectionWrapper').classList.remove('hidden');
+      // Restore PowerShell runtimes
+      var shellOpts2 = $sel('shellSelect').options;
+      for (var j = 0; j < shellOpts2.length; j++) {
+        (shellOpts2[j] as HTMLOptionElement).hidden = false;
+      }
       $sel('shellSelect').value = 'rawjson';
       $sel('shellSelect').dispatchEvent(new Event('change'));
       $('experimentalCaution').classList.remove('hidden');
@@ -1889,6 +1905,11 @@ function init(): void {
       $('experimentalCaution').classList.add('hidden');
       $('policySectionWrapper').classList.remove('hidden');
       ($('experimentalToggle') as HTMLInputElement).disabled = false;
+      // Restore PowerShell runtimes
+      var shellOpts3 = $sel('shellSelect').options;
+      for (var k = 0; k < shellOpts3.length; k++) {
+        (shellOpts3[k] as HTMLOptionElement).hidden = false;
+      }
       if ($sel('shellSelect').value === 'rawjson') {
         $sel('shellSelect').value = 'cmd';
         $sel('shellSelect').dispatchEvent(new Event('change'));

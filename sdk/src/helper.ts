@@ -151,7 +151,7 @@ export function resolveExecutableAndArgs(
   }
 
   // Validate containment against platform
-  if (config.containment) {
+  if (config.containment && !options.skipPlatformCheck) {
     if (config.containment === 'microvm' && os.platform() !== 'win32') {
       throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
     }
