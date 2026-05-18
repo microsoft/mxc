@@ -91,12 +91,10 @@ function attachPtyListeners(ptyProcess: pty.IPty): void {
   activePty = ptyProcess;
 
   ptyProcess.onData((data: string) => {
-    console.log('[main] pty-data:', data.substring(0, 200));
     mainWindow?.webContents.send('pty-data', data);
   });
 
   ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
-    console.log('[main] pty-exit: exitCode =', exitCode);
     activePty = null;
     mainWindow?.webContents.send('pty-exit', exitCode);
   });
@@ -516,28 +514,41 @@ ipcMain.handle('get-test-script', (_event, scriptName: string) => {
 
 // IPC: Run sandbox with raw JSON config (bypass policy creation)
 ipcMain.handle('run-sandbox-raw', (_event, configJson: string, debug: boolean, experimental: boolean) => {
-  console.log('[main] run-sandbox-raw: received IPC call');
-  console.log('[main] run-sandbox-raw: config =', configJson);
-  console.log('[main] run-sandbox-raw: debug =', debug, 'experimental =', experimental);
   killActivePty();
   const sdk = loadSdk();
 
   try {
     const config = JSON.parse(configJson);
     const execPath = resolveExecutablePath();
-    console.log('[main] run-sandbox-raw: resolved executable =', execPath ?? '(SDK default)');
-    console.log('[main] run-sandbox-raw: calling spawnSandboxFromConfig...');
+
+    // MicroVM (nanvixd) requires CWD to be the binary directory
+    let workingDir: string | undefined;
+    if (config.containment === 'microvm') {
+      const fs = require('fs');
+      const candidates = [
+        execPath,
+        path.join(__dirname, '..', '..', '..', 'sdk', 'bin', 'x64'),
+        path.join(__dirname, '..', '..', '..', 'src', 'target', 'release'),
+        path.join(__dirname, '..', '..', '..', 'src', 'target', 'debug'),
+      ].filter(Boolean);
+      for (const c of candidates) {
+        const dir = c!.endsWith('.exe') ? path.dirname(c!) : c!;
+        if (fs.existsSync(path.join(dir, 'nanvixd.exe'))) {
+          workingDir = dir;
+          break;
+        }
+      }
+    }
+
     const ptyProcess = sdk.spawnSandboxFromConfig(config, {
       debug,
       experimental,
       executablePath: execPath, skipPlatformCheck: true,
-    });
-    console.log('[main] run-sandbox-raw: PTY process spawned, pid =', ptyProcess.pid);
+    }, workingDir);
 
     attachPtyListeners(ptyProcess);
     return { success: true, config };
   } catch (e: any) {
-    console.error('[main] run-sandbox-raw: ERROR:', e.message, e.stack);
     return { success: false, error: e.message };
   }
 });
