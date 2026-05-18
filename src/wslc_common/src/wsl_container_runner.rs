@@ -513,14 +513,24 @@ impl WSLContainerRunner {
             // MXC is an execution layer; image management is out of band. The
             // setup script `scripts\setup-wslc.ps1` (or `wxc-exec.exe
             // --setup-wslc --image <name>`) pre-pulls images into the same
-            // WSLC storage_path the runner uses.
+            // WSLC storage_path the runner uses. When the config overrides
+            // `experimental.wslc.storagePath`, include it in the suggested
+            // commands so the operator's first copy-paste lands the image in
+            // the cache the next run will actually read.
+            let (storage_arg_wxc, storage_arg_ps) = match &self.config.storage_path {
+                Some(sp) => (
+                    format!(" --storage-path \"{}\"", sp),
+                    format!(" -StoragePath \"{}\"", sp),
+                ),
+                None => (String::new(), String::new()),
+            };
             return Err(ScriptResponse::error(&format!(
                 "WSLC image '{}' not found locally. Pre-pull it with: \
-                 wxc-exec.exe --setup-wslc --image {} \
-                 (or scripts\\setup-wslc.ps1 -Image {}). \
+                 wxc-exec.exe --setup-wslc --image {}{} \
+                 (or scripts\\setup-wslc.ps1 -Image {}{}). \
                  MXC does not pull images at run time; \
                  see docs/wsl/wsl-container-support-plan.md.",
-                image_name, image_name, image_name
+                image_name, image_name, storage_arg_wxc, image_name, storage_arg_ps,
             )));
         }
 
