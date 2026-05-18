@@ -206,10 +206,16 @@ impl LxcScriptRunner {
             }
         }
 
-        // Execute the script using lxc-attach (container is already running)
-        // TODO: Thread request.script_timeout through to attach_run for timeout enforcement.
+        // Execute the script using lxc-attach (container is already running).
+        // `script_timeout == 0` means "no timeout" per the SDK contract.
+        let timeout = if request.script_timeout == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(u64::from(request.script_timeout)))
+        };
         let _ = writeln!(logger, "Executing script inside container...");
-        let result = container.attach_run(&request.script_code, &request.working_directory);
+        let result =
+            container.attach_run(&request.script_code, &request.working_directory, timeout);
 
         let response = match result {
             Ok((exit_code, stdout, stderr)) => ScriptResponse {
