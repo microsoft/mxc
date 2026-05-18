@@ -15,6 +15,12 @@ parameters:
 - name: triplet
   type: string
   default: aarch64-apple-darwin
+- name: isOfficialBuild
+  type: boolean
+  default: false
+- name: ESRPInfo
+  type: object
+  default: {}
 
 jobs:
 - job: 'build_arm64_MAC'
@@ -81,6 +87,65 @@ jobs:
     - script: cargo test --release --target $(targetTriple) -p mxc_darwin -p seatbelt_common -p wxc_common
       displayName: Run tests
       workingDirectory: $(workingDirectory)
+
+    # --- macOS Code Signing & Notarization (official builds only) ---
+    # Uses ESRP with Microsoft's Developer ID Application certificate
+    # (CP-401337-Apple) to codesign with hardened runtime, then submits
+    # to Apple's notary service. This mirrors the Windows signing pattern
+    # in Rust.Build.Job.yml but uses Apple-specific operations.
+    - task: EsrpCodeSigning@5
+      displayName: 'Code Sign (macOS)'
+      condition: eq(${{ parameters.isOfficialBuild }}, true)
+      inputs:
+        ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+        AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+        AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
+        AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+        AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+        AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+        FolderPath: $(targetTripleDir)
+        Pattern: mxc-exec-mac
+        UseMinimatch: true
+        signConfigType: 'inlineSignParams'
+        inlineOperation: >-
+          [
+            {
+              "KeyCode": "CP-401337-Apple",
+              "OperationCode": "MacAppDeveloperSign",
+              "Parameters": {
+                "Hardening": "--options=runtime"
+              },
+              "ToolName": "sign",
+              "ToolVersion": "1.0"
+            }
+          ]
+
+    - task: EsrpCodeSigning@5
+      displayName: 'Notarize (macOS)'
+      condition: eq(${{ parameters.isOfficialBuild }}, true)
+      inputs:
+        ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+        AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+        AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
+        AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+        AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+        AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+        FolderPath: $(targetTripleDir)
+        Pattern: mxc-exec-mac
+        UseMinimatch: true
+        signConfigType: 'inlineSignParams'
+        inlineOperation: >-
+          [
+            {
+              "KeyCode": "CP-401337-Apple",
+              "OperationCode": "MacAppNotarize",
+              "Parameters": {
+                "BundleId": "com.microsoft.mxc"
+              },
+              "ToolName": "sign",
+              "ToolVersion": "1.0"
+            }
+          ]
 
     - task: CopyFiles@2
       displayName: Copy binary
