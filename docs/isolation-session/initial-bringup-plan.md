@@ -21,7 +21,7 @@ Add an **IsolationSession runner** to `wxc-exec.exe`, behind `--experimental`.
 When the JSON config specifies `"containment": "isolation_session"` and the
 experimental flag is set, the binary routes to a new `IsolationSessionRunner`
 (implementing the existing `ScriptRunner` trait). The runner orchestrates the
-full lifecycle against the OS-side Isolation Session broker API: register the
+full lifecycle against the OS-side Isolation Session API: register the
 calling app, provision an agent user, start a session, run the script
 (capturing stdout / stderr / exit code into `ScriptResponse`), then stop the
 session, deprovision the agent, and unregister. All of this happens through
@@ -157,7 +157,7 @@ Run with: `wxc-exec.exe --experimental config.json`.
 
 The runner calls into the WinRT API namespaced
 `Windows.AI.IsolationEnvironment.Session`, exposed by the OS-side Isolation
-Session broker service (running as SYSTEM via `svchost.exe`). The API is gated
+Session service (running as SYSTEM via `svchost.exe`). The API is gated
 on an internal Windows feature flag.
 
 Activation goes through
@@ -290,7 +290,7 @@ test script to the host, then run the script directly in `cmd.exe` or
 PowerShell on that host.
 
 CI does not run these tests today — there is no CI agent provisioned with
-the OS-side Isolation Session broker service. The feature-unavailable behavior is what runs
+the OS-side Isolation Session service. The feature-unavailable behavior is what runs
 in CI (via the automated unit test in `cargo test`).
 
 ## Known Issues observed in v0.1
@@ -309,7 +309,7 @@ The following were observed during VM testing and are accepted for v0.1.
   non-functional even when present.
 - **Intermittent `IdentityNotFound` (status 4) immediately after VM boot.**
   Observed once, resolved by a VM restart. Cause unconfirmed; suspected to
-  be an Isolation Session broker service initialization race. Re-runs on a settled VM
+  be an Isolation Session service initialization race. Re-runs on a settled VM
   are reliable.
 
 ## Risks
