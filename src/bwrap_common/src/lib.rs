@@ -11,4 +11,5 @@
 //!   spawns the `bwrap` binary.
 
 pub mod bwrap_command;
+#[cfg(target_os = "linux")]
 pub mod bwrap_runner;

@@ -30,6 +30,7 @@ use crate::models::{
     CodexRequest, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ScriptResponse,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
+use crate::sandbox_tracking::{self, TrackingEntry};
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::string_util;
 use sandbox_spec::base_container_layout::{
@@ -67,6 +68,23 @@ const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 
 /// SandboxSpec FlatBuffer schema version embedded in every spec payload.
 const SANDBOX_SPEC_VERSION: &str = "0.1.0";
+
+/// Sandbox cleanup stub. The actual cleanup (DeleteAppContainerProfile, BFS
+/// policy removal, registry tracking deletion) is currently disabled because
+/// wxc-exec only tracks the main AppContainer process handle -- child processes
+/// may still be running when we reach this point. The tracking entry and
+/// ephemeral identity features remain active for diagnostics and future use.
+fn run_sandbox_cleanup(
+    _identity: &str,
+    _sid_string: &str,
+    _proxy_enabled: bool,
+    logger: &mut Logger,
+) {
+    let _ = writeln!(
+        logger,
+        "{EMOJI_SECTION} SECTION: Lifecycle cleanup (skipping -- child process tracking not yet implemented)"
+    );
+}
 
 impl BaseContainerRunner {
     pub fn new() -> Self {
@@ -455,13 +473,68 @@ impl ScriptRunner for BaseContainerRunner {
             cwd_wide.as_ptr()
         };
 
-        // Identity -- used by the sandbox engine to name the AppContainer profile.
-        let identity = if request.container_id.is_empty() {
-            "MxcBaseContainer".to_string()
+        // Identity: when destroy_on_exit is true we generate a random ephemeral
+        // identity so each sandbox gets a unique, cleanable AppContainer profile.
+        // Otherwise we honour whatever the caller passed in (or the default).
+        let (identity, sid_string) = if request.lifecycle.destroy_on_exit {
+            let ephemeral = sandbox_tracking::generate_sandbox_identity();
+            let _ = writeln!(
+                logger,
+                "{EMOJI_WARNING} destroy_on_exit=true: overriding caller identity '{}' -> '{}' for ephemeral cleanup",
+                request.container_id, ephemeral
+            );
+
+            // Derive the AppContainer SID for registry tracking.
+            // This is deterministic and does not require the profile to exist yet.
+            let sid = match sandbox_tracking::derive_sid_string(&ephemeral) {
+                Ok(s) => {
+                    let _ = writeln!(logger, "derived SID: {}", s);
+                    s
+                }
+                Err(e) => {
+                    let _ = writeln!(logger, "warning: could not derive SID: {}", e);
+                    String::new()
+                }
+            };
+
+            // Write registry tracking entry before launch so it survives crashes.
+            if !sid.is_empty() {
+                let entry = TrackingEntry {
+                    identity: ephemeral.clone(),
+                    sid_string: sid.clone(),
+                    destroy_on_exit: true,
+                    requested_identity: request.container_id.clone(),
+                };
+                if let Err(e) = sandbox_tracking::write_tracking_entry(&entry, logger) {
+                    let _ = writeln!(logger, "warning: tracking entry write failed: {}", e);
+                }
+            }
+
+            (ephemeral, sid)
         } else {
-            request.container_id.clone()
+            let id = if request.container_id.is_empty() {
+                sandbox_tracking::generate_sandbox_identity()
+            } else {
+                request.container_id.clone()
+            };
+            let _ = writeln!(
+                logger,
+                "destroy_on_exit=false; using identity '{}', no tracking",
+                id
+            );
+            (id, String::new())
         };
         let identity_wide = string_util::to_wide(&identity);
+
+        // Register Ctrl+C handler early so cleanup runs if wxc-exec is interrupted
+        // during or after the create call.
+        if request.lifecycle.destroy_on_exit {
+            sandbox_tracking::register_ctrl_c_cleanup(
+                &identity,
+                &sid_string,
+                request.policy.network_proxy.is_enabled(),
+            );
+        }
 
         // STARTUPINFOW -- minimal, no handle inheritance (not yet supported by the API).
         let si = STARTUPINFOW {
@@ -472,6 +545,10 @@ impl ScriptRunner for BaseContainerRunner {
 
         let _ = writeln!(logger, "launching: {}", request.script_code);
         let _ = writeln!(logger, "identity: {identity}");
+
+        // Log the derived AppContainerSID for diagnostic correlation.
+        let ac_sid_str = derive_sid_string_from_name(&identity);
+        let _ = writeln!(logger, "AppContainerSID: {ac_sid_str}");
 
         // 4. Call Experimental_CreateProcessInSandbox.
         let success = unsafe {
@@ -501,6 +578,16 @@ impl ScriptRunner for BaseContainerRunner {
                 if !pi.hThread.is_invalid() {
                     let _ = CloseHandle(pi.hThread);
                 }
+            }
+            // The OS may have created the AppContainer profile before failing,
+            // so run the same cleanup logic used on normal exit.
+            if request.lifecycle.destroy_on_exit {
+                run_sandbox_cleanup(
+                    &identity,
+                    &sid_string,
+                    request.policy.network_proxy.is_enabled(),
+                    logger,
+                );
             }
             let err = unsafe { GetLastError() };
             if err.0 == ERROR_CALL_NOT_IMPLEMENTED {
@@ -545,6 +632,19 @@ impl ScriptRunner for BaseContainerRunner {
 
         let _ = writeln!(logger, "process exited with code {exit_code}");
 
+        // 6. Sandbox cleanup: delete AppContainer profile and tracking entry.
+        //    Deferred if a network proxy is configured (proxy state can't be cleaned up yet).
+        if request.lifecycle.destroy_on_exit {
+            run_sandbox_cleanup(
+                &identity,
+                &sid_string,
+                request.policy.network_proxy.is_enabled(),
+                logger,
+            );
+            // Unregister so a late Ctrl+C doesn't double-cleanup.
+            sandbox_tracking::unregister_ctrl_c_cleanup();
+        }
+
         let _ = writeln!(
             logger,
             "{EMOJI_SECTION} SECTION: Done ({:.3}s)",
@@ -560,6 +660,29 @@ impl ScriptRunner for BaseContainerRunner {
             standard_err: String::new(),
             error_message: String::new(),
         }
+    }
+}
+
+/// Derive the AppContainer SID string from a container identity name.
+/// Best-effort: returns a placeholder if derivation fails.
+fn derive_sid_string_from_name(name: &str) -> String {
+    use windows::Win32::Security::FreeSid;
+    use windows::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
+
+    let wide_name = string_util::to_wide(name);
+    let pcwstr_name = PCWSTR(wide_name.as_ptr());
+
+    match unsafe { DeriveAppContainerSidFromAppContainerName(pcwstr_name) } {
+        Ok(sid) => {
+            let s = unsafe { string_util::sid_to_string(sid.0, "unknown-sid") };
+            // SAFETY: SID returned by DeriveAppContainerSidFromAppContainerName
+            // must be freed with FreeSid.
+            unsafe {
+                FreeSid(sid);
+            }
+            s
+        }
+        Err(_) => "unknown-sid".to_string(),
     }
 }
 

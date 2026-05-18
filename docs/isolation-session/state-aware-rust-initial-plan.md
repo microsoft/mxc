@@ -156,6 +156,15 @@ Both modes share the same policy-honor matrix above:
   via `ScriptRunner::validate_runner` then `share_folders` in
   `IsolationSessionRunner::execute`). Rejected at all later state-aware
   phases.
+  - Before forwarding to `ShareFolderBatchAsync`, `share_folders` runs
+    the entries through a small filter (`filter_protected_paths` in
+    `isolation_session_runner.rs`, bracketed by `BEGIN:` / `END:`
+    markers) that silently drops a fixed set of system-folder paths —
+    drive roots, `SystemRoot`, parent of `USERPROFILE`, `ProgramFiles`,
+    `ProgramFiles(x86)`, and `ProgramData`. The mitigation exists
+    because `ShareFolderBatchAsync` applies ACEs with subtree
+    inheritance; the proper fix belongs in the OS API. See the region
+    comment for removal conditions.
 - `policy.filesystem.deniedPaths`, `policy.network`, `policy.ui`, and
   `policy.network.proxy` are rejected at every phase (one-shot via
   `validate_runner`, state-aware via `validate_<phase>` hooks).

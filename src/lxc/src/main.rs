@@ -80,7 +80,8 @@ fn log_request(request: &CodexRequest, logger: &mut Logger) {
 }
 
 fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
-    let _ = writeln!(logger, "Exit code: {}", response.exit_code);
+    let code = response.exit_code;
+    let _ = writeln!(logger, "Exit code: {} (0x{:08X})", code, code as u32);
     if !response.error_message.is_empty() {
         let _ = writeln!(logger, "Error: {}", response.error_message);
     }

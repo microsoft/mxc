@@ -328,6 +328,26 @@ export interface SeatbeltConfig {
    * Optional override of the generated TinyScheme sandbox profile.
    */
   profileOverride?: string;
+  /**
+   * Allow the inner process to allocate its own pseudo-terminals via
+   * `posix_openpt` (needed by tests, `git`, `gh`, REPLs, and any tool
+   * that wraps commands in a pty). Adds `(allow pseudo-tty)` and
+   * read/write/ioctl on `/dev/ptmx` to the generated profile. Defaults
+   * to `true`; set to `false` for the tightest possible sandbox when
+   * the inner command does not need to allocate new ttys.
+   */
+  nestedPty?: boolean;
+  /**
+   * Allow the inner process to use the macOS Keychain (e.g. via
+   * `keytar` or `Security.framework`) end-to-end. Adds Mach lookup for
+   * `securityd`, `trustd`, `ocspd`, `cfprefsd`, `xpcd`, and the
+   * `com.apple.lsd.*` family; read access to `/private/var/db/mds` and
+   * `/private/var/protected/trustd`; and read+write access to
+   * `~/Library/Keychains` and `/private/var/folders` (XPC cache).
+   * Defaults to `false`; opt in only when the inner workload genuinely
+   * needs Keychain access.
+   */
+  keychainAccess?: boolean;
 }
 
 /**

@@ -15,6 +15,8 @@ parameters:
       os: windows
     - name: linux
       os: linux
+    - name: macos
+      os: macos
 
 jobs:
 - ${{ each target in parameters.targets }}:
@@ -22,13 +24,22 @@ jobs:
     displayName: 'Test MXC SDK Integration (${{ target.name }})'
 
     pool:
-      name: Azure-Pipelines-1ESPT-ExDShared
       ${{ if eq(target.os, 'windows') }}:
+        name: Azure-Pipelines-1ESPT-ExDShared
         image: windows-latest
         os: windows
       ${{ if eq(target.os, 'linux') }}:
+        name: Azure-Pipelines-1ESPT-ExDShared
         image: ubuntu-latest
         os: linux
+      ${{ if eq(target.os, 'macos') }}:
+        # macOS is not available on the 1ES managed pool
+        # (Azure-Pipelines-1ESPT-ExDShared does not offer macOS images).
+        # Use the Microsoft-hosted 'Azure Pipelines' pool instead which
+        # uses 'vmImage' (not 'image') per ADO hosted-pool schema.
+        name: Azure Pipelines
+        vmImage: macOS-14-arm64
+        os: macOS
 
     variables:
       integrationDirectory: $(Build.SourcesDirectory)/sdk/tests/integration
@@ -82,6 +93,23 @@ jobs:
           displayName: npm test (sudo, with LXC)
 
       - ${{ if eq(target.os, 'windows') }}:
+        - script: npm test
+          workingDirectory: $(integrationDirectory)
+          displayName: npm test
+          env:
+            MXC_DEBUG: ${{ parameters.debug }}
+            MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
+
+      - ${{ if eq(target.os, 'macos') }}:
+        # Restore execute bit on the mac binary; pipeline artifact
+        # downloads (via npm pack/unpack) drop Unix execute permissions.
+        - script: |
+            set -euo pipefail
+            BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
+            if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found in installed package" && exit 1; fi
+          workingDirectory: $(integrationDirectory)
+          displayName: Restore execute permission on mxc-exec-mac
+
         - script: npm test
           workingDirectory: $(integrationDirectory)
           displayName: npm test

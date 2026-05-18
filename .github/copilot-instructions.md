@@ -177,6 +177,7 @@ New features go under the `experimental` JSON section and are only active when `
 
 - `wxc_common` is the shared library — all config parsing, models, error types, and runner implementations live here
 - `wxc` and `lxc` are thin binary crates that wire up CLI args (`clap`) and dispatch to `wxc_common`
+- `mxc_pty` is the shared pty bridge used by the unix-side backends (`lxc_common::lxc_bindings::attach_run` on Linux and `seatbelt_common::seatbelt_runner` on macOS) so the inner shell sees a real TTY and host stdio is streamed live
 - Platform-specific modules in `wxc_common` use `#[cfg(target_os = "windows")]` / `#[cfg(target_os = "linux")]`
 - Workspace edition is 2021; shared dependencies are declared in the root `Cargo.toml` `[workspace.dependencies]`
 

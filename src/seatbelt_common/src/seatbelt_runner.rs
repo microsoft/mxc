@@ -2,31 +2,54 @@
 // Licensed under the MIT License.
 
 //! `SeatbeltScriptRunner` — executes scripts inside Apple's Seatbelt
-//! sandbox via `/usr/bin/sandbox-exec`.
+//! sandbox.
 //!
-//! It generates a TinyScheme profile from the [`CodexRequest`] using
-//! [`crate::profile_builder::build_profile`], writes it to a tempfile in
-//! `TMPDIR`, then spawns `sandbox-exec -f <profile> /bin/sh -c <script>`
-//! with the request's env and working directory.
+//! The sandbox is applied via `sandbox_init()` inside `Command::pre_exec`,
+//! then `/bin/sh` is exec'd directly. The child inherits the parent's
+//! Mach bootstrap namespace so both CLI commands and GUI applications
+//! (when `guiAccess = true`) work correctly. The exec path uses
+//! [`mxc_pty::run_with_pty`] so the inner shell sees a real TTY and the
+//! host can stream its output as it arrives.
+//!
+//! For apps that require LaunchServices (`launchMethod: "open"`), the runner
+//! writes a sandbox helper script and launches the target app via `open -n -W`,
+//! applying the sandbox to the command running inside the app.
 //!
 //! Compiled only on macOS — the rest of the workspace continues to build
 //! on Windows / Linux unchanged.
 
+use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
-use std::io::Write as IoWrite;
+use std::fs;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome};
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, ScriptResponse};
+use wxc_common::models::{CodexRequest, LaunchMethod, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 
 use crate::profile_builder::build_profile;
 
-/// Path to the system-provided sandbox launcher. Present on every macOS
-/// release (deprecated in headers since 10.7 but still shipped through
-/// current versions).
-const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+// ---------------------------------------------------------------------------
+// FFI declarations for Apple's sandbox API (libsandbox.dylib).
+//
+// `sandbox_init` is declared in <sandbox.h> and marked deprecated since
+// macOS 10.8, but is still shipped and used by first-party apps through
+// macOS 15+.
+// ---------------------------------------------------------------------------
+
+#[link(name = "sandbox")]
+extern "C" {
+    fn sandbox_init(
+        profile: *const libc::c_char,
+        flags: u64,
+        errorbuf: *mut *mut libc::c_char,
+    ) -> libc::c_int;
+
+    fn sandbox_free_error(errorbuf: *mut libc::c_char);
+}
 
 /// Default shell used to execute `script_code`. `/bin/sh` is guaranteed
 /// to exist and is on the SIP-protected path so it's always reachable
@@ -71,47 +94,56 @@ impl ScriptRunner for SeatbeltScriptRunner {
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         // 1. Build the Seatbelt profile from the policy.
-        let profile = build_profile(request);
-
-        // 2. Persist it to a tempfile so sandbox-exec can read it via -f.
-        //    We use `tempfile::NamedTempFile` so the file is removed on drop
-        //    even on panic.
-        let mut profile_file = match tempfile::Builder::new()
-            .prefix("mxc-seatbelt-")
-            .suffix(".sb")
-            .tempfile()
-        {
-            Ok(file) => file,
-            Err(error) => {
-                return error_response(format!("failed to create profile tempfile: {error}"))
+        let profile = match build_profile(request) {
+            Ok(p) => p,
+            Err(e) => {
+                return ScriptResponse {
+                    exit_code: -1,
+                    standard_out: String::new(),
+                    standard_err: String::new(),
+                    error_message: e,
+                }
             }
         };
 
-        if let Err(error) = profile_file.write_all(profile.as_bytes()) {
-            return error_response(format!("failed to write profile: {error}"));
+        // Determine launch method from seatbelt config.
+        let launch_method = request
+            .experimental
+            .seatbelt
+            .as_ref()
+            .map(|s| s.launch_method.clone())
+            .unwrap_or_default();
+
+        let gui_access = request
+            .experimental
+            .seatbelt
+            .as_ref()
+            .map(|s| s.gui_access)
+            .unwrap_or(false);
+
+        match launch_method {
+            LaunchMethod::Exec => self.execute_exec(&profile, request, gui_access, logger),
+            LaunchMethod::Open => self.execute_open(&profile, request, logger),
         }
-        if let Err(error) = profile_file.flush() {
-            return error_response(format!("failed to flush profile: {error}"));
-        }
+    }
+}
 
-        let profile_path = profile_file.path().to_path_buf();
-        let _ = writeln!(
-            logger,
-            "Seatbelt: profile written to {}",
-            profile_path.display()
-        );
+impl SeatbeltScriptRunner {
+    /// Standard execution path: fork → sandbox_init → exec.
+    /// When `gui_access` is true, stdio is inherited for GUI app compatibility.
+    fn execute_exec(
+        &self,
+        profile: &str,
+        request: &CodexRequest,
+        gui_access: bool,
+        logger: &mut Logger,
+    ) -> ScriptResponse {
+        let mut command = match build_sandbox_command(profile, &request.script_code, logger) {
+            Ok(cmd) => cmd,
+            Err(resp) => return resp,
+        };
 
-        // 3. Spawn `sandbox-exec -f <profile> /bin/sh -c <script>`.
-        let mut command = Command::new(SANDBOX_EXEC);
-        command
-            .arg("-f")
-            .arg(&profile_path)
-            .arg(DEFAULT_SHELL)
-            .arg("-c")
-            .arg(&request.script_code);
-
-        // Apply env if any was specified — otherwise inherit the parent
-        // environment (matches LXC behaviour for empty env vectors).
+        // Environment setup.
         if !request.env.is_empty() {
             command.env_clear();
             for kv in &request.env {
@@ -125,66 +157,271 @@ impl ScriptRunner for SeatbeltScriptRunner {
             command.current_dir(&request.working_directory);
         }
 
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        if gui_access {
+            // GUI apps need inherited stdio for window interaction.
+            command
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit());
 
-        let mut child = match command.spawn() {
-            Ok(process) => process,
-            Err(error) => {
-                return error_response(format!(
-                    "failed to spawn {SANDBOX_EXEC}: {error}; ensure sandbox-exec exists"
-                ))
+            // Spawn manually — run_with_pty is not appropriate for GUI mode.
+            let mut child = match command.spawn() {
+                Ok(process) => process,
+                Err(error) => {
+                    let msg = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                        format!(
+                            "failed to spawn sandboxed process (sandbox_init likely rejected \
+                             the profile — check stderr for details): {error}"
+                        )
+                    } else {
+                        format!("failed to spawn sandboxed process: {error}")
+                    };
+                    return error_response(msg);
+                }
+            };
+
+            let timeout = if request.script_timeout == 0 {
+                None
+            } else {
+                Some(Duration::from_millis(u64::from(request.script_timeout)))
+            };
+
+            match wait_with_timeout(&mut child, timeout) {
+                Ok(status) => ScriptResponse {
+                    exit_code: status.code().unwrap_or(-1),
+                    ..Default::default()
+                },
+                Err(WaitError::Timeout) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    ScriptResponse {
+                        exit_code: -1,
+                        error_message: format!(
+                            "Seatbelt: process timed out after {}ms",
+                            request.script_timeout
+                        ),
+                        ..Default::default()
+                    }
+                }
+                Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
+            }
+        } else {
+            // CLI mode: hand off to the shared PTY bridge so the inner shell
+            // sees a real TTY and the host can stream output as it arrives.
+            let timeout = if request.script_timeout == 0 {
+                None
+            } else {
+                Some(Duration::from_millis(u64::from(request.script_timeout)))
+            };
+
+            let options = PtyOptions {
+                timeout,
+                ..PtyOptions::default()
+            };
+
+            match run_with_pty(command, options) {
+                Ok(PtyOutcome::Exited(status)) => ScriptResponse {
+                    exit_code: status.code().unwrap_or(-1),
+                    ..Default::default()
+                },
+                Ok(PtyOutcome::TimedOut) => {
+                    let msg = format!(
+                        "Seatbelt: script timed out after {}ms",
+                        request.script_timeout
+                    );
+                    let _ = writeln!(logger, "{msg}");
+                    error_response(msg)
+                }
+                Err(error) => error_response(format!("Seatbelt: {error}")),
+            }
+        }
+    }
+
+    /// LaunchServices execution path: write a sandbox helper, launch via
+    /// `open -n -W`. Required for Apple system apps with Launch Constraints
+    /// (e.g. Terminal.app).
+    fn execute_open(
+        &self,
+        profile: &str,
+        request: &CodexRequest,
+        logger: &mut Logger,
+    ) -> ScriptResponse {
+        let _ = writeln!(
+            logger,
+            "Seatbelt: using LaunchServices (open) launch method"
+        );
+
+        // 1. Write the profile to a secure temp file.
+        let profile_path = match write_secure_temp_file("mxc_sb_profile_", profile, 0o600) {
+            Ok(p) => p,
+            Err(e) => return error_response(format!("failed to write profile: {e}")),
+        };
+
+        // 2. Build environment exports for the helper script.
+        let mut env_exports = String::new();
+        for kv in &request.env {
+            if let Some((key, value)) = kv.split_once('=') {
+                // Validate key is a safe shell identifier to prevent injection.
+                if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    || key.is_empty()
+                    || key.starts_with(|c: char| c.is_ascii_digit())
+                {
+                    continue; // Skip invalid env var names
+                }
+                // Shell-escape the value.
+                let escaped = value.replace('\'', "'\\''");
+                let _ = writeln!(env_exports, "export {key}='{escaped}'");
+            }
+        }
+
+        // 3. Create the sandbox helper script.
+        // This script is executed inside the terminal app. It:
+        //   a) Calls sandbox-exec with the profile file to sandbox the shell
+        //   b) Execs the user's command inside the sandbox
+        let script_code = &request.script_code;
+        let helper_content = format!(
+            "#!/bin/sh\n\
+             # MXC Seatbelt sandbox helper — auto-generated, do not edit.\n\
+             {env_exports}\
+             exec /usr/bin/sandbox-exec -f '{profile_path}' /bin/sh -c 'clear; {script_escaped}'\n",
+            profile_path = profile_path,
+            script_escaped = script_code.replace('\'', "'\\''"),
+        );
+
+        let helper_path = match write_secure_temp_file("mxc_sb_helper_", &helper_content, 0o700) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = fs::remove_file(&profile_path);
+                return error_response(format!("failed to write helper script: {e}"));
             }
         };
 
-        // 4. Drain stdout/stderr in background threads to avoid deadlock
-        //    if the child fills the OS pipe buffer (~64KB on macOS).
-        let stdout_handle = child
-            .stdout
-            .take()
-            .map(|reader| std::thread::spawn(move || read_to_string(reader)));
-        let stderr_handle = child
-            .stderr
-            .take()
-            .map(|reader| std::thread::spawn(move || read_to_string(reader)));
+        // 4. Create the .command file that Terminal will execute.
+        let command_content = format!("#!/bin/sh\nexec '{}'\n", helper_path);
+        let command_path = match write_secure_temp_file("mxc_sb_launch_", &command_content, 0o700) {
+            Ok(p) => {
+                // Rename to .command extension so Terminal recognizes it.
+                let new_path = format!("{p}.command");
+                if let Err(e) = fs::rename(&p, &new_path) {
+                    let _ = fs::remove_file(&p);
+                    let _ = fs::remove_file(&profile_path);
+                    let _ = fs::remove_file(&helper_path);
+                    return error_response(format!("failed to rename to .command: {e}"));
+                }
+                new_path
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&profile_path);
+                let _ = fs::remove_file(&helper_path);
+                return error_response(format!("failed to write .command file: {e}"));
+            }
+        };
 
-        // 5. Wait with timeout. `script_timeout == 0` means infinite.
+        let _ = writeln!(logger, "Seatbelt: launching via: open -n -W {command_path}");
+
+        // 5. Launch via `open -n -W`.
+        let mut child = match Command::new("open")
+            .args(["-n", "-W", "-a", "Terminal", &command_path])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                cleanup_files(&[&profile_path, &helper_path, &command_path]);
+                return error_response(format!("failed to launch via open: {e}"));
+            }
+        };
+
+        // 6. Wait for the terminal to close.
         let timeout = if request.script_timeout == 0 {
             None
         } else {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
 
-        let exit_status = match wait_with_timeout(&mut child, timeout) {
-            Ok(status) => status,
+        let result = match wait_with_timeout(&mut child, timeout) {
+            Ok(status) => ScriptResponse {
+                exit_code: status.code().unwrap_or(-1),
+                standard_out: String::new(),
+                standard_err: String::new(),
+                error_message: String::new(),
+            },
             Err(WaitError::Timeout) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return ScriptResponse {
+                ScriptResponse {
                     exit_code: -1,
-                    standard_out: join_reader("stdout", stdout_handle),
-                    standard_err: join_reader("stderr", stderr_handle),
+                    standard_out: String::new(),
+                    standard_err: String::new(),
                     error_message: format!(
-                        "Seatbelt: script timed out after {}ms",
+                        "Seatbelt: terminal timed out after {}ms",
                         request.script_timeout
                     ),
-                };
+                }
             }
-            Err(WaitError::Io(error)) => return error_response(format!("wait failed: {error}")),
+            Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
         };
 
-        let stdout = join_reader("stdout", stdout_handle);
-        let stderr = join_reader("stderr", stderr_handle);
+        // 7. Cleanup temp files.
+        cleanup_files(&[&profile_path, &helper_path, &command_path]);
 
-        ScriptResponse {
-            exit_code: exit_status.code().unwrap_or(-1),
-            standard_out: stdout,
-            standard_err: stderr,
-            error_message: String::new(),
-        }
+        result
     }
+}
+
+/// Build a `Command` that applies the sandbox via `sandbox_init()` in
+/// `pre_exec`, then execs `/bin/sh -c <script>`. The child inherits the
+/// parent's Mach bootstrap namespace, so both CLI and GUI applications
+/// work correctly under the sandbox.
+///
+/// # Safety
+///
+/// `pre_exec` runs between `fork()` and `exec()`. We limit operations
+/// inside it to a single FFI call (`sandbox_init`) with pre-allocated
+/// arguments. `sandbox_init` is not formally async-signal-safe but is
+/// used in this pattern by Chromium and other production macOS sandboxes.
+fn build_sandbox_command(
+    profile: &str,
+    script_code: &str,
+    logger: &mut Logger,
+) -> Result<Command, ScriptResponse> {
+    let profile_cstr = CString::new(profile)
+        .map_err(|e| error_response(format!("seatbelt profile contains embedded NUL byte: {e}")))?;
+
+    let _ = writeln!(logger, "Seatbelt: applying sandbox via sandbox_init");
+
+    let mut command = Command::new(DEFAULT_SHELL);
+    command.arg("-c").arg(script_code);
+
+    // SAFETY: The closure runs after fork(), before exec(). We only call
+    // sandbox_init with a pre-allocated CString — no Rust allocations
+    // happen inside the closure. sandbox_init is used in this fork+exec
+    // pattern by Chromium and other production macOS software.
+    unsafe {
+        command.pre_exec(move || {
+            let mut errorbuf: *mut libc::c_char = std::ptr::null_mut();
+            let rc = sandbox_init(profile_cstr.as_ptr(), 0, &mut errorbuf);
+            if rc != 0 {
+                // Extract error message using only libc calls (no allocation).
+                if !errorbuf.is_null() {
+                    let msg = CStr::from_ptr(errorbuf);
+                    let bytes = msg.to_bytes();
+                    // Write directly to stderr fd — no Rust allocation.
+                    let prefix = b"Seatbelt: sandbox_init failed: ";
+                    libc::write(2, prefix.as_ptr().cast(), prefix.len());
+                    libc::write(2, bytes.as_ptr().cast(), bytes.len());
+                    libc::write(2, b"\n".as_ptr().cast(), 1);
+                    sandbox_free_error(errorbuf);
+                }
+                return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+            }
+            Ok(())
+        });
+    }
+
+    Ok(command)
 }
 
 fn error_response(message: String) -> ScriptResponse {
@@ -193,39 +430,6 @@ fn error_response(message: String) -> ScriptResponse {
         standard_out: String::new(),
         standard_err: String::new(),
         error_message: message,
-    }
-}
-
-/// Reads all bytes from `r` into a String. Returns whatever was captured
-/// even if the read fails partway (e.g. broken pipe from a killed child).
-fn read_to_string<R: std::io::Read>(mut reader: R) -> (String, Option<std::io::Error>) {
-    let mut buffer = String::new();
-    match reader.read_to_string(&mut buffer) {
-        Ok(_) => (buffer, None),
-        Err(error) => (buffer, Some(error)),
-    }
-}
-
-fn join_reader(
-    name: &str,
-    handle: Option<std::thread::JoinHandle<(String, Option<std::io::Error>)>>,
-) -> String {
-    match handle {
-        Some(h) => match h.join() {
-            Ok((output, None)) => output,
-            Ok((output, Some(error))) => {
-                eprintln!(
-                    "Seatbelt: warning: failed to read child {}: {}",
-                    name, error
-                );
-                output
-            }
-            Err(_) => {
-                eprintln!("Seatbelt: warning: child {} reader thread panicked", name);
-                String::new()
-            }
-        },
-        None => String::new(),
     }
 }
 
@@ -259,12 +463,65 @@ fn wait_with_timeout(
     }
 }
 
+/// Write `content` to a temp file with a cryptographically random name and the
+/// given permissions mode. Uses `O_CREAT | O_EXCL` (create_new) to avoid
+/// symlink-following and collisions, and sets permissions immediately after
+/// creation on the open file descriptor to close the TOCTOU window.
+fn write_secure_temp_file(
+    prefix: &str,
+    content: &str,
+    mode: u32,
+) -> Result<String, std::io::Error> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let dir = std::env::temp_dir();
+
+    // Retry loop in case of (unlikely) collision with create_new.
+    for _ in 0..8 {
+        let random: u64 = {
+            // Use /dev/urandom for unpredictable temp names.
+            let mut buf = [0u8; 8];
+            let mut f = fs::File::open("/dev/urandom")?;
+            std::io::Read::read_exact(&mut f, &mut buf)?;
+            u64::from_ne_bytes(buf)
+        };
+        let path = dir.join(format!("{prefix}{random:016x}"));
+
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true) // O_EXCL: fail if exists, no symlink follow
+            .mode(mode) // Set permissions atomically at creation
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(content.as_bytes())?;
+                return Ok(path.to_string_lossy().to_string());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "failed to create unique temp file after 8 attempts",
+    ))
+}
+
+/// Remove a list of temp files, ignoring errors.
+fn cleanup_files(paths: &[&str]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::logger::{Logger, Mode};
     use wxc_common::models::{CodexRequest, SeatbeltConfig};
 
+    #[allow(clippy::field_reassign_with_default)]
     fn base_request() -> CodexRequest {
         let mut request = CodexRequest::default();
         request.experimental_enabled = true;
@@ -281,5 +538,31 @@ mod tests {
         assert_eq!(response.exit_code, -1);
         assert!(response.error_message.contains("blockedHosts"));
         assert!(response.error_message.contains("cannot be enforced"));
+    }
+
+    #[test]
+    fn write_secure_temp_file_sets_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = write_secure_temp_file("mxc_test_", "hello", 0o700).unwrap();
+        let meta = fs::metadata(&path).unwrap();
+        // Verify permissions (mask with 0o777 to ignore setuid/sticky bits)
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        // Verify content
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn write_secure_temp_file_no_collisions() {
+        let mut paths = Vec::new();
+        for _ in 0..10 {
+            let path = write_secure_temp_file("mxc_collision_test_", "data", 0o600).unwrap();
+            assert!(!paths.contains(&path), "collision detected: {path}");
+            paths.push(path);
+        }
+        for p in &paths {
+            let _ = fs::remove_file(p);
+        }
     }
 }

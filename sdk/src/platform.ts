@@ -276,7 +276,18 @@ export function findWxcExecutable(): string | null {
  */
 function verifyExecutable(execPath: string): boolean {
   try {
-    return fs.existsSync(execPath) && fs.statSync(execPath).isFile();
+    // Paths inside Electron's app.asar exist to fs but can't be executed
+    if (execPath.includes('.asar')) {
+      return false;
+    }
+    if (!fs.existsSync(execPath) || !fs.statSync(execPath).isFile()) {
+      return false;
+    }
+    // On non-Windows platforms, also verify execute permission
+    if (process.platform !== 'win32') {
+      fs.accessSync(execPath, fs.constants.X_OK);
+    }
+    return true;
   } catch {
     return false;
   }
@@ -337,7 +348,7 @@ export function findLxcExecutable(): string | null {
  * output directories (monorepo dev path).
  * @returns Path to mxc-exec-mac if found, null otherwise
  */
-export function findDarwinExecutable(): string | null {
+export function findSeatbeltExecutable(): string | null {
   // Allow override for bundled deployments (debugging/testing)
   if (process.env.MXC_BIN_DIR) {
     const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'mxc-exec-mac');

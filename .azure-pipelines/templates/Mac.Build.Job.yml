@@ -1,0 +1,105 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Builds mxc-exec-mac (the macOS sandbox executor) on an ARM64 macOS
+# Microsoft-hosted agent and publishes the binary as a pipeline artifact
+# so the Package.NpmSdk and SDK.Integration.Test stages can consume it.
+#
+# This template uses the Microsoft Rust toolchain installer (msrustup) from
+# the Azure Artifacts NuGet feed instead of the 1ES.Build.Rust.* tasks, which
+# are not available on the Microsoft-hosted macOS pool. Crate downloads still
+# go through the centralized Azure Artifacts feed (appended via
+# .azure-pipelines/.cargo/config.toml) to satisfy SFI supply-chain requirements.
+
+parameters:
+- name: triplet
+  type: string
+  default: aarch64-apple-darwin
+
+jobs:
+- job: 'build_arm64_MAC'
+  displayName: 'Build (arm64 MAC)'
+
+  pool:
+    name: Azure Pipelines
+    # macOS-14-arm64 (and later) images are Apple Silicon (arm64). macOS-latest
+    # currently still points to an x86_64 image, which cannot execute the
+    # cross-compiled aarch64 test binaries.
+    vmImage: macOS-14-arm64
+    os: macOS
+
+  variables:
+    CARGO_TARGET_DIR: $(Agent.TempDirectory)/target
+    targetTriple: ${{ parameters.triplet }}
+    targetTripleDir: $(CARGO_TARGET_DIR)/$(targetTriple)/release
+    outputDirectory: $(Build.SourcesDirectory)/out
+    artifactBaseName: mxc-binaries-$(targetTriple)
+    workingDirectory: $(Build.SourcesDirectory)/src
+
+  steps:
+    - checkout: self
+
+    # Append pipeline-specific Cargo settings (centralized registry) to
+    # the workspace config so crates are pulled from the Azure Artifacts
+    # feed (SFI compliance). Authentication is provided via env var on
+    # each cargo step since 1ES.Build.Rust.Setup is not available on macOS.
+    # The append is guarded: skip if the registry block is already present
+    # (e.g., if the workspace config gains these settings in the future).
+    - script: |
+        echo "" >> "$(Build.SourcesDirectory)/.cargo/config.toml"
+        cat "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml" >> "$(Build.SourcesDirectory)/.cargo/config.toml"
+      displayName: Setup Cargo Config
+
+    # Install the Microsoft Rust toolchain from the NuGet feed instead of
+    # plain rustup. This satisfies 1ES supply-chain requirements by using
+    # the same centralized feed (Mxc-Azure-Feed) as Windows/Linux builds.
+    - task: RustInstaller@1
+      inputs:
+        toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+        rustVersion: 'ms-prod-1.93'
+        cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/Cargo/index/
+      displayName: Install Rust toolchain
+
+    - task: CargoAuthenticate@0
+      inputs:
+        configFile: '$(Build.SourcesDirectory)/.cargo/config.toml'
+
+    - script: cargo fmt --all -- --check
+      displayName: Check formatting
+      workingDirectory: $(workingDirectory)
+
+    # Clippy is scoped to the macOS-specific crates because the full
+    # workspace includes Windows-only crates that do not compile on macOS.
+    - script: cargo clippy -p mxc_darwin -p seatbelt_common --target $(targetTriple) -- -D warnings
+      displayName: Clippy
+      workingDirectory: $(workingDirectory)
+
+    - script: cargo build --release --target $(targetTriple) -p mxc_darwin
+      displayName: Build release
+      workingDirectory: $(workingDirectory)
+
+    - script: cargo test --release --target $(targetTriple) -p mxc_darwin -p seatbelt_common -p wxc_common
+      displayName: Run tests
+      workingDirectory: $(workingDirectory)
+
+    - task: CopyFiles@2
+      displayName: Copy binary
+      inputs:
+        sourceFolder: $(targetTripleDir)
+        contents: mxc-exec-mac
+        targetFolder: $(outputDirectory)/$(targetTriple)
+
+    # Copy the .dSYM bundle into a sibling `symbols/` subdir, mirroring the
+    # Windows/Linux pattern (see Rust.Build.Job.yml for the BinSkim rationale).
+    - task: CopyFiles@2
+      displayName: Copy dSYM bundle
+      inputs:
+        sourceFolder: $(targetTripleDir)
+        contents: 'mxc-exec-mac.dSYM/**'
+        targetFolder: $(outputDirectory)/$(targetTriple)/symbols
+
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: Publish
+      inputs:
+        path: '$(outputDirectory)/$(targetTriple)'
+        artifactName: $(artifactBaseName)

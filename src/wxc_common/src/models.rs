@@ -47,12 +47,81 @@ pub enum ContainmentBackend {
 
 /// Configuration specific to the Seatbelt backend (experimental).
 /// Used under `experimental.seatbelt` when `containment == Seatbelt`.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SeatbeltConfig {
     /// Optional override of the generated TinyScheme profile.
     #[serde(rename = "profileOverride", skip_serializing_if = "Option::is_none")]
     pub profile_override: Option<String>,
+
+    /// Allow the Mach IPC services that GUI applications need to draw
+    /// windows, composite frames, resolve fonts, and register with the Dock.
+    /// When `false` (default), these services are blocked and GUI apps will
+    /// be killed by the system on launch.
+    #[serde(rename = "guiAccess", default)]
+    pub gui_access: bool,
+
+    /// How to launch the sandboxed process.
+    ///
+    /// - `"exec"` (default): fork → sandbox_init() → exec. Stdio is inherited
+    ///   when `guiAccess` is true, piped otherwise. Works for most
+    ///   third-party GUI apps and all CLI commands.
+    /// - `"open"`: launch via macOS LaunchServices (`open -n -W`). Required
+    ///   for Apple system apps (e.g. Terminal.app) that have Launch
+    ///   Constraints preventing direct exec from third-party processes.
+    ///   The sandbox is applied to the shell/command running *inside* the
+    ///   launched app via the `sandbox-exec` CLI tool, not to the app itself.
+    #[serde(rename = "launchMethod", default)]
+    pub launch_method: LaunchMethod,
+
+    /// Allow the inner process to allocate its own pseudo-terminals via
+    /// `posix_openpt`. Defaults to `true` because most agent-style
+    /// workloads spawn shells (tests, `git`, `gh`, REPLs) that fail
+    /// without this. Adds `(allow pseudo-tty)`, `(allow iokit-open)`, and
+    /// read/write/ioctl on `/dev/ptmx`. Set to `false` for the tightest
+    /// possible sandbox when the inner command does not need to allocate
+    /// new ttys.
+    #[serde(rename = "nestedPty", default = "default_true")]
+    pub nested_pty: bool,
+
+    /// Allow Mach IPC + filesystem access required for `keytar` /
+    /// `Security.framework` to actually use the macOS Keychain
+    /// end-to-end (Mach: securityd, SecurityServer, cfprefsd.daemon,
+    /// xpcd, lsd.*; FS read: `/Library/Keychains`, `/private/var/db/mds`;
+    /// FS read+write: `~/Library/Keychains`, `/private/var/folders`;
+    /// plus `iokit-open` for crypto accelerators). Defaults to `false`;
+    /// opt in only when the inner workload genuinely needs Keychain
+    /// access.
+    #[serde(rename = "keychainAccess", default)]
+    pub keychain_access: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for SeatbeltConfig {
+    fn default() -> Self {
+        Self {
+            profile_override: None,
+            gui_access: false,
+            launch_method: LaunchMethod::default(),
+            nested_pty: true,
+            keychain_access: false,
+        }
+    }
+}
+
+/// How to launch the sandboxed process in the Seatbelt backend.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaunchMethod {
+    /// Direct fork → sandbox_init() → exec (default).
+    #[default]
+    Exec,
+    /// Launch via macOS LaunchServices (`open`). The sandbox is applied to
+    /// the command running inside the launched terminal app via sandbox-exec.
+    Open,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
