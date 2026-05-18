@@ -93,9 +93,14 @@ jobs:
     # (CP-401337-Apple) to codesign with hardened runtime, then submits
     # to Apple's notary service. This mirrors the Windows signing pattern
     # in Rust.Build.Job.yml but uses Apple-specific operations.
+    #
+    # Note: Stapling is intentionally omitted. Apple does not support
+    # stapling tickets to standalone Mach-O binaries — only .app bundles,
+    # .pkg installers, and .dmg disk images. Gatekeeper verifies the
+    # notarization ticket online for standalone binaries instead.
     - task: EsrpCodeSigning@5
       displayName: 'Code Sign (macOS)'
-      condition: eq(${{ parameters.isOfficialBuild }}, true)
+      condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
       inputs:
         ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
         AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
@@ -122,7 +127,7 @@ jobs:
 
     - task: EsrpCodeSigning@5
       displayName: 'Notarize (macOS)'
-      condition: eq(${{ parameters.isOfficialBuild }}, true)
+      condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
       inputs:
         ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
         AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
