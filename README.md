@@ -17,7 +17,7 @@ MXC is a container wrapper and a TypeScript based SDK for Node/Electron projects
 
 ### Requirements
 
-You will need the [Rust toolchain](https://rustup.rs/) (stable) installed.  The WXC native components are built with Cargo, the Rust package manager and build system.
+You will need the [Rust toolchain](https://rustup.rs/) (stable) installed.  The MXC native components are built with Cargo, the Rust package manager and build system.
 
 You will also need Node.js 20.10+ and must ensure that the node dependencies are resolved.  We recommend going into the SDK and CLI folders and running npm install.
 
@@ -32,7 +32,7 @@ cli/            TypeScript CLI (mxc-cli npm package, depends on SDK)
 docs/           Schema and configuration documentation
 examples/       Example configurations
 test_configs/   Test JSON configurations
-test_scripts/   Test scripts for exercising WXC
+test_scripts/   Test scripts for exercising MXC
 ```
 
 ### Building WXC
@@ -75,7 +75,7 @@ npm install && npm run build
 
 ## Usage
 
-WXC requires a JSON-based configuration to be provided.  The [schema documentation](docs\schema.md) defines all of the policies and execution options.
+MXC requires a JSON-based configuration to be provided.  The [schema documentation](docs\schema.md) defines all of the policies and execution options.
 
 ### 1. File Path
 ```bash
@@ -97,7 +97,7 @@ The base64 mode is useful for:
 
 ### Debug Console Mode
 
-By default, WXC runs in **silent mode** with no console output of its own.  It is designed to couple the stdin/stdout/stderr of the caller to the container.  Use the `--debug` flag to enable verbose console output:
+By default, `wxc-exec` runs in **silent mode** with no console output of its own.  It is designed to couple the stdin/stdout/stderr of the caller to the container.  Use the `--debug` flag to enable verbose console output:
 
 ```bash
 # Silent execution (default) - no console output
@@ -124,7 +124,7 @@ xperf -on PROC_THREAD+LOADER
 xperf -start user -on a68ca8b7-004f-d7b6-a698-07e2de0f1f5d:::'stack'
 ```
 
-### Run WXC
+### Run wxc-exec
 
 Execute your script with AppContainer in permissive learning mode:
 

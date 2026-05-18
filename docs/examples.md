@@ -5,7 +5,7 @@ For a more comprehensive list of examples, look in the examples\ directory.
 ### Basic Hello World
 ```json
 {
-  "script": "python -c \"import sys; print('Hello from WXC!'); print(f'Python version: {sys.version}');\"",
+  "script": "python -c \"import sys; print('Hello from MXC!'); print(f'Python version: {sys.version}');\"",
   "processContainer": {
     "name": "CLI-HelloWorld"
   }
@@ -64,7 +64,7 @@ Route process-container traffic through a localhost proxy. Supported with the
 }
 ```
 
-**Builtin test server** — wxc launches its own minimal HTTP CONNECT proxy on
+**Builtin test server** — `wxc-exec` launches its own minimal HTTP CONNECT proxy on
 an OS-assigned port (for integration testing only, not production):
 
 ```json
