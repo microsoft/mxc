@@ -316,7 +316,7 @@ silently fall back — explicit migration is required.
 4. **Per-feature vs global experimental flag:** Should `--experimental` be a
    global toggle (all experimental features on/off), or per-feature
    (`--experimental compartments --experimental gpu-isolation`)? Per-feature
-   gives more control but adds complexity to the CLI and SDK interfaces.
+   gives more control but adds complexity to the executor and SDK interfaces.
 
 5. **Shipping experimental features to customers:** Should experimental features
    be shippable to specific customers (e.g., Anthropic, Nemoclaw), or strictly

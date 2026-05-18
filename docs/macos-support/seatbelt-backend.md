@@ -104,14 +104,14 @@ configs that invoke Python (`21_mac_python_info.json`) require this.
 > configs that run Python include `"readonlyPaths": ["/opt/homebrew"]` so
 > the sandbox can access the interpreter and its libraries.
 
-### 5. Node.js (optional — needed for SDK/CLI)
+### 5. Node.js (optional — needed for SDK)
 
 ```bash
 brew install node
 ```
 
-Required only if you plan to build and test the TypeScript SDK or CLI
-layers (`npm run build` / `npm test`).
+Required only if you plan to build and test the TypeScript SDK
+layer (`npm run build` / `npm test`).
 
 ### Verification
 
@@ -267,7 +267,7 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
 # Debug build
 ./build-mac.sh --debug
 
-# Rust binary only, skip TS SDK/CLI
+# Rust binary only, skip TS SDK
 ./build-mac.sh --rust-only
 ```
 

@@ -19,7 +19,7 @@ MXC is a container wrapper and a TypeScript based SDK for Node/Electron projects
 
 You will need the [Rust toolchain](https://rustup.rs/) (stable) installed.  The MXC native components are built with Cargo, the Rust package manager and build system.
 
-You will also need Node.js 20.10+ and must ensure that the node dependencies are resolved.  We recommend going into the SDK and CLI folders and running npm install.
+You will also need Node.js 20.10+ and must ensure that the node dependencies are resolved.  We recommend going into the SDK folder and running npm install.
 
 A copy of Python 3.x is needed for executing test scripts.
 
@@ -28,7 +28,6 @@ A copy of Python 3.x is needed for executing test scripts.
 ```
 src/            Rust workspace (wxc-exec native binary + wxc_common library)
 sdk/            TypeScript SDK (@microsoft/mxc-sdk npm package)
-cli/            TypeScript CLI (mxc-cli npm package, depends on SDK)
 docs/           Schema and configuration documentation
 examples/       Example configurations
 test_configs/   Test JSON configurations
@@ -165,14 +164,14 @@ Use `build.sh` from the repo root:
 ```bash
 ./build.sh              # Release build
 ./build.sh --debug      # Debug build
-./build.sh --rust-only  # Only build Rust binaries, skip SDK/CLI
+./build.sh --rust-only  # Only build Rust binaries, skip SDK
 ./build.sh --help       # Show all options
 ```
 
 This will:
 1. Build the Rust `lxc-exec` binary
 2. Copy the binary into `sdk/bin/<target-triple>/` so it is bundled with the SDK package
-3. Build the TypeScript SDK and CLI
+3. Build the TypeScript SDK
 
 ### LXC Example Configurations
 

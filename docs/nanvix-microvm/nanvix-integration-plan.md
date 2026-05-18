@@ -133,7 +133,7 @@ wxc-exec stdout ◀──  nanvixd stdout ◀──  guest python stdout
 wxc-exec stderr ◀──  nanvixd stderr ◀──  kernel traces
 ```
 
-**Script delivery via stdin**: The calling layer (SDK or CLI) writes the script content to wxc-exec's stdin, which relays through to nanvixd and into the guest Python's `sys.stdin.read()`. The SDK closes stdin after writing, which propagates EOF through to the guest.
+**Script delivery via stdin**: The calling layer (the SDK) writes the script content to wxc-exec's stdin, which relays through to nanvixd and into the guest Python's `sys.stdin.read()`. The SDK closes stdin after writing, which propagates EOF through to the guest.
 
 ### Exit Code Propagation
 
