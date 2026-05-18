@@ -112,6 +112,15 @@ jobs:
           testAllTargets: false
           buildAllTargets: false
 
+      # When the matrix entry specifies extra Cargo features (e.g.
+      # hyperlight), rebuild incrementally so the final binary includes
+      # them. Runs after the 1ES base build and before ESRP signing so
+      # the signed binary is the feature-enabled one.
+      - ${{ if item.features }}:
+        - script: cargo build --locked --release --target $(triplet) -p wxc --features ${{ item.features }}
+          displayName: Rebuild with features (${{ item.features }})
+          workingDirectory: $(workingDirectory)
+
       # Run clippy via plain cargo so the 1ES Setup task doesn't have to
       # source-install clippy-sarif (~8 min). The toolchain ships clippy
       # itself; `-D warnings` keeps the build gated.

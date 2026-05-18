@@ -71,6 +71,7 @@ extends:
                 os: windows
                 arch: x64
                 component: WXC
+                features: hyperlight
               - name: windows_arm64
                 os: windows
                 arch: arm64
