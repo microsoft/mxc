@@ -12,6 +12,9 @@ fn main() {
 
     // Always emit rerun-if-changed so Cargo doesn't re-run unnecessarily.
     println!("cargo:rerun-if-changed=build.rs");
+    // Re-run prerequisite checks when PATH changes (e.g., after installing Python).
+    #[cfg(windows)]
+    println!("cargo:rerun-if-env-changed=PATH");
 }
 
 /// Emit build warnings when E2E test prerequisites are missing or
@@ -43,7 +46,7 @@ fn check_test_prerequisites() {
                 "cargo:warning=Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or: winget install Python.Python.3.12 --scope machine"
             );
         }
-        Some(ref path) if path.contains("WindowsApps") => {
+        Some(ref path) if path.to_ascii_lowercase().contains("windowsapps") => {
             println!("cargo:warning=python.exe resolves to a Store alias. Store aliases cannot be launched inside sandbox containers.");
             println!(
                 "cargo:warning=Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or disable App Execution Aliases for Python"
@@ -73,7 +76,7 @@ fn check_test_prerequisites() {
                 "cargo:warning=Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install PowerShell 7"
             );
         }
-        Some(ref path) if path.contains("WindowsApps") => {
+        Some(ref path) if path.to_ascii_lowercase().contains("windowsapps") => {
             println!("cargo:warning=pwsh.exe resolves to a Store alias. Store aliases cannot be launched inside sandbox containers.");
             println!(
                 "cargo:warning=Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or disable App Execution Aliases for PowerShell"

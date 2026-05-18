@@ -131,6 +131,8 @@ set "PYTHON_MISSING=0"
 set "ALIAS_ISSUE=0"
 
 :: Check Python is available and not a Store alias
+set "PYTHON_REAL=0"
+set "PYTHON_ALIAS=0"
 where python.exe >nul 2>&1
 if errorlevel 1 (
     echo   WARNING: python.exe not found. E2E tests require a system-wide Python install.
@@ -139,18 +141,23 @@ if errorlevel 1 (
 ) else (
     for /f "tokens=*" %%P in ('where python.exe') do (
         echo %%P | findstr /i "WindowsApps" >nul 2>&1
-        if not errorlevel 1 (
-            echo   WARNING: python.exe resolves to a Store alias.
-            echo            Store aliases cannot be launched inside sandbox containers.
-            set "PREREQ_WARN=1"
-            set "PYTHON_MISSING=1"
-            set "ALIAS_ISSUE=1"
-            set "ALIAS_ISSUE=1"
+        if errorlevel 1 (
+            set "PYTHON_REAL=1"
+        ) else (
+            set "PYTHON_ALIAS=1"
         )
+    )
+    if "!PYTHON_REAL!"=="0" (
+        echo   WARNING: python.exe only exists as a Store alias.
+        echo            Store aliases cannot be launched inside sandbox containers.
+        set "PREREQ_WARN=1"
+        set "PYTHON_MISSING=1"
+        set "ALIAS_ISSUE=1"
     )
 )
 
 :: Check pwsh.exe is available and not a Store alias
+set "PWSH_REAL=0"
 where pwsh.exe >nul 2>&1
 if errorlevel 1 (
     echo   WARNING: pwsh.exe not found. PowerShell 7 tests will be skipped.
@@ -158,16 +165,17 @@ if errorlevel 1 (
 ) else (
     for /f "tokens=*" %%P in ('where pwsh.exe') do (
         echo %%P | findstr /i "WindowsApps" >nul 2>&1
-        if not errorlevel 1 (
-            echo   WARNING: pwsh.exe resolves to a Store alias.
-            echo            Store aliases cannot be launched inside sandbox containers.
-            set "PREREQ_WARN=1"
-            set "ALIAS_ISSUE=1"
+        if errorlevel 1 (
+            set "PWSH_REAL=1"
         )
-        goto :pwsh_check_done
+    )
+    if "!PWSH_REAL!"=="0" (
+        echo   WARNING: pwsh.exe only exists as a Store alias.
+        echo            Store aliases cannot be launched inside sandbox containers.
+        set "PREREQ_WARN=1"
+        set "ALIAS_ISSUE=1"
     )
 )
-:pwsh_check_done
 
 if "%PREREQ_WARN%"=="0" (
     echo   All E2E test prerequisites met.

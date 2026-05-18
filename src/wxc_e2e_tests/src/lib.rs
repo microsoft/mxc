@@ -245,7 +245,9 @@ pub fn assert_python() {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let has_real_python = stdout.lines().any(|p| !p.contains("WindowsApps"));
+    let has_real_python = stdout
+        .lines()
+        .any(|p| !p.to_ascii_lowercase().contains("windowsapps"));
     if !has_real_python {
         panic!(
             "python.exe only exists as a Windows Store alias.\n\
@@ -281,7 +283,9 @@ pub fn assert_pwsh() {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let has_real_pwsh = stdout.lines().any(|p| !p.contains("WindowsApps"));
+    let has_real_pwsh = stdout
+        .lines()
+        .any(|p| !p.to_ascii_lowercase().contains("windowsapps"));
     if !has_real_pwsh {
         panic!(
             "pwsh.exe only exists as a Windows Store alias.\n\
