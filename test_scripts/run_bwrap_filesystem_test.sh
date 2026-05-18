@@ -21,6 +21,7 @@ RO_DIR="/mnt/readonly"
 DENIED_DIR="/mnt/denied"
 
 sudo mkdir -p "$RW_DIR" "$RO_DIR" "$DENIED_DIR"
+sudo chown "$USER:$USER" "$RW_DIR"
 echo "test content" | sudo tee "$RO_DIR/test.txt" > /dev/null
 echo "should not see this" | sudo tee "$DENIED_DIR/secret.txt" > /dev/null
 

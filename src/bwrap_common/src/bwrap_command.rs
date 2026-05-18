@@ -38,12 +38,21 @@ pub fn build_args(request: &CodexRequest) -> Vec<String> {
     }
 
     // -- Base filesystem ---------------------------------------------------
-    // Bind-mount the entire host root read-only, then layer policy overrides
-    // on top. bwrap applies mounts in order, so later entries shadow earlier
-    // ones at the same path.
+    // bwrap applies mounts in order; later mounts at the same path shadow
+    // earlier ones. We therefore lay down the base + standard virtual
+    // filesystems first, then apply user-supplied policy mounts last so they
+    // always win, including when policy paths overlap a standard mount such
+    // as `/tmp` (e.g. `readwritePaths: ["/tmp/workspace"]`).
     args.extend(["--ro-bind".into(), "/".into(), "/".into()]);
 
-    // Read-write paths (override the base ro-bind)
+    // Standard virtual filesystems (applied before policy mounts so policy
+    // paths under /dev, /proc, or /tmp survive).
+    args.extend(["--dev".into(), "/dev".into()]);
+    args.extend(["--proc".into(), "/proc".into()]);
+    args.extend(["--tmpfs".into(), "/tmp".into()]);
+
+    // Read-write paths (override the base ro-bind and any standard mount
+    // they overlap).
     for path in &request.policy.readwrite_paths {
         args.extend(["--bind".into(), path.clone(), path.clone()]);
     }
@@ -58,11 +67,6 @@ pub fn build_args(request: &CodexRequest) -> Vec<String> {
     for path in &request.policy.denied_paths {
         args.extend(["--tmpfs".into(), path.clone()]);
     }
-
-    // Standard virtual filesystems
-    args.extend(["--dev".into(), "/dev".into()]);
-    args.extend(["--proc".into(), "/proc".into()]);
-    args.extend(["--tmpfs".into(), "/tmp".into()]);
 
     // -- Working directory -------------------------------------------------
     if !request.working_directory.is_empty() {
@@ -211,5 +215,48 @@ mod tests {
         r.working_directory = String::new();
         let args = build_args(&r);
         assert!(!args.contains(&"--chdir".to_string()));
+    }
+
+    /// Regression test for policy-mount-shadowing bug:
+    /// the hard-coded `--tmpfs /tmp` must NOT shadow user policy mounts
+    /// whose paths fall under `/tmp`. With the original ordering the
+    /// standard `/tmp` tmpfs was applied AFTER policy mounts and wiped them
+    /// out. The fix is to lay standard mounts down first so user policy
+    /// mounts always come after and win.
+    #[test]
+    fn policy_mounts_under_tmp_are_not_shadowed_by_standard_tmpfs() {
+        let mut r = base_request();
+        r.policy.readwrite_paths = vec!["/tmp/workspace".into()];
+        r.policy.readonly_paths = vec!["/tmp/data".into()];
+        r.policy.denied_paths = vec!["/tmp/secrets".into()];
+        let args = build_args(&r);
+
+        // Locate the position of the standard --tmpfs /tmp mount.
+        let tmpfs_tmp_pos = args
+            .windows(2)
+            .position(|w| w[0] == "--tmpfs" && w[1] == "/tmp")
+            .expect("standard --tmpfs /tmp must be present");
+
+        // Helper: find the position of an "--<op> /tmp/<x>" mount, asserting
+        // it comes AFTER the standard /tmp tmpfs so it actually applies.
+        let assert_after = |op: &str, target: &str| {
+            let pos = args
+                .windows(2)
+                .position(|w| w[0] == op && w[1] == target)
+                .unwrap_or_else(|| panic!("missing {} {}", op, target));
+            assert!(
+                pos > tmpfs_tmp_pos,
+                "{} {} (pos {}) must come after --tmpfs /tmp (pos {}) \
+                     or it will be shadowed",
+                op,
+                target,
+                pos,
+                tmpfs_tmp_pos
+            );
+        };
+
+        assert_after("--bind", "/tmp/workspace");
+        assert_after("--ro-bind", "/tmp/data");
+        assert_after("--tmpfs", "/tmp/secrets");
     }
 }
