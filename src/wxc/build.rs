@@ -55,34 +55,15 @@ fn check_test_prerequisites() {
         _ => {}
     }
 
-    // Check pwsh
-    let pwsh_ok = Command::new("where.exe")
-        .arg("pwsh.exe")
-        .output()
-        .ok()
-        .and_then(|o| {
-            if !o.status.success() {
-                return None;
-            }
-            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-            let first = stdout.lines().next().unwrap_or("").to_string();
-            Some(first)
-        });
-
-    match pwsh_ok {
-        None => {
-            println!("cargo:warning=pwsh.exe not found. PowerShell 7 sandbox tests will fail.");
-            println!(
-                "cargo:warning=Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install PowerShell 7"
-            );
-        }
-        Some(ref path) if path.to_ascii_lowercase().contains("windowsapps") => {
-            println!("cargo:warning=pwsh.exe resolves to a Store alias. Store aliases cannot be launched inside sandbox containers.");
-            println!(
-                "cargo:warning=Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or disable App Execution Aliases for PowerShell"
-            );
-        }
-        _ => {}
+    // Check pwsh at the expected install path (test configs use a hardcoded path)
+    const PWSH_PATH: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
+    if !std::path::Path::new(PWSH_PATH).exists() {
+        println!(
+            "cargo:warning=PowerShell 7 not found at {PWSH_PATH}. pwsh sandbox tests will fail."
+        );
+        println!(
+            "cargo:warning=Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install PowerShell 7"
+        );
     }
 }
 

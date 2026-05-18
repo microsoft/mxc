@@ -120,16 +120,14 @@ if ($aliasIssues.Count -eq 0) {
     $issues += "App Execution Aliases active for: $($aliasIssues -join ', '). These cause CreateProcessW failures in sandboxed containers."
 }
 
-# 3. Check PowerShell 7
+# 3. Check PowerShell 7 at expected install path
+$PwshExpectedPath = "C:\Program Files\PowerShell\7\pwsh.exe"
 Write-Host "[3/3] PowerShell 7..." -NoNewline
-$pwshReal = Get-Command pwsh.exe -All -ErrorAction SilentlyContinue | 
-    Where-Object { $_.Source -notlike "*WindowsApps*" } | 
-    Select-Object -First 1
-if ($pwshReal) {
-    Write-Host " OK ($($pwshReal.Source))" -ForegroundColor Green
+if (Test-Path $PwshExpectedPath) {
+    Write-Host " OK ($PwshExpectedPath)" -ForegroundColor Green
 } else {
-    Write-Host " MISSING (no non-Store pwsh.exe found)" -ForegroundColor Red
-    $issues += "PowerShell 7 is not installed (or only available via Store alias)."
+    Write-Host " MISSING (not found at $PwshExpectedPath)" -ForegroundColor Red
+    $issues += "PowerShell 7 is not installed at $PwshExpectedPath (required by test configs)."
 }
 
 Write-Host ""

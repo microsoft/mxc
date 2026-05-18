@@ -182,8 +182,15 @@ set /p "FIX_ALL=  Fix issues and install Python? [Y/n] "
 if /i "!FIX_ALL!"=="n" goto :done
 
 if "%PYTHON_MISSING%"=="1" (
-    echo   Installing Python 3.12 via winget...
-    winget install Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements
+    where winget >nul 2>&1
+    if errorlevel 1 (
+        echo   ERROR: winget not available. Install Python 3.12 manually from https://python.org
+        echo          Choose 'Install for all users' during setup.
+    ) else (
+        echo   Installing Python 3.12 via winget...
+        winget install Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements
+        if errorlevel 1 echo   WARNING: winget install may have failed. Verify with: where python.exe
+    )
 )
 
 if "%ALIAS_ISSUE%"=="1" (
