@@ -200,9 +200,12 @@ pub fn setup(force: bool, logger: &mut Logger) -> Result<PathBuf, String> {
     logger.log_line("hyperlight setup: pulling image from GHCR (docker/podman)");
     let opts = pyhl::InstallOptions {
         home: &home,
-        source: pyhl::InstallSource::Ghcr,
+        source: pyhl::InstallSource::Ghcr {
+            tag: Some("v0.5.0"),
+        },
         mounts: &[],
         network: None,
+        listen_ports: None,
         force,
     };
     let report = pyhl::install(&opts).map_err(|e| format!("hyperlight install: {e:#}"))?;
@@ -462,6 +465,7 @@ impl HyperlightScriptRunner {
                 },
                 mounts: &preopens,
                 network: network.as_ref(),
+                listen_ports: None,
                 force: false,
             };
             let report = pyhl::install(&opts)
@@ -473,7 +477,7 @@ impl HyperlightScriptRunner {
         }
 
         logger.log_line(&format!("hyperlight: using image home {home:?}"));
-        let rt = pyhl::Runtime::new(home, &preopens, network.as_ref())
+        let rt = pyhl::Runtime::new(home, &preopens, network.as_ref(), None)
             .map_err(|e| PyhlError::Runtime(format!("open hyperlight runtime: {e:#}")))?;
         self.runtime = Some(rt);
         self.active_home = Some(home.to_path_buf());

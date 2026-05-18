@@ -347,6 +347,16 @@
               "enum": ["exec", "open"],
               "default": "exec",
               "description": "How to launch the sandboxed process. 'exec' (default) uses sandbox_init + exec and works for third-party GUI apps (e.g. Alacritty). 'open' uses LaunchServices ('open -n -W -a Terminal') to satisfy Apple Launch Constraints, then applies the sandbox to the inner shell via sandbox-exec. Required for system apps like Terminal.app that enforce launch constraints."
+            },
+            "nestedPty": {
+              "type": "boolean",
+              "default": true,
+              "description": "Allow the inner process to allocate its own pseudo-terminals via posix_openpt (needed by tests, git, gh, REPLs and other tools that spawn a shell). Adds (allow pseudo-tty) and read/write/ioctl on /dev/ptmx. Defaults to true; set to false for the tightest possible sandbox when the inner command does not need to allocate new ttys."
+            },
+            "keychainAccess": {
+              "type": "boolean",
+              "default": false,
+              "description": "Allow the inner process to use the macOS Keychain (e.g. via keytar or Security.framework) end-to-end. Adds Mach lookup for com.apple.SecurityServer, com.apple.securityd, com.apple.trustd, com.apple.ocspd, com.apple.cfprefsd.daemon, com.apple.xpcd and the com.apple.lsd.* family; read access to /private/var/db/mds and /private/var/protected/trustd; and read+write access to ~/Library/Keychains and /private/var/folders (XPC cache). System keychain stores under /Library and /System/Library are already covered by the baseline read-only allows. Defaults to false; opt in only when the inner workload genuinely needs Keychain access."
             }
           }
         },

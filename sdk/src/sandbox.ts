@@ -367,6 +367,12 @@ export interface SandboxSpawnOptions {
   executablePath?: string;
 
   /**
+   * Skip platform support check. Use when you know the platform
+   * is compatible and want to bypass build version validation.
+   */
+  skipPlatformCheck?: boolean;
+
+  /**
    * PTY options to pass to node-pty (only used by spawnSandbox)
    */
   ptyOptions?: pty.IPtyForkOptions;

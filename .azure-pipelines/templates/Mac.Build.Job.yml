@@ -89,6 +89,15 @@ jobs:
         contents: mxc-exec-mac
         targetFolder: $(outputDirectory)/$(targetTriple)
 
+    # Copy the .dSYM bundle into a sibling `symbols/` subdir, mirroring the
+    # Windows/Linux pattern (see Rust.Build.Job.yml for the BinSkim rationale).
+    - task: CopyFiles@2
+      displayName: Copy dSYM bundle
+      inputs:
+        sourceFolder: $(targetTripleDir)
+        contents: 'mxc-exec-mac.dSYM/**'
+        targetFolder: $(outputDirectory)/$(targetTriple)/symbols
+
     - task: 1ES.PublishPipelineArtifact@1
       displayName: Publish
       inputs:

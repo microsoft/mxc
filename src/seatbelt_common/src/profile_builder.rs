@@ -70,6 +70,8 @@ pub fn build_profile(request: &CodexRequest) -> Result<String, String> {
     // Policy-derived allow rules.
     write_filesystem_allow(&mut out, request)?;
     write_network_rules(&mut out, request);
+    write_nested_pty_rules(&mut out, request);
+    write_keychain_rules(&mut out, request)?;
     write_ui_rules(&mut out, request);
 
     // Policy-derived deny rules go LAST so they win on conflict.
@@ -90,7 +92,8 @@ const BASELINE_ALLOW: &str = "\
     (global-name \"com.apple.system.notification_center\")
     (global-name \"com.apple.system.logger\")
     (global-name \"com.apple.distributed_notifications@Uv3\")
-    (global-name \"com.apple.CoreServices.coreservicesd\"))
+    (global-name \"com.apple.CoreServices.coreservicesd\")
+    (global-name \"com.apple.FSEvents\"))
 ";
 
 /// Read-only access to system paths required by virtually every binary
@@ -113,7 +116,12 @@ const SYSTEM_READ_ALLOW: &str = "\
     (subpath \"/private/var/db/timezone\")
     (subpath \"/private/var/db/dyld\")
     (subpath \"/private/var/select\")
-    (subpath \"/private/etc\")
+    (subpath \"/private/etc\"))
+;; Standard bit-bucket / entropy devices — read+write because shell
+;; redirections (`>/dev/null`, `</dev/urandom`) need both directions.
+;; Writes to /dev/null and /dev/zero are discarded; /dev/random and
+;; /dev/urandom write to the entropy pool, which is harmless.
+(allow file-read* file-write*
     (literal \"/dev/null\")
     (literal \"/dev/zero\")
     (literal \"/dev/random\")
@@ -301,6 +309,100 @@ fn write_ui_rules(out: &mut String, request: &CodexRequest) {
         out.push_str(";; --- ui.injection=false: deny HID iokit access ---\n");
         out.push_str("(deny iokit-open (iokit-user-client-class \"IOHIDLibUserClient\"))\n");
     }
+}
+
+/// Emit rules so the inner process can call `posix_openpt()` and allocate
+/// its own pty. Skipped when `gui_access` (with UI enabled) already emits
+/// a strict superset.
+fn write_nested_pty_rules(out: &mut String, request: &CodexRequest) {
+    let sb = request.experimental.seatbelt.as_ref();
+    let enabled = sb.is_none_or(|c| c.nested_pty);
+    let gui_block_emitted = sb.is_some_and(|c| c.gui_access) && !request.policy.ui.disable;
+    if !enabled || gui_block_emitted {
+        return;
+    }
+    out.push_str(";; --- nestedPty: allow inner process to allocate its own pty ---\n");
+    out.push_str("(allow pseudo-tty)\n");
+    // /dev/ptmx is the master multiplexer; opening it is what posix_openpt
+    // does under the hood. The TTY_ALLOW baseline already grants access to
+    // /dev/ttysNNN (the slave side).
+    out.push_str("(allow file-read* file-write* file-ioctl\n");
+    out.push_str("    (literal \"/dev/ptmx\"))\n");
+}
+
+/// Emit rules so `Security.framework` / `keytar` can reach `securityd`
+/// and read/write the user's Keychain. Off by default — opt in via
+/// `experimental.seatbelt.keychainAccess: true`.
+///
+/// Real-world Keychain access fans out across several daemons. At
+/// minimum we need:
+///
+/// * `securityd` / `SecurityServer` — the actual Keychain server.
+/// * `trustd` / `ocspd` — TLS trust evaluation; without them every
+///   handshake logs "failed to copy trust settings".
+/// * `cfprefsd.daemon` — `Security.framework` reads preferences for
+///   trust settings, ACL prompts, etc.
+/// * `xpcd` + `lsd.*` — XPC bootstrapper and LaunchServices, used to
+///   resolve helper bundles when the keychain is unlocked.
+///
+/// On the filesystem side, the user's keychain DB lives under
+/// `~/Library/Keychains` (read+write — keytar creates new entries),
+/// `/private/var/db/mds` is Spotlight/MDS metadata that
+/// `Security.framework` consults (read-only), and per-user XPC caches
+/// live under `/private/var/folders` (read+write). The system keychain
+/// stores under `/Library/Keychains` and `/System/Library/Keychains`
+/// are already covered by the baseline `/Library` and `/System`
+/// read-only allows, so we don't re-add them here.
+fn write_keychain_rules(out: &mut String, request: &CodexRequest) -> Result<(), String> {
+    let enabled = request
+        .experimental
+        .seatbelt
+        .as_ref()
+        .is_some_and(|c| c.keychain_access);
+    if !enabled {
+        return Ok(());
+    }
+    // Seatbelt only applies on macOS. On other hosts the option is a
+    // no-op so workspace clippy / cross-platform tests don't have to
+    // care about `$HOME` (Windows CI doesn't set it).
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+
+    out.push_str(";; --- keychainAccess: Mach IPC for Keychain (securityd, prefs, XPC, LS) ---\n");
+    out.push_str("(allow mach-lookup\n");
+    out.push_str("    (global-name \"com.apple.SecurityServer\")\n");
+    out.push_str("    (global-name \"com.apple.securityd\")\n");
+    // trustd handles SecTrustSettingsCopyTrustSettings; without it Security
+    // logs "failed to copy trust settings of system certificate-N" for every
+    // cert in the system root store on every TLS handshake.
+    out.push_str("    (global-name \"com.apple.trustd\")\n");
+    out.push_str("    (global-name \"com.apple.trustd.agent\")\n");
+    out.push_str("    (global-name \"com.apple.ocspd\")\n");
+    out.push_str("    (global-name \"com.apple.cfprefsd.daemon\")\n");
+    out.push_str("    (global-name \"com.apple.cfprefsd.agent\")\n");
+    out.push_str("    (global-name \"com.apple.xpcd\")\n");
+    // Seatbelt has no glob in (global-name); use regex for the lsd.* family
+    // (lsd.modifydb, lsd.mapdb, lsd.openurl, …). Anchored to
+    // `com.apple.lsd.` so we don't accidentally match unrelated services.
+    out.push_str("    (global-name-regex #\"^com\\.apple\\.lsd\\.\"))\n");
+
+    out.push_str(";; --- keychainAccess: MDS keychain metadata + trustd protected store ---\n");
+    out.push_str("(allow file-read*\n");
+    // trustd's protected store of trust settings + revocation data.
+    out.push_str("    (subpath \"/private/var/protected/trustd\")\n");
+    out.push_str("    (subpath \"/private/var/db/mds\"))\n");
+
+    let home = std::env::var("HOME").map_err(|_| {
+        "HOME environment variable not set; cannot expand '~/Library/Keychains' for keychainAccess"
+            .to_string()
+    })?;
+    let user_keychains = format!("{home}/Library/Keychains");
+    out.push_str(";; --- keychainAccess: user keychain DB + XPC/folder caches (read+write) ---\n");
+    out.push_str("(allow file-read* file-write*\n");
+    let _ = writeln!(out, "    (subpath {})", quote_scheme(&user_keychains));
+    out.push_str("    (subpath \"/private/var/folders\"))\n");
+    Ok(())
 }
 
 /// Expand a leading `~` or `~/` to the current user's home directory.
@@ -573,6 +675,9 @@ mod tests {
         r.experimental.seatbelt = Some(SeatbeltConfig {
             profile_override: None,
             gui_access: false,
+            // Pin nested_pty off so this test stays focused on
+            // gui_access semantics (otherwise it emits iokit-open).
+            nested_pty: false,
             ..Default::default()
         });
         let p = build_profile(&r).unwrap();
@@ -590,6 +695,9 @@ mod tests {
         r.experimental.seatbelt = Some(SeatbeltConfig {
             profile_override: None,
             gui_access: true,
+            // Pin nested_pty off so this test isolates the
+            // gui_access + ui.disable interaction.
+            nested_pty: false,
             ..Default::default()
         });
         let p = build_profile(&r).unwrap();
@@ -598,5 +706,144 @@ mod tests {
         assert!(!p.contains("(allow iokit-open)"));
         // Should have the deny block instead
         assert!(p.contains("ui.disable: deny WindowServer"));
+    }
+
+    #[test]
+    fn nested_pty_default_on_emits_pty_rules() {
+        // When experimental.seatbelt is absent the builder should still
+        // emit nested_pty rules — that's the documented default behavior.
+        let r = req();
+        assert!(r.experimental.seatbelt.is_none());
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("nestedPty"), "nestedPty comment missing");
+        assert!(p.contains("(allow pseudo-tty)"));
+        assert!(p.contains("(literal \"/dev/ptmx\")"));
+    }
+
+    #[test]
+    fn nested_pty_explicit_true_emits_pty_rules() {
+        let mut r = req();
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            nested_pty: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow pseudo-tty)"));
+        assert!(p.contains("(literal \"/dev/ptmx\")"));
+    }
+
+    #[test]
+    fn nested_pty_false_omits_pty_rules() {
+        let mut r = req();
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            nested_pty: false,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("nestedPty"));
+        assert!(!p.contains("/dev/ptmx"));
+        // pseudo-tty allow should also not be present.
+        assert!(!p.contains("(allow pseudo-tty)"));
+    }
+
+    #[test]
+    fn nested_pty_skipped_when_gui_block_emitted() {
+        // gui_access + ui enabled emits a strict superset of nested_pty
+        // rules. Verify we don't double-emit.
+        let mut r = req();
+        r.policy.ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::None,
+            injection: true,
+        };
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            gui_access: true,
+            nested_pty: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        // No nestedPty comment block — gui_access block carries the rules.
+        assert!(!p.contains("nestedPty"));
+        // GUI block's broader rules should still be there.
+        assert!(p.contains("(allow iokit-open)"));
+        assert!(p.contains("(allow pseudo-tty)"));
+    }
+
+    #[test]
+    fn nested_pty_emits_when_gui_access_set_but_ui_disabled() {
+        // gui_access=true with ui.disable=true means write_ui_rules
+        // suppresses the GUI block — so nested_pty must NOT skip itself.
+        let mut r = req();
+        assert!(
+            r.policy.ui.disable,
+            "default ui.disable expected to be true"
+        );
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            gui_access: true,
+            nested_pty: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("nestedPty"));
+        assert!(p.contains("(allow pseudo-tty)"));
+        assert!(p.contains("/dev/ptmx"));
+    }
+
+    #[test]
+    fn keychain_access_default_off_omits_security_services() {
+        let r = req();
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("keychainAccess"));
+        assert!(!p.contains("com.apple.SecurityServer"));
+        assert!(!p.contains("com.apple.securityd"));
+        assert!(!p.contains("com.apple.cfprefsd.daemon"));
+        assert!(!p.contains("com.apple.lsd"));
+        assert!(!p.contains("/Library/Keychains"));
+        assert!(!p.contains("/private/var/db/mds"));
+    }
+
+    // Keychain rules expand `~/Library/Keychains` from $HOME at build
+    // time, so the tests that exercise `keychain_access: true` are gated
+    // to macOS (the only OS where this code path is actually used and
+    // where $HOME is reliably set in CI).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_access_true_allows_securityd_mach_services() {
+        let mut r = req();
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            keychain_access: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("keychainAccess"));
+        // Mach surface
+        assert!(p.contains("com.apple.SecurityServer"));
+        assert!(p.contains("com.apple.securityd"));
+        assert!(p.contains("com.apple.cfprefsd.daemon"));
+        assert!(p.contains("com.apple.xpcd"));
+        assert!(p.contains("(global-name-regex #\"^com\\.apple\\.lsd\\.\")"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_access_true_allows_filesystem_paths() {
+        let mut r = req();
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            keychain_access: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        // /Library/Keychains and /System/Library/Keychains are read via
+        // the baseline /Library and /System read-only allows; we don't
+        // re-emit them here.
+        assert!(p.contains("(subpath \"/private/var/db/mds\")"));
+        // Read+write surfaces
+        let home = std::env::var("HOME").expect("HOME must be set in test env");
+        let user_keychains = format!("{home}/Library/Keychains");
+        assert!(
+            p.contains(&format!("(subpath \"{user_keychains}\")")),
+            "missing user keychain subpath"
+        );
+        assert!(p.contains("(subpath \"/private/var/folders\")"));
     }
 }

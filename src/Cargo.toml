@@ -21,6 +21,16 @@ members = [
 exclude = ["fuzz"]
 resolver = "3"
 
+# Full debug info so we can analyse customer crash dumps in WinDbg until we
+# publish to a symbol server. `strip = "debuginfo"` removes embedded debug
+# sections from the binary itself (mainly relevant on Linux — Windows pdbs
+# are already split by `split-debuginfo = "packed"`). Full debug info still
+# ships via the side-by-side .pdb / .dwp files.
+[profile.release]
+debug = "full"
+split-debuginfo = "packed"
+strip = "debuginfo"
+
 [workspace.package]
 edition = "2021"
 
@@ -49,6 +59,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Diagnostics_Etw",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
     "Win32_System_Time",
     "Win32_System_SystemServices",
     "Win32_System_JobObjects",

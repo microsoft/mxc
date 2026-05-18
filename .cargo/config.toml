@@ -1,8 +1,35 @@
 
-# Use static CRT for Windows targets so vcruntime DLLs don't need to be
-# pre-installed on the machine.
+# Hardening flags for Windows targets. Most flags apply to both arches;
+# /CETCOMPAT is x86/x64 only (Intel Control-flow Enforcement Technology;
+# ARM64 uses Pointer Authentication / BTI instead).
+#
+# Shared flags:
+# - control-flow-guard (rustc) + /guard:cf (linker) — Control Flow Guard
+# - target-feature=+crt-static — static CRT so vcruntime DLLs aren't needed at runtime
+# - /DYNAMICBASE — ASLR
+# - /LTCG — link-time codegen (pairs best with profile-level lto = "thin"|"fat")
+# - -D warnings — make warnings fatal at compile time
+
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = [
+  "-C",
+  "control-flow-guard",
+  "-C",
+  "target-feature=+crt-static",
+  "-C",
+  "link-args=/guard:cf /DYNAMICBASE /CETCOMPAT /LTCG",
+  "-D",
+  "warnings",
+]
 
 [target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = [
+  "-C",
+  "control-flow-guard",
+  "-C",
+  "target-feature=+crt-static",
+  "-C",
+  "link-args=/guard:cf /DYNAMICBASE /LTCG",
+  "-D",
+  "warnings",
+]

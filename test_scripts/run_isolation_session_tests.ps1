@@ -282,9 +282,26 @@ function Setup-LockedDownTestDir {
 [System.Collections.ArrayList]$results = @()
 
 # Filesystem-policy test scaffolding: a locked-down dir the test expects
-# the agent to read via a readwritePaths grant.
+# the agent to read via a readwritePaths grant. Setup runs at file scope,
+# BEFORE the outer try and BEFORE any agent provision/deprovision cycles.
+# Empirically, running Setup-LockedDownTestDir AFTER agent lifecycles have
+# happened in this cmd.exe session causes Set-Acl to fail with
+# SeSecurityPrivilege on non-elevated consoles; running it BEFORE works
+# (state-aware uses this same ordering for its host-side dirs).
 $FsTestRoot = 'C:\mxc_share_test_oneshot'
 $FsMarkerContent = 'oneshot-marker-content'
+Setup-LockedDownTestDir $FsTestRoot
+$FsMarkerContent | Set-Content -Path (Join-Path $FsTestRoot 'marker.txt') -NoNewline
+
+# Filter test scaffolding: same file-scope ordering as $FsTestRoot above.
+# The outer-try finally also cleans this up between runs so a stale
+# inheritance-disabled directory does not require SeSecurityPrivilege on
+# re-run (Set-Acl on an existing inheritance-disabled directory writes
+# the SACL slot, which non-elevated admins cannot do).
+$FilterTestRoot = 'C:\mxc_filter_test_oneshot'
+$FilterMarkerContent = 'oneshot-filter-marker-content'
+Setup-LockedDownTestDir $FilterTestRoot
+$FilterMarkerContent | Set-Content -Path (Join-Path $FilterTestRoot 'marker.txt') -NoNewline
 
 try {
 
@@ -315,14 +332,23 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_
 # the agent to exit with code 1.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
     -ExpectedExit 1))
-# Filesystem policy: provision the agent with a readwritePaths grant on a
-# locked-down host dir that has a pre-populated marker; agent reads it.
+# Filesystem policy: agent has a readwritePaths grant on $FsTestRoot which
+# was locked-down and populated with a marker file at file scope above.
 # The `type` exit being 0 + the marker content in stdout proves the grant
 # was applied and the agent has read access.
-Setup-LockedDownTestDir $FsTestRoot
-$FsMarkerContent | Set-Content -Path (Join-Path $FsTestRoot 'marker.txt') -NoNewline
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_filesystem.json" `
     -OutputContains @($FsMarkerContent)))
+
+# Filter test: readwritePaths contains both protected (C:\Windows, C:\) and
+# non-protected ($FilterTestRoot, locked-down and populated at file scope
+# above) entries. The wxc-exec filesystem-policy path filter (MXC issue
+# #330) drops the protected entries silently, leaves the non-protected one
+# in place, and provisioning continues. The `type ...marker.txt` exit being
+# 0 + marker content in stdout proves the non-protected grant was applied
+# (positive control); the absence of any error envelope proves the protected
+# entries were dropped without surfacing.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_filtered.json" `
+    -OutputContains @($FilterMarkerContent)))
 
 # One-shot rejection: experimental.isolation_session.user is only honored on
 # the state-aware path. validate_runner rejects any one-shot request that
@@ -547,6 +573,7 @@ try {
 
 } finally {
     Remove-Item -Recurse -Force $FsTestRoot -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $FilterTestRoot -ErrorAction SilentlyContinue
 }
 
 # Summary -- wrap each filtered pipeline in @(...) to force array context.
