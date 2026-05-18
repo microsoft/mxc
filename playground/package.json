@@ -1,0 +1,95 @@
+{
+  "name": "mxc-playground",
+  "version": "0.1.0-alpha.1",
+  "description": "Visual sandbox testing tool for MXC process containers",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "tsc -p tsconfig.renderer.json && node build-renderer.js",
+    "build": "npm run build:main && npm run build:renderer",
+    "start": "npm run build && electron .",
+    "dev": "npm run build:main && electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.microsoft.mxc-playground",
+    "productName": "MXC Playground",
+    "directories": {
+      "output": "out"
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/wxc-exec.exe",
+        "to": "bin/x64/wxc-exec.exe"
+      },
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/wxc-test-proxy.exe",
+        "to": "bin/x64/wxc-test-proxy.exe"
+      },
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/winhttp-proxy-shim.exe",
+        "to": "bin/x64/winhttp-proxy-shim.exe"
+      },
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/wxc-windows-sandbox-daemon.exe",
+        "to": "bin/x64/wxc-windows-sandbox-daemon.exe"
+      },
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/wxc-windows-sandbox-guest.exe",
+        "to": "bin/x64/wxc-windows-sandbox-guest.exe"
+      },
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/wxc-sandbox-daemon.exe",
+        "to": "bin/x64/wxc-sandbox-daemon.exe"
+      },
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/wxc-sandbox-agent.exe",
+        "to": "bin/x64/wxc-sandbox-agent.exe"
+      },
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/nanvixd.exe",
+        "to": "bin/x64/nanvixd.exe"
+      },
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/kernel.elf",
+        "to": "bin/x64/kernel.elf"
+      },
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/python.elf",
+        "to": "bin/x64/python.elf"
+      },
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/cpython-ramfs.img",
+        "to": "bin/x64/cpython-ramfs.img"
+      },
+      {
+        "from": "../sdk/bin/x64/vcruntime140.dll",
+        "to": "bin/x64/vcruntime140.dll"
+      },
+      {
+        "from": "test-scripts",
+        "to": "test-scripts"
+      }
+    ],
+    "win": {
+      "target": "dir"
+    },
+    "npmRebuild": false
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "electron": "^39.8.5",
+    "electron-builder": "^25.0.0",
+    "node-gyp": "^12.2.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "@microsoft/mxc-sdk": "file:../sdk",
+    "node-pty": "^1.0.0"
+  }
+}
