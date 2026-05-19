@@ -79,6 +79,25 @@ struct Cli {
     /// the new bits. Requires --setup-hyperlight.
     #[arg(long, requires = "setup_hyperlight")]
     force: bool,
+
+    /// Pre-pull a WSLC container image into the local image cache and exit.
+    /// MXC is an execution layer and does not pull images at run time; this
+    /// flag (or `scripts/setup-wslc.ps1`) is how operators populate the cache.
+    /// Requires `--image` to specify which image to pull.
+    #[arg(long = "setup-wslc")]
+    setup_wslc: bool,
+
+    /// Image reference to pre-pull (e.g. `alpine:latest`,
+    /// `ghcr.io/owner/image:tag`). Required with `--setup-wslc`.
+    #[arg(long = "image", requires = "setup_wslc")]
+    image: Option<String>,
+
+    /// Optional WSLC storage path. When omitted the runner default is used
+    /// (`%TEMP%\mxc-wslc-sessions`). Pass the same value here that your
+    /// runtime configs set in `experimental.wslc.storagePath`, otherwise
+    /// the runner will not find the pulled image. Requires `--setup-wslc`.
+    #[arg(long = "storage-path", requires = "setup_wslc")]
+    storage_path: Option<String>,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
@@ -230,6 +249,56 @@ fn main() {
         #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
         {
             eprintln!("Error: --setup-hyperlight requires x86_64 (Hyperlight needs KVM or WHP)");
+            process::exit(1);
+        }
+    }
+
+    // --setup-wslc: pre-pull a WSLC image into the local cache and exit.
+    // Runs before config parsing so the user doesn't need a JSON file just
+    // to populate images. Clap enforces that `--image` is present.
+    if cli.setup_wslc {
+        #[cfg(feature = "wslc")]
+        {
+            let image = match cli.image.as_deref() {
+                Some(s) if !s.is_empty() => s,
+                _ => {
+                    eprintln!("Error: --setup-wslc requires --image <name>");
+                    process::exit(1);
+                }
+            };
+            let mut logger = Logger::new(if cli.debug {
+                Mode::Console
+            } else {
+                Mode::Buffer
+            });
+            // SAFETY: setup_pull_image is the canonical SDK-loading entry
+            // point for this subcommand and is called exactly once before
+            // process exit. It owns the COM init contract documented on
+            // `init_and_load_sdk`.
+            let result = unsafe {
+                wslc_common::wsl_container_runner::WSLContainerRunner::setup_pull_image(
+                    image,
+                    cli.storage_path.as_deref(),
+                    &mut logger,
+                )
+            };
+            // Flush logger buffer to stderr regardless of outcome so the
+            // user can see what happened.
+            let buf = logger.get_buffer().to_string();
+            if !buf.is_empty() {
+                eprint!("{}", buf);
+            }
+            match result {
+                Ok(()) => process::exit(0),
+                Err(msg) => {
+                    eprintln!("wslc setup failed: {msg}");
+                    process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(feature = "wslc"))]
+        {
+            eprintln!("Error: WSLC backend not compiled. Rebuild with --features wslc.");
             process::exit(1);
         }
     }

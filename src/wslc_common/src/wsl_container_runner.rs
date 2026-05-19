@@ -510,36 +510,115 @@ impl WSLContainerRunner {
         } else if let Some(tar_path) = &self.config.image_tar_path {
             Self::import_image_from_tar(sdk, session, image_name, tar_path, logger)?;
         } else {
-            // Pull from registry
-            // TODO: Move image pulling to a setup script (scripts/setup-wslc.ps1) as
-            // described in docs/wsl-container-support-plan.md Phase 5. MXC is an execution
-            // layer — image management should be handled externally. For now, auto-pull is
-            // used during development/testing.
-            let _ = writeln!(
-                logger,
-                "[WSLC] Image '{}' not found locally, attempting pull...",
-                image_name
-            );
-            let uri_cstr = format!("{}\0", image_name);
-            let pull_opts = WslcPullImageOptions {
-                uri: uri_cstr.as_bytes().as_ptr() as PCSTR,
-                progress_callback: None,
-                progress_callback_context: ptr::null_mut(),
-                auth_info: ptr::null(),
+            // MXC is an execution layer; image management is out of band. The
+            // setup script `scripts\setup-wslc.ps1` (or `wxc-exec.exe
+            // --setup-wslc --image <name>`) pre-pulls images into the same
+            // WSLC storage_path the runner uses. When the config overrides
+            // `experimental.wslc.storagePath`, include it in the suggested
+            // commands so the operator's first copy-paste lands the image in
+            // the cache the next run will actually read.
+            let (storage_arg_wxc, storage_arg_ps) = match &self.config.storage_path {
+                Some(sp) => (
+                    format!(" --storage-path \"{}\"", sp),
+                    format!(" -StoragePath \"{}\"", sp),
+                ),
+                None => (String::new(), String::new()),
             };
-            let mut err_msg = CoTaskMemPWSTR::null();
-            let hr = (sdk.WslcPullSessionImage)(session, &pull_opts, err_msg.as_mut_ptr());
-            if hr != S_OK {
-                let msg = err_msg.to_string_lossy();
-                return Err(sdk_error(
-                    &format!("Failed to pull image '{}'", image_name),
-                    hr,
-                    &msg,
-                ));
-            }
-            let _ = writeln!(logger, "[WSLC] Image '{}' pulled successfully", image_name);
+            return Err(ScriptResponse::error(&format!(
+                "WSLC image '{}' not found locally. Pre-pull it with: \
+                 wxc-exec.exe --setup-wslc --image {}{} \
+                 (or scripts\\setup-wslc.ps1 -Image {}{}). \
+                 MXC does not pull images at run time; \
+                 see docs/wsl/wsl-container-support-plan.md.",
+                image_name, image_name, storage_arg_wxc, image_name, storage_arg_ps,
+            )));
         }
 
+        Ok(())
+    }
+
+    /// Pre-pull a WSLC image into the SDK's local image cache.
+    ///
+    /// Loads the SDK, opens a minimal session against `storage_path` (or the
+    /// runner default), pulls `image_name`, then releases the session. The
+    /// image persists in the storage path's cache for subsequent runner
+    /// invocations that pass the same `storage_path`.
+    ///
+    /// # Safety
+    /// Must be called once per process before any other WSLC SDK functions
+    /// (it initialises COM via `init_and_load_sdk`).
+    pub unsafe fn setup_pull_image(
+        image_name: &str,
+        storage_path: Option<&str>,
+        logger: &mut Logger,
+    ) -> Result<(), String> {
+        let sdk = match Self::init_and_load_sdk(logger) {
+            Ok(s) => s,
+            Err(resp) => return Err(resp.error_message),
+        };
+
+        let storage_path_str = storage_path.map(|s| s.to_string()).unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("mxc-wslc-sessions")
+                .to_string_lossy()
+                .to_string()
+        });
+        let session_name: Vec<u16> = to_wide("mxc-setup-wslc");
+        let storage_path_wide: Vec<u16> = to_wide(&storage_path_str);
+
+        let mut settings = std::mem::zeroed::<WslcSessionSettings>();
+        let hr = (sdk.WslcInitSessionSettings)(
+            session_name.as_ptr(),
+            storage_path_wide.as_ptr(),
+            &mut settings,
+        );
+        if hr != S_OK {
+            return Err(format!(
+                "WslcInitSessionSettings failed (HRESULT 0x{:08X})",
+                hr as u32
+            ));
+        }
+
+        let mut session: WslcSession = ptr::null_mut();
+        let mut create_err = CoTaskMemPWSTR::null();
+        let hr = (sdk.WslcCreateSession)(&mut settings, &mut session, create_err.as_mut_ptr());
+        if hr != S_OK {
+            return Err(format!(
+                "WslcCreateSession failed (HRESULT 0x{:08X}): {}",
+                hr as u32,
+                create_err.to_string_lossy()
+            ));
+        }
+        let _session_guard =
+            WslcSessionGuard::from_raw(session, sdk.WslcTerminateSession, sdk.WslcReleaseSession);
+
+        let _ = writeln!(
+            logger,
+            "[WSLC setup] Pulling image '{}' into {}",
+            image_name, storage_path_str
+        );
+        let uri_cstr = format!("{}\0", image_name);
+        let pull_opts = WslcPullImageOptions {
+            uri: uri_cstr.as_bytes().as_ptr() as PCSTR,
+            progress_callback: None,
+            progress_callback_context: ptr::null_mut(),
+            auth_info: ptr::null(),
+        };
+        let mut pull_err = CoTaskMemPWSTR::null();
+        let hr = (sdk.WslcPullSessionImage)(session, &pull_opts, pull_err.as_mut_ptr());
+        if hr != S_OK {
+            return Err(format!(
+                "WslcPullSessionImage('{}') failed (HRESULT 0x{:08X}): {}",
+                image_name,
+                hr as u32,
+                pull_err.to_string_lossy()
+            ));
+        }
+        let _ = writeln!(
+            logger,
+            "[WSLC setup] Image '{}' pulled successfully",
+            image_name
+        );
         Ok(())
     }
 
