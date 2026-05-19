@@ -9,6 +9,7 @@ import { parse as semverParse } from 'semver';
 import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } from './types.js';
 import { prepareSpawn, diagLogVersion } from './helper.js';
 import { diagLog } from './diagnostic.js';
+import { MxcError, mxcErrorFromCode } from './errors.js';
 
 const SUPPORTED_VERSION = '0.6.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';
@@ -601,6 +602,15 @@ export function spawnSandboxAsync(
       ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
         // Note: wxc-exec doesn't separate stdout/stderr when using PTY
         // All output is combined
+        //
+        // Check for structured error envelopes from wxc-exec on failure.
+        if (event.exitCode !== 0) {
+          const mxcError = tryParseErrorEnvelopeFromLines(output);
+          if (mxcError) {
+            reject(mxcError);
+            return;
+          }
+        }
         resolve({
           stdout: output,
           stderr: '',
@@ -611,4 +621,28 @@ export function spawnSandboxAsync(
       reject(error);
     }
   });
+}
+
+/**
+ * Scans a multi-line string for a JSON error envelope emitted by wxc-exec
+ * on stderr. Returns the first matching envelope, or null if none found.
+ * The envelope format is: `{"error": {"code": "...", "message": "...", ...}}`
+ */
+function tryParseErrorEnvelopeFromLines(output: string): MxcError | null {
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object' && 'error' in parsed) {
+        const env = parsed.error;
+        if (env && typeof env.code === 'string' && typeof env.message === 'string') {
+          return mxcErrorFromCode(env.code, env.message, env.details);
+        }
+      }
+    } catch {
+      // Not valid JSON on this line, continue scanning.
+    }
+  }
+  return null;
 }

@@ -580,5 +580,19 @@ fn main() {
     if !response.standard_err.is_empty() {
         eprint!("{}", response.standard_err);
     }
+
+    // Emit a structured JSON error envelope on stderr for SDK consumption
+    // when the runner produced an error message (one-shot flows only).
+    if response.exit_code != 0 && !response.error_message.is_empty() {
+        if let Ok(json) = serde_json::to_string(&serde_json::json!({
+            "error": {
+                "code": "backend_error",
+                "message": response.error_message,
+            }
+        })) {
+            eprintln!("{json}");
+        }
+    }
+
     process::exit(response.exit_code);
 }

@@ -55,6 +55,8 @@ pub mod diagnostic;
 #[cfg(target_os = "windows")]
 pub mod base_container_runner;
 #[cfg(target_os = "windows")]
+pub mod launch_diagnostics;
+#[cfg(target_os = "windows")]
 pub mod sandbox_tracking;
 
 // Isolation Session (IsoEnvBroker Session API) support

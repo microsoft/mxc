@@ -580,6 +580,7 @@ impl Default for AppContainerScriptRunner {
 impl ScriptRunner for AppContainerScriptRunner {
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         use crate::filesystem_bfs::FileSystemBfsManager;
+        use crate::launch_diagnostics::{diagnose_launch_failure, format_diagnostic};
         use crate::network_manager::NetworkManager;
 
         // Apply experimental features when flag is set
@@ -633,12 +634,39 @@ impl ScriptRunner for AppContainerScriptRunner {
             }
         }
 
-        let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.run_internal(request, logger)
         })) {
             Ok(r) => r,
             Err(_) => ScriptResponse::error("Unknown error during script execution."),
         };
+
+        // Post-failure diagnostics: if the child failed, check for known
+        // environment issues and enrich the error message with actionable
+        // guidance.
+        if response.exit_code != 0 {
+            let bare_exe =
+                std::path::Path::new(request.script_code.split_whitespace().next().unwrap_or(""));
+            let resolved_exe = crate::launch_diagnostics::resolve_exe_on_path(bare_exe);
+            if let Some(diag) = diagnose_launch_failure(
+                &resolved_exe,
+                &request.policy.readonly_paths,
+                Some(response.exit_code as u32),
+            ) {
+                let diagnostic_text = format_diagnostic(&diag);
+                logger.log_line(&format!(
+                    "Error: Launch diagnostic [{}]: {}",
+                    diag.kind, diag.message
+                ));
+                logger.log_line(&format!("Error: Remediation: {}", diag.remediation));
+                if response.error_message.is_empty() {
+                    response.error_message = diagnostic_text.trim().to_string();
+                } else {
+                    response.error_message.push_str(&diagnostic_text);
+                }
+                response.standard_err.push_str(&diagnostic_text);
+            }
+        }
 
         network_manager.stop_all(!request.lifecycle.preserve_policy, logger);
         if bfs_manager.configured() && !request.lifecycle.preserve_policy {

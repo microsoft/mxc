@@ -22,6 +22,7 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
+use crate::launch_diagnostics::{diagnose_launch_failure, format_diagnostic};
 use crate::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
@@ -598,10 +599,30 @@ impl ScriptRunner for BaseContainerRunner {
                      Use schema version '0.4.0-alpha' to fall back to the AppContainer backend.",
                 );
             }
-            return ScriptResponse::error(&format!(
-                "Experimental_CreateProcessInSandbox failed: {err:?}"
-            ));
+            let bare_exe =
+                std::path::Path::new(request.script_code.split_whitespace().next().unwrap_or(""));
+            let resolved_exe = crate::launch_diagnostics::resolve_exe_on_path(bare_exe);
+            let mut msg = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
+            if let Some(diag) =
+                diagnose_launch_failure(&resolved_exe, &request.policy.readonly_paths, None)
+            {
+                let _ = writeln!(
+                    logger,
+                    "Error: Launch diagnostic [{}]: {}",
+                    diag.kind, diag.message
+                );
+                let _ = writeln!(logger, "Error: Remediation: {}", diag.remediation);
+                msg.push_str(&format_diagnostic(&diag));
+            }
+            return ScriptResponse::error(&msg);
         }
+
+        // Helper: resolve exe path from the command line for post-exit diagnostics.
+        let resolved_exe = {
+            let bare =
+                std::path::Path::new(request.script_code.split_whitespace().next().unwrap_or(""));
+            crate::launch_diagnostics::resolve_exe_on_path(bare)
+        };
 
         let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
 
@@ -654,11 +675,33 @@ impl ScriptRunner for BaseContainerRunner {
         // Stop the builtin test proxy if it was started.
         self.proxy_coordinator.stop(logger);
 
+        // Post-failure diagnostics: if the child failed, check for known
+        // environment issues and enrich the error message.
+        let mut error_message = String::new();
+        let mut standard_err = String::new();
+        if exit_code != 0 {
+            if let Some(diag) = diagnose_launch_failure(
+                &resolved_exe,
+                &request.policy.readonly_paths,
+                Some(exit_code),
+            ) {
+                let _ = writeln!(
+                    logger,
+                    "Error: Launch diagnostic [{}]: {}",
+                    diag.kind, diag.message
+                );
+                let _ = writeln!(logger, "Error: Remediation: {}", diag.remediation);
+                let diagnostic_text = format_diagnostic(&diag);
+                error_message = diagnostic_text.trim().to_string();
+                standard_err = diagnostic_text;
+            }
+        }
+
         ScriptResponse {
             exit_code: exit_code as i32,
             standard_out: String::new(),
-            standard_err: String::new(),
-            error_message: String::new(),
+            standard_err,
+            error_message,
         }
     }
 }
