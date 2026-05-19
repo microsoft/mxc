@@ -15,10 +15,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use wxc_e2e_tests::{
-    assert_exit, assert_success, assert_success_or_skip_missing_prerequisite, examples_dir,
-    find_binary, has_daemon, has_hyperlight_snapshot, has_nanvix_binaries, has_test_driver,
-    has_windows_sandbox_feature, has_wxc_exe, repo_root, run_test_driver, run_wxc_config,
-    run_wxc_state_aware, test_configs_dir, TempDirs,
+    assert_exit, assert_pwsh, assert_python, assert_success,
+    assert_success_or_skip_missing_prerequisite, examples_dir, find_binary, has_daemon,
+    has_hyperlight_snapshot, has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature,
+    has_wxc_exe, repo_root, run_test_driver, run_wxc_config, run_wxc_state_aware, test_configs_dir,
+    TempDirs,
 };
 
 static HAS_WXC_EXE: OnceLock<bool> = OnceLock::new();
@@ -148,6 +149,7 @@ fn test_processcontainer_basic() {
     if !cached_has_wxc_exe() {
         return;
     }
+    assert_python();
     with_test_lock(processcontainer_basic);
 }
 
@@ -157,6 +159,7 @@ fn test_processcontainer_lpac() {
     if !cached_has_wxc_exe() {
         return;
     }
+    assert_python();
     with_test_lock(processcontainer_lpac);
 }
 
@@ -166,6 +169,7 @@ fn test_filesystem_bfs() {
     if !cached_has_wxc_exe() {
         return;
     }
+    assert_python();
     with_test_lock(filesystem_bfs);
 }
 
@@ -175,6 +179,7 @@ fn test_filesystem_bfs_readonly() {
     if !cached_has_wxc_exe() {
         return;
     }
+    assert_python();
     with_test_lock(filesystem_bfs_readonly);
 }
 
@@ -184,6 +189,7 @@ fn test_filesystem_bfs_spaces() {
     if !cached_has_wxc_exe() {
         return;
     }
+    assert_python();
     with_test_lock(filesystem_bfs_spaces);
 }
 
@@ -193,6 +199,7 @@ fn test_pwsh_setlocation() {
     if !cached_has_wxc_exe() {
         return;
     }
+    assert_pwsh();
     with_test_lock(pwsh_setlocation);
 }
 
@@ -265,6 +272,7 @@ fn test_on_repeat() {
     if !cached_has_wxc_exe() {
         return;
     }
+    assert_python();
 
     with_test_lock(|| {
         for pass in 1..=10 {

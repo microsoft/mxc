@@ -122,6 +122,50 @@ popd
 
 echo.
 echo Build complete.
+
+:: Non-blocking prerequisite check for E2E tests.
+:: We check whether the *first* python.exe in PATH is the user's App Execution
+:: Alias reparse point at %LOCALAPPDATA%\Microsoft\WindowsApps\python.exe.
+:: When that alias resolves first, sandbox containers cannot launch python.exe
+:: (CreateProcessW returns 0x80070057).
+echo.
+echo === Checking E2E test prerequisites ===
+set "PREREQ_WARN=0"
+
+:: Check Python is available and first match is not the App Execution Alias
+where python.exe >nul 2>&1
+if errorlevel 1 (
+    echo   WARNING: python.exe not found. E2E tests require a system-wide Python install.
+    set "PREREQ_WARN=1"
+) else (
+    for /f "tokens=*" %%P in ('where python.exe') do (
+        if /i "%%P"=="%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe" (
+            echo   WARNING: python.exe first resolves to an App Execution Alias.
+            echo            The alias reparse point cannot be launched inside sandbox containers.
+            set "PREREQ_WARN=1"
+        )
+        goto :python_check_done
+    )
+)
+:python_check_done
+
+:: Check pwsh.exe exists at the expected path used by test configs
+if not exist "C:\Program Files\PowerShell\7\pwsh.exe" (
+    echo   WARNING: PowerShell 7 not found at C:\Program Files\PowerShell\7\pwsh.exe.
+    echo            pwsh sandbox tests will fail.
+    set "PREREQ_WARN=1"
+)
+
+if "%PREREQ_WARN%"=="0" (
+    echo   All E2E test prerequisites met.
+) else (
+    echo.
+    echo   To install Python and disable the alias, run from an elevated PowerShell prompt:
+    echo     .\scripts\setup-test-prereqs.ps1
+)
+
+:done
+
 exit /b 0
 
 :error
