@@ -72,7 +72,7 @@ export function resolveBinaryAndCommonArgs(
   options: SandboxSpawnOptions,
 ): { executablePath: string; args: string[] } {
   const platformSupport = getPlatformSupport();
-  if (!platformSupport.isSupported) {
+  if (!platformSupport.isSupported && !options.skipPlatformCheck) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
@@ -146,7 +146,7 @@ export function resolveExecutableAndArgs(
   const platformSupport = getPlatformSupport();
   const isExperimental = !!config.containment &&
     (ExperimentalBackends as readonly string[]).includes(config.containment);
-  if (!platformSupport.isSupported && !isExperimental) {
+  if (!platformSupport.isSupported && !isExperimental && !options.skipPlatformCheck) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
