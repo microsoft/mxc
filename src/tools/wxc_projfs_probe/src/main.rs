@@ -50,6 +50,7 @@ struct CliArgs {
     rw: Vec<PathBuf>,
     ro: Vec<PathBuf>,
     check_dirs: Vec<String>,
+    write_probes: Vec<String>,
     no_ac: bool,
     keep_root: bool,
 }
@@ -58,6 +59,7 @@ fn parse_args() -> CliArgs {
     let mut rw = Vec::new();
     let mut ro = Vec::new();
     let mut check_dirs = Vec::new();
+    let mut write_probes = Vec::new();
     let mut no_ac = false;
     let mut keep_root = false;
 
@@ -75,6 +77,10 @@ fn parse_args() -> CliArgs {
             }
             "--check-dir" if i + 1 < args.len() => {
                 check_dirs.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--write-probe" if i + 1 < args.len() => {
+                write_probes.push(args[i + 1].clone());
                 i += 2;
             }
             "--no-ac" => {
@@ -96,6 +102,7 @@ fn parse_args() -> CliArgs {
         rw,
         ro,
         check_dirs,
+        write_probes,
         no_ac,
         keep_root,
     }
@@ -226,6 +233,7 @@ fn main() -> ExitCode {
             &virt_root,
             &ac_sid_string,
             &args.check_dirs,
+            &args.write_probes,
         ) {
             Ok(child_report) => {
                 eprintln!(

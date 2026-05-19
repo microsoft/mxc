@@ -51,7 +51,10 @@ use windows::Win32::Storage::ProjectedFileSystem::{
     PrjFreeAlignedBuffer, PrjMarkDirectoryAsPlaceholder, PrjStartVirtualizing, PrjStopVirtualizing,
     PrjWriteFileData, PrjWritePlaceholderInfo, PRJ_CALLBACKS, PRJ_CALLBACK_DATA,
     PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN, PRJ_DIR_ENTRY_BUFFER_HANDLE, PRJ_FILE_BASIC_INFO,
-    PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT, PRJ_PLACEHOLDER_INFO,
+    PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT, PRJ_NOTIFICATION, PRJ_NOTIFICATION_FILE_PRE_CONVERT_TO_FULL,
+    PRJ_NOTIFICATION_MAPPING, PRJ_NOTIFICATION_PARAMETERS, PRJ_NOTIFICATION_PRE_DELETE,
+    PRJ_NOTIFICATION_PRE_RENAME, PRJ_NOTIFY_FILE_PRE_CONVERT_TO_FULL, PRJ_NOTIFY_PRE_DELETE,
+    PRJ_NOTIFY_PRE_RENAME, PRJ_NOTIFY_TYPES, PRJ_PLACEHOLDER_INFO, PRJ_STARTVIRTUALIZING_OPTIONS,
 };
 
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
@@ -520,8 +523,57 @@ unsafe extern "system" fn cb_get_file_data(
 }
 
 // -------------------------------------------------------------------------
-// Public driver
+// Notification callback — step 2 RO enforcement
 // -------------------------------------------------------------------------
+//
+// We subscribe globally (entire virt root) to the three veto-able write
+// notifications:
+//
+//   - PRE_CONVERT_TO_FULL  ←  modify-existing on a placeholder
+//   - PRE_DELETE           ←  delete on a placeholder
+//   - PRE_RENAME           ←  rename of a placeholder
+//
+// On callback, we resolve the path against the policy. If it lands in an
+// RO branch, return E_ACCESSDENIED to veto. RW branches and out-of-policy
+// paths fall through to S_OK so the kernel handles them normally.
+//
+// Known limitation (called out in the step-2 findings doc): there is no
+// PRE_NEW_FILE_CREATED notification, so the AC can still *create* new
+// files in an RO branch. The production fix is to attach a DACL on the
+// branch's placeholder directory via PRJ_PLACEHOLDER_INFO_1 that denies
+// FILE_ADD_FILE to the AC SID. Out of scope for this spike commit.
+
+const E_ACCESSDENIED: HRESULT = HRESULT(0x8007_0005u32 as i32);
+
+unsafe extern "system" fn cb_notification(
+    callback_data: *const PRJ_CALLBACK_DATA,
+    _is_directory: bool,
+    notification: PRJ_NOTIFICATION,
+    _destination_filename: PCWSTR,
+    _operation_parameters: *mut PRJ_NOTIFICATION_PARAMETERS,
+) -> HRESULT {
+    // Only the three veto-able notifications are interesting; everything
+    // else slips through.
+    if notification != PRJ_NOTIFICATION_FILE_PRE_CONVERT_TO_FULL
+        && notification != PRJ_NOTIFICATION_PRE_DELETE
+        && notification != PRJ_NOTIFICATION_PRE_RENAME
+    {
+        return S_OK;
+    }
+
+    let data = &*callback_data;
+    let rel = pcwstr_to_string(data.FilePathName);
+
+    let st = state().lock().unwrap();
+    match resolve(&st.policy, &rel) {
+        Resolved::Host {
+            mode: BranchMode::ReadOnly,
+            ..
+        } => E_ACCESSDENIED,
+        _ => S_OK,
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct VirtStartReport {
@@ -575,12 +627,26 @@ pub(crate) fn start(
         GetPlaceholderInfoCallback: Some(cb_get_placeholder_info),
         GetFileDataCallback: Some(cb_get_file_data),
         QueryFileNameCallback: None,
-        NotificationCallback: None,
+        NotificationCallback: Some(cb_notification),
         CancelCommandCallback: None,
     };
 
+    // One global notification mapping subscribing to the three veto-able
+    // write events across the entire virt root. The empty NotificationRoot
+    // means "from the root down."
+    let empty_root = to_wide_z("");
+    let mut mappings = [PRJ_NOTIFICATION_MAPPING {
+        NotificationBitMask: PRJ_NOTIFY_TYPES(
+            PRJ_NOTIFY_FILE_PRE_CONVERT_TO_FULL.0 | PRJ_NOTIFY_PRE_DELETE.0 | PRJ_NOTIFY_PRE_RENAME.0,
+        ),
+        NotificationRoot: PCWSTR(empty_root.as_ptr()),
+    }];
+    let mut options = PRJ_STARTVIRTUALIZING_OPTIONS::default();
+    options.NotificationMappings = mappings.as_mut_ptr();
+    options.NotificationMappingsCount = mappings.len() as u32;
+
     let ctx = unsafe {
-        PrjStartVirtualizing(PCWSTR(target.as_ptr()), &callbacks, None, None)
+        PrjStartVirtualizing(PCWSTR(target.as_ptr()), &callbacks, None, Some(&options))
             .map_err(|e| format!("PrjStartVirtualizing: {e} (0x{:08x})", e.code().0))?
     };
 

@@ -33,9 +33,9 @@ use windows::Win32::Foundation::{
     INVALID_HANDLE_VALUE,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileAttributesW, ReadFile,
-    FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES,
-    OPEN_EXISTING, WIN32_FIND_DATAW,
+    CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileAttributesW, ReadFile, WriteFile,
+    CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, WIN32_FIND_DATAW,
 };
 
 #[derive(Debug, Default, Serialize)]
@@ -50,6 +50,8 @@ struct ChildReport {
     read_inner: Option<ReadResult>,
     /// Step-2-style per-branch matrix probes.
     per_dir: Vec<DirProbe>,
+    /// Step-2c write probes.
+    write_probes: Vec<WriteProbe>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -95,11 +97,36 @@ struct ListResult {
     failing_call: Option<&'static str>,
 }
 
+#[derive(Debug, Serialize)]
+struct WriteProbe {
+    /// Branch name (relative to arg_root).
+    branch: String,
+    /// Result of opening an existing file (`readme.txt`) for write +
+    /// writing one byte. Demonstrates the "modify existing placeholder"
+    /// path that ProjFS's PRE_CONVERT_TO_FULL notification can veto.
+    modify_existing: WriteOpResult,
+    /// Result of creating a new file (`probe-write-<pid>.txt`) under the
+    /// branch and writing one byte. Documents the new-file-in-RO-branch
+    /// limitation called out in virt.rs::cb_notification.
+    create_new: WriteOpResult,
+}
+
+#[derive(Debug, Serialize)]
+struct WriteOpResult {
+    /// "SUCCEEDED" | "DENIED" | "OTHER_ERROR"
+    state: &'static str,
+    /// What we tried to open/create.
+    target: String,
+    last_error: Option<u32>,
+    failing_call: Option<&'static str>,
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut root: Option<PathBuf> = None;
     let mut pipe: Option<String> = None;
     let mut check_dirs: Vec<String> = Vec::new();
+    let mut write_probes: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -113,6 +140,10 @@ fn main() {
             }
             "--check-dir" if i + 1 < args.len() => {
                 check_dirs.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--write-probe" if i + 1 < args.len() => {
+                write_probes.push(args[i + 1].clone());
                 i += 2;
             }
             _ => i += 1,
@@ -129,7 +160,7 @@ fn main() {
         ..Default::default()
     };
 
-    if check_dirs.is_empty() {
+    if check_dirs.is_empty() && write_probes.is_empty() {
         // Step-1 backward-compat mode.
         report.enum_root = Some(enumerate(&root));
         report.read_hello = Some(read_file(&root.join("hello.txt")));
@@ -138,6 +169,9 @@ fn main() {
     } else {
         for d in &check_dirs {
             report.per_dir.push(probe_dir(&root, d));
+        }
+        for b in &write_probes {
+            report.write_probes.push(probe_write(&root, b));
         }
     }
 
@@ -204,6 +238,109 @@ fn probe_dir(root: &std::path::Path, name: &str) -> DirProbe {
         name: name.to_string(),
         exist: probe_exist(root, name),
         list: probe_list(root, name),
+    }
+}
+
+fn probe_write(root: &std::path::Path, branch: &str) -> WriteProbe {
+    let modify_target = root.join(branch).join("readme.txt");
+    let create_target = root
+        .join(branch)
+        .join(format!("probe-write-{}.txt", std::process::id()));
+    WriteProbe {
+        branch: branch.to_string(),
+        modify_existing: do_modify(&modify_target),
+        create_new: do_create(&create_target),
+    }
+}
+
+/// Open an existing file with GENERIC_WRITE + write one byte. The
+/// `OPEN_EXISTING` disposition is the right one for "modify existing
+/// placeholder" — that's the path PRE_CONVERT_TO_FULL gates.
+fn do_modify(path: &std::path::Path) -> WriteOpResult {
+    let w = to_wide_z(&path.to_string_lossy());
+    let h = unsafe {
+        CreateFileW(
+            PCWSTR(w.as_ptr()),
+            GENERIC_WRITE.0,
+            FILE_SHARE_MODE(0), // no sharing
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    };
+    let handle = match h {
+        Ok(h) if h != INVALID_HANDLE_VALUE => h,
+        _ => {
+            return classify_write_failure(path, "CreateFileW", unsafe { GetLastError().0 });
+        }
+    };
+
+    let payload = b"X";
+    let mut written = 0u32;
+    let r = unsafe { WriteFile(handle, Some(payload), Some(&mut written), None) };
+    let last_err = unsafe { GetLastError().0 };
+    let _ = unsafe { CloseHandle(handle) };
+
+    if r.is_err() {
+        return classify_write_failure(path, "WriteFile", last_err);
+    }
+    WriteOpResult {
+        state: "SUCCEEDED",
+        target: path.to_string_lossy().into_owned(),
+        last_error: None,
+        failing_call: None,
+    }
+}
+
+/// Create a brand-new file (CREATE_NEW) under the branch. See the comment
+/// at `cb_notification` in virt.rs — new-file creation in an RO branch is
+/// the known spike-scope limitation.
+fn do_create(path: &std::path::Path) -> WriteOpResult {
+    let w = to_wide_z(&path.to_string_lossy());
+    let h = unsafe {
+        CreateFileW(
+            PCWSTR(w.as_ptr()),
+            GENERIC_WRITE.0,
+            FILE_SHARE_MODE(0),
+            None,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    };
+    let handle = match h {
+        Ok(h) if h != INVALID_HANDLE_VALUE => h,
+        _ => {
+            return classify_write_failure(path, "CreateFileW", unsafe { GetLastError().0 });
+        }
+    };
+
+    let payload = b"created\n";
+    let mut written = 0u32;
+    let r = unsafe { WriteFile(handle, Some(payload), Some(&mut written), None) };
+    let last_err = unsafe { GetLastError().0 };
+    let _ = unsafe { CloseHandle(handle) };
+
+    if r.is_err() {
+        return classify_write_failure(path, "WriteFile", last_err);
+    }
+    WriteOpResult {
+        state: "SUCCEEDED",
+        target: path.to_string_lossy().into_owned(),
+        last_error: None,
+        failing_call: None,
+    }
+}
+
+fn classify_write_failure(path: &std::path::Path, call: &'static str, err: u32) -> WriteOpResult {
+    // ERROR_ACCESS_DENIED = 5
+    let state = if err == 5 { "DENIED" } else { "OTHER_ERROR" };
+    WriteOpResult {
+        state,
+        target: path.to_string_lossy().into_owned(),
+        last_error: Some(err),
+        failing_call: Some(call),
     }
 }
 

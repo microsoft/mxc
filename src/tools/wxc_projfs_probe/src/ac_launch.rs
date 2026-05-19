@@ -66,6 +66,7 @@ pub(crate) fn run_child_in_appcontainer(
     virt_root: &Path,
     ac_sid_string: &str,
     check_dirs: &[String],
+    write_probes: &[String],
 ) -> Result<AcChildReport, String> {
     let pipe_name = format!(
         "\\\\.\\pipe\\mxc-projfs-probe-{}-{}",
@@ -80,7 +81,14 @@ pub(crate) fn run_child_in_appcontainer(
 
     // 2. Spawn the AC child.
     let mut errors = Vec::new();
-    let spawn_outcome = spawn_ac(child_exe, virt_root, &pipe_name, ac_sid_string, check_dirs);
+    let spawn_outcome = spawn_ac(
+        child_exe,
+        virt_root,
+        &pipe_name,
+        ac_sid_string,
+        check_dirs,
+        write_probes,
+    );
     let (process_handle, thread_handle) = match spawn_outcome {
         Ok(h) => h,
         Err(e) => {
@@ -259,6 +267,7 @@ fn spawn_ac(
     pipe_name: &str,
     ac_sid_string: &str,
     check_dirs: &[String],
+    write_probes: &[String],
 ) -> Result<(HANDLE, HANDLE), String> {
     // Parse the AC SID string back to a binary SID for SECURITY_CAPABILITIES.
     let sid_w = to_wide_z(ac_sid_string);
@@ -320,10 +329,13 @@ fn spawn_ac(
         pipe = pipe_name,
     );
     for d in check_dirs {
-        // Sanitize: no embedded quotes, no whitespace surprises. The matrix
-        // test only ever passes plain ASCII names (rw/ro/denied/control).
         cmdline.push_str(" --check-dir \"");
         cmdline.push_str(d);
+        cmdline.push('"');
+    }
+    for b in write_probes {
+        cmdline.push_str(" --write-probe \"");
+        cmdline.push_str(b);
         cmdline.push('"');
     }
     let mut cmdline_w = to_wide_z(&cmdline);
