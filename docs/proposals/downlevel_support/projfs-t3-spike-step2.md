@@ -157,13 +157,11 @@ Carrying forward from the step-1 deferred list:
   spike's purpose is the isolation question; write-back is the
   integration question.
 - **New-file-in-RO enforcement.** Tracked above; needs placeholder
-  DACL via `PRJ_PLACEHOLDER_INFO_1`.
+  DACL via `PRJ_PLACEHOLDER_INFO_1`. The required ACE shape was settled
+  empirically (see "Deny-ACE-for-AC-SID semantics" section below).
 - **Performance characterization.** No measurements yet. Step 3 will
   compare against the mxc.green `Measure-AclIdempotence.ps1` numbers
   (822 ms cold / 20 ms warm on a 332k-file tree).
-- **Path remapping for hardcoded host paths.** The AC sees the projected
-  path (`…\LocalCache\…\<branch>\foo`), not the original
-  `C:\Users\…\foo`. Design call for step 3.
 - **Pre-25H2 host coverage.** Only 25H2 (build 26200) tested. Re-run
   required on 21H2 / 22H2 / 23H2 testbeds before the supported-floor
   story is complete.
@@ -187,6 +185,195 @@ In addition to the five from step 1:
    path so we don't accidentally dereference. Documented in
    `virt.rs::collect_host_children`.
 
+## Deny-ACE-for-AC-SID semantics (empirical)
+
+The original write-up of this section claimed Deny ACEs targeting AC SIDs
+do not enforce. That claim was wrong, and the wrongness was the user's
+question that drove this whole investigation. The corrected, empirically
+grounded picture follows. Harness: `test_scripts/Test-DenyAceSemantics.ps1`.
+
+Five DACL variants × two AC modes (regular and LPAC opt-out via
+`PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY` with
+`PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT`), Win11 25H2
+build 26200, non-admin user:
+
+| Variant DACL on the host file | Regular AC | LPAC AC |
+|---|---|---|
+| **A** — SY:F BA:F user:F + `(A;;FR;;;<ac-sid>)` | SUCCEEDED | SUCCEEDED |
+| **B** — A + `(D;;FA;;;<ac-sid>)` | **DENIED (5)** | **DENIED (5)** |
+| **C** — SY:F BA:F user:F (no AC grant) | DENIED (5) | DENIED (5) |
+| **D** — SY:F BA:F user:F + `(A;;FR;;;AAP)` + `(D;;FA;;;<ac-sid>)` | **SUCCEEDED** | DENIED (5) |
+| **E** — SY:F BA:F user:F + `(A;;FR;;;AAP)` only | SUCCEEDED | DENIED (5) |
+
+### Takeaways
+
+1. **B confirms (against my earlier verbal claim) that Deny ACEs for
+   specific AppContainer SIDs DO enforce in the AC access check.** Both
+   regular and LPAC. The canonical-order processing (Deny ACE evaluated
+   before same-SID Allow ACE) wins.
+
+2. **D is the unanticipated finding worth flagging on mxc.green.** When
+   the file's DACL also carries an `ALL APPLICATION PACKAGES` Allow
+   grant, a same-SID Deny ACE *does not* override it on a regular
+   AppContainer. The AAP grant reaches the AC via the AC's implicit AAP
+   membership, and the kernel grants access. Result: `add_deny_aces` on
+   a path that inherits AAP grants (e.g. anything under a parent
+   directory that ever got an `ALL APPLICATION PACKAGES:(F)` ACE — which
+   includes the AC's own profile folder, the user's profile under
+   certain Windows installs, and several SDK-installed locations) is a
+   paper guarantee for *normal* AppContainers. It works only if the
+   target lacks any inherited AAP grant.
+
+3. **E + E-LPAC confirms the LPAC opt-out is wired correctly.** AAP
+   only grant: regular AC reads through it, LPAC AC does not.
+
+4. **D under LPAC works.** Combining LPAC opt-out with a specific-SID
+   Deny ACE gives clean enforcement even on paths inheriting AAP
+   grants. This is a real but currently-unused deployment option for
+   MXC (we don't apply LPAC today).
+
+### Implication for the ProjFS-T3 RO-create-new fix
+
+We control the placeholder DACL completely via
+`PRJ_PLACEHOLDER_INFO_1::OffsetToSecurityDescriptor` and there is *no
+inheritance* into our placeholders. The Deny-ACE finding from D
+therefore doesn't bite us: as long as we don't *also* grant AAP on the
+placeholder, a `(D;;FA;;;<ac-sid>)` ACE enforces. Equivalently, a
+selective-Allow that omits `FILE_ADD_FILE` works. Either shape closes
+the RO-create-new cell.
+
+### Implication for existing T3-DACL in mxc.green
+
+`filesystem_dacl::add_deny_aces` (`mxc.green:user/gudge/downlevel_phase6_t3_enumeration`)
+relies on Deny ACEs for the specific AC SID on **host** paths, where
+the DACL inherits from wherever the user happens to point it. The
+implementation is correct **only when target paths do not inherit AAP
+grants** — true for arbitrary user-controlled paths, *not* true for
+paths under several common locations. Concrete cases that break:
+
+- Anything under the AC profile root
+  `%LOCALAPPDATA%\Packages\<profile>\` — the profile root carries
+  `(A;OICI;FA;;;<this-ac-sid>)` *plus*, on some installs, AAP grants
+  via parent inheritance.
+- Several SDK-installed directories that carry `(A;OICI;0x1200a9;;;AC)`
+  by design so that AppContainer apps can find their resources.
+
+For a comprehensive fix, mxc.green's `add_deny_aces` should either
+(a) strip AAP grants on the target before adding the Deny, or
+(b) supplement the Deny with a Deny for the AAP SID itself, or
+(c) document the limitation and accept that paths inheriting AAP can't
+be denied via this mechanism alone.
+
+This is a separate finding to log against the existing T3 design, not
+a regression on the ProjFS-T3 spike.
+
+## Path remapping in practice
+
+Question that comes up immediately when explaining the design: if I
+project `D:\git\…\mxc.yellow` into the AC, where does the AC see it?
+Concrete answer using a real run of `wxc-projfs-probe`:
+
+```
+--rw  D:\git\microsoft\mxc\mxc.yellow                  (or the C:\etc\... junction;
+                                                        Policy::from_flags canonicalizes)
+```
+
+`Policy::from_flags` runs `fs::canonicalize` on the host path, then
+takes the last component as the branch name. The resulting policy:
+
+```text
+branch name = "mxc.yellow"
+host root   = \\?\D:\git\microsoft\mxc\mxc.yellow
+mode        = ReadWrite
+```
+
+What the AC child sees from `FindFirstFile` on the projected branch
+root (real run, captured in step 1d/step 2 commits):
+
+```text
+.azure-pipelines, .cargo, .editorconfig, .git, .gitattributes, .github,
+.gitignore, build-mac.sh, build.bat, build.sh, CONTRIBUTING.md, docs,
+examples, external, LICENSE.md, playground, README.md, schemas, scripts,
+sdk, SECURITY.md, src, SUPPORT.md, test_configs, test_scripts, tools,
+TRADEMARKS.md
+```
+
+Path remap rule (the entire mapping rule, no caveats):
+
+```text
+<host_root>\<rel-path-from-host_root>
+  ↦  <projection_root>\<branch_name>\<rel-path-from-host_root>
+```
+
+with `<projection_root>` = `%LOCALAPPDATA%\Packages\<ac-profile>\AC\projfs-probe-<run-id>`.
+
+### Concrete example mappings
+
+| Host path | What the AC sees |
+|---|---|
+| `D:\git\microsoft\mxc\mxc.yellow\src\Cargo.toml` | `…\projfs-probe-<id>\mxc.yellow\src\Cargo.toml` |
+| `D:\git\microsoft\mxc\mxc.yellow\docs\schema.md` | `…\projfs-probe-<id>\mxc.yellow\docs\schema.md` |
+| `D:\git\microsoft\mxc\mxc.yellow\.git\HEAD` | `…\projfs-probe-<id>\mxc.yellow\.git\HEAD` |
+| `D:\git\microsoft\mxc\mxc.yellow\.github\copilot-instructions.md` | `…\projfs-probe-<id>\mxc.yellow\.github\copilot-instructions.md` |
+
+### What works for an agent script
+
+PowerShell-style usage running inside the AC with cwd set to
+`<projection_root>\mxc.yellow`:
+
+- `git status`, `git log`, `git checkout` — `git` works on relative
+  paths from cwd and reads/writes `.git\…` through the projection.
+- `cargo build`, `cargo test`, `cargo check` — same.
+- `npm install`, `npm test`; `python script.py`; `pwsh ./build.ps1` —
+  same. Anything driven from cwd with relative paths is invariant under
+  the remap.
+- Filesystem walks: `Get-ChildItem -Recurse`, `git ls-files`, IDE
+  indexing — work, because the load-bearing finding from step 1d is
+  that `FindFirstFile` succeeds on the projection from inside the AC.
+- `$PWD`, `%CD%`, `[System.IO.Path]::GetFullPath('foo')` resolve to
+  paths inside the projection. Whatever they produce is internally
+  consistent for any process inside the AC.
+
+### What does not work
+
+- Hardcoded absolute host paths. `cd D:\git\microsoft\mxc\mxc.yellow`
+  from inside the AC: the path does not exist in the AC's view of the
+  world. No projection there; AppContainer baseline doesn't grant
+  it. `Test-Path 'D:\git\microsoft\mxc\mxc.yellow'` from inside the AC
+  returns `$false`. This applies to any script that resolves a path
+  through a "well known" out-of-policy location.
+- Cross-process path interchange with processes running *outside* the
+  AC. An AC tool that emits `$PWD\result.json` and expects a host-side
+  orchestrator to open the same string by name: the host doesn't know
+  about the projection path. (The host can resolve it because
+  `%LOCALAPPDATA%\Packages\…` exists for the launching user, but the
+  semantics are surprising.)
+- Stable absolute paths across runs. The current spike uses a per-run
+  GUID-suffixed leaf in the projection root to dodge placeholder
+  cleanup. So the projection path is *different on every run*. An
+  agent script that records its working tree path in a log and expects
+  the same path next run will be surprised.
+
+### Design call for step 3
+
+The per-run leaf is a **spike-only** workaround. Step 3 must choose
+one of:
+
+1. **Stable leaf name + proper placeholder cleanup.** Use a fixed
+   subdir like `<projection_root>\projection\` and on the next run
+   walk it via `PrjGetOnDiskFileState` + delete placeholder /
+   hydrated / tombstone state explicitly. Production-quality.
+   Trade-off: requires correct cleanup; cost ~60 LOC + tests.
+2. **Per-run leaf + `MXC_POLICY_ROOT` env var.** Agent script
+   discovers the path at startup. No cleanup cost; concurrent runs
+   trivially isolated. Trade-off: the path is "different every run"
+   which surprises some tooling.
+
+Either makes paths inside the AC stable enough for agent scripts to
+work. Hardcoded absolute host paths (e.g. `D:\git\…`) inside the AC
+remain unsupported by design — same as DACL-T3 (and any other Windows
+filesystem sandbox).
+
 ## Recommendation
 
 Proceed to step 3: write the design doc that proposes **replacing** DACL-T3
@@ -205,4 +392,5 @@ cd test_scripts
 .\Test-ProjfsMatrix.ps1 -IncludeJunction   # also exercises reparse refusal
 .\Test-ProjfsMatrix.ps1 -Json              # emit raw JSON for diffing
 .\Test-ProjfsMatrix.ps1 -KeepArtifacts     # keep scratch tree + virt root
+.\Test-DenyAceSemantics.ps1                # A-E variants × {regular, LPAC} matrix
 ```
