@@ -536,7 +536,19 @@ impl ScriptRunner for HyperlightScriptRunner {
             }
         };
 
-        match rt.run_code(&request.script_code) {
+        let result = if request.script_timeout > 0 {
+            let timeout =
+                std::time::Duration::from_millis(u64::from(request.script_timeout));
+            logger.log_line(&format!(
+                "hyperlight: timeout set to {}ms",
+                request.script_timeout
+            ));
+            rt.run_code_with_timeout(&request.script_code, timeout)
+        } else {
+            rt.run_code(&request.script_code)
+        };
+
+        match result {
             Ok(timing) => {
                 logger.log_line(&format!(
                     "hyperlight: run ok (restore={:.1}ms call={:.1}ms exit={})",
