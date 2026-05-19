@@ -537,8 +537,7 @@ impl ScriptRunner for HyperlightScriptRunner {
         };
 
         let result = if request.script_timeout > 0 {
-            let timeout =
-                std::time::Duration::from_millis(u64::from(request.script_timeout));
+            let timeout = std::time::Duration::from_millis(u64::from(request.script_timeout));
             logger.log_line(&format!(
                 "hyperlight: timeout set to {}ms",
                 request.script_timeout
