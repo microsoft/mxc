@@ -179,8 +179,8 @@ pub struct CapturedOutput {
 /// `CreateProcessW` rules — vulnerable to search-order attacks if the
 /// first token is a bare name.
 ///
-/// This is used by `FileSystemBfsManager` (for `bfscfg.exe`) and the test
-/// driver — anywhere we need to inspect process output rather than relay it.
+/// This is used by the test driver — anywhere we need to inspect
+/// process output rather than relay it.
 pub fn run_process_with_captured_output(
     application_name: Option<&str>,
     command_line: &str,

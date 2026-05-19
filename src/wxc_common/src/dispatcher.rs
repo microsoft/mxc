@@ -3,12 +3,12 @@
 
 //! BaseContainer-fallback tier dispatcher.
 //!
-//! Wires Phases 0–3 (telemetry, fallback detector, AppContainer modes,
-//! DACL manager) into a single entrypoint. Given a [`CodexRequest`], the
-//! dispatcher consults [`crate::fallback_detector::detect`] to choose
-//! between Tier 1 (BaseContainer), Tier 2 (AppContainer + BFS), or Tier 3
-//! (AppContainer + DACL), constructs the appropriate runner, and applies
-//! [`DaclManager`] augmentation when the chosen tier requires it.
+//! Wires the post-phase-4.5 fallback (telemetry, fallback detector,
+//! AppContainer runner, DACL manager) into a single entrypoint. Given a
+//! [`CodexRequest`], the dispatcher consults [`crate::fallback_detector::detect`]
+//! to choose between Tier 1 (BaseContainer) and Tier 3 (AppContainer +
+//! DACL), constructs the appropriate runner, and applies [`DaclManager`]
+//! augmentation when the chosen tier requires it.
 //!
 //! Filesystem-policy enforcement under T1 is delegated entirely to
 //! BaseContainer's own `Experimental_CreateProcessInSandbox` API
@@ -31,17 +31,16 @@
 //! # Performance
 //!
 //! Tier 1 has the lowest per-invocation cost: a single
-//! `BaseContainerRunner::new()`. Tier 2 with empty `denied_paths` is also
-//! near-free. The heavy paths are Tier 2 with deny-only and Tier 3, both
-//! of which stamp host-DACL ACEs via [`DaclManager`].
+//! `BaseContainerRunner::new()`. Tier 3 stamps host-DACL ACEs via
+//! [`DaclManager`].
 //!
 //! The DACL cost is roughly O(N) Win32 syscalls plus one state-file
-//! write per path in (Tier 3: `readwrite_paths` ∪ `readonly_paths` ∪
-//! `denied_paths`; Tier 2: `denied_paths`). The same number of syscalls
-//! is replayed in reverse on `Drop`. At the typical N (6–12 paths) this
-//! adds tens of milliseconds to both dispatch and shutdown; at larger N
-//! it scales linearly and can add hundreds of milliseconds on each side.
-//! SDK callers that spawn `wxc-exec` per task pay this cost on every
+//! write per path in `readwrite_paths` ∪ `readonly_paths` ∪
+//! `denied_paths`. The same number of syscalls is replayed in reverse
+//! on `Drop`. At the typical N (6–12 paths) this adds tens of
+//! milliseconds to both dispatch and shutdown; at larger N it scales
+//! linearly and can add hundreds of milliseconds on each side. SDK
+//! callers that spawn `wxc-exec` per task pay this cost on every
 //! invocation. Parent-directory ACE rollup and session-scoped
 //! [`DaclManager`] caching are tracked as follow-ups.
 //!
@@ -50,7 +49,7 @@
 
 use std::path::PathBuf;
 
-use crate::appcontainer_runner::{derive_sid_string, AppContainerScriptRunner, FilesystemMode};
+use crate::appcontainer_runner::{derive_sid_string, AppContainerScriptRunner};
 use crate::base_container_runner::BaseContainerRunner;
 use crate::error::WxcError;
 use crate::fallback_detector::{self, FallbackError, IsolationTier};
@@ -93,7 +92,7 @@ impl std::fmt::Display for DispatchError {
                 f,
                 "BaseContainer is unavailable on this system and DACL fallback is disabled \
                  (fallback.allowDaclMutation=false). Run on a system with the BaseContainer \
-                 API or bfscfg.exe, or set fallback.allowDaclMutation=true in your config."
+                 API, or set fallback.allowDaclMutation=true in your config."
             ),
             DispatchError::Fallback(FallbackError::WriteDacUnavailable { path, reason }) => {
                 write!(
@@ -103,11 +102,6 @@ impl std::fmt::Display for DispatchError {
                     path.display()
                 )
             }
-            DispatchError::Fallback(FallbackError::SystemRootUnresolved { reason }) => write!(
-                f,
-                "Could not resolve the Windows system directory while probing for bfscfg.exe \
-                 ({reason}). This indicates a corrupted or unsupported OS configuration."
-            ),
             DispatchError::Dacl(e) => write!(f, "Failed to apply DACL ACEs: {e}"),
             DispatchError::Sid(e) => write!(f, "Failed to derive AppContainer SID: {e}"),
         }
@@ -166,37 +160,9 @@ pub fn dispatch_with_fallback(request: &CodexRequest) -> Result<Dispatched, Disp
             let runner: Box<dyn ScriptRunner> = Box::new(BaseContainerRunner::new());
             (runner, None)
         }
-        IsolationTier::AppContainerBfs => {
-            // T2 only needs deny ACEs (BFS handles the rest in-runner)
-            // and only when `deniedPaths` is non-empty. Allocate the
-            // path Vec and derive the SID inside that branch so the
-            // common no-deny case skips both costs.
-            if request.policy.denied_paths.is_empty() {
-                let runner: Box<dyn ScriptRunner> = Box::new(
-                    AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs),
-                );
-                (runner, None)
-            } else {
-                let denied = paths_to_pathbufs(&request.policy.denied_paths);
-                let sid =
-                    derive_sid_string(&container_name(request)).map_err(DispatchError::Sid)?;
-                let mut mgr = DaclManager::new()?;
-                mgr.add_deny_aces(&sid, &denied)?;
-                // Hand the derived SID string to the runner so it does
-                // not re-run `ConvertSidToStringSidW` for the firewall
-                // principal-id lookup.
-                let runner: Box<dyn ScriptRunner> = Box::new(
-                    AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
-                        FilesystemMode::Bfs,
-                        sid,
-                    ),
-                );
-                (runner, Some(mgr))
-            }
-        }
         IsolationTier::AppContainerDacl => {
             // T3 always stamps grant ACEs (for readwrite/readonly paths)
-            // and optionally deny ACEs. Allocate per-arm so T1/T2 don't
+            // and optionally deny ACEs. Allocate per-arm so T1 doesn't
             // pay the cost.
             let readwrite = paths_to_pathbufs(&request.policy.readwrite_paths);
             let readonly = paths_to_pathbufs(&request.policy.readonly_paths);
@@ -207,12 +173,8 @@ pub fn dispatch_with_fallback(request: &CodexRequest) -> Result<Dispatched, Disp
             if !denied.is_empty() {
                 mgr.add_deny_aces(&sid, &denied)?;
             }
-            let runner: Box<dyn ScriptRunner> = Box::new(
-                AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
-                    FilesystemMode::Dacl,
-                    sid,
-                ),
-            );
+            let runner: Box<dyn ScriptRunner> =
+                Box::new(AppContainerScriptRunner::with_sid_string(sid));
             (runner, Some(mgr))
         }
     };
@@ -291,15 +253,6 @@ mod tests {
         );
     }
     #[test]
-    fn dispatch_t2_with_denied_paths_has_dacl() {
-        let _g = ForceTierGuard::set("appcontainer-bfs");
-        let (policy, _tmp) = policy_with_denied_temp();
-        let req = test_request(policy);
-        let d = dispatch_with_fallback(&req).expect("T2+deny dispatch should succeed");
-        assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
-        assert!(d.dacl_manager.is_some());
-    }
-    #[test]
     fn dispatch_t3_always_has_dacl() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let (policy, _tmp) = policy_with_rw_temp();
@@ -328,8 +281,7 @@ mod tests {
         // Forced decisions don't synthesize warnings, so trigger the real
         // chain with an unrecognized force value: the detector ignores it
         // and walks the probe chain, accumulating "BaseContainer API not
-        // present" or "bfscfg.exe not present" warnings as appropriate on
-        // the test machine.
+        // present" warnings as appropriate on the test machine.
         let _g = ForceTierGuard::set("not-a-real-tier");
         let req = test_request(empty_policy());
         // We can't predict the tier on arbitrary CI hardware, so just
