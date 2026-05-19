@@ -9,6 +9,7 @@
 
 use serde::Serialize;
 
+use crate::ac_launch::AcChildReport;
 use crate::ac_profile::AcProfile;
 use crate::feature_detect::FeatureDetect;
 use crate::virt::{SmokeReadReport, VirtStartReport};
@@ -22,6 +23,8 @@ pub(crate) struct ProbeReport {
     pub virt_start: Option<VirtStartReport>,
     pub virt_start_error: Option<String>,
     pub smoke_read: Option<SmokeReadReport>,
+    pub ac_child: Option<AcChildReport>,
+    pub ac_child_error: Option<String>,
 }
 
 impl ProbeReport {
@@ -54,6 +57,14 @@ impl ProbeReport {
 
     pub fn set_smoke_read(&mut self, s: SmokeReadReport) {
         self.smoke_read = Some(s);
+    }
+
+    pub fn set_ac_child(&mut self, c: AcChildReport) {
+        self.ac_child = Some(c);
+    }
+
+    pub fn set_ac_child_error(&mut self, e: String) {
+        self.ac_child_error = Some(e);
     }
 
     pub fn to_json(&self) -> String {

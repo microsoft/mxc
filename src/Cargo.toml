@@ -38,6 +38,7 @@ members = [
     "ffi/mxc_ffi",
     "mxc_telemetry",
     "tools/wxc_projfs_probe",
+    "tools/wxc_projfs_probe_child",
 ]
 exclude = ["testing/fuzz"]
 resolver = "3"

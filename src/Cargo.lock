@@ -3326,6 +3326,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wxc_projfs_probe_child"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "wxc_test_driver"
 version = "0.7.0"
 dependencies = [

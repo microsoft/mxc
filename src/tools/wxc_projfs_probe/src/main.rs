@@ -21,6 +21,7 @@
 
 #![cfg(target_os = "windows")]
 
+mod ac_launch;
 mod ac_profile;
 mod feature_detect;
 mod report;
@@ -32,6 +33,7 @@ use report::ProbeReport;
 
 const PROFILE_NAME: &str = "mxc.projfs.spike";
 const VIRT_ROOT_LEAF: &str = "projfs-probe";
+const CHILD_EXE_NAME: &str = "wxc-projfs-probe-child.exe";
 
 fn main() -> ExitCode {
     let mut report = ProbeReport::new();
@@ -41,15 +43,12 @@ fn main() -> ExitCode {
     report.set_feature_detect(feature.clone());
     eprintln!("[step 1a] feature-detect: {}", feature.summary());
 
-    // If the optional feature is not enabled the rest of the probe is
-    // meaningless; report cleanly and exit non-zero so CI / harness wrappers
-    // can tell the difference between "answered no" and "crashed".
     if !feature.is_usable() {
         println!("{}", report.to_json());
         return ExitCode::from(2);
     }
 
-    // Step 1b — create / derive a test AppContainer profile.
+    // Step 1b — AppContainer profile.
     let ac = match ac_profile::ensure_profile(PROFILE_NAME) {
         Ok(ac) => ac,
         Err(e) => {
@@ -64,10 +63,17 @@ fn main() -> ExitCode {
         ac.sid_string,
         ac.folder_path.display()
     );
-    let virt_root = ac.folder_path.join(VIRT_ROOT_LEAF);
+    let virt_root = ac.folder_path.join(format!(
+        "{VIRT_ROOT_LEAF}-{:08x}",
+        std::process::id() ^ (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0))
+    ));
+    let ac_sid_string = ac.sid_string.clone();
     report.set_ac_profile(ac);
 
-    // Step 1c — set up virt root + PrjStartVirtualizing + launching-user smoke read.
+    // Step 1c — PrjStartVirtualizing + launching-user smoke read.
     let session = match virt::start(&virt_root) {
         Ok((session, start_report)) => {
             eprintln!(
@@ -96,7 +102,50 @@ fn main() -> ExitCode {
         && smoke.read_inner_txt.is_some();
     report.set_smoke_read(smoke);
 
-    // Drop the session (PrjStopVirtualizing) before exiting.
+    // Step 1d — spawn AC child binary and capture its JSON outcome.
+    let child_exe = match std::env::current_exe() {
+        Ok(p) => p
+            .parent()
+            .map(|d| d.join(CHILD_EXE_NAME))
+            .unwrap_or_else(|| std::path::PathBuf::from(CHILD_EXE_NAME)),
+        Err(e) => {
+            report.set_ac_child_error(format!("current_exe: {e}"));
+            drop(session);
+            println!("{}", report.to_json());
+            return ExitCode::from(6);
+        }
+    };
+    if !child_exe.exists() {
+        report.set_ac_child_error(format!(
+            "child binary not found at {} — build wxc_projfs_probe_child",
+            child_exe.display()
+        ));
+        eprintln!(
+            "[step 1d] ac-child: FAILED — child binary not found at {}",
+            child_exe.display()
+        );
+        drop(session);
+        println!("{}", report.to_json());
+        return ExitCode::from(6);
+    }
+
+    match ac_launch::run_child_in_appcontainer(&child_exe, &virt_root, &ac_sid_string) {
+        Ok(child_report) => {
+            eprintln!(
+                "[step 1d] ac-child: exit={:?} wait={} errors={:?}",
+                child_report.exit_code, child_report.wait_status, child_report.errors
+            );
+            if let Some(ref j) = child_report.child_json {
+                eprintln!("[step 1d] ac-child json keys: {:?}", json_keys(j));
+            }
+            report.set_ac_child(child_report);
+        }
+        Err(e) => {
+            eprintln!("[step 1d] ac-child: FAILED — {e}");
+            report.set_ac_child_error(e);
+        }
+    }
+
     drop(session);
 
     println!("{}", report.to_json());
@@ -104,5 +153,12 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(5)
+    }
+}
+
+fn json_keys(v: &serde_json::Value) -> Vec<String> {
+    match v {
+        serde_json::Value::Object(m) => m.keys().cloned().collect(),
+        _ => vec![],
     }
 }
