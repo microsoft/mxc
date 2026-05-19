@@ -92,9 +92,18 @@ jobs:
     # ESRP handles the full signing flow using Microsoft's Developer ID
     # certificate (CP-401337-Apple). No local cert or codesign needed.
     #
+    # ESRP's Mac signing requires a .zip (or .dmg) input — raw Mach-O
+    # binaries are rejected. We zip before signing and unzip afterward.
+    #
     # Note: Notarization is omitted — the binary is distributed via npm
     # (no quarantine xattr), so Gatekeeper never fires. Stapling is also
     # impossible for standalone Mach-O binaries (Apple limitation).
+    - script: |
+        cd "$(targetTripleDir)"
+        zip mxc-exec-mac.zip mxc-exec-mac
+      displayName: 'Zip binary for ESRP signing'
+      condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
+
     - task: EsrpCodeSigning@5
       displayName: 'Sign macOS binary (ESRP)'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
@@ -106,7 +115,7 @@ jobs:
         AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
         AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
         FolderPath: $(targetTripleDir)
-        Pattern: mxc-exec-mac
+        Pattern: mxc-exec-mac.zip
         UseMinimatch: true
         signConfigType: 'inlineSignParams'
         inlineOperation: >-
@@ -121,6 +130,13 @@ jobs:
               "ToolVersion": "1.0"
             }
           ]
+
+    - script: |
+        cd "$(targetTripleDir)"
+        unzip -o mxc-exec-mac.zip
+        rm mxc-exec-mac.zip
+      displayName: 'Unzip signed binary'
+      condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
 
     - task: CopyFiles@2
       displayName: Copy binary
