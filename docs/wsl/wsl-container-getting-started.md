@@ -67,7 +67,40 @@ Verify the binary starts without errors:
 > DLL is loaded at runtime only when the WSLC backend is invoked. All other
 > backends (Process Container, Windows Sandbox) work without it.
 
-## Step 3 — Verify WSLC is working
+## Step 3 — Pre-pull container images
+
+MXC is an execution layer and does **not** pull container images at run
+time. Pre-pull each image you intend to use into the WSLC SDK cache
+before invoking a config that references it:
+
+```powershell
+cd <repo-root>
+.\scripts\setup-wslc.ps1 -Image alpine:latest, python:3.12-alpine
+```
+
+Or pull a single image directly:
+
+```powershell
+.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe `
+    --setup-wslc --image alpine:latest
+```
+
+Pulled images persist in the cache until you remove them — pay the
+cost once per image, not once per run.
+
+> **Storage path consistency:** the cache lives under the WSLC
+> `storage_path` (default `%TEMP%\mxc-wslc-sessions`). If your runtime
+> configs override `experimental.wslc.storagePath`, pass the same
+> value here with `-StoragePath` (or `--storage-path` on
+> `wxc-exec.exe`), otherwise the runner will not find what you just
+> pulled.
+
+If you forget this step, the next `wxc-exec.exe` invocation will fail
+fast with an actionable error pointing back at the `--setup-wslc`
+command — your image name pre-filled — so the first-time stumble is
+self-correcting.
+
+## Step 4 — Verify WSLC is working
 
 Run the included hello world example config from the repo root:
 
@@ -82,6 +115,23 @@ Expected output:
 Hello from WSL Container!
 Linux <hostname> 6.6.x-microsoft-standard-WSL2 ... x86_64 Linux
 ```
+
+## Two-step lifecycle
+
+Once setup is done, the day-to-day flow is two distinct commands:
+
+```powershell
+# (one-time per image) pre-pull into the SDK cache
+.\scripts\setup-wslc.ps1 -Image <image>
+
+# (any number of times) execute against the cached image
+.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe `
+    --experimental my-config.json
+```
+
+This separation keeps `wxc-exec.exe` hermetic and fast at run time —
+the runner never reaches for the network, never blocks on a pull, and
+its failure modes are decoupled from registry availability.
 
 ## Usage
 
@@ -128,13 +178,25 @@ WSLC-specific settings go under `experimental.wslc` in the JSON config:
 
 ### Image sources
 
-**1. Pull from DockerHub (default):**
+> **All three sources require pre-pulling/importing before the runner
+> can use them.** The runner only checks the local cache; see
+> [Step 3](#step-3--pre-pull-container-images) for the setup commands.
+
+**1. Pre-pulled from DockerHub (default registry):**
+
+```powershell
+.\scripts\setup-wslc.ps1 -Image alpine:latest
+```
 
 ```json
 "experimental": { "wslc": { "image": "alpine:latest" } }
 ```
 
-**2. Pull from a custom registry (no auth):**
+**2. Pre-pulled from a custom registry (no auth):**
+
+```powershell
+.\scripts\setup-wslc.ps1 -Image ghcr.io/linuxserver/baseimage-alpine:3.21
+```
 
 ```json
 "experimental": { "wslc": { "image": "ghcr.io/linuxserver/baseimage-alpine:3.21" } }
@@ -142,7 +204,7 @@ WSLC-specific settings go under `experimental.wslc` in the JSON config:
 
 Tested registries: DockerHub, `mcr.microsoft.com`, `ghcr.io`, `quay.io`.
 
-**3. Import from a local tar file:**
+**3. Import from a local tar file (no pre-pull needed):**
 
 ```json
 "experimental": {
@@ -154,7 +216,8 @@ Tested registries: DockerHub, `mcr.microsoft.com`, `ghcr.io`, `quay.io`.
 ```
 
 Both `docker export` (rootfs) and `docker save` (image archive) formats are
-supported — the format is auto-detected.
+supported — the format is auto-detected. Tar import happens on first use;
+no separate `--setup-wslc` step is required.
 
 ### Network configuration
 
@@ -176,6 +239,7 @@ the container.
 | `WSLC backend not compiled` | Binary built without `--features wslc` | Rebuild with `build.bat --with-wslc` |
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
 | `WSLC runtime not available` | WSL version too old or missing components | Update WSL with `wsl --update` or build from the [WSL repo](https://github.com/microsoft/WSL/tree/feature/wsl-for-apps) |
+| `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `experimental.wslc.storagePath` if set |
 | `WSLC is an experimental feature` | Missing `--experimental` flag | Add `--experimental` to CLI or `{ experimental: true }` in SDK |
 | `experimental mode` error in SDK | `SandboxSpawnOptions.experimental` not set | Pass `{ experimental: true }` to spawn functions |
 | Container exits with code -1 | Process failed or timed out | Check stderr output with `--debug` flag |
