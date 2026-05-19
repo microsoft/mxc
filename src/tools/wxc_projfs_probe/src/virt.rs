@@ -1,39 +1,51 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Step 1c — start a ProjFS virtualization instance with a tiny synthetic
-//! namespace and prove the launching user can read + enumerate through it.
+//! Step 2 — ProjFS provider that projects **real host paths** into the
+//! virtualization root.
 //!
-//! The synthetic layout is intentionally trivial so the callback set we have
-//! to implement here is minimal but complete:
+//! Built on top of step 1c's callback skeleton; replaces the static
+//! synthetic layout with a [`Policy`] table mapping projected branch names
+//! to host backing directories.
+//!
+//! Path model
+//! ----------
+//!
+//! The projection root itself contains one entry per [`Branch`]:
 //!
 //! ```text
 //!   <root>/
-//!     hello.txt        ("hello from projfs\n")
-//!     subdir/
-//!       inner.txt      ("inner content\n")
+//!     rw/      ←  --rw <host-path>   (read-write)
+//!     ro/      ←  --ro <host-path>   (read-only, enforced in step 2c)
 //! ```
 //!
-//! Only five callbacks are required for a functioning provider:
-//! `StartDirectoryEnumeration`, `EndDirectoryEnumeration`,
-//! `GetDirectoryEnumeration`, `GetPlaceholderInfo`, and `GetFileData`.
-//! The optional `Notification`, `QueryFileName`, and `CancelCommand`
-//! callbacks are left null — adding them comes later (step 2, RO/RW + reparse
-//! refusal in the real provider).
+//! When the AC child accesses `<root>\rw\foo\bar.txt`, callbacks resolve
+//! the first component (`rw`) to its backing root and stat / read
+//! `<host-root>\foo\bar.txt` directly. Paths that don't match any branch
+//! return `ERROR_FILE_NOT_FOUND`, which is the mechanism by which
+//! `deniedPaths` / paths-not-in-policy are kept invisible to the AC —
+//! we simply do not project them.
 //!
-//! Threading model: ProjFS dispatches callbacks on its own worker pool, so
-//! all per-instance state lives behind a `Mutex` in a `OnceLock`. Per-
-//! enumeration cursor state is keyed by the enumeration GUID we receive in
-//! `StartDirectoryEnumeration`.
+//! Threading model: unchanged from step 1. Callbacks run on ProjFS worker
+//! threads; per-enumeration cursor state lives in a `Mutex<HashMap<GUID, …>>`.
+//! Policy is registered once at `start()` time and read-only thereafter.
+//!
+//! Performance: every `GetFileData` call re-opens the host file. Production
+//! would cache handles keyed by host path (with LRU eviction); for the
+//! spike, simplicity > throughput.
 
 use std::collections::HashMap;
+use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 
 use windows::core::{GUID, HRESULT, PCWSTR};
-use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, S_OK};
+use windows::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_OUTOFMEMORY, S_OK,
+};
 use windows::Win32::Storage::ProjectedFileSystem::{
     PrjAllocateAlignedBuffer, PrjFileNameCompare, PrjFileNameMatch, PrjFillDirEntryBuffer,
     PrjFreeAlignedBuffer, PrjMarkDirectoryAsPlaceholder, PrjStartVirtualizing, PrjStopVirtualizing,
@@ -42,80 +54,167 @@ use windows::Win32::Storage::ProjectedFileSystem::{
     PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT, PRJ_PLACEHOLDER_INFO,
 };
 
-// FILE_ATTRIBUTE_NORMAL / FILE_ATTRIBUTE_DIRECTORY — the windows crate's
-// FileSystem feature would also bring these in, but we don't want to take
-// the whole module just for two u32 constants.
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
-/// One entry in the synthetic namespace.
-struct Entry {
-    /// Path relative to the virt root, with `\` separators. Empty string is the root.
-    rel_path: &'static str,
-    /// Parent directory's `rel_path` ("" for children of the root).
-    parent: &'static str,
-    /// Final path component as the AC / NTFS sees it.
-    name: &'static str,
-    kind: EntryKind,
+// -------------------------------------------------------------------------
+// Public types
+// -------------------------------------------------------------------------
+
+/// Read mode of a projected branch.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub(crate) enum BranchMode {
+    /// Writes through to the host backing. (Spike: enforcement of the
+    /// "through" part is step 2b — for now writes hydrate placeholders
+    /// inside the projection and stay there.)
+    ReadWrite,
+    /// Read-only. RO enforcement via `PRJ_NOTIFY_FILE_PRE_CONVERT_TO_FULL`
+    /// lands in step 2c; this commit only labels the intent.
+    ReadOnly,
 }
 
-#[derive(Clone, Copy)]
-enum EntryKind {
-    Dir,
-    File(&'static [u8]),
+/// One mapped branch in the projection root.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Branch {
+    /// Name as it appears as a directory under the projection root.
+    pub name: String,
+    /// Host directory whose contents are projected through this branch.
+    pub host_root: PathBuf,
+    pub mode: BranchMode,
 }
 
-static LAYOUT: &[Entry] = &[
-    Entry {
-        rel_path: "hello.txt",
-        parent: "",
-        name: "hello.txt",
-        kind: EntryKind::File(b"hello from projfs\n"),
-    },
-    Entry {
-        rel_path: "subdir",
-        parent: "",
-        name: "subdir",
-        kind: EntryKind::Dir,
-    },
-    Entry {
-        rel_path: "subdir\\inner.txt",
-        parent: "subdir",
-        name: "inner.txt",
-        kind: EntryKind::File(b"inner content\n"),
-    },
-];
+/// Total projection policy. Captured at `start()` time; not mutated after.
+#[derive(Debug, Default, Clone, Serialize)]
+pub(crate) struct Policy {
+    pub branches: Vec<Branch>,
+}
 
-/// Per-enumeration cursor.
+impl Policy {
+    pub fn from_flags(rw: &[PathBuf], ro: &[PathBuf]) -> Result<Self, String> {
+        let mut branches = Vec::new();
+        let mut seen_names: HashMap<String, usize> = HashMap::new();
+        for (paths, mode) in [(rw, BranchMode::ReadWrite), (ro, BranchMode::ReadOnly)] {
+            for p in paths {
+                let canonical = fs::canonicalize(p)
+                    .map_err(|e| format!("canonicalize({}): {e}", p.display()))?;
+                let name = canonical
+                    .file_name()
+                    .ok_or_else(|| format!("path has no final component: {}", p.display()))?
+                    .to_string_lossy()
+                    .into_owned();
+                let lower = name.to_ascii_lowercase();
+                if let Some(prev_idx) = seen_names.get(&lower) {
+                    let prev: &Branch = &branches[*prev_idx];
+                    return Err(format!(
+                        "branch name '{name}' is ambiguous between {} and {}",
+                        prev.host_root.display(),
+                        canonical.display()
+                    ));
+                }
+                seen_names.insert(lower, branches.len());
+                branches.push(Branch {
+                    name,
+                    host_root: canonical,
+                    mode,
+                });
+            }
+        }
+        Ok(Self { branches })
+    }
+}
+
+// -------------------------------------------------------------------------
+// Internal state — registered before PrjStartVirtualizing, read-only after.
+// -------------------------------------------------------------------------
+
+struct ProviderState {
+    policy: Policy,
+    enumerations: HashMap<u128, EnumState>,
+}
+
 struct EnumState {
-    /// Children of the directory being enumerated, sorted via `PrjFileNameCompare`.
-    children: Vec<&'static Entry>,
-    /// Next index into `children` to deliver.
+    /// Resolved children of the directory being enumerated, sorted via
+    /// `PrjFileNameCompare`.
+    children: Vec<ChildEntry>,
+    /// Next index to deliver.
     cursor: usize,
-    /// Optional wildcard search expression supplied by the kernel.
+    /// Wildcard pattern from the kernel, captured at first call.
     pattern: Option<Vec<u16>>,
 }
 
-#[derive(Default)]
-struct ProviderState {
-    enumerations: HashMap<u128, EnumState>,
+/// A child of some directory the AC asked us to enumerate. Either a synthetic
+/// branch directory at the root, or a real host filesystem entry inside a
+/// branch.
+struct ChildEntry {
+    name: String,
+    is_dir: bool,
+    file_size: i64,
 }
 
 fn state() -> &'static Mutex<ProviderState> {
     static S: OnceLock<Mutex<ProviderState>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(ProviderState::default()))
+    S.get_or_init(|| {
+        Mutex::new(ProviderState {
+            policy: Policy::default(),
+            enumerations: HashMap::new(),
+        })
+    })
 }
 
-fn guid_to_u128(g: &GUID) -> u128 {
-    // Pack the 16 raw bytes. We don't care about Windows' on-the-wire layout —
-    // we just need a stable Hash + Eq key for the duration of an enumeration.
-    let mut bytes = [0u8; 16];
-    bytes[0..4].copy_from_slice(&g.data1.to_le_bytes());
-    bytes[4..6].copy_from_slice(&g.data2.to_le_bytes());
-    bytes[6..8].copy_from_slice(&g.data3.to_le_bytes());
-    bytes[8..16].copy_from_slice(&g.data4);
-    u128::from_le_bytes(bytes)
+fn install_policy(p: Policy) {
+    let mut s = state().lock().unwrap();
+    s.policy = p;
+    s.enumerations.clear();
 }
+
+// -------------------------------------------------------------------------
+// Path resolution
+// -------------------------------------------------------------------------
+
+/// Result of resolving a `PRJ_CALLBACK_DATA::FilePathName`.
+enum Resolved {
+    /// The virtualization root itself. Children are the policy's branches.
+    Root,
+    /// A real host path inside a branch. `mode` will be consulted by the
+    /// notification callback once step 2c lands; ignored for now.
+    Host {
+        host_path: PathBuf,
+        #[allow(dead_code)]
+        mode: BranchMode,
+    },
+    /// Not in policy — return FILE_NOT_FOUND.
+    NotInPolicy,
+}
+
+fn resolve(policy: &Policy, rel: &str) -> Resolved {
+    if rel.is_empty() {
+        return Resolved::Root;
+    }
+    let (first, rest) = match rel.find('\\') {
+        Some(i) => (&rel[..i], &rel[i + 1..]),
+        None => (rel, ""),
+    };
+    let Some(branch) = policy
+        .branches
+        .iter()
+        .find(|b| b.name.eq_ignore_ascii_case(first))
+    else {
+        return Resolved::NotInPolicy;
+    };
+    let host_path = if rest.is_empty() {
+        branch.host_root.clone()
+    } else {
+        branch.host_root.join(rest.replace('/', "\\"))
+    };
+    Resolved::Host {
+        host_path,
+        mode: branch.mode,
+    }
+}
+
+// -------------------------------------------------------------------------
+// Helpers
+// -------------------------------------------------------------------------
 
 unsafe fn pcwstr_to_string(p: PCWSTR) -> String {
     if p.0.is_null() {
@@ -136,28 +235,66 @@ fn to_wide_z(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn lookup(rel_path: &str) -> Option<&'static Entry> {
-    // PrjFileNameCompare is case-insensitive but locale-aware; for static
-    // ASCII paths a plain eq_ignore_ascii_case match is correct and saves us
-    // a Win32 call inside the hot lookup path.
-    LAYOUT
-        .iter()
-        .find(|e| e.rel_path.eq_ignore_ascii_case(rel_path))
+fn guid_to_u128(g: &GUID) -> u128 {
+    let mut bytes = [0u8; 16];
+    bytes[0..4].copy_from_slice(&g.data1.to_le_bytes());
+    bytes[4..6].copy_from_slice(&g.data2.to_le_bytes());
+    bytes[6..8].copy_from_slice(&g.data3.to_le_bytes());
+    bytes[8..16].copy_from_slice(&g.data4);
+    u128::from_le_bytes(bytes)
 }
 
-fn children_of(parent: &str) -> Vec<&'static Entry> {
-    let mut v: Vec<&'static Entry> = LAYOUT
-        .iter()
-        .filter(|e| e.parent.eq_ignore_ascii_case(parent))
-        .collect();
-    // Sort with PrjFileNameCompare to match what NTFS would deliver.
+fn sort_children(v: &mut [ChildEntry]) {
     v.sort_by(|a, b| {
-        let aw = to_wide_z(a.name);
-        let bw = to_wide_z(b.name);
+        let aw = to_wide_z(&a.name);
+        let bw = to_wide_z(&b.name);
         let c = unsafe { PrjFileNameCompare(PCWSTR(aw.as_ptr()), PCWSTR(bw.as_ptr())) };
         c.cmp(&0)
     });
+}
+
+fn collect_root_children(policy: &Policy) -> Vec<ChildEntry> {
+    let mut v: Vec<ChildEntry> = policy
+        .branches
+        .iter()
+        .map(|b| ChildEntry {
+            name: b.name.clone(),
+            is_dir: true,
+            file_size: 0,
+        })
+        .collect();
+    sort_children(&mut v);
     v
+}
+
+fn collect_host_children(host_dir: &Path) -> std::io::Result<Vec<ChildEntry>> {
+    let mut v = Vec::new();
+    for entry in fs::read_dir(host_dir)? {
+        let entry = entry?;
+        let md = entry.metadata()?;
+        v.push(ChildEntry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            is_dir: md.is_dir(),
+            file_size: if md.is_dir() { 0 } else { md.len() as i64 },
+        });
+    }
+    sort_children(&mut v);
+    Ok(v)
+}
+
+fn file_basic_info_dir() -> PRJ_FILE_BASIC_INFO {
+    let mut bi = PRJ_FILE_BASIC_INFO::default();
+    bi.IsDirectory = true;
+    bi.FileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+    bi
+}
+
+fn file_basic_info_file(size: i64) -> PRJ_FILE_BASIC_INFO {
+    let mut bi = PRJ_FILE_BASIC_INFO::default();
+    bi.IsDirectory = false;
+    bi.FileSize = size;
+    bi.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    bi
 }
 
 // -------------------------------------------------------------------------
@@ -169,13 +306,23 @@ unsafe extern "system" fn cb_start_enum(
     enumeration_id: *const GUID,
 ) -> HRESULT {
     let data = &*callback_data;
-    let parent = pcwstr_to_string(data.FilePathName);
+    let rel = pcwstr_to_string(data.FilePathName);
     let key = guid_to_u128(&*enumeration_id);
+
     let mut st = state().lock().unwrap();
+    let children = match resolve(&st.policy, &rel) {
+        Resolved::Root => collect_root_children(&st.policy),
+        Resolved::Host { host_path, .. } => match collect_host_children(&host_path) {
+            Ok(v) => v,
+            Err(_) => return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0),
+        },
+        Resolved::NotInPolicy => return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0),
+    };
+
     st.enumerations.insert(
         key,
         EnumState {
-            children: children_of(&parent),
+            children,
             cursor: 0,
             pattern: None,
         },
@@ -205,23 +352,17 @@ unsafe extern "system" fn cb_get_enum(
         return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
     };
 
-    // Kernel may restart an existing enumeration mid-flight (e.g. caller
-    // called FindFirstFile + FindClose + FindFirstFile on the same handle).
-    let flags = data.Flags;
-    if flags.0 & PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN.0 != 0 {
+    if data.Flags.0 & PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN.0 != 0 {
         es.cursor = 0;
-        // The pattern is only meaningful at restart; on subsequent calls the
-        // kernel re-sends the same pattern, but we cache it on first sight.
-        if !search_expression.0.is_null() {
-            es.pattern = Some(to_wide_z(&pcwstr_to_string(search_expression)));
+        es.pattern = if search_expression.0.is_null() {
+            None
         } else {
-            es.pattern = None;
-        }
+            Some(to_wide_z(&pcwstr_to_string(search_expression)))
+        };
     } else if es.pattern.is_none() && !search_expression.0.is_null() {
         es.pattern = Some(to_wide_z(&pcwstr_to_string(search_expression)));
     }
 
-    // Snapshot the pattern PCWSTR so we don't reborrow `es` inside the loop.
     let pattern_ptr = es
         .pattern
         .as_ref()
@@ -229,8 +370,8 @@ unsafe extern "system" fn cb_get_enum(
         .unwrap_or(PCWSTR::null());
 
     while es.cursor < es.children.len() {
-        let entry = es.children[es.cursor];
-        let name_w = to_wide_z(entry.name);
+        let entry = &es.children[es.cursor];
+        let name_w = to_wide_z(&entry.name);
         let name_pcwstr = PCWSTR(name_w.as_ptr());
 
         let matches = if pattern_ptr.0.is_null() {
@@ -240,14 +381,17 @@ unsafe extern "system" fn cb_get_enum(
         };
 
         if matches {
-            let basic = file_basic_info(entry);
+            let basic = if entry.is_dir {
+                file_basic_info_dir()
+            } else {
+                file_basic_info_file(entry.file_size)
+            };
             let r = PrjFillDirEntryBuffer(name_pcwstr, Some(&basic), dir_entry_buffer);
             match r {
-                Ok(()) => { /* fall through, advance cursor */ }
+                Ok(()) => {}
                 Err(e) if e.code() == HRESULT::from_win32(ERROR_INSUFFICIENT_BUFFER.0) => {
-                    // Buffer full; do NOT advance cursor — kernel will call
-                    // back for the next slot. Tell it we delivered what we
-                    // could.
+                    // Buffer full; do NOT advance cursor — the kernel will
+                    // call us back for the next slot.
                     return S_OK;
                 }
                 Err(e) => return e.code(),
@@ -264,12 +408,39 @@ unsafe extern "system" fn cb_get_placeholder_info(
     let data = &*callback_data;
     let rel = pcwstr_to_string(data.FilePathName);
 
-    let Some(entry) = lookup(&rel) else {
-        return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
+    let st = state().lock().unwrap();
+    let basic = match resolve(&st.policy, &rel) {
+        Resolved::Root => {
+            // The kernel shouldn't call us for the root, but if it does,
+            // describe it as a directory.
+            file_basic_info_dir()
+        }
+        Resolved::Host { host_path, .. } => {
+            // The Root and Branch directories don't need a host path lookup
+            // — the resolve() already produced the host_path; just stat it.
+            let Ok(md) = fs::symlink_metadata(&host_path) else {
+                return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
+            };
+            if md.file_type().is_symlink() {
+                // Reparse-point refusal lands in step 2d; for this commit
+                // we expose them as if they were the link target.  Track:
+                // microsoft/mxc TBD.
+                if md.is_dir() {
+                    file_basic_info_dir()
+                } else {
+                    file_basic_info_file(md.len() as i64)
+                }
+            } else if md.is_dir() {
+                file_basic_info_dir()
+            } else {
+                file_basic_info_file(md.len() as i64)
+            }
+        }
+        Resolved::NotInPolicy => return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0),
     };
 
     let mut info = PRJ_PLACEHOLDER_INFO::default();
-    info.FileBasicInfo = file_basic_info(entry);
+    info.FileBasicInfo = basic;
 
     let dest = to_wide_z(&rel);
     let r = PrjWritePlaceholderInfo(
@@ -292,26 +463,47 @@ unsafe extern "system" fn cb_get_file_data(
     let data = &*callback_data;
     let rel = pcwstr_to_string(data.FilePathName);
 
-    let Some(entry) = lookup(&rel) else {
-        return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
-    };
-    let bytes = match entry.kind {
-        EntryKind::File(b) => b,
-        EntryKind::Dir => return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0),
+    let host_path = {
+        let st = state().lock().unwrap();
+        match resolve(&st.policy, &rel) {
+            Resolved::Host { host_path, .. } => host_path,
+            _ => return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0),
+        }
     };
 
-    let start = byte_offset as usize;
-    let end = (byte_offset as usize).saturating_add(length as usize);
-    if start >= bytes.len() || end > bytes.len() {
+    let mut f = match fs::File::open(&host_path) {
+        Ok(f) => f,
+        Err(_) => return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0),
+    };
+    if f.seek(SeekFrom::Start(byte_offset)).is_err() {
         return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
     }
-    let slice = &bytes[start..end];
 
     let buf = PrjAllocateAlignedBuffer(data.NamespaceVirtualizationContext, length as usize);
     if buf.is_null() {
-        return HRESULT::from_win32(windows::Win32::Foundation::ERROR_OUTOFMEMORY.0);
+        return HRESULT::from_win32(ERROR_OUTOFMEMORY.0);
     }
-    std::ptr::copy_nonoverlapping(slice.as_ptr(), buf as *mut u8, length as usize);
+
+    let slice = std::slice::from_raw_parts_mut(buf as *mut u8, length as usize);
+    let mut read_total = 0usize;
+    while read_total < length as usize {
+        match f.read(&mut slice[read_total..]) {
+            Ok(0) => break,
+            Ok(n) => read_total += n,
+            Err(_) => {
+                PrjFreeAlignedBuffer(buf);
+                return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
+            }
+        }
+    }
+    if read_total < length as usize {
+        // Short read at EOF — ProjFS expects exactly `length` bytes for the
+        // requested range. The placeholder's file size should have been
+        // set correctly so this is unlikely; if it does happen, surface a
+        // distinct error.
+        PrjFreeAlignedBuffer(buf);
+        return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
+    }
 
     let r = PrjWriteFileData(
         data.NamespaceVirtualizationContext,
@@ -327,23 +519,6 @@ unsafe extern "system" fn cb_get_file_data(
     }
 }
 
-fn file_basic_info(entry: &Entry) -> PRJ_FILE_BASIC_INFO {
-    let mut bi = PRJ_FILE_BASIC_INFO::default();
-    match entry.kind {
-        EntryKind::Dir => {
-            bi.IsDirectory = true;
-            bi.FileSize = 0;
-            bi.FileAttributes = FILE_ATTRIBUTE_DIRECTORY;
-        }
-        EntryKind::File(b) => {
-            bi.IsDirectory = false;
-            bi.FileSize = b.len() as i64;
-            bi.FileAttributes = FILE_ATTRIBUTE_NORMAL;
-        }
-    }
-    bi
-}
-
 // -------------------------------------------------------------------------
 // Public driver
 // -------------------------------------------------------------------------
@@ -352,17 +527,16 @@ fn file_basic_info(entry: &Entry) -> PRJ_FILE_BASIC_INFO {
 pub(crate) struct VirtStartReport {
     pub root_path: PathBuf,
     pub instance_id: String,
+    pub policy: Policy,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SmokeReadReport {
-    pub enumerated_names: Vec<String>,
-    pub read_hello_txt: Option<String>,
-    pub read_inner_txt: Option<String>,
+    pub enumerated_branches: Vec<String>,
+    pub per_branch_sample: HashMap<String, Vec<String>>,
     pub errors: Vec<String>,
 }
 
-/// RAII wrapper — stops virtualization on drop.
 pub(crate) struct VirtSession {
     ctx: PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT,
     pub root: PathBuf,
@@ -376,19 +550,17 @@ impl Drop for VirtSession {
     }
 }
 
-/// Prepare an empty placeholder directory at `root` and start virtualizing it.
-pub(crate) fn start(root: &Path) -> Result<(VirtSession, VirtStartReport), String> {
-    // 1. Make sure the root exists and is empty.
-    if root.exists() {
-        // Best-effort cleanup of any stale projection.
-        let _ = std::fs::remove_dir_all(root);
-    }
-    std::fs::create_dir_all(root).map_err(|e| format!("create_dir_all({}): {e}", root.display()))?;
+pub(crate) fn start(
+    root: &Path,
+    policy: Policy,
+) -> Result<(VirtSession, VirtStartReport), String> {
+    install_policy(policy.clone());
 
-    // 2. Mark as placeholder.  Per the official sample / docs:
-    //    new virt root  -> rootPathName = target, targetPathName = NULL
-    //    descendant inside existing root -> rootPathName = existing root,
-    //                                       targetPathName = descendant
+    if root.exists() {
+        let _ = fs::remove_dir_all(root);
+    }
+    fs::create_dir_all(root).map_err(|e| format!("create_dir_all({}): {e}", root.display()))?;
+
     let target = to_wide_z(&root.to_string_lossy());
     let instance_id = GUID::new().map_err(|e| format!("GUID::new: {e}"))?;
     unsafe {
@@ -396,7 +568,6 @@ pub(crate) fn start(root: &Path) -> Result<(VirtSession, VirtStartReport), Strin
             .map_err(|e| format!("PrjMarkDirectoryAsPlaceholder: {e} (0x{:08x})", e.code().0))?;
     }
 
-    // 3. Build callback table and start virtualizing.
     let callbacks = PRJ_CALLBACKS {
         StartDirectoryEnumerationCallback: Some(cb_start_enum),
         EndDirectoryEnumerationCallback: Some(cb_end_enum),
@@ -413,18 +584,26 @@ pub(crate) fn start(root: &Path) -> Result<(VirtSession, VirtStartReport), Strin
             .map_err(|e| format!("PrjStartVirtualizing: {e} (0x{:08x})", e.code().0))?
     };
 
-    let report = VirtStartReport {
-        root_path: root.to_path_buf(),
-        instance_id: format!("{:?}", instance_id),
-    };
-    Ok((VirtSession { ctx, root: root.to_path_buf() }, report))
+    Ok((
+        VirtSession {
+            ctx,
+            root: root.to_path_buf(),
+        },
+        VirtStartReport {
+            root_path: root.to_path_buf(),
+            instance_id: format!("{:?}", instance_id),
+            policy,
+        },
+    ))
 }
 
-/// Launching-user smoke test against the projected namespace.
+/// Launching-user smoke test: enumerate the projection root, then
+/// enumerate each branch's top-level. Confirms host-backed reads work from
+/// outside the AC before we spend cycles on the AC child.
 pub(crate) fn smoke_read_as_launching_user(session: &VirtSession) -> SmokeReadReport {
     let mut errs = Vec::new();
 
-    let enumerated_names = match std::fs::read_dir(&session.root) {
+    let branches: Vec<String> = match fs::read_dir(&session.root) {
         Ok(rd) => rd
             .filter_map(|r| r.ok())
             .map(|d| d.file_name().to_string_lossy().into_owned())
@@ -435,26 +614,23 @@ pub(crate) fn smoke_read_as_launching_user(session: &VirtSession) -> SmokeReadRe
         }
     };
 
-    let read_hello_txt = match std::fs::read(session.root.join("hello.txt")) {
-        Ok(b) => Some(String::from_utf8_lossy(&b).into_owned()),
-        Err(e) => {
-            errs.push(format!("read hello.txt: {e}"));
-            None
+    let mut per_branch_sample = HashMap::new();
+    for b in &branches {
+        match fs::read_dir(session.root.join(b)) {
+            Ok(rd) => {
+                let v: Vec<String> = rd
+                    .filter_map(|r| r.ok())
+                    .map(|d| d.file_name().to_string_lossy().into_owned())
+                    .collect();
+                per_branch_sample.insert(b.clone(), v);
+            }
+            Err(e) => errs.push(format!("read_dir({b}): {e}")),
         }
-    };
-
-    let read_inner_txt = match std::fs::read(session.root.join("subdir").join("inner.txt")) {
-        Ok(b) => Some(String::from_utf8_lossy(&b).into_owned()),
-        Err(e) => {
-            errs.push(format!("read subdir\\inner.txt: {e}"));
-            None
-        }
-    };
+    }
 
     SmokeReadReport {
-        enumerated_names,
-        read_hello_txt,
-        read_inner_txt,
+        enumerated_branches: branches,
+        per_branch_sample,
         errors: errs,
     }
 }

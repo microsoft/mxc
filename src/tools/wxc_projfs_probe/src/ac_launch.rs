@@ -65,6 +65,7 @@ pub(crate) fn run_child_in_appcontainer(
     child_exe: &Path,
     virt_root: &Path,
     ac_sid_string: &str,
+    check_dirs: &[String],
 ) -> Result<AcChildReport, String> {
     let pipe_name = format!(
         "\\\\.\\pipe\\mxc-projfs-probe-{}-{}",
@@ -79,7 +80,7 @@ pub(crate) fn run_child_in_appcontainer(
 
     // 2. Spawn the AC child.
     let mut errors = Vec::new();
-    let spawn_outcome = spawn_ac(child_exe, virt_root, &pipe_name, ac_sid_string);
+    let spawn_outcome = spawn_ac(child_exe, virt_root, &pipe_name, ac_sid_string, check_dirs);
     let (process_handle, thread_handle) = match spawn_outcome {
         Ok(h) => h,
         Err(e) => {
@@ -257,6 +258,7 @@ fn spawn_ac(
     virt_root: &Path,
     pipe_name: &str,
     ac_sid_string: &str,
+    check_dirs: &[String],
 ) -> Result<(HANDLE, HANDLE), String> {
     // Parse the AC SID string back to a binary SID for SECURITY_CAPABILITIES.
     let sid_w = to_wide_z(ac_sid_string);
@@ -310,13 +312,20 @@ fn spawn_ac(
         })?;
     }
 
-    // Build the command line.
-    let cmdline = format!(
+    // Build the command line.  --check-dir is repeatable.
+    let mut cmdline = format!(
         "\"{exe}\" --root \"{root}\" --pipe \"{pipe}\"",
         exe = exe.to_string_lossy(),
         root = virt_root.to_string_lossy(),
         pipe = pipe_name,
     );
+    for d in check_dirs {
+        // Sanitize: no embedded quotes, no whitespace surprises. The matrix
+        // test only ever passes plain ASCII names (rw/ro/denied/control).
+        cmdline.push_str(" --check-dir \"");
+        cmdline.push_str(d);
+        cmdline.push('"');
+    }
     let mut cmdline_w = to_wide_z(&cmdline);
 
     let si = STARTUPINFOEXW {

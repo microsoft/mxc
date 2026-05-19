@@ -1,22 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! AppContainer-side half of the ProjFS-T3 step-1d spike.
+//! AppContainer-side half of the ProjFS-T3 spike.
 //!
-//! Spawned by `wxc-projfs-probe` with two arguments:
-//!   --root <virt-root-path>   the projected directory to exercise
-//!   --pipe <\\.\pipe\name>    where to write the JSON outcome
+//! Two modes:
 //!
-//! Performs four operations exhaustively, capturing GetLastError on every
-//! failure so the parent can attribute it precisely:
+//! Step-1 mode (default, no `--check-dir`):
+//!   enumerate the root + subdir, read `hello.txt` + `subdir/inner.txt`.
+//!   Preserved for backward-compat with the step-1 findings.
 //!
-//!   1. Enumerate the root      (FindFirstFileW / FindNextFileW on `\*`)
-//!   2. Read hello.txt          (CreateFileW + ReadFile)
-//!   3. Enumerate subdir        (FindFirstFileW / FindNextFileW on subdir\*)
-//!   4. Read subdir\inner.txt
+//! Step-2 mode (`--check-dir <name>`, repeatable):
+//!   For each named branch under `--root`, run the two probes from
+//!   `Test-PathEnumeration.ps1`:
+//!     A. stat by name      `<root>\<name>\readme.txt`  -> VISIBLE | HIDDEN
+//!     B. enumerate         `<root>\<name>\*`            -> ENUMERABLE entries[] | BLOCKED | EMPTY
 //!
-//! Writes a single JSON document to the pipe and exits. Exit code is 0 even
-//! on per-op failure — the parent inspects the JSON.
+//! Always writes a JSON document to the named pipe and exits with code 0.
 
 #![cfg(target_os = "windows")]
 
@@ -34,8 +33,9 @@ use windows::Win32::Foundation::{
     INVALID_HANDLE_VALUE,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FindClose, FindFirstFileW, FindNextFileW, ReadFile, FILE_ATTRIBUTE_NORMAL,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, WIN32_FIND_DATAW,
+    CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileAttributesW, ReadFile,
+    FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES,
+    OPEN_EXISTING, WIN32_FIND_DATAW,
 };
 
 #[derive(Debug, Default, Serialize)]
@@ -43,19 +43,20 @@ struct ChildReport {
     schema: &'static str,
     arg_root: String,
     arg_pipe: String,
-    enum_root: EnumResult,
-    read_hello: ReadResult,
-    enum_subdir: EnumResult,
-    read_inner: ReadResult,
+    /// Step-1-style fixed-target fields (only populated when no --check-dir).
+    enum_root: Option<EnumResult>,
+    read_hello: Option<ReadResult>,
+    enum_subdir: Option<EnumResult>,
+    read_inner: Option<ReadResult>,
+    /// Step-2-style per-branch matrix probes.
+    per_dir: Vec<DirProbe>,
 }
 
 #[derive(Debug, Default, Serialize)]
 struct EnumResult {
     succeeded: bool,
     entries: Vec<String>,
-    /// GetLastError captured at the moment of failure.
     last_error: Option<u32>,
-    /// Which call failed if `succeeded == false`.
     failing_call: Option<&'static str>,
 }
 
@@ -68,10 +69,37 @@ struct ReadResult {
     failing_call: Option<&'static str>,
 }
 
+#[derive(Debug, Serialize)]
+struct DirProbe {
+    /// Branch name as a relative dir under arg_root.
+    name: String,
+    /// "VISIBLE" | "HIDDEN" — does `GetFileAttributesW` on
+    /// `<root>\<name>\readme.txt` succeed?
+    exist: ExistResult,
+    /// "ENUMERABLE" | "BLOCKED" | "EMPTY"
+    list: ListResult,
+}
+
+#[derive(Debug, Serialize)]
+struct ExistResult {
+    state: &'static str, // "VISIBLE" | "HIDDEN"
+    attributes: Option<u32>,
+    last_error: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListResult {
+    state: &'static str, // "ENUMERABLE" | "BLOCKED" | "EMPTY"
+    entries: Vec<String>,
+    last_error: Option<u32>,
+    failing_call: Option<&'static str>,
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut root: Option<PathBuf> = None;
     let mut pipe: Option<String> = None;
+    let mut check_dirs: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -83,6 +111,10 @@ fn main() {
                 pipe = Some(args[i + 1].clone());
                 i += 2;
             }
+            "--check-dir" if i + 1 < args.len() => {
+                check_dirs.push(args[i + 1].clone());
+                i += 2;
+            }
             _ => i += 1,
         }
     }
@@ -91,25 +123,88 @@ fn main() {
     let pipe = pipe.expect("--pipe required");
 
     let mut report = ChildReport {
-        schema: "projfs-probe-child/0.1",
+        schema: "projfs-probe-child/0.2",
         arg_root: root.to_string_lossy().into_owned(),
         arg_pipe: pipe.clone(),
         ..Default::default()
     };
 
-    report.enum_root = enumerate(&root);
-    report.read_hello = read_file(&root.join("hello.txt"));
-    report.enum_subdir = enumerate(&root.join("subdir"));
-    report.read_inner = read_file(&root.join("subdir").join("inner.txt"));
+    if check_dirs.is_empty() {
+        // Step-1 backward-compat mode.
+        report.enum_root = Some(enumerate(&root));
+        report.read_hello = Some(read_file(&root.join("hello.txt")));
+        report.enum_subdir = Some(enumerate(&root.join("subdir")));
+        report.read_inner = Some(read_file(&root.join("subdir").join("inner.txt")));
+    } else {
+        for d in &check_dirs {
+            report.per_dir.push(probe_dir(&root, d));
+        }
+    }
 
-    let json = serde_json::to_string_pretty(&report).unwrap_or_else(|e| {
-        format!("{{\"error\":\"json serialization: {e}\"}}")
-    });
+    let json = serde_json::to_string_pretty(&report)
+        .unwrap_or_else(|e| format!("{{\"error\":\"json serialization: {e}\"}}"));
     write_to_pipe(&pipe, &json);
 }
 
 fn to_wide_z(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn wide_to_string(s: &[u16]) -> String {
+    let len = s.iter().position(|&c| c == 0).unwrap_or(s.len());
+    String::from_utf16_lossy(&s[..len])
+}
+
+/// Matrix probe A: stat `<root>\<name>\readme.txt`.
+fn probe_exist(root: &std::path::Path, name: &str) -> ExistResult {
+    let probe_target = root.join(name).join("readme.txt");
+    let w = to_wide_z(&probe_target.to_string_lossy());
+    let attrs = unsafe { GetFileAttributesW(PCWSTR(w.as_ptr())) };
+    if attrs == INVALID_FILE_ATTRIBUTES {
+        ExistResult {
+            state: "HIDDEN",
+            attributes: None,
+            last_error: Some(unsafe { GetLastError().0 }),
+        }
+    } else {
+        ExistResult {
+            state: "VISIBLE",
+            attributes: Some(attrs),
+            last_error: None,
+        }
+    }
+}
+
+/// Matrix probe B: enumerate `<root>\<name>`.
+fn probe_list(root: &std::path::Path, name: &str) -> ListResult {
+    let er = enumerate(&root.join(name));
+    if !er.succeeded {
+        return ListResult {
+            state: "BLOCKED",
+            entries: er.entries,
+            last_error: er.last_error,
+            failing_call: er.failing_call,
+        };
+    }
+    let state = if er.entries.is_empty() {
+        "EMPTY"
+    } else {
+        "ENUMERABLE"
+    };
+    ListResult {
+        state,
+        entries: er.entries,
+        last_error: None,
+        failing_call: None,
+    }
+}
+
+fn probe_dir(root: &std::path::Path, name: &str) -> DirProbe {
+    DirProbe {
+        name: name.to_string(),
+        exist: probe_exist(root, name),
+        list: probe_list(root, name),
+    }
 }
 
 fn enumerate(dir: &std::path::Path) -> EnumResult {
@@ -141,7 +236,6 @@ fn enumerate(dir: &std::path::Path) -> EnumResult {
             if err == ERROR_NO_MORE_FILES.0 {
                 break;
             }
-            // Partial enumeration — capture and report.
             let _ = unsafe { FindClose(handle) };
             return EnumResult {
                 succeeded: false,
@@ -159,11 +253,6 @@ fn enumerate(dir: &std::path::Path) -> EnumResult {
         last_error: None,
         failing_call: None,
     }
-}
-
-fn wide_to_string(s: &[u16]) -> String {
-    let len = s.iter().position(|&c| c == 0).unwrap_or(s.len());
-    String::from_utf16_lossy(&s[..len])
 }
 
 fn read_file(path: &std::path::Path) -> ReadResult {
@@ -193,14 +282,7 @@ fn read_file(path: &std::path::Path) -> ReadResult {
 
     let mut buf = [0u8; 256];
     let mut read = 0u32;
-    let ok = unsafe {
-        ReadFile(
-            handle,
-            Some(&mut buf),
-            Some(&mut read),
-            None,
-        )
-    };
+    let ok = unsafe { ReadFile(handle, Some(&mut buf), Some(&mut read), None) };
     let _ = unsafe { CloseHandle(handle) };
 
     if ok.is_err() {
@@ -223,9 +305,6 @@ fn read_file(path: &std::path::Path) -> ReadResult {
 }
 
 fn write_to_pipe(pipe: &str, payload: &str) {
-    // Pipe is opened by name like a file. The parent created it; we connect
-    // and write JSON. CreateFileW with OPEN_EXISTING is the documented
-    // client-side primitive.
     let w = to_wide_z(pipe);
     let h = unsafe {
         CreateFileW(
@@ -239,8 +318,6 @@ fn write_to_pipe(pipe: &str, payload: &str) {
         )
     };
     let Ok(handle) = h else {
-        // Fall back to stderr so the parent at least sees something on the
-        // wait side. Exit cleanly so the parent observes a normal exit.
         eprintln!(
             "wxc-projfs-probe-child: pipe open failed (Win32 {}): could not deliver {} bytes",
             unsafe { GetLastError().0 },
@@ -249,9 +326,7 @@ fn write_to_pipe(pipe: &str, payload: &str) {
         return;
     };
 
-    // Wrap in a File for ergonomic write.
     let mut f = unsafe { File::from_raw_handle(handle.0 as *mut c_void) };
     let _ = f.write_all(payload.as_bytes());
     let _ = f.flush();
-    // Dropping f closes the handle, signalling EOF to the parent.
 }
