@@ -59,4 +59,4 @@ pub mod sandbox_tracking;
 
 // Isolation Session (IsoEnvBroker Session API) support
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-pub mod isolation_session_runner;
+pub mod isolation_session;

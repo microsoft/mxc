@@ -16,7 +16,7 @@ use wxc_common::filesystem_bfs::FileSystemBfsManager;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use wxc_common::hyperlight_runner::HyperlightScriptRunner;
 #[cfg(feature = "isolation_session")]
-use wxc_common::isolation_session_runner::IsolationSessionRunner;
+use wxc_common::isolation_session::IsolationSessionRunner;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
