@@ -52,6 +52,7 @@ struct CliArgs {
     check_dirs: Vec<String>,
     write_probes: Vec<String>,
     direct_reads: Vec<String>,
+    lpac: bool,
     no_ac: bool,
     keep_root: bool,
 }
@@ -62,6 +63,7 @@ fn parse_args() -> CliArgs {
     let mut check_dirs = Vec::new();
     let mut write_probes = Vec::new();
     let mut direct_reads = Vec::new();
+    let mut lpac = false;
     let mut no_ac = false;
     let mut keep_root = false;
 
@@ -89,6 +91,10 @@ fn parse_args() -> CliArgs {
                 direct_reads.push(args[i + 1].clone());
                 i += 2;
             }
+            "--lpac" => {
+                lpac = true;
+                i += 1;
+            }
             "--no-ac" => {
                 no_ac = true;
                 i += 1;
@@ -110,6 +116,7 @@ fn parse_args() -> CliArgs {
         check_dirs,
         write_probes,
         direct_reads,
+        lpac,
         no_ac,
         keep_root,
     }
@@ -242,6 +249,7 @@ fn main() -> ExitCode {
             &args.check_dirs,
             &args.write_probes,
             &args.direct_reads,
+            args.lpac,
         ) {
             Ok(child_report) => {
                 eprintln!(

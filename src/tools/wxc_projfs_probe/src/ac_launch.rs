@@ -42,6 +42,8 @@ use windows::Win32::System::Threading::{
 
 // Constants the windows crate doesn't expose under our feature set.
 const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES: usize = 0x0002_0009;
+const PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY: usize = 0x0002_000F;
+const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
 const EXTENDED_STARTUPINFO_PRESENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0008_0000);
 const CREATE_SUSPENDED: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0000_0004);
 const CREATE_UNICODE_ENVIRONMENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0000_0400);
@@ -68,6 +70,7 @@ pub(crate) fn run_child_in_appcontainer(
     check_dirs: &[String],
     write_probes: &[String],
     direct_reads: &[String],
+    lpac: bool,
 ) -> Result<AcChildReport, String> {
     let pipe_name = format!(
         "\\\\.\\pipe\\mxc-projfs-probe-{}-{}",
@@ -90,6 +93,7 @@ pub(crate) fn run_child_in_appcontainer(
         check_dirs,
         write_probes,
         direct_reads,
+        lpac,
     );
     let (process_handle, thread_handle) = match spawn_outcome {
         Ok(h) => h,
@@ -271,6 +275,7 @@ fn spawn_ac(
     check_dirs: &[String],
     write_probes: &[String],
     direct_reads: &[String],
+    lpac: bool,
 ) -> Result<(HANDLE, HANDLE), String> {
     // Parse the AC SID string back to a binary SID for SECURITY_CAPABILITIES.
     let sid_w = to_wide_z(ac_sid_string);
@@ -287,10 +292,12 @@ fn spawn_ac(
         Reserved: 0,
     };
 
-    // Build attribute list with SECURITY_CAPABILITIES.
+    // Build attribute list with SECURITY_CAPABILITIES (+ optional
+    // ALL_APPLICATION_PACKAGES_POLICY for LPAC).
+    let attr_count: u32 = if lpac { 2 } else { 1 };
     let mut attr_size = 0usize;
     unsafe {
-        let _ = InitializeProcThreadAttributeList(None, 1, None, &mut attr_size);
+        let _ = InitializeProcThreadAttributeList(None, attr_count, None, &mut attr_size);
     }
     if attr_size == 0 {
         free_sid(psid);
@@ -299,7 +306,7 @@ fn spawn_ac(
     let mut attr_buf = vec![0u8; attr_size];
     let attr_list = LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as *mut c_void);
     unsafe {
-        InitializeProcThreadAttributeList(Some(attr_list), 1, None, &mut attr_size)
+        InitializeProcThreadAttributeList(Some(attr_list), attr_count, None, &mut attr_size)
             .map_err(|e| {
                 free_sid(psid);
                 format!("InitializeProcThreadAttributeList: {e}")
@@ -322,6 +329,29 @@ fn spawn_ac(
             free_sid(psid);
             format!("UpdateProcThreadAttribute(SECURITY_CAPABILITIES): {e}")
         })?;
+    }
+
+    // LPAC opt-out: the child loses implicit ALL APPLICATION PACKAGES
+    // membership in its LowBox SIDs. Files whose DACL grants AAP only
+    // (and not the specific AC SID) become inaccessible.
+    let aap_optout: u32 = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
+    if lpac {
+        unsafe {
+            UpdateProcThreadAttribute(
+                attr_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+                Some(&aap_optout as *const u32 as *const c_void),
+                std::mem::size_of::<u32>(),
+                None,
+                None,
+            )
+            .map_err(|e| {
+                DeleteProcThreadAttributeList(attr_list);
+                free_sid(psid);
+                format!("UpdateProcThreadAttribute(ALL_APP_PACKAGES_POLICY): {e}")
+            })?;
+        }
     }
 
     // Build the command line.  --check-dir is repeatable.

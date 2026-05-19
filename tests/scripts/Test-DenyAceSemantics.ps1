@@ -80,64 +80,89 @@ $testFile = Join-Path $testDir 'readme.txt'
 # which triggers a SACL write that needs SeSecurityPrivilege. icacls's
 # /grant /deny /inheritance commands operate on the DACL only.
 function Apply-Dacl([string]$Path, [string]$Variant) {
-    # Strip inherited ACEs (and prevent further inheritance). Without
-    # this, the AC SID inherits an Allow from the AC profile root and
-    # all three variants look identical.
     & icacls $Path /inheritance:r | Out-Null
-    # Remove any default explicit ACEs left after /inheritance:r so we
-    # start from a known minimal DACL containing only SY:(F) implicitly.
-    # icacls /inheritance:r leaves the existing explicit ACEs in place
-    # (the file inherited owner=launching-user defaults so there is no
-    # explicit ACE yet; this is a no-op in practice for our setup).
     & icacls $Path /grant:r "*S-1-5-18:(F)"      | Out-Null  # SYSTEM
     & icacls $Path /grant:r "*S-1-5-32-544:(F)"  | Out-Null  # Administrators
     & icacls $Path /grant:r "${env:USERNAME}:(F)"| Out-Null  # launching user
 
     switch ($Variant) {
         'A' {
+            # Allow only — explicit grant to the specific AC SID.
             & icacls $Path /grant:r "*${acSid}:(R)" | Out-Null
         }
         'B' {
-            # Both Allow and Deny on the same AC SID. icacls writes
-            # them in canonical order (Deny then Allow) by default.
+            # Allow + Deny on the specific AC SID.
             & icacls $Path /grant:r "*${acSid}:(R)" | Out-Null
             & icacls $Path /deny    "*${acSid}:(F)" | Out-Null
         }
         'C' {
             # No AC grant.
         }
+        'D' {
+            # AAP allow (broad) + Deny on the specific AC SID. If the
+            # specific deny wins (canonical-order: deny before allow),
+            # the AC is denied. If AAP's grant is consulted via a
+            # separate code path, the AC is allowed.
+            & icacls $Path /grant:r '*S-1-15-2-1:(R)' | Out-Null   # ALL APPLICATION PACKAGES
+            & icacls $Path /deny    "*${acSid}:(F)"   | Out-Null
+        }
+        'E' {
+            # AAP allow only, no specific-SID grant. Used as a probe
+            # under both AAP-on and LPAC-on modes to confirm that
+            # PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY
+            # opt-out is actually taking effect.
+            & icacls $Path /grant:r '*S-1-15-2-1:(R)' | Out-Null
+        }
         default { throw "unknown variant: $Variant" }
     }
 }
 
-function Run-AcRead([string]$Label, [string]$Variant) {
+function Run-AcRead([string]$Label, [string]$Variant, [bool]$Lpac) {
     Apply-Dacl $testFile $Variant
-    $actual = (Get-Acl -LiteralPath $testFile).Sddl
-
-    # Clean any stale virt root the probe might have left.
     Get-ChildItem -Force $acFolder -Filter "projfs-probe-*" -ErrorAction SilentlyContinue |
         ForEach-Object { Remove-Item -Recurse -Force -LiteralPath $_.FullName -ErrorAction SilentlyContinue }
 
-    $rawJson = & $ProbeExe --direct-read $testFile 2>$null
+    $extraArgs = @()
+    if ($Lpac) { $extraArgs += '--lpac' }
+    $rawJson = & $ProbeExe --direct-read $testFile @extraArgs 2>$null
     $rep = $rawJson | ConvertFrom-Json
     $dr = $rep.ac_child.child_json.direct_reads | Select-Object -First 1
     [pscustomobject]@{
-        case         = $Label
-        variant      = $Variant
-        applied_sddl = $actual
-        state        = $dr.state
-        last_error   = $dr.last_error
-        bytes_read   = $dr.bytes_read
+        case        = $Label
+        variant     = $Variant
+        lpac        = $Lpac
+        state       = $dr.state
+        last_error  = $dr.last_error
+        bytes_read  = $dr.bytes_read
     }
 }
 
-$rA = Run-AcRead 'A: Allow only'  'A'
-$rB = Run-AcRead 'B: Allow+Deny'  'B'
-$rC = Run-AcRead 'C: No grant'    'C'
+$results = @()
+foreach ($cfg in @(
+    @{ V='A'; L='A: Allow only' },
+    @{ V='B'; L='B: Allow + Deny (specific AC SID)' },
+    @{ V='C'; L='C: No grant' },
+    @{ V='D'; L='D: AAP Allow + Deny (specific AC SID)' },
+    @{ V='E'; L='E: AAP Allow only' }
+)) {
+    foreach ($lpac in @($false, $true)) {
+        $results += Run-AcRead $cfg.L $cfg.V $lpac
+    }
+}
+$rA  = $results | Where-Object { $_.variant -eq 'A' -and -not $_.lpac } | Select-Object -First 1
+$rB  = $results | Where-Object { $_.variant -eq 'B' -and -not $_.lpac } | Select-Object -First 1
+$rC  = $results | Where-Object { $_.variant -eq 'C' -and -not $_.lpac } | Select-Object -First 1
+$rD  = $results | Where-Object { $_.variant -eq 'D' -and -not $_.lpac } | Select-Object -First 1
+$rE  = $results | Where-Object { $_.variant -eq 'E' -and -not $_.lpac } | Select-Object -First 1
+$rBL = $results | Where-Object { $_.variant -eq 'B' -and $_.lpac } | Select-Object -First 1
+$rEL = $results | Where-Object { $_.variant -eq 'E' -and $_.lpac } | Select-Object -First 1
 
 Write-Host ""
-Write-Host "Results:" -ForegroundColor Cyan
-@($rA, $rB, $rC) | Format-Table case, state, last_error, bytes_read -AutoSize
+Write-Host "Results (regular AppContainer):" -ForegroundColor Cyan
+$results | Where-Object { -not $_.lpac } | Format-Table case, state, last_error, bytes_read -AutoSize
+
+Write-Host "Results (LPAC opt-out):" -ForegroundColor Cyan
+$results | Where-Object { $_.lpac } | Format-Table case, state, last_error, bytes_read -AutoSize
 
 Write-Host ""
 Write-Host "Verdict:" -ForegroundColor Cyan
@@ -148,22 +173,44 @@ function Verdict($expected, $actual, $name) {
     Write-Host ("{0,-6} {1}   actual={2}  expected={3}" -f $icon, $name, $actual, $expected) -ForegroundColor $color
 }
 
-# Sanity rails: A should succeed (AC has explicit allow), C should fail.
-Verdict 'SUCCEEDED' $rA.state 'A baseline rail: AC reads with explicit Allow'
-Verdict 'DENIED'    $rC.state 'C baseline rail: AC denied with no Allow'
+# Baseline rails (regular AC).
+Verdict 'SUCCEEDED' $rA.state 'A: AC reads with explicit Allow                   '
+Verdict 'DENIED'    $rC.state 'C: AC denied with no Allow                         '
 
-# The decisive cell:
+# Decisive cells.
 Write-Host ""
+Write-Host "B (specific Allow + specific Deny, regular AC):" -ForegroundColor Cyan
+Write-Host "  result: $($rB.state)  err=$($rB.last_error)"
+Write-Host ""
+Write-Host "D (AAP Allow + specific-AC-SID Deny, regular AC):" -ForegroundColor Cyan
+Write-Host "  result: $($rD.state)  err=$($rD.last_error)"
+Write-Host ""
+Write-Host "E vs E-LPAC (AAP Allow only, both AC modes):" -ForegroundColor Cyan
+Write-Host "  regular AC : $($rE.state)   err=$($rE.last_error)"
+Write-Host "  LPAC AC    : $($rEL.state)  err=$($rEL.last_error)"
+Write-Host ""
+Write-Host "B-LPAC (specific Allow + specific Deny, LPAC):" -ForegroundColor Cyan
+Write-Host "  result: $($rBL.state)  err=$($rBL.last_error)"
+
+Write-Host ""
+Write-Host "Interpretation:" -ForegroundColor Cyan
 if ($rB.state -eq 'DENIED') {
-    Write-Host "Deny ACEs targeting AppContainer SIDs DO enforce on this host." -ForegroundColor Green
-    Write-Host "  mxc.green::filesystem_dacl::add_deny_aces is doing real work." -ForegroundColor Green
-    Write-Host "  ProjFS-T3 fix for RO-create-new CAN use a Deny ACE on the placeholder DACL." -ForegroundColor Green
-} elseif ($rB.state -eq 'SUCCEEDED') {
-    Write-Host "Deny ACEs targeting AppContainer SIDs do NOT enforce on this host." -ForegroundColor Yellow
-    Write-Host "  -> mxc.green::filesystem_dacl::add_deny_aces is a paper guarantee: the Deny ACEs sit in the DACL but the kernel ignores them at AC access-check time. Threat-model claim for deniedPaths under T3 should be revisited." -ForegroundColor Yellow
-    Write-Host "  -> ProjFS-T3 fix for RO-create-new must use SELECTIVE ALLOW (grant read subset, omit FILE_ADD_FILE) on the placeholder DACL, NOT a Deny ACE." -ForegroundColor Yellow
-} else {
-    Write-Host "Case B returned an unexpected state ($($rB.state)). Re-run with -Verbose." -ForegroundColor Red
+    Write-Host "  - Deny ACE for specific AC SID overrides Allow ACE for same SID (canonical-order semantics)." -ForegroundColor Green
+}
+if ($rD.state -eq 'DENIED') {
+    Write-Host "  - Specific-AC-SID Deny ACE overrides ALL APPLICATION PACKAGES Allow ACE." -ForegroundColor Green
+    Write-Host "    The deniedPaths story under T1/T2/T3 is robust to inherited AAP grants." -ForegroundColor Green
+} elseif ($rD.state -eq 'SUCCEEDED') {
+    Write-Host "  - WARNING: AAP Allow won over specific-AC-SID Deny." -ForegroundColor Yellow
+    Write-Host "    deniedPaths needs to also strip AAP grants, not just add Deny." -ForegroundColor Yellow
+}
+if ($rE.state -eq 'SUCCEEDED' -and $rEL.state -eq 'DENIED') {
+    Write-Host "  - LPAC opt-out demonstrably works: regular AC inherits AAP membership and is granted; LPAC AC is not and is denied." -ForegroundColor Green
+} elseif ($rE.state -eq 'SUCCEEDED' -and $rEL.state -eq 'SUCCEEDED') {
+    Write-Host "  - LPAC opt-out had NO effect on this host (still granted via AAP). Check PROC_THREAD_ATTRIBUTE wiring." -ForegroundColor Yellow
+}
+if ($rBL.state -eq 'DENIED') {
+    Write-Host "  - Specific-AC-SID Deny still enforces under LPAC." -ForegroundColor Green
 }
 
 if (-not $KeepArtifacts) {
