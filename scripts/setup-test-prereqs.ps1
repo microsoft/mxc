@@ -9,7 +9,7 @@
     Installs and configures prerequisites needed to run MXC E2E tests:
     - Python 3.12 (system-wide install, accessible from AppContainers)
     - Disables App Execution Aliases for python.exe, python3.exe, and pwsh.exe
-      (Store reparse points are incompatible with AppContainer/BaseContainer sandboxes)
+      (their reparse points are incompatible with AppContainer/BaseContainer sandboxes)
 
     Must be run elevated (Administrator). Only needs to run once per machine.
 
@@ -35,23 +35,23 @@ function Test-Elevated {
     $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Test-StoreAlias {
+function Test-AppExecutionAlias {
     param([string]$ExeName)
     $aliasPath = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\$ExeName"
     return (Test-Path $aliasPath)
 }
 
-function Disable-StoreAlias {
+function Disable-AppExecutionAlias {
     param([string]$ExeName)
     # NOTE: This script is intended for TEST MACHINES ONLY.
     # App Execution Aliases are reparse points at %LOCALAPPDATA%\Microsoft\WindowsApps\<exe>.
     # The Settings UI ("Apps > Advanced app settings > App execution aliases")
     # disables an alias by deleting this file (per Windows OS source:
     # onecore/base/appmodel/AppExecutionAlias/settingshandlers/lib/SettingsHandlers.cpp,
-    # AppAliasListItemSetting::SetValue → DeleteFileIgnoreNotFound).
+    # AppAliasListItemSetting::SetValue -> DeleteFileIgnoreNotFound).
     # Removing the file IS the documented Windows mechanism to disable an alias.
     # Caveats:
-    #   - Windows Updates / Store package updates may restore the reparse point.
+    #   - Windows Updates / packaged app updates may restore the reparse point.
     #   - For legitimately packaged apps (e.g. Store-installed PowerShell), removing
     #     the alias also removes the convenient `pwsh.exe` PATH entry. Tests should
     #     use a fully-qualified install path (e.g. C:\Program Files\PowerShell\7\pwsh.exe).
@@ -61,7 +61,7 @@ function Disable-StoreAlias {
             Remove-Item $userAlias -Force -ErrorAction Stop
             Write-Host "  Disabled user alias: $userAlias" -ForegroundColor Green
         } catch {
-            Write-Host "  WARNING: failed to remove $userAlias`: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Warning "Failed to remove $userAlias`: $($_.Exception.Message)"
         }
     }
 }
@@ -69,7 +69,7 @@ function Disable-StoreAlias {
 function Test-SystemPython {
     $commands = Get-Command python.exe -All -ErrorAction SilentlyContinue
     if (-not $commands) { return $false }
-    # Satisfied if ANY match is a real system-wide install (not Store/AppData)
+    # Satisfied if ANY match is a real system-wide install (not an alias / per-user path)
     foreach ($cmd in $commands) {
         $path = $cmd.Source
         if (($path -notlike "*WindowsApps*") -and ($path -notlike "*AppData*")) {
@@ -96,8 +96,8 @@ if (Test-SystemPython) {
 } else {
     $cmd = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($cmd) {
-        Write-Host " ISSUE (per-user or Store alias: $($cmd.Source))" -ForegroundColor Yellow
-        $issues += "Python is installed per-user or via Store alias. AppContainers cannot access it."
+        Write-Host " ISSUE (per-user or App Execution Alias: $($cmd.Source))" -ForegroundColor Yellow
+        $issues += "Python is installed per-user or only as an App Execution Alias. AppContainers cannot access it."
     } else {
         Write-Host " MISSING" -ForegroundColor Red
         $issues += "Python is not installed."
@@ -108,14 +108,14 @@ if (Test-SystemPython) {
 Write-Host "[2/3] App Execution Aliases..." -NoNewline
 $aliasIssues = @()
 foreach ($exe in @("python.exe", "python3.exe", "pwsh.exe")) {
-    if (Test-StoreAlias $exe) {
+    if (Test-AppExecutionAlias $exe) {
         $aliasIssues += $exe
     }
 }
 if ($aliasIssues.Count -eq 0) {
-    Write-Host " OK (no Store aliases shadowing executables)" -ForegroundColor Green
+    Write-Host " OK (no App Execution Aliases shadowing executables)" -ForegroundColor Green
 } else {
-    Write-Host " ISSUE ($($aliasIssues -join ', ') resolve to Store aliases)" -ForegroundColor Yellow
+    Write-Host " ISSUE ($($aliasIssues -join ', ') resolve to App Execution Aliases)" -ForegroundColor Yellow
     $issues += "App Execution Aliases active for: $($aliasIssues -join ', '). These cause CreateProcessW failures in sandboxed containers."
 }
 
@@ -151,7 +151,7 @@ if ($CheckOnly) {
 # --- Fix mode ---
 
 if (-not (Test-Elevated)) {
-    Write-Host "ERROR: Fixing prerequisites requires elevation. Run as Administrator." -ForegroundColor Red
+    Write-Warning "Fixing prerequisites requires elevation. Run as Administrator."
     exit 1
 }
 
@@ -162,14 +162,12 @@ Write-Host ""
 if (-not (Test-SystemPython)) {
     $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
     if (-not $wingetCmd) {
-        Write-Host "ERROR: winget is not available. Install Python 3.12 manually from https://python.org" -ForegroundColor Red
-        Write-Host "       Choose 'Install for all users' during setup." -ForegroundColor Yellow
+        Write-Warning "winget is not available. Install Python 3.12 manually from https://python.org (choose 'Install for all users')."
     } else {
         Write-Host "Installing Python 3.12 system-wide via winget..." -ForegroundColor Cyan
         winget install Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "ERROR: winget install failed (exit code $LASTEXITCODE)." -ForegroundColor Red
-            Write-Host "       Install Python 3.12 manually from https://python.org (choose 'Install for all users')." -ForegroundColor Yellow
+            Write-Warning "winget install failed (exit code $LASTEXITCODE). Install Python 3.12 manually from https://python.org (choose 'Install for all users')."
         } else {
             # Refresh PATH for current session
             $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
@@ -180,18 +178,17 @@ if (-not (Test-SystemPython)) {
                 $ver = & python.exe --version 2>&1
                 Write-Host "Python installed successfully ($ver)" -ForegroundColor Green
             } else {
-                Write-Host "WARNING: Python install completed but python.exe not found in PATH." -ForegroundColor Yellow
-                Write-Host "         You may need to restart your terminal." -ForegroundColor Yellow
+                Write-Warning "Python install completed but python.exe not found in PATH. You may need to restart your terminal."
             }
         }
     }
 }
 
-# Fix: Disable Store aliases
+# Fix: Disable App Execution Aliases that shadow real executables
 foreach ($exe in @("python.exe", "python3.exe", "pwsh.exe")) {
-    if (Test-StoreAlias $exe) {
-        Write-Host "Disabling Store alias for $exe..." -ForegroundColor Cyan
-        Disable-StoreAlias $exe
+    if (Test-AppExecutionAlias $exe) {
+        Write-Host "Disabling App Execution Alias for $exe..." -ForegroundColor Cyan
+        Disable-AppExecutionAlias $exe
     }
 }
 
