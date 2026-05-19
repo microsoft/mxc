@@ -88,16 +88,16 @@ jobs:
       displayName: Run tests
       workingDirectory: $(workingDirectory)
 
-    # --- macOS Code Signing (official builds only) ---
+    # --- macOS Code Signing + Notarization (official builds only) ---
     # ESRP handles the full signing flow using Microsoft's Developer ID
     # certificate (CP-401337-Apple). No local cert or codesign needed.
     #
     # ESRP's Mac signing requires a .zip (or .dmg) input — raw Mach-O
     # binaries are rejected. We zip before signing and unzip afterward.
     #
-    # Note: Notarization is omitted — the binary is distributed via npm
-    # (no quarantine xattr), so Gatekeeper never fires. Stapling is also
-    # impossible for standalone Mach-O binaries (Apple limitation).
+    # Flow: (1) zip → (2) ESRP sign (hardened runtime) → (3) ESRP notarize → (4) unzip
+    # Stapling is impossible for standalone Mach-O binaries (Apple limitation);
+    # Gatekeeper checks the notarization ticket online instead.
     - script: |
         cd "$(targetTripleDir)"
         zip mxc-exec-mac.zip mxc-exec-mac
@@ -125,6 +125,33 @@ jobs:
               "OperationCode": "MacAppDeveloperSign",
               "Parameters": {
                 "Hardening": "--options=runtime"
+              },
+              "ToolName": "sign",
+              "ToolVersion": "1.0"
+            }
+          ]
+
+    - task: EsrpCodeSigning@5
+      displayName: 'Notarize macOS binary (ESRP)'
+      condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
+      inputs:
+        ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+        AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+        AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
+        AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+        AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+        AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+        FolderPath: $(targetTripleDir)
+        Pattern: mxc-exec-mac.zip
+        UseMinimatch: true
+        signConfigType: 'inlineSignParams'
+        inlineOperation: >-
+          [
+            {
+              "KeyCode": "CP-401337-Apple",
+              "OperationCode": "MacAppNotarize",
+              "Parameters": {
+                "BundleId": "com.microsoft.mxc"
               },
               "ToolName": "sign",
               "ToolVersion": "1.0"
