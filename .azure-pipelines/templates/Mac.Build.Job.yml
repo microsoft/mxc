@@ -21,14 +21,6 @@ parameters:
 - name: ESRPInfo
   type: object
   default: {}
-- name: AppleSigningInfo
-  type: object
-  default:
-    keyVaultServiceConnection: ''
-    keyVaultName: ''
-    certSecret: 'AppleDeveloperIdCert'
-    certPasswordSecret: 'AppleDeveloperIdCertPassword'
-    signingIdentity: 'Developer ID Application: Microsoft Corporation'
 
 jobs:
 - job: 'build_arm64_MAC'
@@ -96,62 +88,15 @@ jobs:
       displayName: Run tests
       workingDirectory: $(workingDirectory)
 
-    # --- macOS Code Signing & Notarization (official builds only) ---
-    # Flow: Import cert from Key Vault → codesign with Developer ID →
-    # ESRP hardening (runtime flag) → ESRP notarization (Apple notary service).
+    # --- macOS Code Signing (official builds only) ---
+    # ESRP handles the full signing flow using Microsoft's Developer ID
+    # certificate (CP-401337-Apple). No local cert or codesign needed.
     #
-    # Note: Stapling is intentionally omitted. Apple does not support
-    # stapling tickets to standalone Mach-O binaries — only .app bundles,
-    # .pkg installers, and .dmg disk images. Gatekeeper verifies the
-    # notarization ticket online for standalone binaries instead.
-
-    # Step 1: Fetch the Developer ID Application certificate from Key Vault
-    - task: AzureKeyVault@2
-      displayName: 'Fetch Apple signing cert from Key Vault'
-      condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
-      inputs:
-        azureSubscription: ${{ parameters.AppleSigningInfo.keyVaultServiceConnection }}
-        KeyVaultName: ${{ parameters.AppleSigningInfo.keyVaultName }}
-        SecretsFilter: '${{ parameters.AppleSigningInfo.certSecret }},${{ parameters.AppleSigningInfo.certPasswordSecret }}'
-        RunAsPreJob: false
-
-    # Step 2: Import cert into a temporary keychain and codesign the binary
-    - script: |
-        set -euo pipefail
-        KEYCHAIN_PATH="$(Agent.TempDirectory)/build.keychain"
-        KEYCHAIN_PASSWORD="$(Agent.TempDirectory)"
-
-        # Create and configure temporary keychain
-        security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-        security default-keychain -s "$KEYCHAIN_PATH"
-        security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-        security set-keychain-settings -t 3600 "$KEYCHAIN_PATH"
-
-        # Import the Developer ID certificate
-        echo "$(${{ parameters.AppleSigningInfo.certSecret }})" | base64 -d > "$(Agent.TempDirectory)/cert.p12"
-        security import "$(Agent.TempDirectory)/cert.p12" \
-          -k "$KEYCHAIN_PATH" \
-          -P "$(${{ parameters.AppleSigningInfo.certPasswordSecret }})" \
-          -T /usr/bin/codesign
-        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-        # Codesign the binary with Developer ID and entitlements
-        codesign --sign "${{ parameters.AppleSigningInfo.signingIdentity }}" \
-          --entitlements "$(Build.SourcesDirectory)/.azure-pipelines/mac-entitlements.plist" \
-          --timestamp --force \
-          "$(targetTripleDir)/mxc-exec-mac"
-
-        # Verify the signature
-        codesign --verify --verbose=2 "$(targetTripleDir)/mxc-exec-mac"
-
-        # Cleanup cert file
-        rm -f "$(Agent.TempDirectory)/cert.p12"
-      displayName: 'Codesign binary (Developer ID)'
-      condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
-
-    # Step 3: ESRP hardening (adds hardened runtime flag)
+    # Note: Notarization is omitted — the binary is distributed via npm
+    # (no quarantine xattr), so Gatekeeper never fires. Stapling is also
+    # impossible for standalone Mach-O binaries (Apple limitation).
     - task: EsrpCodeSigning@5
-      displayName: 'Harden runtime (ESRP)'
+      displayName: 'Sign macOS binary (ESRP)'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
       inputs:
         ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
@@ -171,34 +116,6 @@ jobs:
               "OperationCode": "MacAppDeveloperSign",
               "Parameters": {
                 "Hardening": "--options=runtime"
-              },
-              "ToolName": "sign",
-              "ToolVersion": "1.0"
-            }
-          ]
-
-    # Step 4: ESRP notarization (submits to Apple notary service)
-    - task: EsrpCodeSigning@5
-      displayName: 'Notarize (ESRP)'
-      condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
-      inputs:
-        ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
-        AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
-        AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
-        AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
-        AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
-        AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
-        FolderPath: $(targetTripleDir)
-        Pattern: mxc-exec-mac
-        UseMinimatch: true
-        signConfigType: 'inlineSignParams'
-        inlineOperation: >-
-          [
-            {
-              "KeyCode": "CP-401337-Apple",
-              "OperationCode": "MacAppNotarize",
-              "Parameters": {
-                "BundleId": "com.microsoft.mxc"
               },
               "ToolName": "sign",
               "ToolVersion": "1.0"
