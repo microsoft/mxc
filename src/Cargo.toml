@@ -37,6 +37,7 @@ members = [
     "tools/mxc_schema_gen",
     "ffi/mxc_ffi",
     "mxc_telemetry",
+    "tools/wxc_projfs_probe",
 ]
 exclude = ["testing/fuzz"]
 resolver = "3"
@@ -91,6 +92,7 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemServices",
     "Win32_System_SystemInformation",
     "Win32_System_JobObjects",
+    "Win32_Storage_ProjectedFileSystem",
 ] }
 windows-core = "0.62"
 serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,24 @@
+[package]
+name = "wxc_projfs_probe"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+# ProjFS-T3 spike harness. See:
+#   ~/.copilot/session-state/<id>/plan.md
+#   docs/proposals/downlevel_support/  (findings land here at step 3)
+#
+# Not shipped. Intentionally not depending on wxc_common — keeps the probe
+# self-contained so it can answer the architectural question without dragging
+# in DACL or dispatcher code.
+
+[[bin]]
+name = "wxc-projfs-probe"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+windows-core = { workspace = true }
+widestring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
