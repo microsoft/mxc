@@ -367,9 +367,24 @@ pub struct CapturedOutput {
 /// Run an external process and capture its stdout/stderr into strings.
 /// Uses reader threads to avoid pipe deadlocks, with a configurable timeout.
 ///
+/// `application_name`, when `Some`, is passed verbatim as
+/// `lpApplicationName` to `CreateProcessW`. This **disables Windows'
+/// executable search order** — the OS will load exactly the binary
+/// named, with no fallback to the loader's directory, the CWD, the
+/// system directories, or `PATH`. Callers that have an authoritative
+/// absolute path (resolved from a probe, e.g. via
+/// [`crate::fallback_detector::find_bfscfg_exe`]) should pass it here
+/// to defeat executable-search-order hijacking.
+///
+/// When `application_name` is `None`, the executable is resolved from
+/// the first token of `command_line` according to the standard
+/// `CreateProcessW` rules — vulnerable to search-order attacks if the
+/// first token is a bare name.
+///
 /// This is used by `FileSystemBfsManager` (for `bfscfg.exe`) and the test
 /// driver — anywhere we need to inspect process output rather than relay it.
 pub fn run_process_with_captured_output(
+    application_name: Option<&str>,
     command_line: &str,
     timeout_ms: u32,
 ) -> Result<CapturedOutput, WxcError> {
@@ -377,7 +392,7 @@ pub fn run_process_with_captured_output(
         CreateProcessW, GetExitCodeProcess, TerminateProcess, CREATE_NO_WINDOW,
         PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW,
     };
-    use windows_core::PWSTR;
+    use windows_core::{PCWSTR, PWSTR};
 
     // Create pipes (stdin not connected to anything — child gets EOF)
     let (_stdin_read, _stdin_write) =
@@ -397,11 +412,19 @@ pub fn run_process_with_captured_output(
     };
 
     let mut cmd_wide = string_util::to_wide(command_line);
+    // When `application_name` is `Some`, keep the wide buffer alive for
+    // the duration of the `CreateProcessW` call so the `PCWSTR` we pass
+    // remains valid.
+    let app_wide: Option<Vec<u16>> = application_name.map(string_util::to_wide);
+    let app_pcwstr: PCWSTR = match app_wide.as_ref() {
+        Some(w) => PCWSTR(w.as_ptr()),
+        None => PCWSTR::null(),
+    };
     let mut pi = PROCESS_INFORMATION::default();
 
     unsafe {
         CreateProcessW(
-            PCWSTR::null(),
+            app_pcwstr,
             Some(PWSTR(cmd_wide.as_mut_ptr())),
             None,
             None,
@@ -820,7 +843,7 @@ mod tests {
     #[test]
     fn test_captured_output_stdout() {
         let output =
-            run_process_with_captured_output("cmd.exe /c echo hello world", 10000).unwrap();
+            run_process_with_captured_output(None, "cmd.exe /c echo hello world", 10000).unwrap();
         assert!(output.stdout.trim().contains("hello world"));
         assert_eq!(output.exit_code, 0);
     }
@@ -828,20 +851,21 @@ mod tests {
     #[test]
     fn test_captured_output_stderr() {
         let output =
-            run_process_with_captured_output("cmd.exe /c echo error_msg 1>&2", 10000).unwrap();
+            run_process_with_captured_output(None, "cmd.exe /c echo error_msg 1>&2", 10000)
+                .unwrap();
         assert!(output.stderr.trim().contains("error_msg"));
     }
 
     #[test]
     fn test_captured_output_exit_code() {
-        let output = run_process_with_captured_output("cmd.exe /c exit 42", 10000).unwrap();
+        let output = run_process_with_captured_output(None, "cmd.exe /c exit 42", 10000).unwrap();
         assert_eq!(output.exit_code, 42);
     }
 
     #[test]
     fn test_captured_output_timeout() {
         // Use a very short timeout with a command that sleeps
-        let result = run_process_with_captured_output("cmd.exe /c ping -n 10 127.0.0.1", 500);
+        let result = run_process_with_captured_output(None, "cmd.exe /c ping -n 10 127.0.0.1", 500);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("timed out"));
