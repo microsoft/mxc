@@ -52,6 +52,9 @@ struct ChildReport {
     per_dir: Vec<DirProbe>,
     /// Step-2c write probes.
     write_probes: Vec<WriteProbe>,
+    /// Direct-read probes (orthogonal to the virt root) used for testing
+    /// host DACL semantics from inside the AC.
+    direct_reads: Vec<DirectReadResult>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -121,12 +124,24 @@ struct WriteOpResult {
     failing_call: Option<&'static str>,
 }
 
+#[derive(Debug, Serialize)]
+struct DirectReadResult {
+    target: String,
+    /// "SUCCEEDED" | "DENIED" | "OTHER_ERROR"
+    state: &'static str,
+    content: Option<String>,
+    bytes_read: Option<u32>,
+    last_error: Option<u32>,
+    failing_call: Option<&'static str>,
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut root: Option<PathBuf> = None;
     let mut pipe: Option<String> = None;
     let mut check_dirs: Vec<String> = Vec::new();
     let mut write_probes: Vec<String> = Vec::new();
+    let mut direct_reads: Vec<PathBuf> = Vec::new();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -146,6 +161,10 @@ fn main() {
                 write_probes.push(args[i + 1].clone());
                 i += 2;
             }
+            "--direct-read" if i + 1 < args.len() => {
+                direct_reads.push(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
             _ => i += 1,
         }
     }
@@ -160,7 +179,7 @@ fn main() {
         ..Default::default()
     };
 
-    if check_dirs.is_empty() && write_probes.is_empty() {
+    if check_dirs.is_empty() && write_probes.is_empty() && direct_reads.is_empty() {
         // Step-1 backward-compat mode.
         report.enum_root = Some(enumerate(&root));
         report.read_hello = Some(read_file(&root.join("hello.txt")));
@@ -173,11 +192,33 @@ fn main() {
         for b in &write_probes {
             report.write_probes.push(probe_write(&root, b));
         }
+        for p in &direct_reads {
+            report.direct_reads.push(probe_direct_read(p));
+        }
     }
 
     let json = serde_json::to_string_pretty(&report)
         .unwrap_or_else(|e| format!("{{\"error\":\"json serialization: {e}\"}}"));
     write_to_pipe(&pipe, &json);
+}
+
+fn probe_direct_read(path: &std::path::Path) -> DirectReadResult {
+    let r = read_file(path);
+    let state = if r.succeeded {
+        "SUCCEEDED"
+    } else if r.last_error == Some(5) {
+        "DENIED"
+    } else {
+        "OTHER_ERROR"
+    };
+    DirectReadResult {
+        target: path.to_string_lossy().into_owned(),
+        state,
+        content: r.content,
+        bytes_read: r.bytes_read,
+        last_error: r.last_error,
+        failing_call: r.failing_call,
+    }
 }
 
 fn to_wide_z(s: &str) -> Vec<u16> {

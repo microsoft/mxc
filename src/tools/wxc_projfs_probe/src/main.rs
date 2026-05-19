@@ -51,6 +51,7 @@ struct CliArgs {
     ro: Vec<PathBuf>,
     check_dirs: Vec<String>,
     write_probes: Vec<String>,
+    direct_reads: Vec<String>,
     no_ac: bool,
     keep_root: bool,
 }
@@ -60,6 +61,7 @@ fn parse_args() -> CliArgs {
     let mut ro = Vec::new();
     let mut check_dirs = Vec::new();
     let mut write_probes = Vec::new();
+    let mut direct_reads = Vec::new();
     let mut no_ac = false;
     let mut keep_root = false;
 
@@ -83,6 +85,10 @@ fn parse_args() -> CliArgs {
                 write_probes.push(args[i + 1].clone());
                 i += 2;
             }
+            "--direct-read" if i + 1 < args.len() => {
+                direct_reads.push(args[i + 1].clone());
+                i += 2;
+            }
             "--no-ac" => {
                 no_ac = true;
                 i += 1;
@@ -103,6 +109,7 @@ fn parse_args() -> CliArgs {
         ro,
         check_dirs,
         write_probes,
+        direct_reads,
         no_ac,
         keep_root,
     }
@@ -234,6 +241,7 @@ fn main() -> ExitCode {
             &ac_sid_string,
             &args.check_dirs,
             &args.write_probes,
+            &args.direct_reads,
         ) {
             Ok(child_report) => {
                 eprintln!(

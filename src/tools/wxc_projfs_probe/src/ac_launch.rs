@@ -67,6 +67,7 @@ pub(crate) fn run_child_in_appcontainer(
     ac_sid_string: &str,
     check_dirs: &[String],
     write_probes: &[String],
+    direct_reads: &[String],
 ) -> Result<AcChildReport, String> {
     let pipe_name = format!(
         "\\\\.\\pipe\\mxc-projfs-probe-{}-{}",
@@ -88,6 +89,7 @@ pub(crate) fn run_child_in_appcontainer(
         ac_sid_string,
         check_dirs,
         write_probes,
+        direct_reads,
     );
     let (process_handle, thread_handle) = match spawn_outcome {
         Ok(h) => h,
@@ -268,6 +270,7 @@ fn spawn_ac(
     ac_sid_string: &str,
     check_dirs: &[String],
     write_probes: &[String],
+    direct_reads: &[String],
 ) -> Result<(HANDLE, HANDLE), String> {
     // Parse the AC SID string back to a binary SID for SECURITY_CAPABILITIES.
     let sid_w = to_wide_z(ac_sid_string);
@@ -336,6 +339,11 @@ fn spawn_ac(
     for b in write_probes {
         cmdline.push_str(" --write-probe \"");
         cmdline.push_str(b);
+        cmdline.push('"');
+    }
+    for p in direct_reads {
+        cmdline.push_str(" --direct-read \"");
+        cmdline.push_str(p);
         cmdline.push('"');
     }
     let mut cmdline_w = to_wide_z(&cmdline);
