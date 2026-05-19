@@ -182,6 +182,26 @@ fn main() {
         )
     };
 
+    // Best-effort: reap any orphaned DACL state files left behind by
+    // crashed prior MXC runs. Errors here are non-fatal and only surface
+    // via stderr.
+    match wxc_common::filesystem_dacl::recover_orphaned_state() {
+        Ok(report) => {
+            if report.files_processed > 0 || !report.errors.is_empty() {
+                eprintln!(
+                    "DACL recovery: {} file(s), {} ACE(s) restored, {} error(s)",
+                    report.files_processed,
+                    report.aces_restored,
+                    report.errors.len()
+                );
+                for e in &report.errors {
+                    eprintln!("  {e}");
+                }
+            }
+        }
+        Err(e) => eprintln!("DACL recovery failed: {e}"),
+    }
+
     let cli = Cli::parse();
 
     // --setup-hyperlight: warm up the snapshot and exit. Runs before
