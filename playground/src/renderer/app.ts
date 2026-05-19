@@ -467,9 +467,9 @@ var SCENARIOS: Scenario[] = [
   { id: 'hl-net-blocked', name: 'HTTP GET (network off)', category: 'Networking', categoryIcon: '🌐', shell: 'python',
     containment: 'hyperlight',
     description: 'Attempts HTTP GET with networking disabled. Should fail to connect.',
-    expectedOutcome: 'show-error', expectedLabel: 'Should fail (network blocked)',
+    expectedOutcome: 'succeed', expectedLabel: 'Should block network request',
     script: "import urllib.request\ntry:\n    urllib.request.urlopen('http://httpbin.org/get', timeout=5)\n    print('ERROR: request should have failed')\nexcept Exception as e:\n    print('Correctly blocked:', type(e).__name__)",
-    policy: {} },
+    policy: {}, successMarker: 'Correctly blocked' },
 
   // ========== Hyperlight — Filesystem ==========
   { id: 'hl-fs-write-read', name: 'Write & read file', category: 'Filesystem', categoryIcon: '📁', shell: 'python',
@@ -1202,10 +1202,9 @@ async function runSandbox(): Promise<void> {
 
     // Merge scenario policy fields (e.g. network, filesystem) into raw config
     var scenarioPolicy = state.selectedScenario ? state.selectedScenario.policy : {};
-    if (scenarioPolicy.network && scenarioPolicy.network.enabled) {
-      rawConfig.policy = rawConfig.policy || {};
-      rawConfig.policy.defaultNetworkPolicy = 'allow';
-    }
+    rawConfig.network = {
+      defaultPolicy: (scenarioPolicy.network && scenarioPolicy.network.enabled) ? 'allow' : 'block',
+    };
     if (scenarioPolicy.timeoutMs) {
       rawConfig.process.timeout = scenarioPolicy.timeoutMs;
     }
@@ -1724,16 +1723,28 @@ function analyzeOutput(terminalText: string, exitCode: number): { title: string;
 // ============================================================
 
 var terminalFullText = '';
+var ptyLineBuffer = '';
 
 mxc.onPtyData(function(data: string) {
   var clean = stripAnsi(data);
   terminalFullText += clean;
-  if (clean.trim()) {
-    termOutput(clean);
+  ptyLineBuffer += clean;
+  var lines = ptyLineBuffer.split('\n');
+  // Keep the last (possibly incomplete) chunk in the buffer
+  ptyLineBuffer = lines.pop() || '';
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].trim()) {
+      termOutput(lines[i]);
+    }
   }
 });
 
 mxc.onPtyExit(function(exitCode: number) {
+  // Flush any remaining buffered output
+  if (ptyLineBuffer.trim()) {
+    termOutput(ptyLineBuffer);
+  }
+  ptyLineBuffer = '';
   // Small delay to let pending PTY data events flush before verdict
   setTimeout(function() { onSandboxExit(exitCode); }, 100);
 });
