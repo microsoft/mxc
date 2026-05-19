@@ -223,11 +223,15 @@ impl LxcContainer {
     /// Stdout/stderr are streamed live via the master fd; the returned
     /// strings are always empty. Callers needing captured output should run
     /// a self-contained `commandLine` and read it back from a file.
+    ///
+    /// `timeout: Some(d)` kills the child if it runs longer than `d` and
+    /// returns `Err("script timed out after {ms}ms")`.
     #[cfg(target_os = "linux")]
     pub fn attach_run(
         &self,
         command: &str,
         _working_directory: &str,
+        timeout: Option<std::time::Duration>,
     ) -> Result<(i32, String, String), String> {
         use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
 
@@ -238,9 +242,7 @@ impl LxcContainer {
 
         let options = PtyOptions {
             unblock_signals: UNBLOCK,
-            // TODO: thread request.script_timeout through to here so the
-            // LXC backend can enforce script-level timeouts the same way
-            // the Seatbelt backend already does.
+            timeout,
             ..PtyOptions::default()
         };
 
@@ -248,9 +250,10 @@ impl LxcContainer {
             PtyOutcome::Exited(status) => {
                 Ok((status.code().unwrap_or(-1), String::new(), String::new()))
             }
-            // Unreachable today because we pass `timeout: None`, but cover
-            // it explicitly so the compiler catches future changes.
-            PtyOutcome::TimedOut => Err("lxc-attach timed out".to_string()),
+            PtyOutcome::TimedOut => {
+                let ms = timeout.map(|d| d.as_millis()).unwrap_or(0);
+                Err(format!("script timed out after {}ms", ms))
+            }
         }
     }
 
@@ -260,6 +263,7 @@ impl LxcContainer {
         &self,
         _command: &str,
         _working_directory: &str,
+        _timeout: Option<std::time::Duration>,
     ) -> Result<(i32, String, String), String> {
         Err("LxcContainer::attach_run is only supported on Linux".to_string())
     }
