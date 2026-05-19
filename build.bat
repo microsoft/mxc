@@ -127,35 +127,26 @@ echo Build complete.
 echo.
 echo === Checking E2E test prerequisites ===
 set "PREREQ_WARN=0"
-set "PYTHON_MISSING=0"
-set "ALIAS_ISSUE=0"
 
 :: Check Python is available and first match is not a Store alias
-set "PYTHON_FIRST_ALIAS=0"
 where python.exe >nul 2>&1
 if errorlevel 1 (
     echo   WARNING: python.exe not found. E2E tests require a system-wide Python install.
     set "PREREQ_WARN=1"
-    set "PYTHON_MISSING=1"
 ) else (
     for /f "tokens=*" %%P in ('where python.exe') do (
         echo %%P | findstr /i "WindowsApps" >nul 2>&1
         if not errorlevel 1 (
-            set "PYTHON_FIRST_ALIAS=1"
+            echo   WARNING: python.exe first resolves to a Store alias.
+            echo            Store aliases shadow real installs and cannot be launched inside sandbox containers.
+            set "PREREQ_WARN=1"
         )
         goto :python_check_done
     )
 )
 :python_check_done
-if "!PYTHON_FIRST_ALIAS!"=="1" (
-    echo   WARNING: python.exe first resolves to a Store alias.
-    echo            Store aliases shadow real installs and cannot be launched inside sandbox containers.
-    set "PREREQ_WARN=1"
-    set "PYTHON_MISSING=1"
-    set "ALIAS_ISSUE=1"
-)
 
-:: Check pwsh.exe exists at the expected path
+:: Check pwsh.exe exists at the expected path used by test configs
 if not exist "C:\Program Files\PowerShell\7\pwsh.exe" (
     echo   WARNING: PowerShell 7 not found at C:\Program Files\PowerShell\7\pwsh.exe.
     echo            pwsh sandbox tests will fail.
@@ -164,46 +155,11 @@ if not exist "C:\Program Files\PowerShell\7\pwsh.exe" (
 
 if "%PREREQ_WARN%"=="0" (
     echo   All E2E test prerequisites met.
-    goto :done
-)
-
-:: Check if running elevated
-net session >nul 2>&1
-if errorlevel 1 (
+) else (
     echo.
-    echo   Not running as Administrator. To fix these issues, run from an elevated prompt:
-    echo     scripts\setup-test-prereqs.ps1
-    goto :done
+    echo   To fix, run from an elevated PowerShell prompt:
+    echo     .\scripts\setup-test-prereqs.ps1
 )
-
-:: Running elevated — offer single combined fix
-echo.
-set /p "FIX_ALL=  Fix issues and install Python? [Y/n] "
-if /i "!FIX_ALL!"=="n" goto :done
-
-if "%PYTHON_MISSING%"=="1" (
-    where winget >nul 2>&1
-    if errorlevel 1 (
-        echo   ERROR: winget not available. Install Python 3.12 manually from https://python.org
-        echo          Choose 'Install for all users' during setup.
-    ) else (
-        echo   Installing Python 3.12 via winget...
-        winget install Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements
-        if errorlevel 1 echo   WARNING: winget install may have failed. Verify with: where python.exe
-    )
-)
-
-if "%ALIAS_ISSUE%"=="1" (
-    echo   Removing Store aliases...
-    if exist "%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe"  del /f "%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe"  2>nul && echo     Removed python.exe alias
-    if exist "%LOCALAPPDATA%\Microsoft\WindowsApps\python3.exe" del /f "%LOCALAPPDATA%\Microsoft\WindowsApps\python3.exe" 2>nul && echo     Removed python3.exe alias
-    if exist "%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe"    del /f "%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe"    2>nul && echo     Removed pwsh.exe alias
-)
-
-echo.
-echo   Prerequisites fixed. Starting a fresh terminal to pick up PATH changes...
-echo.
-start cmd /k "cd /d %~dp0 && echo Ready. Run your tests now."
 
 :done
 

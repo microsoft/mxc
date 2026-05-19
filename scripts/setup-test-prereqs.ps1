@@ -37,32 +37,31 @@ function Test-Elevated {
 
 function Test-StoreAlias {
     param([string]$ExeName)
-    $cmd = Get-Command $ExeName -ErrorAction SilentlyContinue
-    if (-not $cmd) { return $false }
-    $path = $cmd.Source
-    return ($path -like "*WindowsApps*") -or ($path -like "*AppData*Microsoft*WindowsApps*")
+    $aliasPath = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\$ExeName"
+    return (Test-Path $aliasPath)
 }
 
 function Disable-StoreAlias {
     param([string]$ExeName)
-    # App Execution Aliases are stored as reparse points in WindowsApps directories.
-    # Removing them from the user-local path disables the alias for the current user.
+    # NOTE: This script is intended for TEST MACHINES ONLY.
+    # App Execution Aliases are reparse points at %LOCALAPPDATA%\Microsoft\WindowsApps\<exe>.
+    # The Settings UI ("Apps > Advanced app settings > App execution aliases")
+    # disables an alias by deleting this file (per Windows OS source:
+    # onecore/base/appmodel/AppExecutionAlias/settingshandlers/lib/SettingsHandlers.cpp,
+    # AppAliasListItemSetting::SetValue → DeleteFileIgnoreNotFound).
+    # Removing the file IS the documented Windows mechanism to disable an alias.
+    # Caveats:
+    #   - Windows Updates / Store package updates may restore the reparse point.
+    #   - For legitimately packaged apps (e.g. Store-installed PowerShell), removing
+    #     the alias also removes the convenient `pwsh.exe` PATH entry. Tests should
+    #     use a fully-qualified install path (e.g. C:\Program Files\PowerShell\7\pwsh.exe).
     $userAlias = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\$ExeName"
     if (Test-Path $userAlias) {
-        Remove-Item $userAlias -Force -ErrorAction SilentlyContinue
-        Write-Host "  Disabled user alias: $userAlias" -ForegroundColor Green
-    }
-
-    # Also check the system-wide WindowsApps path and warn (can't remove without TrustedInstaller)
-    $systemPaths = @(Get-Command $ExeName -All -ErrorAction SilentlyContinue | 
-        Where-Object { $_.Source -like "*WindowsApps*" } |
-        Select-Object -ExpandProperty Source)
-    
-    foreach ($p in $systemPaths) {
-        if ($p -notlike "*$env:LOCALAPPDATA*") {
-            Write-Host "  WARNING: System-wide Store alias exists: $p" -ForegroundColor Yellow
-            Write-Host "           This may still shadow the real executable in some contexts." -ForegroundColor Yellow
-            Write-Host "           Disable it manually: Settings > Apps > Advanced app settings > App execution aliases" -ForegroundColor Yellow
+        try {
+            Remove-Item $userAlias -Force -ErrorAction Stop
+            Write-Host "  Disabled user alias: $userAlias" -ForegroundColor Green
+        } catch {
+            Write-Host "  WARNING: failed to remove $userAlias`: $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
 }
