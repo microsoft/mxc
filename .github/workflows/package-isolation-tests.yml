@@ -15,9 +15,9 @@ name: Package Isolation Session Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, user/dalegg/iso-test-package]
   pull_request:
-    branches: [main]
+    branches: [main, user/dalegg/iso-test-package]
   workflow_dispatch:
 
 jobs:
