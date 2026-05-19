@@ -624,7 +624,7 @@ fn hyperlight_suite() {
         },
         HyperlightCase {
             config: "hyperlight_timeout.json",
-            description: "time.sleep(120) killed by 5s timeout",
+            description: "time.sleep(120) killed by 1s timeout",
             expected_exit: -1,
             output_contains: Some("timed out"),
         },
