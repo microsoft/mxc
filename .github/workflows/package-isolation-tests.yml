@@ -1,0 +1,142 @@
+# -----------------------------------------------------------------------
+# package-isolation-tests.yml
+#
+# GitHub Actions workflow for microsoft/mxc that produces the
+# mxc-iso-test-package artifact. This packages Rust binaries,
+# test configs, PS1 runners, and the Node E2E suite into a single
+# zip that can be deployed and run on a Windows 11 target with
+# IsoEnvBroker (IsolationSession) APIs.
+#
+# Prerequisites: the existing build.yml workflow (which this reuses
+# via workflow_call or needs from the same workflow file).
+# -----------------------------------------------------------------------
+
+name: Package Isolation Session Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ---- Reuse the existing build jobs for binaries and SDK ----------
+  build:
+    uses: ./.github/workflows/build.yml
+
+  # ---- Package the isolation-session test bundle -------------------
+  package-isolation-tests:
+    name: Package Isolation Session Tests
+    needs: build
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # -- Download Rust binaries (x64 + arm64) from the build job --
+      - name: Download wxc-exec (x64)
+        uses: actions/download-artifact@v4
+        with:
+          name: wxc-exec-x86_64-pc-windows-msvc
+          path: _staging/bin/x64
+
+      - name: Download wxc-exec (arm64)
+        uses: actions/download-artifact@v4
+        with:
+          name: wxc-exec-aarch64-pc-windows-msvc
+          path: _staging/bin/arm64
+
+      # -- Download the SDK .tgz to install into the integration tests --
+      - name: Download SDK package
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-packages
+          path: _staging/sdk-pkg
+
+      # -- Copy test_configs and test_scripts from the repo --
+      - name: Collect test configs and scripts
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse test_configs _staging/test_configs
+          Copy-Item -Recurse test_scripts _staging/test_scripts
+
+      # -- Build sdk-integration tests with the packaged SDK --
+      - name: Build SDK integration tests
+        shell: pwsh
+        run: |
+          $sdkTgz = (Get-Item _staging/sdk-pkg/*.tgz).FullName
+          Push-Location sdk/tests/integration
+          npm install $sdkTgz
+          npm run build
+          Pop-Location
+          # Copy the built integration test suite
+          $dest = "_staging/sdk-integration"
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Copy-Item sdk/tests/integration/package.json $dest/
+          Copy-Item sdk/tests/integration/run-tests.js $dest/ -ErrorAction SilentlyContinue
+          Copy-Item -Recurse sdk/tests/integration/dist $dest/dist
+          Copy-Item -Recurse sdk/tests/integration/node_modules $dest/node_modules
+
+      # -- Generate manifest.json --
+      - name: Generate manifest
+        shell: pwsh
+        run: |
+          $manifest = @{
+            format_version = 1
+            produced_at    = (Get-Date).ToUniversalTime().ToString('o')
+            producer       = @{
+              workflow   = 'package-isolation-tests'
+              run_id     = '${{ github.run_id }}'
+              run_number = '${{ github.run_number }}'
+            }
+            mxc = @{
+              repo_url  = 'https://github.com/microsoft/mxc.git'
+              commit_sha = '${{ github.sha }}'
+              ref        = '${{ github.ref }}'
+            }
+            contents = @{
+              binaries     = @('bin/x64', 'bin/arm64')
+              test_configs = 'test_configs/'
+              ps1_runners  = @(
+                'test_scripts/run_isolation_session_tests.ps1',
+                'test_scripts/run_isolation_session_state_aware_tests.ps1'
+              )
+              node_e2e = 'sdk-integration/'
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 5 |
+            Set-Content _staging/manifest.json -Encoding UTF8
+
+      # -- Create the zip --
+      - name: Create test package zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path _output -Force | Out-Null
+          $stamp = (Get-Date).ToUniversalTime().ToString('yyMMdd-HHmmss')
+          $zipName = "mxc-iso-test-package-$stamp.zip"
+          Compress-Archive -Path _staging/* -DestinationPath "_output/$zipName"
+
+          # Copy the orchestrator and wrapper alongside the zip
+          # NOTE: These files must exist in the repo. If they don't
+          # yet, the user needs to commit them first.
+          $orchestrator = "scripts/ci/Invoke-MxcIsolationSessionTests.ps1"
+          $wrapper = "scripts/ci/Run-Tests.cmd"
+          if (Test-Path $orchestrator) {
+            Copy-Item $orchestrator _output/
+          }
+          if (Test-Path $wrapper) {
+            Copy-Item $wrapper _output/
+          }
+
+      # -- Upload the final artifact --
+      - name: Upload test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: mxc-iso-test-package
+          path: _output/*
+          retention-days: 30
