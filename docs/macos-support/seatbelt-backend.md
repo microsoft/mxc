@@ -2,7 +2,7 @@
 
 The macOS sandbox backend provides macOS
 sandbox isolation by wrapping Apple's
-[Seatbelt](https://en.wikipedia.org/wiki/Seatbelt_%28software%29) sandbox —
+Seatbelt sandbox —
 the same kernel-enforced sandbox that backs the App Sandbox used by every
 Mac App Store application.
 

@@ -190,6 +190,42 @@ See `examples/11_lxc_hello_world.json`, `examples/12_lxc_filesystem_access.json`
 ./lxc-exec --debug config.json
 ```
 
+## macOS Support (Seatbelt)
+
+MXC also supports macOS via Seatbelt — the same kernel-enforced sandbox that backs the App Sandbox used by every Mac App Store application. The `mxc-exec-mac` binary applies a generated TinyScheme profile to the child process via `sandbox_init()`, providing filesystem, network, and UI isolation. The macOS backend is **experimental** and currently requires opt-in via the `--experimental` flag (or `{ experimental: true }` in SDK spawn options).
+
+For full details on the Seatbelt backend, see [docs/macos-support/seatbelt-backend.md](docs/macos-support/seatbelt-backend.md).
+
+### Building on macOS
+
+Use `build-mac.sh` from the repo root:
+
+```bash
+./build-mac.sh              # Native architecture release build
+./build-mac.sh --all        # Both Apple Silicon and Intel slices
+./build-mac.sh --debug      # Debug build
+./build-mac.sh --rust-only  # Only build Rust binary, skip SDK
+```
+
+This will:
+1. Build the Rust `mxc-exec-mac` binary for the selected architecture(s)
+2. Copy the binary into `sdk/bin/<target-triple>/` so it is bundled with the SDK package
+3. Build the TypeScript SDK
+
+### macOS Example Configurations
+
+See `examples/15_mac_hello_world.json` and `examples/21_mac_python_info.json` for macOS-specific examples.
+
+### Running on macOS
+
+```bash
+# Run with config file
+./mxc-exec-mac --experimental config.json
+
+# Run with debug output
+./mxc-exec-mac --experimental --debug config.json
+```
+
 ## License
 
 See LICENSE file for details.
