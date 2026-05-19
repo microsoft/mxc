@@ -3,7 +3,7 @@
   "containerId": "CLI-LPAC-Test",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "python -c \"print('import sys; Testing LPAC (Least Privilege AppContainer) mode'); print(f'Python: {sys.version}')\"",
+    "commandLine": "python -c \"import sys; print('Testing LPAC (Least Privilege AppContainer) mode'); print(f'Python: {sys.version}')\"",
     "timeout": 30000
   },
   "processContainer": {

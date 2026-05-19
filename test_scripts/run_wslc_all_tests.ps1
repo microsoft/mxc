@@ -6,8 +6,15 @@
 # Cannot run in GitHub Actions CI (needs WSL2 + WSLC runtime).
 #
 # Usage:
-#   .\run_wslc_all_tests.ps1              # release build (default)
+#   .\run_wslc_all_tests.ps1              # release build (default), pulls images first
 #   .\run_wslc_all_tests.ps1 -Debug       # debug build
+#   .\run_wslc_all_tests.ps1 -SkipSetup   # skip pre-pull (assume cache is warm)
+#
+# Image pre-pull:
+#   This script invokes scripts\setup-wslc.ps1 as a preflight to populate the
+#   WSLC image cache. MXC's runner no longer auto-pulls images at run time
+#   (see issue #165), so the cache must be warmed before any test that
+#   references a registry image. Pass -SkipSetup to bypass.
 #
 # Prerequisites for tar import tests:
 #
@@ -26,7 +33,8 @@
 
 param(
     [switch]$Debug,
-    [string]$WxcExecPath
+    [string]$WxcExecPath,
+    [switch]$SkipSetup
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,6 +62,34 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
     Write-Host "Build with: cargo build --features wslc $(if (-not $Debug) { '--release ' })--target $Target" -ForegroundColor Yellow
     Write-Host "Or pass -WxcExecPath explicitly." -ForegroundColor Yellow
     exit 1
+}
+
+# Preflight: ensure the WSLC image cache is populated. The runner no longer
+# auto-pulls (see scripts\setup-wslc.ps1 and #165). Skipping is supported for
+# the common case where the caller has already pre-pulled or wants to test
+# a hermetic environment.
+if (-not $SkipSetup) {
+    $SetupScript = Join-Path $RepoRoot "scripts\setup-wslc.ps1"
+    if (Test-Path $SetupScript) {
+        Write-Host "Pre-pulling WSLC images (pass -SkipSetup to skip)..." -ForegroundColor Cyan
+        # Pull every image referenced by the wslc_*.json test configs except
+        # the tar-import variants (those are imported at run time from the
+        # caller-supplied tar file, not pulled from a registry).
+        $images = @(
+            "alpine:latest",
+            "python:3.12-alpine",
+            "mcr.microsoft.com/cbl-mariner/base/core:2.0",
+            "ghcr.io/linuxserver/baseimage-alpine:3.21",
+            "quay.io/fedora/fedora-minimal:latest"
+        )
+        & $SetupScript -WxcExecPath $WxcExec -Image $images -Force
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "WARN: setup-wslc.ps1 reported failures; continuing with tests anyway." -ForegroundColor Yellow
+        }
+        Write-Host ""
+    } else {
+        Write-Host "WARN: $SetupScript not found; assuming images are pre-pulled." -ForegroundColor Yellow
+    }
 }
 
 # Helper: run a single WSLC test config

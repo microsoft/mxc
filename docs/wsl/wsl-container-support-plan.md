@@ -317,8 +317,8 @@ Port mapping (new capability enabled by WSLC SDK):
 
 ### Phase 5 — CLI Updates & Setup (Future Work)
 
-**Status:** Not yet implemented. The features below are planned for a future
-iteration after the core WSLC backend (Phase 3) is validated.
+**Status:** Setup script implemented (issue #165). CLI `--container` /
+`--image` flags still pending.
 
 **Goal:** Give users a simple way to invoke Linux container execution from the
 command line, and a one-command setup for the WSLC SDK prerequisite.
@@ -331,9 +331,11 @@ CLI (`wxc/src/main.rs` — Clap definition):
 - Update `platform` command to show WSLC SDK status
 
 Setup script (`scripts/setup-wslc.ps1`):
-- Verify WSLC SDK is installed via `WslcCanRun()`
-- Pull default Linux image
-- Run a smoke test
+- ✅ Verifies WSLC SDK is installed via `WslcCanRun()` (inherited from
+  `init_and_load_sdk`) before attempting any pull
+- ✅ Pre-pulls the requested images via `wxc-exec.exe --setup-wslc`
+- ✅ Honors a custom `-StoragePath` so caches outside `%TEMP%` are supported
+- TODO: Run a smoke test after the pull (tracked separately)
 
 **Current workaround:** Users write JSON configs with `"containment": "wslc"`
 and run with `wxc-exec.exe --experimental --debug config.json`.
@@ -370,12 +372,22 @@ These need team decisions before implementation:
 
 ## Supported Image Sources
 
-The WSLC backend supports three ways to provide a container image:
+The WSLC backend supports three ways to provide a container image. MXC is
+an execution layer and **does not pull images at run time** — registry
+pulls are handled out of band, before the runner is invoked. If the
+runner is asked to start a container against an image that is not in the
+local cache, it fails fast with an actionable error pointing at the setup
+script.
 
-### 1. Pull from DockerHub
+### 1. Pre-pulled image from DockerHub
 
-The default path. Specify an image name in the `wslc` config section and the
-WSLC SDK pulls it from DockerHub automatically if not already cached locally.
+The default path. Pre-pull the image via the setup script (or
+`wxc-exec.exe --setup-wslc --image <name>` directly), then reference it
+from the config:
+
+```powershell
+.\scripts\setup-wslc.ps1 -Image alpine:latest
+```
 
 ```json
 {
@@ -390,14 +402,16 @@ WSLC SDK pulls it from DockerHub automatically if not already cached locally.
 }
 ```
 
-No additional setup needed — DockerHub is the default registry.
+### 2. Pre-pulled image from a custom registry (no auth)
 
-### 2. Pull from a custom registry (no auth)
+Specify the full registry URL as the image name. The WSLC SDK resolves
+it during the pull. Currently only registries that do not require
+authentication are supported; private registry auth is planned for a
+future WSLC SDK release.
 
-Specify the full registry URL as the image name. The WSLC SDK resolves it
-directly. Currently only registries that do not require authentication are
-supported. Private registry auth support is planned for a future WSLC SDK
-release.
+```powershell
+.\scripts\setup-wslc.ps1 -Image mcr.microsoft.com/cbl-mariner/base/core:2.0
+```
 
 ```json
 {
@@ -412,15 +426,19 @@ release.
 }
 ```
 
-**Setup:** Network access is required for the pull, so set
-`"defaultPolicy": "allow"` (or at minimum ensure the registry host is
-reachable). No Docker Desktop or local Docker daemon is needed — the WSLC SDK
-handles the pull internally.
+**Setup:** Network access is required at pull time. No Docker Desktop or
+local Docker daemon is needed — the WSLC SDK handles the pull internally.
 
 **Tested registries:**
 - `mcr.microsoft.com` (Microsoft Container Registry)
 - `ghcr.io` (GitHub Container Registry, public images)
 - `quay.io` (Red Hat Quay, public images)
+
+> **Note on storage path:** the setup script and the runner must share
+> the same `storage_path`. The runner default is
+> `%TEMP%\mxc-wslc-sessions`; if your config sets
+> `experimental.wslc.storagePath`, pass the same path to the setup
+> script with `-StoragePath`.
 
 ### 3. Import from a local tar file
 
