@@ -274,6 +274,13 @@ fn collect_host_children(host_dir: &Path) -> std::io::Result<Vec<ChildEntry>> {
     let mut v = Vec::new();
     for entry in fs::read_dir(host_dir)? {
         let entry = entry?;
+        // Use `file_type()` (no link follow) so we can detect and skip
+        // reparse points without dereferencing them. Threat-model item #7
+        // is closed by not surfacing reparse points to the AC at all.
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            continue;
+        }
         let md = entry.metadata()?;
         v.push(ChildEntry {
             name: entry.file_name().to_string_lossy().into_owned(),
@@ -419,21 +426,19 @@ unsafe extern "system" fn cb_get_placeholder_info(
             file_basic_info_dir()
         }
         Resolved::Host { host_path, .. } => {
-            // The Root and Branch directories don't need a host path lookup
-            // — the resolve() already produced the host_path; just stat it.
+            // Use `symlink_metadata` so we *detect* reparse points without
+            // following them. If the host file is a reparse point, refuse
+            // to surface it — the AC sees `ERROR_FILE_NOT_FOUND`, which is
+            // semantically identical to "the path is not in policy."
+            // Threat-model item #7 (reparse-point follow-out from within a
+            // granted directory) is closed by this refusal.
             let Ok(md) = fs::symlink_metadata(&host_path) else {
                 return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
             };
             if md.file_type().is_symlink() {
-                // Reparse-point refusal lands in step 2d; for this commit
-                // we expose them as if they were the link target.  Track:
-                // microsoft/mxc TBD.
-                if md.is_dir() {
-                    file_basic_info_dir()
-                } else {
-                    file_basic_info_file(md.len() as i64)
-                }
-            } else if md.is_dir() {
+                return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
+            }
+            if md.is_dir() {
                 file_basic_info_dir()
             } else {
                 file_basic_info_file(md.len() as i64)
