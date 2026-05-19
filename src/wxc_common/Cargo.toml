@@ -21,7 +21,7 @@ getrandom = { workspace = true }
 semver = "1"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-hyperlight-unikraft-host = { git = "https://github.com/hyperlight-dev/hyperlight-unikraft", tag = "v0.5.0", optional = true }
+hyperlight-unikraft-host = { git = "https://github.com/hyperlight-dev/hyperlight-unikraft", tag = "v0.6.0", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
