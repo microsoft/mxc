@@ -151,7 +151,7 @@ HeadlineCheck "control stat=HIDDEN  enum=BLOCKED"      ($pd['control'].exist.sta
 HeadlineCheck "rw  modify=SUCCEEDED"                   ($wp['rw'].modify_existing.state -eq 'SUCCEEDED')
 HeadlineCheck "ro  modify=DENIED"                      ($wp['ro'].modify_existing.state -eq 'DENIED') "PRE_CONVERT_TO_FULL veto"
 HeadlineCheck "rw  create=SUCCEEDED"                   ($wp['rw'].create_new.state -eq 'SUCCEEDED')
-HeadlineCheck "ro  create=SUCCEEDED  (known limitation)" ($wp['ro'].create_new.state -eq 'SUCCEEDED') "ProjFS has no PRE_NEW_FILE_CREATED notification — production needs placeholder DACL"
+HeadlineCheck "ro  create=DENIED  (placeholder DACL)"  ($wp['ro'].create_new.state -eq 'DENIED') "FILE_ADD_FILE not granted to AC SID on the placeholder dir's DACL"
 HeadlineCheck "host ACLs unchanged"                    (-not $aclMutated)
 
 if (-not $KeepArtifacts) {

@@ -470,41 +470,61 @@ unsafe extern "system" fn cb_get_placeholder_info(
     // enforce, but the selective-Allow shape used here is simpler and has
     // no AAP-inheritance gotcha (we own the placeholder DACL entirely;
     // nothing is inherited).
-    let _ = state().lock().unwrap().policy.ac_sid_string.clone();
-    let _ = basic.IsDirectory;
-    let _ = mode_opt;
-    // Step 3 first attempt — attach a selective-Allow SD on RO branch
-    // directory placeholders to close the new-file-in-RO regression cell.
-    // Attempted but reverted: PrjWritePlaceholderInfo returned
-    // ERROR_INTERNAL_ERROR (1359) regardless of SDDL content (even
-    // `D:P(A;OICI;FA;;;SY)` alone failed). Plausible suspects, none yet
-    // confirmed:
-    //   - buffer alignment of the variable-length PRJ_PLACEHOLDER_INFO
-    //     when passed via a Vec<u8> backing store;
-    //   - need to use PrjWritePlaceholderInfo2 / PrjUpdateFileIfNeeded
-    //     instead, especially when the placeholder kind is a directory;
-    //   - SECURITY_DESCRIPTOR self-relative offset semantics inside the
-    //     variable-data block.
-    // Tracked as a named follow-on PR in
-    // docs/proposals/downlevel_support/projfs-t3-spike-step3.md.
-    let sd_bytes: Option<Vec<u8>> = None;
+    let ac_sid_string = state().lock().unwrap().policy.ac_sid_string.clone();
+    let is_dir = basic.IsDirectory;
+    // Step 3 (2/N) — attach a placeholder DACL on RO branch directory
+    // placeholders to close the new-file-in-RO regression cell. The first
+    // attempt failed with ERROR_INTERNAL_ERROR (1359); ProjFS source review
+    // (gvflt: filter\sys\create.c:1559-1635) showed the kernel detects the
+    // failure as "buggy provider — lied about laying down a placeholder."
+    // Root cause: PrjfCopyAsPlaceHolder passes our SD to FltCreateFileEx2
+    // with IO_FORCE_ACCESS_CHECK. If the DACL denies the creating user
+    // (the launching user, mgudgin in the spike) access, the kernel-side
+    // create silently fails the access check and the placeholder is never
+    // laid down. PrjWritePlaceholderInfo still returns S_OK to us.
+    //
+    // Fix: include `(A;OICI;FA;;;OW)` so the file's owner (set to the
+    // launching user by default) gets full access, *and* don't set
+    // explicit O: in the SD (kernel sets the owner from the calling
+    // token).
+    let sd_bytes = match mode_opt {
+        Some(BranchMode::ReadOnly) if is_dir && !ac_sid_string.is_empty() => {
+            build_ro_security_descriptor(&ac_sid_string)
+        }
+        _ => None,
+    };
 
     if let Some(sd) = sd_bytes {
-        // Build a variable-length PRJ_PLACEHOLDER_INFO + SD payload. The
-        // SD lives starting at offsetof(VariableData), NOT at
-        // size_of(PRJ_PLACEHOLDER_INFO) — those differ by 1 because
-        // VariableData is declared as [u8; 1]. Off-by-one here causes
-        // ProjFS to read the SD bytes from one position past where we
-        // put them, returning ERROR_INTERNAL_ERROR (1359).
+        // Build a variable-length PRJ_PLACEHOLDER_INFO + SD payload.
+        //
+        // Critical alignment requirement: the kernel side computes
+        // `userSecDesc = userPlaceholderInfo + OffsetToSecurityDescriptor`
+        // and passes it to SeCaptureSecurityDescriptor, which calls
+        // ProbeForRead with at least DWORD alignment. If the resulting
+        // user-mode address isn't DWORD-aligned, we get
+        // STATUS_DATATYPE_MISALIGNMENT -> ERROR_NOACCESS (0x800703e6).
+        //
+        // userPlaceholderInfo address = user_msgBody + 136 + path_bytes
+        // (with FIELD_OFFSET(PRJFLT_MESSAGE, Buffer) = 8 and
+        // FIELD_OFFSET(PRJFLT_PLACEHOLDER_INFO_MESSAGE, Buffer) = 128).
+        // user_msgBody is 16-aligned (calloc), so the address mod 8 is
+        // `path_bytes mod 8`. We pad OffsetToSecurityDescriptor up so
+        // `(path_bytes + offset) mod 8 == 0`. Aligning to 8 (rather
+        // than the minimum DWORD/4) costs at most 7 unused bytes and
+        // satisfies any conservative probe.
         let var_offset = std::mem::offset_of!(PRJ_PLACEHOLDER_INFO, VariableData);
-        let total = var_offset + sd.len();
+        let path_bytes = (rel.encode_utf16().count() + 1) * 2;
+        let want_align = 8;
+        let pad = (want_align - ((path_bytes + var_offset) % want_align)) % want_align;
+        let sd_offset = var_offset + pad;
+        let total = sd_offset + sd.len();
         let mut buf = vec![0u8; total];
         let info_ptr = buf.as_mut_ptr() as *mut PRJ_PLACEHOLDER_INFO;
         std::ptr::write(info_ptr, PRJ_PLACEHOLDER_INFO::default());
         (*info_ptr).FileBasicInfo = basic;
         (*info_ptr).SecurityInformation.SecurityBufferSize = sd.len() as u32;
-        (*info_ptr).SecurityInformation.OffsetToSecurityDescriptor = var_offset as u32;
-        std::ptr::copy_nonoverlapping(sd.as_ptr(), buf.as_mut_ptr().add(var_offset), sd.len());
+        (*info_ptr).SecurityInformation.OffsetToSecurityDescriptor = sd_offset as u32;
+        std::ptr::copy_nonoverlapping(sd.as_ptr(), buf.as_mut_ptr().add(sd_offset), sd.len());
 
         let dest = to_wide_z(&rel);
         let r = PrjWritePlaceholderInfo(
@@ -553,9 +573,29 @@ fn build_ro_security_descriptor(ac_sid: &str) -> Option<Vec<u8>> {
     use windows::Win32::Security::Authorization::SDDL_REVISION_1;
     use windows::Win32::Security::{GetSecurityDescriptorLength, PSECURITY_DESCRIPTOR};
 
-    let _ = ac_sid;
-    let sddl = "D:P(A;OICI;FA;;;SY)";
-    let sddl_w = to_wide_z(sddl);
+    let sddl = format!(
+        // PROTECTED (P) — fully in charge of this DACL; no inheritance.
+        //
+        // Grants:
+        //   SY (SYSTEM)               — full access (filter, services)
+        //   BA (BUILTIN\Administrators) — full access (operator recovery)
+        //   AU (Authenticated Users)  — full access (the launching user;
+        //                               OW/OWNER_RIGHTS turns out to be
+        //                               unreliable because most user
+        //                               tokens lack the S-1-3-4 group)
+        //   AC SID                    — read+exec only (no FILE_ADD_FILE,
+        //                               which is what blocks new-file-
+        //                               in-RO from inside the AC)
+        //
+        // Mask 0x001200a9 = FILE_LIST_DIRECTORY | FILE_TRAVERSE |
+        // FILE_READ_ATTRIBUTES | FILE_READ_EA | READ_CONTROL | SYNCHRONIZE.
+        //
+        // OICI on each ACE so the read-only AC grant propagates to file
+        // and directory descendants without our needing to attach an SD
+        // per-file.
+        "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;AU)(A;OICI;0x001200a9;;;{ac_sid})"
+    );
+    let sddl_w = to_wide_z(&sddl);
 
     let mut psd = PSECURITY_DESCRIPTOR::default();
     let r = unsafe {
