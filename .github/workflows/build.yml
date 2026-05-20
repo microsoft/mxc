@@ -32,7 +32,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --features isolation_session -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Fail if formatting check failed
         if: steps.fmt.outcome == 'failure'
@@ -65,10 +65,10 @@ jobs:
           rustup target add ${{ matrix.target }}
 
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }} --features isolation_session
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Run tests
-        run: cargo test --release --target ${{ matrix.target }} --workspace --exclude wxc_e2e_tests --features isolation_session
+        run: cargo test --release --target ${{ matrix.target }} --workspace --exclude wxc_e2e_tests
 
       - uses: actions/upload-artifact@v4
         with:
