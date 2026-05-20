@@ -1,0 +1,21 @@
+{
+  "$schema": "../schemas/stable/mxc-config.schema.0.4.0-alpha.json",
+  "version": "0.4.0-alpha",
+  "containerId": "CLI-DeniedOverrideRW-Test",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoProfile -Command \"$path = 'C:\\temp\\wxc_test_denied\\forbidden.txt'; Write-Output 'Testing deniedPaths overrides readwritePaths...'; try { [System.IO.File]::WriteAllText($path, 'overwrite attempt'); Write-Output 'ERROR: Should not have been able to write to denied path!' } catch { $ex = $_.Exception; if ($ex.InnerException) { $ex = $ex.InnerException }; Write-Output ('SUCCESS: Write to denied path was blocked as expected (' + $ex.GetType().Name + ')') }\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\temp\\wxc_test_denied"
+    ],
+    "deniedPaths": [
+      "C:\\temp\\wxc_test_denied"
+    ]
+  },
+  "ui": {
+    "disable": false
+  }
+}

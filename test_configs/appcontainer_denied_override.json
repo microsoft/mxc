@@ -1,19 +1,21 @@
 {
   "$schema": "../schemas/stable/mxc-config.schema.0.4.0-alpha.json",
   "version": "0.4.0-alpha",
-  "containerId": "denied-override-test",
-  "containment": "appcontainer",
+  "containerId": "CLI-DeniedOverride-Test",
+  "containment": "processcontainer",
   "process": {
-    "commandLine": "cmd.exe /c dir C:\\temp",
-    "timeout": 10000
+    "commandLine": "powershell.exe -NoProfile -Command \"$path = 'C:\\temp\\wxc_test_denied\\forbidden.txt'; Write-Output 'Testing deniedPaths overrides readonlyPaths...'; try { Get-Content -LiteralPath $path -ErrorAction Stop | Out-Null; Write-Output 'ERROR: Should not have been able to read from denied path!' } catch { if ($_.Exception -is [System.Management.Automation.ItemNotFoundException]) { Write-Output 'ERROR: File not found - test setup issue' } else { Write-Output ('SUCCESS: Access to denied path was blocked as expected (' + $_.Exception.GetType().Name + ')') } }\"",
+    "timeout": 30000
   },
   "filesystem": {
     "readonlyPaths": [
-      "C:\\",
-      "C:\\temp"
+      "C:\\temp\\wxc_test_denied"
     ],
     "deniedPaths": [
-      "C:\\temp"
+      "C:\\temp\\wxc_test_denied"
     ]
+  },
+  "ui": {
+    "disable": false
   }
 }

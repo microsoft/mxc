@@ -98,6 +98,32 @@ fn filesystem_bfs_spaces() {
     assert_wxc_success("filesystem_bfs_spaces_test.json", &["--debug"]);
 }
 
+fn filesystem_denied_override_readonly() {
+    let temp = TempDirs::create(&["C:\\temp\\wxc_test_denied"]);
+    temp.write_absolute_file("C:\\temp\\wxc_test_denied\\forbidden.txt", "secret data");
+    let result = run_wxc_config("appcontainer_denied_override.json", &["--debug"]);
+    assert_success_or_skip_missing_prerequisite(&result);
+    let combined = format!("{}{}", result.stdout, result.stderr);
+    assert!(
+        combined.contains("SUCCESS"),
+        "denied path should not be readable when also in readonlyPaths:\n{}",
+        combined
+    );
+}
+
+fn filesystem_denied_override_readwrite() {
+    let temp = TempDirs::create(&["C:\\temp\\wxc_test_denied"]);
+    temp.write_absolute_file("C:\\temp\\wxc_test_denied\\forbidden.txt", "secret data");
+    let result = run_wxc_config("appcontainer_denied_override_rw.json", &["--debug"]);
+    assert_success_or_skip_missing_prerequisite(&result);
+    let combined = format!("{}{}", result.stdout, result.stderr);
+    assert!(
+        combined.contains("SUCCESS"),
+        "denied path should not be writable when also in readwritePaths:\n{}",
+        combined
+    );
+}
+
 fn pwsh_setlocation() {
     assert_wxc_success("pwsh_setlocation.json", &["--debug"]);
 }
@@ -185,6 +211,24 @@ fn test_filesystem_bfs_spaces() {
         return;
     }
     with_test_lock(filesystem_bfs_spaces);
+}
+
+#[test]
+#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
+fn test_filesystem_denied_override_readonly() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+    with_test_lock(filesystem_denied_override_readonly);
+}
+
+#[test]
+#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
+fn test_filesystem_denied_override_readwrite() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+    with_test_lock(filesystem_denied_override_readwrite);
 }
 
 #[test]

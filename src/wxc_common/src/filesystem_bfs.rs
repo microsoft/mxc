@@ -57,15 +57,14 @@ impl FileSystemBfsManager {
                 ));
                 continue;
             }
-            let mut inherit = test_for_root_path(path);
+            let inherit = test_for_root_path(path);
             if inherit && has_denied_children(path, &policy.denied_paths) {
                 logger.log_line(&format!(
-                    "Warning: readwrite path {:?} has denied sub-paths; \
-                     disabling inheritance to limit scope. \
-                     BFS cannot deny individual sub-paths under a granted parent.",
+                    "Warning: readwrite path {:?} has denied sub-paths that \
+                     cannot be enforced. BFS has no deny primitive — sub-paths \
+                     under a granted parent with inheritance will remain accessible.",
                     path
                 ));
-                inherit = false;
             }
             if let Err(e) = self.add_bfs_path(path, inherit, logger) {
                 self.remove_configuration(logger);
@@ -82,15 +81,14 @@ impl FileSystemBfsManager {
                 ));
                 continue;
             }
-            let mut inherit = test_for_root_path(path);
+            let inherit = test_for_root_path(path);
             if inherit && has_denied_children(path, &policy.denied_paths) {
                 logger.log_line(&format!(
-                    "Warning: readonly path {:?} has denied sub-paths; \
-                     disabling inheritance to limit scope. \
-                     BFS cannot deny individual sub-paths under a granted parent.",
+                    "Warning: readonly path {:?} has denied sub-paths that \
+                     cannot be enforced. BFS has no deny primitive — sub-paths \
+                     under a granted parent with inheritance will remain accessible.",
                     path
                 ));
-                inherit = false;
             }
             if let Err(e) = self.add_readonly_bfs_path(path, inherit, logger) {
                 self.remove_configuration(logger);
