@@ -38,13 +38,21 @@ jobs:
         with:
           node-version: 22
 
-      # -- Download Rust binaries (x64 + arm64) from the build job --
-      - name: Download wxc-exec (x64)
-        uses: actions/download-artifact@v4
-        with:
-          name: wxc-exec-x86_64-pc-windows-msvc
-          path: _staging/bin/x64
+      - name: Setup Rust toolchain
+        run: |
+          rustup update stable
 
+      # -- Build wxc-exec with isolation_session feature enabled ------
+      # The shared build.yml compiles without this feature, so we build
+      # our own copy here. Only x64 is needed (test VMs are x64).
+      - name: Build wxc-exec (x64, isolation_session)
+        working-directory: src
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc --features isolation_session
+          New-Item -ItemType Directory -Path ../_staging/bin/x64 -Force | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/wxc-exec.exe ../_staging/bin/x64/
+
+      # -- Download wxc-exec (arm64) from shared build (no feature needed for packaging) --
       - name: Download wxc-exec (arm64)
         uses: actions/download-artifact@v4
         with:
@@ -140,3 +148,4 @@ jobs:
           name: mxc-iso-test-package
           path: _output/*
           retention-days: 30
+
