@@ -15,7 +15,7 @@ use crate::script_runner::ScriptRunner;
 
 use super::manager::IsolationSessionManager;
 use super::policy::validate_provision_policy;
-use super::process_options::{build_process_options, compute_redirect_flags};
+use super::process_options::build_process_options;
 use super::IsolationSessionRunner;
 
 impl ScriptRunner for IsolationSessionRunner {
@@ -34,8 +34,6 @@ impl ScriptRunner for IsolationSessionRunner {
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let mut options = build_process_options(request);
-
         // Detect at runtime whether wxc-exec's stdout is a TTY. This flips
         // the backend into ConPTY mode (`InteractiveConsole = true`) and
         // adjusts the redirect flags (no separate stderr in ConPTY mode —
@@ -45,8 +43,7 @@ impl ScriptRunner for IsolationSessionRunner {
         // `child_process.spawn` (`spawnSandboxFromConfig({usePty: false})`),
         // console when launched directly from a shell.
         let interactive = std::io::stdout().is_terminal();
-        options.interactive = interactive;
-        options.redirect_flags = compute_redirect_flags(interactive);
+        let options = build_process_options(request, interactive);
 
         let _ = writeln!(
             logger,

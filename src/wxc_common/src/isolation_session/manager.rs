@@ -7,10 +7,7 @@
 //! the ConPTY relay setup + shutdown ladder against the local console.
 
 use crate::models::IsolationSessionConfigurationId;
-use crate::process_util::{
-    create_relay_thread, create_relay_thread_with_stop, get_local_console_size,
-    ConsoleModeRestorer, OwnedHandle, PipeRelayParams, PipeRelayWithStopParams,
-};
+use crate::process_util::OwnedHandle;
 
 use isolation_session_bindings::bindings::{
     IsoSessionConfigId, IsoSessionFolderSharingRequest, IsoSessionFolderSharingResult,
@@ -26,9 +23,14 @@ use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObj
 use windows_collections::IVectorView;
 use windows_core::{HSTRING, PCWSTR};
 
+use super::console_mode::{get_local_console_size, ConsoleModeRestorer, CtrlHandlerGuard};
+use super::console_relay::{create_console_relay_thread, ConsoleRelayParams};
 use super::error::{check_result, format_iso_error, lifecycle_err, IsolationSessionError};
 use super::folder_sharing::{
     aggregate_share_folder_outcomes, build_share_folder_requests, extract_share_folder_outcomes,
+};
+use super::pipe_relay::{
+    create_relay_thread, create_relay_thread_with_stop, PipeRelayParams, PipeRelayWithStopParams,
 };
 use super::process_options::{build_iso_process_options, ProcessOptions};
 use super::protected_paths_filter::filter_protected_paths;
@@ -378,6 +380,20 @@ impl IsolationSessionManager {
         };
         let stdin_stop_owned = OwnedHandle::new(stdin_stop_event);
 
+        // Install a console Ctrl handler that signals `stdin_stop_owned`
+        // on Ctrl-C or terminal-close events, so the relay loops drain
+        // cleanly instead of being terminated by the OS default
+        // `ExitProcess`. Interactive mode only — non-interactive mode
+        // wants the default behavior so the parent can terminate
+        // wxc-exec via Ctrl-C. Drop order is LIFO: `_ctrl_guard` drops
+        // before `stdin_stop_owned`, ensuring the handler can no longer
+        // reference the event after the guard is gone.
+        let _ctrl_guard = if options.interactive {
+            Some(CtrlHandlerGuard::install(stdin_stop_owned.get()))
+        } else {
+            None
+        };
+
         let mut stdout_params = PipeRelayParams {
             h_read: HANDLE(stdout_handle_val as *mut core::ffi::c_void),
             h_write: wxc_stdout,
@@ -386,12 +402,6 @@ impl IsolationSessionManager {
             h_read: HANDLE(stderr_handle_val as *mut core::ffi::c_void),
             h_write: wxc_stderr,
         };
-        let mut stdin_params = PipeRelayWithStopParams {
-            h_read: wxc_stdin,
-            h_write: HANDLE(stdin_handle_val as *mut core::ffi::c_void),
-            h_stop_event: stdin_stop_owned.get(),
-        };
-
         let stdout_relay: Option<OwnedHandle> = if stdout_handle_val != 0 {
             Some(
                 unsafe { create_relay_thread(&mut stdout_params) }
@@ -408,13 +418,59 @@ impl IsolationSessionManager {
         } else {
             None
         };
-        let stdin_relay: Option<OwnedHandle> = if stdin_handle_val != 0 {
-            Some(
-                unsafe { create_relay_thread_with_stop(&mut stdin_params) }
-                    .map_err(|e| lifecycle_err(format!("create stdin relay: {}", e)))?,
-            )
+        // Stdin: in interactive mode use the console-aware relay so
+        // `WINDOW_BUFFER_SIZE_EVENT` records propagate as
+        // `ResizeConsole(cols, rows)` calls on the agent's inner ConPTY.
+        // In non-interactive mode the agent's stdin is plain byte-oriented
+        // and the simpler stop-aware pipe relay is appropriate. The two
+        // params shapes share `h_read` / `h_write` / `h_stop_event` but
+        // differ in extras (the console variant carries the resize
+        // callback), so we wrap them in a sum type and pattern-match on
+        // it when spawning the thread.
+        enum StdinRelayKind {
+            None,
+            Pipe(PipeRelayWithStopParams),
+            Console(ConsoleRelayParams),
+        }
+
+        let stdin_h_write = HANDLE(stdin_handle_val as *mut core::ffi::c_void);
+        let stdin_h_stop = stdin_stop_owned.get();
+        let mut stdin_relay_state = if stdin_handle_val == 0 {
+            StdinRelayKind::None
+        } else if options.interactive {
+            // Clone the WinRT process handle so the relay thread holds
+            // its own ref-counted reference (WinRT clone = AddRef). The
+            // closure is `'static + Send`; the cloned ref moves onto the
+            // relay thread with the closure.
+            let process_for_resize = process.clone();
+            StdinRelayKind::Console(ConsoleRelayParams {
+                h_read: wxc_stdin,
+                h_write: stdin_h_write,
+                h_stop_event: stdin_h_stop,
+                resize_callback: Box::new(move |cols, rows| {
+                    // Ignore failures: best-effort delivery.
+                    let _ = process_for_resize.ResizeConsole(cols, rows);
+                }),
+            })
         } else {
-            None
+            StdinRelayKind::Pipe(PipeRelayWithStopParams {
+                h_read: wxc_stdin,
+                h_write: stdin_h_write,
+                h_stop_event: stdin_h_stop,
+            })
+        };
+
+        let stdin_relay: Option<OwnedHandle> = match &mut stdin_relay_state {
+            StdinRelayKind::None => None,
+            StdinRelayKind::Pipe(params) => Some(
+                unsafe { create_relay_thread_with_stop(params) }
+                    .map_err(|e| lifecycle_err(format!("create stdin relay: {}", e)))?,
+            ),
+            StdinRelayKind::Console(params) => {
+                Some(unsafe { create_console_relay_thread(params) }.map_err(|e| {
+                    lifecycle_err(format!("create console-aware stdin relay: {}", e))
+                })?)
+            }
         };
 
         // `WaitForExit` is a Win32 `WaitForSingleObject` on a kernel handle

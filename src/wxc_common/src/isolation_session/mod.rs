@@ -13,10 +13,13 @@
 //! - `state_aware`: `StatefulSandboxBackend` — per-phase methods called
 //!   across multiple `wxc-exec` invocations by an external orchestrator.
 
+mod console_mode;
+mod console_relay;
 mod error;
 mod folder_sharing;
 mod manager;
 mod one_shot;
+mod pipe_relay;
 mod policy;
 mod process_options;
 mod protected_paths_filter;
