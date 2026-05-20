@@ -21,8 +21,7 @@ use windows::Win32::Foundation::{
     INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
-    SDDL_REVISION_1,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
     PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES,
@@ -36,8 +35,8 @@ use windows::Win32::System::Pipes::{
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS,
-    PROCESS_INFORMATION, STARTUPINFOEXW, STARTUPINFOW,
+    WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+    STARTUPINFOEXW, STARTUPINFOW,
 };
 
 // Constants the windows crate doesn't expose under our feature set.
@@ -179,10 +178,12 @@ fn getrandom_fallback(buf: &mut [u8]) -> Result<(), ()> {
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
     let pid = std::process::id();
-    let mut seed = (pid as u64).wrapping_mul(2862933555777941757)
-        ^ (nanos as u64).wrapping_mul(3037000493);
+    let mut seed =
+        (pid as u64).wrapping_mul(2862933555777941757) ^ (nanos as u64).wrapping_mul(3037000493);
     for slot in buf {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *slot = (seed >> 33) as u8;
     }
     Ok(())
@@ -426,4 +427,3 @@ fn free_sid(psid: PSID) {
 }
 
 // Removed unused helper stub.
-

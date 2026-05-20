@@ -92,23 +92,25 @@ impl FeatureDetect {
 pub(crate) fn detect() -> FeatureDetect {
     // Load via LOAD_LIBRARY_SEARCH_SYSTEM32 so we cannot be tricked into
     // picking up a planted DLL in CWD or PATH.
-    let wide: Vec<u16> = PROJFS_DLL.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = PROJFS_DLL
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let pcwstr = windows::core::PCWSTR(wide.as_ptr());
 
-    let module: HMODULE = match unsafe {
-        LoadLibraryExW(pcwstr, None, LOAD_LIBRARY_SEARCH_SYSTEM32)
-    } {
-        Ok(m) => m,
-        Err(_) => {
-            let code = unsafe { GetLastError().0 };
-            return FeatureDetect {
-                usable: false,
-                dll_loaded: false,
-                load_error: Some(code),
-                exports: vec![],
-            };
-        }
-    };
+    let module: HMODULE =
+        match unsafe { LoadLibraryExW(pcwstr, None, LOAD_LIBRARY_SEARCH_SYSTEM32) } {
+            Ok(m) => m,
+            Err(_) => {
+                let code = unsafe { GetLastError().0 };
+                return FeatureDetect {
+                    usable: false,
+                    dll_loaded: false,
+                    load_error: Some(code),
+                    exports: vec![],
+                };
+            }
+        };
 
     let mut exports = Vec::with_capacity(REQUIRED_EXPORTS.len());
     let mut all_resolved = true;

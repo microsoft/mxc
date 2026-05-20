@@ -233,10 +233,7 @@ fn main() -> ExitCode {
             }
         };
         if !child_exe.exists() {
-            report.set_ac_child_error(format!(
-                "child binary not found at {}",
-                child_exe.display()
-            ));
+            report.set_ac_child_error(format!("child binary not found at {}", child_exe.display()));
             drop(session);
             println!("{}", report.to_json());
             return ExitCode::from(6);

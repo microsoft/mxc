@@ -52,10 +52,11 @@ use windows::Win32::Storage::ProjectedFileSystem::{
     PrjFreeAlignedBuffer, PrjMarkDirectoryAsPlaceholder, PrjStartVirtualizing, PrjStopVirtualizing,
     PrjWriteFileData, PrjWritePlaceholderInfo, PRJ_CALLBACKS, PRJ_CALLBACK_DATA,
     PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN, PRJ_DIR_ENTRY_BUFFER_HANDLE, PRJ_FILE_BASIC_INFO,
-    PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT, PRJ_NOTIFICATION, PRJ_NOTIFICATION_FILE_PRE_CONVERT_TO_FULL,
-    PRJ_NOTIFICATION_MAPPING, PRJ_NOTIFICATION_PARAMETERS, PRJ_NOTIFICATION_PRE_DELETE,
-    PRJ_NOTIFICATION_PRE_RENAME, PRJ_NOTIFY_FILE_PRE_CONVERT_TO_FULL, PRJ_NOTIFY_PRE_DELETE,
-    PRJ_NOTIFY_PRE_RENAME, PRJ_NOTIFY_TYPES, PRJ_PLACEHOLDER_INFO, PRJ_STARTVIRTUALIZING_OPTIONS,
+    PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT, PRJ_NOTIFICATION,
+    PRJ_NOTIFICATION_FILE_PRE_CONVERT_TO_FULL, PRJ_NOTIFICATION_MAPPING,
+    PRJ_NOTIFICATION_PARAMETERS, PRJ_NOTIFICATION_PRE_DELETE, PRJ_NOTIFICATION_PRE_RENAME,
+    PRJ_NOTIFY_FILE_PRE_CONVERT_TO_FULL, PRJ_NOTIFY_PRE_DELETE, PRJ_NOTIFY_PRE_RENAME,
+    PRJ_NOTIFY_TYPES, PRJ_PLACEHOLDER_INFO, PRJ_STARTVIRTUALIZING_OPTIONS,
 };
 
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
@@ -740,7 +741,6 @@ unsafe extern "system" fn cb_notification(
     }
 }
 
-
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct VirtStartReport {
     pub root_path: PathBuf,
@@ -768,10 +768,7 @@ impl Drop for VirtSession {
     }
 }
 
-pub(crate) fn start(
-    root: &Path,
-    policy: Policy,
-) -> Result<(VirtSession, VirtStartReport), String> {
+pub(crate) fn start(root: &Path, policy: Policy) -> Result<(VirtSession, VirtStartReport), String> {
     install_policy(policy.clone());
 
     if root.exists() {
@@ -803,7 +800,9 @@ pub(crate) fn start(
     let empty_root = to_wide_z("");
     let mut mappings = [PRJ_NOTIFICATION_MAPPING {
         NotificationBitMask: PRJ_NOTIFY_TYPES(
-            PRJ_NOTIFY_FILE_PRE_CONVERT_TO_FULL.0 | PRJ_NOTIFY_PRE_DELETE.0 | PRJ_NOTIFY_PRE_RENAME.0,
+            PRJ_NOTIFY_FILE_PRE_CONVERT_TO_FULL.0
+                | PRJ_NOTIFY_PRE_DELETE.0
+                | PRJ_NOTIFY_PRE_RENAME.0,
         ),
         NotificationRoot: PCWSTR(empty_root.as_ptr()),
     }];

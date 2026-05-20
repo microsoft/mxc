@@ -19,8 +19,7 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{LocalFree, HLOCAL};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
-    GetAppContainerFolderPath,
+    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName, GetAppContainerFolderPath,
 };
 use windows::Win32::Security::PSID;
 use windows::Win32::System::Com::CoTaskMemFree;
@@ -90,8 +89,7 @@ pub(crate) fn folder_path_for_sid(sid_string: &str) -> Result<PathBuf, ProfileEr
 
     // GetAppContainerFolderPath returns a CoTaskMemAlloc'd PWSTR via Result.
     let raw: PWSTR = unsafe {
-        GetAppContainerFolderPath(pcwstr)
-            .map_err(|e| ProfileError::FolderPath(format!("{e}")))?
+        GetAppContainerFolderPath(pcwstr).map_err(|e| ProfileError::FolderPath(format!("{e}")))?
     };
 
     let path = unsafe { pwstr_to_string(raw)? };
@@ -103,17 +101,13 @@ pub(crate) fn folder_path_for_sid(sid_string: &str) -> Result<PathBuf, ProfileEr
 
 unsafe fn pwstr_to_string(p: PWSTR) -> Result<String, ProfileError> {
     if p.is_null() {
-        return Err(ProfileError::Internal(
-            "received null PWSTR".to_string(),
-        ));
+        return Err(ProfileError::Internal("received null PWSTR".to_string()));
     }
     let mut len = 0usize;
     while *p.as_ptr().add(len) != 0 {
         len += 1;
         if len > 32_768 {
-            return Err(ProfileError::Internal(
-                "PWSTR absurdly long".to_string(),
-            ));
+            return Err(ProfileError::Internal("PWSTR absurdly long".to_string()));
         }
     }
     let slice = std::slice::from_raw_parts(p.as_ptr(), len);
