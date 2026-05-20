@@ -47,13 +47,22 @@ jobs:
         shell: pwsh
         run: |
           $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
-          $required = @("wxc-exec.exe", "nanvixd.exe", "kernel.elf", "python3.12", "nanvix_rootfs.img")
+          $required = @(
+            "wxc-exec.exe",
+            "nanvixd.exe",
+            "nanvix_rootfs.img",
+            "python3.initrd",
+            "bin\kernel.elf",
+            "snapshots\kernel.vmem",
+            "snapshots\kernel.whp.cbor"
+          )
           $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
           if ($missing) {
             Write-Host "::error::Missing binaries: $($missing -join ', ')"
             exit 1
           }
-          Get-ChildItem $binDir -Include $required -Recurse | Format-Table Name, Length
+          $leaves = $required | ForEach-Object { Split-Path $_ -Leaf }
+          Get-ChildItem $binDir -Include $leaves -Recurse | Format-Table FullName, Length
 
       - name: Diagnose hypervisor environment
         shell: pwsh
