@@ -139,6 +139,10 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
     let pty_pair =
         openpty(inner_winsize.as_ref(), None).map_err(|e| format!("openpty failed: {}", e))?;
 
+    // The `nix::pty` crate exposes the POSIX field names `.master` and
+    // `.slave` on `PtyPair`. We refer to those ends as primary and
+    // secondary in our own variables and prose below.
+
     // Mark both pty fds close-on-exec. macOS' `openpty(3)` leaves them
     // without `FD_CLOEXEC`, so without this fixup the primary fd would
     // be inherited by the child across `exec` — the secondary would never

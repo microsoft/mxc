@@ -220,7 +220,7 @@ impl LxcContainer {
     /// across `fork`+`exec` and would otherwise make the inner shell
     /// silently ignore Ctrl-C / termination.
     ///
-    /// Stdout/stderr are streamed live via the master fd; the returned
+    /// Stdout/stderr are streamed live via the primary fd; the returned
     /// strings are always empty. Callers needing captured output should run
     /// a self-contained `commandLine` and read it back from a file.
     ///
