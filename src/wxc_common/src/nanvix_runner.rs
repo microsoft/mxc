@@ -10,12 +10,24 @@
 //!
 //! - **stdin**: set to `Stdio::null()` (NanVix guest does not read host stdin)
 //! - **stdout**: inherited from parent via `Stdio::inherit()` (not captured)
-//! - **stderr**: inherited from parent via `Stdio::inherit()` (kernel traces)
+//! - **stderr**: inherited from parent by default (kernel traces stream
+//!   straight to the parent terminal). When the `MXC_NANVIX_TRACE` env var
+//!   is truthy, stderr is piped and captured so it can be embedded in the
+//!   wxc-exec log on non-zero exit.
 //!
 //! **Note for SDK consumers:** Use `usePty: false` (non-PTY mode) for the MicroVM
 //! backend. PTY mode is not supported. Because stdout/stderr are inherited,
 //! `ScriptResponse.standard_out` and `standard_err` are always empty strings.
 //! Output is streamed directly to the parent's pipes.
+//!
+//! ## Diagnostics
+//!
+//! By default the runner sets `RUST_LOG=off` in nanvixd's environment, which
+//! suppresses the per-run `%LOCALAPPDATA%\nanvix\logs\nanvixd_*.log` trace
+//! file and noticeably reduces warm-start latency. Set `MXC_NANVIX_TRACE=1`
+//! (or `true`/`yes`, case-insensitive) before invoking wxc-exec to let
+//! nanvixd use its own `RUST_LOG` default and to capture nanvixd's stderr
+//! for inclusion in the wxc-exec log.
 //!
 //! ## Exit codes
 //!
@@ -55,6 +67,11 @@ const BIN_DIR: &str = nanvix_common::BIN_SUBDIR;
 /// force a specific location; otherwise the runner uses a standard
 /// OS-local data path or falls back to `<exe>/snapshots/`.
 const NANVIX_HOME_ENV: &str = "NANVIX_HOME";
+/// Env var that opts in to nanvixd's verbose tracing (and captured stderr).
+/// When unset (the default), the runner forces `RUST_LOG=off` for nanvixd
+/// and inherits stderr, which saves ~25–30 ms per warm execution by
+/// avoiding nanvixd's per-run log file and the host-side stderr drain.
+const NANVIX_TRACE_ENV: &str = "MXC_NANVIX_TRACE";
 /// Final component of the default OS-local data path.
 const DEFAULT_HOME_LEAF: &str = "nanvix";
 /// Boot grace period that is always enforced.
@@ -124,6 +141,16 @@ impl NanVixError {
 /// Returns the directory containing the current executable.
 fn exe_dir() -> Result<PathBuf, NanVixError> {
     crate::process_util::exe_dir().map_err(|e| NanVixError::Preflight(e.to_string()))
+}
+
+/// Returns `true` when [`NANVIX_TRACE_ENV`] is set to a truthy value
+/// (`"1"`, `"true"`, or `"yes"`, case-insensitive). Any other value
+/// (including unset, empty, or `"0"`/`"false"`/`"no"`) means trace is off.
+fn nanvix_trace_enabled() -> bool {
+    match std::env::var(NANVIX_TRACE_ENV) {
+        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
+        Err(_) => false,
+    }
 }
 
 /// Watchdog thread: waits for timeout or cancellation, then terminates the process.
@@ -348,7 +375,7 @@ impl NanVixScriptRunner {
             ramfs,
             initrd,
         )
-        .map_err(|msg| NanVixError::Preflight(msg))?;
+        .map_err(NanVixError::Preflight)?;
 
         eprintln!(
             "nanvix: snapshot generated in {:.0?} — subsequent runs will use warm start",
@@ -401,8 +428,18 @@ impl NanVixScriptRunner {
         //   nanvixd.exe -snapshot snapshots/kernel.whp.cbor
         //              -bin-dir <exe>/bin -ramfs <img> -mount <staging> -- python3.initrd
         let snapshot_rel = Path::new(SNAPSHOTS_DIR).join(SNAPSHOT_CBOR);
-        Command::new(&paths.nanvixd)
-            .current_dir(&paths.snapshot_home)
+        let trace = nanvix_trace_enabled();
+        // Default: silence nanvixd and inherit stderr so kernel traces (if
+        // any) stream straight to the parent terminal without a per-run
+        // host-side drain. Diagnostic mode pipes stderr so the runner can
+        // attach it to the wxc-exec log on failure.
+        let stderr = if trace {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        };
+        let mut cmd = Command::new(&paths.nanvixd);
+        cmd.current_dir(&paths.snapshot_home)
             .arg("-snapshot")
             .arg(&snapshot_rel)
             .arg("-bin-dir")
@@ -415,11 +452,14 @@ impl NanVixScriptRunner {
             .arg(&paths.initrd)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                NanVixError::Platform(format!("failed to spawn {}: {}", NANVIXD_BINARY, e))
-            })
+            .stderr(stderr);
+        if !trace {
+            // Suppress nanvixd's env_logger output and per-run log file.
+            cmd.env("RUST_LOG", "off");
+        }
+        cmd.spawn().map_err(|e| {
+            NanVixError::Platform(format!("failed to spawn {}: {}", NANVIXD_BINARY, e))
+        })
     }
 
     fn start_watchdog(
@@ -527,18 +567,24 @@ impl NanVixScriptRunner {
         script_timeout: u32,
         logger: &mut Logger,
     ) -> ScriptResponse {
-        // Drain stderr before wait so the pipe buffer doesn't block the child.
-        let stderr_output = child
-            .stderr
-            .take()
-            .and_then(|mut s| {
+        // Drain stderr concurrently with `wait()` so a verbose child cannot
+        // block on a full pipe buffer. In the default (non-trace) mode
+        // stderr is inherited and `child.stderr` is `None`, so the join
+        // returns the empty string immediately.
+        let stderr_handle = child.stderr.take().map(|mut s| {
+            thread::spawn(move || {
                 let mut buf = String::new();
                 use std::io::Read;
-                s.read_to_string(&mut buf).ok().map(|_| buf)
+                let _ = s.read_to_string(&mut buf);
+                buf
             })
-            .unwrap_or_default();
+        });
 
         let exit_status = child.wait();
+
+        let stderr_output = stderr_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
 
         {
             let (lock, cvar) = &**cancel_pair;
