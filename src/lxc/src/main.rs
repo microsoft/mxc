@@ -6,7 +6,7 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
+use wxc_common::config_parser::{load_request, ParseOptions};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
@@ -192,17 +192,19 @@ fn main() {
         process::exit(if success { 0 } else { 1 });
     }
 
-    // Load request
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
+    // Load request. CLI-driven flags go through the parser so the returned
+    // `CodexRequest` is internally consistent (see `ParseOptions`).
+    let parse_opts = ParseOptions {
+        experimental_enabled: cli.experimental,
+        dry_run: cli.dry_run,
+    };
+    let request = match load_request(&config_data, &mut logger, is_base64, parse_opts) {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());
             process::exit(1);
         }
     };
-
-    request.experimental_enabled = cli.experimental;
-    request.dry_run = cli.dry_run;
 
     log_request(&request, &mut logger);
 

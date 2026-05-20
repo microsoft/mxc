@@ -34,6 +34,43 @@ pub enum ParseError {
     StateAware(MxcError),
 }
 
+/// CLI-driven flags that the parser must know at parse time so the returned
+/// `CodexRequest` is internally consistent.
+///
+/// Historically these were mutated onto the request *after* `load_request`
+/// returned, which left a window where the request was structurally invalid
+/// (e.g. `experimental.windows_sandbox = Some(...)` with
+/// `experimental_enabled = false`) and silently accepted `experimental`
+/// blocks from the JSON when `--experimental` was not passed. The parser now
+/// consumes the flags directly so:
+///
+/// 1. `CodexRequest::experimental_enabled` and `CodexRequest::dry_run` reflect
+///    the CLI choice as soon as the request is constructed.
+/// 2. When `experimental_enabled = false` and the JSON carries an
+///    `experimental` block, the block is dropped and a warning naming the
+///    ignored sub-keys is written to the logger — matching the lenient style
+///    used elsewhere in the parser.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ParseOptions {
+    /// Mirrors `--experimental` on the binaries. Required for the parser to
+    /// retain the `experimental` block of the JSON config.
+    pub experimental_enabled: bool,
+    /// Mirrors `--dry-run` on the binaries. Recorded on the returned
+    /// `CodexRequest` so backends can short-circuit consistently.
+    pub dry_run: bool,
+}
+
+impl ParseOptions {
+    /// Convenience for tests that exercise experimental field parsing.
+    #[cfg(test)]
+    pub const fn with_experimental() -> Self {
+        Self {
+            experimental_enabled: true,
+            dry_run: false,
+        }
+    }
+}
+
 // ---------- Intermediate serde structs matching the JSON schema ----------
 
 #[derive(Deserialize, Default)]
@@ -356,10 +393,14 @@ fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError
 ///
 /// If `is_base64` is true, `input` is treated as a base64-encoded JSON string.
 /// Otherwise `input` is treated as a file path.
+///
+/// `opts` carries CLI-driven flags (`--experimental`, `--dry-run`) that the
+/// parser must know up-front. See [`ParseOptions`] for the rationale.
 pub fn load_request(
     input: &str,
     logger: &mut Logger,
     is_base64: bool,
+    opts: ParseOptions,
 ) -> Result<CodexRequest, WxcError> {
     let json_str = decode_request_input(input, logger, is_base64)?;
 
@@ -368,7 +409,7 @@ pub fn load_request(
         WxcError::ConfigParse(format!("JSON parse error: {}", e))
     })?;
 
-    convert_raw_config(raw, logger)
+    convert_raw_config(raw, logger, opts)
 }
 
 /// Loads a request and routes to the one-shot or state-aware path based on
@@ -376,10 +417,14 @@ pub fn load_request(
 /// driver can pick the right output convention per path (envelope on stdout
 /// for state-aware, diagnostic on stderr for one-shot and pre-discrimination
 /// failures).
+///
+/// `opts` is forwarded to whichever conversion path matches. See
+/// [`ParseOptions`].
 pub fn load_mxc_request(
     input: &str,
     logger: &mut Logger,
     is_base64: bool,
+    opts: ParseOptions,
 ) -> Result<MxcRequest, ParseError> {
     let json_str = decode_request_input(input, logger, is_base64).map_err(ParseError::Decode)?;
 
@@ -389,10 +434,12 @@ pub fn load_mxc_request(
     })?;
 
     match raw {
-        RawMxcRequest::StateAware(state_aware) => convert_raw_state_aware(*state_aware, logger)
-            .map(MxcRequest::StateAware)
-            .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string()))),
-        RawMxcRequest::OneShot(one_shot) => convert_raw_config(*one_shot, logger)
+        RawMxcRequest::StateAware(state_aware) => {
+            convert_raw_state_aware(*state_aware, logger, opts)
+                .map(MxcRequest::StateAware)
+                .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
+        }
+        RawMxcRequest::OneShot(one_shot) => convert_raw_config(*one_shot, logger, opts)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot),
     }
@@ -523,8 +570,12 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
 
 // ---------- Conversion from raw JSON to domain model ----------
 
-fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
-    convert_raw_config_inner(raw, logger, true)
+fn convert_raw_config(
+    raw: RawConfig,
+    logger: &mut Logger,
+    opts: ParseOptions,
+) -> Result<CodexRequest, WxcError> {
+    convert_raw_config_inner(raw, logger, true, opts)
 }
 
 // `require_process = false` allows state-aware non-exec phases to omit the
@@ -534,6 +585,7 @@ fn convert_raw_config_inner(
     raw: RawConfig,
     logger: &mut Logger,
     require_process: bool,
+    opts: ParseOptions,
 ) -> Result<CodexRequest, WxcError> {
     // New top-level fields
     let schema_version = raw.version.unwrap_or_default();
@@ -843,83 +895,97 @@ fn convert_raw_config_inner(
     // Schema version check
     validate_schema_version(&schema_version, logger)?;
 
-    // Experimental section (parsed but only applied when --experimental flag is set)
-    let experimental = if let Some(raw_exp) = raw.experimental {
-        let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
-        let windows_sandbox = raw_exp.windows_sandbox.map(|sb| {
-            let mut config = WindowsSandboxConfig::default();
-            if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
-                config.idle_timeout_ms = t;
-            }
-            if let Some(name) = sb.daemon_pipe_name {
-                config.daemon_pipe_name = name;
-            }
-            config
-        });
-        let wslc = raw_exp.wslc.map(|cc| {
-            let mut config = WslcConfig::default();
-            if let Some(os) = cc.target_os {
-                config.target_os = os;
-            }
-            if let Some(img) = cc.image {
-                config.image = img;
-            }
-            config.image_tar_path = cc.image_tar_path;
-            config.cpu_count = cc.cpu_count;
-            config.memory_mb = cc.memory_mb;
-            if let Some(gpu) = cc.gpu {
-                config.gpu = gpu;
-            }
-            config.storage_path = cc.storage_path;
-            if let Some(mappings) = cc.port_mappings {
-                config.port_mappings = mappings
-                    .into_iter()
-                    .map(|m| PortMapping {
-                        windows_port: m.windows_port.unwrap_or(0),
-                        container_port: m.container_port.unwrap_or(0),
-                        protocol: m.protocol.unwrap_or_else(|| "tcp".to_string()),
-                    })
-                    .collect();
-            }
-            config
-        });
-        let isolation_session = raw_exp.isolation_session.map(|as_cfg| {
-            let mut config = IsolationSessionConfig::default();
-            if let Some(id) = as_cfg.configuration_id {
-                use crate::models::IsolationSessionConfigurationId;
-                config.configuration_id = match id.as_str() {
-                    "small" => IsolationSessionConfigurationId::Small,
-                    "medium" => IsolationSessionConfigurationId::Medium,
-                    "large" => IsolationSessionConfigurationId::Large,
-                    "composable" => IsolationSessionConfigurationId::Composable,
-                    _ => {
-                        logger.log_line(&format!(
-                            "Unknown isolation_session configurationId '{}', defaulting to 'composable'",
-                            id
-                        ));
-                        IsolationSessionConfigurationId::Composable
-                    }
-                };
-            }
-            config.user = as_cfg.user;
-            config
-        });
-        let seatbelt = raw_exp.seatbelt.map(|raw_sb| SeatbeltConfig {
-            profile_override: raw_sb.profile_override,
-            gui_access: raw_sb.gui_access.unwrap_or(false),
-            launch_method: raw_sb.launch_method.unwrap_or_default(),
-            nested_pty: raw_sb.nested_pty.unwrap_or(true),
-            keychain_access: raw_sb.keychain_access.unwrap_or(false),
-        });
-        ExperimentalConfig {
-            test,
-            windows_sandbox,
-            wslc,
-            isolation_session,
-            seatbelt,
+    // Experimental section. When `--experimental` is not set we deliberately
+    // drop the block and emit a warning naming the ignored sub-keys, so that
+    // a stray block in a config does not silently survive the parse and then
+    // be silently ignored by the (now wrong) backend. Each binary still
+    // performs its own per-backend gating when it instantiates a runner —
+    // this parser-side gating just prevents the request from carrying
+    // experimental fields the rest of the pipeline is not allowed to honour.
+    let experimental = match (raw.experimental, opts.experimental_enabled) {
+        (None, _) => ExperimentalConfig::default(),
+        (Some(_), false) => {
+            logger.log_line(
+                "Warning: 'experimental' section present in config but --experimental flag is not set; \
+                 dropping experimental config.",
+            );
+            ExperimentalConfig::default()
         }
-    } else {
-        ExperimentalConfig::default()
+        (Some(raw_exp), true) => {
+            let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
+            let windows_sandbox = raw_exp.windows_sandbox.map(|sb| {
+                let mut config = WindowsSandboxConfig::default();
+                if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
+                    config.idle_timeout_ms = t;
+                }
+                if let Some(name) = sb.daemon_pipe_name {
+                    config.daemon_pipe_name = name;
+                }
+                config
+            });
+            let wslc = raw_exp.wslc.map(|cc| {
+                let mut config = WslcConfig::default();
+                if let Some(os) = cc.target_os {
+                    config.target_os = os;
+                }
+                if let Some(img) = cc.image {
+                    config.image = img;
+                }
+                config.image_tar_path = cc.image_tar_path;
+                config.cpu_count = cc.cpu_count;
+                config.memory_mb = cc.memory_mb;
+                if let Some(gpu) = cc.gpu {
+                    config.gpu = gpu;
+                }
+                config.storage_path = cc.storage_path;
+                if let Some(mappings) = cc.port_mappings {
+                    config.port_mappings = mappings
+                        .into_iter()
+                        .map(|m| PortMapping {
+                            windows_port: m.windows_port.unwrap_or(0),
+                            container_port: m.container_port.unwrap_or(0),
+                            protocol: m.protocol.unwrap_or_else(|| "tcp".to_string()),
+                        })
+                        .collect();
+                }
+                config
+            });
+            let isolation_session = raw_exp.isolation_session.map(|as_cfg| {
+                let mut config = IsolationSessionConfig::default();
+                if let Some(id) = as_cfg.configuration_id {
+                    use crate::models::IsolationSessionConfigurationId;
+                    config.configuration_id = match id.as_str() {
+                        "small" => IsolationSessionConfigurationId::Small,
+                        "medium" => IsolationSessionConfigurationId::Medium,
+                        "large" => IsolationSessionConfigurationId::Large,
+                        "composable" => IsolationSessionConfigurationId::Composable,
+                        _ => {
+                            logger.log_line(&format!(
+                                "Unknown isolation_session configurationId '{}', defaulting to 'composable'",
+                                id
+                            ));
+                            IsolationSessionConfigurationId::Composable
+                        }
+                    };
+                }
+                config.user = as_cfg.user;
+                config
+            });
+            let seatbelt = raw_exp.seatbelt.map(|raw_sb| SeatbeltConfig {
+                profile_override: raw_sb.profile_override,
+                gui_access: raw_sb.gui_access.unwrap_or(false),
+                launch_method: raw_sb.launch_method.unwrap_or_default(),
+                nested_pty: raw_sb.nested_pty.unwrap_or(true),
+                keychain_access: raw_sb.keychain_access.unwrap_or(false),
+            });
+            ExperimentalConfig {
+                test,
+                windows_sandbox,
+                wslc,
+                isolation_session,
+                seatbelt,
+            }
+        }
     };
 
     // UI section
@@ -949,15 +1015,16 @@ fn convert_raw_config_inner(
         lifecycle,
         policy,
         lxc_config,
-        experimental_enabled: false,
+        experimental_enabled: opts.experimental_enabled,
         experimental,
-        dry_run: false,
+        dry_run: opts.dry_run,
     })
 }
 
 fn convert_raw_state_aware(
     raw: RawStateAwareRequest,
     logger: &mut Logger,
+    opts: ParseOptions,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
     let phase = Phase::from_wire(&raw.phase).map_err(|e| {
         let msg = e.message.clone();
@@ -987,12 +1054,14 @@ fn convert_raw_state_aware(
         ui: raw.ui,
         // The state-aware experimental block has a different shape from the
         // one-shot RawExperimental; it is preserved separately on
-        // ParsedStateAwareRequest as raw JSON.
+        // ParsedStateAwareRequest as raw JSON. Per-backend typed
+        // deserialisation at dispatch time is responsible for honouring
+        // `opts.experimental_enabled` for the state-aware path.
         experimental: None,
     };
 
     let require_process = phase == Phase::Exec;
-    let request = convert_raw_config_inner(surrogate, logger, require_process)?;
+    let request = convert_raw_config_inner(surrogate, logger, require_process, opts)?;
 
     Ok(ParsedStateAwareRequest {
         request,
@@ -1087,7 +1156,7 @@ mod tests {
     fn load_mxc(json: &str) -> Result<MxcRequest, ParseError> {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        load_mxc_request(&encoded, &mut logger, true)
+        load_mxc_request(&encoded, &mut logger, true, ParseOptions::default())
     }
 
     #[test]
@@ -1197,7 +1266,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.script_code, "echo hello");
         assert_eq!(req.script_timeout, 0);
         assert!(req.working_directory.is_empty());
@@ -1209,7 +1278,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1219,7 +1288,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1229,7 +1298,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1239,7 +1308,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1271,7 +1340,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.script_code, "dir");
         assert_eq!(req.working_directory, "C:\\temp");
         assert_eq!(req.script_timeout, 3000);
@@ -1300,7 +1369,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1311,7 +1380,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1322,21 +1391,37 @@ mod tests {
         std::fs::write(&file_path, r#"{"process": {"commandLine": "whoami"}}"#).unwrap();
 
         let mut logger = test_logger();
-        let req = load_request(file_path.to_str().unwrap(), &mut logger, false).unwrap();
+        let req = load_request(
+            file_path.to_str().unwrap(),
+            &mut logger,
+            false,
+            ParseOptions::default(),
+        )
+        .unwrap();
         assert_eq!(req.script_code, "whoami");
     }
 
     #[test]
     fn file_not_found() {
         let mut logger = test_logger();
-        let result = load_request("nonexistent.json", &mut logger, false);
+        let result = load_request(
+            "nonexistent.json",
+            &mut logger,
+            false,
+            ParseOptions::default(),
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn invalid_base64() {
         let mut logger = test_logger();
-        let result = load_request("not-valid-base64!!!", &mut logger, true);
+        let result = load_request(
+            "not-valid-base64!!!",
+            &mut logger,
+            true,
+            ParseOptions::default(),
+        );
         assert!(result.is_err());
     }
 
@@ -1344,7 +1429,7 @@ mod tests {
     fn invalid_json() {
         let encoded = base64_encode(b"{ not json }");
         let mut logger = test_logger();
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1356,7 +1441,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req
             .policy
             .capabilities
@@ -1371,7 +1456,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(!req
             .policy
             .capabilities
@@ -1388,7 +1473,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.script_timeout, 60000);
     }
 
@@ -1403,7 +1488,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.policy.capabilities.len(), 3);
         assert_eq!(req.policy.capabilities[0], "internetClient");
         assert_eq!(req.policy.capabilities[1], "privateNetworkClientServer");
@@ -1416,7 +1501,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req.policy.least_privilege_mode);
     }
 
@@ -1426,7 +1511,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
     }
 
@@ -1436,7 +1521,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
     }
 
@@ -1446,7 +1531,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(
             req.policy.network_enforcement_mode,
             NetworkEnforcementMode::Capabilities
@@ -1459,7 +1544,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(
             req.policy.network_enforcement_mode,
             NetworkEnforcementMode::Firewall
@@ -1472,7 +1557,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(
             req.policy.network_enforcement_mode,
             NetworkEnforcementMode::Both
@@ -1491,7 +1576,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.policy.allowed_hosts.len(), 2);
         assert_eq!(req.policy.allowed_hosts[0], "example.com");
         assert_eq!(req.policy.allowed_hosts[1], "api.trusted.com");
@@ -1512,7 +1597,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.policy.readwrite_paths.len(), 2);
         assert_eq!(req.policy.readwrite_paths[0], "C:\\Users\\Public");
         assert_eq!(req.policy.readwrite_paths[1], "C:\\Temp\\Data");
@@ -1532,7 +1617,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1551,7 +1636,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.script_code, "import sys\nprint(sys.version)");
         assert_eq!(req.script_timeout, 10000);
         assert_eq!(req.container_id, "TestContainer");
@@ -1564,7 +1649,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1574,7 +1659,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.script_timeout, 0);
     }
 
@@ -1583,7 +1668,7 @@ mod tests {
         let json = r#"{"process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req.policy.fallback.allow_dacl_mutation);
     }
 
@@ -1595,7 +1680,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(!req.policy.fallback.allow_dacl_mutation);
     }
 
@@ -1607,7 +1692,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req.policy.fallback.allow_dacl_mutation);
     }
 
@@ -1621,7 +1706,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
 
         #[cfg(target_os = "linux")]
         assert_eq!(req.containment, ContainmentBackend::Bubblewrap);
@@ -1638,7 +1723,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
     }
 
@@ -1652,7 +1737,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
 
         #[cfg(target_os = "linux")]
         assert_eq!(req.containment, ContainmentBackend::Bubblewrap);
@@ -1671,7 +1756,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.containment, ContainmentBackend::Lxc);
     }
 
@@ -1685,7 +1770,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.containment, ContainmentBackend::Bubblewrap);
     }
 
@@ -1698,7 +1783,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.containment, ContainmentBackend::Hyperlight);
     }
 
@@ -1712,7 +1797,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
 
         #[cfg(target_os = "windows")]
         assert_eq!(req.containment, ContainmentBackend::WindowsSandbox);
@@ -1727,7 +1812,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.containment, ContainmentBackend::WindowsSandbox);
     }
 
@@ -1737,7 +1822,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1747,7 +1832,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let sandbox = req.experimental.windows_sandbox.unwrap();
         assert_eq!(sandbox.idle_timeout_ms, 300_000);
         assert_eq!(sandbox.daemon_pipe_name, "wxc-windows-sandbox");
@@ -1767,7 +1858,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let sandbox = req.experimental.windows_sandbox.unwrap();
         assert_eq!(sandbox.idle_timeout_ms, 60000);
         assert_eq!(sandbox.daemon_pipe_name, "my-custom-pipe");
@@ -1782,7 +1879,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(!req.policy.network_proxy.is_enabled());
     }
 
@@ -1798,7 +1895,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert_eq!(
             req.policy.network_proxy.address.as_ref().unwrap().port(),
@@ -1818,7 +1915,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         let addr = req.policy.network_proxy.address.as_ref().unwrap();
         assert_eq!(addr.port(), 3128);
@@ -1837,7 +1934,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         let addr = req.policy.network_proxy.address.as_ref().unwrap();
         assert_eq!(addr.port(), 8080);
         assert_eq!(addr.host(), "proxy.example.com");
@@ -1850,7 +1947,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1866,7 +1963,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         let addr = req.policy.network_proxy.address.as_ref().unwrap();
         assert_eq!(addr.port(), 8080);
         assert_eq!(addr.host(), "[::1]");
@@ -1886,7 +1983,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(
             req.policy.network_proxy.address.as_ref().unwrap().port(),
             9090
@@ -1900,7 +1997,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1910,7 +2007,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1920,7 +2017,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1930,7 +2027,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1946,7 +2043,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert!(req.policy.network_proxy.builtin_test_server);
         assert!(req.policy.network_proxy.address.is_some());
@@ -1958,7 +2055,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1969,7 +2066,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1979,7 +2076,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -1989,7 +2086,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.schema_version, "0.4.0-alpha");
         assert_eq!(req.container_id, "abc-123");
         assert_eq!(req.platform, "linux");
@@ -2001,7 +2098,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.schema_version, "");
         assert_eq!(req.container_id, "");
         assert_eq!(req.platform, "windows");
@@ -2018,7 +2115,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.env, vec!["FOO=bar", "BAZ=qux"]);
     }
 
@@ -2033,7 +2130,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.working_directory, "/workspace");
     }
 
@@ -2048,7 +2145,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.script_timeout, 9000);
     }
 
@@ -2058,7 +2155,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.containment, ContainmentBackend::MicroVm);
     }
 
@@ -2068,7 +2165,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -2078,7 +2175,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.schema_version, "0.5.0-alpha");
     }
 
@@ -2091,7 +2188,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.schema_version, "0.6.0-alpha");
     }
 
@@ -2101,7 +2198,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.schema_version, "0.4.0-alpha");
     }
 
@@ -2111,7 +2208,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -2128,7 +2225,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.schema_version, "0.5.0-alpha");
         assert_eq!(req.container_id, "test-050");
         assert_eq!(req.script_timeout, 5000);
@@ -2141,7 +2238,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.schema_version, "");
     }
 
@@ -2151,7 +2248,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -2161,7 +2258,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -2171,7 +2268,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_request(&encoded, &mut logger, true, ParseOptions::default());
         assert!(result.is_err());
     }
 
@@ -2181,7 +2278,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         assert_eq!(
             req.experimental.windows_sandbox.unwrap().idle_timeout_ms,
             60000
@@ -2194,7 +2297,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         assert_eq!(
             req.experimental.windows_sandbox.unwrap().idle_timeout_ms,
             60000
@@ -2207,7 +2316,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.container_id, "my-container");
     }
 
@@ -2218,7 +2327,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(!req.lifecycle.destroy_on_exit);
     }
 
@@ -2229,7 +2338,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req.lifecycle.preserve_policy);
     }
 
@@ -2239,7 +2348,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req.lifecycle.destroy_on_exit);
         assert!(!req.lifecycle.preserve_policy);
     }
@@ -2250,7 +2359,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let wslc = req.experimental.wslc.unwrap();
         assert_eq!(wslc.image, "python:3.12");
         assert!(wslc.image_tar_path.is_none());
@@ -2262,7 +2377,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let wslc = req.experimental.wslc.unwrap();
         assert_eq!(wslc.image, "my-image:latest");
         assert_eq!(
@@ -2279,7 +2400,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         assert!(req.experimental.test.is_some());
         assert_eq!(req.experimental.test.unwrap().message, "world");
     }
@@ -2290,18 +2417,98 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req.experimental.test.is_none());
     }
 
     #[test]
-    fn experimental_enabled_defaults_to_false() {
+    fn experimental_enabled_reflects_parse_options() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
+        assert!(!req.experimental_enabled);
+
+        let mut logger = test_logger();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
+        assert!(req.experimental_enabled);
+    }
+
+    #[test]
+    fn dry_run_reflects_parse_options() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
+        assert!(!req.dry_run);
+
+        let opts = ParseOptions {
+            experimental_enabled: false,
+            dry_run: true,
+        };
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true, opts).unwrap();
+        assert!(req.dry_run);
+    }
+
+    #[test]
+    fn experimental_section_dropped_when_flag_disabled() {
+        // JSON carries an experimental block but the parse-time flag is off:
+        // the block must not survive into the returned request.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "check"}, "windows_sandbox": {"idleTimeoutMs": 60000}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
+        assert!(!req.experimental_enabled);
+        assert!(req.experimental.test.is_none());
+        assert!(req.experimental.windows_sandbox.is_none());
+        assert!(req.experimental.wslc.is_none());
+        assert!(req.experimental.isolation_session.is_none());
+        assert!(req.experimental.seatbelt.is_none());
+    }
+
+    #[test]
+    fn experimental_section_dropped_emits_warning() {
+        // The warning is what tells operators their config field was ignored;
+        // make sure we actually log it.
         let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "check"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(!req.experimental_enabled);
+        load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
+        let buf = logger.get_buffer();
+        assert!(
+            buf.contains("'experimental' section present")
+                && buf.contains("--experimental flag is not set"),
+            "expected a drop-warning in the logger buffer, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn experimental_section_kept_when_flag_enabled() {
+        // Mirror of the drop test: with the flag on, the typed fields land.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "check"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
+        assert!(req.experimental_enabled);
+        assert_eq!(req.experimental.test.as_ref().unwrap().message, "check");
     }
 
     #[test]
@@ -2310,7 +2517,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         assert!(req.experimental.test.is_some());
     }
 
@@ -2320,7 +2533,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let test = req.experimental.test.unwrap();
         assert_eq!(test.message, "greetings");
     }
@@ -2331,7 +2550,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let test = req.experimental.test.unwrap();
         assert!(test.message.is_empty());
     }
@@ -2342,7 +2567,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(!req.policy.ui.disable);
         assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::Read);
         assert!(req.policy.ui.injection);
@@ -2354,7 +2579,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req.policy.ui.disable); // default-deny: UI disabled
         assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::None);
         assert!(!req.policy.ui.injection);
@@ -2366,7 +2591,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::All);
     }
 
@@ -2396,7 +2621,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.containment, ContainmentBackend::IsolationSession);
     }
 
@@ -2407,7 +2632,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
@@ -2421,7 +2652,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
@@ -2435,7 +2672,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
@@ -2449,7 +2692,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
@@ -2463,7 +2712,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
@@ -2477,7 +2732,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let cfg = req.experimental.isolation_session.unwrap();
         assert_eq!(
             cfg.configuration_id,
@@ -2491,7 +2752,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         assert!(req.experimental.isolation_session.is_none());
     }
 
@@ -2501,7 +2768,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let cfg = req.experimental.isolation_session.unwrap();
         let user = cfg
             .user
@@ -2516,7 +2789,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let cfg = req.experimental.isolation_session.unwrap();
         assert!(cfg.user.is_none());
     }
@@ -2527,7 +2806,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.containment, ContainmentBackend::Seatbelt);
     }
 
@@ -2539,7 +2818,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req.experimental.seatbelt.is_none());
     }
 
@@ -2549,7 +2828,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let cfg = req
             .experimental
             .seatbelt
@@ -2568,7 +2853,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let cfg = req
             .experimental
             .seatbelt
@@ -2583,7 +2874,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let cfg = req
             .experimental
             .seatbelt
@@ -2605,7 +2902,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
     }
 
@@ -2615,7 +2912,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert_eq!(req.containment, ContainmentBackend::Seatbelt);
     }
 
@@ -2634,7 +2931,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(&encoded, &mut logger, true, ParseOptions::default()).unwrap();
         assert!(req.policy.least_privilege_mode);
         assert_eq!(req.policy.capabilities, vec!["internetClient".to_string()]);
     }
@@ -2651,7 +2948,13 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = load_request(
+            &encoded,
+            &mut logger,
+            true,
+            ParseOptions::with_experimental(),
+        )
+        .unwrap();
         let cfg = req
             .experimental
             .seatbelt

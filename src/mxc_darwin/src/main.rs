@@ -13,7 +13,7 @@ use std::fmt::Write;
 use std::process;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
+use wxc_common::config_parser::{load_request, ParseOptions};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend};
 
@@ -100,16 +100,19 @@ fn main() {
         }
     }
 
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
+    // CLI-driven flags go through the parser so the returned `CodexRequest`
+    // is internally consistent (see `ParseOptions`).
+    let parse_opts = ParseOptions {
+        experimental_enabled: cli.experimental,
+        dry_run: cli.dry_run,
+    };
+    let request = match load_request(&config_data, &mut logger, is_base64, parse_opts) {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());
             process::exit(1);
         }
     };
-
-    request.experimental_enabled = cli.experimental;
-    request.dry_run = cli.dry_run;
 
     log_request(&request, &mut logger);
 

@@ -13,7 +13,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use wxc_common::config_parser::load_mxc_request;
+use wxc_common::config_parser::{load_mxc_request, ParseOptions};
 use wxc_common::logger::{Logger, Mode};
 
 fuzz_target!(|data: &[u8]| {
@@ -23,5 +23,5 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let mut logger = Logger::new(Mode::Buffer);
-    let _ = load_mxc_request(s, &mut logger, false);
+    let _ = load_mxc_request(s, &mut logger, false, ParseOptions::default());
 });

@@ -16,7 +16,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use wxc_common::config_parser::load_mxc_request;
+use wxc_common::config_parser::{load_mxc_request, ParseOptions};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ContainmentBackend;
 use wxc_common::script_runner::ScriptRunner;
@@ -28,7 +28,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let mut logger = Logger::new(Mode::Buffer);
-    if let Ok(MxcRequest::OneShot(req)) = load_mxc_request(s, &mut logger, false) {
+    if let Ok(MxcRequest::OneShot(req)) = load_mxc_request(s, &mut logger, false, ParseOptions::default()) {
         let _ = validate_common(&req);
 
         // Dispatch to runner-specific validation based on backend.

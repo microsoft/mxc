@@ -10,7 +10,7 @@ use std::time::Instant;
 use clap::Parser;
 use wxc_common::appcontainer_runner::{delete_app_container_profile, AppContainerScriptRunner};
 use wxc_common::config_parser::{
-    is_base_container_version, load_mxc_request, load_request, ParseError,
+    is_base_container_version, load_mxc_request, load_request, ParseError, ParseOptions,
 };
 use wxc_common::diagnostic::DiagnosticConfig;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
@@ -420,7 +420,7 @@ fn main() {
             // an in-memory buffer that we discard — the probe must not
             // emit anything other than its JSON line on stdout.
             let mut probe_logger = Logger::new(Mode::Buffer);
-            match load_request(&data, &mut probe_logger, is_b64) {
+            match load_request(&data, &mut probe_logger, is_b64, ParseOptions::default()) {
                 Ok(r) => r.policy,
                 Err(_) => {
                     eprintln!("Error: failed to load probe config");
@@ -616,8 +616,13 @@ fn main() {
     // Load request — discriminates state-aware (top-level `phase` field) from
     // one-shot. State-aware failures emit a JSON envelope on stdout; one-shot
     // and pre-discrimination failures keep the existing diagnostic-on-stderr
-    // convention.
-    let request = match load_mxc_request(&config_data, &mut logger, is_base64) {
+    // convention. CLI-driven flags are passed into the parser so the returned
+    // `CodexRequest` is internally consistent (see `ParseOptions`).
+    let parse_opts = ParseOptions {
+        experimental_enabled: cli.experimental,
+        dry_run: cli.dry_run,
+    };
+    let mut request = match load_mxc_request(&config_data, &mut logger, is_base64, parse_opts) {
         Ok(MxcRequest::OneShot(req)) => req,
         Ok(MxcRequest::StateAware(parsed)) => {
             run_state_aware_main(parsed, cli.dry_run, &mut logger)
@@ -632,10 +637,6 @@ fn main() {
             process::exit(1);
         }
     };
-
-    let mut request = request;
-    request.experimental_enabled = cli.experimental;
-    request.dry_run = cli.dry_run;
 
     // Inject learningModeLogging capability when diagnostic console is enabled.
     let learning_mode_injected = if DiagnosticConfig::force_learning_mode()
