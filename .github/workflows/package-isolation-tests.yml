@@ -14,10 +14,8 @@
 name: Package Isolation Session Tests
 
 on:
-  push:
-    branches: [main, user/dalegg/iso-test-package]
-  pull_request:
-    branches: [main, user/dalegg/iso-test-package]
+  schedule:
+    - cron: '0 8 * * *'  # Daily at 8:00 AM UTC
   workflow_dispatch:
 
 jobs:
