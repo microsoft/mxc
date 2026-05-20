@@ -191,7 +191,7 @@ fn main() -> ExitCode {
     ));
 
     // Step 1c — PrjStartVirtualizing + launching-user smoke read.
-    let session = match virt::start(&virt_root, policy) {
+    let session = match virt::start(&virt_root, policy.with_ac_sid(&ac_sid_string)) {
         Ok((s, r)) => {
             eprintln!(
                 "[step 1c] virt-start: ok — root={}, instance={}",

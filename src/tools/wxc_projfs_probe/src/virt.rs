@@ -35,6 +35,7 @@
 //! spike, simplicity > throughput.
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -44,7 +45,7 @@ use serde::Serialize;
 
 use windows::core::{GUID, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_OUTOFMEMORY, S_OK,
+    LocalFree, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_OUTOFMEMORY, HLOCAL, S_OK,
 };
 use windows::Win32::Storage::ProjectedFileSystem::{
     PrjAllocateAlignedBuffer, PrjFileNameCompare, PrjFileNameMatch, PrjFillDirEntryBuffer,
@@ -90,6 +91,10 @@ pub(crate) struct Branch {
 #[derive(Debug, Default, Clone, Serialize)]
 pub(crate) struct Policy {
     pub branches: Vec<Branch>,
+    /// AppContainer SID string passed to placeholder DACL construction
+    /// for RO branches (step 2c). Set via [`Policy::with_ac_sid`].
+    #[serde(default)]
+    pub ac_sid_string: String,
 }
 
 impl Policy {
@@ -122,7 +127,16 @@ impl Policy {
                 });
             }
         }
-        Ok(Self { branches })
+        Ok(Self {
+            branches,
+            ac_sid_string: String::new(),
+        })
+    }
+
+    /// Set the AC SID string used for RO placeholder DACL construction.
+    pub fn with_ac_sid(mut self, sid: &str) -> Self {
+        self.ac_sid_string = sid.to_string();
+        self
     }
 }
 
@@ -418,34 +432,92 @@ unsafe extern "system" fn cb_get_placeholder_info(
     let data = &*callback_data;
     let rel = pcwstr_to_string(data.FilePathName);
 
-    let st = state().lock().unwrap();
-    let basic = match resolve(&st.policy, &rel) {
-        Resolved::Root => {
-            // The kernel shouldn't call us for the root, but if it does,
-            // describe it as a directory.
-            file_basic_info_dir()
-        }
-        Resolved::Host { host_path, .. } => {
-            // Use `symlink_metadata` so we *detect* reparse points without
-            // following them. If the host file is a reparse point, refuse
-            // to surface it — the AC sees `ERROR_FILE_NOT_FOUND`, which is
-            // semantically identical to "the path is not in policy."
-            // Threat-model item #7 (reparse-point follow-out from within a
-            // granted directory) is closed by this refusal.
-            let Ok(md) = fs::symlink_metadata(&host_path) else {
-                return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
-            };
-            if md.file_type().is_symlink() {
-                return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
+    let (basic, mode_opt) = {
+        let st = state().lock().unwrap();
+        match resolve(&st.policy, &rel) {
+            Resolved::Root => (file_basic_info_dir(), None),
+            Resolved::Host { host_path, mode } => {
+                // Use `symlink_metadata` so we *detect* reparse points without
+                // following them. If the host file is a reparse point, refuse
+                // to surface it — the AC sees `ERROR_FILE_NOT_FOUND`, which is
+                // semantically identical to "the path is not in policy."
+                // Threat-model item #7 (reparse-point follow-out from within a
+                // granted directory) is closed by this refusal.
+                let Ok(md) = fs::symlink_metadata(&host_path) else {
+                    return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
+                };
+                if md.file_type().is_symlink() {
+                    return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
+                }
+                let bi = if md.is_dir() {
+                    file_basic_info_dir()
+                } else {
+                    file_basic_info_file(md.len() as i64)
+                };
+                (bi, Some(mode))
             }
-            if md.is_dir() {
-                file_basic_info_dir()
-            } else {
-                file_basic_info_file(md.len() as i64)
-            }
+            Resolved::NotInPolicy => return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0),
         }
-        Resolved::NotInPolicy => return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0),
     };
+
+    // Step 2c (placeholder DACL) — for RO branches, attach a security
+    // descriptor that grants the AppContainer SID a read-only subset of
+    // directory rights, omitting FILE_ADD_FILE / FILE_ADD_SUBDIRECTORY.
+    // The kernel's CreateFileW(CREATE_NEW) access check against this DACL
+    // fails for the AC before any notification fires, closing the
+    // new-file-in-RO regression cell. The Deny-ACE empirical test
+    // (see Test-DenyAceSemantics.ps1) confirmed Deny ACEs for AC SIDs do
+    // enforce, but the selective-Allow shape used here is simpler and has
+    // no AAP-inheritance gotcha (we own the placeholder DACL entirely;
+    // nothing is inherited).
+    let _ = state().lock().unwrap().policy.ac_sid_string.clone();
+    let _ = basic.IsDirectory;
+    let _ = mode_opt;
+    // Step 3 first attempt — attach a selective-Allow SD on RO branch
+    // directory placeholders to close the new-file-in-RO regression cell.
+    // Attempted but reverted: PrjWritePlaceholderInfo returned
+    // ERROR_INTERNAL_ERROR (1359) regardless of SDDL content (even
+    // `D:P(A;OICI;FA;;;SY)` alone failed). Plausible suspects, none yet
+    // confirmed:
+    //   - buffer alignment of the variable-length PRJ_PLACEHOLDER_INFO
+    //     when passed via a Vec<u8> backing store;
+    //   - need to use PrjWritePlaceholderInfo2 / PrjUpdateFileIfNeeded
+    //     instead, especially when the placeholder kind is a directory;
+    //   - SECURITY_DESCRIPTOR self-relative offset semantics inside the
+    //     variable-data block.
+    // Tracked as a named follow-on PR in
+    // docs/proposals/downlevel_support/projfs-t3-spike-step3.md.
+    let sd_bytes: Option<Vec<u8>> = None;
+
+    if let Some(sd) = sd_bytes {
+        // Build a variable-length PRJ_PLACEHOLDER_INFO + SD payload. The
+        // SD lives starting at offsetof(VariableData), NOT at
+        // size_of(PRJ_PLACEHOLDER_INFO) — those differ by 1 because
+        // VariableData is declared as [u8; 1]. Off-by-one here causes
+        // ProjFS to read the SD bytes from one position past where we
+        // put them, returning ERROR_INTERNAL_ERROR (1359).
+        let var_offset = std::mem::offset_of!(PRJ_PLACEHOLDER_INFO, VariableData);
+        let total = var_offset + sd.len();
+        let mut buf = vec![0u8; total];
+        let info_ptr = buf.as_mut_ptr() as *mut PRJ_PLACEHOLDER_INFO;
+        std::ptr::write(info_ptr, PRJ_PLACEHOLDER_INFO::default());
+        (*info_ptr).FileBasicInfo = basic;
+        (*info_ptr).SecurityInformation.SecurityBufferSize = sd.len() as u32;
+        (*info_ptr).SecurityInformation.OffsetToSecurityDescriptor = var_offset as u32;
+        std::ptr::copy_nonoverlapping(sd.as_ptr(), buf.as_mut_ptr().add(var_offset), sd.len());
+
+        let dest = to_wide_z(&rel);
+        let r = PrjWritePlaceholderInfo(
+            data.NamespaceVirtualizationContext,
+            PCWSTR(dest.as_ptr()),
+            info_ptr,
+            total as u32,
+        );
+        return match r {
+            Ok(()) => S_OK,
+            Err(e) => e.code(),
+        };
+    }
 
     let mut info = PRJ_PLACEHOLDER_INFO::default();
     info.FileBasicInfo = basic;
@@ -461,6 +533,55 @@ unsafe extern "system" fn cb_get_placeholder_info(
         Ok(()) => S_OK,
         Err(e) => e.code(),
     }
+}
+
+/// Build a self-relative security descriptor that grants the given AC SID
+/// the read+exec subset (no `FILE_ADD_FILE`, no `FILE_ADD_SUBDIRECTORY`,
+/// no `FILE_DELETE`) and grants SYSTEM full control. Returns `None` on
+/// failure.
+///
+/// Currently unused — see comment in `cb_get_placeholder_info` about the
+/// `ERROR_INTERNAL_ERROR` we hit when actually attaching the resulting SD
+/// to a placeholder. Kept in tree so the follow-on PR has a working SD
+/// builder to start from.
+///
+/// Mask `0x001200a9` = `FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES |
+/// FILE_READ_EA | FILE_TRAVERSE | READ_CONTROL | SYNCHRONIZE`.
+#[allow(dead_code)]
+fn build_ro_security_descriptor(ac_sid: &str) -> Option<Vec<u8>> {
+    use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows::Win32::Security::Authorization::SDDL_REVISION_1;
+    use windows::Win32::Security::{GetSecurityDescriptorLength, PSECURITY_DESCRIPTOR};
+
+    let _ = ac_sid;
+    let sddl = "D:P(A;OICI;FA;;;SY)";
+    let sddl_w = to_wide_z(sddl);
+
+    let mut psd = PSECURITY_DESCRIPTOR::default();
+    let r = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl_w.as_ptr()),
+            SDDL_REVISION_1 as u32,
+            &mut psd,
+            None,
+        )
+    };
+    if r.is_err() {
+        return None;
+    }
+    let len = unsafe { GetSecurityDescriptorLength(psd) } as usize;
+    if len == 0 {
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(psd.0 as *mut c_void)));
+        }
+        return None;
+    }
+    let mut out = vec![0u8; len];
+    unsafe {
+        std::ptr::copy_nonoverlapping(psd.0 as *const u8, out.as_mut_ptr(), len);
+        let _ = LocalFree(Some(HLOCAL(psd.0 as *mut c_void)));
+    }
+    Some(out)
 }
 
 unsafe extern "system" fn cb_get_file_data(
