@@ -11,6 +11,7 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
+#[cfg(target_os = "linux")]
 use bwrap_common::bwrap_runner::BubblewrapScriptRunner;
 use lxc_common::lxc_runner::LxcScriptRunner;
 use lxc_common::signal_cleanup;
@@ -229,7 +230,17 @@ fn main() {
                 process::exit(1);
             }
         }
-        ContainmentBackend::Bubblewrap => Box::new(BubblewrapScriptRunner::new()),
+        ContainmentBackend::Bubblewrap => {
+            #[cfg(target_os = "linux")]
+            {
+                Box::new(BubblewrapScriptRunner::new())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                eprintln!("Error: Bubblewrap backend is only available on Linux");
+                process::exit(1);
+            }
+        }
         ContainmentBackend::Lxc => Box::new(LxcScriptRunner::new(
             &request.lxc_config,
             &request.container_id,
