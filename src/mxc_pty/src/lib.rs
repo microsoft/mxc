@@ -34,7 +34,7 @@ pub struct PtyOptions {
     pub timeout: Option<Duration>,
 
     /// How long to wait for the inner process to print its first byte
-    /// before forwarding host stdin to the pty master. The delay matters
+    /// before forwarding host stdin to the pty primary. The delay matters
     /// because an interactive shell calls `tcsetattr` during readline
     /// init, which can flush bytes the parent buffered in the pty before
     /// the shell got there. Set to `Duration::ZERO` to forward stdin
@@ -83,8 +83,8 @@ pub enum PtyOutcome {
 /// Spawn `command` attached to a freshly-allocated pty pair and bridge
 /// it to the host's stdin/stdout/stderr.
 ///
-/// The slave end becomes the child's stdin/stdout/stderr; the master end
-/// stays in this process and is forwarded to/from the host fds on
+/// The secondary end becomes the child's stdin/stdout/stderr; the primary
+/// end stays in this process and is forwarded to/from the host fds on
 /// background threads. All of the child's output has therefore been
 /// streamed to the host stdio by the time this function returns;
 /// callers needing captured output should write it to a file in cwd
@@ -92,9 +92,9 @@ pub enum PtyOutcome {
 ///
 /// When fd 0 is itself a tty (i.e. the executor binary is being driven
 /// by a parent that wrapped it in a pty — the common case for the
-/// `mxc-sdk` host), we put that outer slave into raw mode for the
+/// `mxc-sdk` host), we put that outer secondary into raw mode for the
 /// duration of the bridge. Without this, the kernel termios on the
-/// outer pty echoes back any bytes the host writes to its master and
+/// outer pty echoes back any bytes the host writes to its primary and
 /// renders control chars as `^X` on the way through, which corrupts
 /// any TUI the inner child renders (e.g. terminal palette query
 /// responses get echoed instead of forwarded as input).
@@ -109,12 +109,12 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
 
     use nix::pty::openpty;
 
-    // Put our own stdin (the outer pty slave, if any) into raw mode so
+    // Put our own stdin (the outer pty secondary, if any) into raw mode so
     // input bytes pass through to the inner pty without local echo or
     // canonical-mode line buffering. The guard restores the original
     // termios on drop — important because mxc-exec-mac continues to
     // print to stdout after `run_with_pty` returns.
-    let _outer_raw_guard = RawSlaveGuard::install(std::io::stdin().as_raw_fd());
+    let _outer_raw_guard = RawSecondaryGuard::install(std::io::stdin().as_raw_fd());
 
     // Inherit the outer pty's window size so the inner child renders at
     // the host terminal's actual dimensions instead of macOS' default
@@ -139,28 +139,35 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
     let pty_pair =
         openpty(inner_winsize.as_ref(), None).map_err(|e| format!("openpty failed: {}", e))?;
 
-    // Three duplicates of the slave fd so each Stdio takes ownership of
+    // The `nix::pty` crate exposes the POSIX field names `.master` and
+    // `.slave` on `PtyPair`. We refer to those ends as primary and
+    // secondary in our own variables and prose below.
+
+    // Three duplicates of the secondary fd so each Stdio takes ownership of
     // its own handle; otherwise std::process::Stdio::from would consume
     // the single OwnedFd and the rest of the spawn calls would fail.
-    let slave_in: Stdio = pty_pair
+    let secondary_in: Stdio = pty_pair
         .slave
         .try_clone()
-        .map_err(|e| format!("dup slave for stdin: {}", e))?
+        .map_err(|e| format!("dup secondary for stdin: {}", e))?
         .into();
-    let slave_out: Stdio = pty_pair
+    let secondary_out: Stdio = pty_pair
         .slave
         .try_clone()
-        .map_err(|e| format!("dup slave for stdout: {}", e))?
+        .map_err(|e| format!("dup secondary for stdout: {}", e))?
         .into();
-    let slave_err: Stdio = pty_pair.slave.into();
+    let secondary_err: Stdio = pty_pair.slave.into();
 
-    command.stdin(slave_in).stdout(slave_out).stderr(slave_err);
+    command
+        .stdin(secondary_in)
+        .stdout(secondary_out)
+        .stderr(secondary_err);
 
     // Drop the inherited controlling terminal in the child and make the
-    // slave end of our pty its new controlling tty. Without this the
+    // secondary end of our pty its new controlling tty. Without this the
     // child detects that it has a controlling tty (the outer pty from
     // node-pty) and forwards the inner pty's I/O to `/dev/tty` directly,
-    // bypassing the slave fds we wired into stdio. Our master would
+    // bypassing the secondary fds we wired into stdio. Our primary would
     // then see no data at all.
     //
     // `unblock_signals` reverses any sigmask the parent installed (e.g.
@@ -182,7 +189,7 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
             // Become a new session leader, detaching from the inherited
             // controlling terminal.
             nix::unistd::setsid().map_err(std::io::Error::from)?;
-            // ioctl on fd 0 (the slave we just dup2'd in via stdin) to
+            // ioctl on fd 0 (the secondary we just dup2'd in via stdin) to
             // make it the new controlling tty. Errors are non-fatal
             // because setsid above already cleared the ctty state, which
             // is what actually matters for the child.
@@ -204,30 +211,30 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
 
     drop(command);
 
-    // The child inherited all three slave handles and the parent's
-    // copies have been moved into Stdio. The slave will be fully closed
-    // when the child exits, which makes our master read return EOF.
-    let master: std::fs::File = pty_pair.master.into();
-    let mut master_writer = master
+    // The child inherited all three secondary handles and the parent's
+    // copies have been moved into Stdio. The secondary will be fully closed
+    // when the child exits, which makes our primary read return EOF.
+    let primary: std::fs::File = pty_pair.master.into();
+    let mut primary_writer = primary
         .try_clone()
-        .map_err(|e| format!("dup master: {}", e))?;
-    let mut master_reader = master;
+        .map_err(|e| format!("dup primary: {}", e))?;
+    let mut primary_reader = primary;
 
     // Resize forwarder: when the host's terminal resizes, the kernel
     // delivers SIGWINCH to us (because our fd 0 is the outer pty
-    // slave). Read the new size off fd 0 and push it to the inner pty
-    // master via TIOCSWINSZ — that delivers SIGWINCH to the inner
+    // secondary). Read the new size off fd 0 and push it to the inner pty
+    // primary via TIOCSWINSZ — that delivers SIGWINCH to the inner
     // child, so TUIs reflow correctly. Hand the forwarder its own
-    // dup of the master so the resize fd isn't tied to the lifetime
-    // of `master_writer` (which the input-forwarder thread can drop
+    // dup of the primary so the resize fd isn't tied to the lifetime
+    // of `primary_writer` (which the input-forwarder thread can drop
     // mid-session); the forwarder leaks its dup for the rest of the
     // process, the same lifetime as the signal handler that targets it.
-    let winch_master = master_writer
+    let winch_primary = primary_writer
         .try_clone()
-        .map_err(|e| format!("dup master for sigwinch forwarder: {}", e))?;
-    let _winch_thread = spawn_sigwinch_forwarder(winch_master);
+        .map_err(|e| format!("dup primary for sigwinch forwarder: {}", e))?;
+    let _winch_thread = spawn_sigwinch_forwarder(winch_primary);
 
-    // Output forwarder: master -> host stdout. Signals "ready" on the
+    // Output forwarder: primary -> host stdout. Signals "ready" on the
     // first byte from inside the child so the input forwarder doesn't
     // race the inner shell's `tcsetattr` init.
     let (ready_tx, ready_rx) = mpsc::channel::<()>();
@@ -236,7 +243,7 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
         let mut signaled = false;
         let mut stdout = std::io::stdout();
         loop {
-            match master_reader.read(&mut buf) {
+            match primary_reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     if !signaled {
@@ -268,7 +275,7 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
         let _ = ready_rx.recv_timeout(ready_budget);
     }
 
-    // Input forwarder: host stdin -> master. Detached; exits when stdin
+    // Input forwarder: host stdin -> primary. Detached; exits when stdin
     // closes (which happens when our parent closes the outer pty).
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -277,7 +284,7 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
             match stdin.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if master_writer.write_all(&buf[..n]).is_err() {
+                    if primary_writer.write_all(&buf[..n]).is_err() {
                         break;
                     }
                 }
@@ -311,16 +318,16 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
         },
     };
 
-    // Drain remaining output before returning. The slave fds are closed
-    // on child exit, so master_reader hits EOF and the thread exits.
+    // Drain remaining output before returning. The secondary fds are closed
+    // on child exit, so primary_reader hits EOF and the thread exits.
     let _ = output_thread.join();
 
     Ok(outcome)
 }
 
 /// Background thread that watches for SIGWINCH on the outer pty
-/// (delivered to *some* thread because fd 0 is the outer slave) and
-/// forwards the new window size to the inner pty master via TIOCSWINSZ.
+/// (delivered to *some* thread because fd 0 is the outer secondary) and
+/// forwards the new window size to the inner pty primary via TIOCSWINSZ.
 ///
 /// Uses the self-pipe pattern: an async-signal-safe SIGWINCH handler
 /// writes one byte to a pipe, and a dedicated thread reads from the
@@ -333,20 +340,20 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
 /// Best-effort: if any of the setup steps fail we just skip resize
 /// propagation and the inner stays at its initial size.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn spawn_sigwinch_forwarder(master: std::fs::File) -> Option<std::thread::JoinHandle<()>> {
+fn spawn_sigwinch_forwarder(primary: std::fs::File) -> Option<std::thread::JoinHandle<()>> {
     use std::os::unix::io::AsRawFd;
 
     let (read_end, write_end) = nix::unistd::pipe().ok()?;
     let read_fd = read_end.as_raw_fd();
     let write_fd = write_end.as_raw_fd();
-    let master_fd = master.as_raw_fd();
+    let primary_fd = primary.as_raw_fd();
     // Leak so the fds outlive every reader/writer in the process. The
     // signal handler targets `write_fd` for the rest of the process,
-    // and `master_fd` is what we ioctl into on every resize — closing
+    // and `primary_fd` is what we ioctl into on every resize — closing
     // either would race.
     std::mem::forget(read_end);
     std::mem::forget(write_end);
-    std::mem::forget(master);
+    std::mem::forget(primary);
 
     // Make the write end non-blocking so the signal handler can't
     // deadlock on a full pipe (the comment on `sigwinch_handler` already
@@ -390,7 +397,7 @@ fn spawn_sigwinch_forwarder(master: std::fs::File) -> Option<std::thread::JoinHa
                     continue;
                 }
                 // Inner pty gone — exit the thread.
-                if libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws) != 0 {
+                if libc::ioctl(primary_fd, libc::TIOCSWINSZ, &ws) != 0 {
                     return;
                 }
             }
@@ -419,9 +426,9 @@ extern "C" fn sigwinch_handler(_sig: libc::c_int) {
     }
 }
 
-/// RAII guard that puts an outer pty slave fd into raw mode on creation
+/// RAII guard that puts an outer pty secondary fd into raw mode on creation
 /// and restores the original termios on drop. Used by [`run_with_pty`]
-/// when our own stdin is itself a pty slave (i.e. the executor is
+/// when our own stdin is itself a pty secondary (i.e. the executor is
 /// running under a host-allocated pty), so that input bytes round-trip
 /// to the inner child's pty cleanly without local echo or `^X`-style
 /// control-char rendering corrupting the inner TUI.
@@ -431,13 +438,13 @@ extern "C" fn sigwinch_handler(_sig: libc::c_int) {
 /// when termios calls fail — the inner child still works, just without
 /// the raw-mode passthrough.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-struct RawSlaveGuard {
+struct RawSecondaryGuard {
     fd: std::os::unix::io::RawFd,
     original: nix::sys::termios::Termios,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-impl RawSlaveGuard {
+impl RawSecondaryGuard {
     fn install(fd: std::os::unix::io::RawFd) -> Option<Self> {
         use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
         // SAFETY: `isatty` is async-signal-safe and only touches the
@@ -458,7 +465,7 @@ impl RawSlaveGuard {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-impl Drop for RawSlaveGuard {
+impl Drop for RawSecondaryGuard {
     fn drop(&mut self) {
         use nix::sys::termios::{tcsetattr, SetArg};
         let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(self.fd) };
