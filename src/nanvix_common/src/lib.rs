@@ -264,3 +264,56 @@ fn is_newer(src: &Path, dst: &Path) -> bool {
         _ => true,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_stderr_tail_short_buffer_no_prefix() {
+        let out = format_stderr_tail(b"hello", false);
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn format_stderr_tail_short_buffer_with_truncated_flag() {
+        let out = format_stderr_tail(b"hello", true);
+        assert_eq!(out, "...(truncated)hello");
+    }
+
+    #[test]
+    fn format_stderr_tail_trims_oversized_ascii_buffer() {
+        let big = vec![b'A'; STDERR_TAIL_BYTES + 16];
+        let out = format_stderr_tail(&big, false);
+        assert!(out.starts_with("...(truncated)"));
+        // 14 chars for the prefix + STDERR_TAIL_BYTES trailing ASCII bytes.
+        assert_eq!(out.len(), "...(truncated)".len() + STDERR_TAIL_BYTES);
+    }
+
+    /// Regression test for PR review comment r3283559877: an oversized
+    /// buffer containing multi-byte UTF-8 must not panic when the
+    /// truncation byte offset falls inside a codepoint.
+    #[test]
+    fn format_stderr_tail_oversized_multibyte_does_not_panic() {
+        // 4-byte UTF-8 emoji repeated until well past the cap.
+        let unit = "🦀"; // 4 bytes
+        let repeats = (STDERR_TAIL_BYTES / unit.len()) + 64;
+        let big = unit.repeat(repeats).into_bytes();
+        assert!(big.len() > STDERR_TAIL_BYTES);
+        let out = format_stderr_tail(&big, false);
+        assert!(out.starts_with("...(truncated)"));
+        // Ensure the result is still valid UTF-8 (String guarantees this);
+        // partial leading codepoints become U+FFFD via `from_utf8_lossy`.
+        assert!(out.len() >= "...(truncated)".len());
+    }
+
+    #[test]
+    fn format_stderr_tail_oversized_with_truncated_flag_uses_byte_trim() {
+        // When the buffer is oversized, the explicit `truncated` flag
+        // should not change behavior — byte-level trim still applies.
+        let big = vec![b'B'; STDERR_TAIL_BYTES + 1];
+        let out = format_stderr_tail(&big, true);
+        assert!(out.starts_with("...(truncated)"));
+        assert_eq!(out.len(), "...(truncated)".len() + STDERR_TAIL_BYTES);
+    }
+}
