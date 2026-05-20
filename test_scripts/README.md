@@ -36,6 +36,23 @@ These scripts are local helpers. Not every script is run by CI because several
 depend on local OS features such as Windows Sandbox, WHP, proxy setup, or stress
 test duration.
 
+### Manual smoke tests
+
+Manual smokes are visual-inspection scripts for rendering and event-propagation
+behavior that has no automated pass/fail oracle. They must run on a real
+`cmd.exe` console on the test host (not via PowerShell, not via PSSession),
+and the operator observes the output to confirm healthy behavior.
+
+| Script | Description | Prerequisites |
+|--------|-------------|---------------|
+| `run_isolation_session_resize_smoke.ps1` | Ruler-line loop inside an isolation session; resize the window and verify `cols=` / `rows=` track the resize and the trailing `|` stays at the actual right edge. Ctrl-C to exit. | `wxc-exec.exe` (built with `--features isolation_session`), real `cmd.exe` console, IsolationSession backend available |
+
+Invoke from `cmd.exe`:
+
+```cmd
+powershell -ExecutionPolicy Bypass -File test_scripts\run_isolation_session_resize_smoke.ps1
+```
+
 ### Deployment helpers
 
 These scripts copy build artifacts onto a remote test VM. The TShell-based

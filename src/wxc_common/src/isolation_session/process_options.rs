@@ -22,7 +22,7 @@ const REDIRECT_STDERR: u32 = 0x4;
 /// non-interactive mode: in ConPTY mode the OS API merges stderr into
 /// stdout and does not populate the stderr handle, so asking for it would
 /// produce a handle of 0.
-pub(super) fn compute_redirect_flags(interactive: bool) -> u32 {
+fn compute_redirect_flags(interactive: bool) -> u32 {
     let mut flags = REDIRECT_STDIN | REDIRECT_STDOUT;
     if !interactive {
         flags |= REDIRECT_STDERR;
@@ -48,12 +48,14 @@ pub(super) struct ProcessOptions {
     pub interactive: bool,
 }
 
-/// Builds `ProcessOptions` from a `CodexRequest`.
+/// Builds `ProcessOptions` from a `CodexRequest`. `interactive` flips the
+/// backend into ConPTY mode (`InteractiveConsole = true`) and adjusts
+/// `redirect_flags` accordingly (no separate stderr stream in ConPTY mode).
 ///
 /// The command line is wrapped with `cmd.exe /c` so shell features (pipes,
 /// redirections, chained commands) work — same pattern as the LXC backend's
 /// `/bin/sh -c`.
-pub(super) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
+pub(super) fn build_process_options(request: &CodexRequest, interactive: bool) -> ProcessOptions {
     let env_vars: Vec<(String, String)> = request
         .env
         .iter()
@@ -80,8 +82,8 @@ pub(super) fn build_process_options(request: &CodexRequest) -> ProcessOptions {
         timeout_ms: request.script_timeout,
         working_directory: request.working_directory.clone(),
         env_vars,
-        redirect_flags: REDIRECT_STDOUT | REDIRECT_STDERR,
-        interactive: false,
+        redirect_flags: compute_redirect_flags(interactive),
+        interactive,
     }
 }
 
@@ -140,7 +142,7 @@ mod tests {
             script_code: "echo hello".to_string(),
             ..Default::default()
         };
-        let opts = build_process_options(&request);
+        let opts = build_process_options(&request, false);
         // Host-relative — drive comes from %SYSTEMDRIVE% (typically `C:`),
         // so assert the trailing path shape rather than the full literal.
         assert!(
@@ -158,7 +160,7 @@ mod tests {
             script_timeout: 30000,
             ..Default::default()
         };
-        let opts = build_process_options(&request);
+        let opts = build_process_options(&request, false);
         assert_eq!(opts.timeout_ms, 30000);
     }
 
@@ -169,7 +171,7 @@ mod tests {
             working_directory: r"C:\Windows".to_string(),
             ..Default::default()
         };
-        let opts = build_process_options(&request);
+        let opts = build_process_options(&request, false);
         assert_eq!(opts.working_directory, r"C:\Windows");
     }
 
@@ -180,7 +182,7 @@ mod tests {
             env: vec!["FOO=bar".to_string(), "PATH=C:\\bin;C:\\tools".to_string()],
             ..Default::default()
         };
-        let opts = build_process_options(&request);
+        let opts = build_process_options(&request, false);
         assert_eq!(opts.env_vars.len(), 2);
         assert_eq!(opts.env_vars[0], ("FOO".to_string(), "bar".to_string()));
         assert_eq!(
@@ -200,20 +202,40 @@ mod tests {
             ],
             ..Default::default()
         };
-        let opts = build_process_options(&request);
+        let opts = build_process_options(&request, false);
         assert_eq!(opts.env_vars.len(), 2);
         assert_eq!(opts.env_vars[0].0, "GOOD");
         assert_eq!(opts.env_vars[1], ("ALSO_GOOD".to_string(), String::new()));
     }
 
     #[test]
-    fn options_sets_redirect_flags() {
+    fn options_non_interactive_redirects_all_three_streams() {
         let request = CodexRequest {
             script_code: "echo hi".to_string(),
             ..Default::default()
         };
-        let opts = build_process_options(&request);
-        assert_eq!(opts.redirect_flags, REDIRECT_STDOUT | REDIRECT_STDERR);
+        let opts = build_process_options(&request, false);
+        assert!(!opts.interactive);
+        assert_eq!(
+            opts.redirect_flags,
+            REDIRECT_STDIN | REDIRECT_STDOUT | REDIRECT_STDERR
+        );
+    }
+
+    #[test]
+    fn options_interactive_redirects_stdin_stdout_only() {
+        let request = CodexRequest {
+            script_code: "echo hi".to_string(),
+            ..Default::default()
+        };
+        let opts = build_process_options(&request, true);
+        assert!(opts.interactive);
+        assert_eq!(opts.redirect_flags, REDIRECT_STDIN | REDIRECT_STDOUT);
+        assert_eq!(
+            opts.redirect_flags & REDIRECT_STDERR,
+            0,
+            "interactive (ConPTY) mode merges stderr into stdout"
+        );
     }
 
     #[test]

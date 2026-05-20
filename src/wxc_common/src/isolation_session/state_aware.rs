@@ -24,7 +24,7 @@ use super::manager::IsolationSessionManager;
 use super::policy::{
     validate_isolation_session_user, validate_post_provision_policy, validate_provision_policy,
 };
-use super::process_options::{build_process_options, compute_redirect_flags};
+use super::process_options::build_process_options;
 use super::IsolationSessionRunner;
 
 /// Provision-phase metadata. Carries the OS-assigned agent account name
@@ -267,10 +267,8 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         let provision_id = extract_provision_id(sandbox_id)?;
         let manager = IsolationSessionManager::new(provision_id).map_err(map_lifecycle_error)?;
 
-        let mut options = build_process_options(request);
         let interactive = std::io::stdout().is_terminal();
-        options.interactive = interactive;
-        options.redirect_flags = compute_redirect_flags(interactive);
+        let options = build_process_options(request, interactive);
 
         let exit_code = manager
             .create_process(&options)
