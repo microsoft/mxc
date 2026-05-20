@@ -7,12 +7,10 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
-use wxc_common::appcontainer_runner::AppContainerScriptRunner;
+use wxc_common::appcontainer_runner::{delete_app_container_profile, AppContainerScriptRunner};
 use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::{is_base_container_version, load_mxc_request, ParseError};
 use wxc_common::diagnostic::DiagnosticConfig;
-use wxc_common::filesystem_bfs::FileSystemBfsManager;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use wxc_common::hyperlight_runner::HyperlightScriptRunner;
 #[cfg(feature = "isolation_session")]
@@ -165,44 +163,6 @@ fn print_error_envelope(error: &MxcError) {
             println!(
                 r#"{{"error":{{"code":"backend_error","message":"failed to serialise error envelope"}}}}"#
             );
-        }
-    }
-}
-
-fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
-    // Clear BFS policy first. We need an absolute path to `bfscfg.exe`
-    // here for the same security reason as the runner — pass an
-    // authoritative path to `CreateProcessW` rather than a bare name.
-    // If resolution fails (rare; only on hosts where
-    // `GetWindowsDirectoryW` itself returns 0), we log and skip the BFS
-    // clearing step; deleting the AppContainer profile below is still
-    // worth attempting.
-    let bfscfg_path = match wxc_common::fallback_detector::find_bfscfg_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            logger.log_line(&format!(
-                "Skipping BFS policy clear: could not resolve bfscfg.exe ({e})"
-            ));
-            None
-        }
-    };
-    let mut bfs = FileSystemBfsManager::new(name.to_string(), bfscfg_path);
-    bfs.remove_configuration(logger);
-
-    // Delete the AppContainer profile
-    let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let hstring = windows::core::HSTRING::from_wide(&wide_name[..wide_name.len() - 1]);
-    match unsafe { DeleteAppContainerProfile(&hstring) } {
-        Ok(()) => {
-            logger.log_line(&format!("Deleted AppContainer profile: {}", name));
-            true
-        }
-        Err(e) => {
-            logger.log_line(&format!(
-                "Failed to delete AppContainer profile '{}': {}",
-                name, e
-            ));
-            false
         }
     }
 }
