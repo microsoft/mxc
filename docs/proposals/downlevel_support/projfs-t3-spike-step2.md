@@ -89,7 +89,7 @@ Headline:
 | Ancestor traverse admin priming | required | **not required** | **strictly better** (microsoft/mxc#304) |
 | `SetNamedSecurityInfoW` walk on apply/remove | yes (~800 ms cold on 332k tree) | none | **strictly better** |
 | RO modify enforcement | yes (deny ACE) | yes (PRE_CONVERT_TO_FULL veto) | comparable |
-| RO new-file-create enforcement | yes (deny ACE) | **no** | **regression** — known limitation (see below) |
+| RO new-file-create enforcement | yes (deny ACE) | **yes (placeholder DACL)** | comparable |
 | Reparse-point follow-out (threat-model #7) | open | **closed** (provider refuses) | **strictly better** |
 
 The one cell where DACL-T3 wins outright is *new-file creation in an RO
@@ -100,6 +100,27 @@ attach a `FILE_ADD_FILE`-deny ACE for the AppContainer SID via
 that represents the RO branch directory — a one-time per-run setup,
 zero host-side ACL touch. Documented in code at `virt.rs::cb_notification`;
 tracked for step 3 implementation work.
+
+**Update (step 3 (3/N) at `cc72d15`):** This cell is now closed
+empirically. The placeholder DACL approach works on this host. The fix
+is selective-Allow (no `FILE_ADD_FILE` on the AC SID grant), not a Deny
+ACE, but the architectural conclusion is the same: a DACL attached to
+the placeholder via `PRJ_PLACEHOLDER_INFO_1` enforces. Two non-obvious
+prerequisites that the spike learned the hard way:
+
+1. The user-mode SD address must be DWORD-aligned (`SeCaptureSecurityDescriptor`'s
+   internal `ProbeForRead` raises `STATUS_DATATYPE_MISALIGNMENT` otherwise,
+   surfacing in user-mode as `0x800703e6 = ERROR_NOACCESS` not as
+   the more obvious `ERROR_INVALID_SECURITY_DESCR`). Pad `OffsetToSecurityDescriptor`
+   to make `(path_bytes + offset) mod 8 == 0`.
+2. The DACL must include an ACE that the launching user matches — `OW`
+   (OWNER_RIGHTS, S-1-3-4) is unreliable because most user tokens
+   don't have S-1-3-4 enabled (including Entra-style S-1-12-1 users).
+   Use `AU` (Authenticated Users, S-1-5-11) instead.
+
+See `virt.rs::cb_get_placeholder_info` and `build_ro_security_descriptor`
+for the actual code, and the step 3 (3/N) commit message for the
+root-cause walk through the ProjFS source.
 
 ## How `denied` and `control` map onto the new world
 

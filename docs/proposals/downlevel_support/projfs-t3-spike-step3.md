@@ -44,7 +44,8 @@ measurable cell:
   follow-on PR.
 
 One cell genuinely regresses vs DACL-T3, with a documented and bounded
-fix: see "Known open work" below.
+fix: see "Known open work" below. **(Update: closed in step 3 (3/N) at
+`cc72d15` — see PR A below.)**
 
 ## Migration plan
 
@@ -98,28 +99,33 @@ focused enough to land as its own PR.
 
 ### A. **Placeholder DACL to close the ro/create regression cell**
 
-Attempted in step 3 commit (1/N) and reverted: `PrjWritePlaceholderInfo`
-returned `ERROR_INTERNAL_ERROR` (Win32 1359) for every SD shape tried,
-including the trivial `D:P(A;OICI;FA;;;SY)`. The failure is in
-marshaling / API surface choice, not SDDL content. Plausible suspects
-documented inline at `virt.rs::cb_get_placeholder_info`:
+**CLOSED in step 3 (3/N) at `cc72d15`.** Empirical receipts in the
+step-2 findings doc and the commit message.
 
-- buffer alignment when the variable-length `PRJ_PLACEHOLDER_INFO` is
-  backed by a `Vec<u8>`;
-- need to use `PrjWritePlaceholderInfo2` or `PrjUpdateFileIfNeeded`
-  instead, especially for directory placeholders;
-- self-relative SD offset semantics inside the variable-data block.
+Original status (kept here for context): attempted in step 3 (1/N) and
+reverted on `ERROR_INTERNAL_ERROR` (1359). ProjFS source review (gvflt:
+`api/lib/fileoperation.c`, `filter/sys/{message.c, utils.c, create.c}`)
+drove the root cause: the 1359 was a downstream symptom of
+`STATUS_ACCESS_VIOLATION` raised by `SeCaptureSecurityDescriptor`'s
+internal `ProbeForRead` due to DWORD-misalignment of the user-mode SD
+address. Fixed by padding `OffsetToSecurityDescriptor` so
+`(path_bytes + offset) mod 8 == 0`, plus switching the launching-user
+grant from `OW` (OWNER_RIGHTS, unreliable on Entra-style tokens) to
+`AU` (Authenticated Users).
 
-Until this lands, the ro/create cell is the **one cell where
-ProjFS-T3 regresses vs DACL-T3**. The regression is bounded: AC
-writes stay inside the AC profile's LocalCache, never reach the host
-backing, never escalate privileges (see the "What the regression
-actually is" discussion in step 2's findings doc + the corrected
-Deny-ACE empirical results section).
+All matrix headline checks green after the fix:
 
-Estimate: 0.5–1 day with focused debugging (probably a single API or
-alignment fix; spike's `build_ro_security_descriptor` helper is the
-correct shape per the empirical Deny-ACE test).
+```
+[ok]   rw  stat=VISIBLE    enum=ENUMERABLE
+[ok]   ro  stat=VISIBLE    enum=ENUMERABLE
+[ok]   denied  stat=HIDDEN  enum=BLOCKED
+[ok]   control stat=HIDDEN  enum=BLOCKED
+[ok]   rw  modify=SUCCEEDED
+[ok]   ro  modify=DENIED  -- PRE_CONVERT_TO_FULL veto
+[ok]   rw  create=SUCCEEDED
+[ok]   ro  create=DENIED  (placeholder DACL)
+[ok]   host ACLs unchanged
+```
 
 ### B. **Performance characterization**
 
