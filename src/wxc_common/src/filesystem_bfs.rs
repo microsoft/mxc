@@ -50,7 +50,23 @@ impl FileSystemBfsManager {
         }
 
         for path in &policy.readwrite_paths {
-            let inherit = test_for_root_path(path);
+            if is_denied(path, &policy.denied_paths) {
+                logger.log_line(&format!(
+                    "Skipping readwrite path {:?} — overridden by deniedPaths",
+                    path
+                ));
+                continue;
+            }
+            let mut inherit = test_for_root_path(path);
+            if inherit && has_denied_children(path, &policy.denied_paths) {
+                logger.log_line(&format!(
+                    "Warning: readwrite path {:?} has denied sub-paths; \
+                     disabling inheritance to limit scope. \
+                     BFS cannot deny individual sub-paths under a granted parent.",
+                    path
+                ));
+                inherit = false;
+            }
             if let Err(e) = self.add_bfs_path(path, inherit, logger) {
                 self.remove_configuration(logger);
                 return Err(e);
@@ -59,7 +75,23 @@ impl FileSystemBfsManager {
         }
 
         for path in &policy.readonly_paths {
-            let inherit = test_for_root_path(path);
+            if is_denied(path, &policy.denied_paths) {
+                logger.log_line(&format!(
+                    "Skipping readonly path {:?} — overridden by deniedPaths",
+                    path
+                ));
+                continue;
+            }
+            let mut inherit = test_for_root_path(path);
+            if inherit && has_denied_children(path, &policy.denied_paths) {
+                logger.log_line(&format!(
+                    "Warning: readonly path {:?} has denied sub-paths; \
+                     disabling inheritance to limit scope. \
+                     BFS cannot deny individual sub-paths under a granted parent.",
+                    path
+                ));
+                inherit = false;
+            }
             if let Err(e) = self.add_readonly_bfs_path(path, inherit, logger) {
                 self.remove_configuration(logger);
                 return Err(e);
@@ -174,6 +206,44 @@ impl FileSystemBfsManager {
     }
 }
 
+/// Returns `true` if `path` is equal to, or is a child of, any entry in
+/// `denied_paths`. Comparison is case-insensitive and separator-normalized
+/// to match Windows filesystem semantics.
+fn is_denied(path: &str, denied_paths: &[String]) -> bool {
+    let normalized = normalize_for_comparison(path);
+    denied_paths.iter().any(|denied| {
+        let denied_norm = normalize_for_comparison(denied);
+        // Exact match
+        if normalized == denied_norm {
+            return true;
+        }
+        // Child path: `path` starts with `denied` + separator
+        let prefix = format!("{}\\", denied_norm);
+        normalized.starts_with(&prefix)
+    })
+}
+
+/// Returns `true` if any entry in `denied_paths` is a child of `path`.
+/// This detects the case where BFS would grant broad access (e.g. `C:\Users`
+/// with inheritance) that covers a denied sub-path (e.g. `C:\Users\secret`).
+/// BFS has no deny primitive, so we cannot selectively exclude sub-paths
+/// once a parent is granted.
+fn has_denied_children(path: &str, denied_paths: &[String]) -> bool {
+    let normalized = normalize_for_comparison(path);
+    let prefix = format!("{}\\", normalized);
+    denied_paths.iter().any(|denied| {
+        let denied_norm = normalize_for_comparison(denied);
+        denied_norm.starts_with(&prefix)
+    })
+}
+
+/// Lowercase, normalize separators to `\`, and strip trailing separator
+/// for consistent comparison.
+fn normalize_for_comparison(path: &str) -> String {
+    let lower = path.to_lowercase().replace('/', "\\");
+    lower.trim_end_matches('\\').to_string()
+}
+
 /// Returns `false` for `C:\` (no inheritance), `true` for all other paths.
 fn test_for_root_path(path: &str) -> bool {
     path != "C:\\"
@@ -286,5 +356,76 @@ mod tests {
             cmd,
             r#"bfscfg.exe --addpolicy --filename "C:\My Folder\\" --appid test"#
         );
+    }
+
+    #[test]
+    fn is_denied_exact_match() {
+        let denied = vec![r"C:\temp".to_string()];
+        assert!(is_denied(r"C:\temp", &denied));
+    }
+
+    #[test]
+    fn is_denied_case_insensitive() {
+        let denied = vec![r"C:\Temp".to_string()];
+        assert!(is_denied(r"C:\temp", &denied));
+        assert!(is_denied(r"C:\TEMP", &denied));
+    }
+
+    #[test]
+    fn is_denied_child_path() {
+        let denied = vec![r"C:\temp".to_string()];
+        assert!(is_denied(r"C:\temp\subdir", &denied));
+        assert!(is_denied(r"C:\temp\file.txt", &denied));
+    }
+
+    #[test]
+    fn is_denied_not_prefix_of_different_path() {
+        let denied = vec![r"C:\temp".to_string()];
+        // "C:\temporary" should NOT be denied — it's not under "C:\temp\"
+        assert!(!is_denied(r"C:\temporary", &denied));
+    }
+
+    #[test]
+    fn is_denied_no_match() {
+        let denied = vec![r"C:\secrets".to_string()];
+        assert!(!is_denied(r"C:\temp", &denied));
+        assert!(!is_denied(r"C:\Users", &denied));
+    }
+
+    #[test]
+    fn is_denied_trailing_separator() {
+        let denied = vec![r"C:\temp\".to_string()];
+        assert!(is_denied(r"C:\temp", &denied));
+        assert!(is_denied(r"C:\temp\file.txt", &denied));
+    }
+
+    #[test]
+    fn is_denied_mixed_separators() {
+        let denied = vec!["C:/temp".to_string()];
+        assert!(is_denied(r"C:\temp", &denied));
+        assert!(is_denied(r"C:\temp\subdir", &denied));
+
+        let denied2 = vec![r"C:\temp".to_string()];
+        assert!(is_denied("C:/temp", &denied2));
+        assert!(is_denied("C:/temp/subdir", &denied2));
+    }
+
+    #[test]
+    fn has_denied_children_detects_sub_path() {
+        let denied = vec![r"C:\Users\secret".to_string()];
+        assert!(has_denied_children(r"C:\Users", &denied));
+    }
+
+    #[test]
+    fn has_denied_children_no_match() {
+        let denied = vec![r"C:\secrets".to_string()];
+        assert!(!has_denied_children(r"C:\Users", &denied));
+    }
+
+    #[test]
+    fn has_denied_children_exact_match_is_not_child() {
+        let denied = vec![r"C:\Users".to_string()];
+        // Exact match is not a "child" — it's handled by is_denied
+        assert!(!has_denied_children(r"C:\Users", &denied));
     }
 }
