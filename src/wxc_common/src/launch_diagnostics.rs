@@ -108,6 +108,24 @@ pub fn resolve_exe_on_path(exe: &Path) -> std::path::PathBuf {
     exe.to_path_buf()
 }
 
+/// Extract the executable path from a command line string.
+///
+/// Handles both quoted paths (`"C:\Program Files\...\pwsh.exe" -args`) and
+/// unquoted paths (`pwsh.exe -args`). Strips surrounding quotes if present.
+pub fn extract_exe_from_command_line(command_line: &str) -> &str {
+    let trimmed = command_line.trim();
+    if let Some(after_quote) = trimmed.strip_prefix('"') {
+        // Quoted: find the closing quote.
+        match after_quote.find('"') {
+            Some(end) => &after_quote[..end],
+            None => trimmed.split_whitespace().next().unwrap_or(""),
+        }
+    } else {
+        // Unquoted: take up to first whitespace.
+        trimmed.split_whitespace().next().unwrap_or("")
+    }
+}
+
 // --- Internal detection heuristics ---
 
 /// MSIX/packaged apps are installed under `WindowsApps`.
@@ -219,5 +237,44 @@ mod tests {
         let readonly = vec!["\\".to_string()];
         let diag = diagnose_launch_failure(&path, &readonly, None);
         assert!(diag.is_none());
+    }
+
+    #[test]
+    fn extract_exe_quoted_path_with_spaces() {
+        let cmd = r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.1.0_x64__8wekyb3d8bbwe\pwsh.exe" -NoProfile -NoLogo"#;
+        let exe = extract_exe_from_command_line(cmd);
+        assert_eq!(
+            exe,
+            r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.1.0_x64__8wekyb3d8bbwe\pwsh.exe"
+        );
+    }
+
+    #[test]
+    fn extract_exe_unquoted() {
+        let cmd = r"pwsh.exe -NoProfile -NoLogo";
+        let exe = extract_exe_from_command_line(cmd);
+        assert_eq!(exe, "pwsh.exe");
+    }
+
+    #[test]
+    fn extract_exe_quoted_no_args() {
+        let cmd = r#""C:\Program Files\PowerShell\7\pwsh.exe""#;
+        let exe = extract_exe_from_command_line(cmd);
+        assert_eq!(exe, r"C:\Program Files\PowerShell\7\pwsh.exe");
+    }
+
+    #[test]
+    fn extract_exe_empty() {
+        assert_eq!(extract_exe_from_command_line(""), "");
+    }
+
+    #[test]
+    fn quoted_packaged_path_triggers_diagnostic() {
+        let cmd = r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.1.0_x64__8wekyb3d8bbwe\pwsh.exe" -NoProfile"#;
+        let exe = extract_exe_from_command_line(cmd);
+        let path = PathBuf::from(exe);
+        let diag = diagnose_launch_failure(&path, &[], None);
+        assert!(diag.is_some());
+        assert_eq!(diag.unwrap().kind, "packaged_app");
     }
 }

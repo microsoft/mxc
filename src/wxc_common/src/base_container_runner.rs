@@ -599,8 +599,9 @@ impl ScriptRunner for BaseContainerRunner {
                      Use schema version '0.4.0-alpha' to fall back to the AppContainer backend.",
                 );
             }
-            let bare_exe =
-                std::path::Path::new(request.script_code.split_whitespace().next().unwrap_or(""));
+            let bare_exe = std::path::Path::new(
+                crate::launch_diagnostics::extract_exe_from_command_line(&request.script_code),
+            );
             let resolved_exe = crate::launch_diagnostics::resolve_exe_on_path(bare_exe);
             let mut msg = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
             if let Some(diag) =
@@ -619,8 +620,9 @@ impl ScriptRunner for BaseContainerRunner {
 
         // Helper: resolve exe path from the command line for post-exit diagnostics.
         let resolved_exe = {
-            let bare =
-                std::path::Path::new(request.script_code.split_whitespace().next().unwrap_or(""));
+            let bare = std::path::Path::new(
+                crate::launch_diagnostics::extract_exe_from_command_line(&request.script_code),
+            );
             crate::launch_diagnostics::resolve_exe_on_path(bare)
         };
 

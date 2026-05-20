@@ -645,8 +645,9 @@ impl ScriptRunner for AppContainerScriptRunner {
         // environment issues and enrich the error message with actionable
         // guidance.
         if response.exit_code != 0 {
-            let bare_exe =
-                std::path::Path::new(request.script_code.split_whitespace().next().unwrap_or(""));
+            let bare_exe = std::path::Path::new(
+                crate::launch_diagnostics::extract_exe_from_command_line(&request.script_code),
+            );
             let resolved_exe = crate::launch_diagnostics::resolve_exe_on_path(bare_exe);
             if let Some(diag) = diagnose_launch_failure(
                 &resolved_exe,
