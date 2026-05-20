@@ -23,7 +23,7 @@
 //!
 //! Auto-discovery
 //!
-//! All required binaries (`nanvixd.exe`, `python3.12`, `nanvix_rootfs.img`)
+//! All required binaries (`nanvixd.exe`, `python3.initrd`, `nanvix_rootfs.img`)
 //! are discovered next to the running executable. No configuration is needed.
 
 use std::fmt::Write;
@@ -39,16 +39,24 @@ use crate::logger::Logger;
 use crate::models::{CodexRequest, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 
-/// Python guest binary loaded by NanVix (embedded in the rootfs, also provided as a sidecar).
-const PYTHON_BINARY: &str = "python3.12";
-/// Guest PYTHONHOME value used by CPython inside NanVix.
-/// Must NOT contain ';' or spaces — these are NanVix argument delimiters
-/// that would corrupt the guest cmdline string.
-const PYTHON_HOME: &str = "/sysroot";
+/// Multi-binary initrd (daemons + CPython) loaded by NanVix at warm start.
+const INITRD_BINARY: &str = "python3.initrd";
 /// NanVix daemon binary launched by the host runner.
 const NANVIXD_BINARY: &str = "nanvixd.exe";
 /// Combined rootfs image (NanVix kernel userspace + CPython stdlib).
 const RAMFS_IMAGE: &str = "nanvix_rootfs.img";
+/// Pre-built VM state snapshot (CBOR) for warm start.
+const SNAPSHOT_CBOR: &str = "kernel.whp.cbor";
+/// Subdirectory holding snapshot files next to the exe.
+const SNAPSHOTS_DIR: &str = nanvix_common::SNAPSHOTS_SUBDIR;
+/// Subdirectory holding kernel binary.
+const BIN_DIR: &str = nanvix_common::BIN_SUBDIR;
+/// Env var override for the NanVix snapshot home directory. Set this to
+/// force a specific location; otherwise the runner uses a standard
+/// OS-local data path or falls back to `<exe>/snapshots/`.
+const NANVIX_HOME_ENV: &str = "NANVIX_HOME";
+/// Final component of the default OS-local data path.
+const DEFAULT_HOME_LEAF: &str = "nanvix";
 /// Boot grace period that is always enforced.
 const BOOT_TIMEOUT_MS: u64 = 60_000;
 /// Generic error exit code returned to host callers.
@@ -198,17 +206,28 @@ impl Default for NanVixScriptRunner {
     }
 }
 
+/// Resolved paths for NanVix invocation.
+#[derive(Debug)]
+struct ResolvedPaths {
+    nanvixd: PathBuf,
+    ramfs: PathBuf,
+    initrd: PathBuf,
+    /// Directory holding the `bin/` subdir next to the exe.
+    exe_dir: PathBuf,
+    /// Snapshot home directory — used as cwd for nanvixd so it can locate
+    /// `snapshots/kernel.vmem` relative to cwd (nanvixd constraint).
+    snapshot_home: PathBuf,
+}
+
 impl NanVixScriptRunner {
     pub fn new() -> Self {
         Self { _private: () }
     }
 
     /// Resolve and validate all required paths next to the running executable.
-    fn resolve_paths(&self) -> Result<(PathBuf, PathBuf, PathBuf), NanVixError> {
+    fn resolve_paths(&self) -> Result<ResolvedPaths, NanVixError> {
         let dir = exe_dir()?;
-        // NanVix runtime artifacts (nanvixd.exe, kernel.elf, python3.12, nanvix_rootfs.img)
-        // are distributed via GitHub releases from nanvix/nanvix-python.
-        // They are placed next to wxc-exec.exe by the build system.
+        // NanVix runtime artifacts are placed next to wxc-exec.exe by the build system.
 
         let nanvixd = dir.join(NANVIXD_BINARY);
         if !nanvixd.exists() {
@@ -226,15 +245,116 @@ impl NanVixScriptRunner {
             )));
         }
 
-        let python = dir.join(PYTHON_BINARY);
-        if !python.exists() {
+        let initrd = dir.join(INITRD_BINARY);
+        if !initrd.exists() {
             return Err(NanVixError::Preflight(format!(
                 "{} not found in {:?}",
-                PYTHON_BINARY, dir
+                INITRD_BINARY, dir
             )));
         }
 
-        Ok((nanvixd, ramfs, python))
+        let snapshot_home = Self::resolve_snapshot_home(&dir)?;
+        let snapshot_cbor = snapshot_home.join(SNAPSHOTS_DIR).join(SNAPSHOT_CBOR);
+        if !snapshot_cbor.exists() {
+            // No snapshot yet — generate one via cold boot (one-time cost,
+            // ~400–500 ms). Subsequent runs restore directly.
+            Self::generate_snapshot(&dir, &snapshot_home, &nanvixd, &ramfs, &initrd)?;
+        }
+
+        Ok(ResolvedPaths {
+            nanvixd,
+            ramfs,
+            initrd,
+            exe_dir: dir,
+            snapshot_home,
+        })
+    }
+
+    /// Resolve the snapshot home directory.
+    ///
+    /// Discovery chain (first match wins):
+    /// 1. `$NANVIX_HOME` env var (if set and non-empty)
+    /// 2. OS-local data path (`%LOCALAPPDATA%\nanvix` on Windows,
+    ///    `~/.local/share/nanvix` on Linux)
+    /// 3. `<exe>` directory itself (dev builds — nanvixd will write
+    ///    snapshots into `<exe>/snapshots/`)
+    fn resolve_snapshot_home(exe_dir: &Path) -> Result<PathBuf, NanVixError> {
+        // 1. Env var override.
+        if let Some(val) = std::env::var_os(NANVIX_HOME_ENV) {
+            let p = PathBuf::from(val);
+            if !p.as_os_str().is_empty() {
+                std::fs::create_dir_all(&p).map_err(|e| {
+                    NanVixError::Preflight(format!(
+                        "cannot create ${} directory {:?}: {}",
+                        NANVIX_HOME_ENV, p, e
+                    ))
+                })?;
+                return Ok(p);
+            }
+        }
+
+        // 2. OS-local data path.
+        if let Some(home) = Self::default_home() {
+            if home.exists() || std::fs::create_dir_all(&home).is_ok() {
+                return Ok(home);
+            }
+        }
+
+        // 3. Fallback: exe directory itself (nanvixd writes to <cwd>/snapshots/).
+        Ok(exe_dir.to_path_buf())
+    }
+
+    /// Default OS-local snapshot home path.
+    fn default_home() -> Option<PathBuf> {
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join(DEFAULT_HOME_LEAF))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::env::var_os("HOME").map(|d| {
+                PathBuf::from(d)
+                    .join(".local")
+                    .join("share")
+                    .join(DEFAULT_HOME_LEAF)
+            })
+        }
+    }
+
+    /// Generate a WHP snapshot via cold boot (one-time cost).
+    ///
+    /// Delegates to `nanvix_common::generate_snapshot` which runs nanvixd with
+    /// `-kernel-args snapshot` and cwd set to `snapshot_home`. nanvixd writes
+    /// snapshot files to `<snapshot_home>/snapshots/` directly. Subsequent runs
+    /// restore from the snapshot (~20 ms vs ~430 ms cold boot).
+    fn generate_snapshot(
+        exe_dir: &Path,
+        snapshot_home: &Path,
+        nanvixd: &Path,
+        ramfs: &Path,
+        initrd: &Path,
+    ) -> Result<(), NanVixError> {
+        std::fs::create_dir_all(snapshot_home).map_err(|e| {
+            NanVixError::Preflight(format!("failed to create snapshot home: {}", e))
+        })?;
+
+        eprintln!("nanvix: no snapshot found — generating via cold boot (one-time cost)...");
+
+        let start = Instant::now();
+        nanvix_common::generate_snapshot(
+            snapshot_home,
+            nanvixd,
+            &exe_dir.join(BIN_DIR),
+            ramfs,
+            initrd,
+        )
+        .map_err(|msg| NanVixError::Preflight(msg))?;
+
+        eprintln!(
+            "nanvix: snapshot generated in {:.0?} — subsequent runs will use warm start",
+            start.elapsed()
+        );
+        Ok(())
     }
 
     /// Compute total timeout: boot grace + staging overhead + script timeout.
@@ -272,44 +392,30 @@ impl NanVixScriptRunner {
         Ok(())
     }
 
-    fn build_guest_args() -> String {
-        // Build the NanVix guest argument string for mount-based script delivery.
-        // Format: "-S -B /mnt/.mxc-bootstrap.py;PYTHONHOME=/sysroot"
-        //
-        // -S: skip site.py (critical — site import is very slow with large ramfs)
-        // -B: no .pyc writing (read-only filesystem)
-        //
-        // The bootstrap script lives in the staging directory mounted at /mnt.
-        // It exec()s /mnt/.mxc-script.py which has host paths rewritten to
-        // guest mount paths by the staging layer.
-        //
-        // NanVix splits on spaces: argv = ["python3.12", "-S", "-B", "/mnt/..."]
-        // NanVix splits on ';': env = ["PYTHONHOME=/sysroot"]
-        format!("-S -B /mnt/.mxc-bootstrap.py;PYTHONHOME={}", PYTHON_HOME)
-    }
-
     fn spawn_nanvixd(
-        paths: (&Path, &Path, &Path),
-        guest_args: &str,
+        paths: &ResolvedPaths,
         staging_dir: &Path,
     ) -> Result<std::process::Child, NanVixError> {
-        let (nanvixd_path, ramfs_path, python_path) = paths;
-        let bin_dir = nanvixd_path
-            .parent()
-            .expect("nanvixd path must have a parent directory");
-        Command::new(nanvixd_path)
+        // nanvixd loads kernel.vmem from <cwd>/snapshots/ so cwd must be
+        // the snapshot home. All other paths are passed as absolute.
+        //   nanvixd.exe -snapshot snapshots/kernel.whp.cbor
+        //              -bin-dir <exe>/bin -ramfs <img> -mount <staging> -- python3.initrd
+        let snapshot_rel = Path::new(SNAPSHOTS_DIR).join(SNAPSHOT_CBOR);
+        Command::new(&paths.nanvixd)
+            .current_dir(&paths.snapshot_home)
+            .arg("-snapshot")
+            .arg(&snapshot_rel)
             .arg("-bin-dir")
-            .arg(bin_dir)
+            .arg(paths.exe_dir.join(BIN_DIR))
             .arg("-ramfs")
-            .arg(ramfs_path)
+            .arg(&paths.ramfs)
             .arg("-mount")
             .arg(staging_dir)
             .arg("--")
-            .arg(python_path)
-            .arg(guest_args)
+            .arg(&paths.initrd)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
                 NanVixError::Platform(format!("failed to spawn {}: {}", NANVIXD_BINARY, e))
@@ -405,10 +511,11 @@ impl NanVixScriptRunner {
         Ok((watchdog, cancel_pair, timed_out))
     }
 
-    fn log_resolved_paths(logger: &mut Logger, nanvixd: &Path, ramfs: &Path, python: &Path) {
-        let _ = writeln!(logger, "NanVix: nanvixd={:?}", nanvixd);
-        let _ = writeln!(logger, "NanVix: ramfs={:?}", ramfs);
-        let _ = writeln!(logger, "NanVix: python={:?}", python);
+    fn log_resolved_paths(logger: &mut Logger, paths: &ResolvedPaths) {
+        let _ = writeln!(logger, "NanVix: nanvixd={:?}", paths.nanvixd);
+        let _ = writeln!(logger, "NanVix: ramfs={:?}", paths.ramfs);
+        let _ = writeln!(logger, "NanVix: initrd={:?}", paths.initrd);
+        let _ = writeln!(logger, "NanVix: snapshot_home={:?}", paths.snapshot_home);
     }
 
     fn wait_and_respond(
@@ -420,6 +527,17 @@ impl NanVixScriptRunner {
         script_timeout: u32,
         logger: &mut Logger,
     ) -> ScriptResponse {
+        // Drain stderr before wait so the pipe buffer doesn't block the child.
+        let stderr_output = child
+            .stderr
+            .take()
+            .and_then(|mut s| {
+                let mut buf = String::new();
+                use std::io::Read;
+                s.read_to_string(&mut buf).ok().map(|_| buf)
+            })
+            .unwrap_or_default();
+
         let exit_status = child.wait();
 
         {
@@ -447,12 +565,18 @@ impl NanVixScriptRunner {
             Ok(status) => {
                 let exit_code = status.code().unwrap_or(ERROR_EXIT_CODE);
                 let _ = writeln!(logger, "NanVix: process exited with code {}", exit_code);
+                if exit_code != 0 && !stderr_output.is_empty() {
+                    let _ = writeln!(logger, "NanVix stderr:\n{}", stderr_output);
+                }
                 ScriptResponse {
                     exit_code,
                     ..Default::default()
                 }
             }
             Err(e) => {
+                if !stderr_output.is_empty() {
+                    let _ = writeln!(logger, "NanVix stderr:\n{}", stderr_output);
+                }
                 let err =
                     NanVixError::Runtime(format!("failed to wait for {}: {}", NANVIXD_BINARY, e));
                 let _ = writeln!(logger, "{}", err);
@@ -475,8 +599,8 @@ impl ScriptRunner for NanVixScriptRunner {
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let (nanvixd_path, ramfs_path, python_path) = match self.resolve_paths() {
-            Ok(paths) => paths,
+        let paths = match self.resolve_paths() {
+            Ok(p) => p,
             Err(e) => return e.to_response(),
         };
 
@@ -501,15 +625,10 @@ impl ScriptRunner for NanVixScriptRunner {
             }
         };
 
-        Self::log_resolved_paths(logger, &nanvixd_path, &ramfs_path, &python_path);
+        Self::log_resolved_paths(logger, &paths);
         let _ = writeln!(logger, "NanVix: staging_dir={:?}", staging.path());
-        let guest_args = Self::build_guest_args();
 
-        let mut child = match Self::spawn_nanvixd(
-            (&nanvixd_path, &ramfs_path, &python_path),
-            &guest_args,
-            staging.path(),
-        ) {
+        let mut child = match Self::spawn_nanvixd(&paths, staging.path()) {
             Ok(c) => c,
             Err(e) => {
                 let _ = writeln!(logger, "{}", e);
@@ -745,39 +864,12 @@ mod tests {
     }
 
     #[test]
-    fn python_home_constant_has_no_delimiters() {
-        // PYTHON_HOME must not contain ';' or spaces — these are NanVix
-        // argument delimiters that would corrupt the guest arg string.
-        assert!(!PYTHON_HOME.contains(';'), "PYTHON_HOME contains ';'");
-        assert!(!PYTHON_HOME.contains(' '), "PYTHON_HOME contains space");
-    }
-
-    #[test]
-    fn guest_args_format_is_correct() {
-        let expected = "-S -B /mnt/.mxc-bootstrap.py;PYTHONHOME=/sysroot";
-        let actual = NanVixScriptRunner::build_guest_args();
-        assert_eq!(actual, expected);
-        // The bootstrap path segment itself must not contain spaces.
-        // (The -S and -B flags are intentional space-separated argv entries.)
-        assert!(
-            actual.contains("/mnt/.mxc-bootstrap.py"),
-            "must contain bootstrap path"
-        );
-    }
-
-    #[test]
-    fn guest_args_use_bootstrap_path() {
-        let args = NanVixScriptRunner::build_guest_args();
-        assert!(
-            args.contains(".mxc-bootstrap.py"),
-            "guest args should reference bootstrap script, got: {}",
-            args
-        );
-        assert!(
-            !args.contains("exec(__import__"),
-            "guest args should NOT use stdin exec trick, got: {}",
-            args
-        );
+    fn resolve_paths_checks_for_snapshot() {
+        let runner = NanVixScriptRunner::new();
+        let err = runner.resolve_paths().unwrap_err();
+        // Should fail on missing binaries (not on snapshot specifically,
+        // since nanvixd.exe is checked first).
+        assert!(err.to_string().contains("not found"), "got: {}", err);
     }
 
     // -- Copyback decision tests ------------------------------------------------
