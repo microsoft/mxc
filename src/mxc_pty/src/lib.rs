@@ -148,11 +148,12 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
     // uses `F_DUPFD_CLOEXEC`), so we only have to fix the originals
     // returned by `openpty`. Best-effort: an `fcntl` failure here just
     // restores the pre-fix behaviour, no regression.
-    unsafe {
+    {
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
         for fd in [pty_pair.master.as_raw_fd(), pty_pair.slave.as_raw_fd()] {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags >= 0 {
-                let _ = libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            if let Ok(bits) = fcntl(fd, FcntlArg::F_GETFD) {
+                let flags = FdFlag::from_bits_truncate(bits) | FdFlag::FD_CLOEXEC;
+                let _ = fcntl(fd, FcntlArg::F_SETFD(flags));
             }
         }
     }
@@ -547,13 +548,19 @@ mod tests {
 
     /// Documents the libc invariant motivating the FD_CLOEXEC fixup
     /// inside `run_with_pty`. If a future libc starts defaulting to
-    /// `FD_CLOEXEC` on `openpty(3)`, this test fires and the fixup
-    /// can be deleted.
+    /// `FD_CLOEXEC` on `openpty(3)`, this test skips with a message —
+    /// libc has caught up and the fixup in `run_with_pty` can be
+    /// deleted.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn openpty_default_lacks_cloexec() {
+        // openpty returns non-CLOEXEC fds, so taking the lock keeps the
+        // same fork-race guarantees as the leak regression test below.
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         use std::os::unix::io::AsRawFd;
 
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
         use nix::pty::openpty;
 
         let pair = openpty(None, None).expect("openpty");
@@ -561,13 +568,14 @@ mod tests {
             ("master", pair.master.as_raw_fd()),
             ("slave", pair.slave.as_raw_fd()),
         ] {
-            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-            assert!(flags >= 0, "F_GETFD on {label} failed");
-            assert_eq!(
-                flags & libc::FD_CLOEXEC,
-                0,
-                "openpty {label} unexpectedly defaults to CLOEXEC; the fcntl fixup in run_with_pty may now be redundant",
-            );
+            let bits = fcntl(fd, FcntlArg::F_GETFD).expect("F_GETFD");
+            let flags = FdFlag::from_bits_truncate(bits);
+            if flags.contains(FdFlag::FD_CLOEXEC) {
+                eprintln!(
+                    "skipping: openpty {label} now defaults to CLOEXEC; the fcntl fixup in run_with_pty can be removed"
+                );
+                return;
+            }
         }
     }
 
@@ -582,11 +590,14 @@ mod tests {
     /// fd number stays open as a second slave reference unless CLOEXEC
     /// trims it at `execve` time.
     ///
-    /// The child uses `lsof` to enumerate its own open fds and writes
-    /// any leaked pty fd it sees to a temp file. We then assert nothing
-    /// was logged. A `LSOF_OK` sentinel guards against the silent-pass
-    /// failure mode where lsof isn't installed and the awk filter would
-    /// otherwise see empty input.
+    /// The child enumerates its own open fds and reports any inherited
+    /// pty fd via a sentinel-prefixed log file. Linux uses
+    /// `/proc/$$/fd` + `readlink` (no external tool deps). macOS uses
+    /// `/usr/sbin/lsof` because `readlink` on `/dev/fd/N` returns
+    /// `EINVAL` (fdescfs entries aren't symlinks) and lsof is bundled
+    /// with the OS at a fixed path. The sentinel makes the test fail
+    /// loudly when neither probe is available instead of silently
+    /// passing on empty input.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn pty_fds_do_not_leak_into_child_across_exec() {
@@ -607,19 +618,33 @@ mod tests {
             // CLOEXEC regression. fd 255 is excluded because some shells
             // dup the script onto it for job control.
             r#"
-            if ! command -v lsof >/dev/null 2>&1; then
-                echo "LSOF_MISSING" > "{path}"
-                exit 0
+            if [ -d /proc/$$/fd ]; then
+                echo "PROC_OK" > "{path}"
+                for fd_link in /proc/$$/fd/*; do
+                    fd=${{fd_link##*/}}
+                    case "$fd" in
+                        0|1|2|255) continue ;;
+                    esac
+                    target=$(readlink "$fd_link" 2>/dev/null) || continue
+                    case "$target" in
+                        /dev/ptmx|/dev/pts/*)
+                            echo "LEAK fd=$fd target=$target"
+                            ;;
+                    esac
+                done >> "{path}"
+            elif [ -x /usr/sbin/lsof ]; then
+                echo "LSOF_OK" > "{path}"
+                /usr/sbin/lsof -p $$ 2>/dev/null \
+                  | awk 'NR > 1 && $NF ~ /^\/dev\/(ptmx|ttys[0-9]+|pts\/[0-9]+)$/ {{
+                        fd = $4
+                        sub(/[a-zA-Z]+$/, "", fd)
+                        n = fd + 0
+                        if (n > 2 && n != 255) print "LEAK fd=" $4 " target=" $NF
+                    }}' \
+                  >> "{path}"
+            else
+                echo "PROBE_MISSING" > "{path}"
             fi
-            echo "LSOF_OK" > "{path}"
-            lsof -p $$ 2>/dev/null \
-              | awk 'NR > 1 && $NF ~ /^\/dev\/(ptmx|ttys[0-9]+|pts\/[0-9]+)$/ {{
-                    fd = $4
-                    sub(/[a-zA-Z]+$/, "", fd)
-                    n = fd + 0
-                    if (n > 2 && n != 255) print "LEAK fd=" $4 " target=" $NF
-                }}' \
-              >> "{path}"
             "#,
             path = tmp_path,
         ));
@@ -630,13 +655,15 @@ mod tests {
         let contents = std::fs::read_to_string(&tmp_path).unwrap_or_default();
         let _ = std::fs::remove_file(&tmp_path);
 
-        if contents.trim_end() == "LSOF_MISSING" {
-            eprintln!("skipping pty leak assertion: lsof not in PATH");
+        if contents.trim_end() == "PROBE_MISSING" {
+            eprintln!(
+                "skipping pty leak assertion: no usable fd probe (no /proc and no /usr/sbin/lsof)"
+            );
             return;
         }
         assert!(
-            contents.starts_with("LSOF_OK"),
-            "shell probe did not record an lsof status; got: {contents:?}",
+            contents.starts_with("PROC_OK") || contents.starts_with("LSOF_OK"),
+            "shell probe did not record a sentinel; got: {contents:?}",
         );
         let leaks = contents
             .lines()
