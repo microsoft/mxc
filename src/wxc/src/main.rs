@@ -7,16 +7,14 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
-use wxc_common::appcontainer_runner::AppContainerScriptRunner;
+use wxc_common::appcontainer_runner::{delete_app_container_profile, AppContainerScriptRunner};
 use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::{is_base_container_version, load_mxc_request, ParseError};
 use wxc_common::diagnostic::DiagnosticConfig;
-use wxc_common::filesystem_bfs::FileSystemBfsManager;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use wxc_common::hyperlight_runner::HyperlightScriptRunner;
 #[cfg(feature = "isolation_session")]
-use wxc_common::isolation_session_runner::IsolationSessionRunner;
+use wxc_common::isolation_session::IsolationSessionRunner;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
@@ -79,6 +77,25 @@ struct Cli {
     /// the new bits. Requires --setup-hyperlight.
     #[arg(long, requires = "setup_hyperlight")]
     force: bool,
+
+    /// Pre-pull a WSLC container image into the local image cache and exit.
+    /// MXC is an execution layer and does not pull images at run time; this
+    /// flag (or `scripts/setup-wslc.ps1`) is how operators populate the cache.
+    /// Requires `--image` to specify which image to pull.
+    #[arg(long = "setup-wslc")]
+    setup_wslc: bool,
+
+    /// Image reference to pre-pull (e.g. `alpine:latest`,
+    /// `ghcr.io/owner/image:tag`). Required with `--setup-wslc`.
+    #[arg(long = "image", requires = "setup_wslc")]
+    image: Option<String>,
+
+    /// Optional WSLC storage path. When omitted the runner default is used
+    /// (`%TEMP%\mxc-wslc-sessions`). Pass the same value here that your
+    /// runtime configs set in `experimental.wslc.storagePath`, otherwise
+    /// the runner will not find the pulled image. Requires `--setup-wslc`.
+    #[arg(long = "storage-path", requires = "setup_wslc")]
+    storage_path: Option<String>,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
@@ -150,29 +167,6 @@ fn print_error_envelope(error: &MxcError) {
     }
 }
 
-fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
-    // Clear BFS policy first
-    let mut bfs = FileSystemBfsManager::new(name.to_string());
-    bfs.remove_configuration(logger);
-
-    // Delete the AppContainer profile
-    let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let hstring = windows::core::HSTRING::from_wide(&wide_name[..wide_name.len() - 1]);
-    match unsafe { DeleteAppContainerProfile(&hstring) } {
-        Ok(()) => {
-            logger.log_line(&format!("Deleted AppContainer profile: {}", name));
-            true
-        }
-        Err(e) => {
-            logger.log_line(&format!(
-                "Failed to delete AppContainer profile '{}': {}",
-                name, e
-            ));
-            false
-        }
-    }
-}
-
 fn main() {
     // Initialize COM/WinRT for backends that use WinRT APIs (Isolation Session).
     // COINIT_MULTITHREADED is benign for backends that don't use COM.
@@ -187,6 +181,26 @@ fn main() {
             windows::Win32::System::Com::COINIT_MULTITHREADED,
         )
     };
+
+    // Best-effort: reap any orphaned DACL state files left behind by
+    // crashed prior MXC runs. Errors here are non-fatal and only surface
+    // via stderr.
+    match wxc_common::filesystem_dacl::recover_orphaned_state() {
+        Ok(report) => {
+            if report.files_processed > 0 || !report.errors.is_empty() {
+                eprintln!(
+                    "DACL recovery: {} file(s), {} ACE(s) restored, {} error(s)",
+                    report.files_processed,
+                    report.aces_restored,
+                    report.errors.len()
+                );
+                for e in &report.errors {
+                    eprintln!("  {e}");
+                }
+            }
+        }
+        Err(e) => eprintln!("DACL recovery failed: {e}"),
+    }
 
     let cli = Cli::parse();
 
@@ -215,6 +229,56 @@ fn main() {
         #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
         {
             eprintln!("Error: --setup-hyperlight requires x86_64 (Hyperlight needs KVM or WHP)");
+            process::exit(1);
+        }
+    }
+
+    // --setup-wslc: pre-pull a WSLC image into the local cache and exit.
+    // Runs before config parsing so the user doesn't need a JSON file just
+    // to populate images. Clap enforces that `--image` is present.
+    if cli.setup_wslc {
+        #[cfg(feature = "wslc")]
+        {
+            let image = match cli.image.as_deref() {
+                Some(s) if !s.is_empty() => s,
+                _ => {
+                    eprintln!("Error: --setup-wslc requires --image <name>");
+                    process::exit(1);
+                }
+            };
+            let mut logger = Logger::new(if cli.debug {
+                Mode::Console
+            } else {
+                Mode::Buffer
+            });
+            // SAFETY: setup_pull_image is the canonical SDK-loading entry
+            // point for this subcommand and is called exactly once before
+            // process exit. It owns the COM init contract documented on
+            // `init_and_load_sdk`.
+            let result = unsafe {
+                wslc_common::wsl_container_runner::WSLContainerRunner::setup_pull_image(
+                    image,
+                    cli.storage_path.as_deref(),
+                    &mut logger,
+                )
+            };
+            // Flush logger buffer to stderr regardless of outcome so the
+            // user can see what happened.
+            let buf = logger.get_buffer().to_string();
+            if !buf.is_empty() {
+                eprint!("{}", buf);
+            }
+            match result {
+                Ok(()) => process::exit(0),
+                Err(msg) => {
+                    eprintln!("wslc setup failed: {msg}");
+                    process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(feature = "wslc"))]
+        {
+            eprintln!("Error: WSLC backend not compiled. Rebuild with --features wslc.");
             process::exit(1);
         }
     }

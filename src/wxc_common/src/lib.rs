@@ -27,7 +27,11 @@ pub mod validator;
 #[cfg(target_os = "windows")]
 pub mod appcontainer_runner;
 #[cfg(target_os = "windows")]
+pub mod fallback_detector;
+#[cfg(target_os = "windows")]
 pub mod filesystem_bfs;
+#[cfg(target_os = "windows")]
+pub mod filesystem_dacl;
 #[cfg(target_os = "windows")]
 pub mod job_object;
 #[cfg(target_os = "windows")]
@@ -57,4 +61,4 @@ pub mod sandbox_tracking;
 
 // Isolation Session (IsoEnvBroker Session API) support
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-pub mod isolation_session_runner;
+pub mod isolation_session;

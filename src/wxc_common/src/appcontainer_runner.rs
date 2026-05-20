@@ -7,7 +7,7 @@ use windows::Win32::Foundation::{
     GetLastError, LocalFree, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
+    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::PSID;
 use windows::Win32::System::Threading::{
@@ -599,7 +599,20 @@ impl ScriptRunner for AppContainerScriptRunner {
         let principal_id = self.get_principal_id();
         logger.log_line(&format!("AppContainerSID: {principal_id}"));
 
-        let mut bfs_manager = FileSystemBfsManager::new(self.app_container_name.clone());
+        // Resolve `bfscfg.exe` by absolute path so probe and execution
+        // agree on the binary — defeats executable-search-order
+        // hijacking (see `fallback_detector::find_bfscfg_exe`). On
+        // hosts where SystemRoot itself cannot be resolved (a
+        // pathological state on any healthy Windows install) we surface
+        // the resolution error rather than silently demoting to a
+        // weaker isolation tier.
+        let bfscfg_path = match crate::fallback_detector::find_bfscfg_exe() {
+            Ok(p) => p,
+            Err(e) => return ScriptResponse::error(&e.to_string()),
+        };
+
+        let mut bfs_manager =
+            FileSystemBfsManager::new(self.app_container_name.clone(), bfscfg_path);
         if let Err(e) = bfs_manager.configure(&request.policy, logger) {
             return ScriptResponse::error(&e.to_string());
         }
@@ -633,6 +646,37 @@ impl ScriptRunner for AppContainerScriptRunner {
         }
 
         response
+    }
+}
+
+/// Delete the AppContainer profile created via [`CreateAppContainerProfile`]
+/// and clear any BFS policy registered against it.
+///
+/// This is the explicit cleanup entry point used by `wxc-exec --delete`,
+/// kept next to the create/setup path on `AppContainerScriptRunner` so
+/// both ends of the profile lifecycle live in the same module.
+///
+/// The BFS-clear step is best-effort: it delegates to
+/// [`FileSystemBfsManager::clear_policy`], which resolves `bfscfg.exe`
+/// itself and logs (rather than fails) when the resolver returns no
+/// path. The profile delete is still attempted in that case.
+pub fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
+    crate::filesystem_bfs::FileSystemBfsManager::clear_policy(name, logger);
+
+    let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let hstring = windows::core::HSTRING::from_wide(&wide_name[..wide_name.len() - 1]);
+    match unsafe { DeleteAppContainerProfile(&hstring) } {
+        Ok(()) => {
+            logger.log_line(&format!("Deleted AppContainer profile: {}", name));
+            true
+        }
+        Err(e) => {
+            logger.log_line(&format!(
+                "Failed to delete AppContainer profile '{}': {}",
+                name, e
+            ));
+            false
+        }
     }
 }
 
