@@ -153,15 +153,16 @@ pub fn has_nanvix_binaries() -> bool {
     let Some(exe) = find_binary("wxc-exec.exe") else {
         return false;
     };
-    let bin_dir = exe.parent().unwrap_or(Path::new("."));
-    let present = [
-        "nanvixd.exe",
-        "kernel.elf",
-        "python3.12",
-        "nanvix_rootfs.img",
-    ]
-    .iter()
-    .all(|name| bin_dir.join(name).exists());
+    let exe_dir = exe.parent().unwrap_or(Path::new("."));
+    // Flat binaries staged next to wxc-exec.exe by `nanvix_binaries`.
+    let flat_present = ["nanvixd.exe", "nanvix_rootfs.img", "python3.initrd"]
+        .iter()
+        .all(|name| exe_dir.join(name).exists());
+    // Kernel binary now lives under `bin/` (nanvixd locates it via -bin-dir).
+    let bin_present = ["kernel.elf"]
+        .iter()
+        .all(|name| exe_dir.join("bin").join(name).exists());
+    let present = flat_present && bin_present;
     if !present {
         println!("SKIPPED: NanVix binaries not found next to wxc-exec.exe");
     }

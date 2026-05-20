@@ -10,11 +10,11 @@ pub mod hyperlight_runner;
 pub mod id;
 pub mod log_symbols;
 pub mod logger;
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "microvm", target_os = "windows"))]
 pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "microvm", target_os = "windows"))]
 pub mod nanvix_runner;
 pub mod script_runner;
 pub mod state_aware_backend;

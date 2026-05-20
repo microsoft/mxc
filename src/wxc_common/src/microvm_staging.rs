@@ -12,10 +12,8 @@ use uuid::Uuid;
 
 /// Maximum allowed total staging directory size (16 MB).
 pub const MAX_STAGING_BYTES: u64 = 16 * 1024 * 1024;
-/// Bootstrap Python loader filename.
-pub const BOOTSTRAP_FILENAME: &str = ".mxc-bootstrap.py";
-/// User script filename in staging.
-pub const SCRIPT_FILENAME: &str = ".mxc-script.py";
+/// Entry point filename (warm-start protocol executes this automatically).
+pub const BOOTSTRAP_FILENAME: &str = "bootstrap.py";
 /// Subdirectory for read-write staged host paths.
 pub const RW_DIR: &str = "rw";
 /// Subdirectory for read-only staged host paths.
@@ -27,14 +25,17 @@ const GUEST_MOUNT_ROOT: &str = "/mnt";
 fn build_guest_path(category: &str, name: &str) -> String {
     format!("{}/{}/{}", GUEST_MOUNT_ROOT, category, name)
 }
-/// Bootstrap Python source used by the guest runtime.
-/// Minimal — just runs the user script. Path translation is done at staging
-/// time by rewriting host paths in the script source before writing it.
-pub(crate) const BOOTSTRAP_SOURCE: &str = "import sys
-sys.argv = ['/mnt/.mxc-script.py']
-with open(sys.argv[0]) as _f:
-    exec(compile(_f.read(), sys.argv[0], 'exec'), {'__name__': '__main__', '__file__': sys.argv[0]})
-";
+
+/// Preamble prepended to the user script in bootstrap.py.
+///
+/// Composed from [`GUEST_MOUNT_ROOT`] and [`BOOTSTRAP_FILENAME`] so that
+/// any future change to either constant flows through automatically.
+fn bootstrap_preamble() -> String {
+    format!(
+        "import sys\nsys.argv = ['{}/{}']\n",
+        GUEST_MOUNT_ROOT, BOOTSTRAP_FILENAME
+    )
+}
 
 /// Errors produced while creating or validating a staging directory.
 #[derive(Debug, Error)]
@@ -112,8 +113,6 @@ impl StagingDir {
         fs::create_dir_all(&path)?;
 
         let build_result = || -> StagingBuildResult {
-            fs::write(path.join(BOOTSTRAP_FILENAME), BOOTSTRAP_SOURCE)?;
-
             // Collect host→guest path mappings for script rewriting.
             let mut rewrite_map: Vec<(String, String)> = Vec::new();
             let mut rw_mappings: Vec<RwMapping> = Vec::new();
@@ -164,7 +163,8 @@ impl StagingDir {
             // know about the guest mount layout. Both backslash and forward-slash
             // variants of each host path are replaced.
             let rewritten_script = rewrite_paths_in_script(script, &rewrite_map);
-            fs::write(path.join(SCRIPT_FILENAME), &rewritten_script)?;
+            let bootstrap_content = format!("{}{}", bootstrap_preamble(), rewritten_script);
+            fs::write(path.join(BOOTSTRAP_FILENAME), &bootstrap_content)?;
 
             let size_bytes = dir_size(&path)?;
             if size_bytes > MAX_STAGING_BYTES {
@@ -568,16 +568,16 @@ mod tests {
     }
 
     #[test]
-    fn staging_creates_bootstrap_and_script() {
+    fn staging_creates_bootstrap() {
         let root = tempdir().unwrap();
         let script = "print('hello')";
         let staging = StagingDir::new(root.path().to_path_buf(), script, &[], &[]).unwrap();
 
         let bootstrap = staging.path().join(BOOTSTRAP_FILENAME);
-        let script_path = staging.path().join(SCRIPT_FILENAME);
         assert!(bootstrap.exists());
-        assert!(script_path.exists());
-        assert_eq!(fs::read_to_string(script_path).unwrap(), script);
+        let content = fs::read_to_string(bootstrap).unwrap();
+        assert!(content.starts_with(BOOTSTRAP_PREAMBLE));
+        assert!(content.contains(script));
     }
 
     #[test]
@@ -603,7 +603,7 @@ mod tests {
         let guest_rel = host_path_to_guest_relative(&PathBuf::from(&host_path));
         assert!(staging.path().join(RW_DIR).join(&guest_rel).exists());
         // Verify the script was rewritten with the guest path.
-        let rewritten = fs::read_to_string(staging.path().join(SCRIPT_FILENAME)).unwrap();
+        let rewritten = fs::read_to_string(staging.path().join(BOOTSTRAP_FILENAME)).unwrap();
         let expected_guest = build_guest_path(RW_DIR, &guest_rel);
         assert!(
             rewritten.contains(&expected_guest),
@@ -665,7 +665,7 @@ mod tests {
         let rw = vec![host_path.clone()];
         let staging = StagingDir::new(root.path().to_path_buf(), &script, &rw, &[]).unwrap();
 
-        let rewritten = fs::read_to_string(staging.path().join(SCRIPT_FILENAME)).unwrap();
+        let rewritten = fs::read_to_string(staging.path().join(BOOTSTRAP_FILENAME)).unwrap();
         let guest_rel = host_path_to_guest_relative(&PathBuf::from(&host_path));
         let expected_guest = build_guest_path(RW_DIR, &guest_rel);
         assert!(
@@ -687,8 +687,12 @@ mod tests {
 
         let left = fs::read_to_string(a.path().join(BOOTSTRAP_FILENAME)).unwrap();
         let right = fs::read_to_string(b.path().join(BOOTSTRAP_FILENAME)).unwrap();
-        assert_eq!(left, right);
-        assert_eq!(left, BOOTSTRAP_SOURCE);
+        // The preamble (loader boilerplate) must be identical regardless of script content.
+        assert!(left.starts_with(BOOTSTRAP_PREAMBLE));
+        assert!(right.starts_with(BOOTSTRAP_PREAMBLE));
+        let left_preamble = &left[..BOOTSTRAP_PREAMBLE.len()];
+        let right_preamble = &right[..BOOTSTRAP_PREAMBLE.len()];
+        assert_eq!(left_preamble, right_preamble);
     }
 
     #[test]

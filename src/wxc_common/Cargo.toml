@@ -10,6 +10,7 @@ isolation_session = [
     "dep:windows-future",
     "dep:windows-collections",
 ]
+microvm = ["dep:nanvix_common"]
 
 [dependencies]
 serde = { workspace = true }
@@ -24,6 +25,7 @@ semver = "1"
 hyperlight-unikraft-host = { git = "https://github.com/hyperlight-dev/hyperlight-unikraft", tag = "v0.6.0", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+nanvix_common = { path = "../nanvix_common", optional = true }
 windows = { workspace = true }
 windows-core = { workspace = true }
 flatbuffers = { workspace = true }

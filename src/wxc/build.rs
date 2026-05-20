@@ -69,7 +69,6 @@ fn check_test_prerequisites() {
 
 #[cfg(all(windows, feature = "microvm"))]
 fn copy_nanvix_binaries() {
-    use std::fs;
     use std::path::Path;
 
     let nanvix_bin_dir = match std::env::var("DEP_NANVIX_BINARIES_BIN_DIR") {
@@ -95,36 +94,8 @@ fn copy_nanvix_binaries() {
         }
     };
 
-    let src_dir = Path::new(&nanvix_bin_dir);
-
-    for name in nanvix_common::REQUIRED_BINARIES {
-        let src = src_dir.join(name);
-        let dst = target_dir.join(name);
-
-        if src.exists() && (!dst.exists() || is_newer(&src, &dst)) {
-            eprintln!(
-                "wxc build.rs: copying {} -> {}",
-                src.display(),
-                dst.display()
-            );
-            if let Err(e) = fs::copy(&src, &dst) {
-                // Remove partial copy to avoid leaving a dangling file
-                let _ = fs::remove_file(&dst);
-                eprintln!("wxc build.rs: WARNING: failed to copy {}: {}", name, e);
-            }
-        }
-    }
+    nanvix_common::copy_artifacts_to_target(Path::new(&nanvix_bin_dir), target_dir);
 
     // Re-run when source binaries change (detected via nanvix_binaries rebuild)
     println!("cargo:rerun-if-env-changed=DEP_NANVIX_BINARIES_BIN_DIR");
-}
-
-#[cfg(all(windows, feature = "microvm"))]
-fn is_newer(src: &std::path::Path, dst: &std::path::Path) -> bool {
-    let src_time = src.metadata().and_then(|m| m.modified()).ok();
-    let dst_time = dst.metadata().and_then(|m| m.modified()).ok();
-    match (src_time, dst_time) {
-        (Some(s), Some(d)) => s > d,
-        _ => true,
-    }
 }
