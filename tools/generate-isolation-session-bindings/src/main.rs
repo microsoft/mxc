@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Generates Rust bindings for the IsoEnvBroker Session API from a WinMD file.
+//! Generates Rust bindings for the Isolation Session API from a WinMD file.
 //!
 //! Usage:
 //!   cargo run --manifest-path tools/generate-isolation-session-bindings/Cargo.toml -- <winmd-path>
 //!
-//! The WinMD file is built from the OS repo (amd64chk flavor):
-//!   obj/amd64chk/onecoreuap/windows/core/isoenvbroker/src/client/objchk/amd64/windows.ai.isolationsession.winmd
+//! The WinMD file is produced by an internal Microsoft Windows OS build and is
+//! not publicly redistributable. Provide a local path to it via <winmd-path>.
 
 use std::path::{Path, PathBuf};
 use std::process;
@@ -15,10 +15,10 @@ use std::process;
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(about = "Generate IsoEnvBroker Session API Rust bindings from a WinMD file.")]
+#[command(about = "Generate Isolation Session API Rust bindings from a WinMD file.")]
 struct Cli {
-    /// Path to the IsoEnvBroker WinMD file produced by an OS build (e.g.
-    /// amd64chk). Combined with windows-bindgen's bundled Windows metadata.
+    /// Path to the Isolation Session WinMD file produced by a Microsoft Windows
+    /// OS build. Combined with windows-bindgen's bundled Windows metadata.
     winmd_path: PathBuf,
 }
 

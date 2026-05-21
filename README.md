@@ -17,9 +17,9 @@ MXC is a container wrapper and a TypeScript based SDK for Node/Electron projects
 
 ### Requirements
 
-You will need the [Rust toolchain](https://rustup.rs/) (stable) installed.  The WXC native components are built with Cargo, the Rust package manager and build system.
+You will need the [Rust toolchain](https://rustup.rs/) (stable) installed.  The MXC native components are built with Cargo, the Rust package manager and build system.
 
-You will also need Node.js 20.10+ and must ensure that the node dependencies are resolved.  We recommend going into the SDK and CLI folders and running npm install.
+You will also need Node.js 20.10+ and must ensure that the node dependencies are resolved.  We recommend going into the SDK folder and running npm install.
 
 A copy of Python 3.x is needed for executing test scripts.
 
@@ -28,11 +28,10 @@ A copy of Python 3.x is needed for executing test scripts.
 ```
 src/            Rust workspace (wxc-exec native binary + wxc_common library)
 sdk/            TypeScript SDK (@microsoft/mxc-sdk npm package)
-cli/            TypeScript CLI (mxc-cli npm package, depends on SDK)
 docs/           Schema and configuration documentation
 examples/       Example configurations
 test_configs/   Test JSON configurations
-test_scripts/   Test scripts for exercising WXC
+test_scripts/   Test scripts for exercising MXC
 ```
 
 ### Building WXC
@@ -75,7 +74,7 @@ npm install && npm run build
 
 ## Usage
 
-WXC requires a JSON-based configuration to be provided.  The [schema documentation](docs\schema.md) defines all of the policies and execution options.
+MXC requires a JSON-based configuration to be provided.  The [schema documentation](docs\schema.md) defines all of the policies and execution options.
 
 ### 1. File Path
 ```bash
@@ -97,7 +96,7 @@ The base64 mode is useful for:
 
 ### Debug Console Mode
 
-By default, WXC runs in **silent mode** with no console output of its own.  It is designed to couple the stdin/stdout/stderr of the caller to the container.  Use the `--debug` flag to enable verbose console output:
+By default, `wxc-exec` runs in **silent mode** with no console output of its own.  It is designed to couple the stdin/stdout/stderr of the caller to the container.  Use the `--debug` flag to enable verbose console output:
 
 ```bash
 # Silent execution (default) - no console output
@@ -124,7 +123,7 @@ xperf -on PROC_THREAD+LOADER
 xperf -start user -on a68ca8b7-004f-d7b6-a698-07e2de0f1f5d:::'stack'
 ```
 
-### Run WXC
+### Run wxc-exec
 
 Execute your script with AppContainer in permissive learning mode:
 
@@ -165,14 +164,14 @@ Use `build.sh` from the repo root:
 ```bash
 ./build.sh              # Release build
 ./build.sh --debug      # Debug build
-./build.sh --rust-only  # Only build Rust binaries, skip SDK/CLI
+./build.sh --rust-only  # Only build Rust binaries, skip SDK
 ./build.sh --help       # Show all options
 ```
 
 This will:
 1. Build the Rust `lxc-exec` binary
 2. Copy the binary into `sdk/bin/<target-triple>/` so it is bundled with the SDK package
-3. Build the TypeScript SDK and CLI
+3. Build the TypeScript SDK
 
 ### LXC Example Configurations
 
@@ -189,6 +188,42 @@ See `examples/11_lxc_hello_world.json`, `examples/12_lxc_filesystem_access.json`
 
 # Run with debug output
 ./lxc-exec --debug config.json
+```
+
+## macOS Support (Seatbelt)
+
+MXC also supports macOS via Seatbelt — the same kernel-enforced sandbox that backs the App Sandbox used by every Mac App Store application. The `mxc-exec-mac` binary applies a generated TinyScheme profile to the child process via `sandbox_init()`, providing filesystem, network, and UI isolation. The macOS backend is **experimental** and currently requires opt-in via the `--experimental` flag (or `{ experimental: true }` in SDK spawn options).
+
+For full details on the Seatbelt backend, see [docs/macos-support/seatbelt-backend.md](docs/macos-support/seatbelt-backend.md).
+
+### Building on macOS
+
+Use `build-mac.sh` from the repo root:
+
+```bash
+./build-mac.sh              # Native architecture release build
+./build-mac.sh --all        # Both Apple Silicon and Intel slices
+./build-mac.sh --debug      # Debug build
+./build-mac.sh --rust-only  # Only build Rust binary, skip SDK
+```
+
+This will:
+1. Build the Rust `mxc-exec-mac` binary for the selected architecture(s)
+2. Copy the binary into `sdk/bin/<target-triple>/` so it is bundled with the SDK package
+3. Build the TypeScript SDK
+
+### macOS Example Configurations
+
+See `examples/15_mac_hello_world.json` and `examples/21_mac_python_info.json` for macOS-specific examples.
+
+### Running on macOS
+
+```bash
+# Run with config file
+./mxc-exec-mac --experimental config.json
+
+# Run with debug output
+./mxc-exec-mac --experimental --debug config.json
 ```
 
 ## License

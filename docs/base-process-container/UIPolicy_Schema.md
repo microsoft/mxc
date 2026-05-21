@@ -1,14 +1,14 @@
-# Tessera UI Policy Schema — `"ui"` Section
+# UI Policy Schema — `"ui"` Section
 
 > **Status:** Draft — for review
-> **Location:** WXC container configuration JSON
-> **Reference:** [UIContainer.md](https://dev.azure.com/microsoft/OS/_git/os.2020?path=/onecoreuap/windows/core/ntuser/kernel/docs/UIContainer.md&version=GBofficial/ge_current_directwinpd_sf2)
+> **Location:** MXC container configuration JSON
+> **Reference:** Based on the internal Microsoft Windows OS team's UIContainer design (private reference; not publicly available).
 
 ---
 
 ## Overview
 
-The `"ui"` section of the WXC container configuration controls how a contained process interacts with the Windows GUI subsystem. It maps developer intent to the underlying enforcement mechanisms:
+The `"ui"` section of the MXC container configuration controls how a contained process interacts with the Windows GUI subsystem. It maps developer intent to the underlying enforcement mechanisms:
 
 - **Job Object UI Restrictions**
 - **Process Mitigation: Win32k System Call Disable** (`PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY`)
@@ -39,7 +39,7 @@ This makes version a compatibility contract: a config that says `"version": 1` w
 
 ## Config Structure
 
-The `"ui"` section is a sibling of `"processContainer"`, `"filesystem"`, `"network"`, and `"windows_sandbox"` in the WXC config. All fields shown explicitly for illustration — in practice, omitted fields default to their most restrictive value:
+The `"ui"` section is a sibling of `"processContainer"`, `"filesystem"`, `"network"`, and `"windows_sandbox"` in the MXC config. All fields shown explicitly for illustration — in practice, omitted fields default to their most restrictive value:
 
 ```json
 {
@@ -270,9 +270,9 @@ Process has full GUI access and can interact with other windows on the desktop. 
 
 ---
 
-## Internal Mapping (Tessera Implementation Reference)
+## Implementation Mapping (internal reference)
 
-This section is for Tessera developers. The JSON fields map to kernel enforcement as follows:
+This section is an implementation reference for runner developers. The JSON fields map to kernel enforcement as follows:
 
 | Field | Value | OS Enforcement |
 |-------|-------|----------------|
@@ -305,7 +305,7 @@ This pattern — default-deny with explicit, targeted exceptions — might be th
 
 The open architectural question is **where targeted grants live**. Two approaches:
 
-1. **Declarative (schema)** — The container config names specific targets (by job, process, or endpoint), and Tessera resolves the grants at container creation. Clean for static relationships, but requires a target naming and resolution framework that does not exist today.
+1. **Declarative (schema)** — The container config names specific targets (by job, process, or endpoint), and the runner resolves the grants at container creation. Clean for static relationships, but requires a target naming and resolution framework that does not exist today.
 2. **Imperative (runtime API)** — A broker process calls a system API at runtime to grant specific cross-boundary access, similar to how `UserHandleGrantAccess` works today. More flexible for dynamic relationships, but shifts responsibility to the caller.
 
 These are not mutually exclusive — declarative config could resolve to runtime API calls under the hood. The decision depends on whether targeted relationships are known at container creation time or emerge dynamically. **TBD.**
@@ -322,6 +322,5 @@ These are not mutually exclusive — declarative config could resolve to runtime
 
 ## References
 
-- [UIContainer.md](https://dev.azure.com/microsoft/OS/_git/os.2020?path=/onecoreuap/windows/core/ntuser/kernel/docs/UIContainer.md&version=GBofficial/ge_current_directwinpd_sf2) — Comprehensive reference for Job Object UI Restrictions and Win32k System Call Disable
-- [WXC Configuration Schema](https://github.com/microsoft/mxc/tree/main/docs) — Existing WXC config format
+- [MXC Configuration Schema](https://github.com/microsoft/mxc/tree/main/docs) — Existing MXC config format
 - [JOBOBJECT_BASIC_UI_RESTRICTIONS](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_ui_restrictions)

@@ -9,7 +9,7 @@
 # the Azure Artifacts NuGet feed instead of the 1ES.Build.Rust.* tasks, which
 # are not available on the Microsoft-hosted macOS pool. Crate downloads still
 # go through the centralized Azure Artifacts feed (appended via
-# .azure-pipelines/.cargo/config.toml) to satisfy SFI supply-chain requirements.
+# .azure-pipelines/.cargo/config.toml) to satisfy supply-chain security requirements.
 
 parameters:
 - name: triplet
@@ -47,7 +47,7 @@ jobs:
 
     # Append pipeline-specific Cargo settings (centralized registry) to
     # the workspace config so crates are pulled from the Azure Artifacts
-    # feed (SFI compliance). Authentication is provided via env var on
+    # feed (supply-chain security). Authentication is provided via env var on
     # each cargo step since 1ES.Build.Rust.Setup is not available on macOS.
     # The append is guarded: skip if the registry block is already present
     # (e.g., if the workspace config gains these settings in the future).
