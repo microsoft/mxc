@@ -41,7 +41,7 @@ pub struct LaunchDiagnostic {
 pub fn diagnose_launch_failure(
     exe_path: &Path,
     readonly_paths: &[String],
-    _exit_code: Option<u32>,
+    exit_code: Option<u32>,
 ) -> Option<LaunchDiagnostic> {
     if is_packaged_app(exe_path) {
         return Some(LaunchDiagnostic {
@@ -52,6 +52,23 @@ pub fn diagnose_launch_failure(
                 exe_path.display()
             ),
             remediation: "Uninstall the packaged version and install an unpackaged build."
+                .to_string(),
+        });
+    }
+
+    // STATUS_DLL_INIT_FAILED (0xC0000142) from pwsh/powershell typically means
+    // a DLL (e.g. user32.dll) failed to initialize because the sandbox blocked
+    // UI subsystem access (Win32k system calls).
+    const STATUS_DLL_INIT_FAILED: u32 = 0xC000_0142;
+    if exit_code == Some(STATUS_DLL_INIT_FAILED) && is_powershell(exe_path) {
+        return Some(LaunchDiagnostic {
+            kind: "dll_init_failed_ui_required",
+            message: "PowerShell exited with STATUS_DLL_INIT_FAILED (0xC0000142). \
+                      This typically means the sandbox is blocking Win32k system calls \
+                      (UI subsystem access), which PowerShell requires to initialize."
+                .to_string(),
+            remediation: "Enable UI access in your sandbox policy \
+                          (set `ui.allowWindows: true` or equivalent)."
                 .to_string(),
         });
     }
@@ -131,6 +148,17 @@ pub fn extract_exe_from_command_line(command_line: &str) -> &str {
 fn is_packaged_app(exe_path: &Path) -> bool {
     let normalized = exe_path.to_string_lossy().to_lowercase();
     normalized.contains("\\windowsapps\\")
+}
+
+/// Returns `true` when the executable filename is a PowerShell variant
+/// (pwsh.exe or powershell.exe).
+fn is_powershell(exe_path: &Path) -> bool {
+    let filename = exe_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    filename == "pwsh.exe" || filename == "powershell.exe"
 }
 
 /// Returns `true` when the executable is `pwsh.exe` and the sandbox policy
@@ -275,5 +303,39 @@ mod tests {
         let diag = diagnose_launch_failure(&path, &[], None);
         assert!(diag.is_some());
         assert_eq!(diag.unwrap().kind, "packaged_app");
+    }
+
+    #[test]
+    fn dll_init_failed_pwsh_triggers_ui_diagnostic() {
+        let path = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
+        let diag = diagnose_launch_failure(&path, &["C:\\".to_string()], Some(0xC000_0142));
+        assert!(diag.is_some());
+        let d = diag.unwrap();
+        assert_eq!(d.kind, "dll_init_failed_ui_required");
+        assert!(d.message.contains("STATUS_DLL_INIT_FAILED"));
+        assert!(d.remediation.contains("UI access"));
+    }
+
+    #[test]
+    fn dll_init_failed_powershell_exe_triggers_ui_diagnostic() {
+        let path = PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+        let diag = diagnose_launch_failure(&path, &["C:\\".to_string()], Some(0xC000_0142));
+        assert!(diag.is_some());
+        assert_eq!(diag.unwrap().kind, "dll_init_failed_ui_required");
+    }
+
+    #[test]
+    fn dll_init_failed_non_powershell_does_not_trigger() {
+        let path = PathBuf::from(r"C:\tools\myapp.exe");
+        let diag = diagnose_launch_failure(&path, &["C:\\".to_string()], Some(0xC000_0142));
+        assert!(diag.is_none());
+    }
+
+    #[test]
+    fn different_exit_code_pwsh_does_not_trigger_ui_diagnostic() {
+        let path = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
+        // Exit code 1 should not trigger the UI diagnostic
+        let diag = diagnose_launch_failure(&path, &["C:\\".to_string()], Some(1));
+        assert!(diag.is_none());
     }
 }
