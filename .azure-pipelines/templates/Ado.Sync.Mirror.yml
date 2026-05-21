@@ -7,9 +7,6 @@ parameters:
     type: object
     default:
       main: main
-  - name: "SourceRepository"
-    type: string
-    default: "https://github.com/microsoft/mxc.git"
 
 resources:
   repositories:
@@ -17,6 +14,12 @@ resources:
     type: git
     name: 1ESPipelineTemplates/1ESPipelineTemplates
     ref: refs/tags/release
+
+  - repository: SourceRepo
+    type: github
+    endpoint: MXC-GitHub-Connection
+    name: microsoft/mxc
+
 extends:
   template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
   parameters:
@@ -38,30 +41,33 @@ extends:
                   TargetBranch: ${{ branches.value }}
           dependsOn: []
           steps:
-            - checkout: self
-              persistCredentials: true
+          - checkout: self
+            persistCredentials: true
 
-            - task: PowerShell@2
-              inputs:
-                targetType: 'inline'
-                script: |
-                  Write-Host "SourceBranch " + "$(SourceBranch)"
-                  Write-Host "TargetBranch " + "$(TargetBranch)"
+          - checkout: SourceRepo
+            path: source
 
-                  $repo = "${{ parameters.SourceRepository }}"
-                  git remote add sourcerepo $repo
-                  git remote
+          - task: PowerShell@2
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "SourceBranch " + "$(SourceBranch)"
+                Write-Host "TargetBranch " + "$(TargetBranch)"
 
-                  $target = "$(TargetBranch)"
-                  git fetch origin $target
-                  git checkout $target
-                  git pull origin $target
+                $repo = "$(Pipeline.Workspace)\source"
+                git remote add sourcerepo $repo
+                git remote
 
-                  $source = "$(SourceBranch)"
-                  git fetch sourcerepo $source
-                  git pull sourcerepo $source
+                $target = "$(TargetBranch)"
+                git fetch origin $target
+                git checkout $target
+                git pull origin $target
 
-            - task: CmdLine@2
-              inputs:
-                script: |
-                  git push
+                $source = "$(SourceBranch)"
+                git fetch sourcerepo $source
+                git pull sourcerepo $source
+
+          - task: CmdLine@2
+            inputs:
+              script: |
+                git push
