@@ -51,8 +51,10 @@ extends:
             inputs:
               targetType: 'inline'
               script: |
-                Write-Host "SourceBranch " + "$(SourceBranch)"
-                Write-Host "TargetBranch " + "$(TargetBranch)"
+                Write-Host "SourceBranch $(SourceBranch)"
+                Write-Host "TargetBranch $(TargetBranch)"
+
+                cd "$(Pipeline.Workspace)\s"
 
                 $repo = "$(Pipeline.Workspace)\source"
                 git remote add sourcerepo $repo
@@ -70,4 +72,5 @@ extends:
           - task: CmdLine@2
             inputs:
               script: |
+                cd /d "$(Pipeline.Workspace)\s"
                 git push
