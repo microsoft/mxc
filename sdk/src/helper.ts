@@ -150,11 +150,15 @@ export function resolveExecutableAndArgs(
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
+  // Hard platform requirement: microvm needs WHP/Hyper-V on Windows. This guard
+  // runs even when `skipPlatformCheck` is set because it's not a build-version
+  // check — the backend literally cannot run on non-Windows hosts.
+  if (config.containment === 'microvm' && os.platform() !== 'win32') {
+    throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
+  }
+
   // Validate containment against platform
   if (config.containment && !options.skipPlatformCheck) {
-    if (config.containment === 'microvm' && os.platform() !== 'win32') {
-      throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
-    }
     // Abstract intents (process, microvm) are resolved by the native binary
     // at run time, so the SDK accepts them without checking against the
     // host's concrete backend list.

@@ -1882,17 +1882,15 @@ mxc.onPtyData(function(data: string) {
   terminalFullText += clean;
   // termWrite() appends '\n' to each call, so split chunks on newline and
   // hold the final (possibly partial) fragment until the next chunk to avoid
-  // mid-line breaks or duplicate blank lines.
+  // mid-line breaks or duplicate blank lines. Blank lines from the underlying
+  // stdout are preserved.
   ptyLineBuffer += clean;
   var lines = ptyLineBuffer.split('\n');
   ptyLineBuffer = lines.pop() || '';
   for (var i = 0; i < lines.length; i++) {
     // Strip trailing \r from CRLF sequences so the terminal doesn't render
     // a stray carriage return.
-    var line = lines[i].replace(/\r+$/, '');
-    if (line.length > 0) {
-      termOutput(line);
-    }
+    termOutput(lines[i].replace(/\r+$/, ''));
   }
 });
 
@@ -2213,7 +2211,9 @@ function init(): void {
         populateScenarios();
       }
     } else if (containment === 'microvm') {
-      // MicroVM (NanVix) — Python only, no filesystem/network/UI policies
+      // MicroVM (NanVix) — the policy-generator UI is hidden because MicroVM
+      // does not consume the SandboxPolicy schema; scenarios may still set
+      // filesystem (and other) fields in the raw config sent to wxc-exec.
       $('runtimeRow').classList.remove('hidden');
       $sel('shellSelect').disabled = false;
       $('experimentalCaution').classList.add('hidden');
@@ -2232,7 +2232,9 @@ function init(): void {
       $sel('shellSelect').dispatchEvent(new Event('change'));
       updatePlatformBadgeForContainment(containment);
     } else if (containment === 'hyperlight') {
-      // Hyperlight — Python only, no filesystem/network/UI policies
+      // Hyperlight — the policy-generator UI is hidden because Hyperlight
+      // does not consume the SandboxPolicy schema; scenarios may still set
+      // filesystem/network fields in the raw config sent to wxc-exec.
       $('runtimeRow').classList.remove('hidden');
       $sel('shellSelect').disabled = false;
       $('experimentalCaution').classList.add('hidden');
