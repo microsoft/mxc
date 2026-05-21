@@ -93,9 +93,9 @@ extends:
           # Note: all files placed in the output directory will be included in the vpack
           ob_outputDirectory: '$(Build.SourcesDirectory)\out'
           ob_createvpack_enabled: true
-          ob_createvpack_packagename: MXC
-          ob_createvpack_owneralias: Tessera-mxc-admin
-          ob_createvpack_description: Microsoft Execution Containers
+          ob_createvpack_packagename: 'MXC'
+          ob_createvpack_owneralias: 'Tessera-mxc-admin'
+          ob_createvpack_description: 'Microsoft Execution Containers'
           ob_createvpack_provData: true
           ob_createvpack_versionAs: string
           ob_createvpack_version: $(VPackVersion)
