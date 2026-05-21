@@ -65,8 +65,18 @@ extends:
             ob_createvpack_owneralias: 'Tessera-mxc-admin'
             ob_createvpack_description: 'Microsoft Execution Containers'
             ob_createvpack_provData: true
-            ob_createvpack_versionAs: string
-            ob_createvpack_version: $(VPackVersion) # set by the 'Set vpack version' step below
+            # provData needs to call GitHub's commits API; the repo is private so
+            # an unauthenticated request 404s. Token comes from MXC-ESRP-Signing
+            # (or whichever variable group exposes a GitHub PAT with repo:read).
+            ob_createvpack_githubToken: $(githubToken)
+            # Use semver parts: keep major.minor.patch in sync with the SDK and
+            # encode the build date + per-day counter as the prerelease tag.
+            # Example: sdk 0.2.0, first build on 2026-05-21 -> 0.2.0-260521.1
+            ob_createvpack_versionAs: parts
+            ob_createvpack_majorVer: $(SdkMajor)         # set by 'Set vpack version' step
+            ob_createvpack_minorVer: $(SdkMinor)         # set by 'Set vpack version' step
+            ob_createvpack_patchVer: $(SdkPatch)         # set by 'Set vpack version' step
+            ob_createvpack_prereleaseVer: $(VersionDate).$(VersionCounter)
             ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
 
           steps:
@@ -74,13 +84,12 @@ extends:
               displayName: Set vpack version
               inputs:
                 targetType: inline
-                # Vpack requires major.minor.patch. We keep major.minor from the
-                # SDK and pack date + per-day counter into the patch slot.
-                # Example: sdk 0.2.0, first build on 2026-05-21 -> 0.2.02605211
                 script: |
                   $sdkVersion = (Get-Content "$(System.DefaultWorkingDirectory)/sdk/package.json" | ConvertFrom-Json).version
-                  $vpackVersion = "${sdkVersion}$(VersionDate)$(VersionCounter)"
-                  Write-Host "##vso[task.setvariable variable=VPackVersion]$vpackVersion"
+                  $parts = $sdkVersion.Split('.')
+                  Write-Host "##vso[task.setvariable variable=SdkMajor]$($parts[0])"
+                  Write-Host "##vso[task.setvariable variable=SdkMinor]$($parts[1])"
+                  Write-Host "##vso[task.setvariable variable=SdkPatch]$($parts[2])"
 
             # `patterns` filters the download to only wxc-exec.exe + its pdb,
             # keeping the vpack small. Files land at
