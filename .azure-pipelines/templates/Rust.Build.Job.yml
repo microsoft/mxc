@@ -22,12 +22,14 @@ jobs:
     dependsOn: []
     pool:
       
-      ${{ if eq(item.os, 'windows') and eq(parameters.useOneBranchPool, false)}}:
-        name: Azure-Pipelines-1ESPT-ExDShared
-        image: windows-latest #x64 host
-        os: windows
-      ${{ if eq(item.os, 'windows') and eq(parameters.useOneBranchPool, true)}}:
+      ${{ if and(eq(item.os, 'windows'), eq(parameters.useOneBranchPool, false)) }}:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: windows-latest
+      os: windows
+
+      ${{ if and(eq(item.os, 'windows'), eq(parameters.useOneBranchPool, true)) }}:
         type: windows
+
       ${{ if eq(item.os, 'linux') }}:
         name: Azure-Pipelines-1ESPT-ExDShared
         image: ubuntu-latest #x64 host
