@@ -129,3 +129,11 @@ extends:
       - template: .azure-pipelines/templates/SDK.Integration.Test.Job.yml@self
         parameters:
           debug: ${{ parameters.debug }}
+
+    - stage: IsolationSession_Test_Bundle
+      displayName: 'Isolation Session Test Bundle'
+      dependsOn: Build_Binaries
+      jobs:
+      - template: .azure-pipelines/templates/IsolationSession.TestBundle.Job.yml@self
+        parameters:
+          isOfficialBuild: ${{ eq(parameters.officialBuild, 'Official') }}
