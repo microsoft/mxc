@@ -65,11 +65,6 @@ extends:
             ob_createvpack_owneralias: 'Tessera-mxc-admin'
             ob_createvpack_description: 'Microsoft Execution Containers'
             ob_createvpack_provData: true
-            # provData calls GitHub's commits API to embed provenance.json into
-            # the vpack; the Official flow's downstream ORAS step then requires
-            # that file. The repo is private so we pass a PAT from the variable
-            # group. Set githubToken in MXC-ESRP-Signing (scope: repo read).
-            ob_createvpack_githubToken: $(githubToken)
             # Use semver parts: keep major.minor.patch in sync with the SDK and
             # encode the build date + per-day counter as the prerelease tag.
             # Example: sdk 0.2.0, first build on 2026-05-21 -> 0.2.0-260521.1
