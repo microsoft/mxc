@@ -1790,6 +1790,7 @@ mod tests {
     fn proxy_localhost_port() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
             "network": {
                 "proxy": { "localhost": 8080 }
             }
@@ -1809,6 +1810,7 @@ mod tests {
     fn proxy_url_parsed() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
             "network": {
                 "proxy": { "url": "http://localhost:3128" }
             }
@@ -1827,6 +1829,7 @@ mod tests {
     fn proxy_url_non_localhost() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
             "network": {
                 "proxy": { "url": "http://proxy.example.com:8080" }
             }
@@ -1855,6 +1858,7 @@ mod tests {
     fn proxy_url_ipv6_loopback() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
             "network": {
                 "proxy": { "url": "http://[::1]:8080" }
             }
@@ -1872,6 +1876,7 @@ mod tests {
     fn proxy_with_firewall_fields() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
             "network": {
                 "defaultPolicy": "block",
                 "allowedHosts": ["api.github.com"],
@@ -1933,6 +1938,7 @@ mod tests {
     fn proxy_builtin_test_server() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
             "network": {
                 "proxy": { "builtinTestServer": true }
             }
