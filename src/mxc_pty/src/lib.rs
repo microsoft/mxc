@@ -143,6 +143,25 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
     // `.slave` on `PtyPair`. We refer to those ends as primary and
     // secondary in our own variables and prose below.
 
+    // Mark both pty fds close-on-exec. macOS' `openpty(3)` leaves them
+    // without `FD_CLOEXEC`, so without this fixup the primary fd would
+    // be inherited by the child across `exec` — the secondary would never
+    // hang up when we die (the child itself keeps a primary ref open),
+    // and the sandboxed shell would become immortal. The dups we make
+    // below via `File::try_clone` already get CLOEXEC for free (Rust
+    // uses `F_DUPFD_CLOEXEC`), so we only have to fix the originals
+    // returned by `openpty`. Best-effort: an `fcntl` failure here just
+    // restores the pre-fix behaviour, no regression.
+    {
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+        for fd in [pty_pair.master.as_raw_fd(), pty_pair.slave.as_raw_fd()] {
+            if let Ok(bits) = fcntl(fd, FcntlArg::F_GETFD) {
+                let flags = FdFlag::from_bits_truncate(bits) | FdFlag::FD_CLOEXEC;
+                let _ = fcntl(fd, FcntlArg::F_SETFD(flags));
+            }
+        }
+    }
+
     // Three duplicates of the secondary fd so each Stdio takes ownership of
     // its own handle; otherwise std::process::Stdio::from would consume
     // the single OwnedFd and the rest of the spawn calls would fail.
@@ -483,6 +502,17 @@ pub fn run_with_pty(_command: Command, _options: PtyOptions) -> Result<PtyOutcom
 mod tests {
     use super::*;
 
+    // Serialize tests that call `run_with_pty`. The leak regression test
+    // uses `lsof -p $$` in the child to enumerate inherited fds; if other
+    // tests fork in parallel between this test's `openpty` and CLOEXEC
+    // fixup, those concurrent children inherit pre-CLOEXEC fds and the
+    // lsof in *our* child will sometimes see them too. Production code
+    // never runs `run_with_pty` from multiple threads (each mxc-exec-mac
+    // is a one-shot CLI invocation), so serializing the tests faithfully
+    // mirrors real usage rather than masking a real race.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    static RUN_WITH_PTY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn default_options() {
         let opts = PtyOptions::default();
@@ -499,6 +529,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn echo_runs_under_pty() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg("echo hello-from-pty");
         let outcome = run_with_pty(cmd, PtyOptions::default()).expect("bridge spawns");
@@ -511,6 +542,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn timeout_kills_long_running_child() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg("sleep 30");
         let opts = PtyOptions {
@@ -519,5 +551,135 @@ mod tests {
         };
         let outcome = run_with_pty(cmd, opts).expect("bridge spawns");
         assert!(matches!(outcome, PtyOutcome::TimedOut));
+    }
+
+    /// Documents the libc invariant motivating the FD_CLOEXEC fixup
+    /// inside `run_with_pty`. If a future libc starts defaulting to
+    /// `FD_CLOEXEC` on `openpty(3)`, this test skips with a message —
+    /// libc has caught up and the fixup in `run_with_pty` can be
+    /// deleted.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn openpty_default_lacks_cloexec() {
+        // openpty returns non-CLOEXEC fds, so taking the lock keeps the
+        // same fork-race guarantees as the leak regression test below.
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        use std::os::unix::io::AsRawFd;
+
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+        use nix::pty::openpty;
+
+        let pair = openpty(None, None).expect("openpty");
+        for (label, fd) in [
+            ("primary", pair.master.as_raw_fd()),
+            ("secondary", pair.slave.as_raw_fd()),
+        ] {
+            let bits = fcntl(fd, FcntlArg::F_GETFD).expect("F_GETFD");
+            let flags = FdFlag::from_bits_truncate(bits);
+            if flags.contains(FdFlag::FD_CLOEXEC) {
+                eprintln!(
+                    "skipping: openpty {label} now defaults to CLOEXEC; the fcntl fixup in run_with_pty can be removed"
+                );
+                return;
+            }
+        }
+    }
+
+    /// Regression: macOS' `openpty(3)` returns the primary and secondary fds
+    /// *without* `FD_CLOEXEC`. If we don't set it ourselves, the child
+    /// inherits the primary fd across `exec` — the secondary never hangs up
+    /// when the parent dies and the sandboxed shell becomes immortal,
+    /// leaking a pty pair per spawn until the host hits
+    /// `kern.tty.ptmx_max` (default 511 on macOS). The original secondary fd
+    /// (consumed into `secondary_err: Stdio`) also leaks: Rust's spawn
+    /// `dup2`s it onto fd 2 without closing the source, so the original
+    /// fd number stays open as a second secondary reference unless CLOEXEC
+    /// trims it at `execve` time.
+    ///
+    /// The child enumerates its own open fds and reports any inherited
+    /// pty fd via a sentinel-prefixed log file. Linux uses
+    /// `/proc/$$/fd` + `readlink` (no external tool deps). macOS uses
+    /// `/usr/sbin/lsof` because `readlink` on `/dev/fd/N` returns
+    /// `EINVAL` (fdescfs entries aren't symlinks) and lsof is bundled
+    /// with the OS at a fixed path. The sentinel makes the test fail
+    /// loudly when neither probe is available instead of silently
+    /// passing on empty input.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pty_fds_do_not_leak_into_child_across_exec() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let tmp_path = std::env::temp_dir()
+            .join(format!("mxc_pty_leak_test_{}.log", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(format!(
+            // After `exec` the inner shell should hold only fds 0/1/2
+            // (the secondary wired in as stdio). Any extra fd pointing at a
+            // pty device — primary (`/dev/ptmx`), macOS secondary
+            // (`/dev/ttysNNN`), or Linux secondary (`/dev/pts/N`) — is a
+            // CLOEXEC regression. fd 255 is excluded because some shells
+            // dup the script onto it for job control.
+            r#"
+            if [ -d /proc/$$/fd ]; then
+                echo "PROC_OK" > "{path}"
+                for fd_link in /proc/$$/fd/*; do
+                    fd=${{fd_link##*/}}
+                    case "$fd" in
+                        0|1|2|255) continue ;;
+                    esac
+                    target=$(readlink "$fd_link" 2>/dev/null) || continue
+                    case "$target" in
+                        /dev/ptmx|/dev/pts/*)
+                            echo "LEAK fd=$fd target=$target"
+                            ;;
+                    esac
+                done >> "{path}"
+            elif [ -x /usr/sbin/lsof ]; then
+                echo "LSOF_OK" > "{path}"
+                /usr/sbin/lsof -p $$ 2>/dev/null \
+                  | awk 'NR > 1 && $NF ~ /^\/dev\/(ptmx|ttys[0-9]+|pts\/[0-9]+)$/ {{
+                        fd = $4
+                        sub(/[a-zA-Z]+$/, "", fd)
+                        n = fd + 0
+                        if (n > 2 && n != 255) print "LEAK fd=" $4 " target=" $NF
+                    }}' \
+                  >> "{path}"
+            else
+                echo "PROBE_MISSING" > "{path}"
+            fi
+            "#,
+            path = tmp_path,
+        ));
+
+        let outcome = run_with_pty(cmd, PtyOptions::default()).expect("bridge spawns");
+        assert!(matches!(outcome, PtyOutcome::Exited(_)));
+
+        let contents = std::fs::read_to_string(&tmp_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&tmp_path);
+
+        if contents.trim_end() == "PROBE_MISSING" {
+            eprintln!(
+                "skipping pty leak assertion: no usable fd probe (no /proc and no /usr/sbin/lsof)"
+            );
+            return;
+        }
+        assert!(
+            contents.starts_with("PROC_OK") || contents.starts_with("LSOF_OK"),
+            "shell probe did not record a sentinel; got: {contents:?}",
+        );
+        let leaks = contents
+            .lines()
+            .filter(|l| l.starts_with("LEAK"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            leaks.is_empty(),
+            "child inherited pty fd(s) across exec:\n{leaks}",
+        );
     }
 }
