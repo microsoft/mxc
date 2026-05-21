@@ -22,7 +22,7 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
-use crate::launch_diagnostics::{diagnose_launch_failure, format_diagnostic};
+use crate::launch_diagnostics::diagnose_launch_failure;
 use crate::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
@@ -603,7 +603,8 @@ impl ScriptRunner for BaseContainerRunner {
                 crate::launch_diagnostics::extract_exe_from_command_line(&request.script_code),
             );
             let resolved_exe = crate::launch_diagnostics::resolve_exe_on_path(bare_exe);
-            let mut msg = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
+            let raw_error = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
+            let mut user_message = String::new();
             if let Some(diag) =
                 diagnose_launch_failure(&resolved_exe, &request.policy.readonly_paths, None)
             {
@@ -613,9 +614,19 @@ impl ScriptRunner for BaseContainerRunner {
                     diag.kind, diag.message
                 );
                 let _ = writeln!(logger, "Error: Remediation: {}", diag.remediation);
-                msg.push_str(&format_diagnostic(&diag));
+                user_message =
+                    format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
             }
-            return ScriptResponse::error(&msg);
+            if user_message.is_empty() {
+                user_message = raw_error.clone();
+            }
+            return ScriptResponse {
+                exit_code: -1,
+                standard_err: user_message.clone(),
+                error_message: user_message,
+                extended_error: raw_error,
+                ..Default::default()
+            };
         }
 
         // Helper: resolve exe path from the command line for post-exit diagnostics.
@@ -693,9 +704,10 @@ impl ScriptRunner for BaseContainerRunner {
                     diag.kind, diag.message
                 );
                 let _ = writeln!(logger, "Error: Remediation: {}", diag.remediation);
-                let diagnostic_text = format_diagnostic(&diag);
-                error_message = diagnostic_text.trim().to_string();
-                standard_err = diagnostic_text;
+                let user_msg =
+                    format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
+                error_message = user_msg.clone();
+                standard_err = user_msg;
             }
         }
 
@@ -704,6 +716,7 @@ impl ScriptRunner for BaseContainerRunner {
             standard_out: String::new(),
             standard_err,
             error_message,
+            ..Default::default()
         }
     }
 }

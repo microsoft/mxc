@@ -552,6 +552,11 @@ pub struct ScriptResponse {
     pub standard_out: String,
     pub standard_err: String,
     pub error_message: String,
+    /// Raw system/API error detail intended for developers and diagnostics
+    /// (e.g. "Experimental_CreateProcessInSandbox failed: WIN32_ERROR(1920)").
+    /// Kept separate from `error_message` which holds user-friendly text.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub extended_error: String,
 }
 
 impl Default for ScriptResponse {
@@ -561,6 +566,7 @@ impl Default for ScriptResponse {
             standard_out: String::new(),
             standard_err: String::new(),
             error_message: String::new(),
+            extended_error: String::new(),
         }
     }
 }

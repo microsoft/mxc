@@ -539,6 +539,7 @@ impl AppContainerScriptRunner {
             standard_out: String::new(),
             standard_err: String::new(),
             error_message: String::new(),
+            ..Default::default()
         })
     }
 
@@ -580,7 +581,7 @@ impl Default for AppContainerScriptRunner {
 impl ScriptRunner for AppContainerScriptRunner {
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         use crate::filesystem_bfs::FileSystemBfsManager;
-        use crate::launch_diagnostics::{diagnose_launch_failure, format_diagnostic};
+        use crate::launch_diagnostics::diagnose_launch_failure;
         use crate::network_manager::NetworkManager;
 
         // Apply experimental features when flag is set
@@ -654,18 +655,22 @@ impl ScriptRunner for AppContainerScriptRunner {
                 &request.policy.readonly_paths,
                 Some(response.exit_code as u32),
             ) {
-                let diagnostic_text = format_diagnostic(&diag);
                 logger.log_line(&format!(
                     "Error: Launch diagnostic [{}]: {}",
                     diag.kind, diag.message
                 ));
                 logger.log_line(&format!("Error: Remediation: {}", diag.remediation));
+                let user_msg =
+                    format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
                 if response.error_message.is_empty() {
-                    response.error_message = diagnostic_text.trim().to_string();
+                    response.error_message = user_msg.clone();
                 } else {
-                    response.error_message.push_str(&diagnostic_text);
+                    // Preserve original error as extended_error, replace
+                    // error_message with the friendly diagnostic.
+                    response.extended_error = response.error_message.clone();
+                    response.error_message = user_msg.clone();
                 }
-                response.standard_err.push_str(&diagnostic_text);
+                response.standard_err.push_str(&user_msg);
             }
         }
 

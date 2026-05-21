@@ -588,12 +588,17 @@ fn main() {
     if response.exit_code != 0 && !response.error_message.is_empty() {
         use std::io::IsTerminal;
         if !std::io::stderr().is_terminal() {
-            if let Ok(json) = serde_json::to_string(&serde_json::json!({
+            let mut envelope = serde_json::json!({
                 "error": {
                     "code": "backend_error",
                     "message": response.error_message,
                 }
-            })) {
+            });
+            if !response.extended_error.is_empty() {
+                envelope["error"]["extended_error"] =
+                    serde_json::Value::String(response.extended_error.clone());
+            }
+            if let Ok(json) = serde_json::to_string(&envelope) {
                 eprintln!("{json}");
             }
         }
