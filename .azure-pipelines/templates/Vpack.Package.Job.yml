@@ -10,6 +10,8 @@ variables:
 - name: VersionCounter
   value: "$[counter(variables['VersionDate'], 1)]"
 - group: MXC-ESRP-Signing
+- name: WindowsContainerImage
+  value: onebranch.azurecr.io/windows/ltsc2022/vse2022:latest
 
 trigger: none
 
