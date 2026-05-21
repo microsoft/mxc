@@ -114,3 +114,7 @@ extends:
                   $src = "$(Pipeline.Workspace)\MXC"
                   Copy-Item -Recurse -Force "$src\wxc-binaries-x86_64-pc-windows-msvc"  "$(ob_outputDirectory)\x64"
                   Copy-Item -Recurse -Force "$src\wxc-binaries-aarch64-pc-windows-msvc" "$(ob_outputDirectory)\arm64"
+                  # OneBranch's "Publish VPack SBOM Manifest" step expects
+                  # _manifest/spdx_2.2/ at the top of VPackContents. The
+                  # per-arch SBOMs are identical source-wise, so promote x64's.
+                  Copy-Item -Recurse -Force "$(ob_outputDirectory)\x64\_manifest" "$(ob_outputDirectory)\_manifest"
