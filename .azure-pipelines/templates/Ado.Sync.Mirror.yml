@@ -75,12 +75,14 @@ extends:
 
               Write-Host "=== source repo ==="
               cd $sourcePath
+              git remote -v
               git fetch origin $sourceBranch
               git checkout $sourceBranch
               git pull origin $sourceBranch
 
               Write-Host "=== mirror repo ==="
               cd $mirrorPath
+              git remote -v
 
               git fetch origin $targetBranch
               git checkout $targetBranch
