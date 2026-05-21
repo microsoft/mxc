@@ -27,7 +27,15 @@ fn build_guest_path(category: &str, name: &str) -> String {
 }
 
 /// Preamble prepended to the user script in bootstrap.py.
-const BOOTSTRAP_PREAMBLE: &str = "import sys\nsys.argv = ['/mnt/bootstrap.py']\n";
+///
+/// Composed from [`GUEST_MOUNT_ROOT`] and [`BOOTSTRAP_FILENAME`] so that
+/// any future change to either constant flows through automatically.
+fn bootstrap_preamble() -> String {
+    format!(
+        "import sys\nsys.argv = ['{}/{}']\n",
+        GUEST_MOUNT_ROOT, BOOTSTRAP_FILENAME
+    )
+}
 
 /// Errors produced while creating or validating a staging directory.
 #[derive(Debug, Error)]
@@ -155,7 +163,7 @@ impl StagingDir {
             // know about the guest mount layout. Both backslash and forward-slash
             // variants of each host path are replaced.
             let rewritten_script = rewrite_paths_in_script(script, &rewrite_map);
-            let bootstrap_content = format!("{}{}", BOOTSTRAP_PREAMBLE, rewritten_script);
+            let bootstrap_content = format!("{}{}", bootstrap_preamble(), rewritten_script);
             fs::write(path.join(BOOTSTRAP_FILENAME), &bootstrap_content)?;
 
             let size_bytes = dir_size(&path)?;
@@ -568,7 +576,7 @@ mod tests {
         let bootstrap = staging.path().join(BOOTSTRAP_FILENAME);
         assert!(bootstrap.exists());
         let content = fs::read_to_string(bootstrap).unwrap();
-        assert!(content.starts_with(BOOTSTRAP_PREAMBLE));
+        assert!(content.starts_with(&bootstrap_preamble()));
         assert!(content.contains(script));
     }
 
@@ -680,10 +688,11 @@ mod tests {
         let left = fs::read_to_string(a.path().join(BOOTSTRAP_FILENAME)).unwrap();
         let right = fs::read_to_string(b.path().join(BOOTSTRAP_FILENAME)).unwrap();
         // The preamble (loader boilerplate) must be identical regardless of script content.
-        assert!(left.starts_with(BOOTSTRAP_PREAMBLE));
-        assert!(right.starts_with(BOOTSTRAP_PREAMBLE));
-        let left_preamble = &left[..BOOTSTRAP_PREAMBLE.len()];
-        let right_preamble = &right[..BOOTSTRAP_PREAMBLE.len()];
+        let preamble = bootstrap_preamble();
+        assert!(left.starts_with(&preamble));
+        assert!(right.starts_with(&preamble));
+        let left_preamble = &left[..preamble.len()];
+        let right_preamble = &right[..preamble.len()];
         assert_eq!(left_preamble, right_preamble);
     }
 
@@ -1036,7 +1045,7 @@ mod tests {
         let staging = StagingDir::new(root.path().to_path_buf(), "", &[], &[]).unwrap();
         let content = fs::read_to_string(staging.path().join(BOOTSTRAP_FILENAME)).unwrap();
         // Should only contain the preamble.
-        assert_eq!(content, BOOTSTRAP_PREAMBLE);
+        assert_eq!(content, bootstrap_preamble());
     }
 
     #[test]

@@ -280,11 +280,30 @@ impl NanVixScriptRunner {
             )));
         }
 
+        // Preflight-check bin/ subdir contents (nanvixd loads `./bin/kernel.elf`
+        // via `-bin-dir`; missing the file here yields a clearer error than
+        // letting nanvixd fail at boot time).
+        let bin_subdir = dir.join(BIN_DIR);
+        for name in nanvix_common::BIN_SUBDIR_FILES {
+            let path = bin_subdir.join(name);
+            if !path.exists() {
+                return Err(NanVixError::Preflight(format!(
+                    "{}/{} not found in {:?}",
+                    BIN_DIR, name, dir
+                )));
+            }
+        }
+
         let snapshot_home = Self::resolve_snapshot_home(&dir)?;
-        let snapshot_cbor = snapshot_home.join(SNAPSHOTS_DIR).join(SNAPSHOT_CBOR);
-        if !snapshot_cbor.exists() {
-            // No snapshot yet — generate one via cold boot (one-time cost,
-            // ~400–500 ms). Subsequent runs restore directly.
+        // Warm start requires *all* snapshot files (kernel.vmem + kernel.whp.cbor);
+        // a partial/corrupt set must trigger regeneration instead of a late failure
+        // inside nanvixd.
+        let snapshots_present = nanvix_common::SNAPSHOT_FILES
+            .iter()
+            .all(|name| snapshot_home.join(SNAPSHOTS_DIR).join(name).exists());
+        if !snapshots_present {
+            // No (complete) snapshot yet — generate one via cold boot
+            // (one-time cost, ~400–500 ms). Subsequent runs restore directly.
             Self::generate_snapshot(&dir, &snapshot_home, &nanvixd, &ramfs, &initrd)?;
         }
 
@@ -301,10 +320,13 @@ impl NanVixScriptRunner {
     ///
     /// Discovery chain (first match wins):
     /// 1. `$NANVIX_HOME` env var (if set and non-empty)
-    /// 2. OS-local data path (`%LOCALAPPDATA%\nanvix` on Windows,
+    /// 2. `<exe>` directory itself, when a complete set of pre-generated
+    ///    snapshots already lives in `<exe>/snapshots/` (build-time output
+    ///    or shipped artifacts) — using it avoids a redundant cold boot.
+    /// 3. OS-local data path (`%LOCALAPPDATA%\nanvix` on Windows,
     ///    `~/.local/share/nanvix` on Linux)
-    /// 3. `<exe>` directory itself (dev builds — nanvixd will write
-    ///    snapshots into `<exe>/snapshots/`)
+    /// 4. `<exe>` directory itself as a last-resort fallback (dev builds —
+    ///    nanvixd will write snapshots into `<exe>/snapshots/`).
     fn resolve_snapshot_home(exe_dir: &Path) -> Result<PathBuf, NanVixError> {
         // 1. Env var override.
         if let Some(val) = std::env::var_os(NANVIX_HOME_ENV) {
@@ -320,14 +342,26 @@ impl NanVixScriptRunner {
             }
         }
 
-        // 2. OS-local data path.
+        // 2. Prefer exe-side snapshots when they're already complete, so
+        //    build-time-generated artifacts shipped next to wxc-exec are
+        //    actually used instead of triggering a fresh cold boot in
+        //    %LOCALAPPDATA%.
+        let exe_snapshots = exe_dir.join(SNAPSHOTS_DIR);
+        let exe_snapshots_complete = nanvix_common::SNAPSHOT_FILES
+            .iter()
+            .all(|name| exe_snapshots.join(name).exists());
+        if exe_snapshots_complete {
+            return Ok(exe_dir.to_path_buf());
+        }
+
+        // 3. OS-local data path.
         if let Some(home) = Self::default_home() {
             if home.exists() || std::fs::create_dir_all(&home).is_ok() {
                 return Ok(home);
             }
         }
 
-        // 3. Fallback: exe directory itself (nanvixd writes to <cwd>/snapshots/).
+        // 4. Fallback: exe directory itself (nanvixd writes to <cwd>/snapshots/).
         Ok(exe_dir.to_path_buf())
     }
 
@@ -568,22 +602,22 @@ impl NanVixScriptRunner {
         logger: &mut Logger,
     ) -> ScriptResponse {
         // Drain stderr concurrently with `wait()` so a verbose child cannot
-        // block on a full pipe buffer. In the default (non-trace) mode
+        // block on a full pipe buffer. We retain only the last
+        // [`nanvix_common::STDERR_TAIL_BYTES`] bytes so an untrusted guest
+        // emitting unbounded stderr cannot cause host memory growth
+        // (availability / DoS hardening). In the default (non-trace) mode
         // stderr is inherited and `child.stderr` is `None`, so the join
         // returns the empty string immediately.
-        let stderr_handle = child.stderr.take().map(|mut s| {
-            thread::spawn(move || {
-                let mut buf = String::new();
-                use std::io::Read;
-                let _ = s.read_to_string(&mut buf);
-                buf
-            })
-        });
+        let stderr_handle = child
+            .stderr
+            .take()
+            .map(|s| thread::spawn(move || nanvix_common::drain_stderr_tail(s)));
 
         let exit_status = child.wait();
 
         let stderr_output = stderr_handle
             .and_then(|h| h.join().ok())
+            .map(|(bytes, truncated)| nanvix_common::format_stderr_tail(&bytes, truncated))
             .unwrap_or_default();
 
         {

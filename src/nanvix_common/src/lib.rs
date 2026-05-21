@@ -30,6 +30,63 @@ pub const SNAPSHOT_FILES: &[&str] = &["kernel.vmem", "kernel.whp.cbor"];
 /// Binaries sourced from the `nanvix/nanvix-python` GitHub release.
 pub const NANVIX_PYTHON_REPO_BINARIES: &[&str] = REQUIRED_BINARIES;
 
+/// Number of bytes to retain from the end of nanvixd stderr when capturing
+/// it for diagnostics. Bounds host memory growth in the face of an
+/// untrusted/verbose child (availability / DoS hardening).
+pub const STDERR_TAIL_BYTES: usize = 8 * 1024;
+
+/// Render a bounded tail of nanvixd stderr bytes as a UTF-8 string,
+/// prefixed with `...(truncated)` when truncation occurred.
+///
+/// `bytes` may be the full stderr buffer (post-hoc trim) or a buffer that
+/// the caller already capped while streaming. The `truncated` flag tells
+/// us that streaming-time bytes were dropped even when the resulting
+/// buffer length is at or below [`STDERR_TAIL_BYTES`].
+pub fn format_stderr_tail(bytes: &[u8], truncated: bool) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    if bytes.len() > STDERR_TAIL_BYTES {
+        // `from_utf8_lossy` returns valid UTF-8; the prefix bytes we drop
+        // are ASCII-safe in practice for nanvixd output. Use the simple
+        // byte trim on the resulting string.
+        let start = text.len() - STDERR_TAIL_BYTES;
+        format!("...(truncated){}", &text[start..])
+    } else if truncated {
+        format!("...(truncated){}", text)
+    } else {
+        text.into_owned()
+    }
+}
+
+/// Drain `reader` to completion, retaining only the last
+/// [`STDERR_TAIL_BYTES`] bytes. Returns `(tail, truncated)` where
+/// `truncated` is set when any earlier bytes were dropped.
+///
+/// Used to bound host memory growth when capturing nanvixd stderr from a
+/// potentially untrusted / verbose child (availability / DoS hardening).
+/// Read errors terminate the drain and return whatever was captured so
+/// far; this mirrors `read_to_end` failure semantics for our use case
+/// where stderr is best-effort diagnostic data.
+pub fn drain_stderr_tail<R: std::io::Read>(mut reader: R) -> (Vec<u8>, bool) {
+    let mut tail: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8 * 1024];
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                tail.extend_from_slice(&chunk[..n]);
+                if tail.len() > STDERR_TAIL_BYTES {
+                    let drop = tail.len() - STDERR_TAIL_BYTES;
+                    tail.drain(..drop);
+                    truncated = true;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    (tail, truncated)
+}
+
 /// Release configuration loaded from `versions.json`.
 #[derive(Debug, Deserialize)]
 pub struct ReleaseConfig {
@@ -103,14 +160,25 @@ pub fn generate_snapshot(
         .arg(initrd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .output()
         .map_err(|e| format!("failed to run nanvixd for snapshot generation: {}", e))?;
 
     if !output.status.success() {
+        // Include a bounded tail of stderr so callers (build script panic
+        // or runtime preflight error) can surface actionable diagnostics
+        // without growing host memory unboundedly.
+        let tail = format_stderr_tail(&output.stderr, false);
+        let trimmed = tail.trim_end();
+        if trimmed.is_empty() {
+            return Err(format!(
+                "snapshot generation failed (exit code: {})",
+                output.status
+            ));
+        }
         return Err(format!(
-            "snapshot generation failed (exit code: {})",
-            output.status
+            "snapshot generation failed (exit code: {})\nnanvixd stderr:\n{}",
+            output.status, trimmed
         ));
     }
 
