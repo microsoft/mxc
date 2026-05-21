@@ -92,6 +92,102 @@ pub fn diagnose_launch_failure(
     None
 }
 
+/// Velocity key IDs required by the BaseContainer feature.
+const REQUIRED_VELOCITY_KEYS: &[(u32, &str)] = &[
+    (61389575, "BaseContainer core"),
+    (61155944, "BaseContainer sandbox spec"),
+];
+
+/// Produces a diagnostic when `Experimental_CreateProcessInSandbox` returns
+/// `E_NOTIMPL` or `ERROR_CALL_NOT_IMPLEMENTED`, indicating the feature is
+/// gated behind velocity keys that are not enabled.
+pub fn diagnose_api_not_implemented() -> LaunchDiagnostic {
+    let key_status = check_velocity_keys();
+    let (message, remediation) = if key_status.is_empty() {
+        // Could not determine key status (no registry access or different gating)
+        (
+            "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
+             The BaseContainer feature is not enabled on this OS build."
+                .to_string(),
+            "Ensure the required velocity keys are enabled, \
+             or use schema version '0.4.0-alpha' to fall back to the AppContainer backend."
+                .to_string(),
+        )
+    } else {
+        let disabled: Vec<_> = key_status.iter().filter(|(_, enabled)| !enabled).collect();
+        if disabled.is_empty() {
+            // All keys are enabled but we still got E_NOTIMPL - unexpected
+            (
+                "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
+                 All known velocity keys appear enabled, but the feature is still gated."
+                    .to_string(),
+                "The OS build may require additional enablement. \
+                 Use schema version '0.4.0-alpha' to fall back to the AppContainer backend."
+                    .to_string(),
+            )
+        } else {
+            let disabled_list: Vec<String> =
+                disabled.iter().map(|(id, _)| id.to_string()).collect();
+            (
+                format!(
+                    "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
+                     The following velocity keys are not enabled: {}.",
+                    disabled_list.join(", ")
+                ),
+                format!(
+                    "Enable velocity keys {} and retry, \
+                     or use schema version '0.4.0-alpha' to fall back to the AppContainer backend.",
+                    disabled_list.join(", ")
+                ),
+            )
+        }
+    };
+
+    LaunchDiagnostic {
+        kind: "feature_not_enabled",
+        message,
+        remediation,
+    }
+}
+
+/// Query the Windows Feature Store registry to check whether each required
+/// velocity key is enabled. Returns a list of `(key_id, is_enabled)` pairs.
+/// Returns an empty vec if the registry cannot be read.
+fn check_velocity_keys() -> Vec<(u32, bool)> {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::HKEY_LOCAL_MACHINE;
+        use winreg::RegKey;
+
+        let mut results = Vec::new();
+        for &(key_id, _label) in REQUIRED_VELOCITY_KEYS {
+            // Velocity key overrides live under FeatureManagement\Overrides\<priority>\<featureId>.
+            // Priority 4 = user/test override, 8 = flighting.
+            // The key has a DWORD "EnabledState" (1 = disabled, 2 = enabled).
+            let enabled = [4u32, 8]
+                .iter()
+                .any(|priority| {
+                    let path = format!(
+                        r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FeatureManagement\Overrides\{}\{}",
+                        priority, key_id
+                    );
+                    if let Ok(reg_key) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(&path) {
+                        if let Ok(state) = reg_key.get_value::<u32, _>("EnabledState") {
+                            return state == 2; // 2 = enabled
+                        }
+                    }
+                    false
+                });
+            results.push((key_id, enabled));
+        }
+        results
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Vec::new()
+    }
+}
+
 /// Format a `LaunchDiagnostic` into a string suitable for appending to an
 /// error message displayed to the user.
 pub fn format_diagnostic(diag: &LaunchDiagnostic) -> String {

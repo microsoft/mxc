@@ -67,6 +67,10 @@ pub struct BaseContainerRunner {
 /// (e.g., disabled via feature-enablement mechanisms).
 const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 
+/// HRESULT E_NOTIMPL -- the OS may set this via GetLastError when the
+/// feature is gated behind velocity keys.
+const E_NOTIMPL: u32 = 0x8000_4001;
+
 /// SandboxSpec FlatBuffer schema version embedded in every spec payload.
 const SANDBOX_SPEC_VERSION: &str = "0.1.0";
 
@@ -591,13 +595,23 @@ impl ScriptRunner for BaseContainerRunner {
                 );
             }
             let err = unsafe { GetLastError() };
-            if err.0 == ERROR_CALL_NOT_IMPLEMENTED {
-                return ScriptResponse::error(
-                    "Experimental_CreateProcessInSandbox returned ERROR_CALL_NOT_IMPLEMENTED. \
-                     The BaseContainer feature may be disabled on this OS build \
-                     (e.g., via feature-enablement mechanisms). \
-                     Use schema version '0.4.0-alpha' to fall back to the AppContainer backend.",
+            if err.0 == ERROR_CALL_NOT_IMPLEMENTED || err.0 == E_NOTIMPL {
+                let diag = crate::launch_diagnostics::diagnose_api_not_implemented();
+                let _ = writeln!(
+                    logger,
+                    "Error: Launch diagnostic [{}]: {}",
+                    diag.kind, diag.message
                 );
+                let _ = writeln!(logger, "Error: Remediation: {}", diag.remediation);
+                let user_message = format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
+                let raw_error = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
+                return ScriptResponse {
+                    exit_code: -1,
+                    standard_err: user_message.clone(),
+                    error_message: user_message,
+                    extended_error: raw_error,
+                    ..Default::default()
+                };
             }
             let bare_exe = std::path::Path::new(
                 crate::launch_diagnostics::extract_exe_from_command_line(&request.script_code),
