@@ -95,3 +95,17 @@ extends:
                   $sdkVersion = (Get-Content "$(System.DefaultWorkingDirectory)/sdk/package.json" | ConvertFrom-Json).version
                   $vpackVersion = "${sdkVersion}$(VersionDate)$(VersionCounter)"
                   Write-Host "##vso[task.setvariable variable=VPackVersion]$vpackVersion"
+
+            - task: PowerShell@2
+              displayName: Prune artifacts to wxc-exec only
+              inputs:
+                targetType: inline
+                # Keep only wxc-exec.exe + its pdb per-arch. Everything else
+                # in the downloaded artifact (other exes, wslcsdk.dll, other
+                # pdbs/dwps) is dropped to shrink the vpack.
+                script: |
+                  foreach ($arch in 'x64','arm64') {
+                    $dir = "$(ob_outputDirectory)\$arch"
+                    Get-ChildItem -Path $dir -File | Where-Object { $_.Name -ne 'wxc-exec.exe' } | Remove-Item -Force
+                    Get-ChildItem -Path "$dir\symbols" -File | Where-Object { $_.Name -ne 'wxc-exec.pdb' } | Remove-Item -Force
+                  }
