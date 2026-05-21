@@ -163,7 +163,6 @@ export function resolveExecutableAndArgs(
     // at run time, so the SDK accepts them without checking against the
     // host's concrete backend list.
     const isIntent = (ContainmentTypes as readonly string[]).includes(config.containment);
-    const isExperimental = (ExperimentalBackends as readonly string[]).includes(config.containment);
     const isAvailable = platformSupport.availableMethods.includes(config.containment as ContainmentBackend);
     if (!isIntent && !isExperimental && !isAvailable) {
       throw new Error(

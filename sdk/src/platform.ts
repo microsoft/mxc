@@ -112,7 +112,17 @@ function isWindowsSandboxAvailable(): boolean {
     );
     windowsSandboxAvailableCache = /State\s*:\s*Enabled/i.test(output);
   } catch {
-    windowsSandboxAvailableCache = false;
+    // `dism /online` typically requires elevation, so a non-elevated session
+    // throws here and we can't distinguish "disabled" from "no permission".
+    // Fall back to checking for the sandbox executable — Windows installs it
+    // under System32 only when the Containers-DisposableClientVM feature is
+    // enabled, and the path is readable without admin.
+    const sandboxExe = path.join(
+      process.env.SystemRoot || 'C:\\Windows',
+      'System32',
+      'WindowsSandbox.exe',
+    );
+    windowsSandboxAvailableCache = fs.existsSync(sandboxExe);
   }
 
   return windowsSandboxAvailableCache;
