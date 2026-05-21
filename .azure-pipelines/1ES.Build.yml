@@ -16,7 +16,6 @@ resources:
     name: 1ESPipelineTemplates/1ESPipelineTemplates
     ref: refs/tags/release
 
-# Parameters for ESRP signing info will be passed from the ADO UI.
 parameters:
   - name: officialBuild
     displayName: Build Official or Unofficial
@@ -31,15 +30,24 @@ parameters:
     type: boolean
     default: false
 
+  # Reused by Rust/Mac/NpmSdk templates. Values come from MXC-ESRP-Signing
+  # on Official runs; sign steps are gated, so missing values on Unofficial
+  # runs are harmless.
+  - name: ESRPInfo
+    type: object
+    default:
+      serviceName: $(serviceName)
+      tenantId: $(tenantId)
+      azureKeyVaultName: $(azureKeyVaultName)
+      authCertName: $(authCertName)
+      signCertName: $(signCertName)
+      clientId: $(clientId)
+
 variables:
   # Prevents failure when no Rust tests are found; pipeline runs will still fail if present
   # tests do not pass.
   - name: NEXTEST_NO_TESTS
     value: pass
-  # Pull ESRP signing credentials from the variable group only for Official
-  # builds. PR / unofficial runs skip the sign step (see Rust.Build.Job.yml
-  # condition `eq(parameters.isOfficialBuild, true)`), so the group isn't
-  # needed and we avoid surfacing it on pull requests.
   - ${{ if eq(parameters.officialBuild, 'Official') }}:
     - group: MXC-ESRP-Signing
 
@@ -81,14 +89,7 @@ extends:
                 arch: arm64
                 component: LXC
 
-            ${{ if eq(parameters.officialBuild, 'Official') }}:
-              ESRPInfo:
-                serviceName: $(serviceName)
-                tenantId: $(tenantId)
-                azureKeyVaultName: $(azureKeyVaultName)
-                authCertName: $(authCertName)
-                signCertName: $(signCertName)
-                clientId: $(clientId)
+            ESRPInfo: ${{ parameters.ESRPInfo }}
 
         # macOS uses a separate template because it runs on a different
         # pool (Microsoft-hosted). The produced artifact name follows the same
@@ -96,14 +97,7 @@ extends:
         - template: .azure-pipelines/templates/Mac.Build.Job.yml@self
           parameters:
             isOfficialBuild: ${{ eq(parameters.officialBuild, 'Official') }}
-            ${{ if eq(parameters.officialBuild, 'Official') }}:
-              ESRPInfo:
-                serviceName: $(serviceName)
-                tenantId: $(tenantId)
-                azureKeyVaultName: $(azureKeyVaultName)
-                authCertName: $(authCertName)
-                signCertName: $(signCertName)
-                clientId: $(clientId)
+            ESRPInfo: ${{ parameters.ESRPInfo }}
 
     - stage: Package_MXC
       displayName: 'Package MXC'
@@ -123,14 +117,7 @@ extends:
             - artifact: mxc-binaries-aarch64-apple-darwin
               sdkArch: arm64
 
-          ${{ if eq(parameters.officialBuild, 'Official') }}:
-            ESRPInfo:
-              serviceName: $(serviceName)
-              tenantId: $(tenantId)
-              azureKeyVaultName: $(azureKeyVaultName)
-              authCertName: $(authCertName)
-              signCertName: $(signCertName)
-              clientId: $(clientId)
+          ESRPInfo: ${{ parameters.ESRPInfo }}
 
       - template: .azure-pipelines/templates/Mxc.Binary.Packaging.Job.yml@self
 

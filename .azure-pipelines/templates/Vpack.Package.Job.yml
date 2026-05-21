@@ -1,17 +1,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 #
-# MXC VPack publishing pipeline.
-#
-# This pipeline does NOT build anything. It consumes already-signed binaries
-# produced by the official build pipeline (1ES.Build.yml run with
-# `officialBuild: Official`) and packages them into a vpack.
-#
-# Expected upstream pipeline name in ADO: `MXC-Official-Build` (override below
-# if the pipeline is created under a different name in ADO UI).
-#
-# The build-completion trigger that fires this pipeline when the official build
-# succeeds is configured in the ADO UI (Edit pipeline -> Triggers).
+# Consumes signed wxc binaries from MXC-Official-Build and packages them
+# as a vpack. The build-completion trigger is set in the ADO UI.
 
 parameters: # parameters are shown up in ADO UI in a build queue time
 - name: 'debug'
@@ -39,10 +30,6 @@ resources:
       name: OneBranch.Pipelines/GovernedTemplates
       ref: refs/heads/main
   pipelines:
-    # Pre-built, signed binaries come from the official build pipeline.
-    # The build-completion trigger is configured in the ADO UI; this resource
-    # declaration is what enables `DownloadPipelineArtifact@2 source: specific`
-    # and the `pipeline.officialBuild.*` runtime variables.
     - pipeline: officialBuild
       project: Dart
       source: MXC-Official-Build
@@ -104,12 +91,6 @@ extends:
             ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
 
           steps:
-            # Pull pre-built, signed wxc binaries from the upstream official build.
-            # `source: specific` + `runVersion: latestFromBranch` consumes the most
-            # recent successful run on the configured branch; the build-completion
-            # trigger ensures this pipeline runs against the build that just
-            # completed, but the variable group / pipeline resource alias makes
-            # the artifacts available regardless of how this run was queued.
             - task: DownloadPipelineArtifact@2
               displayName: Download wxc x64 artifact
               inputs:
