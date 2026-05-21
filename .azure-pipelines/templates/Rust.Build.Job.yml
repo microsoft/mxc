@@ -47,11 +47,16 @@ jobs:
       ${{ if and(eq(item.os, 'linux'), eq(item.arch, 'arm64')) }}:
         triplet: aarch64-unknown-linux-gnu
 
+      ${{ if eq(parameters.useOneBranchPool, true) }}:
+        srcDir: $(Build.SourcesDirectory)/mxc
+      ${{ else }}:
+        srcDir: $(Build.SourcesDirectory)
+
       # Windows specific variables
       ${{ if eq(item.os, 'windows') }}:
         CARGO_TARGET_DIR: c:/t/target
         artifactPrefix: wxc-binaries
-        workingDirectory: src
+        workingDirectory: $(srcDir)/src
         signPattern: |
             wxc-exec.exe
             winhttp-proxy-shim.exe
@@ -63,7 +68,7 @@ jobs:
       ${{ if eq(item.os, 'linux') }}:
         CARGO_TARGET_DIR: /tmp/target
         artifactPrefix: lxc-binaries
-        workingDirectory: $(Build.SourcesDirectory)/src/lxc
+        workingDirectory: $(srcDir)/src/lxc
         signPattern: |
           lxc-exec
 
@@ -76,7 +81,7 @@ jobs:
       # Paths
       targetTriple: $(triplet)
       targetTripleDir: $(CARGO_TARGET_DIR)/$(targetTriple)/release
-      outputDirectory: $(Build.SourcesDirectory)/out
+      outputDirectory: $(srcDir)/out
       ob_outputDirectory: $(outputDirectory)
       artifactBaseName: $(artifactPrefix)-$(targetTriple)
 
@@ -100,30 +105,9 @@ jobs:
         displayName: Install ARM64 toolchain
         condition: and(eq('${{ item.os }}','linux'), eq('${{ item.arch }}','arm64'))
 
-      - powershell: |
-          Write-Host "Build.SourcesDirectory=$(Build.SourcesDirectory)"
-          Write-Host "System.DefaultWorkingDirectory=$(System.DefaultWorkingDirectory)"
-          Write-Host "Pipeline.Workspace=$(Pipeline.Workspace)"
-
-          Get-ChildItem "$(Build.SourcesDirectory)" -Force
-          Get-ChildItem "$(Build.SourcesDirectory)\.azure-pipelines" -Force -ErrorAction SilentlyContinue
-          Get-ChildItem "$(Build.SourcesDirectory)\.azure-pipelines\.cargo" -Force -ErrorAction SilentlyContinue
-        displayName: Debug checkout layout
-
       # Append pipeline-specific Cargo settings (registry, cross-compile linker) to the workspace config
       - powershell: |
-          $workspaceConfig = "$(Build.SourcesDirectory)\.cargo\config.toml"
-          $pipelineConfig = "$(Build.SourcesDirectory)\.azure-pipelines\.cargo\config.toml"
-
-          if (!(Test-Path $pipelineConfig)) {
-            Write-Host "Expected config not found: $pipelineConfig"
-            Write-Host "Searching for config.toml files..."
-            Get-ChildItem "$(Build.SourcesDirectory)" -Recurse -Filter config.toml -Force | Select-Object -ExpandProperty FullName
-            throw "Pipeline Cargo config missing"
-          }
-
-          New-Item -ItemType Directory -Force -Path (Split-Path $workspaceConfig) | Out-Null
-          Add-Content -Path $workspaceConfig -Value ("`n" + (Get-Content -Raw $pipelineConfig))
+          Add-Content -Path "$(srcDir)/.cargo/config.toml" -Value ("`n" + (Get-Content -Raw "$(srcDir)/.azure-pipelines/.cargo/config.toml"))
         displayName: Setup Cargo Config
 
       - task: 1ES.Build.Rust.Setup@1
