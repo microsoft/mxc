@@ -1332,7 +1332,20 @@ async function runSandbox(): Promise<void> {
     // any dirs the scenario mounts (e.g. C:\Users\Public\MXCPlaygroundTests).
     if (currentContainment === 'microvm' && rawConfig.filesystem && rawConfig.filesystem.readwritePaths) {
       try {
-        await mxc.ensureDirs(rawConfig.filesystem.readwritePaths);
+        var ensureDirsResult = await mxc.ensureDirs(rawConfig.filesystem.readwritePaths);
+        if (ensureDirsResult && typeof ensureDirsResult === 'object') {
+          if ((ensureDirsResult as any).success === false) {
+            throw new Error((ensureDirsResult as any).error || (ensureDirsResult as any).message || 'Unknown error');
+          }
+          if (Array.isArray(ensureDirsResult)) {
+            var failedEnsureDir = ensureDirsResult.find(function (entry: any) {
+              return entry && typeof entry === 'object' && entry.success === false;
+            });
+            if (failedEnsureDir) {
+              throw new Error(failedEnsureDir.error || failedEnsureDir.message || 'Unknown error');
+            }
+          }
+        }
       } catch (e: any) {
         termError('[Playground] Failed to pre-create RW mount dirs: ' + (e && e.message ? e.message : String(e)));
         onSandboxExit(-1);
