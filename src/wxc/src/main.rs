@@ -583,14 +583,19 @@ fn main() {
 
     // Emit a structured JSON error envelope on stderr for SDK consumption
     // when the runner produced an error message (one-shot flows only).
+    // Suppress when stderr is a TTY (PTY mode) -- the human-readable
+    // diagnostic text is already visible; raw JSON would be noise.
     if response.exit_code != 0 && !response.error_message.is_empty() {
-        if let Ok(json) = serde_json::to_string(&serde_json::json!({
-            "error": {
-                "code": "backend_error",
-                "message": response.error_message,
+        use std::io::IsTerminal;
+        if !std::io::stderr().is_terminal() {
+            if let Ok(json) = serde_json::to_string(&serde_json::json!({
+                "error": {
+                    "code": "backend_error",
+                    "message": response.error_message,
+                }
+            })) {
+                eprintln!("{json}");
             }
-        })) {
-            eprintln!("{json}");
         }
     }
 
