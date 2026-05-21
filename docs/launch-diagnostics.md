@@ -46,7 +46,7 @@ pub fn diagnose_launch_failure(
 
 1. **`packaged_app`** -- If the resolved exe path is under `C:\Program Files\WindowsApps\` (MSIX install location), return:
    - message: "The target executable is a packaged (MSIX) app which cannot run inside a sandboxed container."
-   - remediation: "Uninstall the packaged version and install via `winget install Microsoft.PowerShell`."
+   - remediation: "Uninstall the packaged version and install an unpackaged build."
 
 2. **`missing_filesystem_access`** -- If the exe is `pwsh.exe` (not `powershell.exe`) and the policy does NOT grant `readonlyPaths` including the drive root (`C:\`), return:
    - message: "pwsh.exe versions before 7.7 require read-only access to the root drive to start."

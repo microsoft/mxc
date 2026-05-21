@@ -51,8 +51,7 @@ pub fn diagnose_launch_failure(
                  Packaged apps cannot be launched inside a sandboxed container.",
                 exe_path.display()
             ),
-            remediation: "Uninstall the packaged version and install an unpackaged build, \
-                 e.g. `winget install Microsoft.PowerShell`."
+            remediation: "Uninstall the packaged version and install an unpackaged build."
                 .to_string(),
         });
     }
