@@ -30,7 +30,7 @@ pub mod appcontainer_runner;
 pub mod dispatcher;
 #[cfg(target_os = "windows")]
 pub mod fallback_detector;
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "bfs"))]
 pub mod filesystem_bfs;
 #[cfg(target_os = "windows")]
 pub mod filesystem_dacl;

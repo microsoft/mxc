@@ -775,6 +775,7 @@ impl Default for AppContainerScriptRunner {
 
 impl ScriptRunner for AppContainerScriptRunner {
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+        #[cfg(feature = "bfs")]
         use crate::filesystem_bfs::FileSystemBfsManager;
         use crate::launch_diagnostics::diagnose_process_exit;
         use crate::models::FailurePhase;
@@ -802,20 +803,47 @@ impl ScriptRunner for AppContainerScriptRunner {
         // hijacking (see `fallback_detector::find_bfscfg_exe`). Only
         // resolve when we actually plan to use BFS; Tier 3 (DACL) hosts
         // legitimately may not have `bfscfg.exe` installed.
-        let bfscfg_path = if self.filesystem_mode == FilesystemMode::Bfs {
-            match crate::fallback_detector::find_bfscfg_exe() {
-                Ok(p) => p,
-                Err(e) => return ScriptResponse::error(&e.to_string()),
+        //
+        // Compiled out unless the `bfs` Cargo feature is enabled — see
+        // the feature comment in `wxc_common/Cargo.toml`. When BFS is
+        // compiled out, the dispatcher only ever selects Tier 1 or
+        // Tier 3, so this runner can never see `FilesystemMode::Bfs`
+        // for a real policy; we still emit a guard warning for any
+        // direct caller (e.g. legacy `new()` paths) that bypasses the
+        // dispatcher with a non-empty filesystem policy.
+        #[cfg(feature = "bfs")]
+        let mut bfs_manager = {
+            let bfscfg_path = if self.filesystem_mode == FilesystemMode::Bfs {
+                match crate::fallback_detector::find_bfscfg_exe() {
+                    Ok(p) => p,
+                    Err(e) => return ScriptResponse::error(&e.to_string()),
+                }
+            } else {
+                None
+            };
+
+            let mut bfs_manager =
+                FileSystemBfsManager::new(self.app_container_name.clone(), bfscfg_path);
+            if self.filesystem_mode == FilesystemMode::Bfs {
+                if let Err(e) = bfs_manager.configure(&request.policy, logger) {
+                    return ScriptResponse::error(&e.to_string());
+                }
             }
-        } else {
-            None
+            bfs_manager
         };
 
-        let mut bfs_manager =
-            FileSystemBfsManager::new(self.app_container_name.clone(), bfscfg_path);
+        #[cfg(not(feature = "bfs"))]
         if self.filesystem_mode == FilesystemMode::Bfs {
-            if let Err(e) = bfs_manager.configure(&request.policy, logger) {
-                return ScriptResponse::error(&e.to_string());
+            let policy = &request.policy;
+            if !policy.readwrite_paths.is_empty()
+                || !policy.readonly_paths.is_empty()
+                || !policy.denied_paths.is_empty()
+            {
+                logger.log_line(
+                    "WARNING: filesystem policy declared but BFS support is disabled \
+                     (wxc_common built without the `bfs` feature); \
+                     readwrite/readonly/denied paths will not be enforced on this runner.",
+                );
             }
         }
 
@@ -865,6 +893,7 @@ impl ScriptRunner for AppContainerScriptRunner {
         }
 
         network_manager.stop_all(!request.lifecycle.preserve_policy, logger);
+        #[cfg(feature = "bfs")]
         if self.filesystem_mode == FilesystemMode::Bfs
             && bfs_manager.configured()
             && !request.lifecycle.preserve_policy
@@ -883,11 +912,14 @@ impl ScriptRunner for AppContainerScriptRunner {
 /// kept next to the create/setup path on `AppContainerScriptRunner` so
 /// both ends of the profile lifecycle live in the same module.
 ///
-/// The BFS-clear step is best-effort: it delegates to
+/// The BFS-clear step is best-effort and is compiled out unless the
+/// `bfs` Cargo feature is enabled (see the feature comment in
+/// `wxc_common/Cargo.toml`). When the feature is on it delegates to
 /// [`FileSystemBfsManager::clear_policy`], which resolves `bfscfg.exe`
 /// itself and logs (rather than fails) when the resolver returns no
-/// path. The profile delete is still attempted in that case.
+/// path. The profile delete is still attempted in either case.
 pub fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
+    #[cfg(feature = "bfs")]
     crate::filesystem_bfs::FileSystemBfsManager::clear_policy(name, logger);
 
     let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();

@@ -159,6 +159,10 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
 |---------|----------------------|-------------------|-------------|
 | Isolation level | Process | VM | Container |
 | Startup time | Fast (~10ms) | Slow (~30s) | Medium (~1s) |
-| Filesystem | BFS policy | VM filesystem | Bind mounts |
+| Filesystem | BFS policy¹ | VM filesystem | Bind mounts |
 | Network | Windows Firewall | Guest agent | iptables/nftables |
 | Privileges | Optional admin | Admin | Root (or unprivileged LXC) |
+
+¹ Windows BFS support is gated behind the non-default `bfs` Cargo
+feature in `wxc_common`. Default builds skip BFS and emit a warning
+when a policy declares filesystem paths on the AppContainer runner.

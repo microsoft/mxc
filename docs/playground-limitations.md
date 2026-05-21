@@ -6,7 +6,7 @@
 |---------|---------------------------|------------------------------|-------|
 | AppContainer (v0.4.0) | ✅ Works | ✅ Works | N/A |
 | BaseContainer (v0.5.0) | ❌ No processmodel.dll | ✅ Works | N/A |
-| BFS filesystem brokering | ❌ Broker helper not available | ✅ Works | N/A |
+| BFS filesystem brokering | ❌ Broker helper not available | ✅ Works (opt-in via `bfs` Cargo feature) | N/A |
 | Proxy (AppContainer) | ✅ Works (needs admin for shim) | ✅ Works | N/A |
 | Proxy (BaseContainer) | N/A | ⚠️ WinHTTP only, see below | N/A |
 | LXC containers | N/A | N/A | ✅ Works |
@@ -81,7 +81,7 @@ WinHTTP sessions may or may not pick it up depending on how they're initialized.
 | Feature | Needs Admin? |
 |---------|-------------|
 | Basic AppContainer execution | No |
-| BFS filesystem brokering | No |
+| BFS filesystem brokering | No (and disabled by default — build with `--features bfs` to enable) |
 | Network (capabilities only) | No |
 | Network (firewall rules) | Yes — `netsh advfirewall` |
 | Proxy shim (v0.4.0) | Yes — elevated winhttp-proxy-shim |
@@ -121,6 +121,14 @@ When `disallowWin32kSystemCalls=true`:
 - PowerShell, GUI apps, and most Windows executables will fail
 
 ## Filesystem (BFS)
+
+> **BFS is disabled by default** at the Rust-core build level. Known
+> kernel-mode hangs in `bfs.sys` / `bfsapi.dll` make the
+> `bfscfg.exe`-driven path unsafe on most hosts. The integration is
+> gated behind the non-default `bfs` Cargo feature in `wxc_common`;
+> default builds skip it entirely and the AppContainer runner emits a
+> warning if a policy declares filesystem paths. The notes below apply
+> only to builds that opt in via `--features bfs`.
 
 ### Trailing Backslash
 

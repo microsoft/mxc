@@ -80,11 +80,13 @@ fn processcontainer_lpac() {
     assert_wxc_success("basic_lpac.json", &["--debug"]);
 }
 
+#[cfg(feature = "bfs")]
 fn filesystem_bfs() {
     let _temp = TempDirs::create(&["C:\\temp\\wxc_test_allowed", "C:\\temp\\wxc_test_denied"]);
     assert_wxc_success("filesystem_bfs_test.json", &["--debug"]);
 }
 
+#[cfg(feature = "bfs")]
 fn filesystem_bfs_readonly() {
     let temp = TempDirs::create(&["C:\\temp\\wxc_test_allowedreadonly"]);
     temp.write_absolute_file(
@@ -94,6 +96,7 @@ fn filesystem_bfs_readonly() {
     assert_wxc_success("filesystem_bfs_readonly_test.json", &["--debug"]);
 }
 
+#[cfg(feature = "bfs")]
 fn filesystem_bfs_spaces() {
     let _temp = TempDirs::create(&["C:\\Users\\Public\\wxc bfs test"]);
     assert_wxc_success("filesystem_bfs_spaces_test.json", &["--debug"]);
@@ -163,6 +166,7 @@ fn test_processcontainer_lpac() {
     with_test_lock(processcontainer_lpac);
 }
 
+#[cfg(feature = "bfs")]
 #[test]
 #[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
 fn test_filesystem_bfs() {
@@ -173,6 +177,7 @@ fn test_filesystem_bfs() {
     with_test_lock(filesystem_bfs);
 }
 
+#[cfg(feature = "bfs")]
 #[test]
 #[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
 fn test_filesystem_bfs_readonly() {
@@ -183,6 +188,7 @@ fn test_filesystem_bfs_readonly() {
     with_test_lock(filesystem_bfs_readonly);
 }
 
+#[cfg(feature = "bfs")]
 #[test]
 #[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
 fn test_filesystem_bfs_spaces() {
@@ -278,7 +284,9 @@ fn test_on_repeat() {
         for pass in 1..=10 {
             println!("=== Pass {pass} of 10 ===");
             processcontainer_basic();
+            #[cfg(feature = "bfs")]
             filesystem_bfs();
+            #[cfg(feature = "bfs")]
             filesystem_bfs_readonly();
             processcontainer_lpac();
         }

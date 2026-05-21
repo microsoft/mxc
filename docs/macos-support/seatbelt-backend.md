@@ -332,8 +332,12 @@ environment.
 |---|---|---|---|
 | Isolation level | Process | Container | Process |
 | Startup time | Fast (~10 ms) | Medium (~1 s) | Fast (~10 ms) |
-| Filesystem | BFS policy | Bind mounts | Profile `subpath` rules |
+| Filesystem | BFS policy¹ | Bind mounts | Profile `subpath` rules |
 | Network | Windows Firewall | iptables/nftables | Profile `network-*` rules |
 | Privileges | Optional admin | Root (or unprivileged LXC) | None — `sandbox_init` is unprivileged |
 | Container lifecycle | Yes (named) | Yes (named) | No (per-process) |
 | Proxy support | Yes | No | No |
+
+¹ Windows BFS support is gated behind the non-default `bfs` Cargo
+feature in `wxc_common`. Default builds skip BFS and emit a warning
+when a policy declares filesystem paths on the AppContainer runner.

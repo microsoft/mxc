@@ -160,14 +160,18 @@ pub fn mark_cleanup_deferred(sid_string: &str, reason: &str, logger: &mut Logger
     let _ = writeln!(logger, "cleanup deferred: {}", reason);
 }
 
-/// Clean up a sandbox: clear BFS filesystem policies, delete the AppContainer
-/// profile, and remove the tracking registry entry. Best-effort and idempotent
-/// -- failures are logged but do not propagate as errors.
+/// Clean up a sandbox: (optionally) clear BFS filesystem policies, delete
+/// the AppContainer profile, and remove the tracking registry entry.
+/// Best-effort and idempotent — failures are logged but do not propagate
+/// as errors.
 ///
-/// Order matters: BFS policies must be cleared before the AppContainer profile
-/// is deleted (BFS needs the SID, which is derived from the profile identity).
+/// When the `bfs` feature is enabled, BFS policies are cleared first
+/// (BFS needs the SID, which is derived from the profile identity, so
+/// the call must happen before profile deletion). Default builds skip
+/// step 1 entirely.
 pub fn cleanup_sandbox(identity: &str, sid_string: &str, logger: &mut Logger) {
     // Step 1: Clear BFS filesystem policies (must happen before profile deletion).
+    #[cfg(feature = "bfs")]
     crate::filesystem_bfs::FileSystemBfsManager::clear_policy(identity, logger);
 
     // Step 2: Delete the AppContainer profile.

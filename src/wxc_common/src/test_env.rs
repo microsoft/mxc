@@ -66,10 +66,16 @@ impl Drop for ForceTierGuard {
 }
 
 /// RAII guard for `MXC_BFSCFG_PATH`, mirroring [`ForceTierGuard`].
+///
+/// Compiled out when the `bfs` Cargo feature is disabled — the only
+/// callers of this guard are the `find_bfscfg_exe` test-seam tests
+/// which are themselves gated by `feature = "bfs"`.
+#[cfg(feature = "bfs")]
 pub(crate) struct BfscfgPathGuard {
     _lock: MutexGuard<'static, ()>,
 }
 
+#[cfg(feature = "bfs")]
 impl BfscfgPathGuard {
     pub(crate) fn set(value: &str) -> Self {
         let guard = lock();
@@ -81,6 +87,7 @@ impl BfscfgPathGuard {
     }
 }
 
+#[cfg(feature = "bfs")]
 impl Drop for BfscfgPathGuard {
     fn drop(&mut self) {
         // SAFETY: see ForceTierGuard::drop.

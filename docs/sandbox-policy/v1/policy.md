@@ -146,11 +146,15 @@ spawnSandboxFromConfig(config);
 ┌───────────────────────────────────────────────────────────────┐
 │ LAYER 3: OS Primitives                                        │
 │                                                               │
-│ Windows: BaseProcessContainer, BFS, Firewall, Job Objects     │
+│ Windows: BaseProcessContainer, BFS¹, Firewall, Job Objects    │
 │ Linux: LXC cgroups, bind mounts, iptables, seccomp            │
 │                                                               │
 │ Kernel-level enforcement.                                     │
 │ Never referenced by name in Layer 1.                          │
+│                                                               │
+│ ¹ BFS is gated behind a non-default `bfs` Cargo feature;      │
+│   default builds use only BaseProcessContainer + Firewall +   │
+│   Job Objects on Windows.                                     │
 └───────────────────────────────────────────────────────────────┘
 ```
 

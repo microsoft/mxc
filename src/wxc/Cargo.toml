@@ -31,3 +31,7 @@ isolation_session = [
     "dep:isolation_session_bindings",
     "wxc_common/isolation_session",
 ]
+# Enables the AppContainer Brokered File System (BFS) integration in
+# wxc_common (invokes `bfscfg.exe`). Disabled by default: see the
+# matching feature comment in wxc_common/Cargo.toml.
+bfs = ["wxc_common/bfs"]

@@ -5,6 +5,13 @@ edition.workspace = true
 publish = false
 description = "End-to-end integration tests for MXC"
 
+[features]
+# Compile-in the BFS-specific e2e tests. Matches the `bfs` feature in
+# wxc_common / wxc; without it the BFS tests are excluded from the
+# binary. The crate doesn't depend on wxc_common, so this is a local
+# marker feature only.
+bfs = []
+
 [dependencies]
 base64.workspace = true
 serde.workspace = true

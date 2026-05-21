@@ -26,6 +26,10 @@ pub enum IsolationTier {
     /// Tier 1 — `Experimental_CreateProcessInSandbox` from `processmodel.dll`.
     BaseContainer,
     /// Tier 2 — AppContainer + `bfscfg.exe` BFS filesystem policy.
+    ///
+    /// Only selectable when the `bfs` Cargo feature is enabled — see the
+    /// feature comment in `wxc_common/Cargo.toml`.
+    #[cfg(feature = "bfs")]
     AppContainerBfs,
     /// Tier 3 — AppContainer + DACL-based filesystem policy on host paths.
     AppContainerDacl,
@@ -36,6 +40,7 @@ impl IsolationTier {
     pub fn as_str(self) -> &'static str {
         match self {
             IsolationTier::BaseContainer => "base-container",
+            #[cfg(feature = "bfs")]
             IsolationTier::AppContainerBfs => "appcontainer-bfs",
             IsolationTier::AppContainerDacl => "appcontainer-dacl",
         }
@@ -61,6 +66,7 @@ pub struct TierDecision {
     /// executable-search-order hijacking by an attacker who can plant a
     /// rogue `bfscfg.exe` next to `wxc-exec.exe`, in the CWD, or in a
     /// `PATH` entry that precedes `System32`.
+    #[cfg(feature = "bfs")]
     pub bfscfg_path: Option<PathBuf>,
     /// Human-readable degradation messages explaining why a higher tier was
     /// rejected. Empty when the preferred tier was selected.
@@ -91,6 +97,7 @@ pub enum FallbackError {
     /// hardcoded `C:\Windows` guess because doing so would allow an
     /// attacker who can scrub the process environment to silently
     /// downgrade Tier 2 → Tier 3 on hosts where Windows lives elsewhere.
+    #[cfg(feature = "bfs")]
     #[error("could not resolve %SystemRoot%: {reason}")]
     SystemRootUnresolved {
         /// Human-readable description of why resolution failed.
@@ -160,12 +167,20 @@ pub fn detect(
         return Ok(TierDecision {
             tier: IsolationTier::BaseContainer,
             needs_dacl_augmentation: denied,
+            #[cfg(feature = "bfs")]
             bfscfg_path: None,
             warnings,
         });
     }
+    #[cfg(feature = "bfs")]
     warnings.push(
         "BaseContainer API not present or not preferred; falling back to AppContainer + BFS"
+            .to_string(),
+    );
+    #[cfg(not(feature = "bfs"))]
+    warnings.push(
+        "BaseContainer API not present or not preferred; falling back to AppContainer + DACL \
+         (BFS support is disabled at build time)"
             .to_string(),
     );
 
@@ -175,37 +190,53 @@ pub fn detect(
     // BFS to enforce, so we can stay on T2 without resolving bfscfg.exe.
     // Otherwise we need a real path: probe-time resolution doubles as the
     // execution path (see `TierDecision::bfscfg_path`).
-    let bfscfg_path = if has_fs_policy {
-        find_bfscfg_exe()?
-    } else {
-        None
-    };
-    if !has_fs_policy || bfscfg_path.is_some() {
-        if denied {
-            ensure_dacl_augmentation_allowed(policy)?;
-            verify_write_dac_all(&policy.denied_paths)?;
+    //
+    // Compiled out unless the `bfs` Cargo feature is enabled — see the
+    // feature comment in `wxc_common/Cargo.toml`.
+    #[cfg(feature = "bfs")]
+    {
+        let bfscfg_path = if has_fs_policy {
+            find_bfscfg_exe()?
+        } else {
+            None
+        };
+        if !has_fs_policy || bfscfg_path.is_some() {
+            if denied {
+                ensure_dacl_augmentation_allowed(policy)?;
+                verify_write_dac_all(&policy.denied_paths)?;
+            }
+            return Ok(TierDecision {
+                tier: IsolationTier::AppContainerBfs,
+                needs_dacl_augmentation: denied,
+                bfscfg_path,
+                warnings,
+            });
         }
-        return Ok(TierDecision {
-            tier: IsolationTier::AppContainerBfs,
-            needs_dacl_augmentation: denied,
-            bfscfg_path,
-            warnings,
-        });
+        warnings.push("bfscfg.exe not present; falling back to AppContainer + DACL".to_string());
     }
-    warnings.push("bfscfg.exe not present; falling back to AppContainer + DACL".to_string());
 
     // Tier 3 — AppContainer + DACL
-    ensure_dacl_augmentation_allowed(policy)?;
-    verify_write_dac_all(
-        policy
-            .readwrite_paths
-            .iter()
-            .chain(policy.readonly_paths.iter())
-            .chain(policy.denied_paths.iter()),
-    )?;
+    //
+    // When the policy declares no filesystem paths there is nothing to
+    // augment, so we skip the DACL-consent / WRITE_DAC checks entirely.
+    // This preserves the historical behavior of the Tier 2 path for
+    // empty policies: a caller that set `allow_dacl_mutation = false`
+    // should still get a working AppContainer when they ask for no
+    // filesystem enforcement.
+    if has_fs_policy {
+        ensure_dacl_augmentation_allowed(policy)?;
+        verify_write_dac_all(
+            policy
+                .readwrite_paths
+                .iter()
+                .chain(policy.readonly_paths.iter())
+                .chain(policy.denied_paths.iter()),
+        )?;
+    }
     Ok(TierDecision {
         tier: IsolationTier::AppContainerDacl,
-        needs_dacl_augmentation: true,
+        needs_dacl_augmentation: has_fs_policy,
+        #[cfg(feature = "bfs")]
         bfscfg_path: None,
         warnings,
     })
@@ -246,6 +277,7 @@ fn check_write_dac_path(path: &Path) -> Result<(), FallbackError> {
 fn parse_force_tier(s: &str) -> Option<IsolationTier> {
     match s {
         "base-container" => Some(IsolationTier::BaseContainer),
+        #[cfg(feature = "bfs")]
         "appcontainer-bfs" => Some(IsolationTier::AppContainerBfs),
         "appcontainer-dacl" => Some(IsolationTier::AppContainerDacl),
         _ => None,
@@ -263,7 +295,10 @@ fn forced_decision(
     // any tier that would touch them.
     let needs_dacl = match tier {
         IsolationTier::AppContainerDacl => true,
+        #[cfg(feature = "bfs")]
         IsolationTier::BaseContainer | IsolationTier::AppContainerBfs => denied,
+        #[cfg(not(feature = "bfs"))]
+        IsolationTier::BaseContainer => denied,
     };
     if needs_dacl && !policy.fallback.allow_dacl_mutation {
         return Err(FallbackError::DaclFallbackDisabled);
@@ -271,6 +306,7 @@ fn forced_decision(
     Ok(TierDecision {
         tier,
         needs_dacl_augmentation: needs_dacl,
+        #[cfg(feature = "bfs")]
         bfscfg_path: None,
         warnings: Vec::new(),
     })
@@ -313,6 +349,10 @@ pub(crate) fn is_base_container_api_present() -> bool {
 /// Returns `Err(FallbackError::SystemRootUnresolved)` only when the
 /// Win32 API itself fails — on a healthy Windows host this should never
 /// happen.
+///
+/// Compiled out unless the `bfs` Cargo feature is enabled — see the
+/// feature comment in `wxc_common/Cargo.toml`.
+#[cfg(feature = "bfs")]
 pub fn find_bfscfg_exe() -> Result<Option<PathBuf>, FallbackError> {
     #[cfg(test)]
     if let Ok(override_path) = std::env::var("MXC_BFSCFG_PATH") {
@@ -334,6 +374,7 @@ pub fn find_bfscfg_exe() -> Result<Option<PathBuf>, FallbackError> {
 /// The OS populates the answer from boot configuration; it does not
 /// consult the process environment. Returns
 /// [`FallbackError::SystemRootUnresolved`] when the API itself fails.
+#[cfg(feature = "bfs")]
 fn resolve_windows_directory() -> Result<PathBuf, FallbackError> {
     use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
 
@@ -368,6 +409,7 @@ fn resolve_windows_directory() -> Result<PathBuf, FallbackError> {
     parse_utf16(&buf[..len])
 }
 
+#[cfg(feature = "bfs")]
 fn parse_utf16(slice: &[u16]) -> Result<PathBuf, FallbackError> {
     String::from_utf16(slice)
         .map(PathBuf::from)
@@ -457,7 +499,9 @@ mod tests {
     // honored uniformly across the dispatcher and fallback_detector
     // test modules. A per-module lock would let cross-module test
     // threads race on `MXC_FORCE_TIER` / `MXC_BFSCFG_PATH`.
-    use crate::test_env::{BfscfgPathGuard, ForceTierGuard, ENV_LOCK};
+    use crate::test_env::ForceTierGuard;
+    #[cfg(feature = "bfs")]
+    use crate::test_env::{BfscfgPathGuard, ENV_LOCK};
 
     fn empty_policy() -> ContainerPolicy {
         ContainerPolicy::default()
@@ -476,6 +520,7 @@ mod tests {
         assert!(!d.needs_dacl_augmentation);
         assert!(d.warnings.is_empty());
     }
+    #[cfg(feature = "bfs")]
     #[test]
     fn empty_policy_no_filesystem_t2_path() {
         let _g = ForceTierGuard::set("appcontainer-bfs");
@@ -494,6 +539,7 @@ mod tests {
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
+    #[cfg(feature = "bfs")]
     #[test]
     fn denied_paths_disabled_blocks_t2() {
         let _g = ForceTierGuard::set("appcontainer-bfs");
@@ -520,10 +566,16 @@ mod tests {
             parse_force_tier("base-container"),
             Some(IsolationTier::BaseContainer)
         ));
+        #[cfg(feature = "bfs")]
         assert!(matches!(
             parse_force_tier("appcontainer-bfs"),
             Some(IsolationTier::AppContainerBfs)
         ));
+        #[cfg(not(feature = "bfs"))]
+        assert!(
+            parse_force_tier("appcontainer-bfs").is_none(),
+            "`appcontainer-bfs` must not parse when the `bfs` feature is disabled"
+        );
         assert!(matches!(
             parse_force_tier("appcontainer-dacl"),
             Some(IsolationTier::AppContainerDacl)
@@ -542,6 +594,7 @@ mod tests {
         detect(&policy, false).expect("invalid value should not error");
     }
 
+    #[cfg(feature = "bfs")]
     #[test]
     fn find_bfscfg_exe_smoke() {
         // Tests run in parallel by default and other tests below mutate
@@ -568,6 +621,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "bfs")]
     #[test]
     fn resolve_windows_directory_returns_existing_dir() {
         // `GetWindowsDirectoryW` always succeeds on any real Windows
@@ -581,6 +635,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "bfs")]
     #[test]
     fn mxc_bfscfg_path_empty_value_simulates_missing() {
         let _g = BfscfgPathGuard::set("");
@@ -590,6 +645,7 @@ mod tests {
             "empty MXC_BFSCFG_PATH must yield Ok(None), got {result:?}"
         );
     }
+    #[cfg(feature = "bfs")]
     #[test]
     fn mxc_bfscfg_path_nonexistent_path_is_none() {
         let _g = BfscfgPathGuard::set("C:\\__mxc_does_not_exist__\\bfscfg.exe");
@@ -599,6 +655,7 @@ mod tests {
             "non-existent MXC_BFSCFG_PATH must yield Ok(None), got {result:?}"
         );
     }
+    #[cfg(feature = "bfs")]
     #[test]
     fn mxc_bfscfg_path_existing_path_is_returned_verbatim() {
         // Use a file we know exists (this source file itself, via the

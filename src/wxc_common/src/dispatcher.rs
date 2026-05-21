@@ -103,6 +103,7 @@ impl std::fmt::Display for DispatchError {
                     path.display()
                 )
             }
+            #[cfg(feature = "bfs")]
             DispatchError::Fallback(FallbackError::SystemRootUnresolved { reason }) => write!(
                 f,
                 "Could not resolve the Windows system directory while probing for bfscfg.exe \
@@ -166,6 +167,7 @@ pub fn dispatch_with_fallback(request: &CodexRequest) -> Result<Dispatched, Disp
             let runner: Box<dyn ScriptRunner> = Box::new(BaseContainerRunner::new());
             (runner, None)
         }
+        #[cfg(feature = "bfs")]
         IsolationTier::AppContainerBfs => {
             // T2 only needs deny ACEs (BFS handles the rest in-runner)
             // and only when `deniedPaths` is non-empty. Allocate the
@@ -290,6 +292,7 @@ mod tests {
             "T1 must not attach a DaclManager — BC handles deny natively"
         );
     }
+    #[cfg(feature = "bfs")]
     #[test]
     fn dispatch_t2_with_denied_paths_has_dacl() {
         let _g = ForceTierGuard::set("appcontainer-bfs");

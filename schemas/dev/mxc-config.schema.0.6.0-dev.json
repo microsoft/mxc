@@ -110,7 +110,7 @@
         "allowDaclMutation": {
           "type": "boolean",
           "default": true,
-          "description": "When the BaseContainer API is absent and bfscfg.exe is unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). MODIFIES HOST FILESYSTEM SECURITY DESCRIPTORS — original DACLs are restored on exit. Set to false to refuse this fallback (the run will fail on machines that need Tier 3)."
+          "description": "When the BaseContainer API is absent and bfscfg.exe is unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). MODIFIES HOST FILESYSTEM SECURITY DESCRIPTORS — original DACLs are restored on exit. Set to false to refuse this fallback (the run will fail on machines that need Tier 3). Note: BFS (Tier 2) is gated behind the non-default `bfs` Cargo feature in the Rust core; default builds skip Tier 2 entirely, so DACL is the only AppContainer-tier filesystem-policy fallback they offer."
         }
       }
     },

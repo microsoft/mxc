@@ -11,6 +11,11 @@ isolation_session = [
     "dep:windows-collections",
 ]
 microvm = ["dep:nanvix_common"]
+# Enables the AppContainer Brokered File System (BFS) integration that
+# invokes `bfscfg.exe`. Disabled by default: known kernel-mode hangs in
+# `bfs.sys` / `bfsapi.dll` make the call path unsafe on most hosts.
+# Opt in once a fixed `bfs.sys` is available on the target machine.
+bfs = []
 
 [dependencies]
 serde = { workspace = true }
