@@ -84,6 +84,7 @@ jobs:
       outputDirectory: $(srcDir)/out
       ob_outputDirectory: $(outputDirectory)
       artifactBaseName: $(artifactPrefix)-$(targetTriple)
+      configTomlPath: $(srcDir)/.cargo/config.toml
 
     templateContext:
       rust:
@@ -92,6 +93,10 @@ jobs:
           version: 'ms-prod-1.93'
           additionalTargets: $(triplet)
         workingDirectory: $(workingDirectory)
+        authenticateOptions:
+          configFile: $(configTomlPath)
+        installOptions:
+          configFile: $(configTomlPath)
         cacheOptions:
           enableTargetCache: true
 
@@ -107,7 +112,7 @@ jobs:
 
       # Append pipeline-specific Cargo settings (registry, cross-compile linker) to the workspace config
       - powershell: |
-          Add-Content -Path "$(srcDir)/.cargo/config.toml" -Value ("`n" + (Get-Content -Raw "$(srcDir)/.azure-pipelines/.cargo/config.toml"))
+          Add-Content -Path "$(configTomlPath)" -Value ("`n" + (Get-Content -Raw "$(srcDir)/.azure-pipelines/.cargo/config.toml"))
         displayName: Setup Cargo Config
 
       - task: 1ES.Build.Rust.Setup@1
