@@ -18,12 +18,22 @@ roles**:
 
 Each does only what it's best at. Naming is bindflt's whole job.
 Brokering reads the AppContainer principal can't natively perform
-is ProjFS's whole job. **No path goes through both for R/W.**
+is ProjFS's whole job. **R/O brokered reads use both filters in
+tandem; R/W writes only ever go through bindflt — ProjFS is not
+on the write path.**
 
-The single invariant that keeps the state machine sane:
+The invariant that keeps the state machine sane is about *modes*,
+not about which filters participate: a given path picks exactly
+one of three modes —
 
-> A path is either **R/O brokered by ProjFS** or **R/W direct via
-> bindflt**. Never both, never anything else.
+> - **R/W direct**: bindflt R/W identity bind + package-SID grant ACE. ProjFS not involved.
+> - **R/O brokered**: bindflt R/O redirect into the virt root + ProjFS provider. Both filters on the path.
+> - **AAP-readable R/O**: bindflt R/O identity bind (or nothing). No broker.
+>
+> Modes never overlap on the same path. In particular ProjFS
+> never sits under a writable bind, so the provider never sees
+> convert-to-full, mirror-back-to-source, or rename-across-
+> boundary cases.
 
 ## Naming vs access
 
