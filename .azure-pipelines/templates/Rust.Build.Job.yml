@@ -11,9 +11,6 @@ parameters:
 - name: ESRPInfo
   type: object
   default: {}
-- name: useOneBranchPool
-  type: boolean
-  default: false
 
 jobs:
 - ${{ each item in parameters.matrix }}:
@@ -21,17 +18,11 @@ jobs:
     displayName: 'Build (${{ item.arch }} ${{ item.component }})'
     dependsOn: []
     pool:
-      
-      ${{ if and(eq(item.os, 'windows'), eq(parameters.useOneBranchPool, false)) }}:
-        name: Azure-Pipelines-1ESPT-ExDShared
+      name: Azure-Pipelines-1ESPT-ExDShared
+      ${{ if eq(item.os, 'windows') }}:
         image: windows-latest
         os: windows
-
-      ${{ if and(eq(item.os, 'windows'), eq(parameters.useOneBranchPool, true)) }}:
-        type: windows
-
       ${{ if eq(item.os, 'linux') }}:
-        name: Azure-Pipelines-1ESPT-ExDShared
         image: ubuntu-latest #x64 host
         os: linux
 
@@ -47,16 +38,11 @@ jobs:
       ${{ if and(eq(item.os, 'linux'), eq(item.arch, 'arm64')) }}:
         triplet: aarch64-unknown-linux-gnu
 
-      ${{ if eq(parameters.useOneBranchPool, true) }}:
-        srcDir: $(Build.SourcesDirectory)/mxc
-      ${{ else }}:
-        srcDir: $(Build.SourcesDirectory)
-
       # Windows specific variables
       ${{ if eq(item.os, 'windows') }}:
         CARGO_TARGET_DIR: c:/t/target
         artifactPrefix: wxc-binaries
-        workingDirectory: $(srcDir)/src
+        workingDirectory: $(Build.SourcesDirectory)/src
         signPattern: |
             wxc-exec.exe
             winhttp-proxy-shim.exe
@@ -68,7 +54,7 @@ jobs:
       ${{ if eq(item.os, 'linux') }}:
         CARGO_TARGET_DIR: /tmp/target
         artifactPrefix: lxc-binaries
-        workingDirectory: $(srcDir)/src/lxc
+        workingDirectory: $(Build.SourcesDirectory)/src/lxc
         signPattern: |
           lxc-exec
 
@@ -81,10 +67,9 @@ jobs:
       # Paths
       targetTriple: $(triplet)
       targetTripleDir: $(CARGO_TARGET_DIR)/$(targetTriple)/release
-      outputDirectory: $(srcDir)/out
-      ob_outputDirectory: $(outputDirectory)
+      outputDirectory: $(Build.SourcesDirectory)/out
       artifactBaseName: $(artifactPrefix)-$(targetTriple)
-      configTomlPath: $(srcDir)/.cargo/config.toml
+      configTomlPath: $(Build.SourcesDirectory)/.cargo/config.toml
 
     templateContext:
       rust:
@@ -99,9 +84,6 @@ jobs:
           configFile: $(configTomlPath)
         cacheOptions:
           enableTargetCache: true
-        setupOptions:
-          setupPython: ${{ parameters.useOneBranchPool }}
-          pythonArtifactFeeds: 'Dart/Mxc-Azure-Feed'
 
     steps:
       - checkout: self
@@ -115,7 +97,7 @@ jobs:
 
       # Append pipeline-specific Cargo settings (registry, cross-compile linker) to the workspace config
       - powershell: |
-          Add-Content -Path "$(configTomlPath)" -Value ("`n" + (Get-Content -Raw "$(srcDir)/.azure-pipelines/.cargo/config.toml"))
+          Add-Content -Path "$(configTomlPath)" -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
         displayName: Setup Cargo Config
 
       - task: 1ES.Build.Rust.Setup@1
@@ -127,15 +109,8 @@ jobs:
           command: build
           profile: release
           target: $(triplet)
-          # Skip cargo tests in the OneBranch container pool: the container image is
-          # missing runtime DLLs that --all-features test binaries depend on (e.g.
-          # hyperlight). Other pipelines (Azure-Pipelines-1ESPT-ExDShared) run tests.
-          ${{ if eq(parameters.useOneBranchPool, true) }}:
-            testCondition: "eq(variables['isX64'], 'false')"
-            enableTest: false
-          ${{ else }}:
-            testCondition: "eq(variables['isX64'], 'true')" # 1ES nested template takes this as a string
-            enableTest: $(isX64)
+          testCondition: "eq(variables['isX64'], 'true')" # 1ES nested template takes this as a string
+          enableTest: $(isX64)
           publishTestResults: false
           enableClippy: false
           useNextest: false

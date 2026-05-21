@@ -1,3 +1,18 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# MXC VPack publishing pipeline.
+#
+# This pipeline does NOT build anything. It consumes already-signed binaries
+# produced by the official build pipeline (1ES.Build.yml run with
+# `officialBuild: Official`) and packages them into a vpack.
+#
+# Expected upstream pipeline name in ADO: `MXC-Official-Build` (override below
+# if the pipeline is created under a different name in ADO UI).
+#
+# The build-completion trigger that fires this pipeline when the official build
+# succeeds is configured in the ADO UI (Edit pipeline -> Triggers).
+
 parameters: # parameters are shown up in ADO UI in a build queue time
 - name: 'debug'
   displayName: 'Enable debug output'
@@ -9,7 +24,6 @@ variables:
   value: "$[format('{0:yyMMdd}', pipeline.startTime)]"
 - name: VersionCounter
   value: "$[counter(variables['VersionDate'], 1)]"
-- group: MXC-ESRP-Signing
 - name: WindowsContainerImage
   value: onebranch.azurecr.io/windows/ltsc2022/vse2022:latest
 
@@ -19,28 +33,40 @@ pool:
   type: windows
 
 resources:
-  repositories: 
+  repositories:
     - repository: templates
       type: git
       name: OneBranch.Pipelines/GovernedTemplates
       ref: refs/heads/main
+  pipelines:
+    # Pre-built, signed binaries come from the official build pipeline.
+    # The build-completion trigger is configured in the ADO UI; this resource
+    # declaration is what enables `DownloadPipelineArtifact@2 source: specific`
+    # and the `pipeline.officialBuild.*` runtime variables.
+    - pipeline: officialBuild
+      project: Dart
+      source: MXC-Official-Build
+      trigger:
+        branches:
+          include:
+            - main
 
 extends:
   template: v2/Microsoft.NonOfficial.yml@templates
   parameters:
-    platform:     
+    platform:
       name: 'windows_undocked'
-    
+
     featureFlags:
       WindowsHostVersion:
         Version: 2022
-            
+
     cloudvault:
       enabled: false
-          
+
     stages:
-    - stage: Build
-      displayName: 'Build Executables'
+    - stage: vpack
+      displayName: 'Create OS vpack'
       jobs:
         - job: Set_Version
           displayName: Set version
@@ -51,6 +77,7 @@ extends:
             ob_outputDirectory: '$(Build.SourcesDirectory)\out'
           steps:
             - task: PowerShell@2
+              name: setVpackVersion
               displayName: Set vpack version
               inputs:
                 targetType: inline
@@ -59,57 +86,48 @@ extends:
                   $vpackVersion = "$sdkVersion$(VersionDate)$(VersionCounter)"
                   Write-Host "##vso[task.setvariable variable=VPackVersion;isOutput=true]$vpackVersion"
 
-        - template: .azure-pipelines/templates/Rust.Build.Job.yml@self
-          parameters:
-            isOfficialBuild: true
-            useOneBranchPool: true
-            matrix:
-              - name: windows_x64
-                os: windows
-                arch: x64
-                component: WXC
-              - name: windows_arm64
-                os: windows
-                arch: arm64
-                component: WXC
+        - job: Packaging
+          dependsOn: Set_Version
+          pool:
+            type: windows
+          variables:
+            VPackVersion: $[ dependencies.Set_Version.outputs['setVpackVersion.VPackVersion'] ]
+            # Note: all files placed in the output directory will be included in the vpack
+            ob_outputDirectory: '$(Build.SourcesDirectory)\out'
+            ob_createvpack_enabled: true
+            ob_createvpack_packagename: 'MXC'
+            ob_createvpack_owneralias: 'Tessera-mxc-admin'
+            ob_createvpack_description: 'Microsoft Execution Containers'
+            ob_createvpack_provData: true
+            ob_createvpack_versionAs: string
+            ob_createvpack_version: $(VPackVersion)
+            ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
 
-            ESRPInfo:
-              serviceName: $(serviceName)
-              tenantId: $(tenantId)
-              azureKeyVaultName: $(azureKeyVaultName)
-              authCertName: $(authCertName)
-              signCertName: $(signCertName)
-              clientId: $(clientId)
+          steps:
+            # Pull pre-built, signed wxc binaries from the upstream official build.
+            # `source: specific` + `runVersion: latestFromBranch` consumes the most
+            # recent successful run on the configured branch; the build-completion
+            # trigger ensures this pipeline runs against the build that just
+            # completed, but the variable group / pipeline resource alias makes
+            # the artifacts available regardless of how this run was queued.
+            - task: DownloadPipelineArtifact@2
+              displayName: Download wxc x64 artifact
+              inputs:
+                source: specific
+                project: Dart
+                pipeline: MXC-Official-Build
+                runVersion: latestFromBranch
+                runBranch: main
+                artifact: wxc-binaries-x86_64-pc-windows-msvc
+                path: $(ob_outputDirectory)/x64
 
-    - stage: vpack
-      dependsOn: Build
-      displayName: 'Create OS vpack'
-      condition: succeeded()
-      jobs:
-      - job: Packaging
-        pool:
-          type: windows
-        variables:
-          # Note: all files placed in the output directory will be included in the vpack
-          ob_outputDirectory: '$(Build.SourcesDirectory)\out'
-          ob_createvpack_enabled: true
-          ob_createvpack_packagename: 'MXC'
-          ob_createvpack_owneralias: 'Tessera-mxc-admin'
-          ob_createvpack_description: 'Microsoft Execution Containers'
-          ob_createvpack_provData: true
-          ob_createvpack_versionAs: string
-          ob_createvpack_version: $(VPackVersion)
-          ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
-
-        steps:
-          # Download the wxc binaries and pdbs for each architecture
-          - task: DownloadPipelineArtifact@2
-            displayName: Download wxc x64 artifact
-            inputs:
-              artifact: wxc-binaries-x86_64-pc-windows-msvc
-              path: $(ob_outputDirectory)/x64
-          - task: DownloadPipelineArtifact@2
-            displayName: Download wxc arm64 artifact
-            inputs:
-              artifact: wxc-binaries-aarch64-pc-windows-msvc
-              path: $(ob_outputDirectory)/arm64
+            - task: DownloadPipelineArtifact@2
+              displayName: Download wxc arm64 artifact
+              inputs:
+                source: specific
+                project: Dart
+                pipeline: MXC-Official-Build
+                runVersion: latestFromBranch
+                runBranch: main
+                artifact: wxc-binaries-aarch64-pc-windows-msvc
+                path: $(ob_outputDirectory)/arm64
