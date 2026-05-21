@@ -64,11 +64,7 @@ extends:
             ob_createvpack_packagename: 'MXC'
             ob_createvpack_owneralias: 'Tessera-mxc-admin'
             ob_createvpack_description: 'Microsoft Execution Containers'
-            ob_createvpack_provData: true
-            # provData needs to call GitHub's commits API; the repo is private so
-            # an unauthenticated request 404s. Token comes from MXC-ESRP-Signing
-            # (or whichever variable group exposes a GitHub PAT with repo:read).
-            ob_createvpack_githubToken: $(githubToken)
+            ob_createvpack_provData: false
             # Use semver parts: keep major.minor.patch in sync with the SDK and
             # encode the build date + per-day counter as the prerelease tag.
             # Example: sdk 0.2.0, first build on 2026-05-21 -> 0.2.0-260521.1
