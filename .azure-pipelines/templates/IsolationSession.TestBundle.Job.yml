@@ -1,0 +1,117 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Produces a pipeline artifact containing wxc-exec (built with --features isolation_session),
+# test configs, and test scripts ready for deployment to a Windows 11 target with IsoEnvBroker.
+# The artifact is scoped to the ADO project  internal-only by default.
+
+parameters:
+- name: isOfficialBuild
+  type: boolean
+  default: false
+
+jobs:
+- job: package_iso_test_bundle
+  displayName: 'Package Isolation Session Test Bundle (x64)'
+  pool:
+    name: Azure-Pipelines-1ESPT-ExDShared
+    image: windows-2022
+    os: windows
+  variables:
+    triplet: x86_64-pc-windows-msvc
+    CARGO_TARGET_DIR: c:/t/target
+    outputDirectory: $(Build.SourcesDirectory)/out/iso-test-bundle
+
+  templateContext:
+    rust:
+      rustToolchain:
+        toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+        version: 'ms-prod-1.93'
+      additionalTargets: x86_64-pc-windows-msvc
+      workingDirectory: src
+      cacheOptions:
+        enableTargetCache: true
+
+  steps:
+    - checkout: self
+
+    - powershell: |
+        Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" `
+          -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
+      displayName: Setup Cargo Config
+
+    - task: 1ES.Build.Rust.Setup@1
+    - task: 1ES.Build.Rust.Restore@1
+
+    - script: >
+        cargo build --locked --release
+        --target x86_64-pc-windows-msvc
+        --features isolation_session
+        -p wxc-exec
+      displayName: 'Build wxc-exec (isolation_session)'
+      workingDirectory: src
+
+    - powershell: |
+        $out = "$(outputDirectory)"
+        New-Item -ItemType Directory -Force -Path "$out/bin/x64", "$out/test_configs", "$out/test_scripts", "$out/scripts" | Out-Null
+
+        # wxc-exec binary (isolation_session enabled)
+        Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$out/bin/x64/"
+        Write-Host "  -> bin/x64/wxc-exec.exe"
+
+        # Test configs (isolation_session subset)
+        $configs = Get-ChildItem "$(Build.SourcesDirectory)/test_configs/isolation_session_*.json"
+        foreach ($f in $configs) {
+            Copy-Item $f.FullName "$out/test_configs/"
+            Write-Host "  -> test_configs/$($f.Name)"
+        }
+
+        # Test scripts
+        $scripts = @(
+            'run_isolation_session_tests.ps1',
+            'run_isolation_session_state_aware_tests.ps1',
+            'run_test_configs.ps1'
+        )
+        foreach ($s in $scripts) {
+            $src = "$(Build.SourcesDirectory)/test_scripts/$s"
+            if (Test-Path $src) {
+                Copy-Item $src "$out/test_scripts/"
+                Write-Host "  -> test_scripts/$s"
+            }
+        }
+
+        # CI runner scripts
+        $ciScripts = @(
+            'Invoke-MxcIsolationSessionTests.ps1',
+            'Run-Tests.cmd'
+        )
+        foreach ($s in $ciScripts) {
+            $src = "$(Build.SourcesDirectory)/scripts/ci/$s"
+            if (Test-Path $src) {
+                Copy-Item $src "$out/scripts/"
+                Write-Host "  -> scripts/$s"
+            }
+        }
+
+        # Manifest
+        $manifest = @{
+            format_version = 1
+            produced_at    = (Get-Date).ToUniversalTime().ToString('o')
+            commit_sha     = "$(Build.SourceVersion)"
+            build_id       = "$(Build.BuildId)"
+            pipeline       = "$(Build.DefinitionName)"
+            triplet        = "x86_64-pc-windows-msvc"
+            features       = @('isolation_session')
+        }
+        $manifest | ConvertTo-Json -Depth 3 | Set-Content "$out/manifest.json" -Encoding UTF8
+        Write-Host "  -> manifest.json"
+
+        Write-Host "`n==> Bundle assembled at $out"
+        Get-ChildItem $out -Recurse -File | ForEach-Object { Write-Host "  $($_.FullName.Replace($out, ''))" }
+      displayName: 'Assemble test bundle'
+
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: 'Publish Isolation Test Bundle'
+      inputs:
+        path: '$(outputDirectory)'
+        artifactName: mxc-iso-test-bundle-x86_64-pc-windows-msvc
