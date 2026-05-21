@@ -660,8 +660,7 @@ impl ScriptRunner for AppContainerScriptRunner {
                     diag.kind, diag.message
                 ));
                 logger.log_line(&format!("Error: Remediation: {}", diag.remediation));
-                let user_msg =
-                    format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
+                let user_msg = format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
                 if response.error_message.is_empty() {
                     response.error_message = user_msg.clone();
                 } else {

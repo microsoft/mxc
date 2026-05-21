@@ -614,8 +614,7 @@ impl ScriptRunner for BaseContainerRunner {
                     diag.kind, diag.message
                 );
                 let _ = writeln!(logger, "Error: Remediation: {}", diag.remediation);
-                user_message =
-                    format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
+                user_message = format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
             }
             if user_message.is_empty() {
                 user_message = raw_error.clone();
@@ -704,8 +703,7 @@ impl ScriptRunner for BaseContainerRunner {
                     diag.kind, diag.message
                 );
                 let _ = writeln!(logger, "Error: Remediation: {}", diag.remediation);
-                let user_msg =
-                    format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
+                let user_msg = format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
                 error_message = user_msg.clone();
                 standard_err = user_msg;
             }
