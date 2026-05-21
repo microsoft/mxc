@@ -50,6 +50,12 @@ extends:
     cloudvault:
       enabled: false
 
+    # Disable TSA: it tries to register a codebase named "microsoft_Dart_microsoft/mxc"
+    # (illegal slash) and there's no source build to analyze in this pipeline anyway.
+    sdl:
+      tsa:
+        enabled: false
+
     stages:
     - stage: vpack
       displayName: 'Create OS vpack'
