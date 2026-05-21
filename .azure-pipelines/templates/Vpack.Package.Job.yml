@@ -41,12 +41,12 @@ extends:
     stages:
     - stage: Build
       displayName: 'Build Executables'
+      pool:
+        type: windows
       jobs:
         - job: Set_Version
           displayName: Set version
           dependsOn: []
-          pool:
-            type: windows
           variables:
             ob_outputDirectory: '$(Build.SourcesDirectory)\out'
           steps:
