@@ -31,8 +31,6 @@ pub mod dispatcher;
 #[cfg(target_os = "windows")]
 pub mod fallback_detector;
 #[cfg(target_os = "windows")]
-pub mod filesystem_bfs;
-#[cfg(target_os = "windows")]
 pub mod filesystem_dacl;
 #[cfg(target_os = "windows")]
 pub mod job_object;

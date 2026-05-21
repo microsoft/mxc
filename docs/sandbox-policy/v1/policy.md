@@ -146,7 +146,7 @@ spawnSandboxFromConfig(config);
 ┌───────────────────────────────────────────────────────────────┐
 │ LAYER 3: OS Primitives                                        │
 │                                                               │
-│ Windows: BaseProcessContainer, BFS, Firewall, Job Objects     │
+│ Windows: BaseProcessContainer, Firewall, Job Objects          │
 │ Linux: LXC cgroups, bind mounts, iptables, seccomp            │
 │                                                               │
 │ Kernel-level enforcement.                                     │

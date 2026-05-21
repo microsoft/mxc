@@ -746,7 +746,9 @@ function buildPolicy(): any {
       policy.filesystem.readonlyPaths.push(shellPaths.ps7.rootDir);
     }
     // For MSIX installs (WindowsApps), also add the resolved package directory
-    // so BFS can broker access to the actual PS7 binaries/DLLs.
+    // so backends that enforce filesystem policy (BaseContainer, Windows Sandbox,
+    // LXC, seatbelt) can grant access to the actual PS7 binaries/DLLs.
+    // AppContainer ignores filesystem policy and will fall back to ambient DACLs.
     if (shellPaths.ps7.msixPackageDir) {
       if (policy.filesystem.readonlyPaths.indexOf(shellPaths.ps7.msixPackageDir) === -1) {
         policy.filesystem.readonlyPaths.push(shellPaths.ps7.msixPackageDir);
@@ -1817,10 +1819,6 @@ var ERROR_PATTERNS = [
   { pattern: 'Experimental_CreateProcessInSandbox failed', title: 'Sandbox API failed', explanation: 'The CreateProcessInSandbox API returned an error. Check the error code for details.', suggestion: 'Enable Debug Mode for more details.' },
   { pattern: 'LoadLibraryExW(processmodel.dll) failed', title: 'BaseContainer not available', explanation: 'processmodel.dll could not be loaded. BaseContainer requires Windows builds that support the v0.5.0+ schema.', suggestion: 'Use version 0.4.0-alpha instead of 0.5.0-dev.' },
   { pattern: 'Access is denied', title: 'Access denied', explanation: 'The script tried to access a resource that the sandbox blocks.', suggestion: 'Enable File Access and add the needed path, or enable Internet if the script needs network.' },
-  { pattern: 'Unable to open file', title: 'BFS path not found', explanation: 'BFS could not open a brokered path. The directory may not exist or the path contains unresolved environment variables.', suggestion: 'Ensure the path exists on disk. Use resolved paths (e.g., C:\\Users\\...\\Temp) not environment variables like %TEMP%.' },
-  { pattern: 'Unable to perform policy operation', title: 'BFS policy failed', explanation: 'The filesystem broker (BFS) could not apply the path policy. The BFS broker helper may not be available on this OS build.', suggestion: 'BFS requires Windows v0.5.0+. Remove filesystem paths or upgrade the OS.' },
-  { pattern: 'bfscfg.exe was not found', title: 'BFS not available', explanation: 'Filesystem brokering (BFS) component was not found.', suggestion: 'Filesystem brokering (BFS) requires Windows v0.5.0+. The OS may not support it.' },
-  { pattern: 'BFS error', title: 'BFS error', explanation: 'Filesystem brokering (BFS) encountered an error.', suggestion: 'Filesystem brokering (BFS) requires Windows v0.5.0+. The OS may not support it.' },
   { pattern: 'is not recognized', title: 'Command not found', explanation: 'The command was not found inside the sandbox. PATH directories may not be accessible.', suggestion: 'Enable "Include common tools" in File Access to add PATH directories.' },
   { pattern: 'The remote name could not be resolved', title: 'DNS resolution failed', explanation: 'The script could not resolve a hostname. Internet access may be blocked.', suggestion: 'Enable Internet access in the Policy section.' },
   { pattern: 'network is not available', title: 'Network blocked', explanation: 'Outbound network connections are blocked by the sandbox policy.', suggestion: 'Enable "Allow internet access" in Policy.' },

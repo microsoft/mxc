@@ -358,8 +358,7 @@ impl Default for BaseProcessUiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FallbackPolicy {
-    /// When neither the in-process BaseContainer API nor the OS-side
-    /// filesystem broker helper is available, allow MXC to apply DACL ACEs
+    /// When the BaseContainer API is absent, allow MXC to apply DACL ACEs
     /// on policy paths (Tier 3 fallback). This modifies host filesystem
     /// security descriptors; original DACLs are restored on exit. Defaults
     /// to `true`. Set to `false` to refuse the fallback (the run will fail

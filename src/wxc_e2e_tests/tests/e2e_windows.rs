@@ -80,25 +80,6 @@ fn processcontainer_lpac() {
     assert_wxc_success("basic_lpac.json", &["--debug"]);
 }
 
-fn filesystem_bfs() {
-    let _temp = TempDirs::create(&["C:\\temp\\wxc_test_allowed", "C:\\temp\\wxc_test_denied"]);
-    assert_wxc_success("filesystem_bfs_test.json", &["--debug"]);
-}
-
-fn filesystem_bfs_readonly() {
-    let temp = TempDirs::create(&["C:\\temp\\wxc_test_allowedreadonly"]);
-    temp.write_absolute_file(
-        "C:\\temp\\wxc_test_allowedreadonly\\test_input.txt",
-        "Test Input",
-    );
-    assert_wxc_success("filesystem_bfs_readonly_test.json", &["--debug"]);
-}
-
-fn filesystem_bfs_spaces() {
-    let _temp = TempDirs::create(&["C:\\Users\\Public\\wxc bfs test"]);
-    assert_wxc_success("filesystem_bfs_spaces_test.json", &["--debug"]);
-}
-
 fn pwsh_setlocation() {
     assert_wxc_success("pwsh_setlocation.json", &["--debug"]);
 }
@@ -144,7 +125,7 @@ fn processcontainer_proxy() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
+#[ignore] // Requires a Windows host with the AppContainer toolchain
 fn test_processcontainer_basic() {
     if !cached_has_wxc_exe() {
         return;
@@ -154,7 +135,7 @@ fn test_processcontainer_basic() {
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
+#[ignore] // Requires a Windows host with the AppContainer toolchain
 fn test_processcontainer_lpac() {
     if !cached_has_wxc_exe() {
         return;
@@ -164,37 +145,7 @@ fn test_processcontainer_lpac() {
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
-fn test_filesystem_bfs() {
-    if !cached_has_wxc_exe() {
-        return;
-    }
-    assert_python();
-    with_test_lock(filesystem_bfs);
-}
-
-#[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
-fn test_filesystem_bfs_readonly() {
-    if !cached_has_wxc_exe() {
-        return;
-    }
-    assert_python();
-    with_test_lock(filesystem_bfs_readonly);
-}
-
-#[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
-fn test_filesystem_bfs_spaces() {
-    if !cached_has_wxc_exe() {
-        return;
-    }
-    assert_python();
-    with_test_lock(filesystem_bfs_spaces);
-}
-
-#[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
+#[ignore] // Requires a Windows host with the AppContainer toolchain
 fn test_pwsh_setlocation() {
     if !cached_has_wxc_exe() {
         return;
@@ -204,7 +155,7 @@ fn test_pwsh_setlocation() {
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
+#[ignore] // Requires a Windows host with the AppContainer toolchain
 fn test_test_configs() {
     if !cached_has_test_driver() {
         return;
@@ -213,7 +164,7 @@ fn test_test_configs() {
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
+#[ignore] // Requires a Windows host with the AppContainer toolchain
 fn test_examples() {
     if !cached_has_test_driver() {
         return;
@@ -258,7 +209,7 @@ fn test_microvm_suite() {
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled and elevation
+#[ignore] // Requires a Windows host with the AppContainer toolchain and elevation
 fn test_processcontainer_proxy() {
     if !cached_has_test_driver() {
         return;
@@ -278,8 +229,6 @@ fn test_on_repeat() {
         for pass in 1..=10 {
             println!("=== Pass {pass} of 10 ===");
             processcontainer_basic();
-            filesystem_bfs();
-            filesystem_bfs_readonly();
             processcontainer_lpac();
         }
     });

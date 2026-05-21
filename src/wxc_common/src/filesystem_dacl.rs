@@ -1750,8 +1750,7 @@ mod tests {
     // [`crate::test_env::ScopedStateDir`]. That helper acquires the
     // shared crate-wide `ENV_LOCK`, which also serializes against
     // `dispatcher::tests` and `fallback_detector::tests` so concurrent
-    // tests don't race on `MXC_DACL_STATE_DIR` / `MXC_FORCE_TIER` /
-    // `MXC_BFSCFG_PATH`.
+    // tests don't race on `MXC_DACL_STATE_DIR` / `MXC_FORCE_TIER`.
     use crate::test_env::ScopedStateDir;
 
     #[test]

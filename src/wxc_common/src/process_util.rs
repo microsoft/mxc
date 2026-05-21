@@ -170,17 +170,16 @@ pub struct CapturedOutput {
 /// executable search order** — the OS will load exactly the binary
 /// named, with no fallback to the loader's directory, the CWD, the
 /// system directories, or `PATH`. Callers that have an authoritative
-/// absolute path (resolved from a probe, e.g. via
-/// [`crate::fallback_detector::find_bfscfg_exe`]) should pass it here
-/// to defeat executable-search-order hijacking.
+/// absolute path (resolved from a probe) should pass it here to defeat
+/// executable-search-order hijacking.
 ///
 /// When `application_name` is `None`, the executable is resolved from
 /// the first token of `command_line` according to the standard
 /// `CreateProcessW` rules — vulnerable to search-order attacks if the
 /// first token is a bare name.
 ///
-/// This is used by `FileSystemBfsManager` (for `bfscfg.exe`) and the test
-/// driver — anywhere we need to inspect process output rather than relay it.
+/// Used by the test driver — anywhere we need to inspect process output
+/// rather than relay it.
 pub fn run_process_with_captured_output(
     application_name: Option<&str>,
     command_line: &str,

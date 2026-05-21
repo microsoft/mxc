@@ -332,7 +332,7 @@ environment.
 |---|---|---|---|
 | Isolation level | Process | Container | Process |
 | Startup time | Fast (~10 ms) | Medium (~1 s) | Fast (~10 ms) |
-| Filesystem | BFS policy | Bind mounts | Profile `subpath` rules |
+| Filesystem | None — use BaseContainer (schema 0.5+) for filesystem isolation | Bind mounts | Profile `subpath` rules |
 | Network | Windows Firewall | iptables/nftables | Profile `network-*` rules |
 | Privileges | Optional admin | Root (or unprivileged LXC) | None — `sandbox_init` is unprivileged |
 | Container lifecycle | Yes (named) | Yes (named) | No (per-process) |

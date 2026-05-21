@@ -6,7 +6,6 @@
 |---------|---------------------------|------------------------------|-------|
 | AppContainer (v0.4.0) | ✅ Works | ✅ Works | N/A |
 | BaseContainer (v0.5.0) | ❌ No processmodel.dll | ✅ Works | N/A |
-| BFS filesystem brokering | ❌ Broker helper not available | ✅ Works | N/A |
 | Proxy (AppContainer) | ✅ Works (needs admin for shim) | ✅ Works | N/A |
 | Proxy (BaseContainer) | N/A | ⚠️ WinHTTP only, see below | N/A |
 | LXC containers | N/A | N/A | ✅ Works |
@@ -81,7 +80,6 @@ WinHTTP sessions may or may not pick it up depending on how they're initialized.
 | Feature | Needs Admin? |
 |---------|-------------|
 | Basic AppContainer execution | No |
-| BFS filesystem brokering | No |
 | Network (capabilities only) | No |
 | Network (firewall rules) | Yes — `netsh advfirewall` |
 | Proxy shim (v0.4.0) | Yes — elevated winhttp-proxy-shim |
@@ -120,18 +118,17 @@ When `disallowWin32kSystemCalls=true`:
 - `cmd.exe` may still work (doesn't use Win32k)
 - PowerShell, GUI apps, and most Windows executables will fail
 
-## Filesystem (BFS)
+## Filesystem
 
-### Trailing Backslash
+The AppContainer runner (schema 0.4) no longer enforces filesystem
+policy at all: the prior BFS (Brokered File System) integration was
+removed due to known kernel-mode hangs in `bfs.sys` / `bfsapi.dll`.
+Callers that need filesystem isolation must target the BaseContainer
+runner (schema 0.5 or `--experimental`).
 
-Paths ending in `\` (e.g., `C:\`) are handled correctly. The SDK's filesystem-broker argument
-builder only quotes paths containing spaces, avoiding the `"C:\"` escaping issue.
-
-### Short Paths (8.3)
-
-BFS brokers paths using long path names. If `os.tmpdir()` returns a short path like
-`C:\Users\ADMINU~1\...`, use `fs.realpathSync.native()` to resolve it before passing
-to the SDK.
+When a policy declares `readwrite` / `readonly` / `denied` paths against
+the AppContainer runner, wxc-exec now logs a single warning and runs
+the process without filesystem restrictions.
 
 ## Version Compatibility
 

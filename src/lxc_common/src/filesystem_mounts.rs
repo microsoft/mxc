@@ -103,7 +103,7 @@ pub fn configure_filesystem_mounts(
 ///
 /// For LXC, mounts are part of the container config and are automatically
 /// cleaned up when the container is destroyed. This function is provided
-/// for symmetry with the Windows `FileSystemBfsManager`.
+/// for symmetry with the Windows AppContainer cleanup path.
 pub fn remove_filesystem_mounts(_container: &LxcContainer, logger: &mut Logger) {
     logger.log_line("Filesystem mounts will be cleaned up with container destruction.");
 }

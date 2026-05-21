@@ -1,19 +1,18 @@
 //! Shared test-only helpers for env-var serialization across modules.
 //!
 //! The dispatcher tier-selection tests and the fallback-detector probe
-//! tests both mutate `MXC_FORCE_TIER` and `MXC_BFSCFG_PATH` (which are
-//! process-global). Each module previously owned its own private
-//! `ENV_LOCK`, but that meant a `fallback_detector::tests` thread and a
-//! `dispatcher::tests` thread could mutate the same env var
-//! concurrently — observable as a race once both test families started
-//! running under the same profile (cfg(test), any profile).
+//! tests both mutate `MXC_FORCE_TIER` (which is process-global). Each
+//! module previously owned its own private `ENV_LOCK`, but that meant a
+//! `fallback_detector::tests` thread and a `dispatcher::tests` thread
+//! could mutate the same env var concurrently — observable as a race
+//! once both test families started running under the same profile
+//! (cfg(test), any profile).
 //!
 //! This module exposes a single shared `ENV_LOCK` that all test
 //! modules in this crate take before touching the relevant env vars.
 //! Hold the guard for the entire duration of the env-var-dependent
 //! work so the value remains stable across the call. The provided
-//! `ForceTierGuard` and `BfscfgPathGuard` types encapsulate the
-//! set / clear discipline.
+//! `ForceTierGuard` type encapsulates the set / clear discipline.
 //!
 //! Compiled in only under `#[cfg(test)]`.
 
@@ -21,8 +20,8 @@ use std::sync::{Mutex, MutexGuard};
 
 /// Process-wide serialization for tests that mutate test-seam env
 /// vars. Tests in any module in this crate should acquire this lock
-/// (typically via [`ForceTierGuard`] / [`BfscfgPathGuard`]) before
-/// reading or writing `MXC_FORCE_TIER` or `MXC_BFSCFG_PATH`.
+/// (typically via [`ForceTierGuard`]) before reading or writing
+/// `MXC_FORCE_TIER`.
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn lock() -> MutexGuard<'static, ()> {
@@ -47,7 +46,7 @@ impl ForceTierGuard {
     pub(crate) fn set(value: &str) -> Self {
         let guard = lock();
         // SAFETY: env-var mutation is gated by ENV_LOCK; no other
-        // ForceTierGuard / BfscfgPathGuard can be active concurrently.
+        // ForceTierGuard can be active concurrently.
         unsafe {
             std::env::set_var("MXC_FORCE_TIER", value);
         }
@@ -65,43 +64,18 @@ impl Drop for ForceTierGuard {
     }
 }
 
-/// RAII guard for `MXC_BFSCFG_PATH`, mirroring [`ForceTierGuard`].
-pub(crate) struct BfscfgPathGuard {
-    _lock: MutexGuard<'static, ()>,
-}
-
-impl BfscfgPathGuard {
-    pub(crate) fn set(value: &str) -> Self {
-        let guard = lock();
-        // SAFETY: see ForceTierGuard::set.
-        unsafe {
-            std::env::set_var("MXC_BFSCFG_PATH", value);
-        }
-        BfscfgPathGuard { _lock: guard }
-    }
-}
-
-impl Drop for BfscfgPathGuard {
-    fn drop(&mut self) {
-        // SAFETY: see ForceTierGuard::drop.
-        unsafe {
-            std::env::remove_var("MXC_BFSCFG_PATH");
-        }
-    }
-}
-
 /// RAII helper that points `MXC_DACL_STATE_DIR` at a freshly created
 /// tempdir for the duration of a test, then restores the previous
 /// value on drop. Holds [`ENV_LOCK`] for its lifetime via [`lock`],
 /// which serializes all env-var-touching tests within the process.
 ///
 /// Lives here (rather than in `filesystem_dacl::tests`) so it shares
-/// `ENV_LOCK` with [`ForceTierGuard`] / [`BfscfgPathGuard`]. Without
-/// the shared lock, a `filesystem_dacl` test could delete its tempdir
-/// while a concurrent `dispatcher` test was mid-write to the same
-/// path (the dispatcher test reads `MXC_DACL_STATE_DIR` through
-/// `state_dir()` inside `DaclManager::new()` and would race the
-/// `Drop` on the other test's `ScopedStateDir`).
+/// `ENV_LOCK` with [`ForceTierGuard`]. Without the shared lock, a
+/// `filesystem_dacl` test could delete its tempdir while a concurrent
+/// `dispatcher` test was mid-write to the same path (the dispatcher
+/// test reads `MXC_DACL_STATE_DIR` through `state_dir()` inside
+/// `DaclManager::new()` and would race the `Drop` on the other test's
+/// `ScopedStateDir`).
 pub(crate) struct ScopedStateDir {
     _lock: MutexGuard<'static, ()>,
     _td: tempfile::TempDir,

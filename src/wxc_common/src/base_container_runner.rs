@@ -89,9 +89,9 @@ pub struct BaseContainerRunner {
 /// SandboxSpec FlatBuffer schema version embedded in every spec payload.
 const SANDBOX_SPEC_VERSION: &str = "0.1.0";
 
-/// Sandbox cleanup stub. The actual cleanup (DeleteAppContainerProfile, BFS
-/// policy removal, registry tracking deletion) is currently disabled because
-/// wxc-exec only tracks the main AppContainer process handle -- child processes
+/// Sandbox cleanup stub. The actual cleanup (DeleteAppContainerProfile,
+/// registry tracking deletion) is currently disabled because wxc-exec
+/// only tracks the main AppContainer process handle -- child processes
 /// may still be running when we reach this point. The tracking entry and
 /// ephemeral identity features remain active for diagnostics and future use.
 fn run_sandbox_cleanup(
