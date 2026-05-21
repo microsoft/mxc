@@ -656,9 +656,10 @@ fn convert_raw_config_inner(
             ContainmentBackend::Seatbelt
         }
         Some("hyperlight") => ContainmentBackend::Hyperlight,
+        Some("bubblewrap") => ContainmentBackend::Bubblewrap,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', 'seatbelt', or 'hyperlight')",
+                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', 'seatbelt', 'hyperlight', or 'bubblewrap')",
                 other
             );
             logger.log_line(&msg);
@@ -1027,6 +1028,7 @@ fn parse_containment_str(s: &str, logger: &mut Logger) -> Result<ContainmentBack
         "microvm" => Ok(ContainmentBackend::MicroVm),
         "isolation_session" => Ok(ContainmentBackend::IsolationSession),
         "seatbelt" => Ok(ContainmentBackend::Seatbelt),
+        "bubblewrap" => Ok(ContainmentBackend::Bubblewrap),
         "macos_sandbox" => {
             logger.log_line(
                 "[deprecated] containment value 'macos_sandbox' is a legacy alias for 'seatbelt'; \
@@ -1036,7 +1038,7 @@ fn parse_containment_str(s: &str, logger: &mut Logger) -> Result<ContainmentBack
         }
         other => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', or 'seatbelt')",
+                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', 'seatbelt', or 'bubblewrap')",
                 other
             );
             logger.log_line(&msg);

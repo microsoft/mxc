@@ -11,6 +11,7 @@ members = [
     "lxc",
     "lxc_common",
     "wslc_common",
+    "bwrap_common",
     "isolation_session_bindings",
     "seatbelt_common",
     "mxc_darwin",
@@ -78,6 +79,7 @@ getrandom = "0.2"
 libc = "0.2"
 nix = { version = "0.29", features = ["mount", "sched", "signal", "net", "process", "user", "term"] }
 lxc_common = { path = "lxc_common" }
+bwrap_common = { path = "bwrap_common" }
 wslc_common = { path = "wslc_common" }
 isolation_session_bindings = { path = "isolation_session_bindings" }
 mxc_pty = { path = "mxc_pty" }

@@ -250,6 +250,7 @@ impl LxcContainer {
             PtyOutcome::Exited(status) => {
                 Ok((status.code().unwrap_or(-1), String::new(), String::new()))
             }
+
             PtyOutcome::TimedOut => {
                 let ms = timeout.map(|d| d.as_millis()).unwrap_or(0);
                 Err(format!("script timed out after {}ms", ms))
