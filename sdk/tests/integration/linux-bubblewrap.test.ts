@@ -11,12 +11,14 @@ import {
   spawnFromConfigAsync,
 } from './test-helpers.js';
 
-// Probe printed inside the sandbox. Bwrap always creates a fresh mount
-// namespace with a minimal mount table (typically <20 entries from
-// --ro-bind, --dev, --proc, --tmpfs); the host has 30-100+. This signal is
-// robust across root vs non-root contexts (PID/user namespace mechanics
-// differ when running bwrap as root in WSL, but the mount namespace setup
-// is always applied).
+// Bwrap fingerprint: when invoked with `--unshare-pid`, bubblewrap creates a
+// new PID namespace and stays as PID 1 in that namespace, acting as init
+// (reaping orphans, forwarding signals). It does NOT exec the child shell
+// directly — the script runs as PID 2. So /proc/1/comm always reads "bwrap"
+// from inside the sandbox, regardless of how bwrap is invoked or which user
+// runs it. This is documented bubblewrap behavior (see bwrap(1)) and the
+// most reliable cross-context signal — mount-count heuristics break under
+// WSL2 where bind-mount propagation can produce 40+ entries.
 const BWRAP_PROBE =
   "PID1=$(cat /proc/1/comm 2>/dev/null || echo unknown); " +
   "MOUNTS=$(wc -l </proc/self/mountinfo); " +

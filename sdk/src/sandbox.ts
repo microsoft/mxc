@@ -337,8 +337,13 @@ export function createConfigFromPolicy(
     if (containment === 'process') {
         config.containment = 'process';
         if (platform === 'linux') {
-            diagLog(`createConfigFromPolicy: containment=process (linux), id=${containerId}`);
-            return buildLinuxProcessConfig(config, containerId);
+            // Abstract `'process'` on Linux is resolved to Bubblewrap by the
+            // native binary (see `wxc_common::config_parser`). The wire-format
+            // payload intentionally omits any backend-specific block so the
+            // config reflects the abstract intent. Callers who explicitly want
+            // LXC must pass `containment: 'lxc'`.
+            diagLog(`createConfigFromPolicy: containment=process (linux, resolves to bubblewrap), id=${containerId}`);
+            return config;
         }
         if (platform === 'darwin') {
             // The seatbelt backend has no container abstraction

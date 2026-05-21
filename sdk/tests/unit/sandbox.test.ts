@@ -217,12 +217,14 @@ describe('buildSandboxPayload', () => {
       }
     };
 
-    it('should default to process containment on Linux (resolved by binary to lxc)', () => {
+    it('should default to process containment on Linux (resolved by binary to bubblewrap)', () => {
       mockLinux();
       try {
         const payload = buildSandboxPayload('echo hi', defaultPolicy);
         assert.strictEqual(payload.containment, 'process');
-        assert.strictEqual(payload.lxc!.destroyOnExit, true);
+        // Abstract 'process' on Linux resolves to Bubblewrap at runtime;
+        // the wire-format payload must NOT carry an LXC-specific block.
+        assert.strictEqual(payload.lxc, undefined);
       } finally {
         restore();
       }
@@ -528,13 +530,14 @@ describe('createConfigFromPolicy', () => {
       }
     };
 
-    it('should default to process containment (resolved by binary to lxc on Linux)', () => {
+    it('should default to process containment (resolved by binary to bubblewrap on Linux)', () => {
       mockLinux();
       try {
         const config = createConfigFromPolicy(defaultPolicy);
         assert.strictEqual(config.containment, 'process');
-        assert.strictEqual(config.lxc!.distribution, 'alpine');
-        assert.strictEqual(config.lxc!.destroyOnExit, true);
+        // Abstract 'process' on Linux resolves to Bubblewrap at runtime;
+        // the wire-format config must NOT carry an LXC-specific block.
+        assert.strictEqual(config.lxc, undefined);
       } finally {
         restore();
       }
