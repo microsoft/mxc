@@ -38,7 +38,7 @@ resources:
       trigger: none
 
 extends:
-  template: v2/Microsoft.NonOfficial.yml@templates
+  template: v2/Microsoft.Official.yml@templates
   parameters:
     platform:
       name: 'windows_undocked'
