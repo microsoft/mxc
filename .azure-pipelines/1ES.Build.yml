@@ -87,10 +87,12 @@ extends:
             ESRPInfo: ${{ parameters.ESRPInfo }}
 
         # macOS uses a separate template because it runs on a different
-        # pool (Microsoft-hosted) and skips ESRP signing / cross-compile
-        # plumbing. The produced artifact name follows the same scheme
-        # (mxc-binaries-<triplet>) so Package_MXC_NPM_SDK can consume it.
+        # pool (Microsoft-hosted). The produced artifact name follows the same
+        # scheme (mxc-binaries-<triplet>) so Package_MXC_NPM_SDK can consume it.
         - template: .azure-pipelines/templates/Mac.Build.Job.yml@self
+          parameters:
+            isOfficialBuild: ${{ eq(parameters.officialBuild, 'Official') }}
+            ESRPInfo: ${{ parameters.ESRPInfo }}
 
     - stage: Package_MXC
       displayName: 'Package MXC'
@@ -129,11 +131,3 @@ extends:
       - template: .azure-pipelines/templates/SDK.Integration.Test.Job.yml@self
         parameters:
           debug: ${{ parameters.debug }}
-
-    - stage: IsolationSession_Test_Bundle
-      displayName: 'Isolation Session Test Bundle'
-      dependsOn: Build_Binaries
-      jobs:
-      - template: .azure-pipelines/templates/IsolationSession.TestBundle.Job.yml@self
-        parameters:
-          isOfficialBuild: ${{ eq(parameters.officialBuild, 'Official') }}
