@@ -1,0 +1,110 @@
+parameters: # parameters are shown up in ADO UI in a build queue time
+- name: 'debug'
+  displayName: 'Enable debug output'
+  type: boolean
+  default: false
+
+variables:
+- name: VersionDate
+  value: "$[format('{0:yyMMdd}', pipeline.startTime)]"
+- name: VersionCounter
+  value: "$[counter(variables['VersionDate'], 1)]"
+- group: MXC-ESRP-Signing
+
+trigger: none
+
+pool:
+  type: windows
+
+resources:
+  repositories: 
+    - repository: templates
+      type: git
+      name: OneBranch.Pipelines/GovernedTemplates
+      ref: refs/heads/main
+
+extends:
+  template: v2/Microsoft.NonOfficial.yml@templates
+  parameters:
+    platform:     
+      name: 'windows_undocked'
+    
+    featureFlags:
+      WindowsHostVersion:
+        Version: 2022
+            
+    cloudvault:
+      enabled: false
+          
+    stages:
+    - stage: Build
+      displayName: 'Build Executables'
+      jobs:
+        - job: Set_Version
+          displayName: Set version
+          dependsOn: []
+          pool:
+            type: windows
+          variables:
+            ob_outputDirectory: '$(Build.SourcesDirectory)\out'
+          steps:
+            - task: PowerShell@2
+              displayName: Set vpack version
+              inputs:
+                targetType: inline
+                script: |
+                  $sdkVersion = (Get-Content "$(System.DefaultWorkingDirectory)/sdk/package.json" | ConvertFrom-Json).version
+                  $vpackVersion = "$sdkVersion$(VersionDate)$(VersionCounter)"
+                  Write-Host "##vso[task.setvariable variable=VPackVersion;isOutput=true]$vpackVersion"
+        - template: .azure-pipelines/templates/Rust.Build.Job.yml@self
+          parameters:
+            isOfficialBuild: true
+            matrix:
+              - name: windows_x64
+                os: windows
+                arch: x64
+                component: WXC
+              - name: windows_arm64
+                os: windows
+                arch: arm64
+                component: WXC
+
+            ESRPInfo:
+              serviceName: $(serviceName)
+              tenantId: $(tenantId)
+              azureKeyVaultName: $(azureKeyVaultName)
+              authCertName: $(authCertName)
+              signCertName: $(signCertName)
+              clientId: $(clientId)
+
+    - stage: vpack
+      dependsOn: Build
+      displayName: 'Create OS vpack'
+      condition: succeeded()
+      jobs:
+      - job: Packaging
+        pool:
+          type: windows
+        variables:
+          ob_outputDirectory: '$(Build.SourcesDirectory)\out'
+          ob_createvpack_enabled: true
+          ob_createvpack_packagename: MXC
+          ob_createvpack_owneralias: Tessera-mxc-admin
+          ob_createvpack_description: Microsoft Execution Containers
+          ob_createvpack_provData: true
+          ob_createvpack_versionAs: string
+          ob_createvpack_version: $(VPackVersion)
+          ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
+
+        steps:
+          # Download the wxc binaries and pdbs for each architecture
+          - task: DownloadPipelineArtifact@2
+            displayName: Download wxc x64 artifact
+            inputs:
+              artifact: wxc-binaries-x86_64-pc-windows-msvc
+              path: $(ob_outputDirectory)/x64
+          - task: DownloadPipelineArtifact@2
+            displayName: Download wxc arm64 artifact
+            inputs:
+              artifact: wxc-binaries-aarch64-pc-windows-msvc
+              path: $(ob_outputDirectory)/arm64
