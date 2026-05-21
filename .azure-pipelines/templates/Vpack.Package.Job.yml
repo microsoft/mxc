@@ -30,13 +30,12 @@ resources:
       name: OneBranch.Pipelines/GovernedTemplates
       ref: refs/heads/main
   pipelines:
-    - pipeline: officialBuild
-      project: Dart
-      source: MXC-Official-Build
-      trigger:
-        branches:
-          include:
-            - main
+    # Source of the signed wxc binaries. Mirrors the alias used in
+    # 1ES.Release.yml. `trigger: none` because the build-completion
+    # trigger is configured in the ADO UI.
+    - pipeline: MXC
+      source: 'MXC-Official-Build'
+      trigger: none
 
 extends:
   template: v2/Microsoft.NonOfficial.yml@templates
@@ -58,6 +57,20 @@ extends:
         - job: Packaging
           pool:
             type: windows
+          templateContext:
+            # Declarative artifact downloads (same pattern as 1ES.Release.yml).
+            # 1ES PT injects the equivalent DownloadPipelineArtifact steps and
+            # lands the files directly under ob_outputDirectory so the vpack
+            # creation step picks them up without any extra staging.
+            inputs:
+              - input: pipelineArtifact
+                pipeline: MXC
+                artifactName: wxc-binaries-x86_64-pc-windows-msvc
+                targetPath: '$(Build.SourcesDirectory)\out\x64'
+              - input: pipelineArtifact
+                pipeline: MXC
+                artifactName: wxc-binaries-aarch64-pc-windows-msvc
+                targetPath: '$(Build.SourcesDirectory)\out\arm64'
           variables:
             # Note: all files placed in the output directory will be included in the vpack
             ob_outputDirectory: '$(Build.SourcesDirectory)\out'
@@ -81,25 +94,3 @@ extends:
                   $sdkVersion = (Get-Content "$(System.DefaultWorkingDirectory)/sdk/package.json" | ConvertFrom-Json).version
                   $vpackVersion = "${sdkVersion}$(VersionDate)$(VersionCounter)"
                   Write-Host "##vso[task.setvariable variable=ob_createvpack_version]$vpackVersion"
-
-            - task: DownloadPipelineArtifact@2
-              displayName: Download wxc x64 artifact
-              inputs:
-                source: specific
-                project: Dart
-                pipeline: MXC-Official-Build
-                runVersion: latestFromBranch
-                runBranch: main
-                artifact: wxc-binaries-x86_64-pc-windows-msvc
-                path: $(ob_outputDirectory)/x64
-
-            - task: DownloadPipelineArtifact@2
-              displayName: Download wxc arm64 artifact
-              inputs:
-                source: specific
-                project: Dart
-                pipeline: MXC-Official-Build
-                runVersion: latestFromBranch
-                runBranch: main
-                artifact: wxc-binaries-aarch64-pc-windows-msvc
-                path: $(ob_outputDirectory)/arm64
