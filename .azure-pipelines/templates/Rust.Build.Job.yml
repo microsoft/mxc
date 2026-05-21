@@ -11,6 +11,9 @@ parameters:
 - name: ESRPInfo
   type: object
   default: {}
+- name: vPackEnv
+  type: boolean
+  default: false
 
 jobs:
 - ${{ each item in parameters.matrix }}:
@@ -18,11 +21,14 @@ jobs:
     displayName: 'Build (${{ item.arch }} ${{ item.component }})'
     dependsOn: []
     pool:
-      name: Azure-Pipelines-1ESPT-ExDShared
-      ${{ if eq(item.os, 'windows') }}:
+      ${{ if eq(item.os, 'windows') and eq(vPackEnv, false)}}:
+        name: Azure-Pipelines-1ESPT-ExDShared
         image: windows-latest #x64 host
         os: windows
+      ${{ if eq(item.os, 'windows') and eq(vPackEnv, true)}}:
+        type: windows
       ${{ if eq(item.os, 'linux') }}:
+        name: Azure-Pipelines-1ESPT-ExDShared
         image: ubuntu-latest #x64 host
         os: linux
 
