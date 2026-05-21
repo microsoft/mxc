@@ -57,20 +57,6 @@ extends:
         - job: Packaging
           pool:
             type: windows
-          templateContext:
-            # Declarative artifact downloads (same pattern as 1ES.Release.yml).
-            # 1ES PT injects the equivalent DownloadPipelineArtifact steps and
-            # lands the files directly under ob_outputDirectory so the vpack
-            # creation step picks them up without any extra staging.
-            inputs:
-              - input: pipelineArtifact
-                pipeline: MXC
-                artifactName: wxc-binaries-x86_64-pc-windows-msvc
-                targetPath: '$(Build.SourcesDirectory)\out\x64'
-              - input: pipelineArtifact
-                pipeline: MXC
-                artifactName: wxc-binaries-aarch64-pc-windows-msvc
-                targetPath: '$(Build.SourcesDirectory)\out\arm64'
           variables:
             # Note: all files placed in the output directory will be included in the vpack
             ob_outputDirectory: '$(Build.SourcesDirectory)\out'
@@ -96,16 +82,28 @@ extends:
                   $vpackVersion = "${sdkVersion}$(VersionDate)$(VersionCounter)"
                   Write-Host "##vso[task.setvariable variable=VPackVersion]$vpackVersion"
 
+            # `patterns` filters the download to only wxc-exec.exe + its pdb,
+            # keeping the vpack small. Files land at
+            # $(Pipeline.Workspace)/MXC/<artifactName>/...
+            - download: MXC
+              displayName: Download wxc x64 (filtered)
+              artifact: wxc-binaries-x86_64-pc-windows-msvc
+              patterns: |
+                wxc-exec.exe
+                symbols/wxc-exec.pdb
+
+            - download: MXC
+              displayName: Download wxc arm64 (filtered)
+              artifact: wxc-binaries-aarch64-pc-windows-msvc
+              patterns: |
+                wxc-exec.exe
+                symbols/wxc-exec.pdb
+
             - task: PowerShell@2
-              displayName: Prune artifacts to wxc-exec only
+              displayName: Stage binaries for vpack
               inputs:
                 targetType: inline
-                # Keep only wxc-exec.exe + its pdb per-arch. Everything else
-                # in the downloaded artifact (other exes, wslcsdk.dll, other
-                # pdbs/dwps) is dropped to shrink the vpack.
                 script: |
-                  foreach ($arch in 'x64','arm64') {
-                    $dir = "$(ob_outputDirectory)\$arch"
-                    Get-ChildItem -Path $dir -File | Where-Object { $_.Name -ne 'wxc-exec.exe' } | Remove-Item -Force
-                    Get-ChildItem -Path "$dir\symbols" -File | Where-Object { $_.Name -ne 'wxc-exec.pdb' } | Remove-Item -Force
-                  }
+                  $src = "$(Pipeline.Workspace)\MXC"
+                  Copy-Item -Recurse -Force "$src\wxc-binaries-x86_64-pc-windows-msvc"  "$(ob_outputDirectory)\x64"
+                  Copy-Item -Recurse -Force "$src\wxc-binaries-aarch64-pc-windows-msvc" "$(ob_outputDirectory)\arm64"
