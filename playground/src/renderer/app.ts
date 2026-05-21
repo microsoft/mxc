@@ -1930,14 +1930,12 @@ function showJsonPanel(tab: string): void {
     var containment = $sel('containmentSelect').value;
     if (containment === 'windows_sandbox' || containment === 'microvm' || containment === 'hyperlight') {
       var rawScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
-      var rawTimeout = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
-      var rawConfig = {
-        containment: containment,
-        process: {
-          commandLine: rawScript || '(no script)',
-          timeout: rawTimeout,
-        },
-      };
+      var rawConfig = buildRawBackendConfig(
+        containment,
+        state.selectedScenario,
+        rawScript || '(no script)',
+        state.timeoutSeconds,
+      );
       $('jsonContent').innerHTML = highlightJson(escapeHtml(JSON.stringify(rawConfig, null, 2)));
     } else {
       var policyStr = JSON.stringify(buildPolicy(), null, 2);
@@ -1947,14 +1945,12 @@ function showJsonPanel(tab: string): void {
     var containment2 = $sel('containmentSelect').value;
     if (containment2 === 'windows_sandbox' || containment2 === 'microvm' || containment2 === 'hyperlight') {
       var rawScript2 = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
-      var rawTimeout2 = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
-      var rawConfig2 = {
-        containment: containment2,
-        process: {
-          commandLine: rawScript2 || '(no script)',
-          timeout: rawTimeout2,
-        },
-      };
+      var rawConfig2 = buildRawBackendConfig(
+        containment2,
+        state.selectedScenario,
+        rawScript2 || '(no script)',
+        state.timeoutSeconds,
+      );
       $('jsonContent').innerHTML = highlightJson(escapeHtml(JSON.stringify(rawConfig2, null, 2)));
     } else {
       $('jsonContent').innerHTML = '<span class="line-dim">Loading config…</span>';
