@@ -1,7 +1,7 @@
 # MXC FS-policy semantics — v1 language specification
 
 **Status**: draft, language-only (enforcement-independent)
-**Owner**: gudgmi (with Copilot CLI as pair)
+**Owner**: gudge (with Copilot CLI as pair)
 **Branch**: `user/gudge/downlevel-fs-projection-plan`
 **Companion docs**:
 - `docs/proposals/downlevel_support/fs-projection-composition-plan.md`
@@ -244,6 +244,17 @@ create files inside the directory, nor does it allow `RemoveDirectory`
 unless the directory is empty *from the agent's perspective* (and any
 host-side hidden children are excluded — those still block the OS-
 level remove).
+
+**F16a — `RW[L]` on a directory with no covering children entry is a
+validation error.** Because the language otherwise produces an
+awkward "create succeeds but the result is invisible" corner under
+F13/F15, the validator rejects this configuration. The user must
+either change the entry to `RW[S]` (covering descendants) or add
+explicit entries covering the descendants they intend to expose.
+`RO[L]` on a directory does not have this restriction — it is
+useful on its own (the directory's existence and metadata are
+visible; descendants follow default-deny or whatever else covers
+them).
 
 ### F17 — `RW` ⇒ `R`
 
@@ -600,7 +611,12 @@ What the agent observes:
 | Cell | Outer at P | Inner at P\sub | P itself | P\sub | Between (siblings of `sub`) | Validator |
 |---|---|---|---|---|---|---|
 | D1 | `RO[L]` (dir) | `RW[S]` | RO (metadata only) | RW | hidden (default-deny) | OK |
-| D2 | `RW[L]` (dir) | `RO[S]` | RW (metadata only, F16) | RO | hidden — but new files can be created-then-invisible (F13/F15) | warn |
+| D2 | `RW[L]` (dir) | `RO[S]` | RW (metadata only, F16) | RO | (the user must add coverage for siblings) | **error** (per F16a) |
+
+D2 has no valid form. The user must either use `RW[S]` on the outer
+(which covers all descendants) or add explicit entries for each
+sibling of `sub` they want the agent to see. The "create-then-
+invisible" corner that motivated F16a is eliminated by validation.
 
 #### Example — D1
 
@@ -821,7 +837,15 @@ validate(policy):
     if outer.intent == inner.intent:
       warn("redundant nested entry: " + inner.path, F1/F2/F3)
     elif suspicious_nesting(outer, inner):
-      warn(suspicious_nesting_description(outer, inner), B5/B6/C2/C7/D2)
+      warn(suspicious_nesting_description(outer, inner), B5/B6/C2/C7)
+
+  # 5b. F16a check: RW[L] on directory with no covering children
+  for e in entries:
+    if e.intent == RW and e.marker == [L] and is_directory(e.path):
+      if not has_covering_child_entry(entries, e.path):
+        error("RW[L] on directory " + e.path + " with no covering "
+              "entry for descendants; use RW[S] or add explicit "
+              "child entries", F16a)
 
   # 6. Position 3 check (F4)
   for e in entries:
@@ -831,6 +855,116 @@ validate(policy):
 
   return NormalizedPolicy(entries, errors, warnings)
 ```
+
+## Runtime enforcement notes
+
+The language semantics above are intentionally enforcement-agnostic.
+This section catalogues the known runtime-enforcement risks against
+those semantics, names the resolved/open ones, and points each to the
+relevant companion document.
+
+The list is operationally useful: it tells implementers which
+semantic guarantees come for free under the planned composition,
+which are achieved by specific filter behavior, and which degrade
+gracefully (with surfaced annotations) rather than fail loudly.
+
+### R1 / R3 — Object-level hiding via non-name routes (F11)
+
+F11 requires that a hidden object be hidden via *any* route — file
+ID, hardlink alias, junction target, volume-GUID, `\\?\` prefix, 8.3
+short name. Bindflt is a name-based filter and does not mediate
+opens by file ID. ProjFS is rooted at a virt directory and similarly
+does not see file-ID-based opens that don't traverse its root.
+
+**Resolution**: degrade-and-surface. The enforcement layer
+approximates F11 with name-level hiding plus the AppContainer SID's
+own access check as a final gate. The composition plan's run-result
+object includes a `bypass surface notes` field that explicitly
+declares "object-level hiding is approximated by name-level hiding;
+opens by file ID or volume-GUID prefix are not mediated by the
+naming layer. Access still gated by the AppContainer SID's
+NTFS rights." Callers who require strict F11 can refuse to run when
+this annotation is present.
+
+### R2 — Implicit traversal (F10) — **RESOLVED**
+
+F10 requires that every explicit entry creates a name-resolution-only
+traversal grant on each strict ancestor of the entry, without
+granting stat, DACL read, or enumeration on those ancestors.
+
+The enforcement question was whether this required explicit
+`FILE_TRAVERSE` ACEs on ancestor directories — including paths the
+invoking user typically cannot modify (`C:\`, `C:\Users`,
+`C:\Program Files`, etc.).
+
+**Resolution**: confirmed via investigation (see
+`appcontainer_traversal_findings.md`). AppContainer tokens on
+Windows 11 23H2+ retain `SeChangeNotifyPrivilege`. The kernel honors
+the "Bypass traverse checking" semantics: intermediate-component
+`FILE_TRAVERSE` checks during `IRP_MJ_CREATE` path walk are skipped
+entirely. F10 is enforceable as written, with no ancestor ACE work
+needed. The target's own DACL still gates target-level access, which
+is consistent with the language (entries grant access on the named
+path itself; ancestors get only name-resolution).
+
+### R4 — Hidden-returns-not-found, not access-denied (F12)
+
+F12 requires that operations on hidden paths return not-found error
+codes rather than `ACCESS_DENIED`. The composition uses deny ACEs as
+defence-in-depth alongside bindflt exception lists and provider
+denylists. ACEs naturally return `ACCESS_DENIED`, not not-found.
+
+**Resolution**: layer ordering. Bindflt exception lists and ProjFS
+denylists run *before* a deny ACE would be consulted. Operations
+that match the language-level hiding are caught by those layers and
+return not-found per F12. The deny ACE backstops only operations that
+*bypass* the naming layer — exactly the same shape as R1/R3. In
+those cases the language considers the operation already "should not
+have reached here," so `ACCESS_DENIED` is a correct (if not language-
+preferred) error code. Surfaced in the run-result annotations.
+
+### R5 — Enumeration filtering for deny inside RW (F14)
+
+F14 requires that `FindFirstFile`/`FindNextFile` on a directory
+return only children visible to the agent. For a directory served by
+ProjFS, this falls out of the provider's `GetDirectoryEnumeration`
+callback. For a directory served by a bindflt R/W identity bind,
+NTFS's enumeration is passthrough — bindflt does not by itself
+filter the listing.
+
+**Resolution**: bindflt exception lists. When a deny entry sits
+inside an RW subtree, the deny path is added to the bindflt R/W
+bind's exception list. Excepted paths do not appear in enumeration
+through the bind. Spike B in the FS-projection plan explicitly tests
+this; if the spike confirms, F14 holds for the composition. If the
+spike disconfirms, we revisit (likely by routing the affected
+directory through ProjFS, which can filter, at the cost of breaking
+the "no ProjFS under writable binds" invariant in that one location).
+
+### R5b — Create-then-invisible at default-deny under writable parent — **RESOLVED**
+
+F13 + F15 together imply a corner case: under `RW[L]` on a
+directory with no covering children entry, the agent could create a
+new file in the directory (the directory grants `FILE_ADD_FILE` —
+wait, actually F16 already forbids this). On further inspection, the
+corner only arises if the validator allows `RW[L]` on a directory
+without covering children. Since F16a now makes that a validation
+error, the corner cannot arise.
+
+**Resolution**: prevented at validation. The validator's F16a check
+ensures no policy produces a writable directory with default-denied
+children, so the create-then-invisible asymmetry never reaches the
+runtime.
+
+### Summary table
+
+| Risk | Description | Status |
+|---|---|---|
+| R1 / R3 | Object-level hiding via file ID, hardlink alias, etc. | Degraded, surfaced |
+| R2 | Implicit traversal needing ancestor ACEs | Resolved (`SeChangeNotifyPrivilege`) |
+| R4 | Hidden returning ACCESS_DENIED instead of not-found | Mitigated by layer ordering; backstop case surfaced |
+| R5 | Enumeration filtering for deny inside RW | Bindflt exception list; spike verification |
+| R5b | Create-then-invisible at default-deny under writable parent | Resolved by F16a |
 
 ## Open questions and deferrals
 
