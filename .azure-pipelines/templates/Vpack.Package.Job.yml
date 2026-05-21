@@ -41,12 +41,12 @@ extends:
     stages:
     - stage: Build
       displayName: 'Build Executables'
-      pool:
-        type: windows
       jobs:
         - job: Set_Version
           displayName: Set version
           dependsOn: []
+          pool:
+            type: windows
           variables:
             ob_outputDirectory: '$(Build.SourcesDirectory)\out'
           steps:
@@ -62,6 +62,7 @@ extends:
         - template: .azure-pipelines/templates/Rust.Build.Job.yml@self
           parameters:
             isOfficialBuild: true
+            useOneBranchPool: true
             matrix:
               - name: windows_x64
                 os: windows
