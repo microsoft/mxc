@@ -56,6 +56,7 @@ extends:
                   $sdkVersion = (Get-Content "$(System.DefaultWorkingDirectory)/sdk/package.json" | ConvertFrom-Json).version
                   $vpackVersion = "$sdkVersion$(VersionDate)$(VersionCounter)"
                   Write-Host "##vso[task.setvariable variable=VPackVersion;isOutput=true]$vpackVersion"
+
         - template: .azure-pipelines/templates/Rust.Build.Job.yml@self
           parameters:
             isOfficialBuild: true
@@ -86,6 +87,7 @@ extends:
         pool:
           type: windows
         variables:
+          # Note: all files placed in the output directory will be included in the vpack
           ob_outputDirectory: '$(Build.SourcesDirectory)\out'
           ob_createvpack_enabled: true
           ob_createvpack_packagename: MXC
