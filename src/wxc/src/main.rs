@@ -18,6 +18,7 @@ use wxc_common::isolation_session::IsolationSessionRunner;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
+#[cfg(feature = "microvm")]
 use wxc_common::nanvix_runner::NanVixScriptRunner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::{run_state_aware, DispatchOutcome};
@@ -484,7 +485,15 @@ fn main() {
                 eprintln!("Error: MicroVM is an experimental feature. Use --experimental flag.");
                 process::exit(1);
             }
-            Box::new(NanVixScriptRunner::new())
+            #[cfg(feature = "microvm")]
+            {
+                Box::new(NanVixScriptRunner::new())
+            }
+            #[cfg(not(feature = "microvm"))]
+            {
+                eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
+                process::exit(1);
+            }
         }
         ContainmentBackend::Hyperlight => {
             #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]

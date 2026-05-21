@@ -2764,6 +2764,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hyperlight-unikraft-host",
  "isolation_session_bindings",
+ "nanvix_common",
  "sandbox_spec",
  "semver",
  "serde",
