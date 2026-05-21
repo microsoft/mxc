@@ -251,6 +251,30 @@ export function createTempDir(prefix: string = 'mxc-test'): string {
   return dir;
 }
 
+// Async spawn from a pre-built ContainerConfig (no per-call containment arg on
+// spawnSandboxAsync, so tests that need a specific backend build the config
+// directly and run it through this helper).
+export function spawnFromConfigAsync(
+  config: sdkNamespace.ContainerConfig,
+  options: sdkNamespace.SandboxSpawnOptions = {},
+  workingDirectory?: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve, reject) => {
+    try {
+      const ptyProcess = sdkNamespace.spawnSandboxFromConfig(config, options, workingDirectory);
+      let output = '';
+      ptyProcess.onData((data: string) => {
+        output += data;
+      });
+      ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
+        resolve({ stdout: output, stderr: '', exitCode: event.exitCode });
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 // Python helpers
 
 /** Detect a usable Python command. Returns undefined if not installed. */

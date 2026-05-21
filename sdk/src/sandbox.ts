@@ -328,10 +328,16 @@ export function createConfigFromPolicy(
         return buildBubblewrapConfig(config);
     }
 
+    if (containment === 'lxc') {
+        diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
+        config.containment = 'lxc';
+        return buildLinuxProcessConfig(config, containerId);
+    }
+
     if (containment === 'process') {
         config.containment = 'process';
         if (platform === 'linux') {
-            diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
+            diagLog(`createConfigFromPolicy: containment=process (linux), id=${containerId}`);
             return buildLinuxProcessConfig(config, containerId);
         }
         if (platform === 'darwin') {

@@ -671,6 +671,41 @@ describe('createConfigFromPolicy', () => {
       );
     });
   });
+
+  describe('Bubblewrap', () => {
+    it('should set containment to bubblewrap', () => {
+      const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'bubblewrap');
+      assert.strictEqual(config.containment, 'bubblewrap');
+    });
+
+    it('should map filesystem and network policy fields through to ContainerConfig', () => {
+      const config = createConfigFromPolicy({
+        version: '0.5.0-alpha',
+        filesystem: {
+          readwritePaths: ['/workspace'],
+          readonlyPaths: ['/data'],
+          deniedPaths: ['/secrets'],
+        },
+        network: { allowOutbound: true, allowedHosts: ['example.com'] },
+      }, 'bubblewrap');
+      assert.deepStrictEqual(config.filesystem!.readwritePaths, ['/workspace']);
+      assert.deepStrictEqual(config.filesystem!.readonlyPaths, ['/data']);
+      assert.deepStrictEqual(config.filesystem!.deniedPaths, ['/secrets']);
+      // Per buildBubblewrapConfig, host filtering forces firewall mode.
+      assert.strictEqual(config.network!.enforcementMode, 'firewall');
+    });
+  });
+
+  describe('Lxc (explicit opt-in)', () => {
+    it('should set containment to lxc and populate the lxc backend block', () => {
+      // Regression guard: making bubblewrap the Linux default for the
+      // abstract `"process"` intent must not break the explicit LXC path.
+      const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'lxc');
+      assert.strictEqual(config.containment, 'lxc');
+      assert.ok(config.lxc, 'lxc backend block should be populated');
+      assert.strictEqual(config.lxc!.distribution, 'alpine');
+    });
+  });
 });
 
 describe('Schema 0.6.0 vocabulary', () => {
@@ -753,6 +788,16 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     assert.throws(
       () => resolveExecutableAndArgs(makeConfig('wslc'), { executablePath: fakeExe }),
       { message: /experimental mode/ },
+    );
+  });
+
+  it('should NOT require experimental mode for explicit lxc containment', function (this: { skip: (reason?: string) => void }) {
+    if (process.platform !== 'linux') {
+      this.skip('lxc is Linux-only');
+      return;
+    }
+    assert.doesNotThrow(() =>
+      resolveExecutableAndArgs(makeConfig('lxc'), { executablePath: fakeExe }),
     );
   });
 });

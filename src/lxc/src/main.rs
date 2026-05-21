@@ -206,9 +206,13 @@ fn main() {
 
     log_request(&request, &mut logger);
 
-    // Dispatch by containment backend. LXC is the default on Linux;
-    // Hyperlight is the embedded Hyperlight+Unikraft micro-VM;
-    // Bubblewrap is the unprivileged namespace sandbox (experimental).
+    // Dispatch by containment backend. On Linux, Bubblewrap is now the
+    // default for abstract intents (omitted `containment` and
+    // `containment: "process"` both resolve to Bubblewrap in
+    // `wxc_common::config_parser`). LXC is still available via explicit
+    // `containment: "lxc"`, and `containment: "processcontainer"` falls
+    // through to LXC via the catch-all below. Hyperlight is the embedded
+    // Hyperlight+Unikraft micro-VM (experimental, x86_64-only).
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::Hyperlight => {
             #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
