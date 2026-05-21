@@ -17,7 +17,7 @@ interface Scenario {
   expectedLabel: string;
   script: string;
   policy: any;
-  shell: 'cmd' | 'ps51' | 'ps7' | 'python';
+  shell: 'cmd' | 'ps51' | 'ps7' | 'python' | 'networking' | 'filesystem';
   containment?: 'appcontainer' | 'windows_sandbox' | 'microvm' | 'hyperlight';
   requiresV05?: boolean;
   /** If set, output must contain this string for a PASS verdict */
@@ -34,6 +34,8 @@ var shellAvailability: Record<string, boolean> = {
   ps51: true,
   ps7: false,
   python: false,
+  networking: true,
+  filesystem: true,
 };
 
 // Resolved shell paths (populated by detect-shells)
@@ -44,6 +46,8 @@ var SHELL_BADGES: Record<string, string> = {
   ps51: '🔵',
   ps7: '🟣',
   python: '🐍',
+  networking: '🌐',
+  filesystem: '📁',
 };
 
 var SHELL_LABELS: Record<string, string> = {
@@ -51,6 +55,8 @@ var SHELL_LABELS: Record<string, string> = {
   ps51: '🔷 PowerShell 5.1',
   ps7: '🟦 PowerShell 7+',
   python: '🐍 Python',
+  networking: '🌐 Networking',
+  filesystem: '📁 Filesystem',
 };
 
 var SHELL_SHORT: Record<string, string> = {
@@ -58,6 +64,8 @@ var SHELL_SHORT: Record<string, string> = {
   ps51: 'PS 5.1',
   ps7: 'PS 7',
   python: 'Python',
+  networking: 'Network',
+  filesystem: 'FS',
 };
 
 function updateRunAllLabel(): void {
@@ -413,7 +421,33 @@ var SCENARIOS: Scenario[] = [
     script: "import time; time.sleep(120); print('should not reach here')",
     policy: { timeoutMs: 5000 } },
 
-  // ========== Hyperlight ==========
+  // ========== MicroVM — Filesystem ==========
+  { id: 'mv-fs-write-read', name: 'Write & read file (FS mount)', category: 'Filesystem', categoryIcon: '📁', shell: 'filesystem',
+    containment: 'microvm',
+    description: 'Writes a file to a readwritePaths mount and reads it back. Verifies staging dir works.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "import os\ntest_dir = 'C:\\\\Users\\\\Public\\\\MXCPlaygroundTests'\nfpath = os.path.join(test_dir, 'mxc-mv-test.txt')\ntry:\n    with open(fpath, 'w') as f:\n        f.write('hello from microvm')\n    with open(fpath) as f:\n        data = f.read()\n    print('Read back:', data)\n    assert data == 'hello from microvm', 'mismatch!'\n    print('MV FS write/read OK')\nfinally:\n    try: os.remove(fpath)\n    except OSError: pass",
+    policy: { filesystem: { readwritePaths: ['C:\\Users\\Public\\MXCPlaygroundTests'] } }, successMarker: 'MV FS write/read OK' },
+  { id: 'mv-fs-list-dir', name: 'List directory contents', category: 'Filesystem', categoryIcon: '📁', shell: 'filesystem',
+    containment: 'microvm',
+    description: 'Creates and lists files in a readwritePaths mount. Verifies directory operations.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "import os\ntest_dir = 'C:\\\\Users\\\\Public\\\\MXCPlaygroundTests'\nnames = ['mxc-a.txt', 'mxc-b.txt', 'mxc-c.txt']\ntry:\n    for name in names:\n        with open(os.path.join(test_dir, name), 'w') as f:\n            f.write(name)\n    entries = [e for e in os.listdir(test_dir) if e.startswith('mxc-')]\n    print('MXC files:', sorted(entries))\n    assert 'mxc-a.txt' in entries and 'mxc-c.txt' in entries\n    print('MV dir listing OK')\nfinally:\n    for name in names:\n        try: os.remove(os.path.join(test_dir, name))\n        except OSError: pass",
+    policy: { filesystem: { readwritePaths: ['C:\\Users\\Public\\MXCPlaygroundTests'] } }, successMarker: 'MV dir listing OK' },
+
+  // ========== MicroVM — Stdlib ==========
+  { id: 'mv-stdlib-broad', name: 'Stdlib (re, datetime, collections)', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
+    containment: 'microvm',
+    description: 'Imports re, datetime, collections to verify broader stdlib availability.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "import re, datetime, collections\nm = re.match(r'(\\w+)@(\\w+)', 'user@host')\nprint('regex:', m.group(1), m.group(2))\nnow = datetime.datetime(2025, 1, 15, 12, 0)\nprint('datetime:', now.isoformat())\nc = collections.Counter('abracadabra')\nprint('counter:', c.most_common(3))\nprint('broad stdlib OK')",
+    policy: {}, successMarker: 'broad stdlib OK' },
+  { id: 'mv-memory', name: 'Memory stress (10MB list)', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
+    containment: 'microvm',
+    description: 'Allocates a 10MB list to verify the VM handles non-trivial memory.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "data = list(range(1_000_000))\nprint('Allocated', len(data), 'items')\nprint('Sum:', sum(data[:100]))\nprint('Memory OK')",
+    policy: {}, successMarker: 'Memory OK' },
   { id: 'hl-hello', name: 'Hello from Hyperlight', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
     containment: 'hyperlight',
     description: 'Runs a simple Python script inside the Hyperlight+Unikraft micro-VM.',
@@ -458,32 +492,65 @@ var SCENARIOS: Scenario[] = [
     policy: { timeoutMs: 5000 } },
 
   // ========== Hyperlight — Networking ==========
-  { id: 'hl-net-http', name: 'HTTP GET (network on)', category: 'Networking', categoryIcon: '🌐', shell: 'python',
+  { id: 'hl-net-socket-api', name: 'Socket API available', category: 'Networking', categoryIcon: '🌐', shell: 'networking',
     containment: 'hyperlight',
-    description: 'Makes an HTTP GET request with networking enabled. Verifies outbound network works.',
+    description: 'Verifies the socket module loads and socket creation works (no actual connection).',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "import socket\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\nprint('Socket created:', s.fileno())\nprint('Family:', s.family.name)\nprint('Type:', s.type.name)\ns.close()\nprint('Socket API OK')",
+    policy: { network: { enabled: true } }, successMarker: 'Socket API OK' },
+  { id: 'hl-net-modules', name: 'Network stdlib modules', category: 'Networking', categoryIcon: '🌐', shell: 'networking',
+    containment: 'hyperlight',
+    description: 'Imports ssl, http.client, urllib to verify network stdlib is available.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "import ssl\nimport http.client\nimport urllib.request\nimport urllib.parse\nprint('ssl version:', ssl.OPENSSL_VERSION)\nprint('http.client OK')\nprint('urllib OK')\nprint('Net modules OK')",
+    policy: {}, successMarker: 'Net modules OK' },
+  { id: 'hl-net-http-allow', name: 'HTTP GET (network on)', category: 'Networking', categoryIcon: '🌐', shell: 'networking',
+    containment: 'hyperlight',
+    description: 'Makes an HTTP GET request with networking enabled. Verifies real outbound connectivity.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: "import urllib.request\nresp = urllib.request.urlopen('http://httpbin.org/get', timeout=10)\nprint('HTTP status:', resp.status)\nprint('Network works!')",
     policy: { network: { enabled: true } }, successMarker: 'Network works!' },
-  { id: 'hl-net-blocked', name: 'HTTP GET (network off)', category: 'Networking', categoryIcon: '🌐', shell: 'python',
+  { id: 'hl-net-http-blocked', name: 'HTTP GET (network off)', category: 'Networking', categoryIcon: '🌐', shell: 'networking',
     containment: 'hyperlight',
-    description: 'Attempts HTTP GET with networking disabled. Should fail to connect.',
+    description: 'Attempts HTTP GET with networking disabled. Should fail to connect (verdict passes when blocked).',
     expectedOutcome: 'succeed', expectedLabel: 'Should block network request',
     script: "import urllib.request\ntry:\n    urllib.request.urlopen('http://httpbin.org/get', timeout=5)\n    print('ERROR: request should have failed')\nexcept Exception as e:\n    print('Correctly blocked:', type(e).__name__)",
-    policy: {}, successMarker: 'Correctly blocked' },
+    policy: {}, successMarker: 'Correctly blocked', failureMarker: 'ERROR: request should have failed' },
 
   // ========== Hyperlight — Filesystem ==========
-  { id: 'hl-fs-write-read', name: 'Write & read file', category: 'Filesystem', categoryIcon: '📁', shell: 'python',
+  { id: 'hl-fs-write-read', name: 'Write & read file', category: 'Filesystem', categoryIcon: '📁', shell: 'filesystem',
     containment: 'hyperlight',
     description: 'Writes a file to a mounted directory and reads it back. Verifies FS mount works.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: "import os, tempfile\ntd = tempfile.mkdtemp()\nfpath = os.path.join(td, 'test.txt')\nwith open(fpath, 'w') as f:\n    f.write('hello from hyperlight')\nwith open(fpath) as f:\n    data = f.read()\nprint('Read back:', data)\nassert data == 'hello from hyperlight', 'mismatch!'\nprint('FS write/read OK')",
     policy: {}, successMarker: 'FS write/read OK' },
-  { id: 'hl-fs-stdlib-os', name: 'os module (cwd, pid, env)', category: 'Filesystem', categoryIcon: '📁', shell: 'python',
+  { id: 'hl-fs-stdlib-os', name: 'os module (cwd, pid, env)', category: 'Filesystem', categoryIcon: '📁', shell: 'filesystem',
     containment: 'hyperlight',
     description: 'Uses os module to check cwd, pid, and environment. Verifies OS-level introspection.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: "import os\nprint('PID:', os.getpid())\nprint('CWD:', os.getcwd())\nprint('ENV keys:', len(os.environ))\nprint('os module OK')",
     policy: {}, successMarker: 'os module OK' },
+
+  // ========== Hyperlight — Networking (advanced) ==========
+  // ========== Hyperlight — Stdlib & ML stack ==========
+  { id: 'hl-stdlib-broad', name: 'Stdlib (re, datetime, collections)', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
+    containment: 'hyperlight',
+    description: 'Imports re, datetime, collections to verify broader stdlib availability.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "import re, datetime, collections\nm = re.match(r'(\\w+)@(\\w+)', 'user@host')\nprint('regex:', m.group(1), m.group(2))\nnow = datetime.datetime(2025, 1, 15, 12, 0)\nprint('datetime:', now.isoformat())\nc = collections.Counter('abracadabra')\nprint('counter:', c.most_common(3))\nprint('broad stdlib OK')",
+    policy: {}, successMarker: 'broad stdlib OK' },
+  { id: 'hl-numpy', name: 'numpy import & compute', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
+    containment: 'hyperlight',
+    description: 'Imports numpy and does basic array ops. Verifies the preloaded ML stack.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "import numpy as np\narr = np.arange(100).reshape(10, 10)\nprint('Shape:', arr.shape)\nprint('Sum:', arr.sum())\nprint('Mean:', arr.mean())\nprint('numpy OK')",
+    policy: {}, successMarker: 'numpy OK' },
+  { id: 'hl-memory', name: 'Memory stress (10MB list)', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
+    containment: 'hyperlight',
+    description: 'Allocates a 10MB list to verify the VM handles non-trivial memory.',
+    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
+    script: "data = list(range(1_000_000))\nprint('Allocated', len(data), 'items')\nprint('Sum:', sum(data[:100]))\nprint('Memory OK')",
+    policy: {}, successMarker: 'Memory OK' },
 ];
 
 // ============================================================
@@ -1142,6 +1209,55 @@ function loadScenario(id: string): void {
 }
 
 // ============================================================
+// Raw-backend config builder (shared by run + dev sidebar)
+// ============================================================
+
+function buildRawBackendConfig(
+  containment: string,
+  scenario: Scenario | null,
+  script: string,
+  timeoutSeconds: number,
+): any {
+  var scenarioPolicy: any = scenario ? scenario.policy : {};
+  var timeoutMs = timeoutSeconds > 0 ? timeoutSeconds * 1000 : 0;
+  var config: any = {
+    containment: containment,
+    process: {
+      commandLine: script,
+      timeout: timeoutMs,
+    },
+  };
+  if (scenarioPolicy.network && scenarioPolicy.network.enabled) {
+    config.network = { defaultPolicy: 'allow' };
+    if (scenarioPolicy.network.allowedHosts) {
+      config.network.allowedHosts = scenarioPolicy.network.allowedHosts;
+    }
+    if (scenarioPolicy.network.blockedHosts) {
+      config.network.blockedHosts = scenarioPolicy.network.blockedHosts;
+    }
+  }
+  if (scenarioPolicy.filesystem) {
+    config.filesystem = {};
+    if (scenarioPolicy.filesystem.readwritePaths) {
+      config.filesystem.readwritePaths = scenarioPolicy.filesystem.readwritePaths;
+    }
+    if (scenarioPolicy.filesystem.readonlyPaths) {
+      config.filesystem.readonlyPaths = scenarioPolicy.filesystem.readonlyPaths;
+    }
+  }
+  // Hyperlight defaults to network-allowed when `network` is omitted; explicitly
+  // block unless the scenario opts in. MicroVM/NanVix rejects `defaultPolicy: block`,
+  // so leave its network field unset in that case.
+  if (containment === 'hyperlight' && !config.network) {
+    config.network = { defaultPolicy: 'block' };
+  }
+  if (scenarioPolicy.timeoutMs) {
+    config.process.timeout = scenarioPolicy.timeoutMs;
+  }
+  return config;
+}
+
+// ============================================================
 // Run / Kill
 // ============================================================
 
@@ -1155,6 +1271,20 @@ async function runSandbox(): Promise<void> {
     if (!rawJson) {
       termError('No JSON config provided');
       return;
+    }
+
+    // Apply Hyperlight default-block defense-in-depth: if the user-pasted config
+    // targets Hyperlight and omits `network`, inject `{ defaultPolicy: 'block' }`
+    // so we don't silently inherit the backend's default-allow.
+    try {
+      var rawParsed = JSON.parse(rawJson);
+      if (rawParsed && rawParsed.containment === 'hyperlight' && !rawParsed.network) {
+        rawParsed.network = { defaultPolicy: 'block' };
+        rawJson = JSON.stringify(rawParsed);
+        termDim('[Playground] Hyperlight: injected network.defaultPolicy=block (no network field provided)');
+      }
+    } catch {
+      // Let the backend surface the parse error.
     }
 
     state.running = true;
@@ -1191,22 +1321,23 @@ async function runSandbox(): Promise<void> {
       return;
     }
 
-    var rawTimeout = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
-    var rawConfig: any = {
-      containment: currentContainment,
-      process: {
-        commandLine: rawScript,
-        timeout: rawTimeout,
-      },
-    };
+    var rawConfig: any = buildRawBackendConfig(
+      currentContainment,
+      state.selectedScenario,
+      rawScript,
+      state.timeoutSeconds,
+    );
 
-    // Merge scenario policy fields (e.g. network, filesystem) into raw config
-    var scenarioPolicy = state.selectedScenario ? state.selectedScenario.policy : {};
-    rawConfig.network = {
-      defaultPolicy: (scenarioPolicy.network && scenarioPolicy.network.enabled) ? 'allow' : 'block',
-    };
-    if (scenarioPolicy.timeoutMs) {
-      rawConfig.process.timeout = scenarioPolicy.timeoutMs;
+    // MicroVM staging requires readwritePaths to exist on the host. Pre-create
+    // any dirs the scenario mounts (e.g. C:\Users\Public\MXCPlaygroundTests).
+    if (currentContainment === 'microvm' && rawConfig.filesystem && rawConfig.filesystem.readwritePaths) {
+      try {
+        await mxc.ensureDirs(rawConfig.filesystem.readwritePaths);
+      } catch (e: any) {
+        termError('[Playground] Failed to pre-create RW mount dirs: ' + (e && e.message ? e.message : String(e)));
+        onSandboxExit(-1);
+        return;
+      }
     }
 
     state.running = true;
@@ -1397,7 +1528,15 @@ async function runAllScenarios(): Promise<void> {
   var currentContainment = $sel('containmentSelect').value;
   var isRawBackend = currentContainment === 'windows_sandbox' || currentContainment === 'microvm' || currentContainment === 'hyperlight';
   var scenariosToRun = SCENARIOS.filter(function(s) {
-    if (s.shell !== currentShell) { return false; }
+    // When the user picks "python" on a raw backend (MicroVM/Hyperlight), also
+    // pull in the pseudo-shell categories (networking, filesystem) since those
+    // scenarios are Python-backed and would otherwise be silently skipped.
+    var shellMatch = (s.shell === currentShell);
+    if (!shellMatch && isRawBackend && currentShell === 'python' &&
+        (s.shell === 'networking' || s.shell === 'filesystem')) {
+      shellMatch = true;
+    }
+    if (!shellMatch) { return false; }
     if (isRawBackend) { if (s.containment !== currentContainment) return false; }
     else { if (s.containment === 'windows_sandbox' || s.containment === 'microvm' || s.containment === 'hyperlight') return false; }
     if (s.shell === 'ps7' && !shellAvailability['ps7']) { return false; }
@@ -1728,21 +1867,27 @@ var ptyLineBuffer = '';
 mxc.onPtyData(function(data: string) {
   var clean = stripAnsi(data);
   terminalFullText += clean;
+  // termWrite() appends '\n' to each call, so split chunks on newline and
+  // hold the final (possibly partial) fragment until the next chunk to avoid
+  // mid-line breaks or duplicate blank lines.
   ptyLineBuffer += clean;
   var lines = ptyLineBuffer.split('\n');
-  // Keep the last (possibly incomplete) chunk in the buffer
   ptyLineBuffer = lines.pop() || '';
   for (var i = 0; i < lines.length; i++) {
-    if (lines[i].trim()) {
-      termOutput(lines[i]);
+    // Strip trailing \r from CRLF sequences so the terminal doesn't render
+    // a stray carriage return.
+    var line = lines[i].replace(/\r+$/, '');
+    if (line.length > 0) {
+      termOutput(line);
     }
   }
 });
 
 mxc.onPtyExit(function(exitCode: number) {
   // Flush any remaining buffered output
-  if (ptyLineBuffer.trim()) {
-    termOutput(ptyLineBuffer);
+  var tail = ptyLineBuffer.replace(/\r+$/, '');
+  if (tail.length > 0) {
+    termOutput(tail);
   }
   ptyLineBuffer = '';
   // Small delay to let pending PTY data events flush before verdict
@@ -1842,14 +1987,12 @@ function updateDevSidebar(): void {
   // Windows Sandbox / MicroVM / Hyperlight mode — show the raw config
   if ((currentContainment === 'windows_sandbox' || currentContainment === 'microvm' || currentContainment === 'hyperlight') && currentShell !== 'rawjson') {
     var rawScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
-    var rawTimeout = state.timeoutSeconds > 0 ? state.timeoutSeconds * 1000 : 0;
-    var rawConfig = {
-      containment: currentContainment,
-      process: {
-        commandLine: rawScript || '(no script)',
-        timeout: rawTimeout,
-      },
-    };
+    var rawConfig = buildRawBackendConfig(
+      currentContainment,
+      state.selectedScenario,
+      rawScript || '(no script)',
+      state.timeoutSeconds,
+    );
     var backendName = CONTAINMENT_LABELS[currentContainment] || currentContainment;
     $('devPolicyJson').innerHTML = '<span class="line-dim">N/A — ' + backendName + ' bypasses policy generation</span>';
     $('devConfigJson').innerHTML = highlightJson(escapeHtml(JSON.stringify(rawConfig, null, 2)));
@@ -2045,10 +2188,12 @@ function init(): void {
       // Auto-enable experimental (WS requires it) and lock the toggle
       ($('experimentalToggle') as HTMLInputElement).checked = true;
       ($('experimentalToggle') as HTMLInputElement).disabled = true;
-      // Hide PowerShell 7+ runtime — not available in WS VM
+      // Hide PowerShell 7+ runtime — not available in WS VM. Also hide the
+      // pseudo-shells (networking/filesystem) which only apply to MV/HL.
       var shellOpts = $sel('shellSelect').options;
       for (var i = 0; i < shellOpts.length; i++) {
-        if (shellOpts[i].value === 'ps7') {
+        var sv = shellOpts[i].value;
+        if (sv === 'ps7' || sv === 'networking' || sv === 'filesystem') {
           (shellOpts[i] as HTMLOptionElement).hidden = true;
         }
       }
@@ -2068,11 +2213,11 @@ function init(): void {
       $('uiGroupWrapper').classList.add('hidden');
       ($('experimentalToggle') as HTMLInputElement).checked = true;
       ($('experimentalToggle') as HTMLInputElement).disabled = true;
-      // MicroVM only supports Python — hide all other runtimes
+      // MicroVM supports Python + Filesystem test categories
       var mvOpts = $sel('shellSelect').options;
       for (var mi = 0; mi < mvOpts.length; mi++) {
         var v = mvOpts[mi].value;
-        (mvOpts[mi] as HTMLOptionElement).hidden = (v !== 'python' && v !== 'custom' && v !== 'rawjson');
+        (mvOpts[mi] as HTMLOptionElement).hidden = (v !== 'python' && v !== 'filesystem' && v !== 'custom' && v !== 'rawjson');
       }
       $sel('shellSelect').value = 'python';
       $sel('shellSelect').dispatchEvent(new Event('change'));
@@ -2087,11 +2232,11 @@ function init(): void {
       $('uiGroupWrapper').classList.add('hidden');
       ($('experimentalToggle') as HTMLInputElement).checked = true;
       ($('experimentalToggle') as HTMLInputElement).disabled = true;
-      // Hyperlight only supports Python — hide all other runtimes
+      // Hyperlight supports Python + Networking + Filesystem test categories
       var hlOpts = $sel('shellSelect').options;
       for (var hi = 0; hi < hlOpts.length; hi++) {
         var hv = hlOpts[hi].value;
-        (hlOpts[hi] as HTMLOptionElement).hidden = (hv !== 'python' && hv !== 'custom' && hv !== 'rawjson');
+        (hlOpts[hi] as HTMLOptionElement).hidden = (hv !== 'python' && hv !== 'networking' && hv !== 'filesystem' && hv !== 'custom' && hv !== 'rawjson');
       }
       $sel('shellSelect').value = 'python';
       $sel('shellSelect').dispatchEvent(new Event('change'));
@@ -2101,10 +2246,12 @@ function init(): void {
       $('runtimeRow').classList.add('hidden');
       $('categoryRow').classList.add('hidden');
       $('policySectionWrapper').classList.remove('hidden');
-      // Restore PowerShell runtimes
+      // Restore PowerShell runtimes (but keep pseudo-shells hidden — they only
+      // apply to MicroVM/Hyperlight, where Python is the runtime).
       var shellOpts2 = $sel('shellSelect').options;
       for (var j = 0; j < shellOpts2.length; j++) {
-        (shellOpts2[j] as HTMLOptionElement).hidden = false;
+        var sv2 = shellOpts2[j].value;
+        (shellOpts2[j] as HTMLOptionElement).hidden = (sv2 === 'networking' || sv2 === 'filesystem');
       }
       $sel('shellSelect').value = 'rawjson';
       $sel('shellSelect').dispatchEvent(new Event('change'));
@@ -2117,10 +2264,12 @@ function init(): void {
       $('experimentalCaution').classList.add('hidden');
       $('policySectionWrapper').classList.remove('hidden');
       ($('experimentalToggle') as HTMLInputElement).disabled = false;
-      // Restore PowerShell runtimes
+      // Restore PowerShell runtimes (but keep pseudo-shells hidden — they only
+      // apply to MicroVM/Hyperlight, where Python is the runtime).
       var shellOpts3 = $sel('shellSelect').options;
       for (var k = 0; k < shellOpts3.length; k++) {
-        (shellOpts3[k] as HTMLOptionElement).hidden = false;
+        var sv3 = shellOpts3[k].value;
+        (shellOpts3[k] as HTMLOptionElement).hidden = (sv3 === 'networking' || sv3 === 'filesystem');
       }
       if ($sel('shellSelect').value === 'rawjson') {
         $sel('shellSelect').value = 'cmd';
