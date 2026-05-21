@@ -622,6 +622,12 @@ fn hyperlight_suite() {
             expected_exit: 0,
             output_contains: Some("BLOCKED"),
         },
+        HyperlightCase {
+            config: "hyperlight_timeout.json",
+            description: "time.sleep(120) killed by 1s timeout",
+            expected_exit: -1,
+            output_contains: Some("timed out"),
+        },
     ];
 
     let mut failures = Vec::new();

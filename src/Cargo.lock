@@ -855,8 +855,8 @@ dependencies = [
 
 [[package]]
 name = "hyperlight-unikraft-host"
-version = "0.5.0"
-source = "git+https://github.com/hyperlight-dev/hyperlight-unikraft?tag=v0.5.0#ca05c5af35f1728bbce94e17677a18200b7247a6"
+version = "0.6.0"
+source = "git+https://github.com/hyperlight-dev/hyperlight-unikraft?tag=v0.6.0#d8524a99ad4855c7c9f1d0c17381b884386596b0"
 dependencies = [
  "anyhow",
  "base64",
