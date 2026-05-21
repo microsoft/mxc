@@ -94,20 +94,28 @@ function checkWindowsBuildVersion(): boolean {
   return true;
 }
 
+let windowsSandboxAvailableCache: boolean | undefined;
+
 /**
  * Check if Windows Sandbox feature is enabled via DISM.
  * @returns true if the Containers-DisposableClientVM feature is enabled
  */
 function isWindowsSandboxAvailable(): boolean {
+  if (windowsSandboxAvailableCache !== undefined) {
+    return windowsSandboxAvailableCache;
+  }
+
   try {
     const output = execSync(
       'dism /online /get-featureinfo /featurename:Containers-DisposableClientVM',
       { encoding: 'utf-8', stdio: 'pipe', timeout: 10000 },
     );
-    return /State\s*:\s*Enabled/i.test(output);
+    windowsSandboxAvailableCache = /State\s*:\s*Enabled/i.test(output);
   } catch {
-    return false;
+    windowsSandboxAvailableCache = false;
   }
+
+  return windowsSandboxAvailableCache;
 }
 
 /**
