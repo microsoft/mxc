@@ -55,16 +55,22 @@ extends:
     - stage: vpack
       displayName: 'Create OS vpack'
       jobs:
-        - job: Set_Version
-          displayName: Set version
-          dependsOn: []
+        - job: Packaging
           pool:
             type: windows
           variables:
+            # Note: all files placed in the output directory will be included in the vpack
             ob_outputDirectory: '$(Build.SourcesDirectory)\out'
+            ob_createvpack_enabled: true
+            ob_createvpack_packagename: 'MXC'
+            ob_createvpack_owneralias: 'Tessera-mxc-admin'
+            ob_createvpack_description: 'Microsoft Execution Containers'
+            ob_createvpack_provData: true
+            ob_createvpack_versionAs: string
+            ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
+
           steps:
             - task: PowerShell@2
-              name: setVpackVersion
               displayName: Set vpack version
               inputs:
                 targetType: inline
@@ -74,26 +80,8 @@ extends:
                 script: |
                   $sdkVersion = (Get-Content "$(System.DefaultWorkingDirectory)/sdk/package.json" | ConvertFrom-Json).version
                   $vpackVersion = "${sdkVersion}$(VersionDate)$(VersionCounter)"
-                  Write-Host "##vso[task.setvariable variable=VPackVersion;isOutput=true]$vpackVersion"
+                  Write-Host "##vso[task.setvariable variable=ob_createvpack_version]$vpackVersion"
 
-        - job: Packaging
-          dependsOn: Set_Version
-          pool:
-            type: windows
-          variables:
-            VPackVersion: $[ dependencies.Set_Version.outputs['setVpackVersion.VPackVersion'] ]
-            # Note: all files placed in the output directory will be included in the vpack
-            ob_outputDirectory: '$(Build.SourcesDirectory)\out'
-            ob_createvpack_enabled: true
-            ob_createvpack_packagename: 'MXC'
-            ob_createvpack_owneralias: 'Tessera-mxc-admin'
-            ob_createvpack_description: 'Microsoft Execution Containers'
-            ob_createvpack_provData: true
-            ob_createvpack_versionAs: string
-            ob_createvpack_version: $(VPackVersion)
-            ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
-
-          steps:
             - task: DownloadPipelineArtifact@2
               displayName: Download wxc x64 artifact
               inputs:
