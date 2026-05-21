@@ -99,6 +99,9 @@ jobs:
           configFile: $(configTomlPath)
         cacheOptions:
           enableTargetCache: true
+        setupOptions:
+          setupPython: ${{ parameters.useOneBranchPool }}
+          pythonArtifactFeeds: 'https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/pypi/simple/'
 
     steps:
       - checkout: self
