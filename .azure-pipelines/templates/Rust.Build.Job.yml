@@ -127,8 +127,15 @@ jobs:
           command: build
           profile: release
           target: $(triplet)
-          testCondition: "eq(variables['isX64'], 'true')" # 1ES nested template takes this as a string
-          enableTest: $(isX64)
+          # Skip cargo tests in the OneBranch container pool: the container image is
+          # missing runtime DLLs that --all-features test binaries depend on (e.g.
+          # hyperlight). Other pipelines (Azure-Pipelines-1ESPT-ExDShared) run tests.
+          ${{ if eq(parameters.useOneBranchPool, true) }}:
+            testCondition: "eq(variables['isX64'], 'false')"
+            enableTest: false
+          ${{ else }}:
+            testCondition: "eq(variables['isX64'], 'true')" # 1ES nested template takes this as a string
+            enableTest: $(isX64)
           publishTestResults: false
           enableClippy: false
           useNextest: false
