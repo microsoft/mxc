@@ -23,9 +23,9 @@ jobs:
     pool:
       
       ${{ if and(eq(item.os, 'windows'), eq(parameters.useOneBranchPool, false)) }}:
-      name: Azure-Pipelines-1ESPT-ExDShared
-      image: windows-latest
-      os: windows
+        name: Azure-Pipelines-1ESPT-ExDShared
+        image: windows-latest
+        os: windows
 
       ${{ if and(eq(item.os, 'windows'), eq(parameters.useOneBranchPool, true)) }}:
         type: windows
