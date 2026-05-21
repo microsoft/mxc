@@ -68,9 +68,12 @@ extends:
               displayName: Set vpack version
               inputs:
                 targetType: inline
+                # Vpack requires major.minor.patch. We keep major.minor from the
+                # SDK and pack date + per-day counter into the patch slot.
+                # Example: sdk 0.2.0, first build on 2026-05-21 -> 0.2.02605211
                 script: |
                   $sdkVersion = (Get-Content "$(System.DefaultWorkingDirectory)/sdk/package.json" | ConvertFrom-Json).version
-                  $vpackVersion = "$sdkVersion$(VersionDate)$(VersionCounter)"
+                  $vpackVersion = "${sdkVersion}$(VersionDate)$(VersionCounter)"
                   Write-Host "##vso[task.setvariable variable=VPackVersion;isOutput=true]$vpackVersion"
 
         - job: Packaging
