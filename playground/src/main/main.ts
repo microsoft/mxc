@@ -519,11 +519,47 @@ ipcMain.handle('run-sandbox-raw', (_event, configJson: string, debug: boolean, e
 
   try {
     const config = JSON.parse(configJson);
+    const execPath = resolveExecutablePath();
+
+    // MicroVM (nanvixd) requires CWD to be the binary directory
+    let workingDir: string | undefined;
+    if (config.containment === 'microvm') {
+      const fs = require('fs');
+      // Match the SDK's binary discovery layout (sdk/src/platform.ts):
+      // npm-packaged binaries live under sdk/bin/<arch>, local dev builds
+      // under src/target/<triple>/{release,debug}.
+      const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+      const triple = process.arch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
+      const repoRoot = path.join(__dirname, '..', '..', '..');
+      const candidates = [
+        execPath,
+        path.join(repoRoot, 'sdk', 'bin', arch),
+        path.join(repoRoot, 'src', 'target', triple, 'release'),
+        path.join(repoRoot, 'src', 'target', triple, 'debug'),
+        path.join(repoRoot, 'src', 'target', 'release'),
+        path.join(repoRoot, 'src', 'target', 'debug'),
+      ].filter(Boolean);
+      for (const c of candidates) {
+        const dir = c!.endsWith('.exe') ? path.dirname(c!) : c!;
+        if (fs.existsSync(path.join(dir, 'nanvixd.exe'))) {
+          workingDir = dir;
+          break;
+        }
+      }
+      if (!workingDir) {
+        return {
+          success: false,
+          error: `nanvixd.exe not found for arch '${arch}'. Looked in: ${candidates.join('; ')}. ` +
+                 `MicroVM requires nanvixd.exe to be co-located with wxc-exec (and CWD must point at it).`,
+        };
+      }
+    }
+
     const ptyProcess = sdk.spawnSandboxFromConfig(config, {
       debug,
       experimental,
-      executablePath: resolveExecutablePath(), skipPlatformCheck: true,
-    });
+      executablePath: execPath, skipPlatformCheck: true,
+    }, workingDir);
 
     attachPtyListeners(ptyProcess);
     return { success: true, config };

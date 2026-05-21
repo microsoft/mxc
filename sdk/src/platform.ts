@@ -94,6 +94,40 @@ function checkWindowsBuildVersion(): boolean {
   return true;
 }
 
+let windowsSandboxAvailableCache: boolean | undefined;
+
+/**
+ * Check if Windows Sandbox feature is enabled via DISM.
+ * @returns true if the Containers-DisposableClientVM feature is enabled
+ */
+function isWindowsSandboxAvailable(): boolean {
+  if (windowsSandboxAvailableCache !== undefined) {
+    return windowsSandboxAvailableCache;
+  }
+
+  try {
+    const output = execSync(
+      'dism /online /get-featureinfo /featurename:Containers-DisposableClientVM',
+      { encoding: 'utf-8', stdio: 'pipe', timeout: 10000 },
+    );
+    windowsSandboxAvailableCache = /State\s*:\s*Enabled/i.test(output);
+  } catch {
+    // `dism /online` typically requires elevation, so a non-elevated session
+    // throws here and we can't distinguish "disabled" from "no permission".
+    // Fall back to checking for the sandbox executable — Windows installs it
+    // under System32 only when the Containers-DisposableClientVM feature is
+    // enabled, and the path is readable without admin.
+    const sandboxExe = path.join(
+      process.env.SystemRoot || 'C:\\Windows',
+      'System32',
+      'WindowsSandbox.exe',
+    );
+    windowsSandboxAvailableCache = fs.existsSync(sandboxExe);
+  }
+
+  return windowsSandboxAvailableCache;
+}
+
 /**
  * Get platform support information
  * @returns Platform support details including available sandboxing methods
@@ -140,6 +174,9 @@ export function getPlatformSupport(): PlatformSupport {
   if (buildSupported) {
     support.isSupported = true;
     support.availableMethods = ['processcontainer'];
+    if (isWindowsSandboxAvailable()) {
+      support.availableMethods.push('windows_sandbox');
+    }
     return support;
   }
 

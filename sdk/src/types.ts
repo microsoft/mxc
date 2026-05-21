@@ -77,6 +77,7 @@ export type ContainmentBackend =
   | 'wslc'
   | 'lxc'
   | 'microvm'
+  | 'hyperlight'
   | 'seatbelt'
   | 'isolation_session'
   | 'bubblewrap';
@@ -85,7 +86,7 @@ export type ContainmentBackend =
  * Containment values (abstract intent or concrete backend) that require
  * the `--experimental` flag.
  */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'wslc', 'seatbelt', 'bubblewrap'];
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'hyperlight', 'wslc', 'seatbelt', 'bubblewrap'];
 
 /**
  * Clipboard access policy levels
