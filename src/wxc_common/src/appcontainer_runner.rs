@@ -43,35 +43,15 @@ const HRESULT_ERROR_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32;
 /// Proxy-related env var names to strip/override when building the child env block.
 const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
 
-/// Build a Unicode environment block for CreateProcessW with proxy env vars injected.
+/// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
 ///
-/// Copies the current process environment, strips any existing proxy vars
-/// (case-insensitive), injects HTTP_PROXY/HTTPS_PROXY pointing to the
-/// localhost proxy, and returns a double-null-terminated UTF-16 block.
-fn build_proxy_env_block(address: &crate::models::ProxyAddress) -> Vec<u16> {
-    let proxy_url = address.to_url();
-    let mut entries: Vec<(String, String)> = Vec::new();
-
-    for (key, value) in std::env::vars_os() {
-        let key_str = key.to_string_lossy();
-        let is_proxy_var = PROXY_VAR_NAMES
-            .iter()
-            .any(|name| key_str.eq_ignore_ascii_case(name));
-        if !is_proxy_var {
-            entries.push((key_str.into_owned(), value.to_string_lossy().into_owned()));
-        }
-    }
-
-    entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
-    entries.push(("HTTPS_PROXY".to_string(), proxy_url));
-
-    // Sort case-insensitively by key (required by CreateProcessW).
-    entries.sort_by(|(key_a, _), (key_b, _)| {
-        key_a.to_ascii_uppercase().cmp(&key_b.to_ascii_uppercase())
-    });
+/// Entries are sorted case-insensitively by key as required by `CreateProcessW`.
+fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
+    let mut sorted: Vec<&(String, String)> = entries.iter().collect();
+    sorted.sort_by(|(a, _), (b, _)| a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase()));
 
     let mut block = Vec::new();
-    for (key, value) in &entries {
+    for (key, value) in sorted {
         for ch in format!("{}={}", key, value).encode_utf16() {
             block.push(ch);
         }
@@ -79,6 +59,36 @@ fn build_proxy_env_block(address: &crate::models::ProxyAddress) -> Vec<u16> {
     }
     block.push(0);
     block
+}
+
+/// Parse explicit `KEY=VALUE` strings into entry pairs, optionally injecting
+/// proxy env vars (stripping any pre-existing proxy vars first).
+fn build_explicit_entries(
+    env_vars: &[String],
+    proxy_address: Option<&crate::models::ProxyAddress>,
+) -> Vec<(String, String)> {
+    let mut entries: Vec<(String, String)> = env_vars
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
+        .collect();
+
+    if let Some(addr) = proxy_address {
+        // Strip existing proxy vars before injecting ours.
+        entries.retain(|(key, _)| {
+            !PROXY_VAR_NAMES
+                .iter()
+                .any(|name| key.eq_ignore_ascii_case(name))
+        });
+        let proxy_url = addr.to_url();
+        entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
+        entries.push(("HTTPS_PROXY".to_string(), proxy_url));
+    }
+
+    entries
 }
 
 /// RAII guard that frees capability SID pointers via `LocalFree` on drop.
@@ -387,20 +397,35 @@ impl AppContainerScriptRunner {
             PCWSTR(working_dir_wide.as_ptr())
         };
 
-        // Build an explicit environment block when proxy is active.
-        // This avoids mutating process-global env vars (which isn't thread-safe).
-        let env_block: Option<Vec<u16>> = self.proxy_address.as_ref().map(build_proxy_env_block);
+        // Environment block for the sandboxed child.
+        // If explicit env vars were provided, use only those (+ proxy injection).
+        // If only proxy is active (no explicit env), build a block with just proxy vars.
+        // Otherwise, pass NULL to inherit the default environment.
+        let env_block: Option<Vec<u16>> = if !request.env.is_empty() {
+            let entries = build_explicit_entries(&request.env, self.proxy_address.as_ref());
+            Some(encode_env_block(&entries))
+        } else if let Some(addr) = self.proxy_address.as_ref() {
+            // No explicit env but proxy is active -- inject only proxy vars.
+            let proxy_url = addr.to_url();
+            let entries = vec![
+                ("HTTP_PROXY".to_string(), proxy_url.clone()),
+                ("HTTPS_PROXY".to_string(), proxy_url),
+            ];
+            Some(encode_env_block(&entries))
+        } else {
+            None
+        };
 
         let env_ptr = env_block
             .as_ref()
-            .map(|block| block.as_ptr() as *const core::ffi::c_void);
+            .map(|b| b.as_ptr() as *const core::ffi::c_void);
 
-        let creation_flags = if env_block.is_some() {
-            PROCESS_CREATION_FLAGS(
-                EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_UNICODE_ENVIRONMENT.0 | CREATE_SUSPENDED.0,
-            )
-        } else {
-            PROCESS_CREATION_FLAGS(EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0)
+        let creation_flags = {
+            let mut flags = EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0;
+            if env_block.is_some() {
+                flags |= CREATE_UNICODE_ENVIRONMENT.0;
+            }
+            PROCESS_CREATION_FLAGS(flags)
         };
 
         // --- Create process (console inheritance) ---
