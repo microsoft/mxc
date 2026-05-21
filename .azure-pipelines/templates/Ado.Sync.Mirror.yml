@@ -3,10 +3,10 @@
 name: $(BuildDefinitionName)_$(date:yyMMdd)$(rev:.r)
 
 parameters:
-  - name: "SourceToTargetBranches"
-    type: object
-    default:
-      main: main
+- name: SourceToTargetBranches
+  type: object
+  default:
+    main: main
 
 resources:
   repositories:
@@ -23,54 +23,71 @@ resources:
 extends:
   template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
   parameters:
+    sdl:
+      sourceRepositoriesToScan:
+        exclude:
+        - repository: SourceRepo
+
     pool:
       name: Azure-Pipelines-1ESPT-ExDShared
       image: windows-2022
       os: windows
+
     customBuildTags:
     - ES365AIMigrationTooling
+
     stages:
     - stage: stage
       jobs:
-        - job: SyncMirror
-          strategy:
-            matrix:
-              ${{ each branches in parameters.SourceToTargetBranches }}:
-                ${{ branches.key }}:
-                  SourceBranch: ${{ branches.key }}
-                  TargetBranch: ${{ branches.value }}
-          dependsOn: []
-          steps:
-          - checkout: self
-            persistCredentials: true
+      - job: SyncMirror
+        dependsOn: []
+        strategy:
+          matrix:
+            ${{ each branches in parameters.SourceToTargetBranches }}:
+              ${{ branches.key }}:
+                SourceBranch: ${{ branches.key }}
+                TargetBranch: ${{ branches.value }}
 
-          - checkout: SourceRepo
-            path: source
+        steps:
+        - checkout: self
+          persistCredentials: true
+          path: mirror
 
-          - task: PowerShell@2
-            inputs:
-              targetType: 'inline'
-              script: |
-                Write-Host "SourceBranch $(SourceBranch)"
-                Write-Host "TargetBranch $(TargetBranch)"
+        - checkout: SourceRepo
+          path: source
 
-                cd "$(Pipeline.Workspace)\s"
+        - task: PowerShell@2
+          displayName: Sync mirror branch
+          inputs:
+            targetType: inline
+            script: |
+              $ErrorActionPreference = "Stop"
 
-                $repo = "$(Pipeline.Workspace)\source"
-                git remote add sourcerepo $repo
-                git remote
+              $sourceBranch = "$(SourceBranch)"
+              $targetBranch = "$(TargetBranch)"
+              $mirrorPath = "$(Pipeline.Workspace)\mirror"
+              $sourcePath = "$(Pipeline.Workspace)\source"
 
-                $target = "$(TargetBranch)"
-                git fetch origin $target
-                git checkout $target
-                git pull origin $target
+              Write-Host "SourceBranch $sourceBranch"
+              Write-Host "TargetBranch $targetBranch"
+              Write-Host "MirrorPath $mirrorPath"
+              Write-Host "SourcePath $sourcePath"
 
-                $source = "$(SourceBranch)"
-                git fetch sourcerepo $source
-                git pull sourcerepo $source
+              Write-Host "=== source repo ==="
+              cd $sourcePath
+              git fetch origin $sourceBranch
+              git checkout $sourceBranch
+              git pull origin $sourceBranch
 
-          - task: CmdLine@2
-            inputs:
-              script: |
-                cd /d "$(Pipeline.Workspace)\s"
-                git push
+              Write-Host "=== mirror repo ==="
+              cd $mirrorPath
+
+              git fetch origin $targetBranch
+              git checkout $targetBranch
+              git pull origin $targetBranch
+
+              git remote add sourcerepo $sourcePath
+              git fetch sourcerepo $sourceBranch
+              git merge "sourcerepo/$sourceBranch" --no-edit
+
+              git push origin HEAD:$targetBranch
