@@ -73,7 +73,7 @@ extends:
             ob_createvpack_minorVer: $(SdkMinor)         # set by 'Set vpack version' step
             ob_createvpack_patchVer: $(SdkPatch)         # set by 'Set vpack version' step
             ob_createvpack_prereleaseVer: $(VersionDate).$(VersionCounter)
-            ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
+            # ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
 
           steps:
             - task: PowerShell@2
@@ -87,15 +87,16 @@ extends:
                   Write-Host "##vso[task.setvariable variable=SdkMinor]$($parts[1])"
                   Write-Host "##vso[task.setvariable variable=SdkPatch]$($parts[2])"
 
-            # `patterns` filters the download to only wxc-exec.exe + its pdb,
-            # keeping the vpack small. Files land at
-            # $(Pipeline.Workspace)/MXC/<artifactName>/...
+            # `patterns` filters the download to the binary + its pdb + the
+            # SBOM (_manifest/), keeping the vpack small while preserving
+            # provenance metadata OneBranch's post-vpack publish requires.
             - download: MXC
               displayName: Download wxc x64 (filtered)
               artifact: wxc-binaries-x86_64-pc-windows-msvc
               patterns: |
                 wxc-exec.exe
                 symbols/wxc-exec.pdb
+                _manifest/**
 
             - download: MXC
               displayName: Download wxc arm64 (filtered)
@@ -103,6 +104,7 @@ extends:
               patterns: |
                 wxc-exec.exe
                 symbols/wxc-exec.pdb
+                _manifest/**
 
             - task: PowerShell@2
               displayName: Stage binaries for vpack
