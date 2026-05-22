@@ -44,6 +44,8 @@ jobs:
     variables:
       integrationDirectory: $(Build.SourcesDirectory)/sdk/tests/integration
       sdkPkgDirectory: $(Build.SourcesDirectory)/sdk-pkg
+      # Cache npm package downloads across runs (see Package.NpmSdk.Job.yml).
+      npm_config_cache: $(Pipeline.Workspace)/.npm
 
     steps:
       - checkout: self
@@ -52,6 +54,14 @@ jobs:
         displayName: Use Node.js 20
         inputs:
           version: '20.x'
+
+      - task: Cache@2
+        displayName: Cache npm
+        inputs:
+          key: 'npm | "$(Agent.OS)" | sdk/tests/integration/package-lock.json'
+          restoreKeys: |
+            npm | "$(Agent.OS)"
+          path: $(npm_config_cache)
 
       - task: DownloadPipelineArtifact@2
         displayName: Download SDK package
