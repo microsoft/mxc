@@ -650,6 +650,7 @@ impl ScriptRunner for AppContainerScriptRunner {
             if let Some(diag) = diagnose_process_exit(
                 &request.script_code,
                 &request.policy.readonly_paths,
+                &request.policy.readwrite_paths,
                 response.exit_code as u32,
             ) {
                 logger.log_line(&format!(

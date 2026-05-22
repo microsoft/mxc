@@ -595,6 +595,7 @@ impl ScriptRunner for BaseContainerRunner {
                 err.0,
                 &request.script_code,
                 &request.policy.readonly_paths,
+                &request.policy.readwrite_paths,
             );
 
             let extended_error = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
@@ -674,6 +675,7 @@ impl ScriptRunner for BaseContainerRunner {
             if let Some(diag) = diagnose_process_exit(
                 &request.script_code,
                 &request.policy.readonly_paths,
+                &request.policy.readwrite_paths,
                 exit_code,
             ) {
                 let _ = writeln!(

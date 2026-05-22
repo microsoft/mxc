@@ -38,6 +38,7 @@ pub fn diagnose_create_process_failure(
     win32_error: u32,
     command_line: &str,
     readonly_paths: &[String],
+    readwrite_paths: &[String],
 ) -> LaunchDiagnostic {
     // Check for feature-not-enabled (velocity keys).
     if win32_error == ERROR_CALL_NOT_IMPLEMENTED || win32_error == E_NOTIMPL {
@@ -49,6 +50,10 @@ pub fn diagnose_create_process_failure(
     let resolved_exe = resolve_exe_on_path(bare_exe);
 
     if let Some(diag) = check_exe_heuristics(&resolved_exe, readonly_paths, None) {
+        return diag;
+    }
+
+    if let Some(diag) = check_refs_volumes(readonly_paths, readwrite_paths) {
         return diag;
     }
 
@@ -66,11 +71,15 @@ pub fn diagnose_create_process_failure(
 pub fn diagnose_process_exit(
     command_line: &str,
     readonly_paths: &[String],
+    readwrite_paths: &[String],
     exit_code: u32,
 ) -> Option<LaunchDiagnostic> {
     let bare_exe = Path::new(extract_exe_from_command_line(command_line));
     let resolved_exe = resolve_exe_on_path(bare_exe);
-    check_exe_heuristics(&resolved_exe, readonly_paths, Some(exit_code))
+    if let Some(diag) = check_exe_heuristics(&resolved_exe, readonly_paths, Some(exit_code)) {
+        return Some(diag);
+    }
+    check_refs_volumes(readonly_paths, readwrite_paths)
 }
 
 // -- Constants ---------------------------------------------------------------
@@ -210,7 +219,110 @@ fn check_velocity_keys() -> Vec<(u32, bool)> {
     }
 }
 
-// -- Utilities (pub for use by runners) --------------------------------------
+/// Check if any sandbox paths reference volumes that use ReFS (Dev Drive).
+/// BFS (Bind Filter) does not work correctly on ReFS, so filesystem policy
+/// will not be enforced. Returns a diagnostic if problematic volumes are found.
+fn check_refs_volumes(
+    readonly_paths: &[String],
+    readwrite_paths: &[String],
+) -> Option<LaunchDiagnostic> {
+    #[cfg(target_os = "windows")]
+    {
+        let system_drive = std::env::var("SystemDrive")
+            .unwrap_or_else(|_| "C:".to_string())
+            .to_uppercase();
+
+        // Collect unique non-system drive letters from all policy paths.
+        let mut non_system_drives: Vec<char> = Vec::new();
+        for path in readonly_paths.iter().chain(readwrite_paths.iter()) {
+            if let Some(drive_letter) = extract_drive_letter(path) {
+                let upper = drive_letter.to_ascii_uppercase();
+                let drive_prefix = format!("{}:", upper);
+                if drive_prefix != system_drive && !non_system_drives.contains(&upper) {
+                    non_system_drives.push(upper);
+                }
+            }
+        }
+
+        if non_system_drives.is_empty() {
+            return None;
+        }
+
+        // Check which of these drives are ReFS.
+        let refs_drives: Vec<char> = non_system_drives
+            .into_iter()
+            .filter(|&d| is_refs_volume(d))
+            .collect();
+
+        if refs_drives.is_empty() {
+            return None;
+        }
+
+        let drive_list: String = refs_drives
+            .iter()
+            .map(|d| format!("{d}:"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(LaunchDiagnostic {
+            kind: "refs_volume_unsupported",
+            message: format!(
+                "The sandbox policy references paths on ReFS volume(s) ({drive_list}) which \
+                 may be a Dev Drive. The Bind Filter (BFS) used to enforce filesystem policy \
+                 does not work correctly on ReFS volumes, so sandboxed processes may not be \
+                 able to access files on those paths. Move your working directory to an NTFS \
+                 volume, or remove those paths from readonlyPaths/readwritePaths."
+            ),
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (readonly_paths, readwrite_paths);
+        None
+    }
+}
+
+/// Extract the drive letter from a path like "D:\foo" or "d:/bar".
+fn extract_drive_letter(path: &str) -> Option<char> {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        Some(bytes[0] as char)
+    } else {
+        None
+    }
+}
+
+/// Check if a volume uses ReFS by calling GetVolumeInformationW.
+#[cfg(target_os = "windows")]
+fn is_refs_volume(drive_letter: char) -> bool {
+    use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
+
+    let root = format!("{}:\\", drive_letter);
+    let root_wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let mut fs_name_buf = [0u16; 64];
+    let success = unsafe {
+        GetVolumeInformationW(
+            windows::core::PCWSTR(root_wide.as_ptr()),
+            None,                   // volume name (not needed)
+            None,                   // serial number
+            None,                   // max component length
+            None,                   // filesystem flags
+            Some(&mut fs_name_buf), // filesystem name
+        )
+    };
+
+    if success.is_err() {
+        return false;
+    }
+
+    let fs_name = String::from_utf16_lossy(
+        &fs_name_buf[..fs_name_buf
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(fs_name_buf.len())],
+    );
+    fs_name.eq_ignore_ascii_case("ReFS")
+}
 
 /// Attempt to resolve a potentially bare executable name (e.g. `pwsh.exe`)
 /// to its full path by searching the system PATH. Returns the original path
@@ -296,14 +408,15 @@ mod tests {
 
     #[test]
     fn api_not_implemented_triggers_feature_diagnostic() {
-        let diag = diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED, "pwsh.exe", &[]);
+        let diag =
+            diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED, "pwsh.exe", &[], &[]);
         assert_eq!(diag.kind, "feature_not_enabled");
         assert!(diag.message.contains("velocity"));
     }
 
     #[test]
     fn e_notimpl_triggers_feature_diagnostic() {
-        let diag = diagnose_create_process_failure(E_NOTIMPL, "pwsh.exe", &[]);
+        let diag = diagnose_create_process_failure(E_NOTIMPL, "pwsh.exe", &[], &[]);
         assert_eq!(diag.kind, "feature_not_enabled");
     }
 
@@ -311,14 +424,14 @@ mod tests {
     fn packaged_app_detected_from_command_line() {
         let cmd =
             r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe" -NoProfile"#;
-        let diag = diagnose_create_process_failure(87, cmd, &[]);
+        let diag = diagnose_create_process_failure(87, cmd, &[], &[]);
         assert_eq!(diag.kind, "packaged_app");
         assert!(diag.message.contains("packaged"));
     }
 
     #[test]
     fn generic_fallback_for_unknown_error() {
-        let diag = diagnose_create_process_failure(5, "cmd.exe", &["C:\\".to_string()]);
+        let diag = diagnose_create_process_failure(5, "cmd.exe", &["C:\\".to_string()], &[]);
         assert_eq!(diag.kind, "create_process_failed");
         assert!(diag.message.contains("5"));
     }
@@ -330,6 +443,7 @@ mod tests {
         let diag = diagnose_process_exit(
             r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile"#,
             &["C:\\".to_string()],
+            &[],
             STATUS_DLL_INIT_FAILED,
         );
         assert!(diag.is_some());
@@ -344,6 +458,7 @@ mod tests {
         let diag = diagnose_process_exit(
             r#""C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe""#,
             &["C:\\".to_string()],
+            &[],
             STATUS_DLL_INIT_FAILED,
         );
         assert!(diag.is_some());
@@ -355,6 +470,7 @@ mod tests {
         let diag = diagnose_process_exit(
             r"C:\tools\myapp.exe",
             &["C:\\".to_string()],
+            &[],
             STATUS_DLL_INIT_FAILED,
         );
         assert!(diag.is_none());
@@ -365,6 +481,7 @@ mod tests {
         let diag = diagnose_process_exit(
             r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
             &["C:\\".to_string()],
+            &[],
             1,
         );
         assert!(diag.is_none());
@@ -372,7 +489,8 @@ mod tests {
 
     #[test]
     fn missing_root_readonly_from_exit() {
-        let diag = diagnose_process_exit(r#""C:\Program Files\PowerShell\7\pwsh.exe""#, &[], 1);
+        let diag =
+            diagnose_process_exit(r#""C:\Program Files\PowerShell\7\pwsh.exe""#, &[], &[], 1);
         assert!(diag.is_some());
         assert_eq!(diag.unwrap().kind, "missing_filesystem_access");
     }
@@ -382,6 +500,7 @@ mod tests {
         let diag = diagnose_process_exit(
             r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
             &["C:\\".to_string()],
+            &[],
             1,
         );
         assert!(diag.is_none());
@@ -390,7 +509,7 @@ mod tests {
     #[test]
     fn packaged_app_takes_priority_over_missing_access() {
         let cmd = r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe""#;
-        let diag = diagnose_process_exit(cmd, &[], 1);
+        let diag = diagnose_process_exit(cmd, &[], &[], 1);
         assert!(diag.is_some());
         assert_eq!(diag.unwrap().kind, "packaged_app");
     }
@@ -436,6 +555,7 @@ mod tests {
         let diag = diagnose_process_exit(
             r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
             &["c:\\".to_string()],
+            &[],
             1,
         );
         assert!(diag.is_none());
@@ -446,8 +566,27 @@ mod tests {
         let diag = diagnose_process_exit(
             r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
             &["\\".to_string()],
+            &[],
             1,
         );
         assert!(diag.is_none());
+    }
+
+    // -- extract_drive_letter tests --
+
+    #[test]
+    fn extract_drive_letter_absolute() {
+        assert_eq!(extract_drive_letter(r"D:\myrepo"), Some('D'));
+        assert_eq!(extract_drive_letter(r"c:\users"), Some('c'));
+    }
+
+    #[test]
+    fn extract_drive_letter_none_for_unc() {
+        assert_eq!(extract_drive_letter(r"\\server\share"), None);
+    }
+
+    #[test]
+    fn extract_drive_letter_none_for_relative() {
+        assert_eq!(extract_drive_letter("relative/path"), None);
     }
 }
