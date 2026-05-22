@@ -12,24 +12,21 @@
 //! BindFlt mappings tombstone or redirect entries inside the
 //! namespace. Host DACLs are not touched.
 //!
-//! # Phase A.2 status
+//! # Phase A.3 status
 //!
-//! ProjFS path is **live**: `OverlayManager::apply_policy` walks the
-//! `OverlayPlan` from `policy::classify`, groups its `ProjFsBranch`
-//! entries, hands them to `projfs::apply_branches` (which calls
-//! `PrjStartVirtualizing` with the spike's promoted callback set),
-//! and returns an `OverlayHandle` whose `effective_cwd` and
-//! `MXC_POLICY_ROOT` env var let the runner land the AC's cwd inside
-//! the projection.
+//! Crash-safe state-file persistence is **live**. Every primitive's
+//! intent is appended to a JSON state file under the overlay state
+//! directory *before* the underlying ProjFS / BindFlt API call. On
+//! drop, restore consumes the in-memory list LIFO and removes the
+//! state file when empty. [`recover_orphaned_state`] scans the
+//! state directory at startup, reaps state files owned by dead
+//! processes (PID + image basename + creation FILETIME), and
+//! quarantines unparseable ones.
 //!
-//! BindFlt sub-module is still stubbed (returns
-//! `PrimitiveUnavailable`); arrives in Phase B.
-//!
-//! `policy::classify` is still the Phase A.1 stub that returns an
-//! empty plan. The real per-entry classifier lands in Phase C.1.
-//! Until then, the only way `apply_policy` exercises the ProjFS
-//! path is via the integration tests / future runner code passing
-//! a hand-built plan straight to `projfs::apply_branches`.
+//! ProjFS path is live (Phase A.2 promotion). BindFlt sub-module is
+//! still stubbed (returns `PrimitiveUnavailable`); arrives in Phase
+//! B. `policy::classify` is still the Phase A.1 stub returning an
+//! empty plan — the real per-entry classifier lands in Phase C.1.
 
 #![cfg(target_os = "windows")]
 
@@ -40,12 +37,17 @@ pub mod plan;
 pub mod policy;
 pub mod projfs;
 pub mod recovery;
+pub mod state;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use error::OverlayError;
 pub use handle::OverlayHandle;
 pub use plan::{BranchMode, OverlayPlan, OverlayPlanSummary, OverlayPrimitive};
 pub use policy::AcContext;
 pub use recovery::{recover_orphaned_state, RecoveryReport};
+pub use state::{AppliedRecord, StateFile};
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -56,51 +58,56 @@ use crate::models::ContainerPolicy;
 /// enforcement. Parallel to [`crate::filesystem_dacl::DaclManager`]
 /// — same lifecycle, same restore semantics, same `Drop` discipline.
 ///
-/// Apply a policy with [`apply_policy`](Self::apply_policy); call
-/// [`restore`](Self::restore) to undo. On drop,
-/// [`restore`](Self::restore) is invoked best-effort.
+/// # State-file persistence
+///
+/// On the first primitive apply, the manager writes a
+/// `<state_dir>/<run-id>.json` describing its intent. Every
+/// subsequent apply rewrites it atomically (stage to `.tmp`, fsync,
+/// rename). On clean restore the file is deleted; if any restore
+/// step fails the file is rewritten preserving only the unrestored
+/// entries so the next startup's [`recover_orphaned_state`] can
+/// retry.
 #[derive(Debug)]
 pub struct OverlayManager {
     /// Unique id for this run (file name stem under the state dir).
     run_id: String,
     /// Where the state file lives. Created lazily on first apply.
     state_path: PathBuf,
-    /// The one active ProjFS projection, if any. ProjFS opens a
-    /// single virt session whose callbacks serve every projected
-    /// branch — so the manager holds at most one of these, not a
-    /// list.
+    /// Owning process creation FILETIME, captured at construction.
+    process_start_filetime: u64,
+    /// The one active ProjFS projection, if any.
     applied_projfs: Option<projfs::ProjFsApplied>,
     /// BindFlt mappings successfully applied so far, in apply order.
-    /// Independent primitives — one entry per `BfSetupFilter*` call.
     applied_bindflt: Vec<bindflt::BindFltApplied>,
+    /// Mirror of the applied state in serialisable shape; kept in
+    /// sync with `applied_projfs` / `applied_bindflt`.
+    applied_records: Vec<AppliedRecord>,
     /// Non-fatal warnings accumulated during apply / restore.
     warnings: Vec<String>,
 }
 
 impl OverlayManager {
     /// Create a new manager. The state directory is created on the
-    /// first successful apply, not at construction. A fresh `run_id`
-    /// is generated up-front so it's stable across the manager's
-    /// lifetime.
+    /// first successful apply, not at construction.
     pub fn new() -> Result<Self, OverlayError> {
         let run_id = generate_run_id();
-        let state_path = state_dir()?.join(format!("{run_id}.json"));
+        let state_path = state::state_dir()?.join(format!("{run_id}.json"));
+        let process_start_filetime = state::process_creation_filetime()?;
         Ok(Self {
             run_id,
             state_path,
+            process_start_filetime,
             applied_projfs: None,
             applied_bindflt: Vec::new(),
+            applied_records: Vec::new(),
             warnings: Vec::new(),
         })
     }
 
-    /// Apply the policy. Returns an [`OverlayHandle`] the runner
-    /// uses to set up the contained process (cwd, env vars).
-    ///
-    /// Phase A.2: ProjFS branches are grouped and handed to
-    /// [`projfs::apply_branches`] as a single set (one virt session
-    /// serves the whole projection). BindFlt primitives still return
-    /// `PrimitiveUnavailable` until Phase B.
+    /// Apply the policy. Each primitive's [`AppliedRecord`] is
+    /// appended to the state file **before** the underlying API
+    /// call so [`recover_orphaned_state`] can clean up after a
+    /// crash mid-apply.
     pub fn apply_policy(
         &mut self,
         ac_sid: &str,
@@ -108,19 +115,13 @@ impl OverlayManager {
     ) -> Result<OverlayHandle, OverlayError> {
         let ctx = AcContext {
             ac_sid: ac_sid.to_string(),
-            // Phase A.2: these come from `fallback_detector::detect`
-            // in Phase D. Defaulting to `true` keeps `classify`
-            // testable; the real apply will surface
-            // `PrimitiveUnavailable` if the actual primitive is
-            // absent.
+            // Phase D will populate these from `fallback_detector::detect`.
             projfs_available: true,
             bindflt_available: true,
         };
         let plan = policy::classify(policy, &ctx)?;
         let summary = plan.summarize();
 
-        // Group primitives: ProjFS branches go through `apply_branches`
-        // once; BindFlt entries are applied one at a time.
         let projfs_primitives: Vec<OverlayPrimitive> = plan
             .primitives
             .iter()
@@ -138,20 +139,48 @@ impl OverlayManager {
 
         if !projfs_primitives.is_empty() {
             let projection_root = self.compute_projection_root(ac_sid);
-            let applied =
-                projfs::apply_branches(&projfs_primitives, ac_sid, projection_root.clone())?;
-            // Expose the projection root to the runner / agent script.
-            effective_cwd = Some(projection_root.clone());
-            env_injections.push((
-                "MXC_POLICY_ROOT".to_string(),
-                OsString::from(projection_root.as_os_str()),
-            ));
-            self.applied_projfs = Some(applied);
+
+            self.applied_records.push(AppliedRecord::ProjFsProjection {
+                projection_root: projection_root.clone(),
+                branches: projfs_primitives.clone(),
+                ac_sid: ac_sid.to_string(),
+            });
+            if let Err(e) = self.persist_state() {
+                self.applied_records.pop();
+                return Err(e);
+            }
+
+            match projfs::apply_branches(&projfs_primitives, ac_sid, projection_root.clone()) {
+                Ok(applied) => {
+                    effective_cwd = Some(projection_root.clone());
+                    env_injections.push((
+                        "MXC_POLICY_ROOT".to_string(),
+                        OsString::from(projection_root.as_os_str()),
+                    ));
+                    self.applied_projfs = Some(applied);
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         for primitive in bindflt_primitives {
-            let applied = bindflt::apply_mapping(primitive, ac_sid)?;
-            self.applied_bindflt.push(applied);
+            let virt_path = bindflt_virt_path_for(primitive);
+            self.applied_records.push(AppliedRecord::BindFltMapping {
+                primitive: primitive.clone(),
+                virt_path,
+                ac_sid: ac_sid.to_string(),
+            });
+            if let Err(e) = self.persist_state() {
+                self.applied_records.pop();
+                return Err(e);
+            }
+
+            match bindflt::apply_mapping(primitive, ac_sid) {
+                Ok(applied) => {
+                    self.applied_bindflt.push(applied);
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         Ok(OverlayHandle {
@@ -162,24 +191,30 @@ impl OverlayManager {
     }
 
     /// Restore everything applied by this manager. LIFO: BindFlt
-    /// mappings unmap first (they may target paths inside the
-    /// projection), then the ProjFS projection tears down. Per-entry
-    /// failures go into `warnings`; only fatal state-file I/O
-    /// surfaces as `Err`.
+    /// mappings unmap first, then the ProjFS projection tears down.
+    /// Each successful restore drops its record from memory and the
+    /// state file is rewritten (or deleted, if empty). Failed
+    /// records are retained for retry on the next call /
+    /// [`recover_orphaned_state`] pass.
     pub fn restore(&mut self) -> Result<(), OverlayError> {
-        while let Some(applied) = self.applied_bindflt.pop() {
-            if let Err(e) = bindflt::restore_mapping(&applied) {
-                self.warnings
-                    .push(format!("bindflt restore failed: {e} ({applied:?})"));
+        let mut remaining: Vec<AppliedRecord> = Vec::new();
+        while let Some(record) = self.applied_records.pop() {
+            let outcome = self.restore_one_record(&record);
+            if let Err((e, ctx)) = outcome {
+                self.warnings.push(format!("restore failed: {e} ({ctx})"));
+                remaining.push(record);
             }
         }
-        if let Some(mut applied) = self.applied_projfs.take() {
-            if let Err(e) = projfs::restore(&mut applied) {
-                self.warnings.push(format!(
-                    "projfs restore failed: {e} (root={})",
-                    applied.projection_root.display()
-                ));
+        if remaining.is_empty() {
+            if self.state_path.exists() {
+                if let Err(e) = std::fs::remove_file(&self.state_path) {
+                    return Err(OverlayError::StateIo(e));
+                }
             }
+        } else {
+            remaining.reverse();
+            self.applied_records = remaining;
+            self.persist_state()?;
         }
         Ok(())
     }
@@ -199,26 +234,66 @@ impl OverlayManager {
         &self.run_id
     }
 
-    /// Compute the projection root for this manager's run. Lives
-    /// inside the AC profile's `AC\` subfolder so the AC has natural
-    /// traverse access. Per-run GUID-shaped leaf so concurrent runs
-    /// don't collide.
-    ///
-    /// Falls back to `%TEMP%` when the AC profile folder can't be
-    /// resolved — Phase A wires the real lookup once
-    /// `appcontainer_runner` integration lands in Phase D. The
-    /// fallback exists so unit tests on machines without the spike's
-    /// AC profile still get a usable path.
+    fn restore_one_record(&mut self, record: &AppliedRecord) -> Result<(), (OverlayError, String)> {
+        match record {
+            AppliedRecord::ProjFsProjection {
+                projection_root, ..
+            } => {
+                if let Some(mut applied) = self.applied_projfs.take() {
+                    projfs::restore(&mut applied).map_err(|e| {
+                        (
+                            e,
+                            format!("projfs root={}", applied.projection_root.display()),
+                        )
+                    })
+                } else if projection_root.exists() {
+                    // No live session — best-effort clean the
+                    // projection-root directory directly.
+                    std::fs::remove_dir_all(projection_root).map_err(|e| {
+                        (
+                            OverlayError::ProjFs(format!(
+                                "remove projection root {}: {e}",
+                                projection_root.display()
+                            )),
+                            format!("projfs root={}", projection_root.display()),
+                        )
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+            AppliedRecord::BindFltMapping { virt_path, .. } => {
+                let _ = virt_path;
+                if let Some(applied) = self.applied_bindflt.pop() {
+                    bindflt::restore_mapping(&applied).map_err(|e| {
+                        (
+                            e,
+                            format!("bindflt virt_path={}", applied.virt_path.display()),
+                        )
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Persist the current applied-records list to disk.
+    fn persist_state(&self) -> Result<(), OverlayError> {
+        let s = StateFile {
+            run_id: self.run_id.clone(),
+            pid: std::process::id(),
+            image_name: state::current_image_basename(),
+            started_at_filetime: self.process_start_filetime,
+            applied: self.applied_records.clone(),
+        };
+        state::write_state_file(&self.state_path, &s)
+    }
+
+    /// Compute the projection root for this manager's run.
     fn compute_projection_root(&self, ac_sid: &str) -> PathBuf {
-        // Try the AC profile path first.
         if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
-            // Spike convention: the AC profile root is keyed by its
-            // friendly name (`mxc.projfs.spike`). Production
-            // integration in Phase D will derive this from the AC's
-            // moniker. For Phase A.2 just use the SID prefix as a
-            // discriminator so concurrent runs against different AC
-            // identities don't collide.
-            let _ = ac_sid; // Reserved for Phase D.
+            let _ = ac_sid; // Reserved for Phase D AC-profile derivation.
             let base = PathBuf::from(local_appdata)
                 .join("Microsoft")
                 .join("MXC")
@@ -241,87 +316,130 @@ impl Drop for OverlayManager {
 // Helpers
 // -------------------------------------------------------------------------
 
-/// Default state directory:
-/// `%LOCALAPPDATA%\Microsoft\MXC\overlay-state`. Overridable via the
-/// `MXC_OVERLAY_STATE_DIR` env var.
-fn state_dir() -> Result<PathBuf, OverlayError> {
-    if let Ok(override_dir) = std::env::var("MXC_OVERLAY_STATE_DIR") {
-        return Ok(PathBuf::from(override_dir));
+/// Derive the BindFlt virt-path used for `BfRemoveMappingEx` from a
+/// plan primitive. For tombstones / overlays the virt path is the
+/// `path` / `virt_path` field. Returns an empty path for variants
+/// that have no natural virt-path concept.
+fn bindflt_virt_path_for(primitive: &OverlayPrimitive) -> PathBuf {
+    match primitive {
+        OverlayPrimitive::BindFltTombstone { path } => path.clone(),
+        OverlayPrimitive::BindFltRoOverlay { virt_path, .. }
+        | OverlayPrimitive::BindFltRwOverlay { virt_path, .. } => virt_path.clone(),
+        OverlayPrimitive::ProjFsBranch { .. } => PathBuf::new(),
     }
-    let local_appdata = std::env::var("LOCALAPPDATA").map_err(|_| {
-        OverlayError::Apply("LOCALAPPDATA not set; cannot resolve state directory".into())
-    })?;
-    Ok(PathBuf::from(local_appdata)
-        .join("Microsoft")
-        .join("MXC")
-        .join("overlay-state"))
 }
 
 /// Generate a short, monotonic-enough run id. Same shape as
-/// `filesystem_dacl::generate_run_id`: PID + 8 hex chars of system
-/// time micros (truncated).
+/// `filesystem_dacl::generate_run_id` so log readers don't have to
+/// learn two formats.
 fn generate_run_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let pid = std::process::id();
-    let micros = SystemTime::now()
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
+        .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{pid}-{:08x}", micros & 0xFFFF_FFFF)
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in pid.to_le_bytes().iter().chain(nanos.to_le_bytes().iter()) {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("pid-{pid}-{:016x}", h)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filesystem_overlay::plan::BranchMode;
+    use crate::filesystem_overlay::test_support::ScopedStateDir;
 
     #[test]
-    fn new_succeeds_when_localappdata_set() {
-        // Tests run with LOCALAPPDATA set on Windows; just verify
-        // we can construct a manager and that the state path has the
-        // expected shape.
-        let mgr = OverlayManager::new().expect("constructor should succeed on Windows test host");
-        assert!(mgr.run_id().contains('-'));
-        assert!(mgr.state_path().to_string_lossy().ends_with(".json"));
+    fn new_captures_self_filetime() {
+        let _scope = ScopedStateDir::new();
+        let mgr = OverlayManager::new().expect("constructor");
+        assert!(mgr.process_start_filetime > 0);
     }
 
     #[test]
-    fn new_respects_state_dir_override() {
-        // Save / restore env var to avoid polluting other tests.
-        let prev = std::env::var("MXC_OVERLAY_STATE_DIR").ok();
-        std::env::set_var("MXC_OVERLAY_STATE_DIR", r"C:\overlay-test-override");
-        let mgr = OverlayManager::new().expect("constructor with override");
-        assert!(mgr.state_path().starts_with(r"C:\overlay-test-override"));
-        match prev {
-            Some(v) => std::env::set_var("MXC_OVERLAY_STATE_DIR", v),
-            None => std::env::remove_var("MXC_OVERLAY_STATE_DIR"),
-        }
-    }
-
-    #[test]
-    fn apply_empty_policy_yields_empty_handle() {
+    fn apply_empty_policy_writes_no_state_file() {
+        let _scope = ScopedStateDir::new();
         let mut mgr = OverlayManager::new().expect("constructor");
         let policy = ContainerPolicy::default();
         let handle = mgr
             .apply_policy("S-1-15-2-test", &policy)
-            .expect("empty policy applies cleanly in Phase A.1 stub");
+            .expect("empty policy applies cleanly");
         assert!(handle.effective_cwd.is_none());
         assert!(handle.env_injections.is_empty());
-        assert_eq!(handle.plan_summary.projfs_branch_count, 0);
-        assert_eq!(handle.plan_summary.bindflt_mapping_count, 0);
+        // Empty plan → no primitives → no state file.
+        assert!(!mgr.state_path().exists());
     }
 
     #[test]
-    fn restore_with_nothing_applied_is_a_noop() {
+    fn restore_with_no_state_file_is_noop() {
+        let _scope = ScopedStateDir::new();
         let mut mgr = OverlayManager::new().expect("constructor");
-        mgr.restore().expect("idempotent restore");
+        mgr.restore().expect("idempotent");
         assert!(mgr.warnings().is_empty());
     }
 
     #[test]
+    fn bindflt_virt_path_for_tombstone() {
+        let p = OverlayPrimitive::BindFltTombstone {
+            path: PathBuf::from(r"C:\fake"),
+        };
+        assert_eq!(bindflt_virt_path_for(&p), PathBuf::from(r"C:\fake"));
+    }
+
+    #[test]
+    fn bindflt_virt_path_for_ro_overlay() {
+        let p = OverlayPrimitive::BindFltRoOverlay {
+            virt_path: PathBuf::from(r"C:\virt"),
+            target_path: PathBuf::from(r"D:\target"),
+        };
+        assert_eq!(bindflt_virt_path_for(&p), PathBuf::from(r"C:\virt"));
+    }
+
+    #[test]
+    fn bindflt_virt_path_for_rw_overlay() {
+        let p = OverlayPrimitive::BindFltRwOverlay {
+            virt_path: PathBuf::from(r"C:\virt"),
+            target_path: PathBuf::from(r"D:\target"),
+            scratch: Some(PathBuf::from(r"E:\scratch")),
+        };
+        assert_eq!(bindflt_virt_path_for(&p), PathBuf::from(r"C:\virt"));
+    }
+
+    #[test]
     fn run_id_is_unique_per_manager() {
+        let _scope = ScopedStateDir::new();
         let a = OverlayManager::new().expect("a");
         std::thread::sleep(std::time::Duration::from_micros(2));
         let b = OverlayManager::new().expect("b");
         assert_ne!(a.run_id(), b.run_id());
+    }
+
+    /// End-to-end-ish for the persist-before-apply discipline:
+    /// force a non-empty applied list, persist, then restore +
+    /// confirm the state file is gone.
+    #[test]
+    fn persist_then_restore_clears_state_file() {
+        let _scope = ScopedStateDir::new();
+        let mut mgr = OverlayManager::new().expect("constructor");
+        mgr.applied_records.push(AppliedRecord::ProjFsProjection {
+            projection_root: std::env::temp_dir()
+                .join(format!("mxc-overlay-test-proj-{}", mgr.run_id())),
+            branches: vec![OverlayPrimitive::ProjFsBranch {
+                host_path: PathBuf::from(r"C:\test"),
+                branch_name: "test".into(),
+                mode: BranchMode::ReadOnly,
+            }],
+            ac_sid: "S-1-15-2-test".into(),
+        });
+        mgr.persist_state().expect("persist");
+        assert!(mgr.state_path().exists());
+
+        mgr.restore().expect("restore");
+        assert!(!mgr.state_path().exists(), "state file should be removed");
+        assert!(mgr.applied_records.is_empty());
     }
 }
