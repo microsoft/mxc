@@ -49,6 +49,7 @@ jobs:
             wxc-windows-sandbox-daemon.exe
             wxc-windows-sandbox-guest.exe
             wxc-test-proxy.exe
+            mxc-diagnostic-console.exe
 
       # Linux specific variables
       ${{ if eq(item.os, 'linux') }}:
