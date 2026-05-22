@@ -113,13 +113,10 @@ jobs:
           testAllTargets: false
           buildAllTargets: false
 
-      # Run clippy via plain cargo so the 1ES Setup task doesn't have to
-      # source-install clippy-sarif (~8 min). The toolchain ships clippy
-      # itself; `-D warnings` keeps the build gated.
-      - script: cargo clippy --locked --all-targets --all-features --target $(triplet) --release -- -D warnings
-        displayName: Clippy
-        condition: and(succeeded(), eq(variables['isX64'], 'true'))
-        workingDirectory: $(workingDirectory)
+      # Clippy and fmt now run in the parallel Lint stage (see
+      # .azure-pipelines/templates/Lint.Job.yml). Keeping them out of the
+      # critical path here removes ~10+ min of redundant compilation, since
+      # clippy's `--all-features` graph misses the build's fingerprint cache.
 
       - task: EsrpCodeSigning@5
         displayName: Code Sign
