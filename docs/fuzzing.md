@@ -16,9 +16,10 @@ exercising the attacker-influenced config surface consumed by `wxc-exec` and
 | `base64_decode`  | `load_mxc_request(s, .., is_base64 = true)` (SDK wire format) |
 | `validator`      | parse + `validate_common` on a one-shot request          |
 
-Seed corpora are curated from `test_configs/*.json`, one representative file
-per backend × phase. OneFuzz dedups by coverage server-side and grows the
-corpus across daily runs, so we keep the in-repo seeds small.
+Seed corpora for `config_parser` and `validator` targets come directly from
+`test_configs/*.json`. The `base64_decode` target uses pre-encoded seeds in
+`src/fuzz/corpus/base64_decode/`. OneFuzz dedups by coverage server-side and
+grows the corpus across daily runs, so we keep the in-repo seeds small.
 
 ## Platform coverage
 
@@ -43,9 +44,9 @@ $asanDir = (Get-ChildItem 'C:\Program Files\Microsoft Visual Studio' -Recurse `
     | Where-Object FullName -Match 'HostX64\\x64\\clang_rt' | Select-Object -First 1).Directory.FullName
 $env:PATH = "$asanDir;$env:PATH"
 
-# Run a target for 30 seconds
+# Run a target for 30 seconds (uses test_configs/ as the seed corpus)
 cd src\fuzz
-cargo +nightly fuzz run config_parser -- -max_total_time=30
+cargo +nightly fuzz run config_parser ..\..\test_configs -- -max_total_time=30
 ```
 
 Discovered crashes are written to `artifacts/<target>/` (relative to `src/fuzz/`)

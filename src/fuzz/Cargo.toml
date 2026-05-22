@@ -12,6 +12,12 @@ cargo-fuzz = true
 # normal builds and so the nightly-only `libfuzzer-sys` dependency is only
 # pulled in when explicitly fuzzing.
 
+[features]
+# Enable runner-specific validation in the `validator` fuzz target.
+# These pull in heavier deps so they're opt-in for local dev.
+hyperlight = ["wxc_common/hyperlight"]
+isolation_session = ["wxc_common/isolation_session"]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 wxc_common = { path = "../wxc_common" }

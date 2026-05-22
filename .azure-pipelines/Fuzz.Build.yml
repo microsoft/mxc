@@ -7,9 +7,7 @@
 # drop directory to OneFuzz. Bugs found are filed against the SDL fuzzing
 # work item 62294501 via the routing fields in src/fuzz/OneFuzzConfig.json.
 #
-# Schedule: daily at 00:00 UTC on `main`. PRs do not trigger this pipeline,
-# but pushes to `user/saulg/Fuzzer` are allowed during initial bring-up so
-# we can validate the build + drop staging before merging.
+# Schedule: daily at 00:00 UTC on `main`. PRs do not trigger this pipeline.
 
 pr: none
 trigger: none

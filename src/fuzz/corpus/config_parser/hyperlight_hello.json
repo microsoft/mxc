@@ -1,7 +1,0 @@
-{
-    "process": {
-        "commandLine": "import sys\nprint(f'Hello from Hyperlight! Python {sys.version.split()[0]} on {sys.platform}')",
-        "timeout": 30000
-    },
-    "containment": "hyperlight"
-}
