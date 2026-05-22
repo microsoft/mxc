@@ -46,6 +46,8 @@ pub mod diagnostic;
 #[cfg(target_os = "windows")]
 pub mod filesystem_dacl;
 #[cfg(target_os = "windows")]
+pub mod filesystem_overlay;
+#[cfg(target_os = "windows")]
 pub mod process_util;
 #[cfg(target_os = "windows")]
 pub mod string_util;
