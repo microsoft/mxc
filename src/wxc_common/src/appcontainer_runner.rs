@@ -581,7 +581,8 @@ impl Default for AppContainerScriptRunner {
 impl ScriptRunner for AppContainerScriptRunner {
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         use crate::filesystem_bfs::FileSystemBfsManager;
-        use crate::launch_diagnostics::diagnose_launch_failure;
+        use crate::launch_diagnostics::diagnose_process_exit;
+        use crate::models::FailurePhase;
         use crate::network_manager::NetworkManager;
 
         // Apply experimental features when flag is set
@@ -643,33 +644,23 @@ impl ScriptRunner for AppContainerScriptRunner {
         };
 
         // Post-failure diagnostics: if the child failed, check for known
-        // environment issues and enrich the error message with actionable
-        // guidance.
+        // environment issues and enrich the error message.
         if response.exit_code != 0 {
-            let bare_exe = std::path::Path::new(
-                crate::launch_diagnostics::extract_exe_from_command_line(&request.script_code),
-            );
-            let resolved_exe = crate::launch_diagnostics::resolve_exe_on_path(bare_exe);
-            if let Some(diag) = diagnose_launch_failure(
-                &resolved_exe,
+            response.failure_phase = FailurePhase::ProcessExited;
+            if let Some(diag) = diagnose_process_exit(
+                &request.script_code,
                 &request.policy.readonly_paths,
-                Some(response.exit_code as u32),
+                response.exit_code as u32,
             ) {
                 logger.log_line(&format!(
                     "Error: Launch diagnostic [{}]: {}",
                     diag.kind, diag.message
                 ));
-                logger.log_line(&format!("Error: Remediation: {}", diag.remediation));
-                let user_msg = format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
-                if response.error_message.is_empty() {
-                    response.error_message = user_msg.clone();
-                } else {
-                    // Preserve original error as extended_error, replace
-                    // error_message with the friendly diagnostic.
+                if !response.error_message.is_empty() {
                     response.extended_error = response.error_message.clone();
-                    response.error_message = user_msg.clone();
                 }
-                response.standard_err.push_str(&user_msg);
+                response.error_message = diag.message.clone();
+                response.standard_err.push_str(&diag.message);
             }
         }
 

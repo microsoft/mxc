@@ -545,6 +545,19 @@ impl Default for CodexRequest {
     }
 }
 
+/// Distinguishes whether an error occurred during process creation (launch)
+/// or after the process started but exited with a failure code.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FailurePhase {
+    /// No failure (process exited successfully, or has not been evaluated yet).
+    #[default]
+    None,
+    /// The CreateProcess (or equivalent) API call itself failed.
+    LaunchFailed,
+    /// The process was created but exited with a non-zero code.
+    ProcessExited,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScriptResponse {
@@ -557,6 +570,9 @@ pub struct ScriptResponse {
     /// Kept separate from `error_message` which holds user-friendly text.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub extended_error: String,
+    /// Indicates at what phase the failure occurred.
+    #[serde(default)]
+    pub failure_phase: FailurePhase,
 }
 
 impl Default for ScriptResponse {
@@ -567,6 +583,7 @@ impl Default for ScriptResponse {
             standard_err: String::new(),
             error_message: String::new(),
             extended_error: String::new(),
+            failure_phase: FailurePhase::None,
         }
     }
 }

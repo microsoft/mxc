@@ -22,13 +22,13 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
-use crate::launch_diagnostics::diagnose_launch_failure;
+use crate::launch_diagnostics::{diagnose_create_process_failure, diagnose_process_exit};
 use crate::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ScriptResponse,
+    CodexRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ScriptResponse,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
@@ -62,14 +62,6 @@ type PfnCreateProcessInSandbox = unsafe extern "system" fn(
 pub struct BaseContainerRunner {
     proxy_coordinator: ProxyCoordinator,
 }
-
-/// Windows error code for a function that exists but is not implemented
-/// (e.g., disabled via feature-enablement mechanisms).
-const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
-
-/// HRESULT E_NOTIMPL -- the OS may set this via GetLastError when the
-/// feature is gated behind velocity keys.
-const E_NOTIMPL: u32 = 0x8000_4001;
 
 /// SandboxSpec FlatBuffer schema version embedded in every spec payload.
 const SANDBOX_SPEC_VERSION: &str = "0.1.0";
@@ -594,61 +586,25 @@ impl ScriptRunner for BaseContainerRunner {
                     logger,
                 );
             }
+
             let err = unsafe { GetLastError() };
-            if err.0 == ERROR_CALL_NOT_IMPLEMENTED || err.0 == E_NOTIMPL {
-                let diag = crate::launch_diagnostics::diagnose_api_not_implemented();
-                let _ = writeln!(
-                    logger,
-                    "Error: Launch diagnostic [{}]: {}",
-                    diag.kind, diag.message
-                );
-                let _ = writeln!(logger, "Error: Remediation: {}", diag.remediation);
-                let user_message = format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
-                let raw_error = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
-                return ScriptResponse {
-                    exit_code: -1,
-                    standard_err: user_message.clone(),
-                    error_message: user_message,
-                    extended_error: raw_error,
-                    ..Default::default()
-                };
-            }
-            let bare_exe = std::path::Path::new(
-                crate::launch_diagnostics::extract_exe_from_command_line(&request.script_code),
+            let diag = diagnose_create_process_failure(
+                err.0,
+                &request.script_code,
+                &request.policy.readonly_paths,
             );
-            let resolved_exe = crate::launch_diagnostics::resolve_exe_on_path(bare_exe);
-            let raw_error = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
-            let mut user_message = String::new();
-            if let Some(diag) =
-                diagnose_launch_failure(&resolved_exe, &request.policy.readonly_paths, None)
-            {
-                let _ = writeln!(
-                    logger,
-                    "Error: Launch diagnostic [{}]: {}",
-                    diag.kind, diag.message
-                );
-                let _ = writeln!(logger, "Error: Remediation: {}", diag.remediation);
-                user_message = format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
-            }
-            if user_message.is_empty() {
-                user_message = raw_error.clone();
-            }
+
+            let _ = writeln!(logger, "Error: Launch diagnostic [{}]: {}", diag.kind, diag.message);
+
             return ScriptResponse {
                 exit_code: -1,
-                standard_err: user_message.clone(),
-                error_message: user_message,
-                extended_error: raw_error,
+                error_message: diag.message.clone(),
+                standard_err: diag.message,
+                extended_error: format!("Experimental_CreateProcessInSandbox failed: {err:?}"),
+                failure_phase: FailurePhase::LaunchFailed,
                 ..Default::default()
             };
         }
-
-        // Helper: resolve exe path from the command line for post-exit diagnostics.
-        let resolved_exe = {
-            let bare = std::path::Path::new(
-                crate::launch_diagnostics::extract_exe_from_command_line(&request.script_code),
-            );
-            crate::launch_diagnostics::resolve_exe_on_path(bare)
-        };
 
         let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
 
@@ -701,33 +657,33 @@ impl ScriptRunner for BaseContainerRunner {
         // Stop the builtin test proxy if it was started.
         self.proxy_coordinator.stop(logger);
 
-        // Post-failure diagnostics: if the child failed, check for known
+        // Post-exit diagnostics: if the child failed, check for known
         // environment issues and enrich the error message.
-        let mut error_message = String::new();
-        let mut standard_err = String::new();
-        if exit_code != 0 {
-            if let Some(diag) = diagnose_launch_failure(
-                &resolved_exe,
+        let (error_message, failure_phase) = if exit_code != 0 {
+            if let Some(diag) = diagnose_process_exit(
+                &request.script_code,
                 &request.policy.readonly_paths,
-                Some(exit_code),
+                exit_code,
             ) {
                 let _ = writeln!(
                     logger,
                     "Error: Launch diagnostic [{}]: {}",
                     diag.kind, diag.message
                 );
-                let _ = writeln!(logger, "Error: Remediation: {}", diag.remediation);
-                let user_msg = format!("{}\n\nRemediation: {}", diag.message, diag.remediation);
-                error_message = user_msg.clone();
-                standard_err = user_msg;
+                (diag.message, FailurePhase::ProcessExited)
+            } else {
+                (String::new(), FailurePhase::ProcessExited)
             }
-        }
+        } else {
+            (String::new(), FailurePhase::None)
+        };
 
         ScriptResponse {
             exit_code: exit_code as i32,
             standard_out: String::new(),
-            standard_err,
+            standard_err: error_message.clone(),
             error_message,
+            failure_phase,
             ..Default::default()
         }
     }

@@ -6,8 +6,8 @@
 //! When a process-creation call (`CreateProcessW` or
 //! `Experimental_CreateProcessInSandbox`) fails, or when the child exits
 //! with a non-zero code immediately, the caller can invoke
-//! [`diagnose_launch_failure`] to check for well-known environment
-//! conditions and produce an actionable remediation message for the user.
+//! [`diagnose_create_process_failure`] or [`diagnose_process_exit`] to check
+//! for well-known environment conditions and produce an actionable message.
 //!
 //! This module is intentionally decoupled from the runner implementations
 //! so both `AppContainerScriptRunner` and `BaseContainerRunner` share the
@@ -22,23 +22,80 @@ pub struct LaunchDiagnostic {
     /// Machine-readable discriminator (e.g. `"packaged_app"`,
     /// `"missing_filesystem_access"`).
     pub kind: &'static str,
-    /// Human-readable explanation of the failure.
+    /// Human-readable explanation of the failure including remediation guidance.
     pub message: String,
-    /// Actionable remediation guidance for the user.
-    pub remediation: String,
 }
 
-/// Attempts to diagnose a known failure condition after a process launch has
-/// failed. Returns `None` when no recognized condition matches -- the caller
-/// should fall through to its existing generic error message in that case.
+// -- Public API --------------------------------------------------------------
+
+/// Diagnose a failed `CreateProcess` / `Experimental_CreateProcessInSandbox`
+/// call. Inspects the Win32 error code and the command line to identify known
+/// failure conditions.
 ///
-/// # Arguments
-///
-/// * `exe_path` -- Resolved path to the executable that was launched.
-/// * `readonly_paths` -- The `readonlyPaths` from the sandbox policy.
-/// * `_exit_code` -- The child's exit code (if available). Reserved for future
-///   heuristics that key off specific exit codes.
-pub fn diagnose_launch_failure(
+/// Always returns a `LaunchDiagnostic` -- if no specific heuristic matches,
+/// a generic message is produced from the raw error code.
+pub fn diagnose_create_process_failure(
+    win32_error: u32,
+    command_line: &str,
+    readonly_paths: &[String],
+) -> LaunchDiagnostic {
+    // Check for feature-not-enabled (velocity keys).
+    if win32_error == ERROR_CALL_NOT_IMPLEMENTED || win32_error == E_NOTIMPL {
+        return diagnose_api_not_implemented();
+    }
+
+    // Resolve the exe from the command line for further heuristics.
+    let bare_exe = Path::new(extract_exe_from_command_line(command_line));
+    let resolved_exe = resolve_exe_on_path(bare_exe);
+
+    if let Some(diag) = check_exe_heuristics(&resolved_exe, readonly_paths, None) {
+        return diag;
+    }
+
+    // Generic fallback.
+    LaunchDiagnostic {
+        kind: "create_process_failed",
+        message: format!(
+            "CreateProcessInSandbox failed with error code {win32_error} (0x{win32_error:08X})."
+        ),
+    }
+}
+
+/// Diagnose a process that launched successfully but exited with a non-zero
+/// code. Returns `None` when no recognized condition matches.
+pub fn diagnose_process_exit(
+    command_line: &str,
+    readonly_paths: &[String],
+    exit_code: u32,
+) -> Option<LaunchDiagnostic> {
+    let bare_exe = Path::new(extract_exe_from_command_line(command_line));
+    let resolved_exe = resolve_exe_on_path(bare_exe);
+    check_exe_heuristics(&resolved_exe, readonly_paths, Some(exit_code))
+}
+
+// -- Constants ---------------------------------------------------------------
+
+/// Windows error code for a function that exists but is not implemented.
+const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
+
+/// HRESULT E_NOTIMPL -- the OS may set this via GetLastError when the
+/// feature is gated behind velocity keys.
+const E_NOTIMPL: u32 = 0x8000_4001;
+
+/// Velocity key IDs required by the BaseContainer feature.
+const REQUIRED_VELOCITY_KEYS: &[(u32, &str)] = &[
+    (61389575, "BaseContainer core"),
+    (61155944, "BaseContainer sandbox spec"),
+];
+
+/// STATUS_DLL_INIT_FAILED -- typically means Win32k (UI subsystem) was blocked.
+const STATUS_DLL_INIT_FAILED: u32 = 0xC000_0142;
+
+// -- Internal heuristics -----------------------------------------------------
+
+/// Checks exe-path-based heuristics (packaged app, DLL init failure, missing
+/// root access). Returns `None` if nothing matches.
+fn check_exe_heuristics(
     exe_path: &Path,
     readonly_paths: &[String],
     exit_code: Option<u32>,
@@ -48,27 +105,20 @@ pub fn diagnose_launch_failure(
             kind: "packaged_app",
             message: format!(
                 "The target executable '{}' appears to be a packaged (MSIX) app. \
-                 Packaged apps cannot be launched inside a sandboxed container.",
+                 Packaged apps cannot be launched inside a sandboxed container. \
+                 Uninstall the packaged version and install an unpackaged build.",
                 exe_path.display()
             ),
-            remediation: "Uninstall the packaged version and install an unpackaged build."
-                .to_string(),
         });
     }
 
-    // STATUS_DLL_INIT_FAILED (0xC0000142) from pwsh/powershell typically means
-    // a DLL (e.g. user32.dll) failed to initialize because the sandbox blocked
-    // UI subsystem access (Win32k system calls).
-    const STATUS_DLL_INIT_FAILED: u32 = 0xC000_0142;
     if exit_code == Some(STATUS_DLL_INIT_FAILED) && is_powershell(exe_path) {
         return Some(LaunchDiagnostic {
             kind: "dll_init_failed_ui_required",
             message: "PowerShell exited with STATUS_DLL_INIT_FAILED (0xC0000142). \
                       This typically means the sandbox is blocking Win32k system calls \
-                      (UI subsystem access), which PowerShell requires to initialize."
-                .to_string(),
-            remediation: "Enable UI access in your sandbox policy \
-                          (set `ui.allowWindows: true` or equivalent)."
+                      (UI subsystem access), which PowerShell requires to initialize. \
+                      Enable UI access in your sandbox policy (set `ui.allowWindows: true`)."
                 .to_string(),
         });
     }
@@ -80,11 +130,8 @@ pub fn diagnose_launch_failure(
             message: format!(
                 "pwsh.exe versions before 7.7 require read-only access to the \
                  root drive ({root}) to start. The current sandbox policy does \
-                 not grant this access."
-            ),
-            remediation: format!(
-                "Add \"{root}\" to `readonlyPaths` in your sandbox policy, \
-                 or upgrade to pwsh 7.7+ which does not require root drive access."
+                 not grant this access. Add \"{root}\" to `readonlyPaths` in your \
+                 sandbox policy, or upgrade to pwsh 7.7+."
             ),
         });
     }
@@ -92,53 +139,37 @@ pub fn diagnose_launch_failure(
     None
 }
 
-/// Velocity key IDs required by the BaseContainer feature.
-const REQUIRED_VELOCITY_KEYS: &[(u32, &str)] = &[
-    (61389575, "BaseContainer core"),
-    (61155944, "BaseContainer sandbox spec"),
-];
-
-/// Produces a diagnostic when `Experimental_CreateProcessInSandbox` returns
-/// `E_NOTIMPL` or `ERROR_CALL_NOT_IMPLEMENTED`, indicating the feature is
-/// gated behind velocity keys that are not enabled.
-pub fn diagnose_api_not_implemented() -> LaunchDiagnostic {
+/// Produces a diagnostic when the API returns E_NOTIMPL/ERROR_CALL_NOT_IMPLEMENTED,
+/// indicating the feature is gated behind velocity keys.
+fn diagnose_api_not_implemented() -> LaunchDiagnostic {
     let key_status = check_velocity_keys();
-    let (message, remediation) = if key_status.is_empty() {
-        // Could not determine key status (no registry access or different gating)
-        (
-            "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
-             The BaseContainer feature is not enabled on this OS build."
-                .to_string(),
-            "Ensure the required velocity keys are enabled, \
-             or use schema version '0.4.0-alpha' to fall back to the AppContainer backend."
-                .to_string(),
-        )
+
+    let message = if key_status.is_empty() {
+        "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
+         The BaseContainer feature is not enabled on this OS build. \
+         Ensure the required velocity keys are enabled, or use schema \
+         version '0.4.0-alpha' to fall back to the AppContainer backend."
+            .to_string()
     } else {
-        let disabled: Vec<_> = key_status.iter().filter(|(_, enabled)| !enabled).collect();
+        let disabled: Vec<_> = key_status
+            .iter()
+            .filter(|(_, enabled)| !enabled)
+            .collect();
         if disabled.is_empty() {
-            // All keys are enabled but we still got E_NOTIMPL - unexpected
-            (
-                "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
-                 All known velocity keys appear enabled, but the feature is still gated."
-                    .to_string(),
-                "The OS build may require additional enablement. \
-                 Use schema version '0.4.0-alpha' to fall back to the AppContainer backend."
-                    .to_string(),
-            )
+            "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
+             All known velocity keys appear enabled, but the feature is \
+             still gated. The OS build may require additional enablement. \
+             Use schema version '0.4.0-alpha' to fall back to the AppContainer backend."
+                .to_string()
         } else {
             let disabled_list: Vec<String> =
                 disabled.iter().map(|(id, _)| id.to_string()).collect();
-            (
-                format!(
-                    "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
-                     The following velocity keys are not enabled: {}.",
-                    disabled_list.join(", ")
-                ),
-                format!(
-                    "Enable velocity keys {} and retry, \
-                     or use schema version '0.4.0-alpha' to fall back to the AppContainer backend.",
-                    disabled_list.join(", ")
-                ),
+            format!(
+                "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
+                 The following velocity keys are not enabled: {}. \
+                 Enable them and retry, or use schema version '0.4.0-alpha' \
+                 to fall back to the AppContainer backend.",
+                disabled_list.join(", ")
             )
         }
     };
@@ -146,7 +177,6 @@ pub fn diagnose_api_not_implemented() -> LaunchDiagnostic {
     LaunchDiagnostic {
         kind: "feature_not_enabled",
         message,
-        remediation,
     }
 }
 
@@ -161,23 +191,18 @@ fn check_velocity_keys() -> Vec<(u32, bool)> {
 
         let mut results = Vec::new();
         for &(key_id, _label) in REQUIRED_VELOCITY_KEYS {
-            // Velocity key overrides live under FeatureManagement\Overrides\<priority>\<featureId>.
-            // Priority 4 = user/test override, 8 = flighting.
-            // The key has a DWORD "EnabledState" (1 = disabled, 2 = enabled).
-            let enabled = [4u32, 8]
-                .iter()
-                .any(|priority| {
-                    let path = format!(
-                        r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FeatureManagement\Overrides\{}\{}",
-                        priority, key_id
-                    );
-                    if let Ok(reg_key) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(&path) {
-                        if let Ok(state) = reg_key.get_value::<u32, _>("EnabledState") {
-                            return state == 2; // 2 = enabled
-                        }
+            let enabled = [4u32, 8].iter().any(|priority| {
+                let path = format!(
+                    r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FeatureManagement\Overrides\{}\{}",
+                    priority, key_id
+                );
+                if let Ok(reg_key) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(&path) {
+                    if let Ok(state) = reg_key.get_value::<u32, _>("EnabledState") {
+                        return state == 2;
                     }
-                    false
-                });
+                }
+                false
+            });
             results.push((key_id, enabled));
         }
         results
@@ -188,25 +213,15 @@ fn check_velocity_keys() -> Vec<(u32, bool)> {
     }
 }
 
-/// Format a `LaunchDiagnostic` into a string suitable for appending to an
-/// error message displayed to the user.
-pub fn format_diagnostic(diag: &LaunchDiagnostic) -> String {
-    format!(
-        "\n\n--- Diagnostic: {} ---\n{}\n\nRemediation: {}",
-        diag.kind, diag.message, diag.remediation
-    )
-}
+// -- Utilities (pub for use by runners) --------------------------------------
 
 /// Attempt to resolve a potentially bare executable name (e.g. `pwsh.exe`)
 /// to its full path by searching the system PATH. Returns the original path
 /// if resolution fails or the input is already absolute.
 pub fn resolve_exe_on_path(exe: &Path) -> std::path::PathBuf {
-    // If already absolute, return as-is.
     if exe.is_absolute() {
         return exe.to_path_buf();
     }
-
-    // Search PATH for the executable.
     if let Some(path_var) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path_var) {
             let candidate = dir.join(exe);
@@ -215,8 +230,6 @@ pub fn resolve_exe_on_path(exe: &Path) -> std::path::PathBuf {
             }
         }
     }
-
-    // Fallback: return the original (detection will be best-effort).
     exe.to_path_buf()
 }
 
@@ -227,27 +240,22 @@ pub fn resolve_exe_on_path(exe: &Path) -> std::path::PathBuf {
 pub fn extract_exe_from_command_line(command_line: &str) -> &str {
     let trimmed = command_line.trim();
     if let Some(after_quote) = trimmed.strip_prefix('"') {
-        // Quoted: find the closing quote.
         match after_quote.find('"') {
             Some(end) => &after_quote[..end],
             None => trimmed.split_whitespace().next().unwrap_or(""),
         }
     } else {
-        // Unquoted: take up to first whitespace.
         trimmed.split_whitespace().next().unwrap_or("")
     }
 }
 
-// --- Internal detection heuristics ---
+// -- Internal detection helpers ----------------------------------------------
 
-/// MSIX/packaged apps are installed under `WindowsApps`.
 fn is_packaged_app(exe_path: &Path) -> bool {
     let normalized = exe_path.to_string_lossy().to_lowercase();
     normalized.contains("\\windowsapps\\")
 }
 
-/// Returns `true` when the executable filename is a PowerShell variant
-/// (pwsh.exe or powershell.exe).
 fn is_powershell(exe_path: &Path) -> bool {
     let filename = exe_path
         .file_name()
@@ -257,11 +265,6 @@ fn is_powershell(exe_path: &Path) -> bool {
     filename == "pwsh.exe" || filename == "powershell.exe"
 }
 
-/// Returns `true` when the executable is `pwsh.exe` and the sandbox policy
-/// does not grant read-only access to the drive root.
-///
-/// Note: This does NOT apply to `powershell.exe` (inbox Windows PowerShell 5.x)
-/// and does NOT apply to `pwsh.exe` >= 7.7-preview1.
 fn missing_root_readonly(exe_path: &Path, readonly_paths: &[String]) -> bool {
     let filename = exe_path
         .file_name()
@@ -277,8 +280,6 @@ fn missing_root_readonly(exe_path: &Path, readonly_paths: &[String]) -> bool {
         .any(|p| p.eq_ignore_ascii_case(&root) || p == "\\")
 }
 
-/// Extract the drive root (e.g. `C:\`) from an absolute path. Falls back to
-/// `C:\` when the path is relative or otherwise cannot be parsed.
 fn drive_root(exe_path: &Path) -> String {
     let s = exe_path.to_string_lossy();
     if s.len() >= 3 && s.as_bytes()[1] == b':' {
@@ -288,79 +289,123 @@ fn drive_root(exe_path: &Path) -> String {
     }
 }
 
+// -- Tests -------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+
+    // -- diagnose_create_process_failure tests --
 
     #[test]
-    fn packaged_app_detected() {
-        let path =
-            PathBuf::from(r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe");
-        let diag = diagnose_launch_failure(&path, &[], None);
-        assert!(diag.is_some());
-        let d = diag.unwrap();
-        assert_eq!(d.kind, "packaged_app");
-        assert!(d.message.contains("packaged"));
+    fn api_not_implemented_triggers_feature_diagnostic() {
+        let diag =
+            diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED, "pwsh.exe", &[]);
+        assert_eq!(diag.kind, "feature_not_enabled");
+        assert!(diag.message.contains("velocity"));
     }
 
     #[test]
-    fn unpackaged_pwsh_without_root_readonly() {
-        let path = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
-        let diag = diagnose_launch_failure(&path, &[], None);
-        assert!(diag.is_some());
-        let d = diag.unwrap();
-        assert_eq!(d.kind, "missing_filesystem_access");
-        assert!(d.remediation.contains("readonlyPaths"));
+    fn e_notimpl_triggers_feature_diagnostic() {
+        let diag = diagnose_create_process_failure(E_NOTIMPL, "pwsh.exe", &[]);
+        assert_eq!(diag.kind, "feature_not_enabled");
     }
 
     #[test]
-    fn unpackaged_pwsh_with_root_readonly() {
-        let path = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
-        let readonly = vec!["C:\\".to_string()];
-        let diag = diagnose_launch_failure(&path, &readonly, None);
+    fn packaged_app_detected_from_command_line() {
+        let cmd =
+            r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe" -NoProfile"#;
+        let diag = diagnose_create_process_failure(87, cmd, &[]);
+        assert_eq!(diag.kind, "packaged_app");
+        assert!(diag.message.contains("packaged"));
+    }
+
+    #[test]
+    fn generic_fallback_for_unknown_error() {
+        let diag =
+            diagnose_create_process_failure(5, "cmd.exe", &["C:\\".to_string()]);
+        assert_eq!(diag.kind, "create_process_failed");
+        assert!(diag.message.contains("5"));
+    }
+
+    // -- diagnose_process_exit tests --
+
+    #[test]
+    fn dll_init_failed_pwsh_triggers_ui_diagnostic() {
+        let diag = diagnose_process_exit(
+            r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile"#,
+            &["C:\\".to_string()],
+            STATUS_DLL_INIT_FAILED,
+        );
+        assert!(diag.is_some());
+        let d = diag.unwrap();
+        assert_eq!(d.kind, "dll_init_failed_ui_required");
+        assert!(d.message.contains("STATUS_DLL_INIT_FAILED"));
+        assert!(d.message.contains("UI access"));
+    }
+
+    #[test]
+    fn dll_init_failed_powershell_exe_triggers_ui_diagnostic() {
+        let diag = diagnose_process_exit(
+            r#""C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe""#,
+            &["C:\\".to_string()],
+            STATUS_DLL_INIT_FAILED,
+        );
+        assert!(diag.is_some());
+        assert_eq!(diag.unwrap().kind, "dll_init_failed_ui_required");
+    }
+
+    #[test]
+    fn dll_init_failed_non_powershell_does_not_trigger() {
+        let diag = diagnose_process_exit(
+            r"C:\tools\myapp.exe",
+            &["C:\\".to_string()],
+            STATUS_DLL_INIT_FAILED,
+        );
         assert!(diag.is_none());
     }
 
     #[test]
-    fn powershell_5_not_flagged() {
-        let path = PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
-        let diag = diagnose_launch_failure(&path, &[], None);
+    fn different_exit_code_pwsh_does_not_trigger_ui_diagnostic() {
+        let diag = diagnose_process_exit(
+            r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
+            &["C:\\".to_string()],
+            1,
+        );
         assert!(diag.is_none());
     }
 
     #[test]
-    fn non_powershell_not_flagged() {
-        let path = PathBuf::from(r"C:\Windows\System32\cmd.exe");
-        let diag = diagnose_launch_failure(&path, &[], None);
+    fn missing_root_readonly_from_exit() {
+        let diag = diagnose_process_exit(
+            r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
+            &[],
+            1,
+        );
+        assert!(diag.is_some());
+        assert_eq!(diag.unwrap().kind, "missing_filesystem_access");
+    }
+
+    #[test]
+    fn pwsh_with_root_readonly_no_diagnostic() {
+        let diag = diagnose_process_exit(
+            r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
+            &["C:\\".to_string()],
+            1,
+        );
         assert!(diag.is_none());
     }
 
     #[test]
     fn packaged_app_takes_priority_over_missing_access() {
-        // A packaged pwsh.exe should report "packaged_app", not "missing_filesystem_access"
-        let path =
-            PathBuf::from(r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe");
-        let diag = diagnose_launch_failure(&path, &[], None);
+        let cmd =
+            r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe""#;
+        let diag = diagnose_process_exit(cmd, &[], 1);
         assert!(diag.is_some());
         assert_eq!(diag.unwrap().kind, "packaged_app");
     }
 
-    #[test]
-    fn case_insensitive_root_path_match() {
-        let path = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
-        let readonly = vec!["c:\\".to_string()];
-        let diag = diagnose_launch_failure(&path, &readonly, None);
-        assert!(diag.is_none());
-    }
-
-    #[test]
-    fn backslash_only_matches_as_root() {
-        let path = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
-        let readonly = vec!["\\".to_string()];
-        let diag = diagnose_launch_failure(&path, &readonly, None);
-        assert!(diag.is_none());
-    }
+    // -- extract_exe_from_command_line tests --
 
     #[test]
     fn extract_exe_quoted_path_with_spaces() {
@@ -374,16 +419,19 @@ mod tests {
 
     #[test]
     fn extract_exe_unquoted() {
-        let cmd = r"pwsh.exe -NoProfile -NoLogo";
-        let exe = extract_exe_from_command_line(cmd);
-        assert_eq!(exe, "pwsh.exe");
+        assert_eq!(
+            extract_exe_from_command_line("pwsh.exe -NoProfile"),
+            "pwsh.exe"
+        );
     }
 
     #[test]
     fn extract_exe_quoted_no_args() {
         let cmd = r#""C:\Program Files\PowerShell\7\pwsh.exe""#;
-        let exe = extract_exe_from_command_line(cmd);
-        assert_eq!(exe, r"C:\Program Files\PowerShell\7\pwsh.exe");
+        assert_eq!(
+            extract_exe_from_command_line(cmd),
+            r"C:\Program Files\PowerShell\7\pwsh.exe"
+        );
     }
 
     #[test]
@@ -391,47 +439,25 @@ mod tests {
         assert_eq!(extract_exe_from_command_line(""), "");
     }
 
-    #[test]
-    fn quoted_packaged_path_triggers_diagnostic() {
-        let cmd = r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.1.0_x64__8wekyb3d8bbwe\pwsh.exe" -NoProfile"#;
-        let exe = extract_exe_from_command_line(cmd);
-        let path = PathBuf::from(exe);
-        let diag = diagnose_launch_failure(&path, &[], None);
-        assert!(diag.is_some());
-        assert_eq!(diag.unwrap().kind, "packaged_app");
-    }
+    // -- case sensitivity / edge cases --
 
     #[test]
-    fn dll_init_failed_pwsh_triggers_ui_diagnostic() {
-        let path = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
-        let diag = diagnose_launch_failure(&path, &["C:\\".to_string()], Some(0xC000_0142));
-        assert!(diag.is_some());
-        let d = diag.unwrap();
-        assert_eq!(d.kind, "dll_init_failed_ui_required");
-        assert!(d.message.contains("STATUS_DLL_INIT_FAILED"));
-        assert!(d.remediation.contains("UI access"));
-    }
-
-    #[test]
-    fn dll_init_failed_powershell_exe_triggers_ui_diagnostic() {
-        let path = PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
-        let diag = diagnose_launch_failure(&path, &["C:\\".to_string()], Some(0xC000_0142));
-        assert!(diag.is_some());
-        assert_eq!(diag.unwrap().kind, "dll_init_failed_ui_required");
-    }
-
-    #[test]
-    fn dll_init_failed_non_powershell_does_not_trigger() {
-        let path = PathBuf::from(r"C:\tools\myapp.exe");
-        let diag = diagnose_launch_failure(&path, &["C:\\".to_string()], Some(0xC000_0142));
+    fn case_insensitive_root_path_match() {
+        let diag = diagnose_process_exit(
+            r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
+            &["c:\\".to_string()],
+            1,
+        );
         assert!(diag.is_none());
     }
 
     #[test]
-    fn different_exit_code_pwsh_does_not_trigger_ui_diagnostic() {
-        let path = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
-        // Exit code 1 should not trigger the UI diagnostic
-        let diag = diagnose_launch_failure(&path, &["C:\\".to_string()], Some(1));
+    fn backslash_only_matches_as_root() {
+        let diag = diagnose_process_exit(
+            r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
+            &["\\".to_string()],
+            1,
+        );
         assert!(diag.is_none());
     }
 }
