@@ -903,25 +903,49 @@ fn trustee_for(sid: &OwnedSid) -> TRUSTEE_W {
 /// [`AppliedAce::prior_state`] so [`restore_one`] can correctly unwind
 /// by issuing `REVOKE_ACCESS` plus a regrant of the captured state.
 fn apply_ace(entry: &AppliedAce) -> Result<(), DaclError> {
-    let sid = OwnedSid::parse(&entry.sid_string)?;
+    apply_explicit_ace(
+        &entry.canonical_path,
+        &entry.sid_string,
+        entry.access_mask,
+        entry.ace_type,
+        entry.inheritable,
+    )
+}
 
-    let inheritance: u32 = if entry.inheritable {
+/// Apply a single explicit ACE to `path`'s DACL without any restore
+/// tracking. Used by [`apply_ace`] (which adds prior-state capture and
+/// persistence on top) and by host-prep entry points that want a
+/// persistent ACE outside the [`DaclManager`] lifecycle.
+///
+/// The caller is responsible for ensuring the process has `WRITE_DAC`
+/// on the path. No state is recorded; the change persists across
+/// process exit.
+pub(crate) fn apply_explicit_ace(
+    path: &Path,
+    sid_str: &str,
+    access_mask: u32,
+    ace_type: AceType,
+    inheritable: bool,
+) -> Result<(), DaclError> {
+    let sid = OwnedSid::parse(sid_str)?;
+
+    let inheritance: u32 = if inheritable {
         OBJECT_INHERIT_ACE.0 | CONTAINER_INHERIT_ACE.0
     } else {
         0
     };
-    let mode = match entry.ace_type {
+    let mode = match ace_type {
         AceType::Allow => GRANT_ACCESS,
         AceType::Deny => DENY_ACCESS,
     };
     let ea = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: entry.access_mask,
+        grfAccessPermissions: access_mask,
         grfAccessMode: mode,
         grfInheritance: ACE_FLAGS(inheritance),
         Trustee: trustee_for(&sid),
     };
 
-    let path_w = wide(&entry.canonical_path);
+    let path_w = wide(path);
     let object_name = PCWSTR(path_w.as_ptr());
 
     let mut existing_dacl: *mut ACL = ptr::null_mut();
@@ -939,11 +963,7 @@ fn apply_ace(entry: &AppliedAce) -> Result<(), DaclError> {
         )
     };
     if rc != ERROR_SUCCESS {
-        return Err(win32_err(
-            &entry.canonical_path,
-            "GetNamedSecurityInfoW",
-            rc,
-        ));
+        return Err(win32_err(path, "GetNamedSecurityInfoW", rc));
     }
 
     let mut new_dacl: *mut ACL = ptr::null_mut();
@@ -954,13 +974,12 @@ fn apply_ace(entry: &AppliedAce) -> Result<(), DaclError> {
             &mut new_dacl,
         )
     };
-    let _ = ea;
 
     if rc != ERROR_SUCCESS {
         unsafe {
             let _ = LocalFree(Some(HLOCAL(sd.0)));
         }
-        return Err(win32_err(&entry.canonical_path, "SetEntriesInAclW", rc));
+        return Err(win32_err(path, "SetEntriesInAclW", rc));
     }
 
     let rc = unsafe {
@@ -985,18 +1004,162 @@ fn apply_ace(entry: &AppliedAce) -> Result<(), DaclError> {
     if rc != ERROR_SUCCESS {
         if rc.0 == 5 {
             return Err(DaclError::WriteDacDenied {
-                path: entry.canonical_path.clone(),
+                path: path.to_path_buf(),
                 reason: format!("SetNamedSecurityInfoW: {rc:?}"),
             });
         }
-        return Err(win32_err(
-            &entry.canonical_path,
-            "SetNamedSecurityInfoW",
-            rc,
-        ));
+        return Err(win32_err(path, "SetNamedSecurityInfoW", rc));
     }
 
     Ok(())
+}
+
+/// Revoke explicit ACEs on `path` for `sid_str` whose `(access_mask,
+/// ace_type, inherit_flags)` tuple exactly matches the requested one.
+/// Mirrors [`apply_explicit_ace`] in reverse: any non-matching
+/// explicit ACE for the same SID — including those authored by other
+/// tools (e.g. `icacls C:\ /grant "ALL APPLICATION PACKAGES":(R)`) —
+/// is preserved.
+///
+/// Returns the count of ACEs removed. `Ok(0)` is the no-op case (no
+/// matching ACE exists) and is *not* an error.
+///
+/// Implementation: scan the existing DACL for explicit ACEs attached
+/// to the SID; partition into matches/keeps; if any matches, replace
+/// all the SID's contributions with a single `REVOKE_ACCESS` + replay
+/// of the keeps. Inherited ACEs are not touched.
+pub(crate) fn revoke_specific_aces_for_sid(
+    path: &Path,
+    sid_str: &str,
+    access_mask: u32,
+    ace_type: AceType,
+    inheritable: bool,
+) -> Result<usize, DaclError> {
+    // Compute the inherit-flags byte we'd have applied (matches the
+    // logic in `apply_explicit_ace`). Inherited ACEs are masked off by
+    // `scan_explicit_aces_for_sid` so the captured `inherit_flags`
+    // contains only OI/CI/NP/IO bits.
+    let expected_inherit_flags: u8 = if inheritable {
+        (OBJECT_INHERIT_ACE.0 | CONTAINER_INHERIT_ACE.0) as u8
+    } else {
+        0
+    };
+
+    let priors = scan_explicit_aces_for_sid(path, sid_str)?;
+    let mut keeps: Vec<PriorAce> = Vec::new();
+    let mut removed = 0usize;
+    for p in priors {
+        if p.access_mask == access_mask
+            && p.ace_type == ace_type
+            && p.inherit_flags == expected_inherit_flags
+        {
+            removed += 1;
+        } else {
+            keeps.push(p);
+        }
+    }
+
+    if removed == 0 {
+        return Ok(0);
+    }
+
+    let sid = OwnedSid::parse(sid_str)?;
+    let path_w = wide(path);
+    let object_name = PCWSTR(path_w.as_ptr());
+
+    let mut existing_dacl: *mut ACL = ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(ptr::null_mut());
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            object_name,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut existing_dacl),
+            None,
+            &mut sd,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(win32_err(path, "GetNamedSecurityInfoW", rc));
+    }
+    if existing_dacl.is_null() {
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+        // Scan said there were matches; this would imply a TOCTOU
+        // where the DACL was cleared between scan and revoke. Either
+        // way our target state (no matching ACE) is already true.
+        return Ok(removed);
+    }
+
+    let trustee = trustee_for(&sid);
+    let mut batch: Vec<EXPLICIT_ACCESS_W> = Vec::with_capacity(keeps.len() + 1);
+    batch.push(EXPLICIT_ACCESS_W {
+        grfAccessPermissions: 0,
+        grfAccessMode: REVOKE_ACCESS,
+        grfInheritance: ACE_FLAGS(0),
+        Trustee: trustee,
+    });
+    for k in &keeps {
+        let mode = match k.ace_type {
+            AceType::Allow => GRANT_ACCESS,
+            AceType::Deny => DENY_ACCESS,
+        };
+        batch.push(EXPLICIT_ACCESS_W {
+            grfAccessPermissions: k.access_mask,
+            grfAccessMode: mode,
+            grfInheritance: ACE_FLAGS(k.inherit_flags as u32),
+            Trustee: trustee,
+        });
+    }
+
+    let mut new_dacl: *mut ACL = ptr::null_mut();
+    let rc = unsafe {
+        SetEntriesInAclW(
+            Some(&batch),
+            Some(existing_dacl as *const ACL),
+            &mut new_dacl,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+        return Err(win32_err(path, "SetEntriesInAclW", rc));
+    }
+
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            object_name,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(new_dacl as *const ACL),
+            None,
+        )
+    };
+
+    unsafe {
+        if !new_dacl.is_null() {
+            let _ = LocalFree(Some(HLOCAL(new_dacl as *mut c_void)));
+        }
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+    }
+
+    if rc != ERROR_SUCCESS {
+        if rc.0 == 5 {
+            return Err(DaclError::WriteDacDenied {
+                path: path.to_path_buf(),
+                reason: format!("SetNamedSecurityInfoW: {rc:?}"),
+            });
+        }
+        return Err(win32_err(path, "SetNamedSecurityInfoW", rc));
+    }
+
+    Ok(removed)
 }
 
 /// Restore the target's DACL to its pre-apply state by:
