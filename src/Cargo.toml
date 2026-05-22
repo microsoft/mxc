@@ -19,6 +19,7 @@ members = [
     "generated/base_container_specification",
     "mxc_diagnostic_console",
 ]
+exclude = ["fuzz"]
 resolver = "3"
 
 # Full debug info so we can analyse customer crash dumps in WinDbg until we

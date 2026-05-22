@@ -1,0 +1,47 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Daily fuzzing pipeline for MXC.
+#
+# Builds the mxc_fuzz crate with AddressSanitizer and submits the resulting
+# drop directory to OneFuzz. Bugs found are filed against the SDL fuzzing
+# work item 62294501 via the routing fields in src/fuzz/OneFuzzConfig.json.
+#
+# Schedule: daily at 00:00 UTC on `main`. PRs do not trigger this pipeline.
+
+pr: none
+trigger: none
+
+schedules:
+  - cron: "0 0 * * *"
+    displayName: Daily fuzzing submission
+    branches:
+      include:
+        - main
+    always: true
+
+name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+
+resources:
+  repositories:
+    - repository: 1ESPipelineTemplates
+      type: git
+      name: 1ESPipelineTemplates/1ESPipelineTemplates
+      ref: refs/tags/release
+
+extends:
+  template: v1/1ES.Unofficial.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: windows-latest
+      os: windows
+
+    customBuildTags:
+      - ES365AIMigrationTooling
+
+    stages:
+      - stage: Fuzz
+        displayName: 'Build + submit fuzzers'
+        jobs:
+          - template: .azure-pipelines/templates/Fuzz.Build.Job.yml@self
