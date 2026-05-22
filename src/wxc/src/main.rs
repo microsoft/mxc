@@ -573,5 +573,26 @@ fn main() {
     if !response.standard_err.is_empty() {
         eprint!("{}", response.standard_err);
     }
+
+    // Emit a structured JSON error envelope on stderr for SDK/caller consumption
+    // when the runner produced an error message (one-shot flows only).
+    // In PTY mode stderr is merged into the PTY output stream, so the envelope
+    // appears inline -- callers (e.g. copilot) can parse it from the output.
+    if response.exit_code != 0 && !response.error_message.is_empty() {
+        let mut envelope = serde_json::json!({
+            "error": {
+                "code": "backend_error",
+                "message": response.error_message,
+            }
+        });
+        if !response.extended_error.is_empty() {
+            envelope["error"]["extended_error"] =
+                serde_json::Value::String(response.extended_error.clone());
+        }
+        if let Ok(json) = serde_json::to_string(&envelope) {
+            eprintln!("{json}");
+        }
+    }
+
     process::exit(response.exit_code);
 }

@@ -170,6 +170,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
                         "Bubblewrap: script timed out after {}ms",
                         request.script_timeout
                     ),
+                    ..Default::default()
                 };
             }
             Err(WaitError::Io(error)) => {
@@ -186,6 +187,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
             standard_out: join_reader(stdout_handle),
             standard_err: join_reader(stderr_handle),
             error_message: String::new(),
+            ..Default::default()
         }
     }
 }

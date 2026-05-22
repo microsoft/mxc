@@ -465,6 +465,19 @@ impl AppContainerScriptRunner {
         // pass CREATE_NEW_CONSOLE or DETACH_PROCESS, the child shares our console.
         let mut pi = PROCESS_INFORMATION::default();
 
+        // Pre-launch check: abort if policy paths are on ReFS (Dev Drive) volumes
+        // where BFS cannot enforce filesystem policy.
+        if let Some(diag) = crate::launch_diagnostics::check_refs_volumes(
+            &request.policy.readonly_paths,
+            &request.policy.readwrite_paths,
+        ) {
+            logger.log_line(&format!(
+                "Error: Pre-launch diagnostic [{}]: {}",
+                diag.kind, diag.message
+            ));
+            return Err(WxcError::Process(diag.message));
+        }
+
         unsafe {
             CreateProcessW(
                 PCWSTR::null(),
@@ -564,6 +577,7 @@ impl AppContainerScriptRunner {
             standard_out: String::new(),
             standard_err: String::new(),
             error_message: String::new(),
+            ..Default::default()
         })
     }
 
@@ -605,6 +619,8 @@ impl Default for AppContainerScriptRunner {
 impl ScriptRunner for AppContainerScriptRunner {
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         use crate::filesystem_bfs::FileSystemBfsManager;
+        use crate::launch_diagnostics::diagnose_process_exit;
+        use crate::models::FailurePhase;
         use crate::network_manager::NetworkManager;
 
         // Apply experimental features when flag is set
@@ -658,12 +674,34 @@ impl ScriptRunner for AppContainerScriptRunner {
             }
         }
 
-        let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.run_internal(request, logger)
         })) {
             Ok(r) => r,
             Err(_) => ScriptResponse::error("Unknown error during script execution."),
         };
+
+        // Post-failure diagnostics: if the child failed, check for known
+        // environment issues and enrich the error message.
+        if response.exit_code != 0 {
+            response.failure_phase = FailurePhase::ProcessExited;
+            if let Some(diag) = diagnose_process_exit(
+                &request.script_code,
+                &request.policy.readonly_paths,
+                &request.policy.readwrite_paths,
+                response.exit_code as u32,
+            ) {
+                logger.log_line(&format!(
+                    "Error: Launch diagnostic [{}]: {}",
+                    diag.kind, diag.message
+                ));
+                if !response.error_message.is_empty() {
+                    response.extended_error = response.error_message.clone();
+                }
+                response.error_message = diag.message.clone();
+                response.standard_err.push_str(&diag.message);
+            }
+        }
 
         network_manager.stop_all(!request.lifecycle.preserve_policy, logger);
         if bfs_manager.configured() && !request.lifecycle.preserve_policy {

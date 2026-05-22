@@ -22,12 +22,13 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
+use crate::launch_diagnostics::{diagnose_create_process_failure, diagnose_process_exit};
 use crate::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ScriptResponse,
+    CodexRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ScriptResponse,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
@@ -84,10 +85,6 @@ type PfnCreateProcessInSandbox = unsafe extern "system" fn(
 pub struct BaseContainerRunner {
     proxy_coordinator: ProxyCoordinator,
 }
-
-/// Windows error code for a function that exists but is not implemented
-/// (e.g., disabled via feature-enablement mechanisms).
-const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 
 /// SandboxSpec FlatBuffer schema version embedded in every spec payload.
 const SANDBOX_SPEC_VERSION: &str = "0.1.0";
@@ -595,6 +592,26 @@ impl ScriptRunner for BaseContainerRunner {
         let ac_sid_str = derive_sid_string_from_name(&identity);
         let _ = writeln!(logger, "AppContainerSID: {ac_sid_str}");
 
+        // Pre-launch check: abort if policy paths are on ReFS (Dev Drive) volumes
+        // where BFS cannot enforce filesystem policy.
+        if let Some(diag) = crate::launch_diagnostics::check_refs_volumes(
+            &request.policy.readonly_paths,
+            &request.policy.readwrite_paths,
+        ) {
+            let _ = writeln!(
+                logger,
+                "Error: Pre-launch diagnostic [{}]: {}",
+                diag.kind, diag.message
+            );
+            return ScriptResponse {
+                exit_code: -1,
+                error_message: diag.message.clone(),
+                standard_err: diag.message,
+                failure_phase: FailurePhase::LaunchFailed,
+                ..Default::default()
+            };
+        }
+
         // 4. Call Experimental_CreateProcessInSandbox.
         let success = unsafe {
             create_process_in_sandbox(
@@ -634,18 +651,34 @@ impl ScriptRunner for BaseContainerRunner {
                     logger,
                 );
             }
+
+            //
+            // Diagnose the launch failure (FailurePhase::LaunchFailed).
+            //
             let err = unsafe { GetLastError() };
-            if err.0 == ERROR_CALL_NOT_IMPLEMENTED {
-                return ScriptResponse::error(
-                    "Experimental_CreateProcessInSandbox returned ERROR_CALL_NOT_IMPLEMENTED. \
-                     The BaseContainer feature may be disabled on this OS build \
-                     (e.g., via feature-enablement mechanisms). \
-                     Use schema version '0.4.0-alpha' to fall back to the AppContainer backend.",
-                );
-            }
-            return ScriptResponse::error(&format!(
-                "Experimental_CreateProcessInSandbox failed: {err:?}"
-            ));
+            let diag = diagnose_create_process_failure(
+                err.0,
+                &request.script_code,
+                &request.policy.readonly_paths,
+            );
+
+            let extended_error = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
+            let _ = writeln!(logger, "Error: {extended_error}");
+
+            let _ = writeln!(
+                logger,
+                "Error: Launch diagnostic [{}]: {}",
+                diag.kind, diag.message
+            );
+
+            return ScriptResponse {
+                exit_code: -1,
+                error_message: diag.message.clone(),
+                standard_err: diag.message,
+                extended_error,
+                failure_phase: FailurePhase::LaunchFailed,
+                ..Default::default()
+            };
         }
 
         let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
@@ -699,11 +732,36 @@ impl ScriptRunner for BaseContainerRunner {
         // Stop the builtin test proxy if it was started.
         self.proxy_coordinator.stop(logger);
 
+        //
+        // Diagnose the application failure (FailurePhase::ProcessExited).
+        //
+        let (error_message, failure_phase) = if exit_code != 0 {
+            if let Some(diag) = diagnose_process_exit(
+                &request.script_code,
+                &request.policy.readonly_paths,
+                &request.policy.readwrite_paths,
+                exit_code,
+            ) {
+                let _ = writeln!(
+                    logger,
+                    "Error: Launch diagnostic [{}]: {}",
+                    diag.kind, diag.message
+                );
+                (diag.message, FailurePhase::ProcessExited)
+            } else {
+                (String::new(), FailurePhase::ProcessExited)
+            }
+        } else {
+            (String::new(), FailurePhase::None)
+        };
+
         ScriptResponse {
             exit_code: exit_code as i32,
             standard_out: String::new(),
-            standard_err: String::new(),
-            error_message: String::new(),
+            standard_err: error_message.clone(),
+            error_message,
+            failure_phase,
+            ..Default::default()
         }
     }
 }

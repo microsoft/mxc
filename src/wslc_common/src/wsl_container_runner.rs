@@ -834,6 +834,7 @@ impl WSLContainerRunner {
             } else {
                 String::new()
             },
+            ..Default::default()
         }
     }
 
