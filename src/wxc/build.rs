@@ -4,6 +4,9 @@
 //! Build script for wxc — copies NanVix binaries next to the output executable.
 
 fn main() {
+    // Embed Windows version info into the output executable.
+    mxc_winres::embed_version_info("Microsoft MXC Sandbox Executor", "wxc-exec.exe");
+
     #[cfg(windows)]
     check_test_prerequisites();
 

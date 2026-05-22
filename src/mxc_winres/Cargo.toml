@@ -1,0 +1,9 @@
+[package]
+name = "mxc_winres"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+description = "Internal build-time helper that embeds Windows version info resources (FileDescription, ProductName, CompanyName, LegalCopyright, etc.) into MXC executables so the OS shows the same kind of file properties that Microsoft-shipped binaries do."
+
+[dependencies]
+winresource = { workspace = true }

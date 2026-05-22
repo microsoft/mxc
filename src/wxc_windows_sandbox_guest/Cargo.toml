@@ -12,3 +12,6 @@ wxc_common = { path = "../wxc_common" }
 tokio.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+
+[build-dependencies]
+mxc_winres = { workspace = true }

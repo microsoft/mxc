@@ -22,6 +22,9 @@ isolation_session_bindings = { workspace = true, optional = true }
 [target.'cfg(windows)'.build-dependencies]
 nanvix_common = { path = "../nanvix_common" }
 
+[build-dependencies]
+mxc_winres = { workspace = true }
+
 [features]
 default = []
 microvm = ["nanvix_binaries"]

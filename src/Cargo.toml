@@ -17,6 +17,7 @@ members = [
     "mxc_pty",
     "generated/base_container_specification",
     "mxc_diagnostic_console",
+    "mxc_winres",
 ]
 resolver = "3"
 
@@ -86,3 +87,5 @@ sandbox_spec = { path = "generated/base_container_specification" }
 widestring = "1"
 url = "2"
 winreg = "0.55"
+winresource = "0.1.31"
+mxc_winres = { path = "mxc_winres" }

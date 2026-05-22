@@ -12,3 +12,6 @@ wxc_common.workspace = true
 clap.workspace = true
 windows.workspace = true
 windows-core.workspace = true
+
+[build-dependencies]
+mxc_winres = { workspace = true }

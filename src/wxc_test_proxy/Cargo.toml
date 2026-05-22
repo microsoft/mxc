@@ -15,3 +15,6 @@ http-body-util = "0.1"
 bytes = "1"
 clap.workspace = true
 windows.workspace = true
+
+[build-dependencies]
+mxc_winres = { workspace = true }

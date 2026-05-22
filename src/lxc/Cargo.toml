@@ -15,3 +15,6 @@ wxc_common = { workspace = true }
 lxc_common = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+
+[build-dependencies]
+mxc_winres = { workspace = true }

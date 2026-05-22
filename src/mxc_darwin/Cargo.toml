@@ -11,3 +11,6 @@ path = "src/main.rs"
 wxc_common = { workspace = true }
 seatbelt_common = { path = "../seatbelt_common" }
 clap = { workspace = true }
+
+[build-dependencies]
+mxc_winres = { workspace = true }
