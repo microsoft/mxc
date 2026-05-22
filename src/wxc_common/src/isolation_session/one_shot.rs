@@ -133,6 +133,7 @@ impl ScriptRunner for IsolationSessionRunner {
             standard_out: String::new(),
             standard_err: String::new(),
             error_message: String::new(),
+            ..Default::default()
         }
     }
 }
