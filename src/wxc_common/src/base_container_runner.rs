@@ -598,7 +598,11 @@ impl ScriptRunner for BaseContainerRunner {
             &request.policy.readonly_paths,
             &request.policy.readwrite_paths,
         ) {
-            let _ = writeln!(logger, "Error: Pre-launch diagnostic [{}]: {}", diag.kind, diag.message);
+            let _ = writeln!(
+                logger,
+                "Error: Pre-launch diagnostic [{}]: {}",
+                diag.kind, diag.message
+            );
             return ScriptResponse {
                 exit_code: -1,
                 error_message: diag.message.clone(),

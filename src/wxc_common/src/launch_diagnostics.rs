@@ -406,8 +406,7 @@ mod tests {
 
     #[test]
     fn api_not_implemented_triggers_feature_diagnostic() {
-        let diag =
-            diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED, "pwsh.exe", &[]);
+        let diag = diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED, "pwsh.exe", &[]);
         assert_eq!(diag.kind, "feature_not_enabled");
         assert!(diag.message.contains("velocity"));
     }
