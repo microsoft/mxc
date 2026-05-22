@@ -151,10 +151,7 @@ fn diagnose_api_not_implemented() -> LaunchDiagnostic {
          version '0.4.0-alpha' to fall back to the AppContainer backend."
             .to_string()
     } else {
-        let disabled: Vec<_> = key_status
-            .iter()
-            .filter(|(_, enabled)| !enabled)
-            .collect();
+        let disabled: Vec<_> = key_status.iter().filter(|(_, enabled)| !enabled).collect();
         if disabled.is_empty() {
             "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
              All known velocity keys appear enabled, but the feature is \
@@ -299,8 +296,7 @@ mod tests {
 
     #[test]
     fn api_not_implemented_triggers_feature_diagnostic() {
-        let diag =
-            diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED, "pwsh.exe", &[]);
+        let diag = diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED, "pwsh.exe", &[]);
         assert_eq!(diag.kind, "feature_not_enabled");
         assert!(diag.message.contains("velocity"));
     }
@@ -322,8 +318,7 @@ mod tests {
 
     #[test]
     fn generic_fallback_for_unknown_error() {
-        let diag =
-            diagnose_create_process_failure(5, "cmd.exe", &["C:\\".to_string()]);
+        let diag = diagnose_create_process_failure(5, "cmd.exe", &["C:\\".to_string()]);
         assert_eq!(diag.kind, "create_process_failed");
         assert!(diag.message.contains("5"));
     }
@@ -377,11 +372,7 @@ mod tests {
 
     #[test]
     fn missing_root_readonly_from_exit() {
-        let diag = diagnose_process_exit(
-            r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
-            &[],
-            1,
-        );
+        let diag = diagnose_process_exit(r#""C:\Program Files\PowerShell\7\pwsh.exe""#, &[], 1);
         assert!(diag.is_some());
         assert_eq!(diag.unwrap().kind, "missing_filesystem_access");
     }
@@ -398,8 +389,7 @@ mod tests {
 
     #[test]
     fn packaged_app_takes_priority_over_missing_access() {
-        let cmd =
-            r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe""#;
+        let cmd = r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe""#;
         let diag = diagnose_process_exit(cmd, &[], 1);
         assert!(diag.is_some());
         assert_eq!(diag.unwrap().kind, "packaged_app");
