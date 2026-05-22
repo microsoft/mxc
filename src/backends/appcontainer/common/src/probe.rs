@@ -14,7 +14,7 @@
 use serde::Serialize;
 
 use crate::fallback_detector::{self, FallbackError};
-use wxc_common::models::ContainerPolicy;
+use wxc_common::models::{ContainerPolicy, FilesystemOverlayMode};
 use wxc_common::ui_policy::EffectiveUiRestrictions;
 
 /// JSON output emitted by `wxc-exec --probe`.
@@ -128,7 +128,11 @@ pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
             crate::base_container_runner::BaseContainerRunner::base_container_supports_deny_paths(),
         ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
     };
-    match fallback_detector::detect(policy, /* prefer_base_container */ true) {
+    match fallback_detector::detect(
+        policy,
+        /* prefer_base_container */ true,
+        FilesystemOverlayMode::Off,
+    ) {
         Ok(decision) => ProbeOutput {
             tier: Some(decision.tier.as_str()),
             needs_dacl_augmentation: Some(decision.needs_dacl_augmentation),
@@ -156,6 +160,9 @@ fn format_fallback_error(e: &FallbackError) -> String {
         }
         FallbackError::SystemRootUnresolved { reason } => {
             format!("Could not resolve Windows system directory: {reason}")
+        }
+        FallbackError::OverlayUnavailable { reason } => {
+            format!("Overlay tier unavailable: {reason}")
         }
     }
 }
@@ -262,6 +269,10 @@ mod tests {
     fn tier_strings_stable() {
         assert_eq!(IsolationTier::BaseContainer.as_str(), "base-container");
         assert_eq!(IsolationTier::AppContainerBfs.as_str(), "appcontainer-bfs");
+        assert_eq!(
+            IsolationTier::AppContainerOverlay.as_str(),
+            "appcontainer-overlay"
+        );
         assert_eq!(
             IsolationTier::AppContainerDacl.as_str(),
             "appcontainer-dacl"

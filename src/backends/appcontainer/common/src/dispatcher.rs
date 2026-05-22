@@ -73,7 +73,7 @@ use crate::fallback_detector::{self, FallbackError, IsolationTier};
 use wxc_common::error::WxcError;
 use wxc_common::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, FilesystemOverlayMode, ScriptResponse};
 use wxc_common::sandbox_process::{Runner, SandboxBackend, SandboxProcess, StdioMode};
 use wxc_common::script_runner::ScriptRunner;
 
@@ -329,7 +329,14 @@ fn select_backend_with_fallback(
     ),
     DispatchError,
 > {
-    let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
+    let overlay_mode = request
+        .experimental
+        .filesystem_overlay
+        .as_ref()
+        .map(|cfg| cfg.mode)
+        .unwrap_or(FilesystemOverlayMode::Off);
+    let decision =
+        fallback_detector::detect(&request.policy, /*prefer_bc=*/ true, overlay_mode)?;
 
     let (backend, dacl_manager): (SelectedBackend, Option<DaclManager>) = match decision.tier {
         IsolationTier::BaseContainer => {

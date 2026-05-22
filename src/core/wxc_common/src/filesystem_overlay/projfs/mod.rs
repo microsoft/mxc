@@ -14,6 +14,7 @@
 //! `docs/proposals/downlevel_support/projfs-t3-spike-step{1,2,3}.md`
 //! for the empirical backing.
 
+pub mod feature_detect;
 pub mod virt;
 
 use std::path::PathBuf;

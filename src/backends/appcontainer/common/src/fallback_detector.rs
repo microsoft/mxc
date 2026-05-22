@@ -18,7 +18,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use wxc_common::models::ContainerPolicy;
+use wxc_common::filesystem_overlay::projfs::feature_detect as projfs_feature_detect;
+use wxc_common::models::{ContainerPolicy, FilesystemOverlayMode};
 
 /// Selected isolation tier. The variant order corresponds to descending
 /// security strength.
@@ -28,6 +29,13 @@ pub enum IsolationTier {
     BaseContainer,
     /// Tier 2 — AppContainer + `bfscfg.exe` BFS filesystem policy.
     AppContainerBfs,
+    /// Phase D — AppContainer + ProjFS-based filesystem policy via
+    /// `filesystem_overlay`. Sits between BFS and DACL: avoids both
+    /// `bfscfg.exe` (which the spike found flaky on existing builds)
+    /// and host-DACL mutation. Selected when the user opts in via
+    /// `experimental.filesystem_overlay.mode = "on" | "auto"` and
+    /// the `Client-ProjFS` optional feature is enabled.
+    AppContainerOverlay,
     /// Tier 3 — AppContainer + DACL-based filesystem policy on host paths.
     AppContainerDacl,
 }
@@ -38,6 +46,7 @@ impl IsolationTier {
         match self {
             IsolationTier::BaseContainer => "base-container",
             IsolationTier::AppContainerBfs => "appcontainer-bfs",
+            IsolationTier::AppContainerOverlay => "appcontainer-overlay",
             IsolationTier::AppContainerDacl => "appcontainer-dacl",
         }
     }
@@ -88,13 +97,20 @@ pub enum FallbackError {
 
     /// Neither the `GetWindowsDirectoryW` Win32 API call nor (in debug
     /// builds) the `MXC_BFSCFG_PATH` override could identify a usable
-    /// Windows installation directory. We refuse to fall back to a
-    /// hardcoded `C:\Windows` guess because doing so would allow an
-    /// attacker who can scrub the process environment to silently
-    /// downgrade Tier 2 → Tier 3 on hosts where Windows lives elsewhere.
+    /// Windows installation directory.
     #[error("could not resolve %SystemRoot%: {reason}")]
     SystemRootUnresolved {
         /// Human-readable description of why resolution failed.
+        reason: String,
+    },
+
+    /// The caller forced the overlay tier (`overlay_mode = "on"`) but
+    /// the prerequisites aren't satisfied on this host.
+    #[error("overlay tier forced but unavailable: {reason}")]
+    OverlayUnavailable {
+        /// Why the overlay tier can't run here. Usually one of:
+        /// "Client-ProjFS optional feature not enabled" or
+        /// "policy has no readwrite/readonly paths to project".
         reason: String,
     },
 }
@@ -134,6 +150,7 @@ pub enum FallbackError {
 pub fn detect(
     policy: &ContainerPolicy,
     prefer_base_container: bool,
+    overlay_mode: FilesystemOverlayMode,
 ) -> Result<TierDecision, FallbackError> {
     let denied = !policy.denied_paths.is_empty();
     let has_fs_policy =
@@ -181,6 +198,72 @@ pub fn detect(
              for deniedPaths enforcement"
                 .to_string(),
         );
+    }
+    // Phase D — AppContainerOverlay (ProjFS-based filesystem policy)
+    //
+    // Considered ahead of BFS and DACL when the user has opted in via
+    // `experimental.filesystem_overlay.mode`. Two checks gate it:
+    //
+    //   1. `Client-ProjFS` optional feature is enabled on this host.
+    //   2. The policy has at least one rw/ro path — overlay projects
+    //      paths through a synthetic root, so a policy without any
+    //      rw/ro entries gives the AC an empty view (useless).
+    //
+    // `mode = "on"` makes both checks hard errors.
+    // `mode = "auto"` falls through to BFS/DACL on either check
+    // failing.
+    let overlay_eligible = match overlay_mode {
+        FilesystemOverlayMode::Off => false,
+        FilesystemOverlayMode::On | FilesystemOverlayMode::Auto => {
+            let has_projectable =
+                !policy.readwrite_paths.is_empty() || !policy.readonly_paths.is_empty();
+            let fd = projfs_feature_detect::detect();
+            let projfs_ok = fd.is_usable();
+            if overlay_mode == FilesystemOverlayMode::On {
+                if !projfs_ok {
+                    return Err(FallbackError::OverlayUnavailable {
+                        reason: fd.summary(),
+                    });
+                }
+                if !has_projectable {
+                    return Err(FallbackError::OverlayUnavailable {
+                        reason: "policy has no readwrite/readonly paths to project".to_string(),
+                    });
+                }
+                true
+            } else {
+                if !projfs_ok {
+                    warnings.push(format!(
+                        "AppContainerOverlay rejected: {} (falling back to BFS/DACL)",
+                        fd.summary()
+                    ));
+                }
+                if !has_projectable {
+                    warnings.push(
+                        "AppContainerOverlay rejected: policy has no readwrite/readonly paths (falling back to BFS/DACL)"
+                            .to_string(),
+                    );
+                }
+                projfs_ok && has_projectable
+            }
+        }
+    };
+
+    if overlay_eligible {
+        warnings.push(
+            "BaseContainer API not present or not preferred; falling back to AppContainerOverlay"
+                .to_string(),
+        );
+        return Ok(TierDecision {
+            tier: IsolationTier::AppContainerOverlay,
+            // Overlay never mutates host DACLs. Denies are handled
+            // structurally via the projection (deny_subpaths in
+            // `OverlayPrimitive::ProjFsBranch`) or fall outside the
+            // projection entirely.
+            needs_dacl_augmentation: false,
+            bfscfg_path: None,
+            warnings,
+        });
     }
     // Tier 2 — AppContainer + BFS
     //
@@ -421,6 +504,7 @@ fn parse_force_tier(s: &str) -> Option<IsolationTier> {
     match s {
         "base-container" => Some(IsolationTier::BaseContainer),
         "appcontainer-bfs" => Some(IsolationTier::AppContainerBfs),
+        "appcontainer-overlay" => Some(IsolationTier::AppContainerOverlay),
         "appcontainer-dacl" => Some(IsolationTier::AppContainerDacl),
         _ => None,
     }
@@ -438,6 +522,9 @@ fn forced_decision(
     let needs_dacl = match tier {
         IsolationTier::AppContainerDacl => true,
         IsolationTier::BaseContainer | IsolationTier::AppContainerBfs => denied,
+        // Overlay never touches host DACLs even when there are denied
+        // paths — they're handled structurally via the projection.
+        IsolationTier::AppContainerOverlay => false,
     };
     if needs_dacl && !policy.fallback.allow_dacl_mutation {
         return Err(FallbackError::DaclFallbackDisabled);
@@ -688,7 +775,8 @@ mod tests {
     fn empty_policy_t1_when_bc_present_and_preferred() {
         let _g = ForceTierGuard::set("base-container");
         let policy = empty_policy();
-        let d = detect(&policy, true).expect("forced base-container should succeed");
+        let d = detect(&policy, true, FilesystemOverlayMode::Off)
+            .expect("forced base-container should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
         assert!(!d.needs_dacl_augmentation);
         assert!(d.warnings.is_empty());
@@ -697,7 +785,8 @@ mod tests {
     fn empty_policy_no_filesystem_t2_path() {
         let _g = ForceTierGuard::set("appcontainer-bfs");
         let policy = empty_policy();
-        let d = detect(&policy, true).expect("forced bfs should succeed");
+        let d =
+            detect(&policy, true, FilesystemOverlayMode::Off).expect("forced bfs should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
         assert!(!d.needs_dacl_augmentation);
     }
@@ -707,7 +796,7 @@ mod tests {
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
         assert!(matches!(
-            detect(&policy, true),
+            detect(&policy, true, FilesystemOverlayMode::Off),
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
@@ -717,7 +806,7 @@ mod tests {
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
         assert!(matches!(
-            detect(&policy, true),
+            detect(&policy, true, FilesystemOverlayMode::Off),
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
@@ -727,7 +816,7 @@ mod tests {
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
         assert!(matches!(
-            detect(&policy, true),
+            detect(&policy, true, FilesystemOverlayMode::Off),
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
@@ -800,7 +889,7 @@ mod tests {
         );
     }
     #[test]
-    fn force_tier_env_var_parses_all_three_values() {
+    fn force_tier_env_var_parses_all_four_values() {
         assert!(matches!(
             parse_force_tier("base-container"),
             Some(IsolationTier::BaseContainer)
@@ -808,6 +897,10 @@ mod tests {
         assert!(matches!(
             parse_force_tier("appcontainer-bfs"),
             Some(IsolationTier::AppContainerBfs)
+        ));
+        assert!(matches!(
+            parse_force_tier("appcontainer-overlay"),
+            Some(IsolationTier::AppContainerOverlay)
         ));
         assert!(matches!(
             parse_force_tier("appcontainer-dacl"),
@@ -824,7 +917,7 @@ mod tests {
         // presence) and any tier-specific check here would be coincidental.
         let _g = ForceTierGuard::set("not-a-real-tier");
         let policy = empty_policy();
-        detect(&policy, false).expect("invalid value should not error");
+        detect(&policy, false, FilesystemOverlayMode::Off).expect("invalid value should not error");
     }
 
     #[test]
@@ -973,7 +1066,8 @@ mod tests {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let mut policy = empty_policy();
         policy.fallback.allow_dacl_mutation = true;
-        let d = detect(&policy, true).expect("forced dacl with allow_dacl_mutation=true");
+        let d = detect(&policy, true, FilesystemOverlayMode::Off)
+            .expect("forced dacl with allow_dacl_mutation=true");
         assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
         assert!(d.needs_dacl_augmentation);
         assert!(
@@ -1068,7 +1162,8 @@ mod tests {
         policy.fallback.allow_dacl_mutation = true;
         // `prefer_base_container = false` skips Tier 1 deterministically;
         // with `tier2_bfs` off, Tier 2 is skipped too.
-        let d = detect(&policy, false).expect("empty policy must resolve");
+        let d =
+            detect(&policy, false, FilesystemOverlayMode::Off).expect("empty policy must resolve");
         assert!(
             matches!(d.tier, IsolationTier::AppContainerDacl),
             "tier2_bfs off must select AppContainerDacl, got {:?}",
@@ -1099,12 +1194,104 @@ mod tests {
             lock
         };
         let policy = empty_policy();
-        let d = detect(&policy, false).expect("empty policy must resolve");
+        let d =
+            detect(&policy, false, FilesystemOverlayMode::Off).expect("empty policy must resolve");
         assert!(
             matches!(d.tier, IsolationTier::AppContainerBfs),
             "tier2_bfs on with empty policy must select AppContainerBfs, got {:?}",
             d.tier
         );
+        assert!(!d.needs_dacl_augmentation);
+    }
+
+    // ----- Phase D: AppContainerOverlay tier selection -----
+
+    /// Helper: a policy with one rw path so the overlay tier has
+    /// something to project (overlay refuses an empty policy).
+    fn policy_with_rw_path() -> ContainerPolicy {
+        let mut p = empty_policy();
+        // Use the temp dir; canonicalisation happens later when
+        // `policy::classify` runs. The detector itself only checks
+        // emptiness, not validity.
+        p.readwrite_paths = vec![std::env::temp_dir().to_string_lossy().into_owned()];
+        p
+    }
+
+    #[test]
+    fn overlay_mode_off_never_selected() {
+        // Even with a rw path and projfs available, overlay_mode=Off
+        // means the detector skips the overlay branch entirely.
+        let policy = policy_with_rw_path();
+        let d = detect(&policy, false, FilesystemOverlayMode::Off).expect("classifies cleanly");
+        assert!(
+            !matches!(d.tier, IsolationTier::AppContainerOverlay),
+            "overlay_mode=Off must not select overlay; got {:?}",
+            d.tier
+        );
+    }
+
+    #[test]
+    fn overlay_on_with_empty_policy_returns_unavailable() {
+        // overlay_mode=On forces the tier but the policy has no rw/ro
+        // paths to project — overlay must surface OverlayUnavailable.
+        let policy = empty_policy();
+        let err = detect(&policy, false, FilesystemOverlayMode::On)
+            .expect_err("overlay=On + empty policy should fail");
+        match err {
+            FallbackError::OverlayUnavailable { reason } => {
+                assert!(reason.contains("no readwrite"), "got: {reason}");
+            }
+            other => panic!("expected OverlayUnavailable, got {other:?}"),
+        }
+    }
+
+    /// On hosts with Client-ProjFS enabled, overlay_mode=On + rw path
+    /// should select overlay cleanly. On hosts where ProjFS isn't
+    /// enabled, this should surface OverlayUnavailable. Either outcome
+    /// is acceptable for the test; the assertion is just that the
+    /// function dispatches correctly.
+    #[test]
+    fn overlay_on_with_rw_path_either_selects_overlay_or_reports_projfs_missing() {
+        let policy = policy_with_rw_path();
+        match detect(&policy, false, FilesystemOverlayMode::On) {
+            Ok(d) => {
+                assert!(
+                    matches!(d.tier, IsolationTier::AppContainerOverlay),
+                    "with overlay=On + projfs available, expected overlay; got {:?}",
+                    d.tier
+                );
+                assert!(!d.needs_dacl_augmentation);
+            }
+            Err(FallbackError::OverlayUnavailable { reason }) => {
+                // Acceptable on hosts without Client-ProjFS enabled.
+                assert!(!reason.is_empty());
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn overlay_auto_with_rw_path_either_selects_overlay_or_falls_through() {
+        let policy = policy_with_rw_path();
+        // Auto: silently falls through to BFS/DACL when projfs is
+        // absent. So we accept either overlay OR a non-overlay tier
+        // — the assertion is just that the call doesn't error.
+        let d = detect(&policy, false, FilesystemOverlayMode::Auto)
+            .expect("auto mode never errors on projfs absence");
+        // No specific tier assertion — depends on host state.
+        let _ = d;
+    }
+
+    #[test]
+    fn forced_overlay_does_not_require_dacl_even_with_denied_paths() {
+        let _g = ForceTierGuard::set("appcontainer-overlay");
+        let mut policy = policy_with_denied();
+        // Deliberately disable DACL mutation: overlay never touches
+        // host DACLs, so the forced selection must succeed.
+        policy.fallback.allow_dacl_mutation = false;
+        let d = detect(&policy, true, FilesystemOverlayMode::Off)
+            .expect("forced overlay with denied paths should succeed without DACL");
+        assert!(matches!(d.tier, IsolationTier::AppContainerOverlay));
         assert!(!d.needs_dacl_augmentation);
     }
 }
