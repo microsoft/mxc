@@ -756,7 +756,7 @@ describe('createConfigFromPolicy', () => {
       assert.deepStrictEqual(config.filesystem!.readwritePaths, ['/workspace']);
       assert.deepStrictEqual(config.filesystem!.readonlyPaths, ['/data']);
       assert.deepStrictEqual(config.filesystem!.deniedPaths, ['/secrets']);
-      // Per buildBubblewrapConfig, host filtering forces firewall mode.
+      // Per applyIptablesNetworkEnforcement, host filtering forces firewall mode.
       assert.strictEqual(config.network!.enforcementMode, 'firewall');
     });
   });
@@ -769,6 +769,30 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.containment, 'lxc');
       assert.ok(config.lxc, 'lxc backend block should be populated');
       assert.strictEqual(config.lxc!.distribution, 'alpine');
+    });
+
+    it('should force enforcementMode=firewall when host filtering is requested', () => {
+      // The LXC runner only invokes iptables when network_enforcement_mode is
+      // Firewall|Both (see lxc_common::network_iptables). Without this stamp,
+      // the parser would default to Capabilities and allowedHosts/blockedHosts
+      // would be silently dropped on the floor.
+      const config = createConfigFromPolicy({
+        version: '0.5.0-alpha',
+        network: { allowOutbound: true, allowedHosts: ['example.com'] },
+      }, 'lxc');
+      assert.strictEqual(config.containment, 'lxc');
+      assert.strictEqual(config.network!.enforcementMode, 'firewall');
+    });
+
+    it('should allow allowedHosts without allowOutbound (LXC supports per-host iptables filtering)', () => {
+      const config = createConfigFromPolicy({
+        version: '0.5.0-alpha',
+        network: { allowedHosts: ['example.com'] },
+      }, 'lxc');
+      assert.strictEqual(config.containment, 'lxc');
+      assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
+      assert.strictEqual(config.network!.defaultPolicy, 'block');
+      assert.strictEqual(config.network!.enforcementMode, 'firewall');
     });
   });
 });
