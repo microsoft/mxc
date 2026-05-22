@@ -6,7 +6,7 @@
 
 fn main() {
     mxc_winres::embed_version_info(
-        "Microsoft MXC Windows Sandbox Daemon",
+        "MXC Windows Sandbox Daemon",
         "wxc-windows-sandbox-daemon.exe",
     );
     println!("cargo:rerun-if-changed=build.rs");

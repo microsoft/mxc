@@ -9,6 +9,6 @@
 //! targets.
 
 fn main() {
-    mxc_winres::embed_version_info("Microsoft MXC Linux Container Executor", "lxc-exec.exe");
+    mxc_winres::embed_version_info("MXC Linux Container Executor", "lxc-exec.exe");
     println!("cargo:rerun-if-changed=build.rs");
 }

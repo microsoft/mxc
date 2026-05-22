@@ -5,7 +5,7 @@
 
 fn main() {
     // Embed Windows version info into the output executable.
-    mxc_winres::embed_version_info("Microsoft MXC Sandbox Executor", "wxc-exec.exe");
+    mxc_winres::embed_version_info("MXC Executor", "wxc-exec.exe");
 
     #[cfg(windows)]
     check_test_prerequisites();

@@ -6,7 +6,7 @@
 
 fn main() {
     mxc_winres::embed_version_info(
-        "Microsoft MXC Diagnostic Console",
+        "MXC Diagnostic Console",
         "mxc-diagnostic-console.exe",
     );
     println!("cargo:rerun-if-changed=build.rs");

@@ -6,7 +6,7 @@
 
 fn main() {
     mxc_winres::embed_version_info(
-        "Microsoft MXC Windows Sandbox Guest",
+        "MXC Windows Sandbox Guest",
         "wxc-windows-sandbox-guest.exe",
     );
     println!("cargo:rerun-if-changed=build.rs");

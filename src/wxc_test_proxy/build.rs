@@ -5,6 +5,6 @@
 //! `wxc-test-proxy.exe`. No-op on non-Windows targets.
 
 fn main() {
-    mxc_winres::embed_version_info("Microsoft MXC Test Proxy", "wxc-test-proxy.exe");
+    mxc_winres::embed_version_info("MXC Test Proxy", "wxc-test-proxy.exe");
     println!("cargo:rerun-if-changed=build.rs");
 }

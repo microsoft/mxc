@@ -22,7 +22,7 @@
 
 /// Microsoft branding shared by every MXC executable.
 const COMPANY_NAME: &str = "Microsoft Corporation";
-const PRODUCT_NAME: &str = "Microsoft eXecution Container (MXC)";
+const PRODUCT_NAME: &str = "Microsoft Execution Containers";
 /// `\u{00A9}` is the copyright symbol (©). Embedding it as an escape
 /// keeps the source file pure ASCII so editors and tools never have to
 /// guess the encoding.
@@ -37,7 +37,7 @@ const LEGAL_COPYRIGHT: &str = "\u{00A9} Microsoft Corporation. All rights reserv
 ///
 /// * `file_description` — the human-readable string shown as
 ///   "File description" in Explorer's Properties dialog. Typically
-///   something like `"Microsoft MXC Sandbox Executor"`.
+///   something like `"MXC Executor"`.
 /// * `original_filename` — the canonical file name of the produced
 ///   binary, including the `.exe` suffix (for example
 ///   `"wxc-exec.exe"`). This is used both for `OriginalFilename` and
