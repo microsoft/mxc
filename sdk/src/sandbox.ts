@@ -438,6 +438,28 @@ export interface SandboxSpawnOptions {
 }
 
 /**
+ * Inject environment variables into the config's `process.env` field as
+ * `KEY=VALUE` strings.  This is the explicit channel for passing env vars
+ * to the sandboxed child -- the parent process environment is NOT inherited
+ * by the sandbox (security: prevents secret leakage).
+ */
+function injectEnvIntoConfig(
+  config: ContainerConfig,
+  env: { [key: string]: string | undefined },
+): void {
+  if (!config.process) {
+    config.process = { commandLine: '' };
+  }
+  const entries: string[] = config.process.env ? [...config.process.env] : [];
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined) {
+      entries.push(`${key}=${value}`);
+    }
+  }
+  config.process.env = entries;
+}
+
+/**
  * Internal helper: resolves the executor binary path and spawns a PTY process.
  */
 function spawnWithConfig(
@@ -446,6 +468,12 @@ function spawnWithConfig(
   workingDirectory?: string,
   env?: { [key: string]: string | undefined },
 ): pty.IPty {
+  // Inject env vars into config.process.env so they are passed explicitly to
+  // the sandboxed child via the JSON config (not via process inheritance).
+  if (env) {
+    injectEnvIntoConfig(config, env);
+  }
+
   const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
 
   try {
@@ -455,7 +483,6 @@ function spawnWithConfig(
       rows: 80,
       ...options.ptyOptions,
       cwd: workingDirectory || process.cwd(),
-      env: env ?? options.ptyOptions?.env,
     };
 
     diagLog(`spawnWithConfig: spawning PTY process, cwd=${ptyOpts.cwd}`);
@@ -557,12 +584,17 @@ export function spawnSandboxFromConfig(
   env?: { [key: string]: string | undefined }
 ): pty.IPty | ChildProcess {
   if (options.usePty === false) {
+    // Inject env vars into config.process.env so they are passed explicitly to
+    // the sandboxed child via the JSON config (not via process inheritance).
+    if (env) {
+      injectEnvIntoConfig(config, env);
+    }
+
     const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
     try {
       const child = spawn(executablePath, args, {
         cwd: workingDirectory || process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
-        ...(env ? { env: { ...process.env, ...env } as NodeJS.ProcessEnv } : {}),
       });
       child.on('close', (code) => {
         logger?.log('info', 'mxc.spawn.exit', {
