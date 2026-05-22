@@ -3,15 +3,14 @@
   "containerId": "CLI-Pwsh-SetLocation-Test",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "pwsh.exe -nop -nol -c \"Set-PSReadLineOption -HistorySaveStyle SaveNothing; Set-Location c:\\temp\"; Get-ChildItem",
+    "commandLine": "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -nop -nol -c \"Set-PSReadLineOption -HistorySaveStyle SaveNothing; Set-Location c:\\temp\"; Get-ChildItem",
     "timeout": 30000
   },
   "filesystem": {
     "readwritePaths": [
       "C:\\Program Files\\PowerShell\\7",
       "C:\\temp",
-      "C:\\Users",
-      "C:\\Users\\st\\AppData\\Roaming\\Microsoft\\Windows\\PowerShell\\PSReadLine"
+      "C:\\Users"
     ],
     "readonlyPaths": [
       "C:\\"

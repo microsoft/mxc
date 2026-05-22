@@ -38,6 +38,11 @@ pub enum ContainmentBackend {
     /// internal codename for the App Sandbox / `sandbox-exec` machinery
     /// is "Seatbelt"); selected on the wire as `"seatbelt"`.
     Seatbelt,
+    /// Bubblewrap — unprivileged Linux sandboxing via user namespaces.
+    /// Experimental — requires `--experimental` flag. Uses `bwrap` to
+    /// create namespace-isolated processes without root privileges.
+    /// Selected on the wire as `"bubblewrap"`.
+    Bubblewrap,
 }
 
 /// Configuration specific to the Seatbelt backend (experimental).
@@ -353,11 +358,12 @@ impl Default for BaseProcessUiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FallbackPolicy {
-    /// When the BaseContainer API is absent and `bfscfg.exe` is unavailable,
-    /// allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). This
-    /// modifies host filesystem security descriptors; original DACLs are
-    /// restored on exit. Defaults to `true`. Set to `false` to refuse the
-    /// fallback (the run will fail on machines that require Tier 3).
+    /// When neither the in-process BaseContainer API nor the OS-side
+    /// filesystem broker helper is available, allow MXC to apply DACL ACEs
+    /// on policy paths (Tier 3 fallback). This modifies host filesystem
+    /// security descriptors; original DACLs are restored on exit. Defaults
+    /// to `true`. Set to `false` to refuse the fallback (the run will fail
+    /// on machines that require Tier 3).
     pub allow_dacl_mutation: bool,
 }
 

@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'node:url';
-import { PlatformSupport } from './types.js';
+import { ContainmentBackend, PlatformSupport } from './types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -94,6 +94,40 @@ function checkWindowsBuildVersion(): boolean {
   return true;
 }
 
+let windowsSandboxAvailableCache: boolean | undefined;
+
+/**
+ * Check if Windows Sandbox feature is enabled via DISM.
+ * @returns true if the Containers-DisposableClientVM feature is enabled
+ */
+function isWindowsSandboxAvailable(): boolean {
+  if (windowsSandboxAvailableCache !== undefined) {
+    return windowsSandboxAvailableCache;
+  }
+
+  try {
+    const output = execSync(
+      'dism /online /get-featureinfo /featurename:Containers-DisposableClientVM',
+      { encoding: 'utf-8', stdio: 'pipe', timeout: 10000 },
+    );
+    windowsSandboxAvailableCache = /State\s*:\s*Enabled/i.test(output);
+  } catch {
+    // `dism /online` typically requires elevation, so a non-elevated session
+    // throws here and we can't distinguish "disabled" from "no permission".
+    // Fall back to checking for the sandbox executable — Windows installs it
+    // under System32 only when the Containers-DisposableClientVM feature is
+    // enabled, and the path is readable without admin.
+    const sandboxExe = path.join(
+      process.env.SystemRoot || 'C:\\Windows',
+      'System32',
+      'WindowsSandbox.exe',
+    );
+    windowsSandboxAvailableCache = fs.existsSync(sandboxExe);
+  }
+
+  return windowsSandboxAvailableCache;
+}
+
 /**
  * Get platform support information
  * @returns Platform support details including available sandboxing methods
@@ -117,12 +151,16 @@ export function getPlatformSupport(): PlatformSupport {
   }
 
   if (platform === 'linux') {
-    // LXC is the only containment backend on Linux
-    if (isLxcAvailable()) {
+    // LXC and Bubblewrap are both supported on Linux. Report whichever
+    // are installed; callers pick via the containment field.
+    const methods: ContainmentBackend[] = [];
+    if (isLxcAvailable()) methods.push('lxc');
+    if (isBubblewrapAvailable()) methods.push('bubblewrap');
+    if (methods.length > 0) {
       support.isSupported = true;
-      support.availableMethods = ['lxc'];
+      support.availableMethods = methods;
     } else {
-      support.reason = 'LXC is not installed or not available on this system';
+      support.reason = 'Neither LXC nor Bubblewrap is available on this system';
     }
     return support;
   }
@@ -136,6 +174,9 @@ export function getPlatformSupport(): PlatformSupport {
   if (buildSupported) {
     support.isSupported = true;
     support.availableMethods = ['processcontainer'];
+    if (isWindowsSandboxAvailable()) {
+      support.availableMethods.push('windows_sandbox');
+    }
     return support;
   }
 
@@ -149,6 +190,18 @@ export function getPlatformSupport(): PlatformSupport {
 function isLxcAvailable(): boolean {
   try {
     execSync('lxc-ls --version', { encoding: 'utf-8', stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if Bubblewrap (bwrap) is available on the system
+ */
+function isBubblewrapAvailable(): boolean {
+  try {
+    execSync('bwrap --version', { encoding: 'utf-8', stdio: 'pipe' });
     return true;
   } catch {
     return false;

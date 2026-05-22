@@ -33,18 +33,15 @@ export interface LifecycleConfig {
 
 /**
  * Abstract containment intent. Names the *kind* of isolation the caller
- * wants. The native binary (or the SDK as a fallback) resolves this to a
- * concrete {@link ContainmentBackend} at run time based on what the host
- * supports.
- *
-/**
- * Abstract containment intent. Names the *kind* of isolation the caller
  * wants; the native binary resolves it to a concrete
  * {@link ContainmentBackend} per host capability.
  *
  * Today's intents:
  * - "process": OS-native process-level isolation. Resolves to
- *   `processcontainer` (Windows), `lxc` (Linux), or `seatbelt` (macOS).
+ *   `processcontainer` (Windows), `bubblewrap` (Linux), or `seatbelt`
+ *   (macOS). On Linux, `lxc` remains available as an explicit concrete
+ *   backend but is no longer the default for the abstract `"process"`
+ *   intent.
  * - "vm": full hardware-virtualised VM isolation. Resolves to
  *   `windows_sandbox` on Windows; no concrete VM backend exists on other
  *   platforms today.
@@ -77,14 +74,16 @@ export type ContainmentBackend =
   | 'wslc'
   | 'lxc'
   | 'microvm'
+  | 'hyperlight'
   | 'seatbelt'
-  | 'isolation_session';
+  | 'isolation_session'
+  | 'bubblewrap';
 
 /**
  * Containment values (abstract intent or concrete backend) that require
  * the `--experimental` flag.
  */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'wslc', 'seatbelt'];
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'hyperlight', 'wslc', 'seatbelt', 'bubblewrap'];
 
 /**
  * Clipboard access policy levels

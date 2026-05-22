@@ -11,6 +11,8 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
+#[cfg(target_os = "linux")]
+use bwrap_common::bwrap_runner::BubblewrapScriptRunner;
 use lxc_common::lxc_runner::LxcScriptRunner;
 use lxc_common::signal_cleanup;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
@@ -204,8 +206,13 @@ fn main() {
 
     log_request(&request, &mut logger);
 
-    // Dispatch by containment backend. LXC is the default on Linux;
-    // Hyperlight is the new embedded Hyperlight+Unikraft micro-VM.
+    // Dispatch by containment backend. On Linux, Bubblewrap is now the
+    // default for abstract intents (omitted `containment` and
+    // `containment: "process"` both resolve to Bubblewrap in
+    // `wxc_common::config_parser`). LXC is still available via explicit
+    // `containment: "lxc"`, and `containment: "processcontainer"` falls
+    // through to LXC via the catch-all below. Hyperlight is the embedded
+    // Hyperlight+Unikraft micro-VM (experimental, x86_64-only).
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::Hyperlight => {
             #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
@@ -224,6 +231,17 @@ fn main() {
                 eprintln!(
                     "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
                 );
+                process::exit(1);
+            }
+        }
+        ContainmentBackend::Bubblewrap => {
+            #[cfg(target_os = "linux")]
+            {
+                Box::new(BubblewrapScriptRunner::new())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                eprintln!("Error: Bubblewrap backend is only available on Linux");
                 process::exit(1);
             }
         }

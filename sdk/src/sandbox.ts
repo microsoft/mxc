@@ -87,6 +87,41 @@ function buildWslcContainerConfig(
 }
 
 /**
+ * Applies iptables-based network enforcement to `config.network`:
+ * when host filtering is requested, force `enforcementMode = 'firewall'`
+ * so the Linux runner actually applies iptables rules. Without this,
+ * `network_enforcement_mode` falls back to the parser default of
+ * `Capabilities` and the runner silently skips iptables, dropping
+ * `allowedHosts` / `blockedHosts` on the floor.
+ *
+ * Shared between the explicit `'bubblewrap'` / `'lxc'` builders and the
+ * abstract `'process'` branch on Linux (which resolves to Bubblewrap
+ * server-side) so the wire-format `network` block is identical regardless
+ * of which intent the caller used.
+ */
+function applyIptablesNetworkEnforcement(config: ContainerConfig): void {
+    if (config.network) {
+        if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
+            config.network.enforcementMode = 'firewall';
+        }
+    }
+}
+
+/**
+ * Builds the Bubblewrap (bwrap) portion of a ContainerConfig.
+ * Bubblewrap is Linux-only and uses shared cross-backend fields only —
+ * no backend-specific config block. Network enforcement via iptables
+ * reuses the same approach as LXC.
+ */
+function buildBubblewrapConfig(
+    config: ContainerConfig,
+): ContainerConfig {
+    config.containment = 'bubblewrap';
+    applyIptablesNetworkEnforcement(config);
+    return config;
+}
+
+/**
  * Builds the Linux process container (LXC) portion of a ContainerConfig.
  */
 function buildLinuxProcessConfig(
@@ -99,7 +134,7 @@ function buildLinuxProcessConfig(
         release: '3.23',
         destroyOnExit: true,
     };
-
+    applyIptablesNetworkEnforcement(config);
     return config;
 }
 
@@ -277,9 +312,18 @@ export function createConfigFromPolicy(
 
         // WSLC supports block + allowedHosts via iptables (Bridged networking
         // with per-host filtering). macOS sandbox supports it natively via
-        // per-host Seatbelt rules. Other backends require allowOutbound for
-        // host filtering since it maps to AppContainer capabilities.
-        if (containment !== 'wslc' && containment !== 'seatbelt') {
+        // per-host Seatbelt rules. Bubblewrap and LXC support it via iptables.
+        // Abstract `'process'` on Linux resolves to Bubblewrap server-side, so
+        // treat it the same as explicit `'bubblewrap'` here.
+        // Other backends require allowOutbound for host filtering since it
+        // maps to AppContainer capabilities.
+        const resolvesToHostFilteringBackend =
+            containment === 'wslc' ||
+            containment === 'seatbelt' ||
+            containment === 'bubblewrap' ||
+            containment === 'lxc' ||
+            (containment === 'process' && platform === 'linux');
+        if (!resolvesToHostFilteringBackend) {
             if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
                 throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
             }
@@ -302,11 +346,31 @@ export function createConfigFromPolicy(
         return buildWslcContainerConfig(config, policy, containerId);
     }
 
+    if (containment === 'bubblewrap') {
+        diagLog(`createConfigFromPolicy: containment=bubblewrap, id=${containerId}`);
+        return buildBubblewrapConfig(config);
+    }
+
+    if (containment === 'lxc') {
+        diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
+        config.containment = 'lxc';
+        return buildLinuxProcessConfig(config, containerId);
+    }
+
     if (containment === 'process') {
         config.containment = 'process';
         if (platform === 'linux') {
-            diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
-            return buildLinuxProcessConfig(config, containerId);
+            // Abstract `'process'` on Linux is resolved to Bubblewrap by the
+            // native binary (see `wxc_common::config_parser`). The wire-format
+            // payload intentionally omits any backend-specific block so the
+            // config reflects the abstract intent. Callers who explicitly want
+            // LXC must pass `containment: 'lxc'`.
+            //
+            // Network enforcement still needs the same iptables firewall mode
+            // as explicit `'bubblewrap'` when host filtering is in play.
+            applyIptablesNetworkEnforcement(config);
+            diagLog(`createConfigFromPolicy: containment=process (linux, resolves to bubblewrap), id=${containerId}`);
+            return config;
         }
         if (platform === 'darwin') {
             // The seatbelt backend has no container abstraction
@@ -412,6 +476,28 @@ export interface SandboxSpawnOptions {
 }
 
 /**
+ * Inject environment variables into the config's `process.env` field as
+ * `KEY=VALUE` strings.  This is the explicit channel for passing env vars
+ * to the sandboxed child -- the parent process environment is NOT inherited
+ * by the sandbox (security: prevents secret leakage).
+ */
+function injectEnvIntoConfig(
+  config: ContainerConfig,
+  env: { [key: string]: string | undefined },
+): void {
+  if (!config.process) {
+    config.process = { commandLine: '' };
+  }
+  const entries: string[] = config.process.env ? [...config.process.env] : [];
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined) {
+      entries.push(`${key}=${value}`);
+    }
+  }
+  config.process.env = entries;
+}
+
+/**
  * Internal helper: resolves the executor binary path and spawns a PTY process.
  */
 function spawnWithConfig(
@@ -420,6 +506,12 @@ function spawnWithConfig(
   workingDirectory?: string,
   env?: { [key: string]: string | undefined },
 ): pty.IPty {
+  // Inject env vars into config.process.env so they are passed explicitly to
+  // the sandboxed child via the JSON config (not via process inheritance).
+  if (env) {
+    injectEnvIntoConfig(config, env);
+  }
+
   const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
 
   try {
@@ -429,7 +521,6 @@ function spawnWithConfig(
       rows: 80,
       ...options.ptyOptions,
       cwd: workingDirectory || process.cwd(),
-      env: env ?? options.ptyOptions?.env,
     };
 
     diagLog(`spawnWithConfig: spawning PTY process, cwd=${ptyOpts.cwd}`);
@@ -531,12 +622,17 @@ export function spawnSandboxFromConfig(
   env?: { [key: string]: string | undefined }
 ): pty.IPty | ChildProcess {
   if (options.usePty === false) {
+    // Inject env vars into config.process.env so they are passed explicitly to
+    // the sandboxed child via the JSON config (not via process inheritance).
+    if (env) {
+      injectEnvIntoConfig(config, env);
+    }
+
     const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
     try {
       const child = spawn(executablePath, args, {
         cwd: workingDirectory || process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
-        ...(env ? { env: { ...process.env, ...env } as NodeJS.ProcessEnv } : {}),
       });
       child.on('close', (code) => {
         logger?.log('info', 'mxc.spawn.exit', {

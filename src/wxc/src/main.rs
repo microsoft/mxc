@@ -7,19 +7,18 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
-use wxc_common::appcontainer_runner::AppContainerScriptRunner;
+use wxc_common::appcontainer_runner::{delete_app_container_profile, AppContainerScriptRunner};
 use wxc_common::base_container_runner::BaseContainerRunner;
 use wxc_common::config_parser::{is_base_container_version, load_mxc_request, ParseError};
 use wxc_common::diagnostic::DiagnosticConfig;
-use wxc_common::filesystem_bfs::FileSystemBfsManager;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use wxc_common::hyperlight_runner::HyperlightScriptRunner;
 #[cfg(feature = "isolation_session")]
-use wxc_common::isolation_session_runner::IsolationSessionRunner;
+use wxc_common::isolation_session::IsolationSessionRunner;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
+#[cfg(feature = "microvm")]
 use wxc_common::nanvix_runner::NanVixScriptRunner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::{run_state_aware, DispatchOutcome};
@@ -169,44 +168,6 @@ fn print_error_envelope(error: &MxcError) {
     }
 }
 
-fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
-    // Clear BFS policy first. We need an absolute path to `bfscfg.exe`
-    // here for the same security reason as the runner — pass an
-    // authoritative path to `CreateProcessW` rather than a bare name.
-    // If resolution fails (rare; only on hosts where
-    // `GetWindowsDirectoryW` itself returns 0), we log and skip the BFS
-    // clearing step; deleting the AppContainer profile below is still
-    // worth attempting.
-    let bfscfg_path = match wxc_common::fallback_detector::find_bfscfg_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            logger.log_line(&format!(
-                "Skipping BFS policy clear: could not resolve bfscfg.exe ({e})"
-            ));
-            None
-        }
-    };
-    let mut bfs = FileSystemBfsManager::new(name.to_string(), bfscfg_path);
-    bfs.remove_configuration(logger);
-
-    // Delete the AppContainer profile
-    let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let hstring = windows::core::HSTRING::from_wide(&wide_name[..wide_name.len() - 1]);
-    match unsafe { DeleteAppContainerProfile(&hstring) } {
-        Ok(()) => {
-            logger.log_line(&format!("Deleted AppContainer profile: {}", name));
-            true
-        }
-        Err(e) => {
-            logger.log_line(&format!(
-                "Failed to delete AppContainer profile '{}': {}",
-                name, e
-            ));
-            false
-        }
-    }
-}
-
 fn main() {
     // Initialize COM/WinRT for backends that use WinRT APIs (Isolation Session).
     // COINIT_MULTITHREADED is benign for backends that don't use COM.
@@ -221,6 +182,26 @@ fn main() {
             windows::Win32::System::Com::COINIT_MULTITHREADED,
         )
     };
+
+    // Best-effort: reap any orphaned DACL state files left behind by
+    // crashed prior MXC runs. Errors here are non-fatal and only surface
+    // via stderr.
+    match wxc_common::filesystem_dacl::recover_orphaned_state() {
+        Ok(report) => {
+            if report.files_processed > 0 || !report.errors.is_empty() {
+                eprintln!(
+                    "DACL recovery: {} file(s), {} ACE(s) restored, {} error(s)",
+                    report.files_processed,
+                    report.aces_restored,
+                    report.errors.len()
+                );
+                for e in &report.errors {
+                    eprintln!("  {e}");
+                }
+            }
+        }
+        Err(e) => eprintln!("DACL recovery failed: {e}"),
+    }
 
     let cli = Cli::parse();
 
@@ -487,6 +468,10 @@ fn main() {
             eprintln!("Error: LXC backend not available on Windows");
             process::exit(1);
         }
+        ContainmentBackend::Bubblewrap => {
+            eprintln!("Error: Bubblewrap backend not available on Windows");
+            process::exit(1);
+        }
         ContainmentBackend::Seatbelt => {
             eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-mac)");
             process::exit(1);
@@ -500,7 +485,15 @@ fn main() {
                 eprintln!("Error: MicroVM is an experimental feature. Use --experimental flag.");
                 process::exit(1);
             }
-            Box::new(NanVixScriptRunner::new())
+            #[cfg(feature = "microvm")]
+            {
+                Box::new(NanVixScriptRunner::new())
+            }
+            #[cfg(not(feature = "microvm"))]
+            {
+                eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
+                process::exit(1);
+            }
         }
         ContainmentBackend::Hyperlight => {
             #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]

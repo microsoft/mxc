@@ -12,10 +12,8 @@ use uuid::Uuid;
 
 /// Maximum allowed total staging directory size (16 MB).
 pub const MAX_STAGING_BYTES: u64 = 16 * 1024 * 1024;
-/// Bootstrap Python loader filename.
-pub const BOOTSTRAP_FILENAME: &str = ".mxc-bootstrap.py";
-/// User script filename in staging.
-pub const SCRIPT_FILENAME: &str = ".mxc-script.py";
+/// Entry point filename (warm-start protocol executes this automatically).
+pub const BOOTSTRAP_FILENAME: &str = "bootstrap.py";
 /// Subdirectory for read-write staged host paths.
 pub const RW_DIR: &str = "rw";
 /// Subdirectory for read-only staged host paths.
@@ -27,14 +25,17 @@ const GUEST_MOUNT_ROOT: &str = "/mnt";
 fn build_guest_path(category: &str, name: &str) -> String {
     format!("{}/{}/{}", GUEST_MOUNT_ROOT, category, name)
 }
-/// Bootstrap Python source used by the guest runtime.
-/// Minimal — just runs the user script. Path translation is done at staging
-/// time by rewriting host paths in the script source before writing it.
-pub(crate) const BOOTSTRAP_SOURCE: &str = "import sys
-sys.argv = ['/mnt/.mxc-script.py']
-with open(sys.argv[0]) as _f:
-    exec(compile(_f.read(), sys.argv[0], 'exec'), {'__name__': '__main__', '__file__': sys.argv[0]})
-";
+
+/// Preamble prepended to the user script in bootstrap.py.
+///
+/// Composed from [`GUEST_MOUNT_ROOT`] and [`BOOTSTRAP_FILENAME`] so that
+/// any future change to either constant flows through automatically.
+fn bootstrap_preamble() -> String {
+    format!(
+        "import sys\nsys.argv = ['{}/{}']\n",
+        GUEST_MOUNT_ROOT, BOOTSTRAP_FILENAME
+    )
+}
 
 /// Errors produced while creating or validating a staging directory.
 #[derive(Debug, Error)]
@@ -112,8 +113,6 @@ impl StagingDir {
         fs::create_dir_all(&path)?;
 
         let build_result = || -> StagingBuildResult {
-            fs::write(path.join(BOOTSTRAP_FILENAME), BOOTSTRAP_SOURCE)?;
-
             // Collect host→guest path mappings for script rewriting.
             let mut rewrite_map: Vec<(String, String)> = Vec::new();
             let mut rw_mappings: Vec<RwMapping> = Vec::new();
@@ -164,7 +163,8 @@ impl StagingDir {
             // know about the guest mount layout. Both backslash and forward-slash
             // variants of each host path are replaced.
             let rewritten_script = rewrite_paths_in_script(script, &rewrite_map);
-            fs::write(path.join(SCRIPT_FILENAME), &rewritten_script)?;
+            let bootstrap_content = format!("{}{}", bootstrap_preamble(), rewritten_script);
+            fs::write(path.join(BOOTSTRAP_FILENAME), &bootstrap_content)?;
 
             let size_bytes = dir_size(&path)?;
             if size_bytes > MAX_STAGING_BYTES {
@@ -568,16 +568,16 @@ mod tests {
     }
 
     #[test]
-    fn staging_creates_bootstrap_and_script() {
+    fn staging_creates_bootstrap() {
         let root = tempdir().unwrap();
         let script = "print('hello')";
         let staging = StagingDir::new(root.path().to_path_buf(), script, &[], &[]).unwrap();
 
         let bootstrap = staging.path().join(BOOTSTRAP_FILENAME);
-        let script_path = staging.path().join(SCRIPT_FILENAME);
         assert!(bootstrap.exists());
-        assert!(script_path.exists());
-        assert_eq!(fs::read_to_string(script_path).unwrap(), script);
+        let content = fs::read_to_string(bootstrap).unwrap();
+        assert!(content.starts_with(&bootstrap_preamble()));
+        assert!(content.contains(script));
     }
 
     #[test]
@@ -603,7 +603,7 @@ mod tests {
         let guest_rel = host_path_to_guest_relative(&PathBuf::from(&host_path));
         assert!(staging.path().join(RW_DIR).join(&guest_rel).exists());
         // Verify the script was rewritten with the guest path.
-        let rewritten = fs::read_to_string(staging.path().join(SCRIPT_FILENAME)).unwrap();
+        let rewritten = fs::read_to_string(staging.path().join(BOOTSTRAP_FILENAME)).unwrap();
         let expected_guest = build_guest_path(RW_DIR, &guest_rel);
         assert!(
             rewritten.contains(&expected_guest),
@@ -665,7 +665,7 @@ mod tests {
         let rw = vec![host_path.clone()];
         let staging = StagingDir::new(root.path().to_path_buf(), &script, &rw, &[]).unwrap();
 
-        let rewritten = fs::read_to_string(staging.path().join(SCRIPT_FILENAME)).unwrap();
+        let rewritten = fs::read_to_string(staging.path().join(BOOTSTRAP_FILENAME)).unwrap();
         let guest_rel = host_path_to_guest_relative(&PathBuf::from(&host_path));
         let expected_guest = build_guest_path(RW_DIR, &guest_rel);
         assert!(
@@ -687,8 +687,13 @@ mod tests {
 
         let left = fs::read_to_string(a.path().join(BOOTSTRAP_FILENAME)).unwrap();
         let right = fs::read_to_string(b.path().join(BOOTSTRAP_FILENAME)).unwrap();
-        assert_eq!(left, right);
-        assert_eq!(left, BOOTSTRAP_SOURCE);
+        // The preamble (loader boilerplate) must be identical regardless of script content.
+        let preamble = bootstrap_preamble();
+        assert!(left.starts_with(&preamble));
+        assert!(right.starts_with(&preamble));
+        let left_preamble = &left[..preamble.len()];
+        let right_preamble = &right[..preamble.len()];
+        assert_eq!(left_preamble, right_preamble);
     }
 
     #[test]
@@ -915,5 +920,176 @@ mod tests {
         assert!(!old_dir.exists(), "old staging dir should be swept");
         assert!(!fresh_dir.exists(), "staging dir should be swept at age 0");
         assert!(unrelated.exists(), "unrelated dir must not be swept");
+    }
+
+    #[test]
+    fn staging_rejects_path_with_parent_dir_component() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("legit");
+        fs::create_dir_all(&source).unwrap();
+        // Construct a path with `..` to attempt traversal.
+        let traversal = source.join("..").join("legit");
+        let rw = vec![traversal.display().to_string()];
+        let err = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap_err();
+        assert!(
+            matches!(err, StagingError::PathNotFound(ref msg) if msg.contains("..")),
+            "expected PathNotFound with '..' mention, got: {err}"
+        );
+    }
+
+    #[test]
+    fn staging_mixed_rw_and_ro_paths() {
+        let root = tempdir().unwrap();
+        let source_root = tempdir().unwrap();
+        let rw_dir = source_root.path().join("editable");
+        let ro_dir = source_root.path().join("reference");
+        fs::create_dir_all(&rw_dir).unwrap();
+        fs::create_dir_all(&ro_dir).unwrap();
+        write_file(&rw_dir.join("a.txt"), "rw-content");
+        write_file(&ro_dir.join("b.txt"), "ro-content");
+
+        let rw = vec![rw_dir.display().to_string()];
+        let ro = vec![ro_dir.display().to_string()];
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &ro).unwrap();
+
+        // Both subdirectories must exist.
+        assert!(staging.path().join(RW_DIR).exists());
+        assert!(staging.path().join(RO_DIR).exists());
+        // Verify file content was staged.
+        let rw_rel = host_path_to_guest_relative(&rw_dir);
+        let ro_rel = host_path_to_guest_relative(&ro_dir);
+        let staged_rw_file = staging.path().join(RW_DIR).join(&rw_rel).join("a.txt");
+        let staged_ro_file = staging.path().join(RO_DIR).join(&ro_rel).join("b.txt");
+        assert_eq!(fs::read_to_string(staged_rw_file).unwrap(), "rw-content");
+        assert_eq!(fs::read_to_string(staged_ro_file).unwrap(), "ro-content");
+    }
+
+    #[test]
+    fn staging_overhead_ms_scales_with_size() {
+        let root = tempdir().unwrap();
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &[]).unwrap();
+        // A minimal staging dir should have near-zero overhead.
+        assert!(staging.staging_overhead_ms() < 5);
+    }
+
+    #[test]
+    fn staging_overhead_ms_capped_at_30s() {
+        let root = tempdir().unwrap();
+        let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &[]).unwrap();
+        // Simulate a huge staging size (won't actually allocate).
+        staging.size_bytes = 500 * 1024 * 1024; // 500 MB
+        assert_eq!(staging.staging_overhead_ms(), 30_000);
+    }
+
+    #[test]
+    fn preserved_path_none_when_not_preserved() {
+        let root = tempdir().unwrap();
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &[]).unwrap();
+        assert!(staging.preserved_path().is_none());
+    }
+
+    #[test]
+    fn host_path_to_guest_relative_handles_trailing_slash() {
+        let p = PathBuf::from(r"C:\Users\me\work\");
+        assert_eq!(host_path_to_guest_relative(&p), "c/Users/me/work");
+    }
+
+    #[test]
+    fn host_path_to_guest_relative_lowercase_drive() {
+        let p = PathBuf::from(r"E:\Projects\src");
+        let result = host_path_to_guest_relative(&p);
+        assert!(result.starts_with('e'), "drive letter should be lowercase");
+        assert_eq!(result, "e/Projects/src");
+    }
+
+    #[test]
+    fn rewrite_paths_handles_escaped_backslashes() {
+        let host = r"C:\Users\me\work".to_string();
+        let guest = "/mnt/rw/c/Users/me/work".to_string();
+        let script = r#"path = "C:\\Users\\me\\work""#;
+        let result = rewrite_paths_in_script(script, &[(host, guest.clone())]);
+        assert!(
+            result.contains(&guest),
+            "escaped backslashes not rewritten: {result}"
+        );
+    }
+
+    #[test]
+    fn rewrite_paths_longer_prefix_first() {
+        let short_host = r"C:\data".to_string();
+        let short_guest = "/mnt/rw/c/data".to_string();
+        let long_host = r"C:\data\subdir".to_string();
+        let long_guest = "/mnt/rw/c/data/subdir".to_string();
+        let script = r"C:\data\subdir\file.txt";
+        let mappings = vec![
+            (short_host, short_guest.clone()),
+            (long_host, long_guest.clone()),
+        ];
+        let result = rewrite_paths_in_script(script, &mappings);
+        // The longer path must match first so we don't get a partial replacement.
+        assert!(
+            result.contains("/mnt/rw/c/data/subdir"),
+            "longer prefix should match first: {result}"
+        );
+    }
+
+    #[test]
+    fn build_guest_path_format() {
+        assert_eq!(build_guest_path("rw", "c/Users/me"), "/mnt/rw/c/Users/me");
+        assert_eq!(build_guest_path("ro", "d/ref"), "/mnt/ro/d/ref");
+    }
+
+    #[test]
+    fn staging_empty_script() {
+        let root = tempdir().unwrap();
+        let staging = StagingDir::new(root.path().to_path_buf(), "", &[], &[]).unwrap();
+        let content = fs::read_to_string(staging.path().join(BOOTSTRAP_FILENAME)).unwrap();
+        // Should only contain the preamble.
+        assert_eq!(content, bootstrap_preamble());
+    }
+
+    #[test]
+    fn staging_nested_directory_rw_copyback() {
+        let root = tempdir().unwrap();
+        let source_root = tempdir().unwrap();
+        let source = source_root.path().join("nested");
+        let sub = source.join("sub").join("deep");
+        fs::create_dir_all(&sub).unwrap();
+        write_file(&sub.join("deep.txt"), "original");
+        write_file(&source.join("top.txt"), "top-original");
+
+        let rw = vec![source.display().to_string()];
+        let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+        let staged_dir = staged_rw(&staging, &source);
+
+        // Modify deep file and add a new file.
+        fs::write(
+            staged_dir.join("sub").join("deep").join("deep.txt"),
+            "modified",
+        )
+        .unwrap();
+        fs::write(staged_dir.join("new.txt"), "added").unwrap();
+
+        staging.copy_back_to_host().unwrap();
+        assert_eq!(
+            fs::read_to_string(sub.join("deep.txt")).unwrap(),
+            "modified"
+        );
+        assert_eq!(fs::read_to_string(source.join("new.txt")).unwrap(), "added");
+    }
+
+    #[test]
+    fn sweep_ignores_nonexistent_root() {
+        let nonexistent = PathBuf::from(r"C:\nonexistent_mxc_test_dir_12345");
+        // Should not panic or error.
+        sweep_orphaned_staging_dirs(&nonexistent, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn staging_dir_has_unique_names() {
+        let root = tempdir().unwrap();
+        let a = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &[]).unwrap();
+        let b = StagingDir::new(root.path().to_path_buf(), "print(1)", &[], &[]).unwrap();
+        assert_ne!(a.path(), b.path());
     }
 }

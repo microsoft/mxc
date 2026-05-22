@@ -10,11 +10,11 @@ pub mod hyperlight_runner;
 pub mod id;
 pub mod log_symbols;
 pub mod logger;
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "microvm", target_os = "windows"))]
 pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "microvm", target_os = "windows"))]
 pub mod nanvix_runner;
 pub mod script_runner;
 pub mod state_aware_backend;
@@ -30,6 +30,8 @@ pub mod appcontainer_runner;
 pub mod fallback_detector;
 #[cfg(target_os = "windows")]
 pub mod filesystem_bfs;
+#[cfg(target_os = "windows")]
+pub mod filesystem_dacl;
 #[cfg(target_os = "windows")]
 pub mod job_object;
 #[cfg(target_os = "windows")]
@@ -61,4 +63,4 @@ pub mod sandbox_tracking;
 
 // Isolation Session (IsoEnvBroker Session API) support
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-pub mod isolation_session_runner;
+pub mod isolation_session;

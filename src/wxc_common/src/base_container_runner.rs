@@ -39,6 +39,29 @@ use sandbox_spec::base_container_layout::{
     NetworkPolicy as FbsNetworkPolicy, NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
 };
 
+/// `CREATE_UNICODE_ENVIRONMENT` -- tells the API that the environment block is UTF-16 encoded.
+const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
+
+/// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
+///
+/// Entries are sorted case-insensitively by key as required by `CreateProcessW`.
+fn encode_env_block(env_vars: &[String]) -> Vec<u16> {
+    let mut entries: Vec<(&str, &str)> =
+        env_vars.iter().filter_map(|e| e.split_once('=')).collect();
+
+    entries.sort_by(|(a, _), (b, _)| a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase()));
+
+    let mut block = Vec::new();
+    for (key, value) in &entries {
+        for ch in format!("{}={}", key, value).encode_utf16() {
+            block.push(ch);
+        }
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
+
 /// Function pointer type matching `Experimental_CreateProcessInSandbox` from processmodel.dll.
 type PfnCreateProcessInSandbox = unsafe extern "system" fn(
     application_name: *const u16,
@@ -540,6 +563,28 @@ impl ScriptRunner for BaseContainerRunner {
         };
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
+        // Environment block for the sandboxed child.
+        // If the caller specified explicit env vars, use only those.
+        // Otherwise, pass NULL to let the OS provide the default environment
+        // for the sandbox (CreateProcessInSandbox handles this internally).
+        let env_block: Option<Vec<u16>> = if request.env.is_empty() {
+            // TODO: consider calling CreateEnvironmentBlock(NULL, FALSE) here
+            // for a cleansed default env if the OS API doesn't do it for us.
+            None
+        } else {
+            Some(encode_env_block(&request.env))
+        };
+
+        let env_ptr = env_block
+            .as_ref()
+            .map(|b| b.as_ptr() as *const c_void)
+            .unwrap_or(ptr::null());
+        let creation_flags = if env_block.is_some() {
+            CREATE_UNICODE_ENVIRONMENT
+        } else {
+            0
+        };
+
         let _ = writeln!(logger, "launching: {}", request.script_code);
         let _ = writeln!(logger, "identity: {identity}");
 
@@ -571,8 +616,8 @@ impl ScriptRunner for BaseContainerRunner {
                 ptr::null(),             // processAttributes (must be NULL)
                 ptr::null(),             // threadAttributes  (must be NULL)
                 0,                       // inheritHandles    (must be FALSE)
-                0,                       // creationFlags
-                ptr::null(),             // environment       (must be NULL)
+                creation_flags,          // creationFlags
+                env_ptr,                 // environment
                 cwd_ptr,                 // currentDirectory
                 &si,                     // startupInfo
                 identity_wide.as_ptr(),  // identity

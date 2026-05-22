@@ -599,8 +599,31 @@ fn convert_raw_config_inner(
     // target_os. Any future concrete-only backend just needs an arm; any
     // future abstract intent should resolve here (and likewise in
     // `parse_containment_str` below for the state-aware path).
+    //
+    // Default resolution (omitted `containment`) and the abstract intent
+    // `"process"` map to the OS-native process sandbox on each platform:
+    //   * Windows -> ProcessContainer (AppContainer)
+    //   * macOS   -> Seatbelt
+    //   * Linux   -> Bubblewrap (lightweight, unprivileged process sandbox)
+    // LXC is treated as a full Linux container and is only selected when
+    // explicitly requested via `"lxc"`; `"processcontainer"` continues to
+    // route to ProcessContainer (which `lxc-exec` falls back to LXC for).
     let containment = match raw.containment.as_deref() {
-        None | Some("processcontainer") => ContainmentBackend::ProcessContainer,
+        None => {
+            #[cfg(target_os = "linux")]
+            {
+                ContainmentBackend::Bubblewrap
+            }
+            #[cfg(target_os = "macos")]
+            {
+                ContainmentBackend::Seatbelt
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                ContainmentBackend::ProcessContainer
+            }
+        }
+        Some("processcontainer") => ContainmentBackend::ProcessContainer,
         Some("appcontainer") => {
             logger.log_line(
                 "[deprecated] containment value 'appcontainer' is a legacy alias for 'processcontainer'; \
@@ -609,14 +632,13 @@ fn convert_raw_config_inner(
             ContainmentBackend::ProcessContainer
         }
         Some("process") => {
-            // Abstract intent: the caller wants process-level containment but
-            // does not care which concrete backend implements it. Today this
-            // resolves trivially per OS (ProcessContainer on Windows, LXC on
-            // Linux, Seatbelt on macOS). The lxc-exec binary additionally
-            // overrides this to LXC unconditionally on Linux.
+            // Abstract intent: the caller wants the OS-native process
+            // sandbox. Resolves to ProcessContainer on Windows, Bubblewrap
+            // on Linux, and Seatbelt on macOS. Callers who want LXC (a
+            // full container) must request it explicitly via "lxc".
             #[cfg(target_os = "linux")]
             {
-                ContainmentBackend::Lxc
+                ContainmentBackend::Bubblewrap
             }
             #[cfg(target_os = "macos")]
             {
@@ -656,9 +678,10 @@ fn convert_raw_config_inner(
             ContainmentBackend::Seatbelt
         }
         Some("hyperlight") => ContainmentBackend::Hyperlight,
+        Some("bubblewrap") => ContainmentBackend::Bubblewrap,
         Some(other) => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', 'seatbelt', or 'hyperlight')",
+                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', 'seatbelt', 'hyperlight', or 'bubblewrap')",
                 other
             );
             logger.log_line(&msg);
@@ -998,9 +1021,13 @@ fn parse_containment_str(s: &str, logger: &mut Logger) -> Result<ContainmentBack
             Ok(ContainmentBackend::ProcessContainer)
         }
         "process" => {
+            // Abstract intent: the caller wants the OS-native process
+            // sandbox. Resolves to ProcessContainer on Windows, Bubblewrap
+            // on Linux, and Seatbelt on macOS. Callers who want LXC (a
+            // full container) must request it explicitly via "lxc".
             #[cfg(target_os = "linux")]
             {
-                Ok(ContainmentBackend::Lxc)
+                Ok(ContainmentBackend::Bubblewrap)
             }
             #[cfg(target_os = "macos")]
             {
@@ -1027,6 +1054,8 @@ fn parse_containment_str(s: &str, logger: &mut Logger) -> Result<ContainmentBack
         "microvm" => Ok(ContainmentBackend::MicroVm),
         "isolation_session" => Ok(ContainmentBackend::IsolationSession),
         "seatbelt" => Ok(ContainmentBackend::Seatbelt),
+        "hyperlight" => Ok(ContainmentBackend::Hyperlight),
+        "bubblewrap" => Ok(ContainmentBackend::Bubblewrap),
         "macos_sandbox" => {
             logger.log_line(
                 "[deprecated] containment value 'macos_sandbox' is a legacy alias for 'seatbelt'; \
@@ -1036,7 +1065,7 @@ fn parse_containment_str(s: &str, logger: &mut Logger) -> Result<ContainmentBack
         }
         other => {
             let msg = format!(
-                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', or 'seatbelt')",
+                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', 'seatbelt', 'hyperlight', or 'bubblewrap')",
                 other
             );
             logger.log_line(&msg);
@@ -1585,12 +1614,20 @@ mod tests {
     // ====== Containment backend selection tests ======
 
     #[test]
-    fn default_containment_is_processcontainer() {
+    fn default_containment_resolves_per_target() {
+        // Omitted `containment` resolves to the OS-native process sandbox:
+        // ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS.
         let json = r#"{"process": {"commandLine": "echo hello"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(req.containment, ContainmentBackend::Bubblewrap);
+        #[cfg(target_os = "macos")]
+        assert_eq!(req.containment, ContainmentBackend::Seatbelt);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
     }
 
@@ -1607,8 +1644,10 @@ mod tests {
 
     #[test]
     fn process_containment_resolves_per_target() {
-        // Abstract intent "process" resolves to the per-OS default backend:
-        // ProcessContainer on Windows, LXC on Linux, Seatbelt on macOS.
+        // Abstract intent "process" resolves to the OS-native process sandbox:
+        // ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS.
+        // Callers who want LXC (a full container) must request it explicitly
+        // via `"containment": "lxc"`.
         let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "process"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -1616,11 +1655,51 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
 
         #[cfg(target_os = "linux")]
-        assert_eq!(req.containment, ContainmentBackend::Lxc);
+        assert_eq!(req.containment, ContainmentBackend::Bubblewrap);
         #[cfg(target_os = "macos")]
         assert_eq!(req.containment, ContainmentBackend::Seatbelt);
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
+    }
+
+    #[test]
+    fn explicit_lxc_containment_unaffected_by_default_shift() {
+        // Regression guard: making bubblewrap the Linux default for the
+        // abstract `"process"` intent must NOT change how explicit `"lxc"`
+        // resolves. LXC remains available to any caller that asks for it.
+        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "lxc"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::Lxc);
+    }
+
+    #[test]
+    fn explicit_bubblewrap_containment_parses_cleanly() {
+        // Bubblewrap no longer requires gating in the parser/SDK; explicit
+        // `"bubblewrap"` should parse to the concrete backend on every
+        // target without error. (Host availability is checked at runtime by
+        // the runner, not here.)
+        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "bubblewrap"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::Bubblewrap);
+    }
+
+    #[test]
+    fn hyperlight_containment_value_parses() {
+        // Lock in that `"hyperlight"` is accepted by the parser (mirrors
+        // the `convert_raw_config_inner` arm and keeps `parse_containment_str`
+        // in sync for the state-aware path).
+        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "hyperlight"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::Hyperlight);
     }
 
     #[test]
@@ -1711,6 +1790,7 @@ mod tests {
     fn proxy_localhost_port() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
             "network": {
                 "proxy": { "localhost": 8080 }
             }
@@ -1730,6 +1810,7 @@ mod tests {
     fn proxy_url_parsed() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
             "network": {
                 "proxy": { "url": "http://localhost:3128" }
             }
@@ -1748,6 +1829,7 @@ mod tests {
     fn proxy_url_non_localhost() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
             "network": {
                 "proxy": { "url": "http://proxy.example.com:8080" }
             }
@@ -1776,6 +1858,7 @@ mod tests {
     fn proxy_url_ipv6_loopback() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
             "network": {
                 "proxy": { "url": "http://[::1]:8080" }
             }
@@ -1793,6 +1876,7 @@ mod tests {
     fn proxy_with_firewall_fields() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
             "network": {
                 "defaultPolicy": "block",
                 "allowedHosts": ["api.github.com"],
@@ -1854,6 +1938,7 @@ mod tests {
     fn proxy_builtin_test_server() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
             "network": {
                 "proxy": { "builtinTestServer": true }
             }

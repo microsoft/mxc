@@ -194,6 +194,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
+name = "bwrap_common"
+version = "0.1.0"
+dependencies = [
+ "lxc_common",
+ "nix",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "wxc_common",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -843,8 +855,8 @@ dependencies = [
 
 [[package]]
 name = "hyperlight-unikraft-host"
-version = "0.5.0"
-source = "git+https://github.com/hyperlight-dev/hyperlight-unikraft?tag=v0.5.0#ca05c5af35f1728bbce94e17677a18200b7247a6"
+version = "0.6.0"
+source = "git+https://github.com/hyperlight-dev/hyperlight-unikraft?tag=v0.6.0#d8524a99ad4855c7c9f1d0c17381b884386596b0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1175,6 +1187,7 @@ name = "lxc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bwrap_common",
  "clap",
  "lxc_common",
  "wxc_common",
@@ -2751,6 +2764,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hyperlight-unikraft-host",
  "isolation_session_bindings",
+ "nanvix_common",
  "sandbox_spec",
  "semver",
  "serde",

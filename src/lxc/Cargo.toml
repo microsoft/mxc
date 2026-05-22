@@ -13,5 +13,6 @@ hyperlight = ["wxc_common/hyperlight"]
 [dependencies]
 wxc_common = { workspace = true }
 lxc_common = { workspace = true }
+bwrap_common = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
