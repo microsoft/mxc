@@ -10,8 +10,6 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Maximum allowed total staging directory size (16 MB).
-pub const MAX_STAGING_BYTES: u64 = 16 * 1024 * 1024;
 /// Entry point filename (warm-start protocol executes this automatically).
 pub const BOOTSTRAP_FILENAME: &str = "bootstrap.py";
 /// Subdirectory for read-write staged host paths.
@@ -43,9 +41,6 @@ pub enum StagingError {
     /// A requested host path does not exist.
     #[error("host path does not exist: {0}")]
     PathNotFound(String),
-    /// Total staged content exceeded the configured cap.
-    #[error("staging size cap exceeded: {actual_mb:.2} MB > {limit_mb:.2} MB")]
-    SizeCapExceeded { actual_mb: f64, limit_mb: f64 },
     /// A symlink was found in a source path.
     #[error("symlink found in source path: {0}")]
     SymlinkFound(String),
@@ -98,14 +93,13 @@ impl StagingDir {
         readwrite_paths: &[String],
         readonly_paths: &[String],
     ) -> Result<Self, StagingError> {
-        // Pre-flight size estimate — fail fast before writing anything.
-        let estimated = estimate_source_size(readwrite_paths)?
-            .saturating_add(estimate_source_size(readonly_paths)?);
-        if estimated > MAX_STAGING_BYTES {
-            return Err(StagingError::SizeCapExceeded {
-                actual_mb: estimated as f64 / (1024.0 * 1024.0),
-                limit_mb: MAX_STAGING_BYTES as f64 / (1024.0 * 1024.0),
-            });
+        // Validate source paths up front (existence, no symlinks/reparse points,
+        // no `..` components). Validation is done once here; per-entry
+        // symlink/reparse rejection in `copy_dir_recursive` closes the TOCTOU
+        // window between validation and copy, so the per-source loops below
+        // don't need to re-validate.
+        for source in readwrite_paths.iter().chain(readonly_paths.iter()) {
+            validate_source_path(Path::new(source), source)?;
         }
 
         fs::create_dir_all(&root)?;
@@ -116,17 +110,20 @@ impl StagingDir {
             // Collect host→guest path mappings for script rewriting.
             let mut rewrite_map: Vec<(String, String)> = Vec::new();
             let mut rw_mappings: Vec<RwMapping> = Vec::new();
+            // Track staged bytes incrementally to avoid a full directory walk
+            // at the end (which scaled with total staged content size).
+            let mut size_bytes: u64 = 0;
 
             if !readwrite_paths.is_empty() {
                 fs::create_dir_all(path.join(RW_DIR))?;
             }
             for source in readwrite_paths {
                 let host_path = PathBuf::from(source);
-                validate_source_path(&host_path, source)?;
 
                 let relative = host_path_to_guest_relative(&host_path);
                 let slot_dir = path.join(RW_DIR).join(&relative);
-                let kind = stage_host_path(&host_path, &slot_dir)?;
+                let (kind, bytes) = stage_host_path(&host_path, &slot_dir)?;
+                size_bytes = size_bytes.saturating_add(bytes);
                 let guest_path = build_guest_path(RW_DIR, &relative);
                 rewrite_map.push((source.clone(), guest_path));
                 rw_mappings.push(RwMapping {
@@ -141,19 +138,19 @@ impl StagingDir {
             }
             for source in readonly_paths {
                 let host_path = PathBuf::from(source);
-                validate_source_path(&host_path, source)?;
 
                 let relative = host_path_to_guest_relative(&host_path);
                 let slot_dir = path.join(RO_DIR).join(&relative);
-                if host_path.is_dir() {
-                    copy_dir_recursive(&host_path, &slot_dir)?;
+                let bytes = if host_path.is_dir() {
+                    copy_dir_recursive(&host_path, &slot_dir)?
                 } else {
                     fs::create_dir_all(&slot_dir)?;
                     let file_name = host_path
                         .file_name()
                         .ok_or_else(|| StagingError::PathNotFound(source.clone()))?;
-                    fs::copy(&host_path, slot_dir.join(file_name))?;
-                }
+                    fs::copy(&host_path, slot_dir.join(file_name))?
+                };
+                size_bytes = size_bytes.saturating_add(bytes);
                 set_readonly_recursive(&slot_dir)?;
                 let guest_path = build_guest_path(RO_DIR, &relative);
                 rewrite_map.push((source.clone(), guest_path));
@@ -165,14 +162,7 @@ impl StagingDir {
             let rewritten_script = rewrite_paths_in_script(script, &rewrite_map);
             let bootstrap_content = format!("{}{}", bootstrap_preamble(), rewritten_script);
             fs::write(path.join(BOOTSTRAP_FILENAME), &bootstrap_content)?;
-
-            let size_bytes = dir_size(&path)?;
-            if size_bytes > MAX_STAGING_BYTES {
-                return Err(StagingError::SizeCapExceeded {
-                    actual_mb: size_bytes as f64 / (1024.0 * 1024.0),
-                    limit_mb: MAX_STAGING_BYTES as f64 / (1024.0 * 1024.0),
-                });
-            }
+            size_bytes = size_bytes.saturating_add(bootstrap_content.len() as u64);
 
             Ok(StagingBuildOutput {
                 rw_mappings,
@@ -295,18 +285,19 @@ fn rewrite_paths_in_script(script: &str, mappings: &[(String, String)]) -> Strin
 }
 
 /// Stages a single host path in a target slot directory using a private copy.
-fn stage_host_path(host_path: &Path, slot_dir: &Path) -> Result<HostPathKind, StagingError> {
+/// Returns the host-path kind and the total number of bytes copied.
+fn stage_host_path(host_path: &Path, slot_dir: &Path) -> Result<(HostPathKind, u64), StagingError> {
     if host_path.is_dir() {
-        copy_dir_recursive(host_path, slot_dir)?;
-        return Ok(HostPathKind::Directory);
+        let bytes = copy_dir_recursive(host_path, slot_dir)?;
+        return Ok((HostPathKind::Directory, bytes));
     }
 
     fs::create_dir_all(slot_dir)?;
     let file_name = host_path
         .file_name()
         .ok_or_else(|| StagingError::PathNotFound(host_path.display().to_string()))?;
-    fs::copy(host_path, slot_dir.join(file_name))?;
-    Ok(HostPathKind::File)
+    let bytes = fs::copy(host_path, slot_dir.join(file_name))?;
+    Ok((HostPathKind::File, bytes))
 }
 
 /// Copies staged RW content back to the original host path.
@@ -339,7 +330,7 @@ fn mirror_directory(src: &Path, dst: &Path) -> Result<(), StagingError> {
         fs::rename(dst, &backup)?;
     }
     match copy_dir_recursive(src, dst) {
-        Ok(()) => {
+        Ok(_) => {
             // Copy succeeded — best-effort removal of the backup.
             if backup.exists() {
                 let _ = remove_dir_all_force(&backup);
@@ -359,11 +350,13 @@ fn mirror_directory(src: &Path, dst: &Path) -> Result<(), StagingError> {
     }
 }
 
-/// Copies a directory recursively.
+/// Copies a directory recursively. Returns the total number of bytes copied so
+/// callers can track staging size without an extra full-tree walk afterward.
 /// Uses `symlink_metadata` per entry to reject symlinks/reparse points during
 /// traversal, closing the TOCTOU window between upfront validation and the actual copy.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), StagingError> {
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<u64, StagingError> {
     fs::create_dir_all(dst)?;
+    let mut total: u64 = 0;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let metadata = fs::symlink_metadata(entry.path())?;
@@ -374,12 +367,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), StagingError> {
         }
         let target = dst.join(entry.file_name());
         if metadata.file_type().is_dir() {
-            copy_dir_recursive(&entry.path(), &target)?;
+            total = total.saturating_add(copy_dir_recursive(&entry.path(), &target)?);
         } else {
-            fs::copy(entry.path(), target)?;
+            total = total.saturating_add(fs::copy(entry.path(), target)?);
         }
     }
-    Ok(())
+    Ok(total)
 }
 
 /// Sets the read-only attribute recursively for all files in `dir`.
@@ -489,39 +482,6 @@ fn clear_readonly_recursive(path: &Path) -> Result<(), StagingError> {
         fs::set_permissions(path, perms)?;
     }
     Ok(())
-}
-
-/// Computes the recursive total size in bytes for all files in `path`.
-fn dir_size(path: &Path) -> Result<u64, StagingError> {
-    if path.is_file() {
-        return Ok(fs::metadata(path)?.len());
-    }
-
-    let mut total = 0_u64;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let entry_path = entry.path();
-        if entry_path.is_dir() {
-            total = total.saturating_add(dir_size(&entry_path)?);
-        } else {
-            total = total.saturating_add(fs::metadata(entry_path)?.len());
-        }
-    }
-    Ok(total)
-}
-
-/// Estimates the total on-disk size of a list of host paths without copying them.
-/// Returns an error on the first path that cannot be sized, ensuring the preflight
-/// check is deterministic and does not silently under-estimate.
-fn estimate_source_size(paths: &[String]) -> Result<u64, StagingError> {
-    let mut total = 0_u64;
-    for s in paths {
-        let p = Path::new(s);
-        // Validate before sizing to avoid following symlinks/reparse points during traversal.
-        validate_source_path(p, s)?;
-        total = total.saturating_add(dir_size(p)?);
-    }
-    Ok(total)
 }
 
 /// Removes orphaned `mxc-staging-*` directories under `root` that are older than `max_age`.
@@ -848,24 +808,30 @@ mod tests {
     }
 
     #[test]
-    fn staging_rejects_oversized_content() {
+    fn staging_allows_large_content() {
+        // Verify that staging succeeds for large source content (~64 MB).
         let root = tempdir().unwrap();
         let source_root = tempdir().unwrap();
         let source = source_root.path().join("big");
         fs::create_dir_all(&source).unwrap();
-        // Sparse file exceeding MAX_STAGING_BYTES.
+        // Sparse file ~64 MB. Sparse so we don't actually consume the disk
+        // space on test runners.
         let big_file = source.join("large.bin");
+        let big_size: u64 = 64 * 1024 * 1024;
         {
             let f = fs::File::create(&big_file).unwrap();
-            f.set_len(MAX_STAGING_BYTES + 1).unwrap();
+            f.set_len(big_size).unwrap();
         }
 
         let rw = vec![source.display().to_string()];
-        let err = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap_err();
-        assert!(
-            matches!(err, StagingError::SizeCapExceeded { .. }),
-            "expected SizeCapExceeded, got: {err}"
-        );
+        let staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[])
+            .expect("staging should succeed for large content");
+
+        // The large file was staged into the RW slot.
+        let rel = host_path_to_guest_relative(&source);
+        let staged = staging.path().join(RW_DIR).join(&rel).join("large.bin");
+        assert!(staged.exists(), "expected staged file at {staged:?}");
+        assert_eq!(fs::metadata(&staged).unwrap().len(), big_size);
     }
 
     #[test]
