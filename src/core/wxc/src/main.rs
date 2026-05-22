@@ -732,6 +732,25 @@ fn main() {
         Err(e) => eprintln!("DACL recovery failed: {e}"),
     }
 
+    // Same best-effort recovery for the filesystem_overlay enforcer
+    // (ProjFS + BindFlt). Distinct state directory; distinct dead
+    // process detection. Independent of the DACL recovery above.
+    match wxc_common::filesystem_overlay::recover_orphaned_state() {
+        Ok(report) => {
+            if report.files_processed > 0 || !report.errors.is_empty() {
+                eprintln!(
+                    "Overlay recovery: {} file(s), {} primitive(s) restored, {} error(s)",
+                    report.files_processed,
+                    report.primitives_restored,
+                    report.errors.len()
+                );
+                for e in &report.errors {
+                    eprintln!("  {e}");
+                }
+            }
+        }
+        Err(e) => eprintln!("Overlay recovery failed: {e}"),
+    }
     // --probe is a detection-only fast path used by SDK
     // `getPlatformSupport()` on every first call. It does not spawn a
     // sandbox, never parks a DaclManager, and never calls into COM/WinRT.

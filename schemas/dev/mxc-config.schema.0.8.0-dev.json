@@ -139,6 +139,17 @@
     "Experimental": {
       "description": "Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.",
       "properties": {
+        "filesystem_overlay": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FilesystemOverlay"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filesystem-policy enforcer based on ProjFS + BindFlt."
+        },
         "isolation_session": {
           "anyOf": [
             {
@@ -204,6 +215,43 @@
             }
           ],
           "description": "WSL container backend config."
+        }
+      },
+      "type": "object"
+    },
+    "FilesystemOverlay": {
+      "description": "Filesystem-policy enforcer based on ProjFS + BindFlt.",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "off",
+                "auto",
+                "on"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Selection mode: `off`, `auto`, or `on`. Unknown values default to `off` in the parser."
+        },
+        "writeIsolation": {
+          "anyOf": [
+            {
+              "enum": [
+                "passthrough",
+                "private"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Writeback semantics: `passthrough` or `private`. Unknown values default to `passthrough` in the parser."
         }
       },
       "type": "object"

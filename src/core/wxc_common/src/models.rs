@@ -659,6 +659,55 @@ pub struct ExperimentalConfig {
     pub isolation_session: Option<IsolationSessionConfig>,
     /// Telemetry configuration (experimental).
     pub telemetry: Option<TelemetryConfig>,
+    /// Filesystem-policy enforcer based on ProjFS + BindFlt
+    /// (`filesystem_overlay` module).
+    ///
+    /// Opt-in via `mode` (`"off" | "auto" | "on"`); writeback semantics
+    /// controlled by `writeIsolation`. Honored by `fallback_detector`
+    /// + `appcontainer_runner` when Phase D wiring lands.
+    #[serde(rename = "filesystem_overlay")]
+    pub filesystem_overlay: Option<FilesystemOverlayConfig>,
+}
+
+/// Selection mode for the [`crate::filesystem_overlay`] enforcer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FilesystemOverlayMode {
+    /// Never pick the overlay tier. Default until Phase D ships
+    /// detector + runner wiring and we've had one soak release.
+    #[default]
+    Off,
+    /// Let `fallback_detector` decide based on policy shape + primitive
+    /// availability.
+    Auto,
+    /// Force the overlay tier. Surfaces a typed `BackendUnavailable`
+    /// error when the chosen primitives aren't available.
+    On,
+}
+
+/// Writeback semantics for `OverlayPrimitive::ProjFsBranch` / RW
+/// BindFlt overlays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FilesystemOverlayWriteIsolation {
+    /// Writes propagate to host backing immediately (DACL-T3 parity).
+    /// Default.
+    #[default]
+    Passthrough,
+    /// Writes go to a per-run private scratch root; host backing is
+    /// never modified.
+    Private,
+}
+
+/// Experimental config for `filesystem_overlay`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilesystemOverlayConfig {
+    /// Selection mode (`off`/`auto`/`on`).
+    pub mode: FilesystemOverlayMode,
+    /// Writeback semantics for RW branches / overlays.
+    #[serde(rename = "writeIsolation")]
+    pub write_isolation: FilesystemOverlayWriteIsolation,
 }
 
 /// Telemetry configuration parsed from the JSON config `experimental.telemetry` section.

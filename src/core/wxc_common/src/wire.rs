@@ -399,6 +399,20 @@ pub struct Experimental {
     pub seatbelt: Option<Seatbelt>,
     /// Telemetry configuration.
     pub telemetry: Option<Telemetry>,
+    /// Filesystem-policy enforcer based on ProjFS + BindFlt.
+    #[serde(rename = "filesystem_overlay")]
+    pub filesystem_overlay: Option<FilesystemOverlay>,
+}
+
+/// Filesystem-policy enforcer based on ProjFS + BindFlt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct FilesystemOverlay {
+    /// Selection mode: `off`, `auto`, or `on`. Unknown values default to `off` in the parser.
+    pub mode: Option<String>,
+    /// Writeback semantics: `passthrough` or `private`. Unknown values default to `passthrough` in the parser.
+    pub write_isolation: Option<String>,
 }
 
 /// Telemetry configuration (`experimental.telemetry`).

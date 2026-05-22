@@ -9,6 +9,7 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
+    FilesystemOverlayConfig, FilesystemOverlayMode, FilesystemOverlayWriteIsolation,
     IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
     PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig, TestFeatureConfig,
     UiPolicy, WindowsSandboxConfig, WslcConfig,
@@ -1035,12 +1036,43 @@ fn convert_wire_config(
         let telemetry = raw_exp.telemetry.map(|raw_t| TelemetryConfig {
             enabled: raw_t.enabled,
         });
+        let filesystem_overlay = raw_exp.filesystem_overlay.map(|raw_fo| {
+            let mode = match raw_fo.mode.as_deref().map(|s| s.to_ascii_lowercase()) {
+                Some(s) if s == "off" => FilesystemOverlayMode::Off,
+                Some(s) if s == "auto" => FilesystemOverlayMode::Auto,
+                Some(s) if s == "on" => FilesystemOverlayMode::On,
+                Some(other) => {
+                    logger.log_line(&format!(
+                        "Unknown filesystem_overlay.mode '{other}', defaulting to 'off'"
+                    ));
+                    FilesystemOverlayMode::Off
+                }
+                None => FilesystemOverlayMode::Off,
+            };
+            let write_isolation =
+                match raw_fo.write_isolation.as_deref().map(|s| s.to_ascii_lowercase()) {
+                    Some(s) if s == "passthrough" => FilesystemOverlayWriteIsolation::Passthrough,
+                    Some(s) if s == "private" => FilesystemOverlayWriteIsolation::Private,
+                    Some(other) => {
+                        logger.log_line(&format!(
+                            "Unknown filesystem_overlay.writeIsolation '{other}', defaulting to 'passthrough'"
+                        ));
+                        FilesystemOverlayWriteIsolation::Passthrough
+                    }
+                    None => FilesystemOverlayWriteIsolation::Passthrough,
+                };
+            FilesystemOverlayConfig {
+                mode,
+                write_isolation,
+            }
+        });
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
             isolation_session,
             telemetry,
+            filesystem_overlay,
         }
     } else {
         ExperimentalConfig::default()
@@ -3700,6 +3732,82 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.experimental.isolation_session.is_none());
+    }
+
+    #[test]
+    fn filesystem_overlay_absent_from_experimental() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.filesystem_overlay.is_none());
+    }
+
+    #[test]
+    fn filesystem_overlay_defaults_when_empty_object() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"filesystem_overlay": {}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.filesystem_overlay.unwrap();
+        assert_eq!(cfg.mode, FilesystemOverlayMode::Off);
+        assert_eq!(
+            cfg.write_isolation,
+            FilesystemOverlayWriteIsolation::Passthrough
+        );
+    }
+
+    #[test]
+    fn filesystem_overlay_explicit_auto_private() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"filesystem_overlay": {"mode": "auto", "writeIsolation": "private"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.filesystem_overlay.unwrap();
+        assert_eq!(cfg.mode, FilesystemOverlayMode::Auto);
+        assert_eq!(
+            cfg.write_isolation,
+            FilesystemOverlayWriteIsolation::Private
+        );
+    }
+
+    #[test]
+    fn filesystem_overlay_explicit_on() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"filesystem_overlay": {"mode": "on"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.filesystem_overlay.unwrap();
+        assert_eq!(cfg.mode, FilesystemOverlayMode::On);
+    }
+
+    #[test]
+    fn filesystem_overlay_unknown_mode_warns_and_defaults_off() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"filesystem_overlay": {"mode": "garbage"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.filesystem_overlay.unwrap();
+        assert_eq!(cfg.mode, FilesystemOverlayMode::Off);
+    }
+
+    #[test]
+    fn filesystem_overlay_unknown_write_isolation_warns_and_defaults_passthrough() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"filesystem_overlay": {"writeIsolation": "garbage"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.filesystem_overlay.unwrap();
+        assert_eq!(
+            cfg.write_isolation,
+            FilesystemOverlayWriteIsolation::Passthrough
+        );
     }
 
     #[test]
