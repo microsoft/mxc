@@ -5,9 +5,25 @@ trigger: none
 name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
 
 pr:
-- main
-- feature/*
-- user/*
+  branches:
+    include:
+    - main
+    - feature/*
+    - user/*
+  # Skip the full build pipeline when a PR only touches documentation /
+  # non-shipping content. Any change outside this exclusion list still
+  # triggers the pipeline as before. Keep this list conservative — exclude
+  # only paths that cannot possibly affect built artifacts or test behavior.
+  paths:
+    exclude:
+    - 'docs/**'
+    - 'examples/**'
+    - '.github/ISSUE_TEMPLATE/**'
+    - '.github/PULL_REQUEST_TEMPLATE.md'
+    - '.github/copilot-instructions.md'
+    - '.github/instructions/**'
+    - '**/*.md'
+    - '.editorconfig'
 
 resources:
   repositories:
