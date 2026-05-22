@@ -252,6 +252,39 @@ export function createTempDir(prefix: string = 'mxc-test'): string {
   return dir;
 }
 
+// Async spawn from a pre-built ContainerConfig. Mirrors the SDK's own
+// spawnSandboxAsync (sandbox.ts) -- it exists because the SDK doesn't expose
+// an async wrapper around spawnSandboxFromConfig, and tests that need a
+// specific backend build the config directly.
+//
+// Notes (kept in lockstep with spawnSandboxAsync):
+//  - stdout/stderr are merged: wxc-exec runs under node-pty (a single PTY),
+//    so the OS combines both streams. stderr: '' is structural padding.
+//  - No per-call timeout: node:test enforces test-level timeouts and the
+//    config's process.timeout is enforced by the native runner.
+//  - IPty has no onError event. Synchronous spawn failures are caught below;
+//    post-spawn failures surface as a non-zero exitCode via onExit.
+export function spawnFromConfigAsync(
+  config: sdkNamespace.ContainerConfig,
+  options: sdkNamespace.SandboxSpawnOptions = {},
+  workingDirectory?: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve, reject) => {
+    try {
+      const ptyProcess = sdkNamespace.spawnSandboxFromConfig(config, options, workingDirectory);
+      let output = '';
+      ptyProcess.onData((data: string) => {
+        output += data;
+      });
+      ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
+        resolve({ stdout: output, stderr: '', exitCode: event.exitCode });
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 // Python helpers
 
 /** Detect a usable Python command. Returns undefined if not installed. */

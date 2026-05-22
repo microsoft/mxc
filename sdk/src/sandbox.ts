@@ -86,6 +86,27 @@ function buildWslcContainerConfig(
 }
 
 /**
+ * Applies iptables-based network enforcement to `config.network`:
+ * when host filtering is requested, force `enforcementMode = 'firewall'`
+ * so the Linux runner actually applies iptables rules. Without this,
+ * `network_enforcement_mode` falls back to the parser default of
+ * `Capabilities` and the runner silently skips iptables, dropping
+ * `allowedHosts` / `blockedHosts` on the floor.
+ *
+ * Shared between the explicit `'bubblewrap'` / `'lxc'` builders and the
+ * abstract `'process'` branch on Linux (which resolves to Bubblewrap
+ * server-side) so the wire-format `network` block is identical regardless
+ * of which intent the caller used.
+ */
+function applyIptablesNetworkEnforcement(config: ContainerConfig): void {
+    if (config.network) {
+        if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
+            config.network.enforcementMode = 'firewall';
+        }
+    }
+}
+
+/**
  * Builds the Bubblewrap (bwrap) portion of a ContainerConfig.
  * Bubblewrap is Linux-only and uses shared cross-backend fields only —
  * no backend-specific config block. Network enforcement via iptables
@@ -95,14 +116,7 @@ function buildBubblewrapConfig(
     config: ContainerConfig,
 ): ContainerConfig {
     config.containment = 'bubblewrap';
-
-    // Network enforcement: use firewall when host filtering is needed
-    if (config.network) {
-        if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
-            config.network.enforcementMode = 'firewall';
-        }
-    }
-
+    applyIptablesNetworkEnforcement(config);
     return config;
 }
 
@@ -119,7 +133,7 @@ function buildLinuxProcessConfig(
         release: '3.23',
         destroyOnExit: true,
     };
-
+    applyIptablesNetworkEnforcement(config);
     return config;
 }
 
@@ -297,10 +311,18 @@ export function createConfigFromPolicy(
 
         // WSLC supports block + allowedHosts via iptables (Bridged networking
         // with per-host filtering). macOS sandbox supports it natively via
-        // per-host Seatbelt rules. Bubblewrap supports it via iptables.
+        // per-host Seatbelt rules. Bubblewrap and LXC support it via iptables.
+        // Abstract `'process'` on Linux resolves to Bubblewrap server-side, so
+        // treat it the same as explicit `'bubblewrap'` here.
         // Other backends require allowOutbound for host filtering since it
         // maps to AppContainer capabilities.
-        if (containment !== 'wslc' && containment !== 'seatbelt' && containment !== 'bubblewrap') {
+        const resolvesToHostFilteringBackend =
+            containment === 'wslc' ||
+            containment === 'seatbelt' ||
+            containment === 'bubblewrap' ||
+            containment === 'lxc' ||
+            (containment === 'process' && platform === 'linux');
+        if (!resolvesToHostFilteringBackend) {
             if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
                 throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
             }
@@ -328,11 +350,26 @@ export function createConfigFromPolicy(
         return buildBubblewrapConfig(config);
     }
 
+    if (containment === 'lxc') {
+        diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
+        config.containment = 'lxc';
+        return buildLinuxProcessConfig(config, containerId);
+    }
+
     if (containment === 'process') {
         config.containment = 'process';
         if (platform === 'linux') {
-            diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
-            return buildLinuxProcessConfig(config, containerId);
+            // Abstract `'process'` on Linux is resolved to Bubblewrap by the
+            // native binary (see `wxc_common::config_parser`). The wire-format
+            // payload intentionally omits any backend-specific block so the
+            // config reflects the abstract intent. Callers who explicitly want
+            // LXC must pass `containment: 'lxc'`.
+            //
+            // Network enforcement still needs the same iptables firewall mode
+            // as explicit `'bubblewrap'` when host filtering is in play.
+            applyIptablesNetworkEnforcement(config);
+            diagLog(`createConfigFromPolicy: containment=process (linux, resolves to bubblewrap), id=${containerId}`);
+            return config;
         }
         if (platform === 'darwin') {
             // The seatbelt backend has no container abstraction

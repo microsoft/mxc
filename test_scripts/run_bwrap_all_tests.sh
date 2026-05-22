@@ -9,9 +9,9 @@ FAILURES=""
 
 # Check for Windows line endings in test scripts
 check_line_endings() {
-    if grep -rPl '\r$' "$SCRIPT_DIR"/run_bwrap_*.sh >/dev/null 2>&1; then
+    if grep -rPl '\r$' "$SCRIPT_DIR"/run_bwrap_*.sh "$SCRIPT_DIR"/run_linux_process_default_test.sh >/dev/null 2>&1; then
         echo "ERROR: Shell scripts have Windows line endings (CRLF)."
-        echo "Fix with: sed -i 's/\r\$//' $SCRIPT_DIR/run_bwrap_*.sh"
+        echo "Fix with: sed -i 's/\r\$//' $SCRIPT_DIR/run_bwrap_*.sh $SCRIPT_DIR/run_linux_process_default_test.sh"
         exit 1
     fi
 }
@@ -36,6 +36,7 @@ run_test() {
 run_test "Basic Bubblewrap" "$SCRIPT_DIR/run_bwrap_basic_test.sh"
 run_test "Bubblewrap Filesystem" "$SCRIPT_DIR/run_bwrap_filesystem_test.sh"
 run_test "Bubblewrap Network Block" "$SCRIPT_DIR/run_bwrap_network_test.sh"
+run_test "Linux Process Default" "$SCRIPT_DIR/run_linux_process_default_test.sh"
 
 echo "================================"
 echo "Results: $PASSED passed, $FAILED failed"
