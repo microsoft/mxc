@@ -73,6 +73,7 @@ extends:
             ob_createvpack_minorVer: $(SdkMinor)         # set by 'Set vpack version' step
             ob_createvpack_patchVer: $(SdkPatch)         # set by 'Set vpack version' step
             ob_createvpack_prereleaseVer: $(VersionDate).$(VersionCounter)
+            ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
 
           steps:
             - task: PowerShell@2
