@@ -597,15 +597,15 @@ impl ScriptRunner for BaseContainerRunner {
                 &request.policy.readonly_paths,
             );
 
+            let extended_error =
+                format!("Experimental_CreateProcessInSandbox failed: {err:?}");
+            let _ = writeln!(logger, "Error: {extended_error}");
+
             let _ = writeln!(
                 logger,
                 "Error: Launch diagnostic [{}]: {}",
                 diag.kind, diag.message
             );
-
-            let extended_error =
-                format!("Experimental_CreateProcessInSandbox failed: {err:?}");
-            let _ = writeln!(logger, "Error: {extended_error}");
 
             return ScriptResponse {
                 exit_code: -1,
