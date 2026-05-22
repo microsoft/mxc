@@ -109,7 +109,7 @@ jobs:
           enableTest: $(isX64)
           publishTestResults: false
           enableClippy: false
-          useNextest: false
+          useNextest: true
           testAllTargets: false
           buildAllTargets: false
 
