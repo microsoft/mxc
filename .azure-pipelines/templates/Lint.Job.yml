@@ -82,10 +82,12 @@ jobs:
         displayName: cargo fmt --check
         workingDirectory: $(workingDirectory)
 
-      # Run clippy via plain cargo (same invocation that used to live inside
-      # Rust.Build.Job.yml) so the toolchain-installed clippy is used directly,
-      # avoiding the ~8min `clippy-sarif` source install that the 1ES task
-      # would otherwise trigger via enableClippy.
-      - script: cargo clippy --locked --workspace --all-targets --all-features --target $(targetTriple) --release -- -D warnings
+      # Run clippy via plain cargo. Note the deliberate lack of `--workspace`:
+      # on Linux this job runs from `src/lxc` which scopes clippy to the lxc
+      # package and its deps (matching the existing build's scope); the
+      # Windows job runs from `src/` (the workspace root with no `[package]`),
+      # so cargo's default expands to all workspace members. This avoids
+      # dragging Windows-only crates (e.g. wxc) into the Linux clippy graph.
+      - script: cargo clippy --locked --all-targets --all-features --target $(targetTriple) --release -- -D warnings
         displayName: cargo clippy --all-features
         workingDirectory: $(workingDirectory)
