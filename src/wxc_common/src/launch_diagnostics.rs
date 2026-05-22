@@ -250,7 +250,7 @@ pub fn extract_exe_from_command_line(command_line: &str) -> &str {
 
 fn is_packaged_app(exe_path: &Path) -> bool {
     let normalized = exe_path.to_string_lossy().to_lowercase();
-    normalized.contains("\\windowsapps\\")
+    normalized.contains("\\windowsapps\\") || normalized.contains("/windowsapps/")
 }
 
 fn is_powershell(exe_path: &Path) -> bool {
