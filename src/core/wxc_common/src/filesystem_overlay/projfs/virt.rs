@@ -52,8 +52,9 @@ use windows::Win32::Storage::ProjectedFileSystem::{
     PrjWriteFileData, PrjWritePlaceholderInfo, PRJ_CALLBACKS, PRJ_CALLBACK_DATA,
     PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN, PRJ_DIR_ENTRY_BUFFER_HANDLE, PRJ_FILE_BASIC_INFO,
     PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT, PRJ_NOTIFICATION,
-    PRJ_NOTIFICATION_FILE_PRE_CONVERT_TO_FULL, PRJ_NOTIFICATION_MAPPING,
-    PRJ_NOTIFICATION_PARAMETERS, PRJ_NOTIFICATION_PRE_DELETE, PRJ_NOTIFICATION_PRE_RENAME,
+    PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_MODIFIED, PRJ_NOTIFICATION_FILE_PRE_CONVERT_TO_FULL,
+    PRJ_NOTIFICATION_MAPPING, PRJ_NOTIFICATION_PARAMETERS, PRJ_NOTIFICATION_PRE_DELETE,
+    PRJ_NOTIFICATION_PRE_RENAME, PRJ_NOTIFY_FILE_HANDLE_CLOSED_FILE_MODIFIED,
     PRJ_NOTIFY_FILE_PRE_CONVERT_TO_FULL, PRJ_NOTIFY_PRE_DELETE, PRJ_NOTIFY_PRE_RENAME,
     PRJ_NOTIFY_TYPES, PRJ_PLACEHOLDER_INFO, PRJ_STARTVIRTUALIZING_OPTIONS,
 };
@@ -151,6 +152,12 @@ impl ProjFsBranchSet {
 struct ProviderState {
     branches: ProjFsBranchSet,
     enumerations: HashMap<u128, EnumState>,
+    /// Projection root captured at `start()` time so the writeback
+    /// callback (`PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_MODIFIED`)
+    /// can locate the projection-side file at
+    /// `<projection_root>\<rel>` and copy it back to the branch's
+    /// `host_root`. Empty until `install_branches` is called.
+    projection_root: PathBuf,
 }
 
 struct EnumState {
@@ -171,20 +178,23 @@ fn state() -> &'static Mutex<ProviderState> {
         Mutex::new(ProviderState {
             branches: ProjFsBranchSet::default(),
             enumerations: HashMap::new(),
+            projection_root: PathBuf::new(),
         })
     })
 }
 
-fn install_branches(b: ProjFsBranchSet) {
+fn install_branches(b: ProjFsBranchSet, projection_root: PathBuf) {
     let mut s = state().lock().unwrap();
     s.branches = b;
     s.enumerations.clear();
+    s.projection_root = projection_root;
 }
 
 fn clear_branches() {
     let mut s = state().lock().unwrap();
     s.branches = ProjFsBranchSet::default();
     s.enumerations.clear();
+    s.projection_root = PathBuf::new();
 }
 
 // -------------------------------------------------------------------------
@@ -628,16 +638,20 @@ unsafe extern "system" fn cb_get_file_data(
 }
 
 // -------------------------------------------------------------------------
-// Notification callback — RO enforcement
+// Notification callback — RO enforcement + RW writeback
 // -------------------------------------------------------------------------
 //
-// Subscribe globally to the three veto-able write notifications:
+// Subscribe to:
 //
+//   PRE-events (veto-able; we veto for RO branches):
 //   - PRE_CONVERT_TO_FULL   ← modify-existing on a placeholder
 //   - PRE_DELETE            ← delete on a placeholder
 //   - PRE_RENAME            ← rename of a placeholder
 //
-// Return E_ACCESSDENIED when the target lives in an RO branch.
+//   POST-events (informational; we use them to propagate back to host):
+//   - FILE_HANDLE_CLOSED_FILE_MODIFIED  ← RW branch writeback trigger
+//
+// Return E_ACCESSDENIED to veto, S_OK otherwise.
 //
 // Known limitation: there is no PRE_NEW_FILE_CREATED notification.
 // New-file-in-RO is closed by the placeholder DACL (above) instead.
@@ -649,15 +663,49 @@ unsafe extern "system" fn cb_notification(
     _destination_filename: PCWSTR,
     _operation_parameters: *mut PRJ_NOTIFICATION_PARAMETERS,
 ) -> HRESULT {
+    let data = &*callback_data;
+    let rel = pcwstr_to_string(data.FilePathName);
+
+    // POST-event: file was modified and the handle was closed. For
+    // RW branches we propagate the modified content back to the host
+    // backing. Always returns S_OK — post-event notifications can't
+    // veto.
+    if notification == PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_MODIFIED {
+        let (host_path, projection_root) = {
+            let st = state().lock().unwrap();
+            match resolve(&st.branches, &rel) {
+                Resolved::Host {
+                    host_path,
+                    mode: BranchMode::ReadWrite,
+                } => (host_path, st.projection_root.clone()),
+                // RO branches shouldn't get here because PRE_CONVERT_TO_FULL
+                // vetoes the conversion; if a non-RW path does fire this
+                // we ignore it (the host backing was never modified).
+                _ => return S_OK,
+            }
+        };
+        if let Err(e) = writeback_modified_file(&projection_root, &rel, &host_path) {
+            // Best-effort: log to stderr and continue. The AC's view
+            // already has the new content (the placeholder converted
+            // to a full file); we just couldn't sync host-side. A
+            // future restore / recovery pass picks this up via the
+            // host-content drift.
+            eprintln!(
+                "filesystem_overlay::projfs: writeback {} -> {}: {e}",
+                rel,
+                host_path.display()
+            );
+        }
+        return S_OK;
+    }
+
+    // PRE-events: veto when the target lives in an RO branch.
     if notification != PRJ_NOTIFICATION_FILE_PRE_CONVERT_TO_FULL
         && notification != PRJ_NOTIFICATION_PRE_DELETE
         && notification != PRJ_NOTIFICATION_PRE_RENAME
     {
         return S_OK;
     }
-
-    let data = &*callback_data;
-    let rel = pcwstr_to_string(data.FilePathName);
 
     let st = state().lock().unwrap();
     match resolve(&st.branches, &rel) {
@@ -667,6 +715,36 @@ unsafe extern "system" fn cb_notification(
         } => E_ACCESSDENIED,
         _ => S_OK,
     }
+}
+
+/// Copy a modified placeholder's content from
+/// `<projection_root>\<rel>` to `<host_path>`. Creates parent
+/// directories on the host side as needed.
+///
+/// Notes:
+/// - `rel` is the projection-root-relative path the kernel handed us,
+///   using backslash separators on Windows.
+/// - This runs on a ProjFS worker thread, post-close, so the file is
+///   no longer locked by the AC.
+/// - We copy via `std::fs::copy` for simplicity. For large files a
+///   future optimisation could stream / use `CopyFile2` with
+///   `COPY_FILE_ALLOW_DECRYPTED_DESTINATION` semantics. The MVP
+///   correctness goal is to make the host backing reflect the AC's
+///   final write — not to compete with raw-disk throughput.
+fn writeback_modified_file(
+    projection_root: &Path,
+    rel: &str,
+    host_path: &Path,
+) -> std::io::Result<()> {
+    if projection_root.as_os_str().is_empty() {
+        return Err(std::io::Error::other("projection root not installed"));
+    }
+    let source = projection_root.join(rel.replace('/', "\\"));
+    if let Some(parent) = host_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&source, host_path)?;
+    Ok(())
 }
 
 // -------------------------------------------------------------------------
@@ -708,7 +786,7 @@ impl Drop for VirtSession {
 /// `root` somewhere the AC has traverse access (typically inside the
 /// AC profile's `AC\` folder).
 pub fn start(root: &Path, branches: ProjFsBranchSet) -> Result<VirtSession, OverlayError> {
-    install_branches(branches);
+    install_branches(branches, root.to_path_buf());
 
     if root.exists() {
         let _ = fs::remove_dir_all(root);
@@ -740,14 +818,17 @@ pub fn start(root: &Path, branches: ProjFsBranchSet) -> Result<VirtSession, Over
         CancelCommandCallback: None,
     };
 
-    // One global notification mapping covering the entire virt root,
-    // for the three veto-able write events.
+    // One global notification mapping covering the entire virt root.
+    // The three PRE-events are vetoed for RO branches; the
+    // FILE_HANDLE_CLOSED_FILE_MODIFIED post-event drives RW writeback
+    // to the host backing.
     let empty_root = to_wide_z("");
     let mut mappings = [PRJ_NOTIFICATION_MAPPING {
         NotificationBitMask: PRJ_NOTIFY_TYPES(
             PRJ_NOTIFY_FILE_PRE_CONVERT_TO_FULL.0
                 | PRJ_NOTIFY_PRE_DELETE.0
-                | PRJ_NOTIFY_PRE_RENAME.0,
+                | PRJ_NOTIFY_PRE_RENAME.0
+                | PRJ_NOTIFY_FILE_HANDLE_CLOSED_FILE_MODIFIED.0,
         ),
         NotificationRoot: PCWSTR(empty_root.as_ptr()),
     }];

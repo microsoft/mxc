@@ -271,6 +271,73 @@ mod tests {
             .expect("read through projection");
         assert_eq!(read, b"rw content");
 
+        // ----- A.5 writeback verification -----
+        //
+        // Modify a file in the RW branch through the projection,
+        // then verify the host backing reflects the change. This
+        // exercises the PRJ_NOTIFY_FILE_HANDLE_CLOSED_FILE_MODIFIED
+        // path that lands the projection's content back on the host.
+        //
+        // NOTE: ProjFS suppresses notification callbacks for writes
+        // originating from the provider's own process. The test
+        // process IS the provider (it owns the virt session), so we
+        // can't write directly with `std::fs::write` and expect the
+        // callback to fire. Instead we spawn `cmd.exe /c >` as a
+        // child process, which writes from a separate process and
+        // does cause the kernel to fire the notification.
+        let modified = "rw content modified by the projection writeback test";
+        let target = projection_root.join("rw").join("readme.txt");
+        // Use PowerShell rather than cmd.exe — cmd's redirection
+        // parser is allergic to colons and backslashes in unquoted
+        // arguments. PowerShell's `Set-Content` works cleanly on
+        // arbitrary Win32 paths.
+        let ps_script = format!(
+            "[System.IO.File]::WriteAllText('{}', '{}')",
+            target.display(),
+            modified
+        );
+        let status = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &ps_script])
+            .status()
+            .expect("spawn powershell writer");
+        assert!(status.success(), "child writer should succeed");
+        // The post-event notification fires asynchronously on a
+        // worker thread after the close. Give it up to ~2s to land
+        // before asserting — exits the wait early on the first read
+        // that sees the new content.
+        let mut host_content = String::new();
+        for _ in 0..40 {
+            if let Ok(c) = std::fs::read_to_string(rw_host.join("readme.txt")) {
+                host_content = c;
+                if host_content == modified {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(
+            host_content, modified,
+            "host backing should reflect writeback within timeout"
+        );
+
+        // Verify the RO branch was NOT writable — overwriting
+        // readme.txt should fail or the host content must remain
+        // unchanged.
+        let ro_target = projection_root.join("ro").join("readme.txt");
+        let ro_ps_script = format!(
+            "try {{ [System.IO.File]::WriteAllText('{}', 'should fail') }} catch {{ }}",
+            ro_target.display()
+        );
+        let _ = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &ro_ps_script])
+            .status();
+        let ro_host_content =
+            std::fs::read(ro_host.join("readme.txt")).expect("read ro host backing");
+        assert_eq!(
+            ro_host_content, b"ro content",
+            "RO host backing must not be modified by ro write attempt"
+        );
+
         // Restore the projection. Drops the VirtSession (→
         // PrjStopVirtualizing) and removes the projection root.
         restore(&mut applied).expect("restore");
