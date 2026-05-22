@@ -1,0 +1,17 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "wslc-port-mapping-multiple",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "for port in 8080 9090; do python3 -c \"import socket; s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('0.0.0.0',$port)); s.close(); print('bound tcp', $port)\" || { echo bind failed for $port >&2; exit 1; }; done; echo PORT_MAPPING_MULTI_OK"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "python:3.12-alpine",
+      "portMappings": [
+        { "windowsPort": 18080, "containerPort": 8080, "protocol": "tcp" },
+        { "windowsPort": 19090, "containerPort": 9090, "protocol": "tcp" }
+      ]
+    }
+  }
+}

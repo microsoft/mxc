@@ -856,33 +856,108 @@ fn convert_raw_config_inner(
             }
             config
         });
-        let wslc = raw_exp.wslc.map(|cc| {
-            let mut config = WslcConfig::default();
-            if let Some(os) = cc.target_os {
-                config.target_os = os;
-            }
-            if let Some(img) = cc.image {
-                config.image = img;
-            }
-            config.image_tar_path = cc.image_tar_path;
-            config.cpu_count = cc.cpu_count;
-            config.memory_mb = cc.memory_mb;
-            if let Some(gpu) = cc.gpu {
-                config.gpu = gpu;
-            }
-            config.storage_path = cc.storage_path;
-            if let Some(mappings) = cc.port_mappings {
-                config.port_mappings = mappings
-                    .into_iter()
-                    .map(|m| PortMapping {
-                        windows_port: m.windows_port.unwrap_or(0),
-                        container_port: m.container_port.unwrap_or(0),
-                        protocol: m.protocol.unwrap_or_else(|| "tcp".to_string()),
-                    })
-                    .collect();
-            }
-            config
-        });
+        let wslc = raw_exp
+            .wslc
+            .map(|cc| -> Result<WslcConfig, WxcError> {
+                let mut config = WslcConfig::default();
+                if let Some(os) = cc.target_os {
+                    config.target_os = os;
+                }
+                if let Some(img) = cc.image {
+                    config.image = img;
+                }
+                config.image_tar_path = cc.image_tar_path;
+                config.cpu_count = cc.cpu_count;
+                config.memory_mb = cc.memory_mb;
+                if let Some(gpu) = cc.gpu {
+                    config.gpu = gpu;
+                }
+                config.storage_path = cc.storage_path;
+                if let Some(mappings) = cc.port_mappings {
+                    let parsed = mappings
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, m)| -> Result<PortMapping, WxcError> {
+                            let windows_port = m.windows_port.ok_or_else(|| {
+                                WxcError::ConfigParse(format!(
+                                    "wslc.portMappings[{idx}]: 'windowsPort' is required"
+                                ))
+                            })?;
+                            let container_port = m.container_port.ok_or_else(|| {
+                                WxcError::ConfigParse(format!(
+                                    "wslc.portMappings[{idx}]: 'containerPort' is required"
+                                ))
+                            })?;
+                            if windows_port == 0 {
+                                return Err(WxcError::ConfigParse(format!(
+                                    "wslc.portMappings[{idx}]: 'windowsPort' must be > 0"
+                                )));
+                            }
+                            if container_port == 0 {
+                                return Err(WxcError::ConfigParse(format!(
+                                    "wslc.portMappings[{idx}]: 'containerPort' must be > 0"
+                                )));
+                            }
+                            let protocol = m
+                                .protocol
+                                .unwrap_or_else(|| "tcp".to_string())
+                                .to_lowercase();
+                            if protocol != "tcp" && protocol != "udp" {
+                                return Err(WxcError::ConfigParse(format!(
+                                    "wslc.portMappings[{idx}]: protocol '{protocol}' not supported; expected 'tcp'"
+                                )));
+                            }
+                            // The WSLC SDK header (Microsoft.WSL.Containers
+                            // 2.8.1, vendored under external/wslc-sdk/)
+                            // declares WSLC_PORT_PROTOCOL_UDP = 1, but the
+                            // shipped runtime returns E_NOTIMPL (0x80004001)
+                            // when UDP is actually passed to
+                            // WslcSetContainerSettingsPortMappings. Reject
+                            // UDP at parse time with a clear message until a
+                            // future SDK version implements it.
+                            if protocol == "udp" {
+                                return Err(WxcError::ConfigParse(format!(
+                                    "wslc.portMappings[{idx}]: protocol 'udp' is not supported by the vendored WSLC SDK runtime (Microsoft.WSL.Containers 2.8.1). Only 'tcp' is currently implemented. UDP support will be enabled when a future SDK version ships it."
+                                )));
+                            }
+                            Ok(PortMapping {
+                                windows_port,
+                                container_port,
+                                protocol,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+
+                    // Reject duplicate windowsPort entries. Same host port on
+                    // TCP+UDP would in principle be legal, but UDP is rejected
+                    // earlier; the second protocol dimension is retained in
+                    // the dedupe key in case UDP support is enabled later.
+                    let mut seen: std::collections::HashSet<(u16, &str)> =
+                        std::collections::HashSet::new();
+                    for pm in &parsed {
+                        if !seen.insert((pm.windows_port, pm.protocol.as_str())) {
+                            return Err(WxcError::ConfigParse(format!(
+                                "wslc.portMappings: duplicate windowsPort {} for protocol '{}'",
+                                pm.windows_port, pm.protocol
+                            )));
+                        }
+                    }
+                    config.port_mappings = parsed;
+                }
+                Ok(config)
+            })
+            .transpose()
+            .inspect_err(|e| {
+                // Surface the parser error message in the logger buffer so
+                // it reaches stderr (main.rs prints `Request error\n{buf}`
+                // on parse failure). Without this, callers see a bare
+                // "Request error" with no detail about what went wrong.
+                let msg = match e {
+                    WxcError::ConfigParse(m) => m.clone(),
+                    other => format!("{:?}", other),
+                };
+                logger.log_line(&msg);
+            })?;
         let isolation_session = raw_exp.isolation_session.map(|as_cfg| {
             let mut config = IsolationSessionConfig::default();
             if let Some(id) = as_cfg.configuration_id {
@@ -2269,6 +2344,147 @@ mod tests {
             wslc.image_tar_path.as_deref(),
             Some("C:\\images\\alpine.tar")
         );
+    }
+
+    // ---------- WSLC port mapping tests ----------
+
+    #[test]
+    fn wslc_port_mapping_basic_tcp_parsed() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "alpine", "portMappings": [{"windowsPort": 8080, "containerPort": 80}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let wslc = req.experimental.wslc.unwrap();
+        assert_eq!(wslc.port_mappings.len(), 1);
+        assert_eq!(wslc.port_mappings[0].windows_port, 8080);
+        assert_eq!(wslc.port_mappings[0].container_port, 80);
+        assert_eq!(wslc.port_mappings[0].protocol, "tcp");
+    }
+
+    #[test]
+    fn wslc_port_mapping_udp_rejected_with_sdk_limitation_message() {
+        // The vendored WSLC SDK 2.8.1 runtime returns E_NOTIMPL for UDP. The
+        // parser must reject UDP up front with a clear message until a future
+        // SDK version implements it.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "alpine", "portMappings": [{"windowsPort": 5353, "containerPort": 53, "protocol": "udp"}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("udp") && msg.contains("not supported"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wslc_port_mapping_protocol_normalized_to_lowercase() {
+        // "TCP" is normalized to "tcp" and accepted. (UDP rejection is covered
+        // by wslc_port_mapping_udp_rejected_with_sdk_limitation_message.)
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "alpine", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "TCP"}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let wslc = req.experimental.wslc.unwrap();
+        assert_eq!(wslc.port_mappings[0].protocol, "tcp");
+    }
+
+    #[test]
+    fn wslc_port_mapping_zero_windows_port_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "alpine", "portMappings": [{"windowsPort": 0, "containerPort": 80}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("windowsPort") && msg.contains("> 0"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wslc_port_mapping_zero_container_port_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "alpine", "portMappings": [{"windowsPort": 8080, "containerPort": 0}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("containerPort") && msg.contains("> 0"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wslc_port_mapping_missing_windows_port_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "alpine", "portMappings": [{"containerPort": 80}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("windowsPort") && msg.contains("required"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wslc_port_mapping_missing_container_port_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "alpine", "portMappings": [{"windowsPort": 8080}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("containerPort") && msg.contains("required"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wslc_port_mapping_unsupported_protocol_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "alpine", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "sctp"}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("sctp") && (msg.contains("not supported") || msg.contains("tcp")),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wslc_port_mapping_duplicate_host_port_same_protocol_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "alpine", "portMappings": [{"windowsPort": 8080, "containerPort": 80}, {"windowsPort": 8080, "containerPort": 81}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("duplicate") && msg.contains("8080"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wslc_port_mapping_empty_list_default() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "alpine"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let wslc = req.experimental.wslc.unwrap();
+        assert!(wslc.port_mappings.is_empty());
     }
 
     // ---------- Experimental feature tests ----------

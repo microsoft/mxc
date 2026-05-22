@@ -967,9 +967,44 @@ impl WSLContainerRunner {
             return sdk_error("WslcInitContainerSettings failed", hr, "");
         }
 
-        // TODO: Port mappings (WslcConfig.port_mappings) are parsed but not yet applied.
-        // Requires adding WslcSetContainerSettingsPortMappings and WslcContainerPortMapping
-        // bindings. See wslcsdk.h lines 120-128, 183-186.
+        // -- Port mappings (host<->container) --
+        // Set before networking mode so the SDK has the complete picture when
+        // the container is created. Empty list = no forwarding (default).
+        if !self.config.port_mappings.is_empty() {
+            let mappings: Vec<WslcContainerPortMapping> = self
+                .config
+                .port_mappings
+                .iter()
+                .map(|pm| WslcContainerPortMapping {
+                    windows_port: pm.windows_port,
+                    container_port: pm.container_port,
+                    // Parser validated protocol is "tcp" or "udp".
+                    protocol: if pm.protocol == "udp" {
+                        WslcPortProtocol::Udp
+                    } else {
+                        WslcPortProtocol::Tcp
+                    },
+                    // Default bind address (typically loopback/0.0.0.0 per SDK
+                    // config). Not exposed in the MXC config today.
+                    windows_address: ptr::null(),
+                })
+                .collect();
+
+            let hr = (sdk.WslcSetContainerSettingsPortMappings)(
+                &mut container_settings,
+                mappings.as_ptr(),
+                mappings.len() as u32,
+            );
+            if hr != S_OK {
+                return sdk_error("WslcSetContainerSettingsPortMappings failed", hr, "");
+            }
+            let _ = writeln!(
+                logger,
+                "[WSLC] {} port mapping(s) configured",
+                mappings.len()
+            );
+        }
+
         let (mounts, warnings) = policy_mapping::build_volume_mounts(
             &request.policy.readwrite_paths,
             &request.policy.readonly_paths,

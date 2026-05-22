@@ -326,6 +326,36 @@
             "storagePath": {
               "type": "string",
               "description": "Storage path for the WSLC session image store. Omit to use a temporary directory."
+            },
+            "portMappings": {
+              "type": "array",
+              "description": "Host\u2194container port mappings. Each mapping forwards a Windows-host port to a container port. Only TCP is supported by the vendored WSLC SDK runtime (Microsoft.WSL.Containers 2.8.1); UDP is reserved in the schema for forward compatibility but rejected by the parser.",
+              "default": [],
+              "items": {
+                "type": "object",
+                "required": ["windowsPort", "containerPort"],
+                "properties": {
+                  "windowsPort": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535,
+                    "description": "Port on the Windows host."
+                  },
+                  "containerPort": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535,
+                    "description": "Port inside the Linux container."
+                  },
+                  "protocol": {
+                    "type": "string",
+                    "enum": ["tcp"],
+                    "default": "tcp",
+                    "description": "Transport protocol. Only 'tcp' is currently supported."
+                  }
+                },
+                "additionalProperties": false
+              }
             }
           }
         },

@@ -211,7 +211,7 @@ Container APIs:
 - `WslcSetContainerSettingsInitProcess()` — attach process settings before creation
 - `WslcSetContainerSettingsNetworkingMode()` — `NONE` (isolated) or `BRIDGED` (NAT)
 - `WslcSetContainerSettingsVolumes()` — mount Windows paths into Linux container
-- `WslcSetContainerSettingsPortMappings()` — host↔container port forwarding (TCP only)
+- `WslcSetContainerSettingsPortMappings()` — host↔container port forwarding (TCP only; UDP declared in the header but returns E_NOTIMPL in the vendored SDK 2.8.1 runtime, so it's rejected at parse time)
 - `WslcSetContainerSettingsFlags()` — `AUTO_REMOVE`, `ENABLE_GPU`, `PRIVILEGED`
 - `WslcGetContainerInitProcess()` — retrieve process handle after start
 - `WslcStopContainer()` / `WslcDeleteContainer()` / `WslcReleaseContainer()` — teardown
@@ -309,7 +309,7 @@ Network mapping:
 Port mapping (new capability enabled by WSLC SDK):
 | Config field | WSLC SDK equivalent |
 |---|---|
-| `portMappings: [{ windowsPort: 8080, containerPort: 80 }]` | `WslcSetContainerSettingsPortMappings()` with `WslcContainerPortMapping` structs (TCP only) |
+| `portMappings: [{ windowsPort: 8080, containerPort: 80, protocol: "tcp" }]` | `WslcSetContainerSettingsPortMappings()` with `WslcContainerPortMapping` structs (TCP only; `protocol` defaults to `"tcp"`. UDP is declared by the SDK header but returns E_NOTIMPL at runtime in the vendored SDK 2.8.1 and is rejected by the parser.) |
 
 **WSLC SDK advantage:** The `WslcContainerVolume` struct directly models the Windows↔Linux path mapping with `windowsPath` (PCWSTR) and `containerPath` (PCSTR) fields. The runner applies the deterministic `/mnt/<drive>/...` mapping rule and the SDK's 9P filesystem handles the cross-OS bridging internally.
 

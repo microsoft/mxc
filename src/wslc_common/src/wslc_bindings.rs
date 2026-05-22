@@ -189,6 +189,27 @@ pub struct WslcContainerVolume {
     pub read_only: BOOL,
 }
 
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WslcPortProtocol {
+    Tcp = 0,
+    Udp = 1,
+}
+
+/// Host\u2194container port mapping passed to
+/// `WslcSetContainerSettingsPortMappings`.
+///
+/// Matches `WslcContainerPortMapping` in `wslcsdk.h`. The trailing
+/// `windows_address` field is an optional override for the host bind address;
+/// MXC always passes `null`, which lets the SDK select the default address.
+#[repr(C)]
+pub struct WslcContainerPortMapping {
+    pub windows_port: u16,
+    pub container_port: u16,
+    pub protocol: WslcPortProtocol,
+    pub windows_address: *const c_void,
+}
+
 pub const WSLC_IMAGE_NAME_LENGTH: usize = 256;
 
 #[repr(C)]
@@ -315,6 +336,11 @@ mod ffi_types {
         *const WslcContainerVolume,
         u32,
     ) -> HRESULT;
+    pub type WslcSetContainerSettingsPortMappingsFn = unsafe extern "system" fn(
+        *mut WslcContainerSettings,
+        *const WslcContainerPortMapping,
+        u32,
+    ) -> HRESULT;
     pub type WslcSetContainerSettingsInitProcessFn =
         unsafe extern "system" fn(*mut WslcContainerSettings, *mut WslcProcessSettings) -> HRESULT;
     pub type WslcCreateContainerFn = unsafe extern "system" fn(
@@ -382,6 +408,7 @@ pub struct WslcSdk {
     pub WslcSetContainerSettingsNetworkingMode: ffi_types::WslcSetContainerSettingsNetworkingModeFn,
     pub WslcSetContainerSettingsFlags: ffi_types::WslcSetContainerSettingsFlagsFn,
     pub WslcSetContainerSettingsVolumes: ffi_types::WslcSetContainerSettingsVolumesFn,
+    pub WslcSetContainerSettingsPortMappings: ffi_types::WslcSetContainerSettingsPortMappingsFn,
     pub WslcSetContainerSettingsInitProcess: ffi_types::WslcSetContainerSettingsInitProcessFn,
     pub WslcCreateContainer: ffi_types::WslcCreateContainerFn,
     pub WslcStartContainer: ffi_types::WslcStartContainerFn,
@@ -468,6 +495,10 @@ impl WslcSdk {
                 WslcSetContainerSettingsVolumes: load_fn!(
                     lib,
                     b"WslcSetContainerSettingsVolumes\0"
+                ),
+                WslcSetContainerSettingsPortMappings: load_fn!(
+                    lib,
+                    b"WslcSetContainerSettingsPortMappings\0"
                 ),
                 WslcSetContainerSettingsInitProcess: load_fn!(
                     lib,
@@ -677,6 +708,20 @@ mod tests {
         );
         assert_eq!(mem::align_of::<WslcContainerSettings>(), 8);
         assert_eq!(mem::align_of::<WslcProcessSettings>(), 8);
+    }
+
+    #[test]
+    fn port_mapping_struct_layout_matches_c_header() {
+        // WslcContainerPortMapping in wslcsdk.h:
+        //   uint16_t windowsPort;                      // offset 0
+        //   uint16_t containerPort;                    // offset 2
+        //   WslcPortProtocol protocol;                 // offset 4 (u32 enum)
+        //   struct sockaddr_storage* windowsAddress;   // offset 8 (pointer, 8-byte aligned)
+        // Total: 16 bytes on 64-bit, 8-byte aligned because of the pointer.
+        assert_eq!(mem::size_of::<WslcContainerPortMapping>(), 16);
+        assert_eq!(mem::align_of::<WslcContainerPortMapping>(), 8);
+        assert_eq!(WslcPortProtocol::Tcp as u32, 0);
+        assert_eq!(WslcPortProtocol::Udp as u32, 1);
     }
 
     #[test]
