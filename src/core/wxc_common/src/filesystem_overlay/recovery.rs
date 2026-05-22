@@ -281,6 +281,7 @@ mod tests {
                     host_path: std::env::temp_dir().join("anywhere"),
                     branch_name: "anywhere".into(),
                     mode: BranchMode::ReadOnly,
+                    deny_subpaths: Vec::new(),
                 }],
                 ac_sid: "S-1-15-2-test".into(),
             }],

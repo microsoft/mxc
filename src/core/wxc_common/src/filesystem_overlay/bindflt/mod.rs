@@ -132,6 +132,7 @@ mod tests {
             host_path: PathBuf::from(r"C:\fake"),
             branch_name: "fake".into(),
             mode: BranchMode::ReadOnly,
+            deny_subpaths: Vec::new(),
         };
         let err = apply_mapping(&p, "S-1-15-2-test").expect_err("misrouted primitive");
         match err {

@@ -89,6 +89,12 @@ pub struct ResolvedBranch {
     pub host_root: PathBuf,
     /// RO or RW.
     pub mode: BranchMode,
+    /// Canonicalized subpaths (each is a prefix under `host_root`)
+    /// the AC must not see. Populated from
+    /// `OverlayPrimitive::ProjFsBranch::deny_subpaths`; checked by
+    /// [`resolve`] and [`collect_host_children`] so callbacks
+    /// return `ERROR_FILE_NOT_FOUND` and filter the host's entries.
+    pub deny_subpaths: Vec<PathBuf>,
 }
 
 /// Set of projected branches plus the AC SID needed for placeholder
@@ -114,12 +120,13 @@ impl ProjFsBranchSet {
         let mut branches = Vec::new();
         let mut seen_names: HashMap<String, usize> = HashMap::new();
         for p in primitives {
-            let (host_path, branch_name, mode) = match p {
+            let (host_path, branch_name, mode, deny_subpaths) = match p {
                 OverlayPrimitive::ProjFsBranch {
                     host_path,
                     branch_name,
                     mode,
-                } => (host_path, branch_name, *mode),
+                    deny_subpaths,
+                } => (host_path, branch_name, *mode, deny_subpaths),
                 _ => continue,
             };
             let lower = branch_name.to_ascii_lowercase();
@@ -136,6 +143,7 @@ impl ProjFsBranchSet {
                 name: branch_name.clone(),
                 host_root: host_path.clone(),
                 mode,
+                deny_subpaths: deny_subpaths.clone(),
             });
         }
         Ok(Self {
@@ -230,10 +238,59 @@ fn resolve(branches: &ProjFsBranchSet, rel: &str) -> Resolved {
     } else {
         branch.host_root.join(rest.replace('/', "\\"))
     };
+    // Structural deny: if this host_path is under one of the
+    // branch's `deny_subpaths`, return NotInPolicy so the AC sees
+    // ERROR_FILE_NOT_FOUND. Each deny_subpath is canonicalized.
+    if is_under_any(&host_path, &branch.deny_subpaths) {
+        return Resolved::NotInPolicy;
+    }
     Resolved::Host {
         host_path,
         mode: branch.mode,
     }
+}
+
+/// Case-insensitive Windows-style "is `child` under (or equal to) any
+/// of the `parents`?". Mirrors `policy::canonical_starts_with` but
+/// kept local to keep `virt.rs` self-contained.
+///
+/// Robust to the `\\?\` prefix difference between
+/// `std::fs::canonicalize` outputs and `read_dir` entry paths — we
+/// strip the prefix before component-wise comparison.
+fn is_under_any(child: &Path, parents: &[PathBuf]) -> bool {
+    if parents.is_empty() {
+        return false;
+    }
+    let cs = path_components_for_compare(child);
+    for parent in parents {
+        let ps = path_components_for_compare(parent);
+        if ps.len() > cs.len() {
+            continue;
+        }
+        let mut matched = true;
+        for (i, p) in ps.iter().enumerate() {
+            if cs[i] != *p {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
+}
+
+/// Build a case-insensitive component list, stripping any leading
+/// `\\?\` extended-path prefix so canonicalised and non-canonicalised
+/// paths compare equal.
+fn path_components_for_compare(p: &Path) -> Vec<String> {
+    let s = p.to_string_lossy();
+    let stripped = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    Path::new(stripped)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect()
 }
 
 // -------------------------------------------------------------------------
@@ -291,7 +348,10 @@ fn collect_root_children(branches: &ProjFsBranchSet) -> Vec<ChildEntry> {
     v
 }
 
-fn collect_host_children(host_dir: &Path) -> std::io::Result<Vec<ChildEntry>> {
+fn collect_host_children(
+    host_dir: &Path,
+    deny_subpaths: &[PathBuf],
+) -> std::io::Result<Vec<ChildEntry>> {
     let mut v = Vec::new();
     for entry in fs::read_dir(host_dir)? {
         let entry = entry?;
@@ -299,6 +359,13 @@ fn collect_host_children(host_dir: &Path) -> std::io::Result<Vec<ChildEntry>> {
         // reparse points without dereferencing them.
         let ft = entry.file_type()?;
         if ft.is_symlink() {
+            continue;
+        }
+        // Structural deny: if this entry's full path is under any
+        // of the branch's deny_subpaths, omit it from the
+        // enumeration so the AC doesn't see denied subtrees in
+        // listings.
+        if is_under_any(&entry.path(), deny_subpaths) {
             continue;
         }
         let md = entry.metadata()?;
@@ -344,10 +411,24 @@ unsafe extern "system" fn cb_start_enum(
     let mut st = state().lock().unwrap();
     let children = match resolve(&st.branches, &rel) {
         Resolved::Root => collect_root_children(&st.branches),
-        Resolved::Host { host_path, .. } => match collect_host_children(&host_path) {
-            Ok(v) => v,
-            Err(_) => return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0),
-        },
+        Resolved::Host { host_path, .. } => {
+            // Look up the branch the host_path belongs to so we can
+            // pass its deny_subpaths through to the enumeration
+            // filter. The first branch whose host_root is a prefix
+            // of host_path wins (there's only ever one since
+            // `policy::classify` rejects nesting).
+            let denies = st
+                .branches
+                .branches
+                .iter()
+                .find(|b| host_path.starts_with(&b.host_root))
+                .map(|b| b.deny_subpaths.clone())
+                .unwrap_or_default();
+            match collect_host_children(&host_path, &denies) {
+                Ok(v) => v,
+                Err(_) => return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0),
+            }
+        }
         Resolved::NotInPolicy => return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0),
     };
 
@@ -865,6 +946,7 @@ mod tests {
                 host_path: PathBuf::from(r"C:\Users\a"),
                 branch_name: "a".into(),
                 mode: BranchMode::ReadOnly,
+                deny_subpaths: Vec::new(),
             },
         ];
         let set = ProjFsBranchSet::from_primitives(&prims, "S-1-15-2-test").unwrap();
@@ -880,11 +962,13 @@ mod tests {
                 host_path: PathBuf::from(r"D:\sources\repo"),
                 branch_name: "repo".into(),
                 mode: BranchMode::ReadOnly,
+                deny_subpaths: Vec::new(),
             },
             OverlayPrimitive::ProjFsBranch {
                 host_path: PathBuf::from(r"E:\backups\repo"),
                 branch_name: "REPO".into(),
                 mode: BranchMode::ReadWrite,
+                deny_subpaths: Vec::new(),
             },
         ];
         let err = ProjFsBranchSet::from_primitives(&prims, "S-1-15-2-test").unwrap_err();
@@ -901,6 +985,7 @@ mod tests {
                 name: "x".into(),
                 host_root: PathBuf::from(r"C:\x"),
                 mode: BranchMode::ReadOnly,
+                deny_subpaths: Vec::new(),
             }],
             ac_sid_string: "S-1-15-2-test".into(),
         };
@@ -914,6 +999,7 @@ mod tests {
                 name: "Repo".into(),
                 host_root: PathBuf::from(r"D:\sources\repo"),
                 mode: BranchMode::ReadWrite,
+                deny_subpaths: Vec::new(),
             }],
             ac_sid_string: "S-1-15-2-test".into(),
         };

@@ -154,11 +154,13 @@ mod tests {
                 host_path: PathBuf::from(r"D:\a"),
                 branch_name: "x".into(),
                 mode: BranchMode::ReadOnly,
+                deny_subpaths: Vec::new(),
             },
             OverlayPrimitive::ProjFsBranch {
                 host_path: PathBuf::from(r"D:\b"),
                 branch_name: "X".into(),
                 mode: BranchMode::ReadWrite,
+                deny_subpaths: Vec::new(),
             },
         ];
         let err = apply_branches(
@@ -210,6 +212,12 @@ mod tests {
         let ro_host = host_scratch.join("ro");
         std::fs::create_dir_all(rw_host.join("subdir")).expect("create rw scratch");
         std::fs::create_dir_all(ro_host.join("subdir")).expect("create ro scratch");
+        // Create a "secret" subdir + file inside the RO branch that
+        // we'll add to `deny_subpaths` — the AC must NOT see it
+        // through enumeration or path stat.
+        let secret_dir = ro_host.join("secret");
+        std::fs::create_dir_all(&secret_dir).expect("create secret dir");
+        std::fs::write(secret_dir.join("token.txt"), b"hidden-token").expect("secret file");
         std::fs::write(rw_host.join("readme.txt"), b"rw content").expect("rw readme");
         std::fs::write(ro_host.join("readme.txt"), b"ro content").expect("ro readme");
 
@@ -220,11 +228,20 @@ mod tests {
                 host_path: rw_host.clone(),
                 branch_name: "rw".into(),
                 mode: BranchMode::ReadWrite,
+                deny_subpaths: Vec::new(),
             },
             OverlayPrimitive::ProjFsBranch {
                 host_path: ro_host.clone(),
                 branch_name: "ro".into(),
                 mode: BranchMode::ReadOnly,
+                // The secret dir must not appear inside the RO
+                // projection. Phase C's classifier produces a
+                // canonical path here; the e2e test bypasses
+                // classify and constructs the primitive directly,
+                // so we pass the canonicalised secret path.
+                deny_subpaths: vec![
+                    std::fs::canonicalize(&secret_dir).expect("canonicalize secret")
+                ],
             },
         ];
 
@@ -264,6 +281,33 @@ mod tests {
         assert!(
             rw_entries.iter().any(|n| n == "subdir"),
             "rw branch missing subdir; got {rw_entries:?}"
+        );
+
+        // ----- Phase C structural-deny verification -----
+        //
+        // Enumerate inside the RO branch: the `secret` subdir was
+        // added to deny_subpaths so it must NOT appear. The other
+        // entries should be visible normally.
+        let ro_entries: Vec<String> = std::fs::read_dir(projection_root.join("ro"))
+            .expect("read ro branch")
+            .filter_map(|e| e.ok())
+            .map(|d| d.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !ro_entries.iter().any(|n| n == "secret"),
+            "ro branch should NOT enumerate the denied 'secret' subdir; got {ro_entries:?}"
+        );
+        assert!(
+            ro_entries.iter().any(|n| n == "readme.txt"),
+            "ro branch should still enumerate non-denied entries; got {ro_entries:?}"
+        );
+        // Direct stat-by-name on the denied path must return
+        // not-found (Win32 ERROR_FILE_NOT_FOUND surfaces as
+        // io::ErrorKind::NotFound).
+        let secret_stat = std::fs::metadata(projection_root.join("ro").join("secret"));
+        assert!(
+            secret_stat.is_err(),
+            "stat on denied 'secret' should fail; got {secret_stat:?}"
         );
 
         // Read content through the projection — drives cb_get_file_data.

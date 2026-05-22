@@ -274,6 +274,7 @@ mod tests {
                     host_path: PathBuf::from(r"D:\src\repo"),
                     branch_name: "repo".into(),
                     mode: BranchMode::ReadOnly,
+                    deny_subpaths: Vec::new(),
                 }],
                 ac_sid: "S-1-15-2-test".into(),
             }],

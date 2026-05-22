@@ -432,6 +432,7 @@ mod tests {
                 host_path: PathBuf::from(r"C:\test"),
                 branch_name: "test".into(),
                 mode: BranchMode::ReadOnly,
+                deny_subpaths: Vec::new(),
             }],
             ac_sid: "S-1-15-2-test".into(),
         });

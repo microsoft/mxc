@@ -43,6 +43,16 @@ pub enum OverlayPrimitive {
         branch_name: String,
         /// RO or RW.
         mode: BranchMode,
+        /// Subpaths (canonicalized, relative to `host_path` using
+        /// backslash separators) that the projection must hide /
+        /// refuse. Each entry was a `denied_paths` policy entry
+        /// inside this branch's host root. The ProjFS callbacks
+        /// (`cb_start_enum`, `cb_get_placeholder_info`) treat any
+        /// path under one of these prefixes as structurally
+        /// not-in-policy, returning `ERROR_FILE_NOT_FOUND` to the
+        /// AC. Empty for branches with no overlapping denies.
+        #[serde(default)]
+        deny_subpaths: Vec<PathBuf>,
     },
 
     /// Install a BindFlt tombstone that makes `path` appear
@@ -165,6 +175,7 @@ mod tests {
                     host_path: PathBuf::from(r"C:\Users\test"),
                     branch_name: "test".into(),
                     mode: BranchMode::ReadOnly,
+                    deny_subpaths: Vec::new(),
                 },
                 OverlayPrimitive::BindFltTombstone {
                     path: PathBuf::from(r"C:\Users\test\.ssh"),
