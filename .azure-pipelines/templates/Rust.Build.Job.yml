@@ -16,11 +16,11 @@ jobs:
 - ${{ each item in parameters.matrix }}:
   - job: 'build_${{ item.arch }}_${{ item.component }}'
     displayName: 'Build (${{ item.arch }} ${{ item.component }})'
-
+    dependsOn: []
     pool:
       name: Azure-Pipelines-1ESPT-ExDShared
       ${{ if eq(item.os, 'windows') }}:
-        image: windows-latest #x64 host
+        image: windows-latest
         os: windows
       ${{ if eq(item.os, 'linux') }}:
         image: ubuntu-latest #x64 host
@@ -42,7 +42,7 @@ jobs:
       ${{ if eq(item.os, 'windows') }}:
         CARGO_TARGET_DIR: c:/t/target
         artifactPrefix: wxc-binaries
-        workingDirectory: src
+        workingDirectory: $(Build.SourcesDirectory)/src
         signPattern: |
             wxc-exec.exe
             winhttp-proxy-shim.exe
@@ -70,6 +70,7 @@ jobs:
       targetTripleDir: $(CARGO_TARGET_DIR)/$(targetTriple)/release
       outputDirectory: $(Build.SourcesDirectory)/out
       artifactBaseName: $(artifactPrefix)-$(targetTriple)
+      configTomlPath: $(Build.SourcesDirectory)/.cargo/config.toml
 
     templateContext:
       rust:
@@ -78,6 +79,10 @@ jobs:
           version: 'ms-prod-1.93'
           additionalTargets: $(triplet)
         workingDirectory: $(workingDirectory)
+        authenticateOptions:
+          configFile: $(configTomlPath)
+        installOptions:
+          configFile: $(configTomlPath)
         cacheOptions:
           enableTargetCache: true
 
@@ -93,7 +98,7 @@ jobs:
 
       # Append pipeline-specific Cargo settings (registry, cross-compile linker) to the workspace config
       - powershell: |
-          Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
+          Add-Content -Path "$(configTomlPath)" -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
         displayName: Setup Cargo Config
 
       - task: 1ES.Build.Rust.Setup@1

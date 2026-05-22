@@ -16,7 +16,6 @@ resources:
     name: 1ESPipelineTemplates/1ESPipelineTemplates
     ref: refs/tags/release
 
-# Parameters for ESRP signing info will be passed from the ADO UI.
 parameters:
   - name: officialBuild
     displayName: Build Official or Unofficial
@@ -26,25 +25,31 @@ parameters:
       - Official
       - Unofficial
 
-  - name: ESRPInfo
-    type: object
-    default:
-      serviceName: ''
-      tenantId: ''
-      azureKeyVaultName: ''
-      authCertName: ''
-      signCertName: ''
-      clientId: ''
-
   - name: debug
     displayName: Enable debug output for SDK tests
     type: boolean
     default: false
 
+  # Reused by Rust/Mac/NpmSdk templates. Values come from MXC-ESRP-Signing
+  # on Official runs; sign steps are gated, so missing values on Unofficial
+  # runs are harmless.
+  - name: ESRPInfo
+    type: object
+    default:
+      serviceName: $(serviceName)
+      tenantId: $(tenantId)
+      azureKeyVaultName: $(azureKeyVaultName)
+      authCertName: $(authCertName)
+      signCertName: $(signCertName)
+      clientId: $(clientId)
+
 variables:
   # Prevents failure when no Rust tests are found; pipeline runs will still fail if present
   # tests do not pass.
-  NEXTEST_NO_TESTS: pass
+  - name: NEXTEST_NO_TESTS
+    value: pass
+  - ${{ if eq(parameters.officialBuild, 'Official') }}:
+    - group: MXC-ESRP-Signing
 
 extends:
   template: v1/1ES.${{parameters.officialBuild}}.PipelineTemplate.yml@1ESPipelineTemplates
