@@ -10,6 +10,12 @@ Mxc-Azure-Feed = { index = "sparse+https://microsoft.pkgs.visualstudio.com/Dart/
 [source.crates-io]
 replace-with = "Mxc-Azure-Feed"
 
-# Add linker for arm64 on linux for cross-compilation
+# Add linker for arm64 on linux for cross-compilation.
+# Use the `gold` linker (shipped via binutils-aarch64-linux-gnu with the
+# cross-gcc package) — gold is multi-threaded and substantially faster
+# than the default ld.bfd on large cross-compile builds. Unlike mold,
+# `-fuse-ld=gold` resolves cleanly through the cross-gcc's standard
+# linker search path on stock Ubuntu images.
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
+rustflags = ["-C", "link-arg=-fuse-ld=gold"]

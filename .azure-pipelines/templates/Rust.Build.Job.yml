@@ -84,10 +84,15 @@ jobs:
     steps:
       - checkout: self
 
-      # Install Linux ARM64 toolchain for arm64 linux builds
+      # Install Linux ARM64 toolchain for arm64 linux builds.
+      # The gold linker (used via `-fuse-ld=gold` in .azure-pipelines/.cargo/config.toml)
+      # ships in binutils-aarch64-linux-gnu, pulled in transitively by the
+      # cross-gcc package. gold is multi-threaded and substantially faster
+      # than the default ld.bfd on the cross-compile link step, which is
+      # the dominant cost of the arm64 LXC build.
       - script: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
         displayName: Install ARM64 toolchain
         condition: and(eq('${{ item.os }}','linux'), eq('${{ item.arch }}','arm64'))
 
