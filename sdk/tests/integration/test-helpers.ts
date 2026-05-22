@@ -50,6 +50,7 @@ export const EXPECTED_WINDOWS_BINARIES = [
   'wxc-test-proxy.exe',
   'wxc-windows-sandbox-daemon.exe',
   'wxc-windows-sandbox-guest.exe',
+  'mxc-diagnostic-console.exe',
 ];
 
 export const EXPECTED_LINUX_BINARIES = [
@@ -354,4 +355,3 @@ export function startTestProxy(dir: string): { port: number; proxyProcess: Child
 
   return { port, proxyProcess };
 }
-
