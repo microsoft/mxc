@@ -603,11 +603,15 @@ impl ScriptRunner for BaseContainerRunner {
                 diag.kind, diag.message
             );
 
+            let extended_error =
+                format!("Experimental_CreateProcessInSandbox failed: {err:?}");
+            let _ = writeln!(logger, "Error: {extended_error}");
+
             return ScriptResponse {
                 exit_code: -1,
                 error_message: diag.message.clone(),
                 standard_err: diag.message,
-                extended_error: format!("Experimental_CreateProcessInSandbox failed: {err:?}"),
+                extended_error,
                 failure_phase: FailurePhase::LaunchFailed,
                 ..Default::default()
             };
