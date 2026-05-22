@@ -31,6 +31,7 @@ export {
   SandboxingMethod,
   ContainmentType,
   ContainmentTypes,
+  LegacyContainmentAliases,
   ContainmentBackend,
   ExperimentalBackends,
   ContainerConfig,

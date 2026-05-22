@@ -64,6 +64,18 @@ export type ContainmentType = "process" | "vm" | "microvm";
 export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm', 'microvm'];
 
 /**
+ * Deprecated wire values accepted by the native binary via serde aliases.
+ * Maps each legacy name to the canonical {@link ContainmentBackend} value
+ * so the SDK validator can resolve them before the platform check. Configs
+ * using these values still reach wxc-exec unchanged — the Rust parser
+ * handles the final mapping at run time.
+ */
+export const LegacyContainmentAliases: Readonly<Record<string, ContainmentBackend>> = {
+  appcontainer: 'processcontainer',
+  macos_sandbox: 'seatbelt',
+};
+
+/**
  * Concrete containment backend. Each value names a specific runner
  * implementation in the native binary. Prefer a {@link ContainmentType}
  * value unless you specifically need to force a particular backend.

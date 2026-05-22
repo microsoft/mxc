@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { FileLogger } from './logger.js';
-import { ContainerConfig, ContainmentBackend, ContainmentTypes, ExperimentalBackends } from './types.js';
+import { ContainerConfig, ContainmentBackend, ContainmentTypes, ExperimentalBackends, LegacyContainmentAliases } from './types.js';
 import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupport } from './platform.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { diagLog } from './diagnostic.js';
@@ -163,7 +163,12 @@ export function resolveExecutableAndArgs(
     // at run time, so the SDK accepts them without checking against the
     // host's concrete backend list.
     const isIntent = (ContainmentTypes as readonly string[]).includes(config.containment);
-    const isAvailable = platformSupport.availableMethods.includes(config.containment as ContainmentBackend);
+    // Legacy wire values accepted by the native binary via serde aliases
+    // (e.g. "appcontainer" → processcontainer, "macos_sandbox" → seatbelt).
+    const resolved = LegacyContainmentAliases[config.containment];
+    const isAvailable = platformSupport.availableMethods.includes(
+      (resolved ?? config.containment) as ContainmentBackend
+    );
     if (!isIntent && !isExperimental && !isAvailable) {
       throw new Error(
         `Containment backend '${config.containment}' is not available on this platform. ` +
