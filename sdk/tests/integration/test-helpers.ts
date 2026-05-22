@@ -251,9 +251,18 @@ export function createTempDir(prefix: string = 'mxc-test'): string {
   return dir;
 }
 
-// Async spawn from a pre-built ContainerConfig (no per-call containment arg on
-// spawnSandboxAsync, so tests that need a specific backend build the config
-// directly and run it through this helper).
+// Async spawn from a pre-built ContainerConfig. Mirrors the SDK's own
+// spawnSandboxAsync (sandbox.ts) -- it exists because the SDK doesn't expose
+// an async wrapper around spawnSandboxFromConfig, and tests that need a
+// specific backend build the config directly.
+//
+// Notes (kept in lockstep with spawnSandboxAsync):
+//  - stdout/stderr are merged: wxc-exec runs under node-pty (a single PTY),
+//    so the OS combines both streams. stderr: '' is structural padding.
+//  - No per-call timeout: node:test enforces test-level timeouts and the
+//    config's process.timeout is enforced by the native runner.
+//  - IPty has no onError event. Synchronous spawn failures are caught below;
+//    post-spawn failures surface as a non-zero exitCode via onExit.
 export function spawnFromConfigAsync(
   config: sdkNamespace.ContainerConfig,
   options: sdkNamespace.SandboxSpawnOptions = {},
