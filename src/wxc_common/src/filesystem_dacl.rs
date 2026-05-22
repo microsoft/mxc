@@ -1792,9 +1792,32 @@ mod tests {
             &[PathBuf::from(r"\\someserver\share\foo")],
             &[],
         );
-        assert!(matches!(
-            err,
-            Err(DaclError::NetworkPathRejected(_)) | Err(DaclError::PathNotFound(_))
-        ));
+        // The test's intent is "we never silently succeed on a UNC
+        // path". The exact error variant depends on how
+        // `fs::canonicalize` resolves `\\someserver\share\foo` on the
+        // host running the test:
+        //   * On dev boxes / agents with no DNS resolution for
+        //     `someserver`, canonicalize returns
+        //     `io::ErrorKind::NotFound` → `PathNotFound`.
+        //   * On agents where canonicalize succeeds (rare but
+        //     possible if the share actually exists or is being
+        //     resolved by a redirector), our `ensure_local_canonical_
+        //     prefix` rejects the UNC namespace → `NetworkPathRejected`.
+        //   * On agents where DNS resolves `someserver` to an
+        //     unreachable host or returns a non-NotFound Win32 error
+        //     (e.g. `ERROR_BAD_NETPATH`, `ERROR_LOGON_FAILURE`),
+        //     canonicalize returns a generic IO error that doesn't
+        //     map to `NotFound` → `Win32 { reason: "canonicalize: …" }`.
+        // All three are acceptable. The unit tests of
+        // `ensure_local_canonical_prefix` above verify the
+        // classification function deterministically.
+        match &err {
+            Err(DaclError::NetworkPathRejected(_))
+            | Err(DaclError::PathNotFound(_))
+            | Err(DaclError::Win32 { .. }) => {}
+            other => panic!(
+                "expected NetworkPathRejected | PathNotFound | Win32 for UNC path, got: {other:?}"
+            ),
+        }
     }
 }
