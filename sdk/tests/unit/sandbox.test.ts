@@ -543,6 +543,40 @@ describe('createConfigFromPolicy', () => {
       }
     });
 
+    it('should force enforcementMode=firewall when host filtering is requested (process resolves to bubblewrap on Linux)', () => {
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.5.0-alpha',
+          network: { allowOutbound: true, allowedHosts: ['example.com'] },
+        });
+        assert.strictEqual(config.containment, 'process');
+        assert.strictEqual(config.lxc, undefined);
+        // Abstract 'process' on Linux must apply the same iptables firewall
+        // enforcement as explicit 'bubblewrap', because the native binary
+        // resolves the abstract intent to Bubblewrap server-side.
+        assert.strictEqual(config.network!.enforcementMode, 'firewall');
+      } finally {
+        restore();
+      }
+    });
+
+    it('should allow allowedHosts without allowOutbound on Linux (bubblewrap supports per-host filtering)', () => {
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.5.0-alpha',
+          network: { allowedHosts: ['example.com'] },
+        });
+        assert.strictEqual(config.containment, 'process');
+        assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
+        assert.strictEqual(config.network!.defaultPolicy, 'block');
+        assert.strictEqual(config.network!.enforcementMode, 'firewall');
+      } finally {
+        restore();
+      }
+    });
+
     it('should reject proxy on Linux', () => {
       mockLinux();
       try {
@@ -560,24 +594,52 @@ describe('createConfigFromPolicy', () => {
   });
 
   describe('network validation', () => {
+    // These tests assert the "allowOutbound required for host filtering"
+    // gate. The gate applies to backends that map host filtering to
+    // capabilities/ACLs (Windows process container path). It is intentionally
+    // waived for backends that do per-host iptables/Seatbelt filtering
+    // (wslc, seatbelt, bubblewrap, and Linux abstract 'process' which
+    // resolves to bubblewrap). Mock platform to win32 so the test asserts
+    // the gate independent of the CI runner's OS.
+    let originalPlatform: PropertyDescriptor | undefined;
+    const mockWindows = () => {
+      originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+    };
+    const restore = () => {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    };
+
     it('should reject allowedHosts without allowOutbound', () => {
-      assert.throws(
-        () => createConfigFromPolicy({
-          version: '0.4.0-alpha',
-          network: { allowedHosts: ['example.com'] },
-        }),
-        { message: /allowedHosts\/blockedHosts require allowOutbound/ },
-      );
+      mockWindows();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.4.0-alpha',
+            network: { allowedHosts: ['example.com'] },
+          }),
+          { message: /allowedHosts\/blockedHosts require allowOutbound/ },
+        );
+      } finally {
+        restore();
+      }
     });
 
     it('should reject blockedHosts without allowOutbound', () => {
-      assert.throws(
-        () => createConfigFromPolicy({
-          version: '0.4.0-alpha',
-          network: { blockedHosts: ['evil.com'] },
-        }),
-        { message: /allowedHosts\/blockedHosts require allowOutbound/ },
-      );
+      mockWindows();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.4.0-alpha',
+            network: { blockedHosts: ['evil.com'] },
+          }),
+          { message: /allowedHosts\/blockedHosts require allowOutbound/ },
+        );
+      } finally {
+        restore();
+      }
     });
   });
 
