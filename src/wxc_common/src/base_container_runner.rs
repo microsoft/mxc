@@ -587,6 +587,9 @@ impl ScriptRunner for BaseContainerRunner {
                 );
             }
 
+            //
+            // Diagnose the launch failure (FailurePhase::LaunchFailed).
+            //
             let err = unsafe { GetLastError() };
             let diag = diagnose_create_process_failure(
                 err.0,
@@ -657,8 +660,9 @@ impl ScriptRunner for BaseContainerRunner {
         // Stop the builtin test proxy if it was started.
         self.proxy_coordinator.stop(logger);
 
-        // Post-exit diagnostics: if the child failed, check for known
-        // environment issues and enrich the error message.
+        //
+        // Diagnose the application failure (FailurePhase::ProcessExited).
+        //
         let (error_message, failure_phase) = if exit_code != 0 {
             if let Some(diag) = diagnose_process_exit(
                 &request.script_code,
