@@ -33,7 +33,7 @@ fuzz_target!(|data: &[u8]| {
 
         // Dispatch to runner-specific validation based on backend.
         #[cfg(target_os = "windows")]
-        match req.containment_backend {
+        match req.containment {
             ContainmentBackend::MicroVm => {
                 let runner = wxc_common::nanvix_runner::NanVixScriptRunner::new();
                 let _ = runner.validate_runner(&req);
