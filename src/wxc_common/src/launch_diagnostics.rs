@@ -38,7 +38,6 @@ pub fn diagnose_create_process_failure(
     win32_error: u32,
     command_line: &str,
     readonly_paths: &[String],
-    readwrite_paths: &[String],
 ) -> LaunchDiagnostic {
     // Check for feature-not-enabled (velocity keys).
     if win32_error == ERROR_CALL_NOT_IMPLEMENTED || win32_error == E_NOTIMPL {
@@ -50,10 +49,6 @@ pub fn diagnose_create_process_failure(
     let resolved_exe = resolve_exe_on_path(bare_exe);
 
     if let Some(diag) = check_exe_heuristics(&resolved_exe, readonly_paths, None) {
-        return diag;
-    }
-
-    if let Some(diag) = check_refs_volumes(readonly_paths, readwrite_paths) {
         return diag;
     }
 
@@ -219,10 +214,13 @@ fn check_velocity_keys() -> Vec<(u32, bool)> {
     }
 }
 
-/// Check if any sandbox paths reference volumes that use ReFS (Dev Drive).
-/// BFS (Bind Filter) does not work correctly on ReFS, so filesystem policy
-/// will not be enforced. Returns a diagnostic if problematic volumes are found.
-fn check_refs_volumes(
+/// Pre-launch check: detect if any sandbox policy paths reference ReFS volumes
+/// (e.g. Dev Drives). BFS (Bind Filter) does not work correctly on ReFS, so
+/// filesystem policy will not be enforced on those volumes.
+///
+/// Call this **before** launching the sandboxed process. If it returns `Some`,
+/// the caller should abort launch and surface the diagnostic to the user.
+pub fn check_refs_volumes(
     readonly_paths: &[String],
     readwrite_paths: &[String],
 ) -> Option<LaunchDiagnostic> {
@@ -409,14 +407,14 @@ mod tests {
     #[test]
     fn api_not_implemented_triggers_feature_diagnostic() {
         let diag =
-            diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED, "pwsh.exe", &[], &[]);
+            diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED, "pwsh.exe", &[]);
         assert_eq!(diag.kind, "feature_not_enabled");
         assert!(diag.message.contains("velocity"));
     }
 
     #[test]
     fn e_notimpl_triggers_feature_diagnostic() {
-        let diag = diagnose_create_process_failure(E_NOTIMPL, "pwsh.exe", &[], &[]);
+        let diag = diagnose_create_process_failure(E_NOTIMPL, "pwsh.exe", &[]);
         assert_eq!(diag.kind, "feature_not_enabled");
     }
 
@@ -424,14 +422,14 @@ mod tests {
     fn packaged_app_detected_from_command_line() {
         let cmd =
             r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe" -NoProfile"#;
-        let diag = diagnose_create_process_failure(87, cmd, &[], &[]);
+        let diag = diagnose_create_process_failure(87, cmd, &[]);
         assert_eq!(diag.kind, "packaged_app");
         assert!(diag.message.contains("packaged"));
     }
 
     #[test]
     fn generic_fallback_for_unknown_error() {
-        let diag = diagnose_create_process_failure(5, "cmd.exe", &["C:\\".to_string()], &[]);
+        let diag = diagnose_create_process_failure(5, "cmd.exe", &["C:\\".to_string()]);
         assert_eq!(diag.kind, "create_process_failed");
         assert!(diag.message.contains("5"));
     }

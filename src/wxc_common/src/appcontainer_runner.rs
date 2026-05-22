@@ -440,6 +440,19 @@ impl AppContainerScriptRunner {
         // pass CREATE_NEW_CONSOLE or DETACH_PROCESS, the child shares our console.
         let mut pi = PROCESS_INFORMATION::default();
 
+        // Pre-launch check: abort if policy paths are on ReFS (Dev Drive) volumes
+        // where BFS cannot enforce filesystem policy.
+        if let Some(diag) = crate::launch_diagnostics::check_refs_volumes(
+            &request.policy.readonly_paths,
+            &request.policy.readwrite_paths,
+        ) {
+            logger.log_line(&format!(
+                "Error: Pre-launch diagnostic [{}]: {}",
+                diag.kind, diag.message
+            ));
+            return Err(WxcError::Process(diag.message));
+        }
+
         unsafe {
             CreateProcessW(
                 PCWSTR::null(),

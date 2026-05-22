@@ -547,6 +547,22 @@ impl ScriptRunner for BaseContainerRunner {
         let ac_sid_str = derive_sid_string_from_name(&identity);
         let _ = writeln!(logger, "AppContainerSID: {ac_sid_str}");
 
+        // Pre-launch check: abort if policy paths are on ReFS (Dev Drive) volumes
+        // where BFS cannot enforce filesystem policy.
+        if let Some(diag) = crate::launch_diagnostics::check_refs_volumes(
+            &request.policy.readonly_paths,
+            &request.policy.readwrite_paths,
+        ) {
+            let _ = writeln!(logger, "Error: Pre-launch diagnostic [{}]: {}", diag.kind, diag.message);
+            return ScriptResponse {
+                exit_code: -1,
+                error_message: diag.message.clone(),
+                standard_err: diag.message,
+                failure_phase: FailurePhase::LaunchFailed,
+                ..Default::default()
+            };
+        }
+
         // 4. Call Experimental_CreateProcessInSandbox.
         let success = unsafe {
             create_process_in_sandbox(
@@ -595,7 +611,6 @@ impl ScriptRunner for BaseContainerRunner {
                 err.0,
                 &request.script_code,
                 &request.policy.readonly_paths,
-                &request.policy.readwrite_paths,
             );
 
             let extended_error = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
