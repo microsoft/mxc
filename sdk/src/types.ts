@@ -64,13 +64,25 @@ export type ContainmentType = "process" | "vm" | "microvm";
 export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm', 'microvm'];
 
 /**
- * Deprecated wire values accepted by the native binary via serde aliases.
- * Maps each legacy name to the canonical {@link ContainmentBackend} value
- * so the SDK validator can resolve them before the platform check. Configs
- * using these values still reach wxc-exec unchanged — the Rust parser
- * handles the final mapping at run time.
+ * Deprecated containment wire values, mapped to their canonical
+ * {@link ContainmentBackend} replacement. The native binary (wxc-exec) accepts
+ * the deprecated form via serde aliases; this map mirrors that behavior in
+ * the SDK validator so legacy configs are not rejected before reaching the
+ * binary.
+ *
+ * The map is intentionally partial: only deprecated keys appear. Use a
+ * presence check (e.g. `LegacyContainmentAliases[value] ?? value`) rather
+ * than indexing blindly.
+ *
+ * The wire payload is forwarded to wxc-exec unchanged — the Rust parser
+ * performs the final mapping at runtime. Resolution here is purely so the
+ * SDK's experimental-mode, platform-support, and availability checks see
+ * the canonical backend.
+ *
+ * Internal to the SDK; not part of the public API. Subject to removal in a
+ * future minor release once the deprecation window closes.
  */
-export const LegacyContainmentAliases: Readonly<Record<string, ContainmentBackend>> = {
+export const LegacyContainmentAliases: Readonly<Partial<Record<string, ContainmentBackend>>> = {
   appcontainer: 'processcontainer',
   macos_sandbox: 'seatbelt',
 };
