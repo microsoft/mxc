@@ -19,6 +19,7 @@ members = [
     "mxc_pty",
     "generated/base_container_specification",
     "mxc_diagnostic_console",
+    "mxc_build_common",
 ]
 exclude = ["fuzz"]
 resolver = "3"
@@ -34,6 +35,7 @@ split-debuginfo = "packed"
 strip = "debuginfo"
 
 [workspace.package]
+version = "0.3.0"
 edition = "2021"
 
 [workspace.dependencies]
@@ -91,3 +93,4 @@ sandbox_spec = { path = "generated/base_container_specification" }
 widestring = "1"
 url = "2"
 winreg = "0.55"
+mxc_build_common = { path = "mxc_build_common" }

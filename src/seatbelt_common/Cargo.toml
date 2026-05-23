@@ -1,7 +1,7 @@
 [package]
 name = "seatbelt_common"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 # Provides CodexRequest, ContainerPolicy, SeatbeltConfig, Logger, and

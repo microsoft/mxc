@@ -3,7 +3,7 @@
 
 fn main() {
     mxc_build_common::embed_version_info(
-        "WinHTTP proxy policy shim for sandbox networking",
-        "winhttp-proxy-shim.exe",
+        "Windows Sandbox integration daemon",
+        "wxc-windows-sandbox-daemon.exe",
     );
 }
