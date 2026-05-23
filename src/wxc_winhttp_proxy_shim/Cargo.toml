@@ -14,9 +14,4 @@ windows.workspace = true
 windows-core.workspace = true
 
 [build-dependencies]
-winresource = "0.1.31"
-
-[package.metadata.winresource]
-ProductName = "Microsoft Experimental Containers"
-FileDescription = "Elevated WinHTTP proxy policy shim for AppContainer sandboxing"
-OriginalFilename = "winhttp-proxy-shim.exe"
+winresource = { version = "0.1.31", default-features = false }

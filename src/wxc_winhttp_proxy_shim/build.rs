@@ -9,7 +9,14 @@ fn main() {
         return;
     }
 
-    winresource::WindowsResource::new()
+    let mut resource = winresource::WindowsResource::new();
+    resource
+        .set("ProductName", "Microsoft Experimental Containers")
+        .set(
+            "FileDescription",
+            "Elevated WinHTTP proxy policy shim for AppContainer sandboxing",
+        )
+        .set("OriginalFilename", "winhttp-proxy-shim.exe")
         .compile()
         .expect("failed to embed Windows version info");
 }
