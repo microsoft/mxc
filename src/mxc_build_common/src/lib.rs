@@ -11,8 +11,6 @@
 use std::path::Path;
 use std::process::Command;
 
-const PRODUCT_NAME: &str = "Microsoft eXecution Containers (MXC)";
-
 /// Embed Windows VersionInfo resource metadata into the binary being compiled.
 ///
 /// On non-Windows targets this is a no-op.  The `ProductVersion` field is set
@@ -25,9 +23,19 @@ pub fn embed_version_info(file_description: &str, original_filename: &str) {
     // Track git HEAD so the embedded commit hash updates on new commits.
     track_git_head();
 
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-        return;
+    #[cfg(windows)]
+    embed_version_info_windows(file_description, original_filename);
+
+    // Suppress unused-variable warnings on non-Windows.
+    #[cfg(not(windows))]
+    {
+        let _ = (file_description, original_filename);
     }
+}
+
+#[cfg(windows)]
+fn embed_version_info_windows(file_description: &str, original_filename: &str) {
+    const PRODUCT_NAME: &str = "Microsoft eXecution Containers (MXC)";
 
     let version = std::env::var("CARGO_PKG_VERSION").unwrap();
     let commit = git_short_hash();
@@ -38,7 +46,10 @@ pub fn embed_version_info(file_description: &str, original_filename: &str) {
         .set("FileDescription", file_description)
         .set("OriginalFilename", original_filename)
         .set("ProductVersion", &format!("{version}+{commit}"))
-        .set("LegalCopyright", "\u{00a9} Microsoft Corporation. All rights reserved.")
+        .set(
+            "LegalCopyright",
+            "\u{00a9} Microsoft Corporation. All rights reserved.",
+        )
         .compile()
         .expect("failed to embed Windows version info");
 }
