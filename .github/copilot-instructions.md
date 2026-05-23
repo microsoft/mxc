@@ -144,6 +144,7 @@ Core references:
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
 - `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
 - `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
+- `docs/host-prep.md` — `wxc-exec --prepare-system-drive` / `--unprepare-system-drive` host setup (metadata-only ACEs on the system-drive root for the AppContainer well-known SIDs, so `cmd.exe` / `pwsh.exe` / `node.exe` can stat `C:\` inside an AppContainer). Hand-test helpers live in `scripts/host-prep/`.
 - `docs/sandbox-policy/v1/policy.md` — sandbox policy v1 specification
 
 Per-backend guides:

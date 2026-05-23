@@ -47,6 +47,8 @@ pub mod sandbox_protocol;
 #[cfg(target_os = "windows")]
 pub mod string_util;
 #[cfg(target_os = "windows")]
+pub mod system_drive_prep;
+#[cfg(target_os = "windows")]
 pub mod windows_sandbox_runner;
 
 // Diagnostic logging (registry/env-controlled real-time output)
