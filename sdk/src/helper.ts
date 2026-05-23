@@ -6,10 +6,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { FileLogger } from './logger.js';
-import { ContainerConfig, ContainmentBackend, ContainmentTypes, ExperimentalBackends, LegacyContainmentAliases } from './types.js';
+import { ContainerConfig, ContainmentBackend, ContainmentTypes } from './types.js';
 import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupport } from './platform.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { diagLog } from './diagnostic.js';
+import { ContainmentRegistry, judge, Verdict } from './version-registry.js';
 
 /** SDK version read from package.json at module load time. */
 export const SDK_VERSION: string = (() => {
@@ -42,15 +43,25 @@ const legacyContainmentWarned = new Set<string>();
  * uses a legacy containment wire value. Dedup'd per legacy value per process
  * so the message doesn't flood the diag stream on repeated spawns.
  *
+ * The verdict carries the rename target and version metadata sourced from
+ * `ContainmentRegistry`, so the message stays in sync with the registry
+ * without further plumbing.
+ *
  * Exposed for tests so the latch can be reset between describes.
  */
-export function warnLegacyContainmentOnce(legacy: string, canonical: string): void {
+export function warnLegacyContainmentOnce(
+    legacy: string,
+    verdict: Extract<Verdict, { kind: 'ok-deprecated' }>,
+): void {
     if (!legacyContainmentWarned.has(legacy)) {
         legacyContainmentWarned.add(legacy);
+        const removalNote = verdict.removeIn
+            ? ` and will be removed in ${verdict.removeIn}`
+            : '';
         diagLog(
-            `Containment value '${legacy}' is deprecated; use '${canonical}' instead. ` +
-            `The legacy spelling is accepted via a backward-compatibility alias and may be ` +
-            `removed in a future SDK release.`
+            `Containment value '${legacy}' is deprecated since schema ${verdict.deprecatedSince}${removalNote}; ` +
+            `use '${verdict.canonical}' instead. The legacy spelling is accepted via a ` +
+            `backward-compatibility alias.`
         );
     }
 }
@@ -160,33 +171,56 @@ export function resolveExecutableAndArgs(
     throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
   }
 
-  // Resolve deprecated wire values (e.g. "appcontainer" → "processcontainer",
-  // "macos_sandbox" → "seatbelt") once, and drive every containment check
-  // from the resolved value. The native binary accepts both spellings via
-  // serde aliases, so the wire payload is forwarded unchanged below — this
-  // resolution is purely for SDK-side validation. Without it, legacy values
-  // bypass the experimental-mode gate (because they are not in
-  // ExperimentalBackends under their alias) and produce a confusing
-  // "not available on this platform" error instead.
+  // Consult the version registry once. The verdict carries the canonical
+  // value (with renames resolved), the entry's experimental/abstract
+  // flags, and version metadata for the deprecation message. The native
+  // binary accepts legacy spellings via serde aliases, so the wire
+  // payload is forwarded unchanged below — `judge` is purely for SDK-side
+  // validation. Without this resolution, legacy values bypass the
+  // experimental-mode gate and produce confusing platform errors.
   const rawContainment = config.containment;
-  const effectiveContainment = rawContainment
-    ? (LegacyContainmentAliases[rawContainment] ?? rawContainment)
-    : undefined;
-  if (rawContainment && effectiveContainment !== rawContainment) {
-    warnLegacyContainmentOnce(rawContainment, effectiveContainment as ContainmentBackend);
+  let effectiveContainment: string | undefined = rawContainment;
+  let isExperimental = false;
+  let isIntent = false;
+  if (rawContainment) {
+    const verdict = judge(ContainmentRegistry, rawContainment, config.version);
+    switch (verdict.kind) {
+      case 'ok-deprecated':
+        warnLegacyContainmentOnce(rawContainment, verdict);
+        effectiveContainment = verdict.canonical;
+        isExperimental = !!verdict.entry.experimental;
+        isIntent = !!verdict.entry.abstract;
+        break;
+      case 'ok':
+      case 'too-new':
+        effectiveContainment = verdict.canonical;
+        isExperimental = !!verdict.entry.experimental;
+        isIntent = !!verdict.entry.abstract;
+        break;
+      case 'removed':
+        throw new Error(
+          `Containment value '${rawContainment}' was removed in schema ${verdict.removedIn}; ` +
+          `use '${verdict.canonical}' instead.`
+        );
+      case 'unknown':
+        // Value not in registry; preserve raw and fall back to the
+        // static `ContainmentTypes` check + platform-availability gate
+        // below. The TS union is still the entry gate for unknown values.
+        effectiveContainment = rawContainment;
+        isIntent = (ContainmentTypes as readonly string[]).includes(rawContainment);
+        break;
+    }
   }
 
   // Check experimental mode before anything else so the caller gets a clear
   // message about the missing flag rather than a platform/binary error.
-  if (effectiveContainment && ExperimentalBackends.includes(effectiveContainment) && !options.experimental) {
+  if (effectiveContainment && isExperimental && !options.experimental) {
     throw new Error(
       `'${rawContainment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
     );
   }
 
   const platformSupport = getPlatformSupport();
-  const isExperimental = !!effectiveContainment &&
-    (ExperimentalBackends as readonly string[]).includes(effectiveContainment);
   if (!platformSupport.isSupported && !isExperimental && !options.skipPlatformCheck) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
@@ -198,12 +232,10 @@ export function resolveExecutableAndArgs(
     throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
   }
 
-  // Validate containment against platform
+  // Validate containment against platform. Abstract intents (process, vm,
+  // microvm) are resolved by the native binary at run time, so the SDK
+  // accepts them without checking against the host's concrete backend list.
   if (effectiveContainment && !options.skipPlatformCheck) {
-    // Abstract intents (process, microvm) are resolved by the native binary
-    // at run time, so the SDK accepts them without checking against the
-    // host's concrete backend list.
-    const isIntent = (ContainmentTypes as readonly string[]).includes(effectiveContainment);
     const isAvailable = platformSupport.availableMethods.includes(
       effectiveContainment as ContainmentBackend
     );

@@ -333,6 +333,26 @@ through the same promotion-style migration: a single release that turns the
 silent accept-and-warn into an explicit `unsupported_containment` error.
 Document the removal in the schema bump that drops it.
 
+**SDK implementation.** The TypeScript validator routes containment-field
+values through a single declarative registry
+(`sdk/src/version-registry.ts`) and the pure `judge()` function. Each
+registered value carries `addedIn`, optional `deprecatedSince` / `renamedTo`,
+and optional `removeIn` metadata. `judge()` returns one of:
+
+| Verdict | Meaning |
+|---------|---------|
+| `ok` | value is canonical and supported for the declared version |
+| `ok-deprecated` | value is a legacy alias; warn and rewrite to canonical |
+| `removed` | declared version ≥ `removeIn`; reject |
+| `too-new` | value was introduced after the declared version (plumbed but not enforced today) |
+| `unknown` | value not in registry; fall through to the static union check |
+
+This keeps deprecation/sunset metadata co-located with the rest of the
+version information, lets the deprecation warning string be driven by
+registry data (`deprecated since X, will be removed in Y`), and means
+flipping `appcontainer` from accept-with-warn to reject is a one-line
+registry edit when the time comes.
+
 ## Open Questions
 
 1. **Experimental features on the OS side:** Does

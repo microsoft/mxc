@@ -6,6 +6,7 @@
  * These types match the wxc-exec JSON configuration schema
  */
 
+import { ExperimentalContainments } from './version-registry.js';
 
 /**
  * Process execution settings
@@ -64,30 +65,6 @@ export type ContainmentType = "process" | "vm" | "microvm";
 export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm', 'microvm'];
 
 /**
- * Deprecated containment wire values, mapped to their canonical
- * {@link ContainmentBackend} replacement. The native binary (wxc-exec) accepts
- * the deprecated form via serde aliases; this map mirrors that behavior in
- * the SDK validator so legacy configs are not rejected before reaching the
- * binary.
- *
- * The map is intentionally partial: only deprecated keys appear. Use a
- * presence check (e.g. `LegacyContainmentAliases[value] ?? value`) rather
- * than indexing blindly.
- *
- * The wire payload is forwarded to wxc-exec unchanged — the Rust parser
- * performs the final mapping at runtime. Resolution here is purely so the
- * SDK's experimental-mode, platform-support, and availability checks see
- * the canonical backend.
- *
- * Internal to the SDK; not part of the public API. Subject to removal in a
- * future minor release once the deprecation window closes.
- */
-export const LegacyContainmentAliases: Readonly<Partial<Record<string, ContainmentBackend>>> = {
-  appcontainer: 'processcontainer',
-  macos_sandbox: 'seatbelt',
-};
-
-/**
  * Concrete containment backend. Each value names a specific runner
  * implementation in the native binary. Prefer a {@link ContainmentType}
  * value unless you specifically need to force a particular backend.
@@ -105,9 +82,11 @@ export type ContainmentBackend =
 
 /**
  * Containment values (abstract intent or concrete backend) that require
- * the `--experimental` flag.
+ * the `--experimental` flag. Derived from the version registry so the
+ * SDK has a single source of truth for backend metadata.
  */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'hyperlight', 'wslc', 'seatbelt', 'bubblewrap'];
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] =
+  ExperimentalContainments as readonly (ContainmentType | ContainmentBackend)[];
 
 /**
  * Clipboard access policy levels
