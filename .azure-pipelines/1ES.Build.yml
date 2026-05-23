@@ -1,7 +1,38 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-trigger: none
+# Push trigger on `main` exists primarily to populate the Azure Pipelines
+# target-dir and CARGO_HOME cache scopes for the default branch. PR-triggered
+# runs are branch-scoped on writes and cannot populate `main`'s scope; they
+# can only *read* from it as a fallback. Without a `main` trigger, the
+# `**`-wildcard cache restore in `Rust.Build.Job.yml` always misses, and
+# every PR build does a fully cold cargo compile (~14 min on x64 WXC).
+#
+# After this trigger is enabled, the first push to `main` populates the
+# cache; every subsequent PR's restore step finds it and the cargo build
+# step drops to a few minutes.
+#
+# Docs-only commits to `main` don't need to rebuild the whole workspace,
+# so the path exclusion mirrors the conservative list used by the PR
+# trigger below.
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    exclude:
+    - 'docs/**'
+    - 'examples/**'
+    - '.github/ISSUE_TEMPLATE/**'
+    - '.github/PULL_REQUEST_TEMPLATE.md'
+    - '.github/copilot-instructions.md'
+    - '.github/instructions/**'
+    - '**/*.md'
+    - 'LICENSE'
+    - '.gitignore'
+    - '.gitattributes'
+    - '.editorconfig'
+
 name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
 
 pr:
