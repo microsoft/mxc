@@ -5,16 +5,21 @@
 # target-dir and CARGO_HOME cache scopes for the default branch. PR-triggered
 # runs are branch-scoped on writes and cannot populate `main`'s scope; they
 # can only *read* from it as a fallback. Without a `main` trigger, the
-# `**`-wildcard cache restore in `Rust.Build.Job.yml` always misses, and
-# every PR build does a fully cold cargo compile (~14 min on x64 WXC).
+# 1ES `cacheOptions.enableTargetCache: true` configuration in
+# `Rust.Build.Job.yml` runs every PR with a cold target dir — the
+# auto-generated wildcard restore key (visible in the `🎯 Cache target
+# directory` task log as `…|Rust=<ver>|**`) finds no prior entry in
+# main's scope, so each PR build does a fully cold cargo compile
+# (~14 min on x64 WXC).
 #
 # After this trigger is enabled, the first push to `main` populates the
-# cache; every subsequent PR's restore step finds it and the cargo build
-# step drops to a few minutes.
+# cache; every subsequent PR's restore step finds it via that wildcard
+# fallback and the cargo build step drops to a few minutes.
 #
 # Docs-only commits to `main` don't need to rebuild the whole workspace,
-# so the path exclusion mirrors the conservative list used by the PR
-# trigger below.
+# so the path exclusion list here matches the one added to the `pr:`
+# trigger in PR #396 (kept in sync intentionally — if that PR lands and
+# the lists drift, reconcile them).
 trigger:
   branches:
     include:
