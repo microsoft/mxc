@@ -49,9 +49,7 @@ only ACEs whose `(access mask, ACE type, inheritance flags)` exactly
 match what `--prepare-system-drive` would have authored are removed.
 Other explicit ACEs for the same SIDs — e.g. an existing
 `icacls C:\ /grant "ALL APPLICATION PACKAGES":(R)` written by a
-third-party tool — are preserved. This is symmetric with the PowerShell
-`Unprepare-SystemDriveForAppContainer.ps1` script's
-`RemoveAccessRuleSpecific` semantics.
+third-party tool — are preserved.
 
 Re-running `--prepare-system-drive` is safe when our exact ACE is
 already present — the scan-before-apply detects the existing match and
@@ -123,7 +121,4 @@ both with `FileSystemRights` listing
   `REVOKE_ACCESS` for the SID followed by replay of any non-matching
   explicit ACEs — symmetric with `restore_one`'s pattern.
 - Unit tests redirect the target path to a tempdir via the debug-only
-  `MXC_PREPARE_PATH_OVERRIDE` env var. The elevation flow itself is
-  verified manually with the PowerShell scripts in
-  [`scripts/host-prep/`](../scripts/host-prep/), which mirror the Rust
-  implementation for hand-testing without rebuilding `wxc-exec`.
+  `MXC_PREPARE_PATH_OVERRIDE` env var.
