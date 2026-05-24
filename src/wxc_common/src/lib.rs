@@ -27,6 +27,8 @@ pub mod validator;
 #[cfg(target_os = "windows")]
 pub mod appcontainer_runner;
 #[cfg(target_os = "windows")]
+pub mod dispatcher;
+#[cfg(target_os = "windows")]
 pub mod fallback_detector;
 #[cfg(target_os = "windows")]
 pub mod filesystem_bfs;
@@ -66,3 +68,11 @@ pub mod sandbox_tracking;
 // Isolation Session (IsoEnvBroker Session API) support
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub mod isolation_session;
+
+/// Test-only helpers shared across unit-test modules.
+///
+/// Gated by `#[cfg(test)]` so this module compiles in only when
+/// building the crate's own test binary (under any profile, including
+/// CI's `--profile release`). Production binaries never link this.
+#[cfg(test)]
+pub(crate) mod test_env;

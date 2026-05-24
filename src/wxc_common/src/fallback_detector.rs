@@ -102,7 +102,7 @@ pub enum FallbackError {
 ///
 /// The algorithm matches the design doc:
 ///
-/// 1. If `MXC_FORCE_TIER` is set in a debug build, honor it (test seam).
+/// 1. If `MXC_FORCE_TIER` is set in a test build, honor it (test seam).
 /// 2. Try Tier 1 (BaseContainer) when `prefer_base_container` is true and the
 ///    API surface is detected.
 /// 3. Otherwise try Tier 2 (AppContainer + BFS) when there's no filesystem
@@ -131,7 +131,18 @@ pub fn detect(
     // Test-only injection seam. An invalid value is silently ignored and we
     // proceed with the real probe chain — that lets tests assert
     // pass-through behavior without any error plumbing.
-    #[cfg(debug_assertions)]
+    //
+    // Gate is `cfg(test)`, not `cfg(debug_assertions)`: production
+    // `wxc-exec.exe` builds (release *and* dev binaries) must not honor
+    // `MXC_FORCE_TIER` from the environment. `cfg(test)` ensures the
+    // seam is compiled in only when the crate is built as a test binary
+    // — which is exactly the case for unit tests under any profile,
+    // including CI's `cargo test --profile release` invocation. The
+    // dispatcher/fallback unit tests in this crate's `mod tests` thus
+    // actually exercise tier selection under release-profile CI runs
+    // (previously the seam was elided by `cfg(debug_assertions)` and
+    // the tests silently no-op'd).
+    #[cfg(test)]
     if let Ok(forced) = std::env::var("MXC_FORCE_TIER") {
         if let Some(tier) = parse_force_tier(&forced) {
             return forced_decision(tier, policy, denied);
@@ -231,7 +242,7 @@ fn check_write_dac_path(path: &Path) -> Result<(), FallbackError> {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 fn parse_force_tier(s: &str) -> Option<IsolationTier> {
     match s {
         "base-container" => Some(IsolationTier::BaseContainer),
@@ -241,7 +252,7 @@ fn parse_force_tier(s: &str) -> Option<IsolationTier> {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 fn forced_decision(
     tier: IsolationTier,
     policy: &ContainerPolicy,
@@ -288,10 +299,14 @@ pub(crate) fn is_base_container_api_present() -> bool {
 ///   `SystemRoot` environment variable is deliberately ignored to deny
 ///   an attacker who can scrub or rewrite the process environment a
 ///   Tier 2 → Tier 3 downgrade primitive.
-/// - **Debug builds** additionally honor `MXC_BFSCFG_PATH` as a narrow
+/// - **Test builds** additionally honor `MXC_BFSCFG_PATH` as a narrow
 ///   test seam. Its value is used verbatim as the resolved path; an
-///   empty value simulates "not present" by returning `Ok(None)`. The
-///   release build cannot read this variable at all.
+///   empty value simulates "not present" by returning `Ok(None)`.
+///   Production `wxc-exec.exe` (both release and dev binaries) cannot
+///   read this variable at all — the seam is gated by `cfg(test)` so
+///   it compiles in only when building this crate's test binary,
+///   regardless of profile (so CI's `--profile release` test run
+///   exercises these paths).
 /// - We deliberately do not look in `SysWOW64`: `bfscfg.exe` is shipped
 ///   only in the native System32 directory.
 ///
@@ -299,7 +314,7 @@ pub(crate) fn is_base_container_api_present() -> bool {
 /// Win32 API itself fails — on a healthy Windows host this should never
 /// happen.
 pub fn find_bfscfg_exe() -> Result<Option<PathBuf>, FallbackError> {
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     if let Ok(override_path) = std::env::var("MXC_BFSCFG_PATH") {
         if override_path.is_empty() {
             return Ok(None);
@@ -437,61 +452,21 @@ pub(crate) fn has_write_dac(path: &Path) -> Result<bool, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(debug_assertions)]
     use crate::models::ContainerPolicy;
-    #[cfg(debug_assertions)]
-    use std::sync::Mutex;
+    // Shared ENV_LOCK + guards live in `crate::test_env` so they're
+    // honored uniformly across the dispatcher and fallback_detector
+    // test modules. A per-module lock would let cross-module test
+    // threads race on `MXC_FORCE_TIER` / `MXC_BFSCFG_PATH`.
+    use crate::test_env::{BfscfgPathGuard, ForceTierGuard, ENV_LOCK};
 
-    /// Serializes tests that mutate `MXC_FORCE_TIER` because env vars are
-    /// process-global. We don't have `serial_test` as a dev-dep so we roll
-    /// our own. Gated with the force-tier mechanism itself.
-    #[cfg(debug_assertions)]
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    #[cfg(debug_assertions)]
-    struct ForceTierGuard {
-        // Holding the lock inside the guard ensures the env-var clear in
-        // `Drop` happens *before* the lock is released. The previous
-        // `(Self, MutexGuard)` tuple shape released the lock first (rev.
-        // declaration order), allowing concurrent tests to observe stale
-        // `MXC_FORCE_TIER`.
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-    #[cfg(debug_assertions)]
-    impl ForceTierGuard {
-        fn set(value: &str) -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            // SAFETY: env-var mutation in tests; serialized by ENV_LOCK.
-            unsafe {
-                std::env::set_var("MXC_FORCE_TIER", value);
-            }
-            ForceTierGuard { _lock: lock }
-        }
-    }
-    #[cfg(debug_assertions)]
-    impl Drop for ForceTierGuard {
-        fn drop(&mut self) {
-            // SAFETY: serialized by ENV_LOCK still held in `_lock`; the lock
-            // is released only after this `Drop` returns.
-            unsafe {
-                std::env::remove_var("MXC_FORCE_TIER");
-            }
-        }
-    }
-
-    #[cfg(debug_assertions)]
     fn empty_policy() -> ContainerPolicy {
         ContainerPolicy::default()
     }
-
-    #[cfg(debug_assertions)]
     fn policy_with_denied() -> ContainerPolicy {
         let mut p = ContainerPolicy::default();
         p.denied_paths.push("C:\\Windows".to_string());
         p
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn empty_policy_t1_when_bc_present_and_preferred() {
         let _g = ForceTierGuard::set("base-container");
@@ -501,8 +476,6 @@ mod tests {
         assert!(!d.needs_dacl_augmentation);
         assert!(d.warnings.is_empty());
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn empty_policy_no_filesystem_t2_path() {
         let _g = ForceTierGuard::set("appcontainer-bfs");
@@ -511,8 +484,6 @@ mod tests {
         assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
         assert!(!d.needs_dacl_augmentation);
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn denied_paths_disabled_blocks_t1() {
         let _g = ForceTierGuard::set("base-container");
@@ -523,8 +494,6 @@ mod tests {
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn denied_paths_disabled_blocks_t2() {
         let _g = ForceTierGuard::set("appcontainer-bfs");
@@ -535,8 +504,6 @@ mod tests {
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn denied_paths_disabled_blocks_t3() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
@@ -547,8 +514,6 @@ mod tests {
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn force_tier_env_var_parses_all_three_values() {
         assert!(matches!(
@@ -564,8 +529,6 @@ mod tests {
             Some(IsolationTier::AppContainerDacl)
         ));
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn force_tier_env_var_invalid_value_falls_through_to_real_probes() {
         // An unrecognized value must NOT raise an error. The detector should
@@ -583,9 +546,7 @@ mod tests {
     fn find_bfscfg_exe_smoke() {
         // Tests run in parallel by default and other tests below mutate
         // `MXC_BFSCFG_PATH`. We must therefore observe the unset state
-        // under `ENV_LOCK` so we don't race them. In release builds the
-        // override is ignored entirely, so the lock is debug-only.
-        #[cfg(debug_assertions)]
+        // under `ENV_LOCK` so we don't race them.
         let _lock = {
             let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
             // SAFETY: env-var mutation in tests; serialized by ENV_LOCK.
@@ -620,35 +581,6 @@ mod tests {
         );
     }
 
-    /// Guard for `MXC_BFSCFG_PATH` mirroring `ForceTierGuard`. Holds
-    /// `ENV_LOCK` for the duration of the test so concurrent threads
-    /// don't observe stale values.
-    #[cfg(debug_assertions)]
-    struct BfscfgPathGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-    #[cfg(debug_assertions)]
-    impl BfscfgPathGuard {
-        fn set(value: &str) -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            // SAFETY: env-var mutation in tests; serialized by ENV_LOCK.
-            unsafe {
-                std::env::set_var("MXC_BFSCFG_PATH", value);
-            }
-            BfscfgPathGuard { _lock: lock }
-        }
-    }
-    #[cfg(debug_assertions)]
-    impl Drop for BfscfgPathGuard {
-        fn drop(&mut self) {
-            // SAFETY: serialized by ENV_LOCK still held in `_lock`.
-            unsafe {
-                std::env::remove_var("MXC_BFSCFG_PATH");
-            }
-        }
-    }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn mxc_bfscfg_path_empty_value_simulates_missing() {
         let _g = BfscfgPathGuard::set("");
@@ -658,8 +590,6 @@ mod tests {
             "empty MXC_BFSCFG_PATH must yield Ok(None), got {result:?}"
         );
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn mxc_bfscfg_path_nonexistent_path_is_none() {
         let _g = BfscfgPathGuard::set("C:\\__mxc_does_not_exist__\\bfscfg.exe");
@@ -669,8 +599,6 @@ mod tests {
             "non-existent MXC_BFSCFG_PATH must yield Ok(None), got {result:?}"
         );
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn mxc_bfscfg_path_existing_path_is_returned_verbatim() {
         // Use a file we know exists (this source file itself, via the
@@ -711,8 +639,6 @@ mod tests {
             "expected error for non-existent path, got {res:?}"
         );
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn compute_decision_with_force_tier_carries_warnings_empty() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
