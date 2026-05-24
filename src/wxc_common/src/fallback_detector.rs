@@ -293,8 +293,19 @@ fn forced_decision(
     // Forced tiers honor the same DACL-fallback guard the real algorithm
     // does: if the operator forbade host DACL changes we must still refuse
     // any tier that would touch them.
+    //
+    // For `AppContainerDacl` specifically, we mirror the empty-policy
+    // carve-out in `detect()` (see the Tier 3 block): when the policy
+    // declares no filesystem paths there is nothing to augment, so we
+    // do not require DACL mutation consent. This keeps the
+    // `MXC_FORCE_TIER` test seam faithful to the real algorithm — a
+    // caller forcing Tier 3 with an empty policy should not be
+    // rejected just because `allow_dacl_mutation = false`.
+    let has_fs_policy = !policy.readwrite_paths.is_empty()
+        || !policy.readonly_paths.is_empty()
+        || !policy.denied_paths.is_empty();
     let needs_dacl = match tier {
-        IsolationTier::AppContainerDacl => true,
+        IsolationTier::AppContainerDacl => has_fs_policy,
         #[cfg(feature = "bfs")]
         IsolationTier::BaseContainer | IsolationTier::AppContainerBfs => denied,
         #[cfg(not(feature = "bfs"))]
@@ -560,6 +571,22 @@ mod tests {
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
+
+    /// Mirrors the empty-policy carve-out in `detect()` for the forced
+    /// `AppContainerDacl` path: when the policy declares no filesystem
+    /// paths there is nothing to augment, so the DACL-fallback guard
+    /// must not fire even with `allow_dacl_mutation = false`.
+    #[test]
+    fn forced_appcontainer_dacl_with_empty_policy_does_not_require_dacl_mutation() {
+        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let mut policy = empty_policy();
+        policy.fallback.allow_dacl_mutation = false;
+        let d = detect(&policy, true)
+            .expect("empty policy must not require DACL mutation under forced T3");
+        assert_eq!(d.tier, IsolationTier::AppContainerDacl);
+        assert!(!d.needs_dacl_augmentation);
+    }
+
     #[test]
     fn force_tier_env_var_parses_all_three_values() {
         assert!(matches!(
@@ -703,7 +730,11 @@ mod tests {
         policy.fallback.allow_dacl_mutation = true;
         let d = detect(&policy, true).expect("forced dacl with allow_dacl_mutation=true");
         assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
-        assert!(d.needs_dacl_augmentation);
+        // Empty policy ⇒ no DACL augmentation required, matching the
+        // empty-policy carve-out in `detect()`'s Tier 3 block. See
+        // `forced_appcontainer_dacl_with_empty_policy_does_not_require_dacl_mutation`
+        // for the dedicated regression test.
+        assert!(!d.needs_dacl_augmentation);
         assert!(
             d.warnings.is_empty(),
             "forced decisions should not accumulate fallback-chain warnings"
