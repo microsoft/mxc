@@ -1022,7 +1022,7 @@ fn apply_ace(entry: &AppliedAce) -> Result<(), DaclError> {
 /// The caller is responsible for ensuring the process has `WRITE_DAC`
 /// on the path. No state is recorded; the change persists across
 /// process exit.
-pub(crate) fn apply_explicit_ace(
+pub fn apply_explicit_ace(
     path: &Path,
     sid_str: &str,
     access_mask: u32,
@@ -1130,7 +1130,7 @@ pub(crate) fn apply_explicit_ace(
 /// to the SID; partition into matches/keeps; if any matches, replace
 /// all the SID's contributions with a single `REVOKE_ACCESS` + replay
 /// of the keeps. Inherited ACEs are not touched.
-pub(crate) fn revoke_specific_aces_for_sid(
+pub fn revoke_specific_aces_for_sid(
     path: &Path,
     sid_str: &str,
     access_mask: u32,
@@ -1198,7 +1198,7 @@ fn restore_one(entry: &AppliedAce) -> Result<Option<String>, DaclError> {
 /// type. Called from [`DaclManager::apply_one`] under the per-path
 /// mutex so the captured state is consistent with the subsequent
 /// apply.
-pub(crate) fn scan_explicit_aces_for_sid(
+pub fn scan_explicit_aces_for_sid(
     canonical: &Path,
     sid_str: &str,
 ) -> Result<Vec<PriorAce>, DaclError> {
