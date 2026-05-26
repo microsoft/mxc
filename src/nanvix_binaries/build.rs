@@ -77,16 +77,33 @@ fn main() {
     // Generate host-local WHP snapshots at build time so even the first
     // runtime execution uses warm start. The runtime fallback in
     // nanvix_runner.rs handles the case where snapshots are missing.
-    let snapshots_dir = bin_dir.join(nanvix_common::SNAPSHOTS_SUBDIR);
-    let snapshots_present = nanvix_common::SNAPSHOT_FILES
-        .iter()
-        .all(|name| snapshots_dir.join(name).exists());
-    if !snapshots_present {
-        fs::create_dir_all(&snapshots_dir).expect("failed to create snapshots dir");
-        eprintln!("nanvix_binaries: generating host-local snapshots (cold boot)...");
-        generate_snapshots_locally(&bin_dir);
+    //
+    // Skip on non-x86_64 hosts: `nanvixd.exe` is an x86_64 Windows binary
+    // and launching it on (e.g.) ARM64 Windows fails with
+    // STATUS_INVALID_IMAGE_FORMAT (0xc000007b). Snapshot pre-generation is
+    // a warm-start cache only — the runtime fallback covers cold boot on
+    // hosts where this build step is skipped.
+    let host = std::env::var("HOST").unwrap_or_default();
+    let host_is_x86_64 = host.starts_with("x86_64-");
+    if !host_is_x86_64 {
+        eprintln!(
+            "nanvix_binaries: skipping host-local snapshot generation \
+             (host '{}' is not x86_64; nanvixd.exe cannot run here). \
+             Runtime will cold-boot on first use.",
+            host
+        );
     } else {
-        eprintln!("nanvix_binaries: host-local snapshots already present");
+        let snapshots_dir = bin_dir.join(nanvix_common::SNAPSHOTS_SUBDIR);
+        let snapshots_present = nanvix_common::SNAPSHOT_FILES
+            .iter()
+            .all(|name| snapshots_dir.join(name).exists());
+        if !snapshots_present {
+            fs::create_dir_all(&snapshots_dir).expect("failed to create snapshots dir");
+            eprintln!("nanvix_binaries: generating host-local snapshots (cold boot)...");
+            generate_snapshots_locally(&bin_dir);
+        } else {
+            eprintln!("nanvix_binaries: host-local snapshots already present");
+        }
     }
 
     println!("cargo:rustc-env=NANVIX_BIN_DIR={}", bin_dir.display());
