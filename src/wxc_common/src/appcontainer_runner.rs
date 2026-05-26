@@ -4,18 +4,22 @@
 use std::ptr;
 
 use windows::Win32::Foundation::{
-    GetLastError, LocalFree, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    GetLastError, LocalFree, ERROR_ALREADY_EXISTS, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::{FreeSid, PSID};
+use windows::Win32::System::SystemServices::SE_GROUP_ENABLED;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, STARTUPINFOEXW, STARTUPINFOW,
+    WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS,
+    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    STARTUPINFOEXW, STARTUPINFOW,
 };
 use windows_core::{PCWSTR, PWSTR};
 
@@ -27,19 +31,12 @@ use crate::process_util::{get_capability_sid_from_name, OwnedHandle, SidAndAttri
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::{process_mitigation, string_util, ui_policy};
 
-// Attribute list constants (not always exported by the windows crate)
-const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES: usize = 0x0002_0009;
-const PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY: usize = 0x0002_000F;
+/// `UpdateProcThreadAttribute` value for
+/// `PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY` that opts the
+/// process out of inheriting `ALL APPLICATION PACKAGES` grants. This
+/// specific *value* (not the attribute id) is not currently exported
+/// by the windows crate.
 const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
-const EXTENDED_STARTUPINFO_PRESENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0008_0000);
-const CREATE_UNICODE_ENVIRONMENT: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0000_0400);
-const CREATE_SUSPENDED: PROCESS_CREATION_FLAGS = PROCESS_CREATION_FLAGS(0x0000_0004);
-
-/// SE_GROUP_ENABLED attribute value for SID_AND_ATTRIBUTES.
-const SE_GROUP_ENABLED: u32 = 0x0000_0004;
-
-/// HRESULT value for ERROR_ALREADY_EXISTS (183 / 0xB7).
-const HRESULT_ERROR_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32;
 
 /// Proxy-related env var names to strip/override when building the child env block.
 const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
@@ -324,7 +321,7 @@ impl AppContainerScriptRunner {
 
         match result {
             Ok(sid) => Ok(sid),
-            Err(e) if e.code().0 == HRESULT_ERROR_ALREADY_EXISTS => {
+            Err(e) if e.code() == ERROR_ALREADY_EXISTS.to_hresult() => {
                 // Profile already exists — derive the SID from the name.
                 let sid = unsafe {
                     DeriveAppContainerSidFromAppContainerName(pcwstr_name).map_err(|e2| {
@@ -393,7 +390,7 @@ impl AppContainerScriptRunner {
                 Ok(sid_ptr) => {
                     sid_attrs.push(SidAndAttributes {
                         sid: PSID(sid_ptr),
-                        attributes: SE_GROUP_ENABLED,
+                        attributes: SE_GROUP_ENABLED as u32,
                     });
                     capability_sid_guard.push(sid_ptr);
                 }
@@ -466,7 +463,7 @@ impl AppContainerScriptRunner {
             UpdateProcThreadAttribute(
                 attr_list,
                 0,
-                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
                 Some(
                     &security_capabilities as *const SecurityCapabilities
                         as *const core::ffi::c_void,
@@ -490,7 +487,7 @@ impl AppContainerScriptRunner {
                 UpdateProcThreadAttribute(
                     attr_list,
                     0,
-                    PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+                    PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY as usize,
                     Some(&lpac_value as *const u32 as *const core::ffi::c_void),
                     std::mem::size_of::<u32>(),
                     None,

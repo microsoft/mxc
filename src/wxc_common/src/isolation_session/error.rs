@@ -136,8 +136,8 @@ mod tests {
         // HRESULT_FROM_WIN32(ERROR_NOT_FOUND) = 0x80070000 | (1168 & 0xFFFF)
         // = 0x80070490. A regression in this constant would silently downgrade
         // stale-id detection to backend_error.
-        const ERROR_NOT_FOUND: u32 = 1168;
-        let expected = 0x8007_0000u32 | (ERROR_NOT_FOUND & 0xFFFF);
+        use windows::Win32::Foundation::ERROR_NOT_FOUND;
+        let expected = 0x8007_0000u32 | (ERROR_NOT_FOUND.0 & 0xFFFF);
         assert_eq!(ERROR_NOT_FOUND_HRESULT, expected);
         assert_eq!(ERROR_NOT_FOUND_HRESULT, 0x80070490);
     }

@@ -866,11 +866,11 @@ mod tests {
         // (FILE_GENERIC_READ = 0x00120089 — differs from ours by the
         // FILE_READ_DATA bit). This simulates a pre-existing
         // third-party ACE.
-        const FILE_GENERIC_READ: u32 = 0x0012_0089;
+        use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
         apply_explicit_ace(
             tmp.path(),
             SID_ALL_APP_PACKAGES,
-            FILE_GENERIC_READ,
+            FILE_GENERIC_READ.0,
             AceType::Allow,
             false,
         )
@@ -885,7 +885,7 @@ mod tests {
         let removed = revoke_specific_aces_for_sid(
             tmp.path(),
             SID_ALL_APP_PACKAGES,
-            FILE_GENERIC_READ,
+            FILE_GENERIC_READ.0,
             AceType::Allow,
             false,
         )
@@ -936,11 +936,11 @@ mod tests {
 
         // Pre-existing third-party ACE: FILE_GENERIC_READ (differs
         // from STAT_ACCESS_MASK by the FILE_READ_DATA bit).
-        const FILE_GENERIC_READ: u32 = 0x0012_0089;
+        use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
         apply_explicit_ace(
             tmp.path(),
             SID_ALL_APP_PACKAGES,
-            FILE_GENERIC_READ,
+            FILE_GENERIC_READ.0,
             AceType::Allow,
             false,
         )
@@ -956,7 +956,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(sid, SID_ALL_APP_PACKAGES);
-                assert_eq!(existing_mask, FILE_GENERIC_READ);
+                assert_eq!(existing_mask, FILE_GENERIC_READ.0);
                 assert_eq!(expected_mask, STAT_ACCESS_MASK);
             }
             other => panic!("expected ConflictingAce, got {other:?}"),
@@ -966,7 +966,7 @@ mod tests {
         revoke_specific_aces_for_sid(
             tmp.path(),
             SID_ALL_APP_PACKAGES,
-            FILE_GENERIC_READ,
+            FILE_GENERIC_READ.0,
             AceType::Allow,
             false,
         )

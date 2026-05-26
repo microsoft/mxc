@@ -40,7 +40,7 @@ pub fn diagnose_create_process_failure(
     readonly_paths: &[String],
 ) -> LaunchDiagnostic {
     // Check for feature-not-enabled (velocity keys).
-    if win32_error == ERROR_CALL_NOT_IMPLEMENTED || win32_error == E_NOTIMPL {
+    if win32_error == ERROR_CALL_NOT_IMPLEMENTED.0 || win32_error == E_NOTIMPL.0 as u32 {
         return diagnose_api_not_implemented();
     }
 
@@ -79,21 +79,17 @@ pub fn diagnose_process_exit(
 
 // -- Constants ---------------------------------------------------------------
 
-/// Windows error code for a function that exists but is not implemented.
-const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
-
-/// HRESULT E_NOTIMPL -- the OS may set this via GetLastError when the
-/// feature is gated behind velocity keys.
-const E_NOTIMPL: u32 = 0x8000_4001;
-
 /// Velocity key IDs required by the BaseContainer feature.
 const REQUIRED_VELOCITY_KEYS: &[(u32, &str)] = &[
     (61389575, "BaseContainer core"),
     (61155944, "BaseContainer sandbox spec"),
 ];
 
-/// STATUS_DLL_INIT_FAILED -- typically means Win32k (UI subsystem) was blocked.
-const STATUS_DLL_INIT_FAILED: u32 = 0xC000_0142;
+// `ERROR_CALL_NOT_IMPLEMENTED`, `E_NOTIMPL`, and `STATUS_DLL_INIT_FAILED`
+// are re-exported from the `windows` crate. Comparisons against them
+// flow through `u32`, which matches the existing public surface of
+// this module (`diagnose_create_process_failure` takes `u32`).
+use windows::Win32::Foundation::{ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, STATUS_DLL_INIT_FAILED};
 
 // -- Internal heuristics -----------------------------------------------------
 
@@ -116,7 +112,7 @@ fn check_exe_heuristics(
         });
     }
 
-    if exit_code == Some(STATUS_DLL_INIT_FAILED) && is_powershell(exe_path) {
+    if exit_code == Some(STATUS_DLL_INIT_FAILED.0 as u32) && is_powershell(exe_path) {
         return Some(LaunchDiagnostic {
             kind: "dll_init_failed_ui_required",
             message: "PowerShell exited with STATUS_DLL_INIT_FAILED (0xC0000142). \
@@ -406,14 +402,14 @@ mod tests {
 
     #[test]
     fn api_not_implemented_triggers_feature_diagnostic() {
-        let diag = diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED, "pwsh.exe", &[]);
+        let diag = diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED.0, "pwsh.exe", &[]);
         assert_eq!(diag.kind, "feature_not_enabled");
         assert!(diag.message.contains("velocity"));
     }
 
     #[test]
     fn e_notimpl_triggers_feature_diagnostic() {
-        let diag = diagnose_create_process_failure(E_NOTIMPL, "pwsh.exe", &[]);
+        let diag = diagnose_create_process_failure(E_NOTIMPL.0 as u32, "pwsh.exe", &[]);
         assert_eq!(diag.kind, "feature_not_enabled");
     }
 
@@ -441,7 +437,7 @@ mod tests {
             r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile"#,
             &["C:\\".to_string()],
             &[],
-            STATUS_DLL_INIT_FAILED,
+            STATUS_DLL_INIT_FAILED.0 as u32,
         );
         assert!(diag.is_some());
         let d = diag.unwrap();
@@ -456,7 +452,7 @@ mod tests {
             r#""C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe""#,
             &["C:\\".to_string()],
             &[],
-            STATUS_DLL_INIT_FAILED,
+            STATUS_DLL_INIT_FAILED.0 as u32,
         );
         assert!(diag.is_some());
         assert_eq!(diag.unwrap().kind, "dll_init_failed_ui_required");
@@ -468,7 +464,7 @@ mod tests {
             r"C:\tools\myapp.exe",
             &["C:\\".to_string()],
             &[],
-            STATUS_DLL_INIT_FAILED,
+            STATUS_DLL_INIT_FAILED.0 as u32,
         );
         assert!(diag.is_none());
     }
