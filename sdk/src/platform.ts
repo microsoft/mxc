@@ -1,9 +1,9 @@
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { fileURLToPath } from 'node:url';
-import { ContainmentBackend, PlatformSupport } from './types.js';
+import { ContainmentBackend, IsolationTier, PlatformSupport } from './types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -129,12 +129,91 @@ function isWindowsSandboxAvailable(): boolean {
 }
 
 /**
- * Get platform support information
+ * Get platform support information.
+ *
+ * On Windows, when the host build is supported, this also invokes
+ * `wxc-exec --probe` to populate `isolationTier` and (if any) the
+ * `isolationWarnings` array. The result is cached for the lifetime of
+ * the SDK module — the underlying machine state is not expected to
+ * change at runtime.
+ *
  * @returns Platform support details including available sandboxing methods
  */
 export function getPlatformSupport(): PlatformSupport {
+  if (cachedSupport !== null) {
+    return cachedSupport;
+  }
+  const support = computeSupport();
+  cachedSupport = support;
+  return support;
+}
+
+let cachedSupport: PlatformSupport | null = null;
+
+/** @internal Test-only: clear the cached PlatformSupport. */
+export function _resetPlatformSupportCache(): void {
+  cachedSupport = null;
+}
+
+/**
+ * Probe runner injection seam. Spawns `wxc-exec --probe` and returns
+ * its stdout. Replaceable in unit tests via {@link _setProbeRunner}.
+ */
+type ProbeRunner = () => string;
+
+let probeRunner: ProbeRunner = defaultProbeRunner;
+
+/** @internal Test-only: override the probe runner. */
+export function _setProbeRunner(runner: ProbeRunner | null): void {
+  probeRunner = runner ?? defaultProbeRunner;
+}
+
+function defaultProbeRunner(): string {
+  const wxcPath = findWxcExecutable();
+  if (!wxcPath) {
+    throw new Error('wxc-exec not found');
+  }
+  return execFileSync(wxcPath, ['--probe'], {
+    timeout: 5000,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function isValidTier(s: unknown): s is IsolationTier {
+  return s === 'base-container' || s === 'appcontainer-bfs' || s === 'appcontainer-dacl';
+}
+
+/**
+ * Run the probe binary and merge its results into `support`. On any
+ * failure (binary missing, timeout, malformed JSON, unknown tier), the
+ * function silently leaves `support.isolationTier` and
+ * `support.isolationWarnings` unset — callers see the same contract as
+ * pre-Phase-5 SDKs.
+ */
+function populateIsolationFromProbe(support: PlatformSupport): void {
+  try {
+    const stdout = probeRunner();
+    const probe = JSON.parse(stdout);
+    if (probe && typeof probe === 'object') {
+      if (isValidTier(probe.tier)) {
+        support.isolationTier = probe.tier;
+      }
+      if (Array.isArray(probe.warnings) && probe.warnings.length > 0) {
+        const warnings = probe.warnings.filter((w: unknown): w is string => typeof w === 'string');
+        if (warnings.length > 0) {
+          support.isolationWarnings = warnings;
+        }
+      }
+    }
+  } catch {
+    // Graceful degradation: leave isolation fields unset.
+  }
+}
+
+function computeSupport(): PlatformSupport {
   const platform = os.platform();
-  var support : PlatformSupport = { isSupported: false, reason: '', availableMethods: [] };
+  const support: PlatformSupport = { isSupported: false, reason: '', availableMethods: [] };
 
   // Non-Windows platforms
   if (platform === 'darwin') {
@@ -166,7 +245,7 @@ export function getPlatformSupport(): PlatformSupport {
   }
 
   if (platform !== 'win32') {
-        support.reason = 'MXC is not supported on this platform';
+    support.reason = 'MXC is not supported on this platform';
     return support;
   }
 
@@ -177,6 +256,7 @@ export function getPlatformSupport(): PlatformSupport {
     if (isWindowsSandboxAvailable()) {
       support.availableMethods.push('windows_sandbox');
     }
+    populateIsolationFromProbe(support);
     return support;
   }
 

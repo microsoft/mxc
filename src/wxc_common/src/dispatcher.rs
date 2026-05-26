@@ -21,11 +21,21 @@
 //!
 //! See `docs/proposals/downlevel_support/basecontainer-fallback-plan-v2.md`.
 //!
+//! # Why T2 (BFS) also gets DACL deny augmentation
+//!
+//! `bfscfg.exe`'s BFS model expresses read-write / read-only allow lists,
+//! but does **not** model a deny semantic for paths *outside* its allow
+//! list (those are implicitly inaccessible, but a path that lives inside
+//! an allowed parent cannot be selectively denied via BFS). To honor
+//! `policy.denied_paths` on T2 we therefore add deny ACEs targeting the
+//! AppContainer SID alongside the BFS configuration.
+//!
 //! # Drop ordering
 //!
-//! Callers must keep the returned [`Dispatched::dacl_manager`] alive for the
-//! entire duration of the run — its [`Drop`] removes the ACEs we added to
-//! the host filesystem. Dropping it before the runner finishes would yank
+//! Callers must keep the [`DaclManager`] returned by
+//! [`Dispatched::into_runner_and_guard`] alive for the entire duration of
+//! the run — its [`Drop`] removes the ACEs we added to the host
+//! filesystem. Dropping it before the runner finishes would yank
 //! filesystem access mid-execution.
 //!
 //! # Performance
@@ -45,6 +55,15 @@
 //! invocation. Parent-directory ACE rollup and session-scoped
 //! [`DaclManager`] caching are tracked as follow-ups.
 //!
+//! # Known limitation
+//!
+//! Two concurrent runs with the *same* `container_id` derive the same
+//! AppContainer SID and therefore share the same target principal for
+//! ACE bookkeeping. When the second run finishes it issues
+//! `REVOKE_ACCESS` for that SID, which wipes the first run's still-live
+//! grants. This is out of scope for the dispatcher; callers that need
+//! parallel-safe isolation must use distinct `container_id` values.
+//!
 //! Windows-only by virtue of `lib.rs` gating the module behind
 //! `#[cfg(target_os = "windows")]`; no inner attribute is needed.
 
@@ -58,21 +77,55 @@ use crate::filesystem_dacl::{DaclError, DaclManager};
 use crate::models::CodexRequest;
 use crate::script_runner::ScriptRunner;
 
-/// Result of a successful dispatch decision.
+/// Result of a successful dispatch decision: a phased handle holding a
+/// runner and (optionally) a `DaclManager`, with **private fields** so
+/// callers cannot reorder their drops.
 ///
-/// The caller should bind `dacl_manager` to a local that outlives the
-/// runner so its `Drop` removes any ACEs we applied after the child
-/// process completes.
+/// This is *not* a compile-time typestate — there are no
+/// `PhantomData<State>` markers and `Dispatched<Ready>` /
+/// `Dispatched<Spawned>` do not exist. The safety property
+/// ("`DaclManager`'s `Drop` runs AFTER the runner has finished, or the
+/// ACEs we applied would be revoked mid-execution") is enforced
+/// dynamically by the single extraction point
+/// [`Dispatched::into_runner_and_guard`]: it returns a tuple whose
+/// binding order dictates drop order, and callers cannot `.take()`
+/// either half independently because the fields are private.
+///
+/// If you need stronger guarantees (e.g. statically rejecting
+/// `runner.drop()` before `dacl_manager` is taken at the FFI boundary),
+/// promote the struct to a real typestate machine. Today, the
+/// surface area we expose to wxc-exec / SDK doesn't need that.
 pub struct Dispatched {
-    /// Runner ready to execute.
-    pub runner: Box<dyn ScriptRunner>,
-    /// `DaclManager` whose `Drop` restores ACEs. `None` when the chosen
-    /// tier did not require host DACL augmentation.
-    pub dacl_manager: Option<DaclManager>,
+    runner: Box<dyn ScriptRunner>,
+    dacl_manager: Option<DaclManager>,
     /// The selected tier, for telemetry.
     pub tier: IsolationTier,
     /// Operator-visible warnings collected during tier selection.
     pub warnings: Vec<String>,
+}
+
+impl Dispatched {
+    /// Consume `self` and return `(runner, dacl_manager)`. Bind these
+    /// in a single `let` such that the runner is dropped before the
+    /// DACL guard — Rust drops local bindings in reverse declaration
+    /// order, so the standard idiom is:
+    ///
+    /// ```ignore
+    /// let (mut runner, _dacl_guard) = dispatched.into_runner_and_guard();
+    /// // ... use runner ...
+    /// // at end of scope: runner drops first, then _dacl_guard restores ACEs.
+    /// ```
+    pub fn into_runner_and_guard(self) -> (Box<dyn ScriptRunner>, Option<DaclManager>) {
+        (self.runner, self.dacl_manager)
+    }
+
+    /// Read-only check used by unit tests to assert whether the chosen
+    /// tier required DACL augmentation, without exposing the manager
+    /// itself (which would let tests `.take()` it).
+    #[cfg(test)]
+    pub(crate) fn has_dacl_guard(&self) -> bool {
+        self.dacl_manager.is_some()
+    }
 }
 
 /// Errors that can abort dispatch before the runner executes.
@@ -80,8 +133,16 @@ pub struct Dispatched {
 pub enum DispatchError {
     /// Fallback detection refused the request.
     Fallback(FallbackError),
-    /// `DaclManager` failed to apply ACEs.
-    Dacl(DaclError),
+    /// `DaclManager` failed to apply ACEs. `warnings` carries any
+    /// retained-entry messages drained from the manager before the
+    /// failed apply was rolled back via `restore()`. Entries that
+    /// `restore()` itself could not clean up are persisted to disk and
+    /// will be reaped on the next wxc-exec startup by
+    /// `recover_orphaned_state`.
+    Dacl {
+        error: DaclError,
+        warnings: Vec<String>,
+    },
     /// AppContainer SID derivation failed.
     Sid(WxcError),
 }
@@ -108,7 +169,7 @@ impl std::fmt::Display for DispatchError {
                 "Could not resolve the Windows system directory while probing for bfscfg.exe \
                  ({reason}). This indicates a corrupted or unsupported OS configuration."
             ),
-            DispatchError::Dacl(e) => write!(f, "Failed to apply DACL ACEs: {e}"),
+            DispatchError::Dacl { error, .. } => write!(f, "Failed to apply DACL ACEs: {error}"),
             DispatchError::Sid(e) => write!(f, "Failed to derive AppContainer SID: {e}"),
         }
     }
@@ -119,12 +180,6 @@ impl std::error::Error for DispatchError {}
 impl From<FallbackError> for DispatchError {
     fn from(e: FallbackError) -> Self {
         DispatchError::Fallback(e)
-    }
-}
-
-impl From<DaclError> for DispatchError {
-    fn from(e: DaclError) -> Self {
-        DispatchError::Dacl(e)
     }
 }
 
@@ -143,14 +198,97 @@ fn paths_to_pathbufs(paths: &[String]) -> Vec<PathBuf> {
     paths.iter().map(PathBuf::from).collect()
 }
 
+/// Access masks that mirror what
+/// `DaclManager::grant_appcontainer_access` stamps. Kept here (not
+/// imported from `fallback_detector`) because the filter is part of
+/// the dispatcher's apply-side contract; the detector has its own
+/// mirror that must match.
+const T3_RW_MASK: u32 = {
+    use windows::Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE};
+    FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0
+};
+const T3_RO_MASK: u32 = {
+    use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+    FILE_GENERIC_READ.0
+};
+
+/// Drop paths that already grant `needed_mask` to the well-known
+/// AppContainer SIDs (`ALL APPLICATION PACKAGES`,
+/// `ALL RESTRICTED APPLICATION PACKAGES`, `Everyone`). Mirrors the
+/// same effective-access check that
+/// [`fallback_detector::appcontainer_already_grants`] performs for
+/// the `WRITE_DAC` precheck.
+fn filter_paths_needing_grant(paths: Vec<PathBuf>, needed_mask: u32) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .filter(|p| !fallback_detector::appcontainer_already_grants(p, needed_mask))
+        .collect()
+}
+
+/// Wrap a `DaclError` together with any retained-entry warnings from the
+/// manager whose apply failed. Called immediately before `mgr` goes out
+/// of scope (which triggers `restore()` via Drop) so we capture the
+/// apply-time warnings, not whatever `restore()` itself accumulates
+/// while unwinding.
+fn dacl_err(mgr: &DaclManager, error: DaclError) -> DispatchError {
+    DispatchError::Dacl {
+        error,
+        warnings: mgr.warnings().to_vec(),
+    }
+}
+
+/// Build the deny-only DACL manager used by T1 and T2 when
+/// `denied_paths` is non-empty. Returns `Ok(None)` when no DACL work is
+/// required.
+fn build_deny_only_dacl(
+    sid: &str,
+    denied: &[PathBuf],
+) -> Result<Option<DaclManager>, DispatchError> {
+    if denied.is_empty() {
+        return Ok(None);
+    }
+    let mut mgr = DaclManager::new().map_err(|e| DispatchError::Dacl {
+        error: e,
+        warnings: Vec::new(),
+    })?;
+    if let Err(e) = mgr.add_deny_aces(sid, denied) {
+        return Err(dacl_err(&mgr, e));
+    }
+    Ok(Some(mgr))
+}
+
+/// Build the grant + (optional) deny DACL manager used by T3. T3 always
+/// returns a `DaclManager` because grants are mandatory; if grants
+/// succeed and deny fails, the manager's `Drop` rolls back the grants.
+fn build_t3_dacl(
+    sid: &str,
+    readwrite: &[PathBuf],
+    readonly: &[PathBuf],
+    denied: &[PathBuf],
+) -> Result<DaclManager, DispatchError> {
+    let mut mgr = DaclManager::new().map_err(|e| DispatchError::Dacl {
+        error: e,
+        warnings: Vec::new(),
+    })?;
+    if let Err(e) = mgr.grant_appcontainer_access(sid, readwrite, readonly) {
+        return Err(dacl_err(&mgr, e));
+    }
+    if !denied.is_empty() {
+        if let Err(e) = mgr.add_deny_aces(sid, denied) {
+            return Err(dacl_err(&mgr, e));
+        }
+    }
+    Ok(mgr)
+}
+
 /// Build a runner with appropriate DACL augmentation for the
 /// BaseContainer-preferred path. The caller is responsible for the explicit
 /// (no-fallback) AppContainer path.
 ///
 /// On success the returned [`Dispatched`] contains a runner ready to
 /// execute and (when applicable) a [`DaclManager`] that has already
-/// applied its ACEs. The caller MUST keep `dacl_manager` alive through the
-/// run.
+/// applied its ACEs. Use [`Dispatched::into_runner_and_guard`] to
+/// extract both; the manager MUST stay alive through the run.
 pub fn dispatch_with_fallback(request: &CodexRequest) -> Result<Dispatched, DispatchError> {
     let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
 
@@ -171,17 +309,16 @@ pub fn dispatch_with_fallback(request: &CodexRequest) -> Result<Dispatched, Disp
             // and only when `deniedPaths` is non-empty. Allocate the
             // path Vec and derive the SID inside that branch so the
             // common no-deny case skips both costs.
-            if request.policy.denied_paths.is_empty() {
+            let denied = paths_to_pathbufs(&request.policy.denied_paths);
+            if denied.is_empty() {
                 let runner: Box<dyn ScriptRunner> = Box::new(
                     AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs),
                 );
                 (runner, None)
             } else {
-                let denied = paths_to_pathbufs(&request.policy.denied_paths);
                 let sid =
                     derive_sid_string(&container_name(request)).map_err(DispatchError::Sid)?;
-                let mut mgr = DaclManager::new()?;
-                mgr.add_deny_aces(&sid, &denied)?;
+                let mgr = build_deny_only_dacl(&sid, &denied)?;
                 // Hand the derived SID string to the runner so it does
                 // not re-run `ConvertSidToStringSidW` for the firewall
                 // principal-id lookup.
@@ -191,22 +328,34 @@ pub fn dispatch_with_fallback(request: &CodexRequest) -> Result<Dispatched, Disp
                         sid,
                     ),
                 );
-                (runner, Some(mgr))
+                (runner, mgr)
             }
         }
         IsolationTier::AppContainerDacl => {
             // T3 always stamps grant ACEs (for readwrite/readonly paths)
             // and optionally deny ACEs. Allocate per-arm so T1/T2 don't
             // pay the cost.
-            let readwrite = paths_to_pathbufs(&request.policy.readwrite_paths);
-            let readonly = paths_to_pathbufs(&request.policy.readonly_paths);
+            //
+            // Skip per-run grant ACEs on paths where the well-known
+            // AppContainer SIDs already grant the equivalent access.
+            // `fallback_detector::detect` performs the same effective-
+            // access check up front so it can skip the `WRITE_DAC`
+            // requirement; this filter is the matching application
+            // side so we don't try (and fail) to stamp a redundant
+            // ACE on a system path the user doesn't own. Denied paths
+            // are not filtered — DENY ACEs are about subtracting
+            // access, which well-known group grants can't do.
+            let readwrite = filter_paths_needing_grant(
+                paths_to_pathbufs(&request.policy.readwrite_paths),
+                T3_RW_MASK,
+            );
+            let readonly = filter_paths_needing_grant(
+                paths_to_pathbufs(&request.policy.readonly_paths),
+                T3_RO_MASK,
+            );
             let denied = paths_to_pathbufs(&request.policy.denied_paths);
             let sid = derive_sid_string(&container_name(request)).map_err(DispatchError::Sid)?;
-            let mut mgr = DaclManager::new()?;
-            mgr.grant_appcontainer_access(&sid, &readwrite, &readonly)?;
-            if !denied.is_empty() {
-                mgr.add_deny_aces(&sid, &denied)?;
-            }
+            let mgr = build_t3_dacl(&sid, &readwrite, &readonly, &denied)?;
             let runner: Box<dyn ScriptRunner> = Box::new(
                 AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
                     FilesystemMode::Dacl,
@@ -234,7 +383,7 @@ mod tests {
     // a dispatcher test and a fallback-detector test running on
     // different threads could each mutate `MXC_FORCE_TIER` under
     // independent locks and race.
-    use crate::test_env::ForceTierGuard;
+    use crate::test_env::{ForceTierGuard, ENV_LOCK};
 
     fn test_request(policy: ContainerPolicy) -> CodexRequest {
         CodexRequest {
@@ -268,7 +417,7 @@ mod tests {
         let d = dispatch_with_fallback(&req).expect("T1 dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
         assert!(
-            d.dacl_manager.is_none(),
+            !d.has_dacl_guard(),
             "T1 with no denied_paths should not allocate DaclManager"
         );
     }
@@ -286,7 +435,7 @@ mod tests {
         let d = dispatch_with_fallback(&req).expect("T1+deny dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
         assert!(
-            d.dacl_manager.is_none(),
+            !d.has_dacl_guard(),
             "T1 must not attach a DaclManager — BC handles deny natively"
         );
     }
@@ -297,7 +446,7 @@ mod tests {
         let req = test_request(policy);
         let d = dispatch_with_fallback(&req).expect("T2+deny dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
-        assert!(d.dacl_manager.is_some());
+        assert!(d.has_dacl_guard());
     }
     #[test]
     fn dispatch_t3_always_has_dacl() {
@@ -307,7 +456,7 @@ mod tests {
         let d = dispatch_with_fallback(&req).expect("T3 dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
         assert!(
-            d.dacl_manager.is_some(),
+            d.has_dacl_guard(),
             "T3 always requires DaclManager (grants applied)"
         );
     }
@@ -322,24 +471,6 @@ mod tests {
             res,
             Err(DispatchError::Fallback(FallbackError::DaclFallbackDisabled))
         ));
-    }
-    #[test]
-    fn dispatch_warnings_propagated() {
-        // Forced decisions don't synthesize warnings, so trigger the real
-        // chain with an unrecognized force value: the detector ignores it
-        // and walks the probe chain, accumulating "BaseContainer API not
-        // present" or "bfscfg.exe not present" warnings as appropriate on
-        // the test machine.
-        let _g = ForceTierGuard::set("not-a-real-tier");
-        let req = test_request(empty_policy());
-        // We can't predict the tier on arbitrary CI hardware, so just
-        // assert dispatch returns a Dispatched whose warnings field is
-        // honored from the decision.
-        let d = dispatch_with_fallback(&req).expect("real chain on empty policy");
-        // Warnings vector is present (possibly empty if we got T1 on a
-        // BC-capable machine). Just assert it was forwarded from the
-        // decision — the type guarantees this.
-        let _ = d.warnings.len();
     }
 
     #[test]
@@ -359,17 +490,124 @@ mod tests {
         assert!(format!("{s}").contains("AppContainer SID"));
     }
 
+    /// `DispatchError::Dacl { error, warnings }` is the shape consumers
+    /// (SDK envelope, error formatters) depend on. Force an actual
+    /// apply failure by passing a non-existent path through
+    /// `build_deny_only_dacl` — `apply_one` -> `canonicalize_local`
+    /// fails with `io::Error` rooted at the missing path. The
+    /// resulting `DispatchError::Dacl` must:
+    ///   - be the `Dacl` variant (not `Fallback`),
+    ///   - carry a `warnings: Vec<String>` (its presence/empty-or-not
+    ///     is the documented contract; populated entries are added
+    ///     mid-multi-path runs),
+    ///   - format with a message that mentions the offending path
+    ///     via its inner `DaclError`.
     #[test]
-    fn dispatch_t1_runs_trivial_command_when_bc_present() {
+    fn dispatch_error_dacl_variant_shape_on_apply_failure() {
+        use crate::test_env::ScopedStateDir;
+        let _scope = ScopedStateDir::new();
+
+        // Construct a path that is guaranteed not to exist. Using a
+        // tempdir + unique suffix keeps the test resilient against
+        // any pre-existing junk in %TEMP%.
+        let nonexistent = std::env::temp_dir()
+            .join(format!("mxc-dispatcher-error-shape-{}", std::process::id()))
+            .join("does-not-exist");
+        let err = build_deny_only_dacl("S-1-1-0", std::slice::from_ref(&nonexistent))
+            .expect_err("non-existent path should fail apply");
+        match err {
+            DispatchError::Dacl { error, warnings } => {
+                // Shape contract: warnings is Vec<String> (possibly
+                // empty for a first-path apply failure). Every entry,
+                // when present, is non-empty.
+                for w in &warnings {
+                    assert!(!w.is_empty(), "warning entries must be non-empty");
+                }
+                // Inner error references the offending path. The
+                // canonicalize failure may surface as either
+                // `DaclError::Win32` or another path-bearing variant;
+                // both must serialize to a message mentioning the path.
+                let s = format!("{error}");
+                assert!(
+                    s.contains("does-not-exist"),
+                    "inner DaclError message should mention offending path: {s}"
+                );
+            }
+            other => panic!("expected DispatchError::Dacl, got: {other:?}"),
+        }
+    }
+
+    /// `filter_paths_needing_grant` is the per-path side of the
+    /// `ce7713d` optimization ("skip per-run ACE when AC SID already
+    /// has access"). Direct exercise: stamp an Everyone (S-1-1-0)
+    /// grant on a temp dir — Everyone is in every AppContainer
+    /// token's well-known-SID set — and assert
+    /// `filter_paths_needing_grant` drops the path. A tempdir without
+    /// any stamp must survive the filter because %TEMP%'s shadow
+    /// ACLs do not grant the well-known AC SIDs `T3_RW_MASK`.
+    #[test]
+    fn filter_paths_needing_grant_drops_well_known_grant() {
+        use crate::test_env::ScopedStateDir;
+        let _scope = ScopedStateDir::new();
+        let td_grant = tempfile::tempdir().expect("temp dir grant");
+        let td_no_grant = tempfile::tempdir().expect("temp dir no-grant");
+
+        // Stamp an Everyone grant on td_grant via `grant_appcontainer_access`
+        // and persist it for the duration of the test by holding the
+        // manager. Drop at end of scope rolls it back.
+        let mut mgr = crate::filesystem_dacl::DaclManager::new().expect("dacl mgr");
+        mgr.grant_appcontainer_access(
+            "S-1-1-0",
+            std::slice::from_ref(&td_grant.path().to_path_buf()),
+            &[],
+        )
+        .expect("grant");
+
+        let input = vec![
+            td_grant.path().to_path_buf(),
+            td_no_grant.path().to_path_buf(),
+        ];
+        let kept = filter_paths_needing_grant(input, T3_RW_MASK);
+        assert!(
+            !kept.iter().any(|p| p == td_grant.path()),
+            "grant-stamped path should be filtered out: kept={kept:?}"
+        );
+        assert!(
+            kept.iter().any(|p| p == td_no_grant.path()),
+            "non-stamped path should survive the filter: kept={kept:?}"
+        );
+
+        // Best-effort cleanup; Drop will also run restore().
+        mgr.restore().ok();
+    }
+
+    #[test]
+    fn dispatch_t1_naturally_selected_when_bc_present() {
         // Natural T1 selection (no force). Skip on systems where the
-        // BaseContainer API isn't present.
+        // BaseContainer API isn't present. The test asserts only that
+        // the dispatcher resolves to T1 — it does not actually exec
+        // because spinning up BC requires kernel support and fights
+        // the test runner's stdio capture.
+        //
+        // Acquire ENV_LOCK and clear MXC_FORCE_TIER for the duration of
+        // the test so a concurrent `ForceTierGuard`-using test (in this
+        // module or `fallback_detector::tests`) cannot leak a forced
+        // value into our natural-detection call. Without the lock the
+        // probe chain inside `detect` can observe a sibling test's
+        // `set_var("MXC_FORCE_TIER", ...)` and short-circuit to a
+        // non-T1 tier.
+        let _lock = {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            // SAFETY: env-var mutation in tests; serialized by ENV_LOCK.
+            unsafe {
+                std::env::remove_var("MXC_FORCE_TIER");
+            }
+            lock
+        };
         if !crate::fallback_detector::is_base_container_api_present() {
             eprintln!("skipping: BaseContainer API not present on this machine");
             return;
         }
-        // Just exercise dispatcher construction; we don't actually exec
-        // here because spinning up BC requires kernel support and fights
-        // the test runner's stdio capture.
         let req = test_request(empty_policy());
         let d = dispatch_with_fallback(&req).expect("dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));

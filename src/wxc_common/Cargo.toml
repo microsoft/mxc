@@ -11,6 +11,12 @@ isolation_session = [
     "dep:windows-collections",
 ]
 microvm = ["dep:nanvix_common"]
+# Compile-time gate for Tier 2 (AppContainer + BFS via bfscfg.exe).
+# OFF by default: production wxc-exec cannot resolve or spawn bfscfg.exe,
+# and `fallback_detector::detect` naturally falls through T2 to T3 because
+# `find_bfscfg_exe` returns `Ok(None)`. Enable explicitly on hosts where
+# bfscfg.exe is known safe to invoke.
+tier2_bfs = []
 
 [dependencies]
 serde = { workspace = true }

@@ -66,6 +66,7 @@ use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -77,15 +78,16 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Security::Authorization::{
     ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW,
-    EXPLICIT_ACCESS_W, GRANT_ACCESS, REVOKE_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID,
-    TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 // DENY_ACCESS lives on ACCESS_MODE in windows 0.62
 use windows::Win32::Security::Authorization::DENY_ACCESS;
 use windows::Win32::Security::{
-    AclSizeInformation, EqualSid, GetAce, GetAclInformation, IsValidSid, ACCESS_ALLOWED_ACE,
-    ACCESS_DENIED_ACE, ACE_FLAGS, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, CONTAINER_INHERIT_ACE,
-    DACL_SECURITY_INFORMATION, INHERITED_ACE, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID,
+    AclSizeInformation, AddAccessAllowedAceEx, AddAccessDeniedAceEx, AddAce, EqualSid, GetAce,
+    GetAclInformation, GetLengthSid, InitializeAcl, IsValidSid, ACCESS_ALLOWED_ACE,
+    ACCESS_DENIED_ACE, ACE_FLAGS, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION,
+    CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, INHERITED_ACE, OBJECT_INHERIT_ACE,
+    PSECURITY_DESCRIPTOR, PSID,
 };
 use windows::Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE};
 use windows::Win32::System::Threading::{
@@ -617,9 +619,46 @@ fn tmp_path_for(path: &Path) -> PathBuf {
 }
 
 fn read_state_file(path: &Path) -> Result<StateFile, DaclError> {
-    let bytes = fs::read(path)?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| DaclError::StateParse(format!("{}: {e}", path.display())))
+    // Retry on ERROR_SHARING_VIOLATION (Win32 32). A concurrent writer
+    // mid `<path>.tmp` → `<path>` rename briefly holds the destination
+    // open exclusively. Without retry the caller's parse-fallback path
+    // would quarantine a perfectly-good state file to `.corrupt`,
+    // permanently divorcing a live process from its real ACEs.
+    //
+    // ERROR_LOCK_VIOLATION (33) is also retried — antivirus on-access
+    // scanners sometimes surface it transiently when an unrelated
+    // process is still in the open-write-close window.
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    const ATTEMPTS: u32 = 3;
+    let mut last_err: Option<io::Error> = None;
+    for i in 0..ATTEMPTS {
+        match fs::read(path) {
+            Ok(bytes) => {
+                return serde_json::from_slice(&bytes)
+                    .map_err(|e| DaclError::StateParse(format!("{}: {e}", path.display())));
+            }
+            Err(e) => {
+                let transient = matches!(
+                    e.raw_os_error(),
+                    Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+                );
+                if !transient {
+                    return Err(e.into());
+                }
+                last_err = Some(e);
+                if i + 1 < ATTEMPTS {
+                    // 20ms, 40ms — short enough to be invisible to
+                    // human-driven scenarios; long enough for a
+                    // typical rename to complete.
+                    std::thread::sleep(std::time::Duration::from_millis(20u64 << i));
+                }
+            }
+        }
+    }
+    Err(DaclError::StateIo(last_err.unwrap_or_else(|| {
+        io::Error::other("read_state_file: retries exhausted on transient error")
+    })))
 }
 
 fn generate_run_id() -> String {
@@ -763,6 +802,38 @@ impl Drop for OwnedSid {
             }
         }
     }
+}
+
+// SAFETY: `OwnedSid` wraps a `LocalAlloc`'d PSID whose underlying SID
+// bytes are immutable after `parse()` returns (`ConvertStringSidToSidW`
+// writes once, then we only ever read via `EqualSid` / `GetLengthSid`,
+// both of which are documented reentrant). The pointer is never aliased
+// to another writer. We use this purely for the process-lifetime SID
+// cache in [`well_known_ac_sids`]; a per-stack OwnedSid still moves
+// across thread boundaries safely because we never read past the
+// allocation.
+unsafe impl Send for OwnedSid {}
+unsafe impl Sync for OwnedSid {}
+
+/// Process-wide cache of the three well-known AppContainer-membership
+/// SIDs. `compute_appcontainer_effective_access` used to re-parse these
+/// from string form on every invocation — three `ConvertStringSidToSidW`
+/// + `LocalAlloc` + matching `LocalFree` per call.
+///
+/// The cache is read-only after first init; OnceLock guarantees the
+/// init closure runs exactly once. The cached `OwnedSid`s deliberately
+/// live for the process lifetime (no `Drop` ever runs on them) — the
+/// caller-side hot path becomes a pointer copy.
+fn well_known_ac_sids() -> &'static [OwnedSid] {
+    static CACHE: OnceLock<Vec<OwnedSid>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            WELL_KNOWN_AC_SIDS
+                .iter()
+                .map(|s| OwnedSid::parse(s).expect("well-known AC SID must parse"))
+                .collect()
+        })
+        .as_slice()
 }
 
 // -------------------------------------------------------------------------
@@ -1063,220 +1134,31 @@ pub(crate) fn revoke_specific_aces_for_sid(
         return Ok(0);
     }
 
-    let sid = OwnedSid::parse(sid_str)?;
-    let path_w = wide(path);
-    let object_name = PCWSTR(path_w.as_ptr());
-
-    let mut existing_dacl: *mut ACL = ptr::null_mut();
-    let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(ptr::null_mut());
-    let rc = unsafe {
-        GetNamedSecurityInfoW(
-            object_name,
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            Some(&mut existing_dacl),
-            None,
-            &mut sd,
-        )
-    };
-    if rc != ERROR_SUCCESS {
-        return Err(win32_err(path, "GetNamedSecurityInfoW", rc));
-    }
-    if existing_dacl.is_null() {
-        unsafe {
-            let _ = LocalFree(Some(HLOCAL(sd.0)));
-        }
-        // Scan said there were matches; this would imply a TOCTOU
-        // where the DACL was cleared between scan and revoke. Either
-        // way our target state (no matching ACE) is already true.
-        return Ok(removed);
-    }
-
-    let trustee = trustee_for(&sid);
-    let mut batch: Vec<EXPLICIT_ACCESS_W> = Vec::with_capacity(keeps.len() + 1);
-    batch.push(EXPLICIT_ACCESS_W {
-        grfAccessPermissions: 0,
-        grfAccessMode: REVOKE_ACCESS,
-        grfInheritance: ACE_FLAGS(0),
-        Trustee: trustee,
-    });
-    for k in &keeps {
-        let mode = match k.ace_type {
-            AceType::Allow => GRANT_ACCESS,
-            AceType::Deny => DENY_ACCESS,
-        };
-        batch.push(EXPLICIT_ACCESS_W {
-            grfAccessPermissions: k.access_mask,
-            grfAccessMode: mode,
-            grfInheritance: ACE_FLAGS(k.inherit_flags as u32),
-            Trustee: trustee,
-        });
-    }
-
-    let mut new_dacl: *mut ACL = ptr::null_mut();
-    let rc = unsafe {
-        SetEntriesInAclW(
-            Some(&batch),
-            Some(existing_dacl as *const ACL),
-            &mut new_dacl,
-        )
-    };
-    if rc != ERROR_SUCCESS {
-        unsafe {
-            let _ = LocalFree(Some(HLOCAL(sd.0)));
-        }
-        return Err(win32_err(path, "SetEntriesInAclW", rc));
-    }
-
-    let rc = unsafe {
-        SetNamedSecurityInfoW(
-            object_name,
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            Some(new_dacl as *const ACL),
-            None,
-        )
-    };
-
-    unsafe {
-        if !new_dacl.is_null() {
-            let _ = LocalFree(Some(HLOCAL(new_dacl as *mut c_void)));
-        }
-        let _ = LocalFree(Some(HLOCAL(sd.0)));
-    }
-
-    if rc != ERROR_SUCCESS {
-        if rc.0 == 5 {
-            return Err(DaclError::WriteDacDenied {
-                path: path.to_path_buf(),
-                reason: format!("SetNamedSecurityInfoW: {rc:?}"),
-            });
-        }
-        return Err(win32_err(path, "SetNamedSecurityInfoW", rc));
-    }
-
+    // Delegate to the manual-rebuild helper. Same reason as
+    // `restore_one`: `SetEntriesInAclW(REVOKE_ACCESS)` doesn't
+    // reliably remove explicit DENY ACEs on Windows 11 25H2, so we
+    // rebuild the DACL by hand.
+    replace_explicit_aces_for_sid(path, sid_str, &keeps)?;
     Ok(removed)
 }
 
 /// Restore the target's DACL to its pre-apply state by:
 /// 1. acquiring the per-path mutex,
-/// 2. issuing a single `SetEntriesInAclW` call carrying
-///    `REVOKE_ACCESS` for our SID followed by one `GRANT_ACCESS` or
-///    `DENY_ACCESS` entry per captured [`PriorAce`].
+/// 2. delegating to [`replace_explicit_aces_for_sid`], which removes
+///    every explicit ACE for our SID and re-adds the captured prior
+///    entries.
 ///
-/// `REVOKE_ACCESS` strips **all** explicit ACEs (allow and deny) for
-/// the given trustee from the input DACL, which atomically removes
-/// our contribution regardless of whether it landed as a separate ACE
-/// or got merged into a pre-existing one. The subsequent
-/// `GRANT`/`DENY` entries replay the original explicit ACEs verbatim.
+/// We intentionally do **not** use `SetEntriesInAclW(REVOKE_ACCESS)`
+/// here — on Windows 11 25H2 it fails to remove explicit
+/// `ACCESS_DENIED` ACEs (see `deny_round_trip_leaves_no_residue`).
+/// Manual ACL surgery via [`replace_explicit_aces_for_sid`] is the
+/// reliable path.
 ///
 /// Returns `Ok(Some(warning))` for idempotent no-ops (e.g. the target
 /// had no DACL); `Ok(None)` on a fully applied restore.
 fn restore_one(entry: &AppliedAce) -> Result<Option<String>, DaclError> {
     let _guard = PathMutexGuard::acquire(&entry.canonical_path)?;
-    let sid = OwnedSid::parse(&entry.sid_string)?;
-
-    let path_w = wide(&entry.canonical_path);
-    let object_name = PCWSTR(path_w.as_ptr());
-
-    let mut existing_dacl: *mut ACL = ptr::null_mut();
-    let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(ptr::null_mut());
-    let rc = unsafe {
-        GetNamedSecurityInfoW(
-            object_name,
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            Some(&mut existing_dacl),
-            None,
-            &mut sd,
-        )
-    };
-    if rc != ERROR_SUCCESS {
-        return Err(win32_err(
-            &entry.canonical_path,
-            "GetNamedSecurityInfoW",
-            rc,
-        ));
-    }
-    if existing_dacl.is_null() {
-        unsafe {
-            let _ = LocalFree(Some(HLOCAL(sd.0)));
-        }
-        return Ok(Some(format!(
-            "no DACL on {} during restore",
-            entry.canonical_path.display()
-        )));
-    }
-
-    // Build the EXPLICIT_ACCESS_W batch: REVOKE first, then regrant
-    // each prior entry. All share the same trustee.
-    let trustee = trustee_for(&sid);
-    let mut batch: Vec<EXPLICIT_ACCESS_W> = Vec::with_capacity(entry.prior_state.len() + 1);
-    batch.push(EXPLICIT_ACCESS_W {
-        grfAccessPermissions: 0,
-        grfAccessMode: REVOKE_ACCESS,
-        grfInheritance: ACE_FLAGS(0),
-        Trustee: trustee,
-    });
-    for prior in &entry.prior_state {
-        let mode = match prior.ace_type {
-            AceType::Allow => GRANT_ACCESS,
-            AceType::Deny => DENY_ACCESS,
-        };
-        batch.push(EXPLICIT_ACCESS_W {
-            grfAccessPermissions: prior.access_mask,
-            grfAccessMode: mode,
-            grfInheritance: ACE_FLAGS(prior.inherit_flags as u32),
-            Trustee: trustee,
-        });
-    }
-
-    let mut new_dacl: *mut ACL = ptr::null_mut();
-    let rc = unsafe {
-        SetEntriesInAclW(
-            Some(&batch),
-            Some(existing_dacl as *const ACL),
-            &mut new_dacl,
-        )
-    };
-    if rc != ERROR_SUCCESS {
-        unsafe {
-            let _ = LocalFree(Some(HLOCAL(sd.0)));
-        }
-        return Err(win32_err(&entry.canonical_path, "SetEntriesInAclW", rc));
-    }
-
-    let rc = unsafe {
-        SetNamedSecurityInfoW(
-            object_name,
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            Some(new_dacl as *const ACL),
-            None,
-        )
-    };
-    unsafe {
-        if !new_dacl.is_null() {
-            let _ = LocalFree(Some(HLOCAL(new_dacl as *mut c_void)));
-        }
-        let _ = LocalFree(Some(HLOCAL(sd.0)));
-    }
-
-    if rc != ERROR_SUCCESS {
-        return Err(win32_err(
-            &entry.canonical_path,
-            "SetNamedSecurityInfoW",
-            rc,
-        ));
-    }
+    replace_explicit_aces_for_sid(&entry.canonical_path, &entry.sid_string, &entry.prior_state)?;
     Ok(None)
 }
 
@@ -1373,6 +1255,393 @@ pub(crate) fn scan_explicit_aces_for_sid(
         let _ = LocalFree(Some(HLOCAL(sd.0)));
     }
     Ok(prior)
+}
+
+/// SIDs every AppContainer process token implicitly belongs to. A grant
+/// to any of these is observed by every AppContainer the OS launches.
+///
+/// - `S-1-15-2-1` — `APPLICATION PACKAGE AUTHORITY\ALL APPLICATION PACKAGES`.
+/// - `S-1-15-2-2` — `APPLICATION PACKAGE AUTHORITY\ALL RESTRICTED APPLICATION PACKAGES`.
+/// - `S-1-1-0`    — `Everyone`. AppContainer tokens DO retain Everyone;
+///   they strip `Authenticated Users` and `Users`, so we deliberately
+///   omit those.
+const WELL_KNOWN_AC_SIDS: &[&str] = &["S-1-15-2-1", "S-1-15-2-2", "S-1-1-0"];
+
+/// Walk the effective DACL on `path` and compute the access mask granted
+/// to a process whose only relevant identities are the well-known
+/// AppContainer-membership SIDs (`ALL APPLICATION PACKAGES`,
+/// `ALL RESTRICTED APPLICATION PACKAGES`, and `Everyone`). Inherited
+/// ACEs are included; per-container explicit grants on a specific
+/// AppContainer SID are NOT — the caller is presumably deciding
+/// whether such a grant is needed.
+///
+/// Walking is canonical: a `DENY` ACE matching one of these SIDs marks
+/// bits as denied, and subsequent `ALLOW` ACEs can only add bits that
+/// haven't been denied. This matches Windows' own access check for the
+/// ALLOW path.
+///
+/// Returns 0 when the DACL is empty / NULL.
+pub(crate) fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, DaclError> {
+    let well_known = well_known_ac_sids();
+
+    let path_w = wide(path);
+    let object_name = PCWSTR(path_w.as_ptr());
+    let mut dacl: *mut ACL = ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(ptr::null_mut());
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            object_name,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut dacl),
+            None,
+            &mut sd,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(win32_err(path, "GetNamedSecurityInfoW", rc));
+    }
+    if dacl.is_null() {
+        // NULL DACL means full access for everyone, but per Microsoft
+        // guidance we treat that as "trust nothing about it" and return
+        // 0 — the caller will fall back to WRITE_DAC + apply.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+        return Ok(0);
+    }
+
+    let mut info = ACL_SIZE_INFORMATION::default();
+    let info_sz = std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32;
+    let scan_res = unsafe {
+        GetAclInformation(
+            dacl,
+            &mut info as *mut _ as *mut c_void,
+            info_sz,
+            AclSizeInformation,
+        )
+    };
+    if let Err(e) = scan_res {
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+        return Err(win32_err_str(path, &format!("GetAclInformation: {e}")));
+    }
+
+    let mut allowed: u32 = 0;
+    let mut denied: u32 = 0;
+    for i in 0..info.AceCount {
+        let mut ace_ptr: *mut c_void = ptr::null_mut();
+        if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() {
+            continue;
+        }
+        let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+        let ace_type = match header.AceType {
+            0x00 => AceType::Allow,
+            0x01 => AceType::Deny,
+            _ => continue, // ignore object/compound/audit ACEs
+        };
+        let mask_and_sid = ace_ptr as *const ACCESS_ALLOWED_ACE;
+        let ace_mask = unsafe { (*mask_and_sid).Mask };
+        let ace_sid = PSID(unsafe { &(*mask_and_sid).SidStart } as *const _ as *mut c_void);
+        let matches = well_known
+            .iter()
+            .any(|s| unsafe { EqualSid(ace_sid, s.as_psid()).is_ok() });
+        if !matches {
+            continue;
+        }
+        match ace_type {
+            AceType::Deny => {
+                // Bits this ACE denies that haven't been definitively
+                // allowed yet become "denied" for the rest of the walk.
+                denied |= ace_mask & !allowed;
+            }
+            AceType::Allow => {
+                // Bits this ACE allows that haven't been denied yet
+                // become "allowed" for the rest of the walk.
+                allowed |= ace_mask & !denied;
+            }
+        }
+    }
+    // Keep the import live (ACCESS_DENIED_ACE shares prefix with
+    // ACCESS_ALLOWED_ACE; we cast both via the latter).
+    let _ = std::mem::size_of::<ACCESS_DENIED_ACE>();
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+    }
+    Ok(allowed)
+}
+
+/// Rebuild `path`'s DACL by dropping every explicit ACE whose trustee
+/// is `sid_str`, then re-appending `replay` ACEs (also for `sid_str`)
+/// in canonical order. Inherited ACEs and explicit ACEs for other
+/// trustees are preserved verbatim.
+///
+/// This exists because `SetEntriesInAclW` with `REVOKE_ACCESS` on
+/// Windows 11 25H2 **fails to remove explicit ACCESS_DENIED ACEs**
+/// from the target DACL (see `deny_round_trip_leaves_no_residue`
+/// regression test). The documented behaviour (REVOKE removes all
+/// trustee ACEs) does not match observed behaviour. We work around
+/// it by building a fresh ACL via `InitializeAcl` + `AddAce`, which
+/// gives us deterministic control over what survives.
+fn replace_explicit_aces_for_sid(
+    path: &Path,
+    sid_str: &str,
+    replay: &[PriorAce],
+) -> Result<(), DaclError> {
+    let sid = OwnedSid::parse(sid_str)?;
+    let path_w = wide(path);
+    let object_name = PCWSTR(path_w.as_ptr());
+
+    let mut existing_dacl: *mut ACL = ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(ptr::null_mut());
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            object_name,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut existing_dacl),
+            None,
+            &mut sd,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(win32_err(path, "GetNamedSecurityInfoW", rc));
+    }
+
+    let result = replace_explicit_aces_for_sid_inner(path, &sid, existing_dacl, replay);
+
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+    }
+    result.and_then(|new_acl_dwords| {
+        // `new_acl_dwords` is the freshly-built ACL buffer; we apply
+        // it via `SetNamedSecurityInfoW` outside the inner helper so
+        // the SD cleanup above can still run on the early-return path.
+        let new_acl_ptr = new_acl_dwords.as_ptr() as *const ACL;
+        let rc = unsafe {
+            SetNamedSecurityInfoW(
+                object_name,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(new_acl_ptr),
+                None,
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            if rc.0 == 5 {
+                return Err(DaclError::WriteDacDenied {
+                    path: path.to_path_buf(),
+                    reason: format!("SetNamedSecurityInfoW: {rc:?}"),
+                });
+            }
+            return Err(win32_err(path, "SetNamedSecurityInfoW", rc));
+        }
+        Ok(())
+    })
+}
+
+/// Canonical-order bucket for an ACE. Smaller bucket = earlier slot
+/// in the rebuilt DACL. Per MS guidance (`AddAce` docs / "Order of
+/// ACEs in a DACL"):
+///   0 — explicit ACCESS_DENIED (type 0x01)
+///   1 — explicit ACCESS_ALLOWED (type 0x00)
+///   2 — explicit other (object ACEs, audit, etc.)
+///   3 — inherited (any type, in original order)
+fn canonical_bucket(ace_type: u8, inherited: bool) -> u8 {
+    if inherited {
+        3
+    } else {
+        match ace_type {
+            0x01 => 0,
+            0x00 => 1,
+            _ => 2,
+        }
+    }
+}
+
+/// The pure-rebuild half of [`replace_explicit_aces_for_sid`]:
+/// walks the existing DACL, filters explicit ACEs for our SID, adds
+/// replay ACEs, and returns a `Vec<u32>` whose bytes are the new ACL
+/// (Vec<u32> guarantees 4-byte alignment, which `InitializeAcl`
+/// requires). Returns an empty vec if there is no work and the
+/// caller can short-circuit.
+fn replace_explicit_aces_for_sid_inner(
+    path: &Path,
+    sid: &OwnedSid,
+    existing_dacl: *mut ACL,
+    replay: &[PriorAce],
+) -> Result<Vec<u32>, DaclError> {
+    // Entries we will emit into the rebuilt ACL. Either a verbatim
+    // copy of an existing ACE (`Kept`) or one of the `replay` slice
+    // entries materialized via `AddAccessAllowed/DeniedAceEx`.
+    // `bucket` is the canonical-order sort key (see `canonical_bucket`).
+    enum Entry<'a> {
+        Kept {
+            ptr: *mut c_void,
+            size: u32,
+            bucket: u8,
+            order: u32,
+        },
+        Replay {
+            prior: &'a PriorAce,
+            bucket: u8,
+            order: u32,
+        },
+    }
+
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut keeps_bytes: u32 = 0;
+    let mut next_order: u32 = 0;
+
+    if !existing_dacl.is_null() {
+        let mut info = ACL_SIZE_INFORMATION::default();
+        let info_sz = std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32;
+        unsafe {
+            GetAclInformation(
+                existing_dacl,
+                &mut info as *mut _ as *mut c_void,
+                info_sz,
+                AclSizeInformation,
+            )
+            .map_err(|e| win32_err_str(path, &format!("GetAclInformation: {e}")))?;
+        }
+        let inherited_bit = INHERITED_ACE.0 as u8;
+        for i in 0..info.AceCount {
+            let mut ace_ptr: *mut c_void = ptr::null_mut();
+            if unsafe { GetAce(existing_dacl, i, &mut ace_ptr) }.is_err() {
+                continue;
+            }
+            let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+            let inherited = (header.AceFlags & inherited_bit) != 0;
+            let mut drop_it = false;
+            if !inherited && (header.AceType == 0x00 || header.AceType == 0x01) {
+                // ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE share the
+                // mask/SID layout. The SID immediately follows the
+                // mask via the `SidStart` inline field.
+                let ace_struct = ace_ptr as *const ACCESS_ALLOWED_ACE;
+                let ace_sid = PSID(unsafe { &(*ace_struct).SidStart } as *const _ as *mut c_void);
+                if unsafe { EqualSid(ace_sid, sid.as_psid()).is_ok() } {
+                    drop_it = true;
+                }
+            }
+            if !drop_it {
+                entries.push(Entry::Kept {
+                    ptr: ace_ptr,
+                    size: header.AceSize as u32,
+                    bucket: canonical_bucket(header.AceType, inherited),
+                    order: next_order,
+                });
+                next_order += 1;
+                keeps_bytes += header.AceSize as u32;
+            }
+        }
+    }
+
+    // Replay ACEs are by construction explicit (non-inherited) — we
+    // only persist explicit prior ACEs for our SID. Bucket them as
+    // explicit-deny / explicit-allow accordingly.
+    for prior in replay {
+        let ace_type_byte = match prior.ace_type {
+            AceType::Allow => 0x00u8,
+            AceType::Deny => 0x01u8,
+        };
+        entries.push(Entry::Replay {
+            prior,
+            bucket: canonical_bucket(ace_type_byte, false),
+            order: next_order,
+        });
+        next_order += 1;
+    }
+
+    // Stable sort by (bucket, original order). Stability preserves the
+    // original DACL ordering inside each bucket so byte layout doesn't
+    // shuffle inherited or unrelated explicit ACEs.
+    entries.sort_by_key(|e| match e {
+        Entry::Kept { bucket, order, .. } | Entry::Replay { bucket, order, .. } => {
+            (*bucket, *order)
+        }
+    });
+
+    // Per-replay-ACE byte size: ACE_HEADER (4) + ACCESS_MASK (4) + SID
+    // bytes. `ACCESS_ALLOWED_ACE`'s `SidStart` field is a `u32`
+    // inline DWORD that's the first 4 bytes of the SID, so we add
+    // `GetLengthSid` to that — but we also include the inline DWORD
+    // size, then subtract the trailing padding. Simpler: ACE header
+    // is 4 bytes; mask is 4; SID is `GetLengthSid` bytes — total is
+    // 8 + GetLengthSid(sid).
+    let sid_len: u32 = unsafe { GetLengthSid(sid.as_psid()) };
+    let per_replay_size: u32 = 8 + sid_len;
+    let replay_bytes: u32 = per_replay_size.saturating_mul(replay.len() as u32);
+
+    let mut new_acl_size: u32 = std::mem::size_of::<ACL>() as u32 + keeps_bytes + replay_bytes;
+    // ACL must be DWORD-aligned and ACL_SIZE_INFORMATION reports
+    // sizes in multiples of `sizeof(DWORD)`. Round up to be safe.
+    new_acl_size = (new_acl_size + 3) & !3;
+    // InitializeAcl rejects a buffer too small to hold even an empty
+    // ACL header (the documented minimum is `sizeof(ACL)`). The
+    // arithmetic above already guarantees this, but the safety net
+    // is cheap.
+    let min_acl_size = std::mem::size_of::<ACL>() as u32;
+    if new_acl_size < min_acl_size {
+        new_acl_size = min_acl_size;
+    }
+
+    // Vec<u32> guarantees 4-byte alignment. The size we pass to
+    // InitializeAcl is in bytes.
+    let dwords = (new_acl_size as usize).div_ceil(4);
+    let mut new_acl_buf: Vec<u32> = vec![0u32; dwords];
+    let new_acl_ptr = new_acl_buf.as_mut_ptr() as *mut ACL;
+
+    unsafe {
+        InitializeAcl(new_acl_ptr, new_acl_size, ACL_REVISION)
+            .map_err(|e| win32_err_str(path, &format!("InitializeAcl: {e}")))?;
+    }
+
+    // Emit ACEs in canonical (bucket-sorted) order. Both `AddAce` and
+    // the typed `AddAccess{Allowed,Denied}AceEx` family append at the
+    // tail of the ACL (despite the latter's name, they do NOT
+    // canonicalize on insert), so we must drive the order ourselves.
+    for entry in &entries {
+        match entry {
+            Entry::Kept { ptr, size, .. } => unsafe {
+                AddAce(new_acl_ptr, ACL_REVISION, u32::MAX, *ptr, *size)
+                    .map_err(|e| win32_err_str(path, &format!("AddAce(keep): {e}")))?;
+            },
+            Entry::Replay { prior, .. } => {
+                let flags = ACE_FLAGS(prior.inherit_flags as u32);
+                let res = unsafe {
+                    match prior.ace_type {
+                        AceType::Allow => AddAccessAllowedAceEx(
+                            new_acl_ptr,
+                            ACL_REVISION,
+                            flags,
+                            prior.access_mask,
+                            sid.as_psid(),
+                        ),
+                        AceType::Deny => AddAccessDeniedAceEx(
+                            new_acl_ptr,
+                            ACL_REVISION,
+                            flags,
+                            prior.access_mask,
+                            sid.as_psid(),
+                        ),
+                    }
+                };
+                res.map_err(|e| {
+                    win32_err_str(path, &format!("AddAccess{:?}AceEx: {e}", prior.ace_type))
+                })?;
+            }
+        }
+    }
+
+    Ok(new_acl_buf)
 }
 
 fn win32_err(path: &Path, op: &str, rc: WIN32_ERROR) -> DaclError {
@@ -1789,6 +2058,258 @@ mod tests {
         assert!(m.applied.is_empty());
     }
 
+    /// Apply a DENY ACE to a temp directory, restore, and assert the
+    /// path's DACL has no residual explicit ACEs for our SID. This
+    /// Walk every ACE in `path`'s DACL (regardless of trustee), returning
+    /// `(ace_type_byte, inherited)` tuples in DACL order. Used by canonical-
+    /// order assertions; replicates just enough of the existing scan to
+    /// see all ACEs, not just our SID's.
+    fn collect_full_dacl_order(path: &Path) -> Vec<(u8, bool)> {
+        let path_w = wide(path);
+        let object_name = PCWSTR(path_w.as_ptr());
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(ptr::null_mut());
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                object_name,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut dacl),
+                None,
+                &mut sd,
+            )
+        };
+        assert_eq!(rc, ERROR_SUCCESS, "GetNamedSecurityInfoW failed: {rc:?}");
+        let mut out: Vec<(u8, bool)> = Vec::new();
+        if !dacl.is_null() {
+            let mut info = ACL_SIZE_INFORMATION::default();
+            let info_sz = std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32;
+            unsafe {
+                GetAclInformation(
+                    dacl,
+                    &mut info as *mut _ as *mut c_void,
+                    info_sz,
+                    AclSizeInformation,
+                )
+                .expect("GetAclInformation");
+            }
+            let inherited_bit = INHERITED_ACE.0 as u8;
+            for i in 0..info.AceCount {
+                let mut ace_ptr: *mut c_void = ptr::null_mut();
+                if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() {
+                    continue;
+                }
+                let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+                let inherited = (header.AceFlags & inherited_bit) != 0;
+                out.push((header.AceType, inherited));
+            }
+        }
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+        out
+    }
+
+    /// Assert that `aces` (output of `collect_full_dacl_order`) is in
+    /// canonical order: no explicit ACE after any inherited ACE; no
+    /// explicit DENY (0x01) after any explicit ALLOW (0x00). Object/
+    /// audit ACEs (other AceType bytes) are tolerated but expected only
+    /// in the explicit-other bucket between explicit ALLOW and inherited.
+    fn assert_canonical_order(aces: &[(u8, bool)], label: &str) {
+        let mut saw_inherited = false;
+        let mut saw_explicit_allow = false;
+        for (i, (ty, inh)) in aces.iter().enumerate() {
+            if *inh {
+                saw_inherited = true;
+                continue;
+            }
+            assert!(
+                !saw_inherited,
+                "{label}: explicit ACE at index {i} appears AFTER an inherited ACE. order={aces:?}"
+            );
+            if *ty == 0x01 {
+                assert!(
+                    !saw_explicit_allow,
+                    "{label}: explicit DENY at index {i} appears AFTER an explicit ALLOW. order={aces:?}"
+                );
+            } else if *ty == 0x00 {
+                saw_explicit_allow = true;
+            }
+        }
+    }
+
+    /// Round-trip an explicit DENY through the surgical-ACL-rewrite
+    /// path and assert no residue (zero count drift) AND canonical
+    /// order at every observable step. Guards against:
+    ///   (1) `SetEntriesInAclW(REVOKE_ACCESS)` quirk on Windows 25H2
+    ///       where DENY ACEs survive a REVOKE; observed in the field
+    ///       via Win25H2Safe-Tests Phase 3 / Phase 4 "denied ACL
+    ///       restored" failures.
+    ///   (2) `replace_explicit_aces_for_sid_inner` emitting ACEs in
+    ///       non-canonical order, which Windows accepts but resolves
+    ///       per first-match — making a DENY-after-ALLOW silently
+    ///       resolve as ALLOW.
+    #[test]
+    fn deny_round_trip_leaves_no_residue() {
+        let _scope = ScopedStateDir::new();
+        let td = tempfile::tempdir().unwrap();
+        // Use a deterministic AppContainer-shaped SID so we can grep
+        // for it in the post-restore DACL. S-1-1-0 (Everyone) often
+        // appears via inheritance and would create false positives.
+        // S-1-15-2-1 (ALL APPLICATION PACKAGES) does NOT inherit
+        // onto a temp dir under %TEMP%, so any explicit ACE we see
+        // for it after restore is unambiguously residue from us.
+        let sid_str = "S-1-15-2-1";
+
+        // Capture the explicit-ACE count for `sid_str` before apply.
+        let before = scan_explicit_aces_for_sid(td.path(), sid_str).expect("scan before");
+        assert_canonical_order(&collect_full_dacl_order(td.path()), "before apply");
+
+        // First: apply an explicit ALLOW for our SID. This seeds the
+        // explicit-allow slot of the canonical layout.
+        let mut allow_mgr = DaclManager::new().unwrap();
+        allow_mgr
+            .grant_appcontainer_access(sid_str, std::slice::from_ref(&td.path().to_path_buf()), &[])
+            .unwrap();
+        assert_canonical_order(&collect_full_dacl_order(td.path()), "after ALLOW apply");
+
+        // Then: apply an explicit DENY for the same SID via a fresh
+        // manager. The DENY must land in the explicit-deny slot —
+        // BEFORE the existing explicit ALLOW — even though it's
+        // appended last by the rebuild logic. This is exactly the C1
+        // regression seam.
+        let mut deny_mgr = DaclManager::new().unwrap();
+        deny_mgr
+            .add_deny_aces(sid_str, std::slice::from_ref(&td.path().to_path_buf()))
+            .unwrap();
+        let mid_order = collect_full_dacl_order(td.path());
+        assert_canonical_order(&mid_order, "after DENY apply");
+
+        // After apply: at least one explicit ACE for our SID (the
+        // DENY and ALLOW we just added).
+        let mid = scan_explicit_aces_for_sid(td.path(), sid_str).expect("scan mid");
+        assert!(
+            mid.len() > before.len(),
+            "apply should have added explicit ACEs for {sid_str}: before={} mid={}",
+            before.len(),
+            mid.len()
+        );
+
+        // Restore in reverse order (last-in, first-out — what Drop
+        // would do).
+        deny_mgr.restore().unwrap();
+        assert!(deny_mgr.applied.is_empty());
+        assert_canonical_order(&collect_full_dacl_order(td.path()), "after DENY restore");
+
+        allow_mgr.restore().unwrap();
+        assert!(allow_mgr.applied.is_empty());
+
+        // After full restore: explicit-ACE count must match pre-apply
+        // and the DACL must still be canonical.
+        let after = scan_explicit_aces_for_sid(td.path(), sid_str).expect("scan after");
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "restore left {} explicit ACEs for {sid_str} (expected {}). Residue: {after:?}",
+            after.len(),
+            before.len()
+        );
+        assert_canonical_order(&collect_full_dacl_order(td.path()), "after full restore");
+    }
+
+    /// Pre-load a tempdir with N>16 unrelated explicit ACEs (each for
+    /// a distinct AC-family SID), then run an explicit DENY for a
+    /// separate SID through the surgical rewrite path. Asserts:
+    ///   1. every seeded ACE is preserved (the kept-pass copies them
+    ///      verbatim via `AddAce`).
+    ///   2. canonical order is restored (the new DENY lands BEFORE
+    ///      all the unrelated ALLOWs even though it was appended last
+    ///      to the rebuild list — this is the C1 regression seam).
+    ///   3. restore unwinds the DENY without disturbing any seeded
+    ///      ACE.
+    ///
+    /// Uses N=20 to ensure we exercise multi-ACL byte arithmetic
+    /// beyond any small-N short-circuit in `replace_explicit_aces_for_sid_inner`.
+    #[test]
+    fn replace_explicit_aces_preserves_unrelated_and_canonicalizes() {
+        let _scope = ScopedStateDir::new();
+        let td = tempfile::tempdir().unwrap();
+
+        // Seed N distinct AC-family SIDs as ALLOW grants. The
+        // `S-1-15-2-N` family parses to a valid PSID whether or not
+        // any package on the host actually owns that SID; the DACL
+        // accepts them as explicit ALLOW ACEs.
+        const N: u32 = 20;
+        let mut seed_managers: Vec<DaclManager> = Vec::new();
+        for i in 100..(100 + N) {
+            let sid = format!("S-1-15-2-{i}");
+            let mut m = DaclManager::new().unwrap();
+            m.grant_appcontainer_access(&sid, std::slice::from_ref(&td.path().to_path_buf()), &[])
+                .unwrap();
+            seed_managers.push(m);
+        }
+
+        // Snapshot per-SID explicit-ACE counts (each should be 1).
+        let baseline: Vec<(String, usize)> = (100..(100 + N))
+            .map(|i| {
+                let sid = format!("S-1-15-2-{i}");
+                let c = scan_explicit_aces_for_sid(td.path(), &sid).unwrap().len();
+                (sid, c)
+            })
+            .collect();
+        for (sid, c) in &baseline {
+            assert_eq!(*c, 1, "seeded SID {sid} should have 1 explicit ACE");
+        }
+
+        // Apply a DENY for a SID that is NOT one of the seeded grants,
+        // routing through `replace_explicit_aces_for_sid_inner` with
+        // 20 explicit "keep" ACEs in the existing DACL.
+        let our_sid = "S-1-15-2-9999";
+        let mut deny_mgr = DaclManager::new().unwrap();
+        deny_mgr
+            .add_deny_aces(our_sid, std::slice::from_ref(&td.path().to_path_buf()))
+            .unwrap();
+
+        // 1 + 2: every seeded ACE preserved, canonical order holds.
+        let mid_order = collect_full_dacl_order(td.path());
+        assert_canonical_order(&mid_order, "after N=20 keep + 1 deny");
+        for (sid, c) in &baseline {
+            let after = scan_explicit_aces_for_sid(td.path(), sid).unwrap().len();
+            assert_eq!(
+                after, *c,
+                "unrelated SID {sid} lost ACEs through rewrite: before={c} after={after}"
+            );
+        }
+        let our_mid = scan_explicit_aces_for_sid(td.path(), our_sid).unwrap();
+        assert!(
+            our_mid.iter().any(|p| p.ace_type == AceType::Deny),
+            "our DENY should be present in the rewritten DACL"
+        );
+
+        // 3: restore unwinds without disturbing seeded ACEs.
+        deny_mgr.restore().unwrap();
+        assert!(deny_mgr.applied.is_empty());
+        assert_canonical_order(&collect_full_dacl_order(td.path()), "after restore");
+        for (sid, c) in &baseline {
+            let after = scan_explicit_aces_for_sid(td.path(), sid).unwrap().len();
+            assert_eq!(after, *c, "restore disturbed seeded SID {sid}");
+        }
+        let our_after = scan_explicit_aces_for_sid(td.path(), our_sid).unwrap();
+        assert!(
+            our_after.is_empty(),
+            "restore left residue for our SID: {our_after:?}"
+        );
+
+        // Clean up seeded grants (Drop would also do this, but
+        // explicit restore lets us catch any panic before the
+        // tempdir disappears).
+        for mut m in seed_managers.into_iter().rev() {
+            m.restore().ok();
+        }
+    }
+
     #[test]
     fn inheritance_propagation() {
         let _scope = ScopedStateDir::new();
@@ -1940,5 +2461,67 @@ mod tests {
                 "expected NetworkPathRejected | PathNotFound | Win32 for UNC path, got: {other:?}"
             ),
         }
+    }
+
+    /// A fresh temp dir has only user / SYSTEM / admin ACEs — none for
+    /// the well-known AppContainer SIDs — so the effective AC access
+    /// must be exactly 0.
+    #[test]
+    fn effective_ac_access_empty_on_plain_temp_dir() {
+        let td = tempfile::tempdir().unwrap();
+        let access = compute_appcontainer_effective_access(td.path())
+            .expect("effective access should not error on a normal temp dir");
+        assert_eq!(
+            access, 0,
+            "fresh temp dir should have no AC-group grants, got mask 0x{access:08x}"
+        );
+    }
+
+    /// Stamp an explicit grant for `ALL APPLICATION PACKAGES`
+    /// (S-1-15-2-1) on a temp dir, then verify the effective-access
+    /// computation surfaces exactly that grant. Restores via the
+    /// `DaclManager` Drop.
+    #[test]
+    fn effective_ac_access_picks_up_explicit_all_app_packages_grant() {
+        let _scope = ScopedStateDir::new();
+        let td = tempfile::tempdir().unwrap();
+        let mask = FILE_GENERIC_READ.0; // RO grant; what installers typically stamp
+        {
+            let mut m = DaclManager::new().unwrap();
+            m.grant_appcontainer_access("S-1-15-2-1", &[], &[td.path().to_path_buf()])
+                .unwrap();
+            let observed = compute_appcontainer_effective_access(td.path())
+                .expect("effective access should not error after grant");
+            assert!(
+                observed & mask == mask,
+                "expected effective mask to cover at least 0x{mask:08x}, got 0x{observed:08x}"
+            );
+            // Restore happens on drop.
+        }
+        // After restore: back to zero.
+        let post = compute_appcontainer_effective_access(td.path())
+            .expect("effective access after restore");
+        assert_eq!(post, 0, "DaclManager Drop should have removed the ACE");
+    }
+
+    /// `S-1-5-32-545` (BUILTIN\Users) is not one of the SIDs every
+    /// AppContainer token belongs to, so a grant to Users must NOT
+    /// inflate the AppContainer's effective access.
+    #[test]
+    fn effective_ac_access_ignores_unrelated_sid_grants() {
+        let _scope = ScopedStateDir::new();
+        let td = tempfile::tempdir().unwrap();
+        // Adding via DaclManager requires write-DAC, which we have on a
+        // freshly-created temp dir. BUILTIN\Users (S-1-5-32-545) is on
+        // most user-owned paths anyway, but we set it explicitly so the
+        // test is robust to host-specific ACL layouts.
+        let mut m = DaclManager::new().unwrap();
+        m.grant_appcontainer_access("S-1-5-32-545", &[td.path().to_path_buf()], &[])
+            .unwrap();
+        let observed = compute_appcontainer_effective_access(td.path()).unwrap();
+        assert_eq!(
+            observed, 0,
+            "BUILTIN\\Users grant should not affect AC effective access, got 0x{observed:08x}"
+        );
     }
 }

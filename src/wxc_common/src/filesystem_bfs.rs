@@ -6,10 +6,13 @@ use std::path::PathBuf;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::ContainerPolicy;
+#[cfg(feature = "tier2_bfs")]
 use crate::process_util;
 
+#[cfg(feature = "tier2_bfs")]
 pub(crate) const BFSCFG_EXE: &str = "bfscfg.exe";
 const UNABLE_TO_PERFORM: &str = "Unable to perform policy operation";
+#[cfg(feature = "tier2_bfs")]
 const BFSCFG_TIMEOUT_MS: u32 = 10_000;
 
 /// Manages the BFS (Brokered File System) policy for an AppContainer.
@@ -177,50 +180,66 @@ impl FileSystemBfsManager {
     }
 
     fn run_bfscfg(&self, args: &[&str]) -> Result<String, WxcError> {
-        // Resolved at probe time; `configure` errors before we get here
-        // when this is `None`. The `remove_configuration` path also
-        // requires it via `configured = true`, which only flips after a
-        // successful `configure` (i.e. after a successful resolve).
-        let bfscfg_path = self.bfscfg_path.as_ref().ok_or_else(|| {
-            WxcError::FilesystemPolicy(
-                "bfscfg.exe path not resolved; refusing to invoke by bare name".to_string(),
-            )
-        })?;
-        let bfscfg_path_str = bfscfg_path.to_str().ok_or_else(|| {
-            WxcError::FilesystemPolicy(format!(
-                "bfscfg.exe path is not valid UTF-8: {}",
-                bfscfg_path.display()
+        // Defence-in-depth gate. The primary safety guarantee is in
+        // `fallback_detector::find_bfscfg_exe`, which returns `Ok(None)`
+        // when the `tier2_bfs` feature is off — so `configure()` errors
+        // out before reaching this method. The gate here ensures no
+        // future caller can reach the spawn site without flipping the
+        // feature.
+        #[cfg(not(feature = "tier2_bfs"))]
+        {
+            let _ = (self, args);
+            Err(WxcError::FilesystemPolicy(
+                "bfscfg.exe invocation refused: tier2_bfs feature is not enabled".to_string(),
             ))
-        })?;
-        let cmd_line = build_bfscfg_cmd_line(bfscfg_path_str, args);
-
-        // Pass `lpApplicationName = Some(bfscfg_path_str)` so Windows
-        // loads exactly this binary, bypassing the executable search
-        // order. This is the security-critical half of the absolute-
-        // path execution policy; the command-line argv[0] is purely
-        // cosmetic for the child.
-        let output = process_util::run_process_with_captured_output(
-            Some(bfscfg_path_str),
-            &cmd_line,
-            BFSCFG_TIMEOUT_MS,
-        )?;
-
-        let stdout = output.stdout;
-        let stderr = output.stderr;
-
-        // Only include stderr if the process failed (non-zero exit code)
-        if output.exit_code != 0 {
-            let mut combined = stdout;
-            if !stderr.is_empty() {
-                if !combined.is_empty() {
-                    combined.push('\n');
-                }
-                combined.push_str(&stderr);
-            }
-            return Ok(combined);
         }
+        #[cfg(feature = "tier2_bfs")]
+        {
+            // Resolved at probe time; `configure` errors before we get here
+            // when this is `None`. The `remove_configuration` path also
+            // requires it via `configured = true`, which only flips after a
+            // successful `configure` (i.e. after a successful resolve).
+            let bfscfg_path = self.bfscfg_path.as_ref().ok_or_else(|| {
+                WxcError::FilesystemPolicy(
+                    "bfscfg.exe path not resolved; refusing to invoke by bare name".to_string(),
+                )
+            })?;
+            let bfscfg_path_str = bfscfg_path.to_str().ok_or_else(|| {
+                WxcError::FilesystemPolicy(format!(
+                    "bfscfg.exe path is not valid UTF-8: {}",
+                    bfscfg_path.display()
+                ))
+            })?;
+            let cmd_line = build_bfscfg_cmd_line(bfscfg_path_str, args);
 
-        Ok(stdout)
+            // Pass `lpApplicationName = Some(bfscfg_path_str)` so Windows
+            // loads exactly this binary, bypassing the executable search
+            // order. This is the security-critical half of the absolute-
+            // path execution policy; the command-line argv[0] is purely
+            // cosmetic for the child.
+            let output = process_util::run_process_with_captured_output(
+                Some(bfscfg_path_str),
+                &cmd_line,
+                BFSCFG_TIMEOUT_MS,
+            )?;
+
+            let stdout = output.stdout;
+            let stderr = output.stderr;
+
+            // Only include stderr if the process failed (non-zero exit code)
+            if output.exit_code != 0 {
+                let mut combined = stdout;
+                if !stderr.is_empty() {
+                    if !combined.is_empty() {
+                        combined.push('\n');
+                    }
+                    combined.push_str(&stderr);
+                }
+                return Ok(combined);
+            }
+
+            Ok(stdout)
+        }
     }
 }
 
@@ -239,6 +258,7 @@ fn test_for_root_path(path: &str) -> bool {
 // Note that `lpApplicationName` (passed separately to `CreateProcessW`) is the authoritative
 // source for *which* binary executes; this command line is only what the child sees as its
 // argv. We still include the full absolute path here for tools that scrape it from logs.
+#[cfg(feature = "tier2_bfs")]
 fn build_bfscfg_cmd_line(exe_path: &str, args: &[&str]) -> String {
     let mut cmd_line = if exe_path.contains(' ') {
         let escaped = if exe_path.ends_with('\\') {
@@ -289,6 +309,9 @@ mod tests {
         assert!(!mgr.configured());
     }
 
+    // `build_bfscfg_cmd_line` only exists when the `tier2_bfs` feature
+    // is compiled in; its tests must be gated the same way.
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn test_build_cmd_line_quotes_args_with_spaces() {
         let cmd = build_bfscfg_cmd_line(
@@ -307,6 +330,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn test_build_cmd_line_no_quotes_without_spaces() {
         let cmd = build_bfscfg_cmd_line(
@@ -326,6 +350,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn test_build_cmd_line_trailing_backslash() {
         let cmd = build_bfscfg_cmd_line(
@@ -346,6 +371,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn test_build_cmd_line_path_with_spaces_and_trailing_backslash() {
         let cmd = build_bfscfg_cmd_line(
@@ -365,6 +391,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn test_build_cmd_line_quotes_exe_path_with_spaces() {
         // Unusual but legal: Windows installed under a path with spaces.

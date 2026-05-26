@@ -66,10 +66,18 @@ impl Drop for ForceTierGuard {
 }
 
 /// RAII guard for `MXC_BFSCFG_PATH`, mirroring [`ForceTierGuard`].
+///
+/// Only compiled in under the `tier2_bfs` feature, because the
+/// `MXC_BFSCFG_PATH` test seam in `fallback_detector::find_bfscfg_exe`
+/// is itself feature-gated — without `tier2_bfs`, `find_bfscfg_exe`
+/// returns `Ok(None)` unconditionally and setting the env var would
+/// have no observable effect.
+#[cfg(feature = "tier2_bfs")]
 pub(crate) struct BfscfgPathGuard {
     _lock: MutexGuard<'static, ()>,
 }
 
+#[cfg(feature = "tier2_bfs")]
 impl BfscfgPathGuard {
     pub(crate) fn set(value: &str) -> Self {
         let guard = lock();
@@ -81,6 +89,7 @@ impl BfscfgPathGuard {
     }
 }
 
+#[cfg(feature = "tier2_bfs")]
 impl Drop for BfscfgPathGuard {
     fn drop(&mut self) {
         // SAFETY: see ForceTierGuard::drop.

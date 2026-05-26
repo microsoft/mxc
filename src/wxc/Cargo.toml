@@ -31,3 +31,5 @@ isolation_session = [
     "dep:isolation_session_bindings",
     "wxc_common/isolation_session",
 ]
+# Forwards wxc_common/tier2_bfs. OFF by default; see wxc_common/Cargo.toml.
+tier2_bfs = ["wxc_common/tier2_bfs"]

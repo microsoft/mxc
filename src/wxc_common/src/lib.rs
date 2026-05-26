@@ -39,6 +39,8 @@ pub mod job_object;
 #[cfg(target_os = "windows")]
 pub mod network_manager;
 #[cfg(target_os = "windows")]
+pub mod probe;
+#[cfg(target_os = "windows")]
 pub mod process_mitigation;
 #[cfg(target_os = "windows")]
 pub mod process_util;

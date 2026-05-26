@@ -7,6 +7,7 @@ members = [
     "wxc_windows_sandbox_guest",
     "wxc_windows_sandbox_daemon",
     "wxc_winhttp_proxy_shim",
+    "wxc_ui_probe",
     "wxc_e2e_tests",
     "lxc",
     "lxc_common",
