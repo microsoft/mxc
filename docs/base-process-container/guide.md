@@ -15,8 +15,8 @@ understand how SandboxPolicy maps to ContainerConfig.
 2. Read
 [authoring-a-new-feature.md](../authoring-a-new-feature.md),
 especially Step 1 (feature spec) and Step 2 (OS changes).
-3. We recommend submitting a feature spec to the MXC repo so
-the team understands the end-to-end flow.
+3. We recommend submitting a feature spec via the MXC repo so
+reviewers understand the end-to-end flow.
 
 ## Architecture recap
 
@@ -42,13 +42,14 @@ into the FlatBuffer blob passed to
 
 ### 1. Update the OS FlatBuffer schema
 
-The source-of-truth schema is in the OS repo:
+> **Note:** Steps 1–3 below modify the internal Microsoft Windows OS source
+> tree and the `processmodel` component, and are only actionable for
+> contributors with access to that source. External contributors typically
+> consume the OS-side schema via `external/windows-sdk/BaseContainerSpecification.fbs`
+> (see Step 4) once a new field has shipped in the public Windows SDK.
 
-```
-/onecore/base/appmodel/execmodel/processmodel/lib/schema/SandboxSpec.fbs
-```
-
-Add your new field to the `SandboxSpec` table:
+The source-of-truth schema lives inside the Microsoft Windows OS source tree
+(path not publicly disclosed). It defines the `SandboxSpec` table:
 
 ```flatbuffers
 table SandboxSpec {
@@ -61,14 +62,10 @@ table SandboxSpec {
 
 ### 2. Build processmodel
 
-Build the processmodel project in the OS repo to pick up the
-schema change:
+Build the `processmodel` component in the Microsoft Windows OS source tree to
+pick up the schema change.
 
-```
-/onecore/base/appmodel/execmodel/processmodel
-```
-
-This regenerates the internal FlatBuffer bindings and makes
+This regenerates the OS-side FlatBuffer bindings and makes
 the new field available to `CreateProcessInSandbox`.
 
 ### 3. Implement OS enforcement
@@ -93,12 +90,8 @@ Then regenerate the Rust bindings. See
 for the exact steps.
 
 If the OS change hasn't shipped yet and the `.fbs` is not in
-the Windows SDK, you can copy it directly from the OS repo:
-
-```
-/onecore/base/appmodel/execmodel/processmodel/lib/schema/SandboxSpec.fbs
-→ external/windows-sdk/BaseContainerSpecification.fbs
-```
+the Windows SDK, copy it directly from the Microsoft Windows OS source tree
+into `external/windows-sdk/BaseContainerSpecification.fbs`.
 
 ### 5. Update BaseContainerRunner in MXC
 
@@ -144,8 +137,8 @@ Verify the most-restrictive default is applied.
 
 | Layer | Repo | File |
 |-------|------|------|
-| OS schema | os.2020 | `/onecore/.../schema/SandboxSpec.fbs` |
-| OS enforcement | os.2020 | processmodel implementation |
+| OS schema | Microsoft Windows OS source (internal) | `SandboxSpec.fbs` |
+| OS enforcement | Microsoft Windows OS source (internal) | `processmodel` component |
 | MXC FlatBuffer copy | mxc | `external/windows-sdk/BaseContainerSpecification.fbs` |
 | MXC generated bindings | mxc | `src/generated/base_container_specification/` (regenerated) |
 | MXC executor | mxc | `src/wxc_common/src/base_container_runner.rs` |

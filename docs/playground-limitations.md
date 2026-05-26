@@ -6,7 +6,7 @@
 |---------|---------------------------|------------------------------|-------|
 | AppContainer (v0.4.0) | ✅ Works | ✅ Works | N/A |
 | BaseContainer (v0.5.0) | ❌ No processmodel.dll | ✅ Works | N/A |
-| BFS filesystem brokering | ❌ No bfscfg.exe | ✅ Works | N/A |
+| BFS filesystem brokering | ❌ Broker helper not available | ✅ Works | N/A |
 | Proxy (AppContainer) | ✅ Works (needs admin for shim) | ✅ Works | N/A |
 | Proxy (BaseContainer) | N/A | ⚠️ WinHTTP only, see below | N/A |
 | LXC containers | N/A | N/A | ✅ Works |
@@ -124,7 +124,7 @@ When `disallowWin32kSystemCalls=true`:
 
 ### Trailing Backslash
 
-Paths ending in `\` (e.g., `C:\`) are handled correctly. The SDK's bfscfg argument
+Paths ending in `\` (e.g., `C:\`) are handled correctly. The SDK's filesystem-broker argument
 builder only quotes paths containing spaces, avoiding the `"C:\"` escaping issue.
 
 ### Short Paths (8.3)

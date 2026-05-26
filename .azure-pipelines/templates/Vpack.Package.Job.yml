@@ -1,0 +1,120 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Consumes signed wxc binaries from MXC-Official-Build and packages them
+# as a vpack. The build-completion trigger is set in the ADO UI.
+
+parameters: # parameters are shown up in ADO UI in a build queue time
+- name: 'debug'
+  displayName: 'Enable debug output'
+  type: boolean
+  default: false
+
+variables:
+- name: VersionDate
+  value: "$[format('{0:yyMMdd}', pipeline.startTime)]"
+- name: VersionCounter
+  value: "$[counter(variables['VersionDate'], 1)]"
+- name: WindowsContainerImage
+  value: onebranch.azurecr.io/windows/ltsc2022/vse2022:latest
+
+trigger: none
+
+pool:
+  type: windows
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: OneBranch.Pipelines/GovernedTemplates
+      ref: refs/heads/main
+  pipelines:
+    # Source of the signed wxc binaries. Mirrors the alias used in
+    # 1ES.Release.yml. `trigger: none` because the build-completion
+    # trigger is configured in the ADO UI.
+    - pipeline: MXC
+      source: 'MXC-Official-Build'
+      trigger: none
+
+extends:
+  template: v2/Microsoft.Official.yml@templates
+  parameters:
+    platform:
+      name: 'windows_undocked'
+
+    featureFlags:
+      WindowsHostVersion:
+        Version: 2022
+
+    cloudvault:
+      enabled: false
+
+    stages:
+    - stage: vpack
+      displayName: 'Create OS vpack'
+      jobs:
+        - job: Packaging
+          pool:
+            type: windows
+          variables:
+            # Note: all files placed in the output directory will be included in the vpack
+            ob_outputDirectory: '$(Build.SourcesDirectory)\out'
+            ob_createvpack_enabled: true
+            ob_createvpack_packagename: 'MXC'
+            ob_createvpack_owneralias: 'Tessera-mxc-admin'
+            ob_createvpack_description: 'Microsoft Execution Containers'
+            ob_createvpack_provData: true
+            # Use semver parts: keep major.minor.patch in sync with the SDK and
+            # encode the build date + per-day counter as the prerelease tag.
+            # Example: sdk 0.2.0, first build on 2026-05-21 -> 0.2.0-260521.1
+            ob_createvpack_versionAs: parts
+            ob_createvpack_majorVer: $(SdkMajor)         # set by 'Set vpack version' step
+            ob_createvpack_minorVer: $(SdkMinor)         # set by 'Set vpack version' step
+            ob_createvpack_patchVer: $(SdkPatch)         # set by 'Set vpack version' step
+            ob_createvpack_prereleaseVer: $(VersionDate).$(VersionCounter)
+            ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
+
+          steps:
+            - task: PowerShell@2
+              displayName: Set vpack version
+              inputs:
+                targetType: inline
+                script: |
+                  $sdkVersion = (Get-Content "$(System.DefaultWorkingDirectory)/sdk/package.json" | ConvertFrom-Json).version
+                  $parts = $sdkVersion.Split('.')
+                  Write-Host "##vso[task.setvariable variable=SdkMajor]$($parts[0])"
+                  Write-Host "##vso[task.setvariable variable=SdkMinor]$($parts[1])"
+                  Write-Host "##vso[task.setvariable variable=SdkPatch]$($parts[2])"
+
+            # `patterns` filters the download to the binary + its pdb + the
+            # SBOM (_manifest/), keeping the vpack small while preserving
+            # provenance metadata OneBranch's post-vpack publish requires.
+            - download: MXC
+              displayName: Download wxc x64 (filtered)
+              artifact: wxc-binaries-x86_64-pc-windows-msvc
+              patterns: |
+                wxc-exec.exe
+                symbols/wxc-exec.pdb
+                _manifest/**
+
+            - download: MXC
+              displayName: Download wxc arm64 (filtered)
+              artifact: wxc-binaries-aarch64-pc-windows-msvc
+              patterns: |
+                wxc-exec.exe
+                symbols/wxc-exec.pdb
+                _manifest/**
+
+            - task: PowerShell@2
+              displayName: Stage binaries for vpack
+              inputs:
+                targetType: inline
+                script: |
+                  $src = "$(Pipeline.Workspace)\MXC"
+                  Copy-Item -Recurse -Force "$src\wxc-binaries-x86_64-pc-windows-msvc"  "$(ob_outputDirectory)\x64"
+                  Copy-Item -Recurse -Force "$src\wxc-binaries-aarch64-pc-windows-msvc" "$(ob_outputDirectory)\arm64"
+                  # OneBranch's "Publish VPack SBOM Manifest" step expects
+                  # _manifest/spdx_2.2/ at the top of VPackContents. The
+                  # per-arch SBOMs are identical source-wise, so promote x64's.
+                  Copy-Item -Recurse -Force "$(ob_outputDirectory)\x64\_manifest" "$(ob_outputDirectory)\_manifest"

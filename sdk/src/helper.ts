@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { FileLogger } from './logger.js';
-import { ContainerConfig, ContainmentBackend, ContainmentTypes, ExperimentalBackends } from './types.js';
+import { ContainerConfig, ContainmentBackend, ContainmentTypes, ExperimentalBackends, LegacyContainmentAliases } from './types.js';
 import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupport } from './platform.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { diagLog } from './diagnostic.js';
@@ -72,7 +72,7 @@ export function resolveBinaryAndCommonArgs(
   options: SandboxSpawnOptions,
 ): { executablePath: string; args: string[] } {
   const platformSupport = getPlatformSupport();
-  if (!platformSupport.isSupported) {
+  if (!platformSupport.isSupported && !options.skipPlatformCheck) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
@@ -146,21 +146,29 @@ export function resolveExecutableAndArgs(
   const platformSupport = getPlatformSupport();
   const isExperimental = !!config.containment &&
     (ExperimentalBackends as readonly string[]).includes(config.containment);
-  if (!platformSupport.isSupported && !isExperimental) {
+  if (!platformSupport.isSupported && !isExperimental && !options.skipPlatformCheck) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
+  // Hard platform requirement: microvm needs WHP/Hyper-V on Windows. This guard
+  // runs even when `skipPlatformCheck` is set because it's not a build-version
+  // check — the backend literally cannot run on non-Windows hosts.
+  if (config.containment === 'microvm' && os.platform() !== 'win32') {
+    throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
+  }
+
   // Validate containment against platform
-  if (config.containment) {
-    if (config.containment === 'microvm' && os.platform() !== 'win32') {
-      throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
-    }
+  if (config.containment && !options.skipPlatformCheck) {
     // Abstract intents (process, microvm) are resolved by the native binary
     // at run time, so the SDK accepts them without checking against the
     // host's concrete backend list.
     const isIntent = (ContainmentTypes as readonly string[]).includes(config.containment);
-    const isExperimental = (ExperimentalBackends as readonly string[]).includes(config.containment);
-    const isAvailable = platformSupport.availableMethods.includes(config.containment as ContainmentBackend);
+    // Legacy wire values accepted by the native binary via serde aliases
+    // (e.g. "appcontainer" → processcontainer, "macos_sandbox" → seatbelt).
+    const resolved = LegacyContainmentAliases[config.containment];
+    const isAvailable = platformSupport.availableMethods.includes(
+      (resolved ?? config.containment) as ContainmentBackend
+    );
     if (!isIntent && !isExperimental && !isAvailable) {
       throw new Error(
         `Containment backend '${config.containment}' is not available on this platform. ` +

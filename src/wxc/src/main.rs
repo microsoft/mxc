@@ -4,22 +4,23 @@
 use std::fmt::Write;
 use std::fs;
 use std::process;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use clap::Parser;
-use windows::Win32::Security::Isolation::DeleteAppContainerProfile;
-use wxc_common::appcontainer_runner::AppContainerScriptRunner;
-use wxc_common::base_container_runner::BaseContainerRunner;
-use wxc_common::config_parser::{is_base_container_version, load_mxc_request, ParseError};
+use wxc_common::appcontainer_runner::{delete_app_container_profile, AppContainerScriptRunner};
+use wxc_common::config_parser::{
+    is_base_container_version, load_mxc_request, load_request, ParseError,
+};
 use wxc_common::diagnostic::DiagnosticConfig;
-use wxc_common::filesystem_bfs::FileSystemBfsManager;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use wxc_common::hyperlight_runner::HyperlightScriptRunner;
 #[cfg(feature = "isolation_session")]
-use wxc_common::isolation_session_runner::IsolationSessionRunner;
+use wxc_common::isolation_session::IsolationSessionRunner;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
+#[cfg(feature = "microvm")]
 use wxc_common::nanvix_runner::NanVixScriptRunner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::{run_state_aware, DispatchOutcome};
@@ -98,6 +99,67 @@ struct Cli {
     /// the runner will not find the pulled image. Requires `--setup-wslc`.
     #[arg(long = "storage-path", requires = "setup_wslc")]
     storage_path: Option<String>,
+
+    /// Grant the AppContainer "ALL APPLICATION PACKAGES" and
+    /// "ALL RESTRICTED APPLICATION PACKAGES" groups the minimum rights
+    /// needed to stat the system-drive root (e.g. `C:\`). Persistent —
+    /// survives across runs. Requests elevation via UAC if not already
+    /// elevated. See `wxc_common::system_drive_prep`.
+    #[cfg(target_os = "windows")]
+    #[arg(
+        long = "prepare-system-drive",
+        conflicts_with_all = [
+            "unprepare_system_drive",
+            "setup_hyperlight",
+            "setup_wslc",
+            "delete",
+            "dry_run",
+        ]
+    )]
+    prepare_system_drive: bool,
+
+    /// Remove the ACEs added by `--prepare-system-drive`. Uses precise
+    /// tuple matching: only ACEs the matching `--prepare-system-drive`
+    /// invocation would have written are removed. Other explicit ACEs
+    /// for the same SIDs are preserved.
+    #[cfg(target_os = "windows")]
+    #[arg(
+        long = "unprepare-system-drive",
+        conflicts_with_all = [
+            "setup_hyperlight",
+            "setup_wslc",
+            "delete",
+            "dry_run",
+        ]
+    )]
+    unprepare_system_drive: bool,
+
+    /// Internal — set by `--prepare-system-drive` / `--unprepare-system-drive`
+    /// when re-launching with elevation. Not for user use.
+    #[cfg(target_os = "windows")]
+    #[arg(long = "internal-elevated-helper", hide = true)]
+    internal_elevated_helper: bool,
+
+    /// Internal — the target path resolved by the unelevated parent,
+    /// passed to the elevated child so the child does not re-read
+    /// `%SystemDrive%` from a potentially attacker-controlled
+    /// environment. Validated as a drive root by the child.
+    #[cfg(target_os = "windows")]
+    #[arg(long = "internal-target-path", hide = true)]
+    internal_target_path: Option<String>,
+
+    /// Internal — the helper-log path chosen by the unelevated parent.
+    /// Passed to the elevated child so both processes write to / read
+    /// from the same file, even when UAC consents under a different
+    /// user than the parent ("over-the-shoulder" UAC). Not for user
+    /// use.
+    #[cfg(target_os = "windows")]
+    #[arg(long = "internal-log-path", hide = true)]
+    internal_log_path: Option<String>,
+
+    /// Run the fallback detector and emit JSON, without spawning a sandbox.
+    #[arg(long)]
+    probe: bool,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
@@ -169,45 +231,217 @@ fn print_error_envelope(error: &MxcError) {
     }
 }
 
-fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
-    // Clear BFS policy first. We need an absolute path to `bfscfg.exe`
-    // here for the same security reason as the runner — pass an
-    // authoritative path to `CreateProcessW` rather than a bare name.
-    // If resolution fails (rare; only on hosts where
-    // `GetWindowsDirectoryW` itself returns 0), we log and skip the BFS
-    // clearing step; deleting the AppContainer profile below is still
-    // worth attempting.
-    let bfscfg_path = match wxc_common::fallback_detector::find_bfscfg_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            logger.log_line(&format!(
-                "Skipping BFS policy clear: could not resolve bfscfg.exe ({e})"
-            ));
-            None
-        }
-    };
-    let mut bfs = FileSystemBfsManager::new(name.to_string(), bfscfg_path);
-    bfs.remove_configuration(logger);
-
-    // Delete the AppContainer profile
-    let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let hstring = windows::core::HSTRING::from_wide(&wide_name[..wide_name.len() - 1]);
-    match unsafe { DeleteAppContainerProfile(&hstring) } {
-        Ok(()) => {
-            logger.log_line(&format!("Deleted AppContainer profile: {}", name));
-            true
-        }
-        Err(e) => {
-            logger.log_line(&format!(
-                "Failed to delete AppContainer profile '{}': {}",
-                name, e
-            ));
-            false
-        }
+fn config_input(cli: &Cli) -> Option<(String, bool)> {
+    if let Some(b64) = cli.config_base64.as_ref() {
+        Some((b64.clone(), true))
+    } else if let Some(p) = cli.config.as_ref() {
+        Some((p.clone(), false))
+    } else {
+        cli.config_path.as_ref().map(|p| (p.clone(), false))
     }
 }
 
+// ---------------------------------------------------------------------------
+// Graceful-exit DACL cleanup
+// ---------------------------------------------------------------------------
+//
+// `DaclManager`'s `Drop` is the only thing that restores host ACEs we
+// applied during a Tier 2 / Tier 3 run. We need that `Drop` to fire on
+// every code path that can leave main, including the abnormal ones.
+// There are three:
+//
+// 1. **Normal exit / `process::exit`** — destructors of stack-owned
+//    values run on the former and are SKIPPED on the latter. We deal
+//    with this by explicitly `drop(take_parked_dacl())`-ing before any
+//    `process::exit` site below.
+// 2. **Panic unwind** — destructors of stack-owned values run; the
+//    release profile uses the default `unwind` strategy (see
+//    `src/Cargo.toml`). But the `DaclManager` we extract from
+//    `Dispatched` lives inside a process-global static (so the Ctrl-C
+//    handler can reach it), and statics are NOT touched by unwinding.
+//    To restore on panic we install a stack-owned `ParkedDaclGuard` in
+//    `main` whose `Drop` calls `take_parked_dacl()` and drops the
+//    manager. The guard sits at function scope so the unwind path
+//    threads through it.
+// 3. **Ctrl-C / Ctrl-Break / console close / logoff / shutdown** — the
+//    default Windows handler calls `ExitProcess` directly, skipping
+//    every Rust destructor. We install a `SetConsoleCtrlHandler` that
+//    takes-and-drops the parked manager before yielding to the
+//    default handler.
+//
+// The mutex in the slot serializes the Ctrl-C handler and the guard
+// against each other, so the manager is taken (and therefore
+// `Drop`'d) at most once.
+//
+// Parent-process kill (`TerminateProcess`) still bypasses every
+// handler; any leak there is reaped by `recover_orphaned_state` on
+// the next wxc-exec startup (which we already run at the top of
+// `main`).
+
+static DACL_CLEANUP_SLOT: OnceLock<Mutex<Option<wxc_common::filesystem_dacl::DaclManager>>> =
+    OnceLock::new();
+
+fn dacl_cleanup_slot() -> &'static Mutex<Option<wxc_common::filesystem_dacl::DaclManager>> {
+    DACL_CLEANUP_SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Park the DACL manager in the global slot so the Ctrl-C handler can
+/// drop it if a signal arrives before the normal-exit path runs.
+fn park_dacl_for_cleanup(mgr: wxc_common::filesystem_dacl::DaclManager) {
+    let slot = dacl_cleanup_slot();
+    let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
+    *guard = Some(mgr);
+}
+
+/// Take the parked DACL manager (if any) so the caller can drop it,
+/// triggering ACE restore. Returns `None` if either nothing was parked
+/// or another path (the Ctrl-C handler) already took it.
+///
+/// Recovers from `PoisonError` the same way [`park_dacl_for_cleanup`]
+/// does (`into_inner`): a poisoned mutex must NOT silently swallow a
+/// parked manager — that would leak ACEs until the next-startup
+/// recovery scan reaps them.
+fn take_parked_dacl() -> Option<wxc_common::filesystem_dacl::DaclManager> {
+    DACL_CLEANUP_SLOT.get().and_then(|slot| {
+        let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
+        guard.take()
+    })
+}
+
+/// Stack-owned witness that ensures `take_parked_dacl()` runs on every
+/// path out of `main`, including panic unwind. The parked
+/// `DaclManager` lives in a process-global static (so the Ctrl-C
+/// handler can reach it), and Rust's unwinder doesn't touch statics —
+/// without this guard, a panic between `park_dacl_for_cleanup` and
+/// the explicit `drop(take_parked_dacl())` near the end of `main`
+/// would leave host ACEs in place until the next startup's recovery
+/// scan.
+///
+/// `Drop` is a no-op if nothing was ever parked or if the Ctrl-C
+/// handler already drained the slot.
+struct ParkedDaclGuard;
+
+impl Drop for ParkedDaclGuard {
+    fn drop(&mut self) {
+        drop(take_parked_dacl());
+    }
+}
+
+/// Windows console-control handler. Called by the OS on Ctrl-C, Ctrl-Break,
+/// console close, logoff, and shutdown. Takes the parked DACL manager and
+/// drops it — `Drop` runs `restore()` which removes the ACEs we applied.
+/// Returns `FALSE` so the default handler still runs (which terminates
+/// the process).
+///
+/// Acquires the slot with a bounded wait (≤5s), not `try_lock`. If the
+/// main thread is mid-`Drop` on the same manager — which can be doing a
+/// `SetNamedSecurityInfoW` — returning FALSE immediately lets the
+/// default handler call `ExitProcess`, terminating that drop mid-Win32
+/// and leaving the host DACL in an inconsistent state. The bounded
+/// wait blocks the default handler until either main finishes (lock
+/// released) or 5s elapses — whichever comes first. On timeout we
+/// proceed anyway; the recovery scan on the next `wxc-exec` startup
+/// reaps anything left behind.
+unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
+    if let Some(slot) = DACL_CLEANUP_SLOT.get() {
+        use std::time::{Duration, Instant};
+        // 5s mirrors the WaitForSingleObject pattern recommended for
+        // graceful-shutdown handlers; tuned to be longer than a worst-
+        // case `SetNamedSecurityInfoW` on a deep tree but well under
+        // the Windows default 10s shutdown-handler budget.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(mut guard) = slot.try_lock() {
+                // Either main already took the manager (guard is None)
+                // or it never parked one; dropping `Option::take` is
+                // a no-op in both cases. Either way, the contract — no
+                // restore thread running concurrently with the default
+                // handler's ExitProcess — is satisfied.
+                drop(guard.take());
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    // FALSE = "I did not fully handle this; run the next handler in the
+    // chain (i.e. the default handler that calls ExitProcess)".
+    windows::core::BOOL(0)
+}
+
+/// Install the console-control handler. Idempotent — calling twice
+/// registers the same handler twice, which is harmless because the
+/// take-and-drop is `Option::take`-based.
+fn install_dacl_ctrl_handler() {
+    use windows::Win32::System::Console::SetConsoleCtrlHandler;
+    // SAFETY: `dacl_ctrl_handler` has the correct ABI; the `Add=TRUE`
+    // call merely appends to the OS handler chain.
+    let _ = unsafe { SetConsoleCtrlHandler(Some(dacl_ctrl_handler), true) };
+}
+
 fn main() {
+    let cli = Cli::parse();
+
+    // Best-effort: reap any orphaned DACL state files left behind by
+    // crashed prior MXC runs. Runs BEFORE the `--probe` arm because
+    // `wxc-exec --probe` is the canonical recovery trigger consumers
+    // (Win25H2Safe-Tests Phase 6, SDK warm-start) rely on. Errors here
+    // are non-fatal and only surface via stderr. On a healthy host
+    // with zero state files this is sub-millisecond.
+    match wxc_common::filesystem_dacl::recover_orphaned_state() {
+        Ok(report) => {
+            if report.files_processed > 0 || !report.errors.is_empty() {
+                eprintln!(
+                    "DACL recovery: {} file(s), {} ACE(s) restored, {} error(s)",
+                    report.files_processed,
+                    report.aces_restored,
+                    report.errors.len()
+                );
+                for e in &report.errors {
+                    eprintln!("  {e}");
+                }
+            }
+        }
+        Err(e) => eprintln!("DACL recovery failed: {e}"),
+    }
+
+    // --probe is a detection-only fast path used by SDK
+    // `getPlatformSupport()` on every first call. It does not spawn a
+    // sandbox, never parks a DaclManager, and never calls into COM/WinRT.
+    // Run it AFTER recovery (so consumers that rely on `--probe`-as-
+    // reaper still get it) but BEFORE COM init / SetConsoleCtrlHandler
+    // (which probe doesn't need; deferring them shaves cold-start cost
+    // off the SDK warm path).
+    if cli.probe {
+        let policy = if let Some((data, is_b64)) = config_input(&cli) {
+            // Parse using the existing pipeline but route logger output to
+            // an in-memory buffer that we discard — the probe must not
+            // emit anything other than its JSON line on stdout.
+            let mut probe_logger = Logger::new(Mode::Buffer);
+            match load_request(&data, &mut probe_logger, is_b64) {
+                Ok(r) => r.policy,
+                Err(_) => {
+                    eprintln!("Error: failed to load probe config");
+                    eprint!("{}", probe_logger.get_buffer());
+                    process::exit(1);
+                }
+            }
+        } else {
+            wxc_common::models::ContainerPolicy::default()
+        };
+        let output = wxc_common::probe::run_probe(&policy);
+        match wxc_common::probe::to_json_pretty(&output) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("Error: probe serialization failed: {e}");
+                process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Initialize COM/WinRT for backends that use WinRT APIs (Isolation Session).
     // COINIT_MULTITHREADED is benign for backends that don't use COM.
     //
@@ -222,7 +456,40 @@ fn main() {
         )
     };
 
-    let cli = Cli::parse();
+    // Install the Ctrl-C / Ctrl-Break handler that drops any parked
+    // DaclManager on signal. Cheap and idempotent.
+    install_dacl_ctrl_handler();
+
+    // Stack-owned witness so a panic anywhere below — between
+    // `park_dacl_for_cleanup` and the explicit `drop(take_parked_dacl())`
+    // near the end of `main` — still drains the slot and runs
+    // `restore()` during unwind. Without it the manager is parked in
+    // a static and unwinding skips destructors of static-owned values.
+    let _dacl_guard = ParkedDaclGuard;
+
+    // --prepare-system-drive / --unprepare-system-drive: host DACL prep.
+    // Modifies the DACL of the system drive root to grant the well-known
+    // AppContainer SIDs metadata-read access. Self-elevates via UAC.
+    // Runs before config parsing so the user doesn't need a JSON file.
+    // Mutual exclusion with other top-level "do and exit" flags is
+    // enforced by clap (conflicts_with_all).
+    #[cfg(target_os = "windows")]
+    {
+        if cli.prepare_system_drive {
+            process::exit(wxc_common::system_drive_prep::run_prepare(
+                cli.internal_elevated_helper,
+                cli.internal_target_path.as_deref(),
+                cli.internal_log_path.as_deref(),
+            ));
+        }
+        if cli.unprepare_system_drive {
+            process::exit(wxc_common::system_drive_prep::run_unprepare(
+                cli.internal_elevated_helper,
+                cli.internal_target_path.as_deref(),
+                cli.internal_log_path.as_deref(),
+            ));
+        }
+    }
 
     // --setup-hyperlight: warm up the snapshot and exit. Runs before
     // config parsing so the user doesn't need a JSON file on disk
@@ -302,6 +569,9 @@ fn main() {
             process::exit(1);
         }
     }
+
+    // --probe is handled at the top of `main` (before COM init) for
+    // SDK first-call latency. See note there.
 
     // Determine config input and whether it's base64
     let (config_data, is_base64) = if let Some(ref b64) = cli.config_base64 {
@@ -439,13 +709,35 @@ fn main() {
         wxc_common::diagnostic::redacted_request_json(&request)
     );
 
+    // DaclManager parking for the BaseContainer/fallback path. Parked
+    // into a global slot (see `dacl_cleanup_slot`) so the Ctrl-C handler
+    // can drop it on signal as well as the normal-exit path below. The
+    // slot returns `None` if no DACL augmentation was required.
+
     // Run script in selected containment backend.
     // BaseContainer is used when --experimental is passed or schema version >= 0.5.
     // Sandbox and MicroVM require --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::ProcessContainer => {
+            // Compute fallback eligibility on the ProcessContainer arm
+            // only — every other `ContainmentBackend` variant is
+            // unaffected by `use_base_container` and does not need to
+            // pay the (trivial) semver parse cost.
             let version_implies_base_container = is_base_container_version(&request.schema_version);
             let use_base_container = request.experimental_enabled || version_implies_base_container;
+
+            // Validation warning: deniedPaths is only honored on the
+            // BaseContainer-fallback path. Surface once at parse time
+            // through the buffered logger so it lands in `--dry-run`
+            // output and any tooling scraping the diagnostic pipe.
+            if !use_base_container && !request.policy.denied_paths.is_empty() {
+                let _ = writeln!(
+                    logger,
+                    "warning: filesystem.deniedPaths is set but containment is ProcessContainer \
+                     (no BaseContainer fallback in effect). deniedPaths will not be honored. \
+                     Use --experimental or schema 0.5+ to enable fallback with deny enforcement."
+                );
+            }
 
             if use_base_container {
                 let reason = if version_implies_base_container {
@@ -453,8 +745,36 @@ fn main() {
                 } else {
                     "--experimental".to_string()
                 };
-                let _ = writeln!(logger, "Using BaseContainer runner ({reason})");
-                Box::new(BaseContainerRunner::new())
+                let _ = writeln!(logger, "Using BaseContainer-fallback dispatcher ({reason})");
+
+                match wxc_common::dispatcher::dispatch_with_fallback(&request) {
+                    Ok(dispatched) => {
+                        for w in &dispatched.warnings {
+                            let _ = writeln!(logger, "warning: {w}");
+                        }
+                        let _ = writeln!(
+                            logger,
+                            "selected isolation tier: {}",
+                            dispatched.tier.as_str()
+                        );
+
+                        let (dispatched_runner, dacl_manager) = dispatched.into_runner_and_guard();
+                        if let Some(mgr) = dacl_manager {
+                            park_dacl_for_cleanup(mgr);
+                        }
+                        dispatched_runner
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        if let wxc_common::dispatcher::DispatchError::Dacl { warnings, .. } = &e {
+                            for w in warnings {
+                                eprintln!("  dacl warning: {w}");
+                            }
+                        }
+                        eprint!("{}", logger.get_buffer());
+                        process::exit(1);
+                    }
+                }
             } else {
                 Box::new(AppContainerScriptRunner::new())
             }
@@ -487,6 +807,10 @@ fn main() {
             eprintln!("Error: LXC backend not available on Windows");
             process::exit(1);
         }
+        ContainmentBackend::Bubblewrap => {
+            eprintln!("Error: Bubblewrap backend not available on Windows");
+            process::exit(1);
+        }
         ContainmentBackend::Seatbelt => {
             eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-mac)");
             process::exit(1);
@@ -500,7 +824,15 @@ fn main() {
                 eprintln!("Error: MicroVM is an experimental feature. Use --experimental flag.");
                 process::exit(1);
             }
-            Box::new(NanVixScriptRunner::new())
+            #[cfg(feature = "microvm")]
+            {
+                Box::new(NanVixScriptRunner::new())
+            }
+            #[cfg(not(feature = "microvm"))]
+            {
+                eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
+                process::exit(1);
+            }
         }
         ContainmentBackend::Hyperlight => {
             #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
@@ -563,6 +895,16 @@ fn main() {
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
 
+    // Explicitly drop the runner before retrieving the parked DACL
+    // manager so any runner-internal resources holding child handles
+    // release first; then drop the manager so its `restore()` runs.
+    // (process::exit below skips destructors, so we must do this
+    // manually for prompt cleanup on the normal path. The Ctrl-C
+    // handler covers the abnormal path; recover_orphaned_state on the
+    // next startup covers everything else.)
+    drop(runner);
+    drop(take_parked_dacl());
+
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);
     }
@@ -580,5 +922,26 @@ fn main() {
     if !response.standard_err.is_empty() {
         eprint!("{}", response.standard_err);
     }
+
+    // Emit a structured JSON error envelope on stderr for SDK/caller consumption
+    // when the runner produced an error message (one-shot flows only).
+    // In PTY mode stderr is merged into the PTY output stream, so the envelope
+    // appears inline -- callers (e.g. copilot) can parse it from the output.
+    if response.exit_code != 0 && !response.error_message.is_empty() {
+        let mut envelope = serde_json::json!({
+            "error": {
+                "code": "backend_error",
+                "message": response.error_message,
+            }
+        });
+        if !response.extended_error.is_empty() {
+            envelope["error"]["extended_error"] =
+                serde_json::Value::String(response.extended_error.clone());
+        }
+        if let Ok(json) = serde_json::to_string(&envelope) {
+            eprintln!("{json}");
+        }
+    }
+
     process::exit(response.exit_code);
 }

@@ -64,7 +64,7 @@ pub fn build_profile(request: &CodexRequest) -> Result<String, String> {
     // shell to a freshly-allocated pty (see `mxc_pty::run_with_pty`) so
     // callers can stream output and the shell sees a real TTY. Without
     // these rules, `isatty()` / `tcgetattr()` / `ttyname()` fail with
-    // EPERM because the kernel calls block on the slave fd.
+    // EPERM because the kernel calls block on the secondary fd.
     out.push_str(TTY_ALLOW);
 
     // Policy-derived allow rules.
@@ -129,7 +129,7 @@ const SYSTEM_READ_ALLOW: &str = "\
 ";
 
 /// Pseudo-terminal device access required by the inner shell when the
-/// runner attaches it to a pty. The slave fd we hand the child as
+/// runner attaches it to a pty. The secondary fd we hand the child as
 /// stdin/stdout/stderr lives at `/dev/ttysNNN`, and the shell calls
 /// `isatty()` (→ `tcgetattr` → ioctl) plus `ttyname()` against it. We
 /// also need read access to `/dev/tty` because most shells re-open it
@@ -323,9 +323,9 @@ fn write_nested_pty_rules(out: &mut String, request: &CodexRequest) {
     }
     out.push_str(";; --- nestedPty: allow inner process to allocate its own pty ---\n");
     out.push_str("(allow pseudo-tty)\n");
-    // /dev/ptmx is the master multiplexer; opening it is what posix_openpt
+    // /dev/ptmx is the primary multiplexer; opening it is what posix_openpt
     // does under the hood. The TTY_ALLOW baseline already grants access to
-    // /dev/ttysNNN (the slave side).
+    // /dev/ttysNNN (the secondary side).
     out.push_str("(allow file-read* file-write* file-ioctl\n");
     out.push_str("    (literal \"/dev/ptmx\"))\n");
 }

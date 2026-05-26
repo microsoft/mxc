@@ -29,8 +29,10 @@
 export {
   SandboxPolicy,
   SandboxingMethod,
+  IsolationTier,
   ContainmentType,
   ContainmentTypes,
+  LegacyContainmentAliases,
   ContainmentBackend,
   ExperimentalBackends,
   ContainerConfig,

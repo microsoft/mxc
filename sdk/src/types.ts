@@ -33,18 +33,15 @@ export interface LifecycleConfig {
 
 /**
  * Abstract containment intent. Names the *kind* of isolation the caller
- * wants. The native binary (or the SDK as a fallback) resolves this to a
- * concrete {@link ContainmentBackend} at run time based on what the host
- * supports.
- *
-/**
- * Abstract containment intent. Names the *kind* of isolation the caller
  * wants; the native binary resolves it to a concrete
  * {@link ContainmentBackend} per host capability.
  *
  * Today's intents:
  * - "process": OS-native process-level isolation. Resolves to
- *   `processcontainer` (Windows), `lxc` (Linux), or `seatbelt` (macOS).
+ *   `processcontainer` (Windows), `bubblewrap` (Linux), or `seatbelt`
+ *   (macOS). On Linux, `lxc` remains available as an explicit concrete
+ *   backend but is no longer the default for the abstract `"process"`
+ *   intent.
  * - "vm": full hardware-virtualised VM isolation. Resolves to
  *   `windows_sandbox` on Windows; no concrete VM backend exists on other
  *   platforms today.
@@ -67,6 +64,18 @@ export type ContainmentType = "process" | "vm" | "microvm";
 export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm', 'microvm'];
 
 /**
+ * Deprecated wire values accepted by the native binary via serde aliases.
+ * Maps each legacy name to the canonical {@link ContainmentBackend} value
+ * so the SDK validator can resolve them before the platform check. Configs
+ * using these values still reach wxc-exec unchanged — the Rust parser
+ * handles the final mapping at run time.
+ */
+export const LegacyContainmentAliases: Readonly<Record<string, ContainmentBackend>> = {
+  appcontainer: 'processcontainer',
+  macos_sandbox: 'seatbelt',
+};
+
+/**
  * Concrete containment backend. Each value names a specific runner
  * implementation in the native binary. Prefer a {@link ContainmentType}
  * value unless you specifically need to force a particular backend.
@@ -77,14 +86,16 @@ export type ContainmentBackend =
   | 'wslc'
   | 'lxc'
   | 'microvm'
+  | 'hyperlight'
   | 'seatbelt'
-  | 'isolation_session';
+  | 'isolation_session'
+  | 'bubblewrap';
 
 /**
  * Containment values (abstract intent or concrete backend) that require
  * the `--experimental` flag.
  */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'wslc', 'seatbelt'];
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'hyperlight', 'wslc', 'seatbelt', 'bubblewrap'];
 
 /**
  * Clipboard access policy levels
@@ -359,6 +370,18 @@ export interface SeatbeltConfig {
 export type SandboxingMethod = ContainmentType | ContainmentBackend;
 
 /**
+ * Isolation tier selected by the runtime fallback detector.
+ *
+ * - `base-container`: full BaseContainer (Experimental_CreateProcessInSandbox)
+ * - `appcontainer-bfs`: AppContainer + BFS filesystem isolation
+ * - `appcontainer-dacl`: AppContainer + host DACL augmentation (last-resort fallback)
+ */
+export type IsolationTier =
+  | 'base-container'
+  | 'appcontainer-bfs'
+  | 'appcontainer-dacl';
+
+/**
  * Platform support information
  */
 export interface PlatformSupport {
@@ -368,4 +391,14 @@ export interface PlatformSupport {
   reason?: string;
   /** Available sandboxing methods on this platform */
   availableMethods: ContainmentBackend[];
+  /**
+   * Tier that would be selected for an empty policy on this system.
+   * Omitted on non-Windows platforms or when the probe fails.
+   */
+  isolationTier?: IsolationTier;
+  /**
+   * Tier degradation warnings (one per fall-through during selection).
+   * Omitted on non-Windows platforms or when the probe fails.
+   */
+  isolationWarnings?: string[];
 }

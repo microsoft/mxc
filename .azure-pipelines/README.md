@@ -10,7 +10,7 @@ and `npmjs` directly so they can iterate quickly.
 ### Central Feed Services
 Production CI pipelines use an Azure Artifacts feed (CFS) to source dependencies
 from crates.io and npmjs, helping ensure secure and vetted consumption of third‑party packages.
-For Microsoft folks see: [Central Feed Services](https://eng.ms/docs/coreai/devdiv/one-engineering-system-1es/1es-docs/secure-supply-chain/central-feed-services-cfs/central-feed-services-cfs).
+(Microsoft engineers can consult the internal "Central Feed Services" documentation for setup details; external readers can treat the centralized feed as a Microsoft-internal Azure Artifacts mirror of the public registries.)
 
 ### Production Build and Release pipelines
 - We use Azure pipelines for official builds with signing and public releases.

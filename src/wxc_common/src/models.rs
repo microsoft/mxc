@@ -38,6 +38,11 @@ pub enum ContainmentBackend {
     /// internal codename for the App Sandbox / `sandbox-exec` machinery
     /// is "Seatbelt"); selected on the wire as `"seatbelt"`.
     Seatbelt,
+    /// Bubblewrap — unprivileged Linux sandboxing via user namespaces.
+    /// Experimental — requires `--experimental` flag. Uses `bwrap` to
+    /// create namespace-isolated processes without root privileges.
+    /// Selected on the wire as `"bubblewrap"`.
+    Bubblewrap,
 }
 
 /// Configuration specific to the Seatbelt backend (experimental).
@@ -353,11 +358,12 @@ impl Default for BaseProcessUiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FallbackPolicy {
-    /// When the BaseContainer API is absent and `bfscfg.exe` is unavailable,
-    /// allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). This
-    /// modifies host filesystem security descriptors; original DACLs are
-    /// restored on exit. Defaults to `true`. Set to `false` to refuse the
-    /// fallback (the run will fail on machines that require Tier 3).
+    /// When neither the in-process BaseContainer API nor the OS-side
+    /// filesystem broker helper is available, allow MXC to apply DACL ACEs
+    /// on policy paths (Tier 3 fallback). This modifies host filesystem
+    /// security descriptors; original DACLs are restored on exit. Defaults
+    /// to `true`. Set to `false` to refuse the fallback (the run will fail
+    /// on machines that require Tier 3).
     pub allow_dacl_mutation: bool,
 }
 
@@ -545,6 +551,19 @@ impl Default for CodexRequest {
     }
 }
 
+/// Distinguishes whether an error occurred during process creation (launch)
+/// or after the process started but exited with a failure code.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FailurePhase {
+    /// No failure (process exited successfully, or has not been evaluated yet).
+    #[default]
+    None,
+    /// The CreateProcess (or equivalent) API call itself failed.
+    LaunchFailed,
+    /// The process was created but exited with a non-zero code.
+    ProcessExited,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScriptResponse {
@@ -552,6 +571,14 @@ pub struct ScriptResponse {
     pub standard_out: String,
     pub standard_err: String,
     pub error_message: String,
+    /// Raw system/API error detail intended for developers and diagnostics
+    /// (e.g. "Experimental_CreateProcessInSandbox failed: WIN32_ERROR(1920)").
+    /// Kept separate from `error_message` which holds user-friendly text.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub extended_error: String,
+    /// Indicates at what phase the failure occurred.
+    #[serde(default)]
+    pub failure_phase: FailurePhase,
 }
 
 impl Default for ScriptResponse {
@@ -561,6 +588,8 @@ impl Default for ScriptResponse {
             standard_out: String::new(),
             standard_err: String::new(),
             error_message: String::new(),
+            extended_error: String::new(),
+            failure_phase: FailurePhase::None,
         }
     }
 }

@@ -217,12 +217,14 @@ describe('buildSandboxPayload', () => {
       }
     };
 
-    it('should default to process containment on Linux (resolved by binary to lxc)', () => {
+    it('should default to process containment on Linux (resolved by binary to bubblewrap)', () => {
       mockLinux();
       try {
         const payload = buildSandboxPayload('echo hi', defaultPolicy);
         assert.strictEqual(payload.containment, 'process');
-        assert.strictEqual(payload.lxc!.destroyOnExit, true);
+        // Abstract 'process' on Linux resolves to Bubblewrap at runtime;
+        // the wire-format payload must NOT carry an LXC-specific block.
+        assert.strictEqual(payload.lxc, undefined);
       } finally {
         restore();
       }
@@ -528,13 +530,48 @@ describe('createConfigFromPolicy', () => {
       }
     };
 
-    it('should default to process containment (resolved by binary to lxc on Linux)', () => {
+    it('should default to process containment (resolved by binary to bubblewrap on Linux)', () => {
       mockLinux();
       try {
         const config = createConfigFromPolicy(defaultPolicy);
         assert.strictEqual(config.containment, 'process');
-        assert.strictEqual(config.lxc!.distribution, 'alpine');
-        assert.strictEqual(config.lxc!.destroyOnExit, true);
+        // Abstract 'process' on Linux resolves to Bubblewrap at runtime;
+        // the wire-format config must NOT carry an LXC-specific block.
+        assert.strictEqual(config.lxc, undefined);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should force enforcementMode=firewall when host filtering is requested (process resolves to bubblewrap on Linux)', () => {
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.5.0-alpha',
+          network: { allowOutbound: true, allowedHosts: ['example.com'] },
+        });
+        assert.strictEqual(config.containment, 'process');
+        assert.strictEqual(config.lxc, undefined);
+        // Abstract 'process' on Linux must apply the same iptables firewall
+        // enforcement as explicit 'bubblewrap', because the native binary
+        // resolves the abstract intent to Bubblewrap server-side.
+        assert.strictEqual(config.network!.enforcementMode, 'firewall');
+      } finally {
+        restore();
+      }
+    });
+
+    it('should allow allowedHosts without allowOutbound on Linux (bubblewrap supports per-host filtering)', () => {
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.5.0-alpha',
+          network: { allowedHosts: ['example.com'] },
+        });
+        assert.strictEqual(config.containment, 'process');
+        assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
+        assert.strictEqual(config.network!.defaultPolicy, 'block');
+        assert.strictEqual(config.network!.enforcementMode, 'firewall');
       } finally {
         restore();
       }
@@ -556,25 +593,115 @@ describe('createConfigFromPolicy', () => {
     });
   });
 
+  describe('macOS', () => {
+    let originalPlatform: PropertyDescriptor | undefined;
+
+    const mockDarwin = () => {
+      originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+    };
+
+    const restore = () => {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    };
+
+    it('should allow allowedHosts without allowOutbound on macOS (seatbelt supports per-host filtering)', () => {
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.5.0-alpha',
+          network: { allowedHosts: ['api.github.com'] },
+        });
+        // Abstract 'process' on macOS resolves to 'seatbelt' in the wire format
+        // (unlike Linux where the binary resolves it server-side).
+        assert.strictEqual(config.containment, 'seatbelt');
+        assert.deepStrictEqual(config.network!.allowedHosts, ['api.github.com']);
+        assert.strictEqual(config.network!.defaultPolicy, 'block');
+      } finally {
+        restore();
+      }
+    });
+
+    it('should allow blockedHosts without allowOutbound on macOS', () => {
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.5.0-alpha',
+          network: { blockedHosts: ['evil.com'] },
+        });
+        assert.strictEqual(config.containment, 'seatbelt');
+        assert.deepStrictEqual(config.network!.blockedHosts, ['evil.com']);
+        assert.strictEqual(config.network!.defaultPolicy, 'block');
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject proxy configuration on macOS', () => {
+      mockDarwin();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.4.0-alpha',
+            network: { proxy: { builtinTestServer: true } },
+          }),
+          { message: /not supported on macOS/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+  });
+
   describe('network validation', () => {
+    // These tests assert the "allowOutbound required for host filtering"
+    // gate. The gate applies to backends that map host filtering to
+    // capabilities/ACLs (Windows process container path). It is intentionally
+    // waived for backends that do per-host iptables/Seatbelt filtering
+    // (wslc, seatbelt, bubblewrap, and Linux abstract 'process' which
+    // resolves to bubblewrap). Mock platform to win32 so the test asserts
+    // the gate independent of the CI runner's OS.
+    let originalPlatform: PropertyDescriptor | undefined;
+    const mockWindows = () => {
+      originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+    };
+    const restore = () => {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    };
+
     it('should reject allowedHosts without allowOutbound', () => {
-      assert.throws(
-        () => createConfigFromPolicy({
-          version: '0.4.0-alpha',
-          network: { allowedHosts: ['example.com'] },
-        }),
-        { message: /allowedHosts\/blockedHosts require allowOutbound/ },
-      );
+      mockWindows();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.4.0-alpha',
+            network: { allowedHosts: ['example.com'] },
+          }),
+          { message: /allowedHosts\/blockedHosts require allowOutbound/ },
+        );
+      } finally {
+        restore();
+      }
     });
 
     it('should reject blockedHosts without allowOutbound', () => {
-      assert.throws(
-        () => createConfigFromPolicy({
-          version: '0.4.0-alpha',
-          network: { blockedHosts: ['evil.com'] },
-        }),
-        { message: /allowedHosts\/blockedHosts require allowOutbound/ },
-      );
+      mockWindows();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.4.0-alpha',
+            network: { blockedHosts: ['evil.com'] },
+          }),
+          { message: /allowedHosts\/blockedHosts require allowOutbound/ },
+        );
+      } finally {
+        restore();
+      }
     });
   });
 
@@ -671,6 +798,65 @@ describe('createConfigFromPolicy', () => {
       );
     });
   });
+
+  describe('Bubblewrap', () => {
+    it('should set containment to bubblewrap', () => {
+      const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'bubblewrap');
+      assert.strictEqual(config.containment, 'bubblewrap');
+    });
+
+    it('should map filesystem and network policy fields through to ContainerConfig', () => {
+      const config = createConfigFromPolicy({
+        version: '0.5.0-alpha',
+        filesystem: {
+          readwritePaths: ['/workspace'],
+          readonlyPaths: ['/data'],
+          deniedPaths: ['/secrets'],
+        },
+        network: { allowOutbound: true, allowedHosts: ['example.com'] },
+      }, 'bubblewrap');
+      assert.deepStrictEqual(config.filesystem!.readwritePaths, ['/workspace']);
+      assert.deepStrictEqual(config.filesystem!.readonlyPaths, ['/data']);
+      assert.deepStrictEqual(config.filesystem!.deniedPaths, ['/secrets']);
+      // Per applyIptablesNetworkEnforcement, host filtering forces firewall mode.
+      assert.strictEqual(config.network!.enforcementMode, 'firewall');
+    });
+  });
+
+  describe('Lxc (explicit opt-in)', () => {
+    it('should set containment to lxc and populate the lxc backend block', () => {
+      // Regression guard: making bubblewrap the Linux default for the
+      // abstract `"process"` intent must not break the explicit LXC path.
+      const config = createConfigFromPolicy({ version: '0.5.0-alpha' }, 'lxc');
+      assert.strictEqual(config.containment, 'lxc');
+      assert.ok(config.lxc, 'lxc backend block should be populated');
+      assert.strictEqual(config.lxc!.distribution, 'alpine');
+    });
+
+    it('should force enforcementMode=firewall when host filtering is requested', () => {
+      // The LXC runner only invokes iptables when network_enforcement_mode is
+      // Firewall|Both (see lxc_common::network_iptables). Without this stamp,
+      // the parser would default to Capabilities and allowedHosts/blockedHosts
+      // would be silently dropped on the floor.
+      const config = createConfigFromPolicy({
+        version: '0.5.0-alpha',
+        network: { allowOutbound: true, allowedHosts: ['example.com'] },
+      }, 'lxc');
+      assert.strictEqual(config.containment, 'lxc');
+      assert.strictEqual(config.network!.enforcementMode, 'firewall');
+    });
+
+    it('should allow allowedHosts without allowOutbound (LXC supports per-host iptables filtering)', () => {
+      const config = createConfigFromPolicy({
+        version: '0.5.0-alpha',
+        network: { allowedHosts: ['example.com'] },
+      }, 'lxc');
+      assert.strictEqual(config.containment, 'lxc');
+      assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
+      assert.strictEqual(config.network!.defaultPolicy, 'block');
+      assert.strictEqual(config.network!.enforcementMode, 'firewall');
+    });
+  });
 });
 
 describe('Schema 0.6.0 vocabulary', () => {
@@ -753,6 +939,16 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     assert.throws(
       () => resolveExecutableAndArgs(makeConfig('wslc'), { executablePath: fakeExe }),
       { message: /experimental mode/ },
+    );
+  });
+
+  it('should NOT require experimental mode for explicit lxc containment', function (this: { skip: (reason?: string) => void }) {
+    if (process.platform !== 'linux') {
+      this.skip('lxc is Linux-only');
+      return;
+    }
+    assert.doesNotThrow(() =>
+      resolveExecutableAndArgs(makeConfig('lxc'), { executablePath: fakeExe }),
     );
   });
 });

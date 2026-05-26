@@ -223,6 +223,7 @@ impl LxcScriptRunner {
                 standard_out: stdout,
                 standard_err: stderr,
                 error_message: String::new(),
+                ..Default::default()
             },
             Err(e) => ScriptResponse::error(&format!("Execution failed: {}", e)),
         };

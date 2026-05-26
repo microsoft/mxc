@@ -102,6 +102,7 @@ impl ScriptRunner for SeatbeltScriptRunner {
                     standard_out: String::new(),
                     standard_err: String::new(),
                     error_message: e,
+                    ..Default::default()
                 }
             }
         };
@@ -344,21 +345,18 @@ impl SeatbeltScriptRunner {
         let result = match wait_with_timeout(&mut child, timeout) {
             Ok(status) => ScriptResponse {
                 exit_code: status.code().unwrap_or(-1),
-                standard_out: String::new(),
-                standard_err: String::new(),
-                error_message: String::new(),
+                ..Default::default()
             },
             Err(WaitError::Timeout) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 ScriptResponse {
                     exit_code: -1,
-                    standard_out: String::new(),
-                    standard_err: String::new(),
                     error_message: format!(
                         "Seatbelt: terminal timed out after {}ms",
                         request.script_timeout
                     ),
+                    ..Default::default()
                 }
             }
             Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
@@ -427,9 +425,8 @@ fn build_sandbox_command(
 fn error_response(message: String) -> ScriptResponse {
     ScriptResponse {
         exit_code: -1,
-        standard_out: String::new(),
-        standard_err: String::new(),
         error_message: message,
+        ..Default::default()
     }
 }
 

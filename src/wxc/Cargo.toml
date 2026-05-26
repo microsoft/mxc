@@ -27,7 +27,12 @@ mxc_winres = { workspace = true }
 
 [features]
 default = []
-microvm = ["nanvix_binaries"]
+microvm = ["nanvix_binaries", "wxc_common/microvm"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
 hyperlight = ["wxc_common/hyperlight"]
-isolation_session = ["dep:isolation_session_bindings", "wxc_common/isolation_session"]
+isolation_session = [
+    "dep:isolation_session_bindings",
+    "wxc_common/isolation_session",
+]
+# Forwards wxc_common/tier2_bfs. OFF by default; see wxc_common/Cargo.toml.
+tier2_bfs = ["wxc_common/tier2_bfs"]

@@ -1,6 +1,6 @@
 {
   "name": "@microsoft/mxc-sdk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "TypeScript SDK for MXC (Microsoft eXecution Containers)",
   "type": "module",
   "types": "dist/index.d.ts",
@@ -23,7 +23,7 @@
     "watch": "tsc --watch",
     "clean": "rimraf dist",
     "test": "npm run test:unit",
-    "test:unit": "npm run build:test-unit && node --test dist-tests/tests/unit/sandbox.test.js dist-tests/tests/unit/policy.test.js dist-tests/tests/unit/logger.test.js dist-tests/tests/unit/errors.test.js dist-tests/tests/unit/state-aware-types.test.js dist-tests/tests/unit/state-aware.test.js",
+    "test:unit": "npm run build:test-unit && node --test dist-tests/tests/unit/sandbox.test.js dist-tests/tests/unit/policy.test.js dist-tests/tests/unit/logger.test.js dist-tests/tests/unit/errors.test.js dist-tests/tests/unit/state-aware-types.test.js dist-tests/tests/unit/state-aware.test.js dist-tests/tests/unit/platform.test.js",
     "test:integration": "cd tests/integration && npm install && npm run build && npm test",
     "prepublishOnly": "npm run build"
   },

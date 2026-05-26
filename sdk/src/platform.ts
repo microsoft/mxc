@@ -1,9 +1,9 @@
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { fileURLToPath } from 'node:url';
-import { PlatformSupport } from './types.js';
+import { ContainmentBackend, IsolationTier, PlatformSupport } from './types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -94,13 +94,126 @@ function checkWindowsBuildVersion(): boolean {
   return true;
 }
 
+let windowsSandboxAvailableCache: boolean | undefined;
+
 /**
- * Get platform support information
+ * Check if Windows Sandbox feature is enabled via DISM.
+ * @returns true if the Containers-DisposableClientVM feature is enabled
+ */
+function isWindowsSandboxAvailable(): boolean {
+  if (windowsSandboxAvailableCache !== undefined) {
+    return windowsSandboxAvailableCache;
+  }
+
+  try {
+    const output = execSync(
+      'dism /online /get-featureinfo /featurename:Containers-DisposableClientVM',
+      { encoding: 'utf-8', stdio: 'pipe', timeout: 10000 },
+    );
+    windowsSandboxAvailableCache = /State\s*:\s*Enabled/i.test(output);
+  } catch {
+    // `dism /online` typically requires elevation, so a non-elevated session
+    // throws here and we can't distinguish "disabled" from "no permission".
+    // Fall back to checking for the sandbox executable — Windows installs it
+    // under System32 only when the Containers-DisposableClientVM feature is
+    // enabled, and the path is readable without admin.
+    const sandboxExe = path.join(
+      process.env.SystemRoot || 'C:\\Windows',
+      'System32',
+      'WindowsSandbox.exe',
+    );
+    windowsSandboxAvailableCache = fs.existsSync(sandboxExe);
+  }
+
+  return windowsSandboxAvailableCache;
+}
+
+/**
+ * Get platform support information.
+ *
+ * On Windows, when the host build is supported, this also invokes
+ * `wxc-exec --probe` to populate `isolationTier` and (if any) the
+ * `isolationWarnings` array. The result is cached for the lifetime of
+ * the SDK module — the underlying machine state is not expected to
+ * change at runtime.
+ *
  * @returns Platform support details including available sandboxing methods
  */
 export function getPlatformSupport(): PlatformSupport {
+  if (cachedSupport !== null) {
+    return cachedSupport;
+  }
+  const support = computeSupport();
+  cachedSupport = support;
+  return support;
+}
+
+let cachedSupport: PlatformSupport | null = null;
+
+/** @internal Test-only: clear the cached PlatformSupport. */
+export function _resetPlatformSupportCache(): void {
+  cachedSupport = null;
+}
+
+/**
+ * Probe runner injection seam. Spawns `wxc-exec --probe` and returns
+ * its stdout. Replaceable in unit tests via {@link _setProbeRunner}.
+ */
+type ProbeRunner = () => string;
+
+let probeRunner: ProbeRunner = defaultProbeRunner;
+
+/** @internal Test-only: override the probe runner. */
+export function _setProbeRunner(runner: ProbeRunner | null): void {
+  probeRunner = runner ?? defaultProbeRunner;
+}
+
+function defaultProbeRunner(): string {
+  const wxcPath = findWxcExecutable();
+  if (!wxcPath) {
+    throw new Error('wxc-exec not found');
+  }
+  return execFileSync(wxcPath, ['--probe'], {
+    timeout: 5000,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function isValidTier(s: unknown): s is IsolationTier {
+  return s === 'base-container' || s === 'appcontainer-bfs' || s === 'appcontainer-dacl';
+}
+
+/**
+ * Run the probe binary and merge its results into `support`. On any
+ * failure (binary missing, timeout, malformed JSON, unknown tier), the
+ * function silently leaves `support.isolationTier` and
+ * `support.isolationWarnings` unset — callers see the same contract as
+ * pre-Phase-5 SDKs.
+ */
+function populateIsolationFromProbe(support: PlatformSupport): void {
+  try {
+    const stdout = probeRunner();
+    const probe = JSON.parse(stdout);
+    if (probe && typeof probe === 'object') {
+      if (isValidTier(probe.tier)) {
+        support.isolationTier = probe.tier;
+      }
+      if (Array.isArray(probe.warnings) && probe.warnings.length > 0) {
+        const warnings = probe.warnings.filter((w: unknown): w is string => typeof w === 'string');
+        if (warnings.length > 0) {
+          support.isolationWarnings = warnings;
+        }
+      }
+    }
+  } catch {
+    // Graceful degradation: leave isolation fields unset.
+  }
+}
+
+function computeSupport(): PlatformSupport {
   const platform = os.platform();
-  var support : PlatformSupport = { isSupported: false, reason: '', availableMethods: [] };
+  const support: PlatformSupport = { isSupported: false, reason: '', availableMethods: [] };
 
   // Non-Windows platforms
   if (platform === 'darwin') {
@@ -117,18 +230,22 @@ export function getPlatformSupport(): PlatformSupport {
   }
 
   if (platform === 'linux') {
-    // LXC is the only containment backend on Linux
-    if (isLxcAvailable()) {
+    // LXC and Bubblewrap are both supported on Linux. Report whichever
+    // are installed; callers pick via the containment field.
+    const methods: ContainmentBackend[] = [];
+    if (isLxcAvailable()) methods.push('lxc');
+    if (isBubblewrapAvailable()) methods.push('bubblewrap');
+    if (methods.length > 0) {
       support.isSupported = true;
-      support.availableMethods = ['lxc'];
+      support.availableMethods = methods;
     } else {
-      support.reason = 'LXC is not installed or not available on this system';
+      support.reason = 'Neither LXC nor Bubblewrap is available on this system';
     }
     return support;
   }
 
   if (platform !== 'win32') {
-        support.reason = 'MXC is not supported on this platform';
+    support.reason = 'MXC is not supported on this platform';
     return support;
   }
 
@@ -136,6 +253,10 @@ export function getPlatformSupport(): PlatformSupport {
   if (buildSupported) {
     support.isSupported = true;
     support.availableMethods = ['processcontainer'];
+    if (isWindowsSandboxAvailable()) {
+      support.availableMethods.push('windows_sandbox');
+    }
+    populateIsolationFromProbe(support);
     return support;
   }
 
@@ -149,6 +270,18 @@ export function getPlatformSupport(): PlatformSupport {
 function isLxcAvailable(): boolean {
   try {
     execSync('lxc-ls --version', { encoding: 'utf-8', stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if Bubblewrap (bwrap) is available on the system
+ */
+function isBubblewrapAvailable(): boolean {
+  try {
+    execSync('bwrap --version', { encoding: 'utf-8', stdio: 'pipe' });
     return true;
   } catch {
     return false;

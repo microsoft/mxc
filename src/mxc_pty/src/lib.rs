@@ -34,7 +34,7 @@ pub struct PtyOptions {
     pub timeout: Option<Duration>,
 
     /// How long to wait for the inner process to print its first byte
-    /// before forwarding host stdin to the pty master. The delay matters
+    /// before forwarding host stdin to the pty primary. The delay matters
     /// because an interactive shell calls `tcsetattr` during readline
     /// init, which can flush bytes the parent buffered in the pty before
     /// the shell got there. Set to `Duration::ZERO` to forward stdin
@@ -83,8 +83,8 @@ pub enum PtyOutcome {
 /// Spawn `command` attached to a freshly-allocated pty pair and bridge
 /// it to the host's stdin/stdout/stderr.
 ///
-/// The slave end becomes the child's stdin/stdout/stderr; the master end
-/// stays in this process and is forwarded to/from the host fds on
+/// The secondary end becomes the child's stdin/stdout/stderr; the primary
+/// end stays in this process and is forwarded to/from the host fds on
 /// background threads. All of the child's output has therefore been
 /// streamed to the host stdio by the time this function returns;
 /// callers needing captured output should write it to a file in cwd
@@ -92,9 +92,9 @@ pub enum PtyOutcome {
 ///
 /// When fd 0 is itself a tty (i.e. the executor binary is being driven
 /// by a parent that wrapped it in a pty — the common case for the
-/// `mxc-sdk` host), we put that outer slave into raw mode for the
+/// `mxc-sdk` host), we put that outer secondary into raw mode for the
 /// duration of the bridge. Without this, the kernel termios on the
-/// outer pty echoes back any bytes the host writes to its master and
+/// outer pty echoes back any bytes the host writes to its primary and
 /// renders control chars as `^X` on the way through, which corrupts
 /// any TUI the inner child renders (e.g. terminal palette query
 /// responses get echoed instead of forwarded as input).
@@ -109,12 +109,12 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
 
     use nix::pty::openpty;
 
-    // Put our own stdin (the outer pty slave, if any) into raw mode so
+    // Put our own stdin (the outer pty secondary, if any) into raw mode so
     // input bytes pass through to the inner pty without local echo or
     // canonical-mode line buffering. The guard restores the original
     // termios on drop — important because mxc-exec-mac continues to
     // print to stdout after `run_with_pty` returns.
-    let _outer_raw_guard = RawSlaveGuard::install(std::io::stdin().as_raw_fd());
+    let _outer_raw_guard = RawSecondaryGuard::install(std::io::stdin().as_raw_fd());
 
     // Inherit the outer pty's window size so the inner child renders at
     // the host terminal's actual dimensions instead of macOS' default
@@ -139,28 +139,54 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
     let pty_pair =
         openpty(inner_winsize.as_ref(), None).map_err(|e| format!("openpty failed: {}", e))?;
 
-    // Three duplicates of the slave fd so each Stdio takes ownership of
+    // The `nix::pty` crate exposes the POSIX field names `.master` and
+    // `.slave` on `PtyPair`. We refer to those ends as primary and
+    // secondary in our own variables and prose below.
+
+    // Mark both pty fds close-on-exec. macOS' `openpty(3)` leaves them
+    // without `FD_CLOEXEC`, so without this fixup the primary fd would
+    // be inherited by the child across `exec` — the secondary would never
+    // hang up when we die (the child itself keeps a primary ref open),
+    // and the sandboxed shell would become immortal. The dups we make
+    // below via `File::try_clone` already get CLOEXEC for free (Rust
+    // uses `F_DUPFD_CLOEXEC`), so we only have to fix the originals
+    // returned by `openpty`. Best-effort: an `fcntl` failure here just
+    // restores the pre-fix behaviour, no regression.
+    {
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+        for fd in [pty_pair.master.as_raw_fd(), pty_pair.slave.as_raw_fd()] {
+            if let Ok(bits) = fcntl(fd, FcntlArg::F_GETFD) {
+                let flags = FdFlag::from_bits_truncate(bits) | FdFlag::FD_CLOEXEC;
+                let _ = fcntl(fd, FcntlArg::F_SETFD(flags));
+            }
+        }
+    }
+
+    // Three duplicates of the secondary fd so each Stdio takes ownership of
     // its own handle; otherwise std::process::Stdio::from would consume
     // the single OwnedFd and the rest of the spawn calls would fail.
-    let slave_in: Stdio = pty_pair
+    let secondary_in: Stdio = pty_pair
         .slave
         .try_clone()
-        .map_err(|e| format!("dup slave for stdin: {}", e))?
+        .map_err(|e| format!("dup secondary for stdin: {}", e))?
         .into();
-    let slave_out: Stdio = pty_pair
+    let secondary_out: Stdio = pty_pair
         .slave
         .try_clone()
-        .map_err(|e| format!("dup slave for stdout: {}", e))?
+        .map_err(|e| format!("dup secondary for stdout: {}", e))?
         .into();
-    let slave_err: Stdio = pty_pair.slave.into();
+    let secondary_err: Stdio = pty_pair.slave.into();
 
-    command.stdin(slave_in).stdout(slave_out).stderr(slave_err);
+    command
+        .stdin(secondary_in)
+        .stdout(secondary_out)
+        .stderr(secondary_err);
 
     // Drop the inherited controlling terminal in the child and make the
-    // slave end of our pty its new controlling tty. Without this the
+    // secondary end of our pty its new controlling tty. Without this the
     // child detects that it has a controlling tty (the outer pty from
     // node-pty) and forwards the inner pty's I/O to `/dev/tty` directly,
-    // bypassing the slave fds we wired into stdio. Our master would
+    // bypassing the secondary fds we wired into stdio. Our primary would
     // then see no data at all.
     //
     // `unblock_signals` reverses any sigmask the parent installed (e.g.
@@ -182,7 +208,7 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
             // Become a new session leader, detaching from the inherited
             // controlling terminal.
             nix::unistd::setsid().map_err(std::io::Error::from)?;
-            // ioctl on fd 0 (the slave we just dup2'd in via stdin) to
+            // ioctl on fd 0 (the secondary we just dup2'd in via stdin) to
             // make it the new controlling tty. Errors are non-fatal
             // because setsid above already cleared the ctty state, which
             // is what actually matters for the child.
@@ -204,30 +230,30 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
 
     drop(command);
 
-    // The child inherited all three slave handles and the parent's
-    // copies have been moved into Stdio. The slave will be fully closed
-    // when the child exits, which makes our master read return EOF.
-    let master: std::fs::File = pty_pair.master.into();
-    let mut master_writer = master
+    // The child inherited all three secondary handles and the parent's
+    // copies have been moved into Stdio. The secondary will be fully closed
+    // when the child exits, which makes our primary read return EOF.
+    let primary: std::fs::File = pty_pair.master.into();
+    let mut primary_writer = primary
         .try_clone()
-        .map_err(|e| format!("dup master: {}", e))?;
-    let mut master_reader = master;
+        .map_err(|e| format!("dup primary: {}", e))?;
+    let mut primary_reader = primary;
 
     // Resize forwarder: when the host's terminal resizes, the kernel
     // delivers SIGWINCH to us (because our fd 0 is the outer pty
-    // slave). Read the new size off fd 0 and push it to the inner pty
-    // master via TIOCSWINSZ — that delivers SIGWINCH to the inner
+    // secondary). Read the new size off fd 0 and push it to the inner pty
+    // primary via TIOCSWINSZ — that delivers SIGWINCH to the inner
     // child, so TUIs reflow correctly. Hand the forwarder its own
-    // dup of the master so the resize fd isn't tied to the lifetime
-    // of `master_writer` (which the input-forwarder thread can drop
+    // dup of the primary so the resize fd isn't tied to the lifetime
+    // of `primary_writer` (which the input-forwarder thread can drop
     // mid-session); the forwarder leaks its dup for the rest of the
     // process, the same lifetime as the signal handler that targets it.
-    let winch_master = master_writer
+    let winch_primary = primary_writer
         .try_clone()
-        .map_err(|e| format!("dup master for sigwinch forwarder: {}", e))?;
-    let _winch_thread = spawn_sigwinch_forwarder(winch_master);
+        .map_err(|e| format!("dup primary for sigwinch forwarder: {}", e))?;
+    let _winch_thread = spawn_sigwinch_forwarder(winch_primary);
 
-    // Output forwarder: master -> host stdout. Signals "ready" on the
+    // Output forwarder: primary -> host stdout. Signals "ready" on the
     // first byte from inside the child so the input forwarder doesn't
     // race the inner shell's `tcsetattr` init.
     let (ready_tx, ready_rx) = mpsc::channel::<()>();
@@ -236,7 +262,7 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
         let mut signaled = false;
         let mut stdout = std::io::stdout();
         loop {
-            match master_reader.read(&mut buf) {
+            match primary_reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     if !signaled {
@@ -268,7 +294,7 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
         let _ = ready_rx.recv_timeout(ready_budget);
     }
 
-    // Input forwarder: host stdin -> master. Detached; exits when stdin
+    // Input forwarder: host stdin -> primary. Detached; exits when stdin
     // closes (which happens when our parent closes the outer pty).
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -277,7 +303,7 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
             match stdin.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if master_writer.write_all(&buf[..n]).is_err() {
+                    if primary_writer.write_all(&buf[..n]).is_err() {
                         break;
                     }
                 }
@@ -311,16 +337,16 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
         },
     };
 
-    // Drain remaining output before returning. The slave fds are closed
-    // on child exit, so master_reader hits EOF and the thread exits.
+    // Drain remaining output before returning. The secondary fds are closed
+    // on child exit, so primary_reader hits EOF and the thread exits.
     let _ = output_thread.join();
 
     Ok(outcome)
 }
 
 /// Background thread that watches for SIGWINCH on the outer pty
-/// (delivered to *some* thread because fd 0 is the outer slave) and
-/// forwards the new window size to the inner pty master via TIOCSWINSZ.
+/// (delivered to *some* thread because fd 0 is the outer secondary) and
+/// forwards the new window size to the inner pty primary via TIOCSWINSZ.
 ///
 /// Uses the self-pipe pattern: an async-signal-safe SIGWINCH handler
 /// writes one byte to a pipe, and a dedicated thread reads from the
@@ -333,20 +359,20 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
 /// Best-effort: if any of the setup steps fail we just skip resize
 /// propagation and the inner stays at its initial size.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn spawn_sigwinch_forwarder(master: std::fs::File) -> Option<std::thread::JoinHandle<()>> {
+fn spawn_sigwinch_forwarder(primary: std::fs::File) -> Option<std::thread::JoinHandle<()>> {
     use std::os::unix::io::AsRawFd;
 
     let (read_end, write_end) = nix::unistd::pipe().ok()?;
     let read_fd = read_end.as_raw_fd();
     let write_fd = write_end.as_raw_fd();
-    let master_fd = master.as_raw_fd();
+    let primary_fd = primary.as_raw_fd();
     // Leak so the fds outlive every reader/writer in the process. The
     // signal handler targets `write_fd` for the rest of the process,
-    // and `master_fd` is what we ioctl into on every resize — closing
+    // and `primary_fd` is what we ioctl into on every resize — closing
     // either would race.
     std::mem::forget(read_end);
     std::mem::forget(write_end);
-    std::mem::forget(master);
+    std::mem::forget(primary);
 
     // Make the write end non-blocking so the signal handler can't
     // deadlock on a full pipe (the comment on `sigwinch_handler` already
@@ -390,7 +416,7 @@ fn spawn_sigwinch_forwarder(master: std::fs::File) -> Option<std::thread::JoinHa
                     continue;
                 }
                 // Inner pty gone — exit the thread.
-                if libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws) != 0 {
+                if libc::ioctl(primary_fd, libc::TIOCSWINSZ, &ws) != 0 {
                     return;
                 }
             }
@@ -419,9 +445,9 @@ extern "C" fn sigwinch_handler(_sig: libc::c_int) {
     }
 }
 
-/// RAII guard that puts an outer pty slave fd into raw mode on creation
+/// RAII guard that puts an outer pty secondary fd into raw mode on creation
 /// and restores the original termios on drop. Used by [`run_with_pty`]
-/// when our own stdin is itself a pty slave (i.e. the executor is
+/// when our own stdin is itself a pty secondary (i.e. the executor is
 /// running under a host-allocated pty), so that input bytes round-trip
 /// to the inner child's pty cleanly without local echo or `^X`-style
 /// control-char rendering corrupting the inner TUI.
@@ -431,13 +457,13 @@ extern "C" fn sigwinch_handler(_sig: libc::c_int) {
 /// when termios calls fail — the inner child still works, just without
 /// the raw-mode passthrough.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-struct RawSlaveGuard {
+struct RawSecondaryGuard {
     fd: std::os::unix::io::RawFd,
     original: nix::sys::termios::Termios,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-impl RawSlaveGuard {
+impl RawSecondaryGuard {
     fn install(fd: std::os::unix::io::RawFd) -> Option<Self> {
         use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
         // SAFETY: `isatty` is async-signal-safe and only touches the
@@ -458,7 +484,7 @@ impl RawSlaveGuard {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-impl Drop for RawSlaveGuard {
+impl Drop for RawSecondaryGuard {
     fn drop(&mut self) {
         use nix::sys::termios::{tcsetattr, SetArg};
         let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(self.fd) };
@@ -476,6 +502,17 @@ pub fn run_with_pty(_command: Command, _options: PtyOptions) -> Result<PtyOutcom
 mod tests {
     use super::*;
 
+    // Serialize tests that call `run_with_pty`. The leak regression test
+    // uses `lsof -p $$` in the child to enumerate inherited fds; if other
+    // tests fork in parallel between this test's `openpty` and CLOEXEC
+    // fixup, those concurrent children inherit pre-CLOEXEC fds and the
+    // lsof in *our* child will sometimes see them too. Production code
+    // never runs `run_with_pty` from multiple threads (each mxc-exec-mac
+    // is a one-shot CLI invocation), so serializing the tests faithfully
+    // mirrors real usage rather than masking a real race.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    static RUN_WITH_PTY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn default_options() {
         let opts = PtyOptions::default();
@@ -492,6 +529,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn echo_runs_under_pty() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg("echo hello-from-pty");
         let outcome = run_with_pty(cmd, PtyOptions::default()).expect("bridge spawns");
@@ -504,6 +542,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn timeout_kills_long_running_child() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg("sleep 30");
         let opts = PtyOptions {
@@ -512,5 +551,135 @@ mod tests {
         };
         let outcome = run_with_pty(cmd, opts).expect("bridge spawns");
         assert!(matches!(outcome, PtyOutcome::TimedOut));
+    }
+
+    /// Documents the libc invariant motivating the FD_CLOEXEC fixup
+    /// inside `run_with_pty`. If a future libc starts defaulting to
+    /// `FD_CLOEXEC` on `openpty(3)`, this test skips with a message —
+    /// libc has caught up and the fixup in `run_with_pty` can be
+    /// deleted.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn openpty_default_lacks_cloexec() {
+        // openpty returns non-CLOEXEC fds, so taking the lock keeps the
+        // same fork-race guarantees as the leak regression test below.
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        use std::os::unix::io::AsRawFd;
+
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+        use nix::pty::openpty;
+
+        let pair = openpty(None, None).expect("openpty");
+        for (label, fd) in [
+            ("primary", pair.master.as_raw_fd()),
+            ("secondary", pair.slave.as_raw_fd()),
+        ] {
+            let bits = fcntl(fd, FcntlArg::F_GETFD).expect("F_GETFD");
+            let flags = FdFlag::from_bits_truncate(bits);
+            if flags.contains(FdFlag::FD_CLOEXEC) {
+                eprintln!(
+                    "skipping: openpty {label} now defaults to CLOEXEC; the fcntl fixup in run_with_pty can be removed"
+                );
+                return;
+            }
+        }
+    }
+
+    /// Regression: macOS' `openpty(3)` returns the primary and secondary fds
+    /// *without* `FD_CLOEXEC`. If we don't set it ourselves, the child
+    /// inherits the primary fd across `exec` — the secondary never hangs up
+    /// when the parent dies and the sandboxed shell becomes immortal,
+    /// leaking a pty pair per spawn until the host hits
+    /// `kern.tty.ptmx_max` (default 511 on macOS). The original secondary fd
+    /// (consumed into `secondary_err: Stdio`) also leaks: Rust's spawn
+    /// `dup2`s it onto fd 2 without closing the source, so the original
+    /// fd number stays open as a second secondary reference unless CLOEXEC
+    /// trims it at `execve` time.
+    ///
+    /// The child enumerates its own open fds and reports any inherited
+    /// pty fd via a sentinel-prefixed log file. Linux uses
+    /// `/proc/$$/fd` + `readlink` (no external tool deps). macOS uses
+    /// `/usr/sbin/lsof` because `readlink` on `/dev/fd/N` returns
+    /// `EINVAL` (fdescfs entries aren't symlinks) and lsof is bundled
+    /// with the OS at a fixed path. The sentinel makes the test fail
+    /// loudly when neither probe is available instead of silently
+    /// passing on empty input.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pty_fds_do_not_leak_into_child_across_exec() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let tmp_path = std::env::temp_dir()
+            .join(format!("mxc_pty_leak_test_{}.log", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(format!(
+            // After `exec` the inner shell should hold only fds 0/1/2
+            // (the secondary wired in as stdio). Any extra fd pointing at a
+            // pty device — primary (`/dev/ptmx`), macOS secondary
+            // (`/dev/ttysNNN`), or Linux secondary (`/dev/pts/N`) — is a
+            // CLOEXEC regression. fd 255 is excluded because some shells
+            // dup the script onto it for job control.
+            r#"
+            if [ -d /proc/$$/fd ]; then
+                echo "PROC_OK" > "{path}"
+                for fd_link in /proc/$$/fd/*; do
+                    fd=${{fd_link##*/}}
+                    case "$fd" in
+                        0|1|2|255) continue ;;
+                    esac
+                    target=$(readlink "$fd_link" 2>/dev/null) || continue
+                    case "$target" in
+                        /dev/ptmx|/dev/pts/*)
+                            echo "LEAK fd=$fd target=$target"
+                            ;;
+                    esac
+                done >> "{path}"
+            elif [ -x /usr/sbin/lsof ]; then
+                echo "LSOF_OK" > "{path}"
+                /usr/sbin/lsof -p $$ 2>/dev/null \
+                  | awk 'NR > 1 && $NF ~ /^\/dev\/(ptmx|ttys[0-9]+|pts\/[0-9]+)$/ {{
+                        fd = $4
+                        sub(/[a-zA-Z]+$/, "", fd)
+                        n = fd + 0
+                        if (n > 2 && n != 255) print "LEAK fd=" $4 " target=" $NF
+                    }}' \
+                  >> "{path}"
+            else
+                echo "PROBE_MISSING" > "{path}"
+            fi
+            "#,
+            path = tmp_path,
+        ));
+
+        let outcome = run_with_pty(cmd, PtyOptions::default()).expect("bridge spawns");
+        assert!(matches!(outcome, PtyOutcome::Exited(_)));
+
+        let contents = std::fs::read_to_string(&tmp_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&tmp_path);
+
+        if contents.trim_end() == "PROBE_MISSING" {
+            eprintln!(
+                "skipping pty leak assertion: no usable fd probe (no /proc and no /usr/sbin/lsof)"
+            );
+            return;
+        }
+        assert!(
+            contents.starts_with("PROC_OK") || contents.starts_with("LSOF_OK"),
+            "shell probe did not record a sentinel; got: {contents:?}",
+        );
+        let leaks = contents
+            .lines()
+            .filter(|l| l.starts_with("LEAK"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            leaks.is_empty(),
+            "child inherited pty fd(s) across exec:\n{leaks}",
+        );
     }
 }

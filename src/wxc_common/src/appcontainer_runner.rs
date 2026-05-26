@@ -6,10 +6,11 @@ use std::ptr;
 use windows::Win32::Foundation::{
     GetLastError, LocalFree, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
+use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
+    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
-use windows::Win32::Security::PSID;
+use windows::Win32::Security::{FreeSid, PSID};
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
@@ -43,35 +44,15 @@ const HRESULT_ERROR_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32;
 /// Proxy-related env var names to strip/override when building the child env block.
 const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
 
-/// Build a Unicode environment block for CreateProcessW with proxy env vars injected.
+/// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
 ///
-/// Copies the current process environment, strips any existing proxy vars
-/// (case-insensitive), injects HTTP_PROXY/HTTPS_PROXY pointing to the
-/// localhost proxy, and returns a double-null-terminated UTF-16 block.
-fn build_proxy_env_block(address: &crate::models::ProxyAddress) -> Vec<u16> {
-    let proxy_url = address.to_url();
-    let mut entries: Vec<(String, String)> = Vec::new();
-
-    for (key, value) in std::env::vars_os() {
-        let key_str = key.to_string_lossy();
-        let is_proxy_var = PROXY_VAR_NAMES
-            .iter()
-            .any(|name| key_str.eq_ignore_ascii_case(name));
-        if !is_proxy_var {
-            entries.push((key_str.into_owned(), value.to_string_lossy().into_owned()));
-        }
-    }
-
-    entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
-    entries.push(("HTTPS_PROXY".to_string(), proxy_url));
-
-    // Sort case-insensitively by key (required by CreateProcessW).
-    entries.sort_by(|(key_a, _), (key_b, _)| {
-        key_a.to_ascii_uppercase().cmp(&key_b.to_ascii_uppercase())
-    });
+/// Entries are sorted case-insensitively by key as required by `CreateProcessW`.
+fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
+    let mut sorted: Vec<&(String, String)> = entries.iter().collect();
+    sorted.sort_by(|(a, _), (b, _)| a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase()));
 
     let mut block = Vec::new();
-    for (key, value) in &entries {
+    for (key, value) in sorted {
         for ch in format!("{}={}", key, value).encode_utf16() {
             block.push(ch);
         }
@@ -79,6 +60,36 @@ fn build_proxy_env_block(address: &crate::models::ProxyAddress) -> Vec<u16> {
     }
     block.push(0);
     block
+}
+
+/// Parse explicit `KEY=VALUE` strings into entry pairs, optionally injecting
+/// proxy env vars (stripping any pre-existing proxy vars first).
+fn build_explicit_entries(
+    env_vars: &[String],
+    proxy_address: Option<&crate::models::ProxyAddress>,
+) -> Vec<(String, String)> {
+    let mut entries: Vec<(String, String)> = env_vars
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
+        .collect();
+
+    if let Some(addr) = proxy_address {
+        // Strip existing proxy vars before injecting ours.
+        entries.retain(|(key, _)| {
+            !PROXY_VAR_NAMES
+                .iter()
+                .any(|name| key.eq_ignore_ascii_case(name))
+        });
+        let proxy_url = addr.to_url();
+        entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
+        entries.push(("HTTPS_PROXY".to_string(), proxy_url));
+    }
+
+    entries
 }
 
 /// RAII guard that frees capability SID pointers via `LocalFree` on drop.
@@ -131,11 +142,121 @@ fn compute_attr_count(least_privilege_mode: bool, ui_disable: bool) -> u32 {
     n
 }
 
+/// Derive the AppContainer SID for `profile_name` and return it as a string
+/// in `S-1-15-...` form.
+///
+/// Used by the Phase 4 dispatcher to target deny / grant ACEs at the same
+/// AppContainer principal the runner will execute under. Co-located with
+/// [`AppContainerScriptRunner::create_app_container_sid`] so any future
+/// name normalization is added to a single place — keeping the dispatcher's
+/// ACE target and the runner's process principal from drifting.
+///
+/// `profile_name` corresponds to the AppContainer profile name the runner
+/// would create (matching the `request.container_id` mapping in the
+/// AppContainer / BaseContainer runners — empty becomes `"CLI"` at the
+/// caller; this function rejects empty input outright).
+///
+/// # Errors
+///
+/// Returns [`WxcError::Initialization`] if `profile_name` is empty, the
+/// derivation Win32 call fails, or the returned SID cannot be converted to
+/// a string.
+pub(crate) fn derive_sid_string(profile_name: &str) -> Result<String, WxcError> {
+    if profile_name.is_empty() {
+        return Err(WxcError::Initialization(
+            "AppContainer profile name is empty; cannot derive SID".to_string(),
+        ));
+    }
+
+    let wide_name = string_util::to_wide(profile_name);
+    let pcwstr_name = PCWSTR(wide_name.as_ptr());
+
+    // SAFETY: `wide_name` is a valid null-terminated UTF-16 string and lives
+    // for the duration of the call.
+    let sid: PSID =
+        unsafe { DeriveAppContainerSidFromAppContainerName(pcwstr_name) }.map_err(|e| {
+            WxcError::Initialization(format!(
+                "DeriveAppContainerSidFromAppContainerName failed for '{profile_name}': {e}"
+            ))
+        })?;
+
+    let mut string_sid = PWSTR::null();
+    // SAFETY: `sid` is a valid SID returned by the call above.
+    let convert_result = unsafe { ConvertSidToStringSidW(sid, &mut string_sid) };
+
+    let result = match convert_result {
+        Ok(()) => {
+            // Defensive null-check: `ConvertSidToStringSidW` documents
+            // that it always allocates a valid pointer on success, but
+            // matching the rest of the codebase's posture on raw Win32
+            // pointers is cheap. If we ever see a null here it's a
+            // real Win32 bug — surface it as an error rather than UB.
+            if string_sid.is_null() {
+                Err(WxcError::Initialization(
+                    "ConvertSidToStringSidW returned success but produced a null string SID"
+                        .to_string(),
+                ))
+            } else {
+                // SAFETY: ConvertSidToStringSidW writes a null-terminated
+                // wide string to `string_sid` on success and we just
+                // verified non-null.
+                let s = unsafe { string_sid.to_string() }
+                    .map_err(|e| WxcError::Initialization(format!("SID-to-string failed: {e}")));
+                // SAFETY: `string_sid` was allocated by ConvertSidToStringSidW;
+                // free it with LocalFree per the Win32 contract.
+                unsafe {
+                    let _ = LocalFree(Some(HLOCAL(string_sid.0 as *mut std::ffi::c_void)));
+                }
+                s
+            }
+        }
+        Err(e) => Err(WxcError::Initialization(format!(
+            "ConvertSidToStringSidW failed: {e}"
+        ))),
+    };
+
+    // SAFETY: SIDs returned by DeriveAppContainerSidFromAppContainerName
+    // must be released with FreeSid.
+    unsafe {
+        let _ = FreeSid(sid);
+    }
+
+    result
+}
+
+/// Selects how filesystem policy is enforced for an AppContainer run.
+///
+/// Used by the Phase 4 dispatcher to skip the in-runner BFS configure when
+/// the caller (Tier 3) is enforcing filesystem policy via host DACLs
+/// instead.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum FilesystemMode {
+    /// Configure the AppContainer's BFS policy via `bfscfg.exe` (default
+    /// historical behavior).
+    #[default]
+    Bfs,
+    /// Skip BFS setup; the caller has handled filesystem policy via host
+    /// DACL augmentation (Tier 3 path).
+    Dacl,
+}
+
 /// Script runner that executes commands inside a Windows AppContainer.
 pub struct AppContainerScriptRunner {
     app_container_name: String,
     app_container_sid: PSID,
     proxy_address: Option<crate::models::ProxyAddress>,
+    filesystem_mode: FilesystemMode,
+    /// Optional pre-derived SID string supplied by the dispatcher.
+    ///
+    /// When `Some`, the runner uses this value for the firewall
+    /// principal-id and any other capability-string lookups instead of
+    /// re-running `ConvertSidToStringSidW` on its owned `PSID`. The
+    /// `PSID` itself is still derived by [`create_app_container_sid`]
+    /// at run time because `windows-rs` does not expose a safe
+    /// "string → PSID" conversion with the same ownership semantics as
+    /// [`DeriveAppContainerSidFromAppContainerName`] / `FreeSid`; that
+    /// duplicate Win32 call is documented and left as a follow-up.
+    preset_sid_string: Option<String>,
 }
 
 impl AppContainerScriptRunner {
@@ -144,10 +265,50 @@ impl AppContainerScriptRunner {
             app_container_name: String::new(),
             app_container_sid: PSID(ptr::null_mut()),
             proxy_address: None,
+            filesystem_mode: FilesystemMode::Bfs,
+            preset_sid_string: None,
+        }
+    }
+
+    /// Construct a runner with an explicit [`FilesystemMode`].
+    ///
+    /// Used by the Phase 4 dispatcher to disable in-runner BFS setup for
+    /// the Tier 3 (DACL-augmented) path.
+    pub fn with_filesystem_mode(mode: FilesystemMode) -> Self {
+        Self {
+            app_container_name: String::new(),
+            app_container_sid: PSID(ptr::null_mut()),
+            proxy_address: None,
+            filesystem_mode: mode,
+            preset_sid_string: None,
+        }
+    }
+
+    /// Construct a runner with an explicit [`FilesystemMode`] and a
+    /// pre-derived SID string.
+    ///
+    /// Used by the Phase 4 dispatcher to avoid a second
+    /// `ConvertSidToStringSidW` round-trip when the dispatcher has
+    /// already derived the SID string for ACE targeting. The `PSID`
+    /// itself is still derived inside [`create_app_container_sid`] at
+    /// run time — see [`Self::preset_sid_string`].
+    pub fn with_filesystem_mode_and_sid_string(mode: FilesystemMode, sid_string: String) -> Self {
+        Self {
+            app_container_name: String::new(),
+            app_container_sid: PSID(ptr::null_mut()),
+            proxy_address: None,
+            filesystem_mode: mode,
+            preset_sid_string: Some(sid_string),
         }
     }
 
     /// Create or derive an AppContainer SID for the given container name.
+    ///
+    /// Returns a [`PSID`] owned by the runner (released via [`FreeSid`] in
+    /// cleanup). If you only need the string form of the SID (e.g. to
+    /// target ACEs at the same principal), call
+    /// [`derive_sid_string`] — it shares the underlying derivation so the
+    /// two paths can't drift in name normalization.
     fn create_app_container_sid(name: &str) -> Result<PSID, WxcError> {
         let wide_name = string_util::to_wide(name);
         let pcwstr_name = PCWSTR(wide_name.as_ptr());
@@ -387,20 +548,35 @@ impl AppContainerScriptRunner {
             PCWSTR(working_dir_wide.as_ptr())
         };
 
-        // Build an explicit environment block when proxy is active.
-        // This avoids mutating process-global env vars (which isn't thread-safe).
-        let env_block: Option<Vec<u16>> = self.proxy_address.as_ref().map(build_proxy_env_block);
+        // Environment block for the sandboxed child.
+        // If explicit env vars were provided, use only those (+ proxy injection).
+        // If only proxy is active (no explicit env), build a block with just proxy vars.
+        // Otherwise, pass NULL to inherit the default environment.
+        let env_block: Option<Vec<u16>> = if !request.env.is_empty() {
+            let entries = build_explicit_entries(&request.env, self.proxy_address.as_ref());
+            Some(encode_env_block(&entries))
+        } else if let Some(addr) = self.proxy_address.as_ref() {
+            // No explicit env but proxy is active -- inject only proxy vars.
+            let proxy_url = addr.to_url();
+            let entries = vec![
+                ("HTTP_PROXY".to_string(), proxy_url.clone()),
+                ("HTTPS_PROXY".to_string(), proxy_url),
+            ];
+            Some(encode_env_block(&entries))
+        } else {
+            None
+        };
 
         let env_ptr = env_block
             .as_ref()
-            .map(|block| block.as_ptr() as *const core::ffi::c_void);
+            .map(|b| b.as_ptr() as *const core::ffi::c_void);
 
-        let creation_flags = if env_block.is_some() {
-            PROCESS_CREATION_FLAGS(
-                EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_UNICODE_ENVIRONMENT.0 | CREATE_SUSPENDED.0,
-            )
-        } else {
-            PROCESS_CREATION_FLAGS(EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0)
+        let creation_flags = {
+            let mut flags = EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0;
+            if env_block.is_some() {
+                flags |= CREATE_UNICODE_ENVIRONMENT.0;
+            }
+            PROCESS_CREATION_FLAGS(flags)
         };
 
         // --- Create process (console inheritance) ---
@@ -439,6 +615,19 @@ impl AppContainerScriptRunner {
         // process initialization, regardless of bInheritHandles. Since we don't
         // pass CREATE_NEW_CONSOLE or DETACH_PROCESS, the child shares our console.
         let mut pi = PROCESS_INFORMATION::default();
+
+        // Pre-launch check: abort if policy paths are on ReFS (Dev Drive) volumes
+        // where BFS cannot enforce filesystem policy.
+        if let Some(diag) = crate::launch_diagnostics::check_refs_volumes(
+            &request.policy.readonly_paths,
+            &request.policy.readwrite_paths,
+        ) {
+            logger.log_line(&format!(
+                "Error: Pre-launch diagnostic [{}]: {}",
+                diag.kind, diag.message
+            ));
+            return Err(WxcError::Process(diag.message));
+        }
 
         unsafe {
             CreateProcessW(
@@ -539,6 +728,7 @@ impl AppContainerScriptRunner {
             standard_out: String::new(),
             standard_err: String::new(),
             error_message: String::new(),
+            ..Default::default()
         })
     }
 
@@ -556,6 +746,12 @@ impl AppContainerScriptRunner {
 
     /// Return the SID string for firewall rule association.
     fn get_principal_id(&self) -> String {
+        // Prefer the dispatcher-supplied string when present — saves a
+        // `ConvertSidToStringSidW` round-trip (the dispatcher has
+        // already converted the underlying SID once for ACE targeting).
+        if let Some(s) = &self.preset_sid_string {
+            return s.clone();
+        }
         if self.app_container_sid.0.is_null() {
             return "unknown-sid".to_string();
         }
@@ -580,6 +776,8 @@ impl Default for AppContainerScriptRunner {
 impl ScriptRunner for AppContainerScriptRunner {
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
         use crate::filesystem_bfs::FileSystemBfsManager;
+        use crate::launch_diagnostics::diagnose_process_exit;
+        use crate::models::FailurePhase;
         use crate::network_manager::NetworkManager;
 
         // Apply experimental features when flag is set
@@ -601,20 +799,24 @@ impl ScriptRunner for AppContainerScriptRunner {
 
         // Resolve `bfscfg.exe` by absolute path so probe and execution
         // agree on the binary — defeats executable-search-order
-        // hijacking (see `fallback_detector::find_bfscfg_exe`). On
-        // hosts where SystemRoot itself cannot be resolved (a
-        // pathological state on any healthy Windows install) we surface
-        // the resolution error rather than silently demoting to a
-        // weaker isolation tier.
-        let bfscfg_path = match crate::fallback_detector::find_bfscfg_exe() {
-            Ok(p) => p,
-            Err(e) => return ScriptResponse::error(&e.to_string()),
+        // hijacking (see `fallback_detector::find_bfscfg_exe`). Only
+        // resolve when we actually plan to use BFS; Tier 3 (DACL) hosts
+        // legitimately may not have `bfscfg.exe` installed.
+        let bfscfg_path = if self.filesystem_mode == FilesystemMode::Bfs {
+            match crate::fallback_detector::find_bfscfg_exe() {
+                Ok(p) => p,
+                Err(e) => return ScriptResponse::error(&e.to_string()),
+            }
+        } else {
+            None
         };
 
         let mut bfs_manager =
             FileSystemBfsManager::new(self.app_container_name.clone(), bfscfg_path);
-        if let Err(e) = bfs_manager.configure(&request.policy, logger) {
-            return ScriptResponse::error(&e.to_string());
+        if self.filesystem_mode == FilesystemMode::Bfs {
+            if let Err(e) = bfs_manager.configure(&request.policy, logger) {
+                return ScriptResponse::error(&e.to_string());
+            }
         }
 
         let mut network_manager = NetworkManager::new();
@@ -633,19 +835,75 @@ impl ScriptRunner for AppContainerScriptRunner {
             }
         }
 
-        let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.run_internal(request, logger)
         })) {
             Ok(r) => r,
             Err(_) => ScriptResponse::error("Unknown error during script execution."),
         };
 
+        // Post-failure diagnostics: if the child failed, check for known
+        // environment issues and enrich the error message.
+        if response.exit_code != 0 {
+            response.failure_phase = FailurePhase::ProcessExited;
+            if let Some(diag) = diagnose_process_exit(
+                &request.script_code,
+                &request.policy.readonly_paths,
+                &request.policy.readwrite_paths,
+                response.exit_code as u32,
+            ) {
+                logger.log_line(&format!(
+                    "Error: Launch diagnostic [{}]: {}",
+                    diag.kind, diag.message
+                ));
+                if !response.error_message.is_empty() {
+                    response.extended_error = response.error_message.clone();
+                }
+                response.error_message = diag.message.clone();
+                response.standard_err.push_str(&diag.message);
+            }
+        }
+
         network_manager.stop_all(!request.lifecycle.preserve_policy, logger);
-        if bfs_manager.configured() && !request.lifecycle.preserve_policy {
+        if self.filesystem_mode == FilesystemMode::Bfs
+            && bfs_manager.configured()
+            && !request.lifecycle.preserve_policy
+        {
             bfs_manager.remove_configuration(logger);
         }
 
         response
+    }
+}
+
+/// Delete the AppContainer profile created via [`CreateAppContainerProfile`]
+/// and clear any BFS policy registered against it.
+///
+/// This is the explicit cleanup entry point used by `wxc-exec --delete`,
+/// kept next to the create/setup path on `AppContainerScriptRunner` so
+/// both ends of the profile lifecycle live in the same module.
+///
+/// The BFS-clear step is best-effort: it delegates to
+/// [`FileSystemBfsManager::clear_policy`], which resolves `bfscfg.exe`
+/// itself and logs (rather than fails) when the resolver returns no
+/// path. The profile delete is still attempted in that case.
+pub fn delete_app_container_profile(name: &str, logger: &mut Logger) -> bool {
+    crate::filesystem_bfs::FileSystemBfsManager::clear_policy(name, logger);
+
+    let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let hstring = windows::core::HSTRING::from_wide(&wide_name[..wide_name.len() - 1]);
+    match unsafe { DeleteAppContainerProfile(&hstring) } {
+        Ok(()) => {
+            logger.log_line(&format!("Deleted AppContainer profile: {}", name));
+            true
+        }
+        Err(e) => {
+            logger.log_line(&format!(
+                "Failed to delete AppContainer profile '{}': {}",
+                name, e
+            ));
+            false
+        }
     }
 }
 
@@ -682,5 +940,31 @@ mod tests {
     #[test]
     fn attr_count_both() {
         assert_eq!(super::compute_attr_count(true, true), 3);
+    }
+
+    #[test]
+    fn derive_sid_string_empty_profile_name_errors() {
+        let res = super::derive_sid_string("");
+        assert!(matches!(
+            res,
+            Err(crate::error::WxcError::Initialization(_))
+        ));
+    }
+
+    #[test]
+    fn derive_sid_string_returns_appcontainer_prefix() {
+        let sid =
+            super::derive_sid_string("MxcDeriveSidTestSimple").expect("derivation should succeed");
+        assert!(
+            sid.starts_with("S-1-15-"),
+            "expected AppContainer SID prefix S-1-15-, got: {sid}"
+        );
+    }
+
+    #[test]
+    fn derive_sid_string_is_stable_for_same_name() {
+        let a = super::derive_sid_string("MxcDeriveSidTestStable").expect("first derivation");
+        let b = super::derive_sid_string("MxcDeriveSidTestStable").expect("second derivation");
+        assert_eq!(a, b);
     }
 }

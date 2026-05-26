@@ -1,0 +1,112 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Build the mxc_fuzz crate (libFuzzer + AddressSanitizer) and submit the
+# resulting drop directory to OneFuzz via `onefuzz-task@0`.
+#
+# Nightly Rust toolchain: cargo-fuzz requires `-Z sanitizer=address`, which
+# only nightly accepts. The Mxc-Azure-Feed (`ms-prod-*`) toolchains are
+# stable-only today, so we install nightly via `rustup-init` here.
+# TODO(SFI): switch to a Microsoft-published nightly via msrustup once one
+# is available in Mxc-Azure-Feed; until then keep cargo registry pointed at
+# Mxc-Azure-Feed so all *crate* sources still come from the internal feed.
+
+jobs:
+- job: build_fuzz_windows_x64
+  displayName: 'Build Fuzzers (Windows x64, ASAN)'
+
+  pool:
+    name: Azure-Pipelines-1ESPT-ExDShared
+    image: windows-latest
+    os: windows
+
+  variables:
+    triplet: x86_64-pc-windows-msvc
+    fuzzDir: $(Build.SourcesDirectory)/src/fuzz
+    fuzzTargetDir: $(Build.SourcesDirectory)/src/fuzz/target/$(triplet)/release
+    dropDir: $(Build.ArtifactStagingDirectory)/onefuzz-drop
+    # TODO: pin a specific nightly date (e.g. nightly-2026-05-01) for build
+    # reproducibility once we've validated cargo-fuzz against it.
+    rustNightly: nightly
+
+  steps:
+    - checkout: self
+
+    # Keep all crate fetches going through the internal feed.
+    - powershell: |
+        Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
+      displayName: Setup Cargo Config
+
+    # Install nightly Rust via rustup-init. The toolchain itself runs on the
+    # hosted agent only -- crates come from Mxc-Azure-Feed (see above).
+    - powershell: |
+        $rustupInit = "$env:TEMP\rustup-init.exe"
+        Invoke-WebRequest -UseBasicParsing -Uri 'https://win.rustup.rs/x86_64' -OutFile $rustupInit
+        & $rustupInit -y --profile minimal --default-toolchain $(rustNightly) --default-host x86_64-pc-windows-msvc
+        if ($LASTEXITCODE -ne 0) { throw "rustup-init failed" }
+        Write-Host "##vso[task.prependpath]$env:USERPROFILE\.cargo\bin"
+      displayName: Install Rust nightly
+
+    - powershell: |
+        rustc --version
+        cargo --version
+      displayName: Verify toolchain
+
+    - powershell: cargo install cargo-fuzz --locked
+      displayName: Install cargo-fuzz
+
+    # Build all three fuzz targets with ASAN.
+    - powershell: |
+        cd $(fuzzDir)
+        foreach ($t in 'config_parser','base64_decode') {
+          Write-Host "===== building $t ====="
+          cargo fuzz build $t --release
+          if ($LASTEXITCODE -ne 0) { throw "fuzz build failed for $t" }
+        }
+        Write-Host "===== building validator ====="
+        cargo fuzz build validator --release --features hyperlight,isolation_session
+        if ($LASTEXITCODE -ne 0) { throw "fuzz build failed for validator" }
+      displayName: Build fuzz targets (ASAN)
+
+    # Stage the OneFuzz drop directory: one subdir per fuzzer with the .exe,
+    # the OneFuzzConfig.json subset for that fuzzer, the ASAN runtime DLL,
+    # and the seed corpus.
+    - powershell: |
+        $asanDir = (Get-ChildItem 'C:\Program Files\Microsoft Visual Studio' -Recurse -Filter 'clang_rt.asan_dynamic-x86_64.dll' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'HostX64\\x64\\clang_rt' } | Select-Object -First 1).Directory.FullName
+        if (-not $asanDir) { throw "Could not locate clang_rt.asan_dynamic-x86_64.dll" }
+        Write-Host "ASAN runtime: $asanDir"
+
+        New-Item -ItemType Directory -Force -Path '$(dropDir)' | Out-Null
+        Copy-Item '$(fuzzDir)/OneFuzzConfig.json' '$(dropDir)/OneFuzzConfig.json'
+
+        foreach ($t in 'config_parser','base64_decode','validator') {
+          $sub = "$(dropDir)/$t"
+          New-Item -ItemType Directory -Force -Path $sub, "$sub/corpus" | Out-Null
+          Copy-Item "$(fuzzTargetDir)/$t.exe" $sub
+          Copy-Item "$asanDir/clang_rt.asan_dynamic-x86_64.dll" $sub
+          if ($t -eq 'base64_decode') {
+            Copy-Item "$(fuzzDir)/corpus/$t/*" "$sub/corpus/" -Recurse
+          } else {
+            Copy-Item "$(Build.SourcesDirectory)/test_configs/*.json" "$sub/corpus/"
+          }
+        }
+        Get-ChildItem -Recurse '$(dropDir)' | Select-Object FullName, Length
+      displayName: Stage OneFuzz drop directory
+
+    # Publish the drop dir as a pipeline artifact for visibility / debugging.
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: Publish OneFuzz drop
+      inputs:
+        path: '$(dropDir)'
+        artifactName: onefuzz-drop
+
+    # Submit to OneFuzz. Skipped on PR builds; only the scheduled daily run
+    # submits live jobs.
+    - task: onefuzz-task@0
+      displayName: Submit to OneFuzz
+      condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+      inputs:
+        onefuzzOSes: Windows
+      env:
+        onefuzzDropDirectory: $(dropDir)
+        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
