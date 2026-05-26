@@ -430,5 +430,75 @@
         }
       }
     }
-  }
+  },
+
+  "allOf": [
+    {
+      "$comment": "Enforce single backend section: each per-backend section requires the matching concrete `containment` value (or `containment` to be absent / default). See issue #104.",
+      "if": { "required": ["processContainer"] },
+      "then": {
+        "anyOf": [
+          { "not": { "required": ["containment"] } },
+          { "properties": { "containment": { "enum": ["processcontainer"] } } }
+        ]
+      }
+    },
+    {
+      "if": { "required": ["lxc"] },
+      "then": {
+        "anyOf": [
+          { "not": { "required": ["containment"] } },
+          { "properties": { "containment": { "enum": ["lxc"] } } }
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": ["experimental"],
+        "properties": { "experimental": { "required": ["windows_sandbox"] } }
+      },
+      "then": {
+        "anyOf": [
+          { "not": { "required": ["containment"] } },
+          { "properties": { "containment": { "enum": ["windows_sandbox"] } } }
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": ["experimental"],
+        "properties": { "experimental": { "required": ["wslc"] } }
+      },
+      "then": {
+        "anyOf": [
+          { "not": { "required": ["containment"] } },
+          { "properties": { "containment": { "enum": ["wslc"] } } }
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": ["experimental"],
+        "properties": { "experimental": { "required": ["seatbelt"] } }
+      },
+      "then": {
+        "anyOf": [
+          { "not": { "required": ["containment"] } },
+          { "properties": { "containment": { "enum": ["seatbelt"] } } }
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": ["experimental"],
+        "properties": { "experimental": { "required": ["isolation_session"] } }
+      },
+      "then": {
+        "anyOf": [
+          { "not": { "required": ["containment"] } },
+          { "properties": { "containment": { "enum": ["isolation_session"] } } }
+        ]
+      }
+    }
+  ]
 }

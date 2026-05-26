@@ -523,6 +523,73 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
 
 // ---------- Conversion from raw JSON to domain model ----------
 
+/// Returns the per-backend section "owned" by the given concrete containment,
+/// if any. Abstract intents and backends without a per-backend section return
+/// `None`, in which case no backend section is permitted.
+fn owned_backend_section(c: &ContainmentBackend) -> Option<&'static str> {
+    match c {
+        ContainmentBackend::ProcessContainer => Some("processContainer"),
+        ContainmentBackend::Lxc => Some("lxc"),
+        ContainmentBackend::WindowsSandbox => Some("experimental.windows_sandbox"),
+        ContainmentBackend::Wslc => Some("experimental.wslc"),
+        ContainmentBackend::Seatbelt => Some("experimental.seatbelt"),
+        ContainmentBackend::IsolationSession => Some("experimental.isolation_session"),
+        // Backends with no per-backend section: any backend section is foreign.
+        ContainmentBackend::Bubblewrap
+        | ContainmentBackend::Hyperlight
+        | ContainmentBackend::MicroVm
+        | ContainmentBackend::Vm => None,
+    }
+}
+
+/// Enforces that a config selecting one backend does not also carry per-backend
+/// sections for other backends. The runner only consults the section for the
+/// selected backend, so a stray `appContainer` block under `containment:
+/// "lxc"` would otherwise be silently ignored.
+fn validate_single_backend_section(
+    containment: ContainmentBackend,
+    present_sections: &[&'static str],
+    logger: &mut Logger,
+) -> Result<(), WxcError> {
+    let owned = owned_backend_section(&containment);
+    let extras: Vec<&'static str> = present_sections
+        .iter()
+        .copied()
+        .filter(|s| Some(*s) != owned)
+        .collect();
+    if extras.is_empty() {
+        return Ok(());
+    }
+
+    let containment_wire = match containment {
+        ContainmentBackend::ProcessContainer => "processcontainer",
+        ContainmentBackend::Lxc => "lxc",
+        ContainmentBackend::WindowsSandbox => "windows_sandbox",
+        ContainmentBackend::Wslc => "wslc",
+        ContainmentBackend::Seatbelt => "seatbelt",
+        ContainmentBackend::IsolationSession => "isolation_session",
+        ContainmentBackend::Bubblewrap => "bubblewrap",
+        ContainmentBackend::Hyperlight => "hyperlight",
+        ContainmentBackend::MicroVm => "microvm",
+        ContainmentBackend::Vm => "vm",
+    };
+    let msg = match owned {
+        Some(owned_name) => format!(
+            "Multiple containment backends configured: 'containment' is '{}' (allows the '{}' section), but the config also includes unrelated backend section(s): {}. Only one backend section is allowed; remove the unused section(s).",
+            containment_wire,
+            owned_name,
+            extras.join(", "),
+        ),
+        None => format!(
+            "Multiple containment backends configured: 'containment' is '{}' (no per-backend section is defined for this backend), but the config includes backend section(s): {}. Only one backend section is allowed; remove the unused section(s).",
+            containment_wire,
+            extras.join(", "),
+        ),
+    };
+    logger.log_line(&msg);
+    Err(WxcError::ConfigParse(msg))
+}
+
 fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
     convert_raw_config_inner(raw, logger, true)
 }
@@ -535,6 +602,31 @@ fn convert_raw_config_inner(
     logger: &mut Logger,
     require_process: bool,
 ) -> Result<CodexRequest, WxcError> {
+    // Capture which per-backend sections are present before any of the raw
+    // fields get consumed below; the multi-backend check needs to inspect
+    // them after `containment` has been resolved.
+    let mut present_backend_sections: Vec<&'static str> = Vec::new();
+    if raw.process_container.is_some() {
+        present_backend_sections.push("processContainer");
+    }
+    if raw.lxc.is_some() {
+        present_backend_sections.push("lxc");
+    }
+    if let Some(exp) = raw.experimental.as_ref() {
+        if exp.windows_sandbox.is_some() {
+            present_backend_sections.push("experimental.windows_sandbox");
+        }
+        if exp.wslc.is_some() {
+            present_backend_sections.push("experimental.wslc");
+        }
+        if exp.seatbelt.is_some() {
+            present_backend_sections.push("experimental.seatbelt");
+        }
+        if exp.isolation_session.is_some() {
+            present_backend_sections.push("experimental.isolation_session");
+        }
+    }
+
     // New top-level fields
     let schema_version = raw.version.unwrap_or_default();
     let container_id = raw.container_id.unwrap_or_default();
@@ -688,6 +780,13 @@ fn convert_raw_config_inner(
             return Err(WxcError::ConfigParse(msg));
         }
     };
+
+    // Mutual-exclusivity: each concrete backend owns at most one per-backend
+    // section (top-level `processContainer`/`lxc` or nested
+    // `experimental.<backend>`). Reject configs that include sections for
+    // other backends, so a stray `appContainer` block under `containment:
+    // "lxc"` fails loudly instead of being silently ignored.
+    validate_single_backend_section(containment.clone(), &present_backend_sections, logger)?;
 
     // LXC configuration
     let lxc_config = {
@@ -1743,7 +1842,7 @@ mod tests {
 
     #[test]
     fn sandbox_config_defaults() {
-        let json = r#"{"process": {"commandLine": "echo hello"}, "experimental": {"windows_sandbox": {}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "windows_sandbox", "experimental": {"windows_sandbox": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1757,6 +1856,7 @@ mod tests {
     fn sandbox_config_custom_values() {
         let json = r#"{
             "process": {"commandLine": "echo hello"},
+            "containment": "windows_sandbox",
             "experimental": {
                 "windows_sandbox": {
                     "idleTimeoutMs": 60000,
@@ -2177,7 +2277,7 @@ mod tests {
 
     #[test]
     fn sandbox_idle_timeout_ms_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"windows_sandbox": {"idleTimeoutMs": 60000}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "windows_sandbox", "experimental": {"windows_sandbox": {"idleTimeoutMs": 60000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2190,7 +2290,7 @@ mod tests {
 
     #[test]
     fn sandbox_idle_timeout_ms_overrides_idle_timeout() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"windows_sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "windows_sandbox", "experimental": {"windows_sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2402,8 +2502,7 @@ mod tests {
 
     #[test]
     fn isolation_session_config_defaults() {
-        let json =
-            r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2417,7 +2516,7 @@ mod tests {
 
     #[test]
     fn isolation_session_config_small() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "small"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "small"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2431,7 +2530,7 @@ mod tests {
 
     #[test]
     fn isolation_session_config_medium() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2445,7 +2544,7 @@ mod tests {
 
     #[test]
     fn isolation_session_config_large() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "large"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "large"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2459,7 +2558,7 @@ mod tests {
 
     #[test]
     fn isolation_session_config_composable() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "composable"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "composable"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2473,7 +2572,7 @@ mod tests {
 
     #[test]
     fn isolation_session_config_unknown_defaults_to_composable() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "xlarge"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "xlarge"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2497,7 +2596,7 @@ mod tests {
 
     #[test]
     fn isolation_session_user_field_round_trips_through_one_shot_parser() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2512,7 +2611,7 @@ mod tests {
 
     #[test]
     fn isolation_session_user_absent_when_field_omitted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2660,5 +2759,108 @@ mod tests {
             cfg.profile_override.as_deref(),
             Some("(version 1)(allow default)")
         );
+    }
+
+    // ====== Single-backend-section enforcement (issue #104) ======
+
+    fn assert_multi_backend_rejected(json: &str, expected_extra: &str) {
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("config with multiple backend sections should be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("Multiple containment backends configured"),
+            "error did not mention multi-backend rejection: {msg}"
+        );
+        assert!(
+            msg.contains(expected_extra),
+            "error did not name the foreign section '{expected_extra}': {msg}"
+        );
+    }
+
+    #[test]
+    fn lxc_containment_with_processcontainer_section_rejected() {
+        let json = r#"{
+            "containment": "lxc",
+            "process": {"commandLine": "echo hi"},
+            "lxc": {"distribution": "alpine", "release": "3.20"},
+            "processContainer": {"leastPrivilege": true}
+        }"#;
+        assert_multi_backend_rejected(json, "processContainer");
+    }
+
+    #[test]
+    fn lxc_containment_with_legacy_app_container_alias_rejected() {
+        // `appContainer` is a deprecated alias for `processContainer`; the
+        // single-backend check applies to the canonical key after aliasing,
+        // so this combination is still rejected.
+        let json = r#"{
+            "containment": "lxc",
+            "process": {"commandLine": "echo hi"},
+            "lxc": {"distribution": "alpine", "release": "3.20"},
+            "appContainer": {"leastPrivilege": true}
+        }"#;
+        assert_multi_backend_rejected(json, "processContainer");
+    }
+
+    #[test]
+    fn processcontainer_containment_with_lxc_section_rejected() {
+        let json = r#"{
+            "containment": "processcontainer",
+            "process": {"commandLine": "echo hi"},
+            "lxc": {"distribution": "alpine", "release": "3.20"}
+        }"#;
+        assert_multi_backend_rejected(json, "lxc");
+    }
+
+    #[test]
+    fn processcontainer_containment_with_experimental_seatbelt_rejected() {
+        let json = r#"{
+            "containment": "processcontainer",
+            "process": {"commandLine": "echo hi"},
+            "experimental": {"seatbelt": {"guiAccess": true}}
+        }"#;
+        assert_multi_backend_rejected(json, "experimental.seatbelt");
+    }
+
+    #[test]
+    fn bubblewrap_containment_with_lxc_section_rejected() {
+        // Bubblewrap has no per-backend section, so any backend block is foreign.
+        let json = r#"{
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "lxc": {"distribution": "alpine", "release": "3.20"}
+        }"#;
+        assert_multi_backend_rejected(json, "lxc");
+    }
+
+    #[test]
+    fn lxc_containment_with_only_lxc_section_accepted() {
+        // Sanity check: the matching section is still accepted.
+        let json = r#"{
+            "containment": "lxc",
+            "process": {"commandLine": "echo hi"},
+            "lxc": {"distribution": "alpine", "release": "3.20"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::Lxc);
+    }
+
+    #[test]
+    fn experimental_test_section_does_not_count_as_backend() {
+        // `experimental.test` is a generic test feature, not a backend block,
+        // so it should not trigger the multi-backend check.
+        let json = r#"{
+            "containment": "lxc",
+            "process": {"commandLine": "echo hi"},
+            "lxc": {"distribution": "alpine", "release": "3.20"},
+            "experimental": {"test": {"message": "hello"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        load_request(&encoded, &mut logger, true).unwrap();
     }
 }
