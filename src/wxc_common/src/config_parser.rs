@@ -523,6 +523,34 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
 
 // ---------- Conversion from raw JSON to domain model ----------
 
+/// Returns the list of per-backend section names present in the raw config.
+/// Used by `validate_single_backend_section` to detect configs that include
+/// backend sections for more than one backend.
+fn present_backend_sections(raw: &RawConfig) -> Vec<&'static str> {
+    let mut sections: Vec<&'static str> = Vec::new();
+    if raw.process_container.is_some() {
+        sections.push("processContainer");
+    }
+    if raw.lxc.is_some() {
+        sections.push("lxc");
+    }
+    if let Some(exp) = raw.experimental.as_ref() {
+        if exp.windows_sandbox.is_some() {
+            sections.push("experimental.windows_sandbox");
+        }
+        if exp.wslc.is_some() {
+            sections.push("experimental.wslc");
+        }
+        if exp.seatbelt.is_some() {
+            sections.push("experimental.seatbelt");
+        }
+        if exp.isolation_session.is_some() {
+            sections.push("experimental.isolation_session");
+        }
+    }
+    sections
+}
+
 /// Returns the per-backend section "owned" by the given concrete containment,
 /// if any. Abstract intents and backends without a per-backend section return
 /// `None`, in which case no backend section is permitted.
@@ -605,27 +633,7 @@ fn convert_raw_config_inner(
     // Capture which per-backend sections are present before any of the raw
     // fields get consumed below; the multi-backend check needs to inspect
     // them after `containment` has been resolved.
-    let mut present_backend_sections: Vec<&'static str> = Vec::new();
-    if raw.process_container.is_some() {
-        present_backend_sections.push("processContainer");
-    }
-    if raw.lxc.is_some() {
-        present_backend_sections.push("lxc");
-    }
-    if let Some(exp) = raw.experimental.as_ref() {
-        if exp.windows_sandbox.is_some() {
-            present_backend_sections.push("experimental.windows_sandbox");
-        }
-        if exp.wslc.is_some() {
-            present_backend_sections.push("experimental.wslc");
-        }
-        if exp.seatbelt.is_some() {
-            present_backend_sections.push("experimental.seatbelt");
-        }
-        if exp.isolation_session.is_some() {
-            present_backend_sections.push("experimental.isolation_session");
-        }
-    }
+    let present_backend_sections = present_backend_sections(&raw);
 
     // New top-level fields
     let schema_version = raw.version.unwrap_or_default();
