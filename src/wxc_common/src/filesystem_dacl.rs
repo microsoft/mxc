@@ -96,6 +96,40 @@ use windows::Win32::System::Threading::{
 };
 
 // -------------------------------------------------------------------------
+// Access masks — single source of truth
+// -------------------------------------------------------------------------
+//
+// These are the masks `DaclManager::grant_appcontainer_access` actually
+// stamps onto host paths. Other modules (the dispatcher's
+// `filter_paths_needing_grant`, the fallback detector's
+// `ensure_path_grantable_for_ac` precheck) must observe the SAME
+// values or they'll predict / filter against a different mask than
+// what we apply, silently breaking the "skip per-run ACE when AC SID
+// already has access" optimization and the WRITE_DAC precheck.
+//
+// Keep these as the only definitions in the crate; the constants
+// are `pub(crate)` so dispatcher and fallback_detector can import
+// them rather than re-derive the bit pattern.
+
+/// Access mask granted on `readwritePaths` entries: read + write + delete.
+pub(crate) const RW_MASK: u32 = FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0;
+
+/// Access mask granted on `readonlyPaths` entries: read only.
+pub(crate) const RO_MASK: u32 = FILE_GENERIC_READ.0;
+
+// Compile-time guarantee that the masks above keep their well-known
+// shape. Any change to [`RW_MASK`] or [`RO_MASK`] that breaks one of
+// these invariants fails to build, preventing silent drift inside
+// the dispatcher's `filter_paths_needing_grant` and the detector's
+// `ensure_path_grantable_for_ac` (both of which read the constants
+// directly from this module).
+const _: () = {
+    assert!(RW_MASK == FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0);
+    assert!(RO_MASK == FILE_GENERIC_READ.0);
+    assert!((RW_MASK & RO_MASK) == RO_MASK);
+};
+
+// -------------------------------------------------------------------------
 // Public API
 // -------------------------------------------------------------------------
 
@@ -278,13 +312,11 @@ impl DaclManager {
         readwrite: &[PathBuf],
         readonly: &[PathBuf],
     ) -> Result<(), DaclError> {
-        let rw_mask = FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0;
-        let ro_mask = FILE_GENERIC_READ.0;
         for p in readwrite {
-            self.apply_one(appcontainer_sid_str, p, rw_mask, AceType::Allow)?;
+            self.apply_one(appcontainer_sid_str, p, RW_MASK, AceType::Allow)?;
         }
         for p in readonly {
-            self.apply_one(appcontainer_sid_str, p, ro_mask, AceType::Allow)?;
+            self.apply_one(appcontainer_sid_str, p, RO_MASK, AceType::Allow)?;
         }
         Ok(())
     }
@@ -1769,6 +1801,12 @@ fn process_creation_filetime() -> Result<u64, DaclError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Note: the analogous compile-time `const _: () = assert!(...)`
+    // block at module level (above) covers RW_MASK/RO_MASK shape
+    // invariants. Putting them there means a value drift fails the
+    // build instead of silently passing tests on hosts where the
+    // suite is filtered.
 
     #[test]
     fn state_file_roundtrip() {

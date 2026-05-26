@@ -205,10 +205,10 @@ pub fn detect(
     // Denied paths always require `WRITE_DAC` because well-known SID
     // grants don't help us subtract access.
     for p in &policy.readwrite_paths {
-        ensure_path_grantable_for_ac(Path::new(p), rw_mask())?;
+        ensure_path_grantable_for_ac(Path::new(p), crate::filesystem_dacl::RW_MASK)?;
     }
     for p in &policy.readonly_paths {
-        ensure_path_grantable_for_ac(Path::new(p), ro_mask())?;
+        ensure_path_grantable_for_ac(Path::new(p), crate::filesystem_dacl::RO_MASK)?;
     }
     verify_write_dac_all(&policy.denied_paths)?;
     Ok(TierDecision {
@@ -217,22 +217,6 @@ pub fn detect(
         bfscfg_path: None,
         warnings,
     })
-}
-
-/// Access mask the dispatcher would grant for a `readwritePaths` entry.
-/// Must stay in sync with
-/// [`crate::filesystem_dacl::DaclManager::grant_appcontainer_access`].
-fn rw_mask() -> u32 {
-    use windows::Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE};
-    FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0
-}
-
-/// Access mask the dispatcher would grant for a `readonlyPaths` entry.
-/// Must stay in sync with the RO branch of
-/// [`crate::filesystem_dacl::DaclManager::grant_appcontainer_access`].
-fn ro_mask() -> u32 {
-    use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
-    FILE_GENERIC_READ.0
 }
 
 /// Returns `Ok(true)` if a per-run ACE on `path` is unnecessary because
