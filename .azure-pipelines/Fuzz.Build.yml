@@ -9,14 +9,8 @@
 #
 # Schedule: daily at 00:00 UTC on `main`. PRs do not trigger this pipeline.
 
-pr:
-  branches:
-    include:
-      - user/saulg/fuzzerFix
-trigger:
-  branches:
-    include:
-      - user/saulg/fuzzerFix
+pr: none
+trigger: none
 
 schedules:
   - cron: "0 0 * * *"
