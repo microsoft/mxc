@@ -1,0 +1,93 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Standalone Lint stage that runs `cargo fmt --check` and `cargo clippy`
+# (with --all-features) in parallel with the Build_Binaries stage.
+#
+# Why this exists: clippy was previously a step inside Rust.Build.Job.yml
+# that ran AFTER the release build of the workspace finished. Because clippy
+# uses `--all-features` while the build uses default features, the cargo
+# fingerprint cache misses and clippy ends up recompiling the entire
+# workspace from scratch — adding ~10+ minutes to the critical path of the
+# x64 WXC build. Moving clippy into its own job lets it run in parallel
+# with the build, so wall-clock time on the pipeline becomes
+# max(build, clippy) instead of build + clippy.
+#
+# Linting is scoped to the two x64 targets because the existing inline step
+# was already gated on `isX64`. arm64 lint coverage is identical to x64 for
+# the rust source we control.
+
+parameters:
+- name: matrix
+  type: object
+  default:
+    - name: windows_x64
+      os: windows
+      triplet: x86_64-pc-windows-msvc
+      component: WXC
+    - name: linux_x64
+      os: linux
+      triplet: x86_64-unknown-linux-gnu
+      component: LXC
+
+jobs:
+- ${{ each item in parameters.matrix }}:
+  - job: 'lint_${{ item.name }}'
+    displayName: 'Lint (${{ item.component }} ${{ item.os }})'
+
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      ${{ if eq(item.os, 'windows') }}:
+        image: windows-latest
+        os: windows
+      ${{ if eq(item.os, 'linux') }}:
+        image: ubuntu-latest
+        os: linux
+
+    variables:
+      ${{ if eq(item.os, 'windows') }}:
+        CARGO_TARGET_DIR: c:/t/target
+        workingDirectory: src
+      ${{ if eq(item.os, 'linux') }}:
+        CARGO_TARGET_DIR: /tmp/target
+        # LXC build job uses src/lxc as cwd; mirror it so the cargo
+        # target-dir cache key matches and we benefit from any shared cache.
+        workingDirectory: $(Build.SourcesDirectory)/src/lxc
+      targetTriple: ${{ item.triplet }}
+
+    templateContext:
+      rust:
+        rustToolchain:
+          toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+          version: 'ms-prod-1.93'
+          additionalTargets: $(targetTriple)
+        workingDirectory: $(workingDirectory)
+        cacheOptions:
+          enableTargetCache: true
+
+    steps:
+      - checkout: self
+
+      # Append pipeline-specific Cargo settings (registry, cross-compile linker)
+      # to the workspace config so crate downloads go through the centralized
+      # Azure Artifacts feed. Mirrors the setup in Rust.Build.Job.yml.
+      - powershell: |
+          Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
+        displayName: Setup Cargo Config
+
+      - task: 1ES.Build.Rust.Setup@1
+      - task: 1ES.Build.Rust.Restore@1
+
+      - script: cargo fmt --all -- --check
+        displayName: cargo fmt --check
+        workingDirectory: $(workingDirectory)
+
+      # Run clippy via plain cargo. Note the deliberate lack of `--workspace`:
+      # on Linux this job runs from `src/lxc` which scopes clippy to the lxc
+      # package and its deps (matching the existing build's scope); the
+      # Windows job runs from `src/` (the workspace root with no `[package]`),
+      # so cargo's default expands to all workspace members. This avoids
+      # dragging Windows-only crates (e.g. wxc) into the Linux clippy graph.
+      - script: cargo clippy --locked --all-targets --all-features --target $(targetTriple) --release -- -D warnings
+        displayName: cargo clippy --all-features
+        workingDirectory: $(workingDirectory)

@@ -170,6 +170,12 @@ extends:
 
       - template: .azure-pipelines/templates/Mxc.Binary.Packaging.Job.yml@self
 
+    - stage: Lint
+      displayName: 'Lint'
+      dependsOn: []
+      jobs:
+      - template: .azure-pipelines/templates/Lint.Job.yml@self
+
     - stage: SDK_Unit_Tests
       displayName: 'SDK Unit Tests'
       dependsOn: []
