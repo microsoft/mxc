@@ -178,6 +178,12 @@ export interface NetworkConfig {
   enforcementMode?: 'capabilities' | 'firewall' | 'both';
   /** Default network policy: "allow" or "block" (default: "allow") */
   defaultPolicy?: 'allow' | 'block';
+  /**
+   * Whether to allow inbound connections to local IP listeners (i.e. the
+   * sandboxed process may call `bind()` + `listen()` and accept incoming
+   * TCP/UDP). Independent of `defaultPolicy`. (default: false)
+   */
+  allowLocalNetwork?: boolean;
   /** Hostnames or IP addresses/CIDR blocks to allow (firewall mode only) */
   allowedHosts?: string[];
   /** Hostnames or IP addresses to block (firewall mode only) */
