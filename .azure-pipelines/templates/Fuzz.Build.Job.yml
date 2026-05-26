@@ -39,6 +39,7 @@ jobs:
         $feedConfig = Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"
         Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + $feedConfig)
         $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { "$env:USERPROFILE\.cargo" }
+        New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null
         Add-Content -Path "$cargoHome\config.toml" -Value ("`n" + $feedConfig)
       displayName: Setup Cargo Config
 
