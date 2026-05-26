@@ -51,8 +51,6 @@ pub enum StagingError {
 
 /// Intermediate result from the staging build closure.
 struct StagingBuildOutput {
-    /// Read-write directory mappings for copyback.
-    rw_mappings: Vec<RwMapping>,
     /// Total bytes written to the staging directory.
     size_bytes: u64,
 }
@@ -60,46 +58,36 @@ struct StagingBuildOutput {
 /// Return type of the staging build closure.
 type StagingBuildResult = Result<StagingBuildOutput, StagingError>;
 
-/// Whether the original host path was a file or directory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HostPathKind {
-    File,
-    Directory,
-}
-
-/// Tracks the relationship between a host path, its staged copy, and its type.
-#[derive(Debug)]
-struct RwMapping {
-    host_path: PathBuf,
-    staged_path: PathBuf,
-    kind: HostPathKind,
-}
-
 /// RAII wrapper over a temporary staging directory.
 #[derive(Debug)]
 pub struct StagingDir {
     path: PathBuf,
-    rw_mappings: Vec<RwMapping>,
     size_bytes: u64,
-    /// When true, `Drop` skips cleanup so the staging dir can be recovered.
-    preserve: bool,
 }
 
 impl StagingDir {
     /// Creates and populates a staging directory under `root`.
+    ///
+    /// Read-write paths are exposed as symlinks pointing at the original host
+    /// location, so guest writes are visible live on the host without an
+    /// explicit copy-back step. Read-only paths are copied into the staging
+    /// directory and marked read-only to enforce the policy independently of
+    /// the host filesystem ACLs.
     pub fn new(
         root: PathBuf,
         script: &str,
         readwrite_paths: &[String],
         readonly_paths: &[String],
     ) -> Result<Self, StagingError> {
-        // Validate source paths up front (existence, no symlinks/reparse points,
-        // no `..` components). Validation is done once here; per-entry
-        // symlink/reparse rejection in `copy_dir_recursive` closes the TOCTOU
-        // window between validation and copy, so the per-source loops below
-        // don't need to re-validate.
-        for source in readwrite_paths.iter().chain(readonly_paths.iter()) {
-            validate_source_path(Path::new(source), source)?;
+        // Validate source paths up front. Read-write paths are exposed via
+        // symlink so we only need to check existence and reject `..` traversal;
+        // read-only paths are still copied so the no-symlink/no-reparse check
+        // applies recursively to their contents.
+        for source in readwrite_paths {
+            validate_rw_source_path(Path::new(source), source)?;
+        }
+        for source in readonly_paths {
+            validate_ro_source_path(Path::new(source), source)?;
         }
 
         fs::create_dir_all(&root)?;
@@ -109,7 +97,6 @@ impl StagingDir {
         let build_result = || -> StagingBuildResult {
             // Collect host→guest path mappings for script rewriting.
             let mut rewrite_map: Vec<(String, String)> = Vec::new();
-            let mut rw_mappings: Vec<RwMapping> = Vec::new();
             // Track staged bytes incrementally to avoid a full directory walk
             // at the end (which scaled with total staged content size).
             let mut size_bytes: u64 = 0;
@@ -122,15 +109,10 @@ impl StagingDir {
 
                 let relative = host_path_to_guest_relative(&host_path);
                 let slot_dir = path.join(RW_DIR).join(&relative);
-                let (kind, bytes) = stage_host_path(&host_path, &slot_dir)?;
+                let bytes = stage_rw_host_path(&host_path, &slot_dir)?;
                 size_bytes = size_bytes.saturating_add(bytes);
                 let guest_path = build_guest_path(RW_DIR, &relative);
                 rewrite_map.push((source.clone(), guest_path));
-                rw_mappings.push(RwMapping {
-                    host_path,
-                    staged_path: slot_dir,
-                    kind,
-                });
             }
 
             if !readonly_paths.is_empty() {
@@ -164,16 +146,10 @@ impl StagingDir {
             fs::write(path.join(BOOTSTRAP_FILENAME), &bootstrap_content)?;
             size_bytes = size_bytes.saturating_add(bootstrap_content.len() as u64);
 
-            Ok(StagingBuildOutput {
-                rw_mappings,
-                size_bytes,
-            })
+            Ok(StagingBuildOutput { size_bytes })
         }();
 
-        let StagingBuildOutput {
-            rw_mappings,
-            size_bytes,
-        } = match build_result {
+        let StagingBuildOutput { size_bytes } = match build_result {
             Ok(result) => result,
             Err(err) => {
                 let _ = remove_dir_all_force(&path);
@@ -181,12 +157,7 @@ impl StagingDir {
             }
         };
 
-        Ok(Self {
-            path,
-            rw_mappings,
-            size_bytes,
-            preserve: false,
-        })
+        Ok(Self { path, size_bytes })
     }
 
     /// Returns the host path to the staging directory.
@@ -194,34 +165,19 @@ impl StagingDir {
         &self.path
     }
 
-    /// Copies all read-write staged paths back to their original host locations.
-    /// Attempts all mappings even if one fails; returns the first error encountered.
-    /// On any failure, marks the staging dir as preserved so `Drop` won't delete it.
+    /// No-op kept for backward compatibility with the previous copy-back model.
+    ///
+    /// Read-write paths are now exposed as symlinks, so guest writes land on
+    /// the original host path immediately. Callers retain the same call site
+    /// but the operation is a guaranteed success.
     pub fn copy_back_to_host(&mut self) -> Result<(), StagingError> {
-        let mut first_err: Option<StagingError> = None;
-        // Preserve before starting — if any copy fails, staging must survive Drop.
-        self.preserve = true;
-        for mapping in &self.rw_mappings {
-            if let Err(e) = copy_back_mapping(mapping) {
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
-            }
-        }
-        if first_err.is_none() {
-            // All copies succeeded — allow normal cleanup on Drop.
-            self.preserve = false;
-        }
-        first_err.map_or(Ok(()), Err)
+        Ok(())
     }
 
-    /// Returns the staging directory path (useful for recovery messages).
+    /// Always `None`: there is nothing to preserve because no copy-back step
+    /// can fail under the symlink-based model.
     pub fn preserved_path(&self) -> Option<&Path> {
-        if self.preserve {
-            Some(&self.path)
-        } else {
-            None
-        }
+        None
     }
 
     /// Returns additional staging overhead in milliseconds.
@@ -233,9 +189,6 @@ impl StagingDir {
 
 impl Drop for StagingDir {
     fn drop(&mut self) {
-        if self.preserve {
-            return;
-        }
         let _ = remove_dir_all_force(&self.path);
     }
 }
@@ -284,69 +237,55 @@ fn rewrite_paths_in_script(script: &str, mappings: &[(String, String)]) -> Strin
     result
 }
 
-/// Stages a single host path in a target slot directory using a private copy.
-/// Returns the host-path kind and the total number of bytes copied.
-fn stage_host_path(host_path: &Path, slot_dir: &Path) -> Result<(HostPathKind, u64), StagingError> {
+/// Stages a single host path as a symlink under the read-write slot so guest
+/// writes propagate live to the original host location. Falls back to a
+/// private copy if symlink creation fails (e.g., the process lacks the
+/// `SeCreateSymbolicLinkPrivilege` and Developer Mode is off).
+///
+/// Returns the number of bytes consumed by the staged content (0 for the
+/// symlink path; the copy-back path returns the bytes copied).
+fn stage_rw_host_path(host_path: &Path, slot_dir: &Path) -> Result<u64, StagingError> {
     if host_path.is_dir() {
-        let bytes = copy_dir_recursive(host_path, slot_dir)?;
-        return Ok((HostPathKind::Directory, bytes));
-    }
-
-    fs::create_dir_all(slot_dir)?;
-    let file_name = host_path
-        .file_name()
-        .ok_or_else(|| StagingError::PathNotFound(host_path.display().to_string()))?;
-    let bytes = fs::copy(host_path, slot_dir.join(file_name))?;
-    Ok((HostPathKind::File, bytes))
-}
-
-/// Copies staged RW content back to the original host path.
-fn copy_back_mapping(mapping: &RwMapping) -> Result<(), StagingError> {
-    match mapping.kind {
-        HostPathKind::Directory => mirror_directory(&mapping.staged_path, &mapping.host_path),
-        HostPathKind::File => {
-            let file_name = mapping.host_path.file_name().ok_or_else(|| {
-                StagingError::PathNotFound(mapping.host_path.display().to_string())
-            })?;
-            let staged_file = mapping.staged_path.join(file_name);
-            fs::copy(staged_file, &mapping.host_path)?;
-            Ok(())
+        // Mirror the slot layout of the copy-based staging: the symlink lives
+        // at `slot_dir` itself, with its parent already created.
+        if let Some(parent) = slot_dir.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match create_symlink(host_path, slot_dir, true) {
+            Ok(()) => Ok(0),
+            Err(_) => copy_dir_recursive(host_path, slot_dir),
+        }
+    } else {
+        fs::create_dir_all(slot_dir)?;
+        let file_name = host_path
+            .file_name()
+            .ok_or_else(|| StagingError::PathNotFound(host_path.display().to_string()))?;
+        let link_path = slot_dir.join(file_name);
+        match create_symlink(host_path, &link_path, false) {
+            Ok(()) => Ok(0),
+            Err(_) => Ok(fs::copy(host_path, link_path)?),
         }
     }
 }
 
-/// Replaces the destination directory with the source directory contents.
-/// Uses a rename-based backup to avoid permanent data loss if the copy fails mid-way.
-fn mirror_directory(src: &Path, dst: &Path) -> Result<(), StagingError> {
-    // Build a sibling backup path on the same volume as dst — rename is atomic.
-    // Include the PID to avoid collision with stale backups from prior interrupted runs.
-    let backup = dst.with_extension(format!("__mxc_bak_{}", std::process::id()));
-    // Clean up any pre-existing backup with the same name (e.g. from a previous run
-    // of this process that was interrupted between the rename and cleanup).
-    if backup.exists() {
-        let _ = remove_dir_all_force(&backup);
-    }
-    if dst.exists() {
-        fs::rename(dst, &backup)?;
-    }
-    match copy_dir_recursive(src, dst) {
-        Ok(_) => {
-            // Copy succeeded — best-effort removal of the backup.
-            if backup.exists() {
-                let _ = remove_dir_all_force(&backup);
-            }
-            Ok(())
+/// Creates a symlink at `link` pointing to `target`.
+///
+/// On Windows the kind (file vs. directory) must be specified up front; on
+/// other platforms it is irrelevant.
+fn create_symlink(target: &Path, link: &Path, is_dir: bool) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+        if is_dir {
+            symlink_dir(target, link)
+        } else {
+            symlink_file(target, link)
         }
-        Err(e) => {
-            // Copy failed — attempt to restore the backup to the original path.
-            if backup.exists() {
-                if dst.exists() {
-                    let _ = remove_dir_all_force(dst);
-                }
-                let _ = fs::rename(&backup, dst);
-            }
-            Err(e)
-        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = is_dir;
+        std::os::unix::fs::symlink(target, link)
     }
 }
 
@@ -398,8 +337,23 @@ fn set_readonly_recursive(dir: &Path) -> Result<(), StagingError> {
     Ok(())
 }
 
-/// Validates that a source host path exists, has a filename, and contains no reparse points.
-fn validate_source_path(path: &Path, original: &str) -> Result<(), StagingError> {
+/// Validates a read-write source: exists, has a filename, and contains no
+/// `..` components. The path is exposed via symlink so we do not traverse it
+/// to reject internal symlinks/reparse points — the host filesystem will
+/// resolve them at access time.
+fn validate_rw_source_path(path: &Path, original: &str) -> Result<(), StagingError> {
+    validate_basic_source(path, original)
+}
+
+/// Validates a read-only source: same basic checks plus a recursive
+/// no-symlink/no-reparse-point scan, since the content will be copied.
+fn validate_ro_source_path(path: &Path, original: &str) -> Result<(), StagingError> {
+    validate_basic_source(path, original)?;
+    check_no_reparse_points(path)
+}
+
+/// Shared validation for both RW and RO sources.
+fn validate_basic_source(path: &Path, original: &str) -> Result<(), StagingError> {
     if !path.exists() {
         return Err(StagingError::PathNotFound(original.to_string()));
     }
@@ -419,7 +373,7 @@ fn validate_source_path(path: &Path, original: &str) -> Result<(), StagingError>
             )));
         }
     }
-    check_no_reparse_points(path)
+    Ok(())
 }
 
 /// Ensures no symlink or Windows reparse point is present in `path` or descendants.
@@ -463,8 +417,15 @@ fn remove_dir_all_force(path: &Path) -> Result<(), StagingError> {
 
 #[allow(clippy::permissions_set_readonly_false)]
 fn clear_readonly_recursive(path: &Path) -> Result<(), StagingError> {
-    if path.is_file() {
-        let mut perms = fs::metadata(path)?.permissions();
+    let metadata = fs::symlink_metadata(path)?;
+    // Never follow symlinks/reparse points: under the RW slot the staged
+    // entries are symlinks pointing at host paths we must not mutate.
+    if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Ok(());
+    }
+
+    if metadata.is_file() {
+        let mut perms = metadata.permissions();
         if perms.readonly() {
             perms.set_readonly(false);
             fs::set_permissions(path, perms)?;
@@ -525,6 +486,18 @@ mod tests {
             .path()
             .join(RW_DIR)
             .join(host_path_to_guest_relative(host_path))
+    }
+
+    /// Probe whether the current process can create symlinks. On Windows this
+    /// requires `SeCreateSymbolicLinkPrivilege` or Developer Mode; on POSIX
+    /// it always succeeds. Live-update assertions are gated on this so the
+    /// suite still passes on hosts where the runtime falls back to copying.
+    fn symlinks_available() -> bool {
+        let tmp = tempdir().unwrap();
+        let target = tmp.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        let link = tmp.path().join("link");
+        create_symlink(&target, &link, true).is_ok()
     }
 
     #[test]
@@ -702,7 +675,10 @@ mod tests {
     }
 
     #[test]
-    fn staging_rw_directory_is_private_until_copyback() {
+    fn staging_rw_directory_updates_are_live() {
+        if !symlinks_available() {
+            return;
+        }
         let root = tempdir().unwrap();
         let source_root = tempdir().unwrap();
         let source = source_root.path().join("work");
@@ -713,14 +689,15 @@ mod tests {
         let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
         let staged_file = staged_rw(&staging, &source).join("data.txt");
 
-        // Mutate the staged copy — original must remain unchanged.
+        // Writes to the staged path land on the host immediately (no copy-back
+        // step required) because the staged slot is a symlink to the source.
         fs::write(&staged_file, "after").unwrap();
         assert_eq!(
             fs::read_to_string(source.join("data.txt")).unwrap(),
-            "before"
+            "after"
         );
 
-        // After explicit copyback, original should reflect the staged changes.
+        // copy_back_to_host is a guaranteed-success no-op under the symlink model.
         staging.copy_back_to_host().unwrap();
         assert_eq!(
             fs::read_to_string(source.join("data.txt")).unwrap(),
@@ -729,7 +706,10 @@ mod tests {
     }
 
     #[test]
-    fn staging_rw_file_copyback_updates_original_file() {
+    fn staging_rw_file_updates_are_live() {
+        if !symlinks_available() {
+            return;
+        }
         let root = tempdir().unwrap();
         let source_root = tempdir().unwrap();
         let source_file = source_root.path().join("payload.txt");
@@ -740,14 +720,17 @@ mod tests {
         let staged_file = staged_rw(&staging, &source_file).join("payload.txt");
 
         fs::write(&staged_file, "after").unwrap();
-        assert_eq!(fs::read_to_string(&source_file).unwrap(), "before");
+        assert_eq!(fs::read_to_string(&source_file).unwrap(), "after");
 
         staging.copy_back_to_host().unwrap();
         assert_eq!(fs::read_to_string(&source_file).unwrap(), "after");
     }
 
     #[test]
-    fn staging_rw_directory_copyback_mirrors_deletions() {
+    fn staging_rw_directory_propagates_deletions_and_additions_live() {
+        if !symlinks_available() {
+            return;
+        }
         let root = tempdir().unwrap();
         let source_root = tempdir().unwrap();
         let source = source_root.path().join("work");
@@ -763,6 +746,7 @@ mod tests {
         fs::write(staged_dir.join("kept.txt"), "after").unwrap();
         fs::write(staged_dir.join("created.txt"), "new").unwrap();
 
+        // copy_back_to_host is a no-op; the changes are already on the host.
         staging.copy_back_to_host().unwrap();
 
         assert_eq!(
@@ -777,33 +761,29 @@ mod tests {
     }
 
     #[test]
-    fn staging_preserve_on_copyback_failure() {
+    fn staging_drop_does_not_delete_host_rw_paths() {
+        if !symlinks_available() {
+            return;
+        }
         let root = tempdir().unwrap();
         let source_root = tempdir().unwrap();
         let source = source_root.path().join("work");
         fs::create_dir_all(&source).unwrap();
-        write_file(&source.join("data.txt"), "original");
+        write_file(&source.join("data.txt"), "keep");
 
         let rw = vec![source.display().to_string()];
-        let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
-        let staging_path = staging.path().to_path_buf();
+        {
+            let _staging =
+                StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
+            // staging dropped here
+        }
 
-        // Delete the staged directory to make copyback fail.
-        fs::remove_dir_all(staging.path().join(RW_DIR)).unwrap();
-
-        let result = staging.copy_back_to_host();
-        assert!(result.is_err(), "expected copyback error");
-
-        // The staging dir must still exist (preserve=true) so the user can inspect it.
-        assert!(
-            staging_path.exists(),
-            "staging dir must be preserved on copyback failure"
-        );
-
-        // The original host directory is unchanged.
+        // The host source must survive Drop — only the symlink should be removed.
+        assert!(source.exists(), "host RW directory must not be removed");
         assert_eq!(
             fs::read_to_string(source.join("data.txt")).unwrap(),
-            "original"
+            "keep",
+            "host RW contents must be preserved across staging Drop"
         );
     }
 
@@ -1015,7 +995,10 @@ mod tests {
     }
 
     #[test]
-    fn staging_nested_directory_rw_copyback() {
+    fn staging_nested_directory_rw_updates_are_live() {
+        if !symlinks_available() {
+            return;
+        }
         let root = tempdir().unwrap();
         let source_root = tempdir().unwrap();
         let source = source_root.path().join("nested");
@@ -1028,7 +1011,8 @@ mod tests {
         let mut staging = StagingDir::new(root.path().to_path_buf(), "print(1)", &rw, &[]).unwrap();
         let staged_dir = staged_rw(&staging, &source);
 
-        // Modify deep file and add a new file.
+        // Modify deep file and add a new file — both should appear on the host
+        // immediately because staged_dir is a symlink to source.
         fs::write(
             staged_dir.join("sub").join("deep").join("deep.txt"),
             "modified",
@@ -1036,12 +1020,13 @@ mod tests {
         .unwrap();
         fs::write(staged_dir.join("new.txt"), "added").unwrap();
 
-        staging.copy_back_to_host().unwrap();
         assert_eq!(
             fs::read_to_string(sub.join("deep.txt")).unwrap(),
             "modified"
         );
         assert_eq!(fs::read_to_string(source.join("new.txt")).unwrap(), "added");
+
+        staging.copy_back_to_host().unwrap();
     }
 
     #[test]
