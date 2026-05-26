@@ -135,9 +135,9 @@ Windows kernel resets the SD to a default value at every boot; for
 the AppContainer-based backends the default does not include the
 well-known AppContainer SIDs, and processes that open `NUL` for
 stdin/stdout/stderr redirection fail with `ERROR_ACCESS_DENIED`
-partway through startup. Run `prepare-null-device` once per boot
-from an elevated context (e.g. a scheduled task, an MDM-managed
-startup script, or interactively from an elevated prompt).
+partway through startup. Apply MXC's SD once per boot via the
+companion scheduled task scripts described below, an MDM-managed
+startup script, or interactively from an elevated prompt.
 
 The target SDDL is:
 
@@ -210,6 +210,27 @@ Use for triage after `verify-null-device` reports drift.
 `verify-null-device --json` is the right place to look for the
 drift label; `dump-null-device` deliberately only reports the
 current SD.
+
+## Boot-trigger scheduled task
+
+Because the Windows kernel resets `\Device\Null`'s SD at every
+boot, `prepare-null-device` needs to run once per boot. Two helper
+scripts in
+[`scripts/host-prep/`](../scripts/host-prep/) automate the
+registration:
+
+- [`Register-NullDeviceAclTask.ps1`](../scripts/host-prep/Register-NullDeviceAclTask.ps1)
+  creates a scheduled task named `mxc-null-device-acl` that runs
+  `wxc-host-prep prepare-null-device --quiet` at boot under
+  `NT AUTHORITY\SYSTEM`. The task is fired once at registration so
+  the SD is applied immediately without waiting for reboot.
+- [`Unregister-NullDeviceAclTask.ps1`](../scripts/host-prep/Unregister-NullDeviceAclTask.ps1)
+  removes the task. The currently-applied SD is left in place; the
+  kernel default is restored on the next reboot.
+
+Both scripts require elevation. By default
+`Register-NullDeviceAclTask.ps1` looks for `wxc-host-prep.exe`
+next to itself (one directory up); pass `-ExePath` to override.
 
 ## Logs
 

@@ -151,7 +151,7 @@ Core references:
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
 - `docs/examples.md` — annotated configuration examples (see also `tests/examples/` and `tests/configs/`)
 - `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
-- `docs/host-prep.md` — `wxc-host-prep.exe` host setup binary (`prepare-system-drive` / `unprepare-system-drive` for the AppContainer ACEs on the system-drive root, plus `prepare-null-device` / `verify-null-device` / `dump-null-device` for the `\Device\Null` security descriptor that AppContainer-based backends require). Owns elevation via embedded `requireAdministrator` manifest — `wxc-exec.exe` no longer self-elevates.
+- `docs/host-prep.md` — `wxc-host-prep.exe` host setup binary (`prepare-system-drive` / `unprepare-system-drive` for the AppContainer ACEs on the system-drive root, plus `prepare-null-device` / `verify-null-device` / `dump-null-device` for the `\Device\Null` security descriptor that AppContainer-based backends require). Owns elevation via embedded `requireAdministrator` manifest — `wxc-exec.exe` no longer self-elevates. Boot-trigger scheduled-task registration scripts live in `scripts/host-prep/`.
 - `docs/sandbox-policy/v1/policy.md` — sandbox policy v1 specification
 
 Per-backend guides:
