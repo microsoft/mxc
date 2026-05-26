@@ -629,10 +629,11 @@ describe('createConfigFromPolicy', () => {
       try {
         const config = createConfigFromPolicy({
           version: '0.5.0-alpha',
-          network: { allowOutbound: true, blockedHosts: ['evil.com'] },
+          network: { blockedHosts: ['evil.com'] },
         });
         assert.strictEqual(config.containment, 'seatbelt');
         assert.deepStrictEqual(config.network!.blockedHosts, ['evil.com']);
+        assert.strictEqual(config.network!.defaultPolicy, 'block');
       } finally {
         restore();
       }
