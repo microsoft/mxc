@@ -313,8 +313,9 @@ export function createConfigFromPolicy(
         // WSLC supports block + allowedHosts via iptables (Bridged networking
         // with per-host filtering). macOS sandbox supports it natively via
         // per-host Seatbelt rules. Bubblewrap and LXC support it via iptables.
-        // Abstract `'process'` on Linux resolves to Bubblewrap server-side, so
-        // treat it the same as explicit `'bubblewrap'` here.
+        // Abstract `'process'` on Linux resolves to Bubblewrap server-side, and
+        // on macOS resolves to Seatbelt, so treat both the same as their
+        // explicit backend counterparts here.
         // Other backends require allowOutbound for host filtering since it
         // maps to AppContainer capabilities.
         const resolvesToHostFilteringBackend =
@@ -322,7 +323,8 @@ export function createConfigFromPolicy(
             containment === 'seatbelt' ||
             containment === 'bubblewrap' ||
             containment === 'lxc' ||
-            (containment === 'process' && platform === 'linux');
+            (containment === 'process' && platform === 'linux') ||
+            (containment === 'process' && platform === 'darwin');
         if (!resolvesToHostFilteringBackend) {
             if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
                 throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');

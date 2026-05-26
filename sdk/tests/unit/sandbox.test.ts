@@ -593,6 +593,67 @@ describe('createConfigFromPolicy', () => {
     });
   });
 
+  describe('macOS', () => {
+    let originalPlatform: PropertyDescriptor | undefined;
+
+    const mockDarwin = () => {
+      originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+    };
+
+    const restore = () => {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    };
+
+    it('should allow allowedHosts without allowOutbound on macOS (seatbelt supports per-host filtering)', () => {
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.5.0-alpha',
+          network: { allowedHosts: ['api.github.com'] },
+        });
+        // Abstract 'process' on macOS resolves to 'seatbelt' in the wire format
+        // (unlike Linux where the binary resolves it server-side).
+        assert.strictEqual(config.containment, 'seatbelt');
+        assert.deepStrictEqual(config.network!.allowedHosts, ['api.github.com']);
+        assert.strictEqual(config.network!.defaultPolicy, 'block');
+      } finally {
+        restore();
+      }
+    });
+
+    it('should allow blockedHosts without allowOutbound on macOS', () => {
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.5.0-alpha',
+          network: { allowOutbound: true, blockedHosts: ['evil.com'] },
+        });
+        assert.strictEqual(config.containment, 'seatbelt');
+        assert.deepStrictEqual(config.network!.blockedHosts, ['evil.com']);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject proxy configuration on macOS', () => {
+      mockDarwin();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.4.0-alpha',
+            network: { proxy: { builtinTestServer: true } },
+          }),
+          { message: /not supported on macOS/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+  });
+
   describe('network validation', () => {
     // These tests assert the "allowOutbound required for host filtering"
     // gate. The gate applies to backends that map host filtering to
