@@ -660,8 +660,7 @@ fn read_state_file(path: &Path) -> Result<StateFile, DaclError> {
     // ERROR_LOCK_VIOLATION (33) is also retried — antivirus on-access
     // scanners sometimes surface it transiently when an unrelated
     // process is still in the open-write-close window.
-    const ERROR_SHARING_VIOLATION: i32 = 32;
-    const ERROR_LOCK_VIOLATION: i32 = 33;
+    use windows::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
     const ATTEMPTS: u32 = 3;
     let mut last_err: Option<io::Error> = None;
     for i in 0..ATTEMPTS {
@@ -672,8 +671,8 @@ fn read_state_file(path: &Path) -> Result<StateFile, DaclError> {
             }
             Err(e) => {
                 let transient = matches!(
-                    e.raw_os_error(),
-                    Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+                    e.raw_os_error().map(|c| c as u32),
+                    Some(c) if c == ERROR_SHARING_VIOLATION.0 || c == ERROR_LOCK_VIOLATION.0
                 );
                 if !transient {
                     return Err(e.into());

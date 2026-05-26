@@ -453,11 +453,9 @@ pub(crate) fn has_write_dac(path: &Path) -> Result<bool, std::io::Error> {
     use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING,
+        FILE_SHARE_WRITE, OPEN_EXISTING, WRITE_DAC,
     };
     use windows_core::PCWSTR;
-
-    const WRITE_DAC: u32 = 0x0004_0000;
 
     let path_str = path
         .to_str()
@@ -470,7 +468,7 @@ pub(crate) fn has_write_dac(path: &Path) -> Result<bool, std::io::Error> {
     let handle = unsafe {
         CreateFileW(
             PCWSTR(wide.as_ptr()),
-            WRITE_DAC,
+            WRITE_DAC.0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             None,
             OPEN_EXISTING,

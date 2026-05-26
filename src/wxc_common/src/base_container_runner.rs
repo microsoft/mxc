@@ -39,8 +39,7 @@ use sandbox_spec::base_container_layout::{
     NetworkPolicy as FbsNetworkPolicy, NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
 };
 
-/// `CREATE_UNICODE_ENVIRONMENT` -- tells the API that the environment block is UTF-16 encoded.
-const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
+use windows::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
 
 /// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
 ///
@@ -580,7 +579,7 @@ impl ScriptRunner for BaseContainerRunner {
             .map(|b| b.as_ptr() as *const c_void)
             .unwrap_or(ptr::null());
         let creation_flags = if env_block.is_some() {
-            CREATE_UNICODE_ENVIRONMENT
+            CREATE_UNICODE_ENVIRONMENT.0
         } else {
             0
         };
