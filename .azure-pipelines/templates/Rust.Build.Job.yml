@@ -84,6 +84,7 @@ jobs:
         installOptions:
           configFile: $(configTomlPath)
         cacheOptions:
+          enabled: true
           enableTargetCache: true
 
     steps:
@@ -113,15 +114,13 @@ jobs:
           testCondition: "eq(variables['isX64'], 'true')" # 1ES nested template takes this as a string
           enableTest: $(isX64)
           publishTestResults: false
+          # Clippy + fmt run in the parallel Lint stage (Lint.Job.yml).
           enableClippy: false
+          enableCodeStyleCheck: false
+          checkAllCodeStyle: false
           useNextest: false
           testAllTargets: false
           buildAllTargets: false
-
-      # Clippy and fmt now run in the parallel Lint stage (see
-      # .azure-pipelines/templates/Lint.Job.yml). Keeping them out of the
-      # critical path here removes ~10+ min of redundant compilation, since
-      # clippy's `--all-features` graph misses the build's fingerprint cache.
 
       - task: EsrpCodeSigning@5
         displayName: Code Sign
