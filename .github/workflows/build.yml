@@ -70,6 +70,16 @@ jobs:
       - name: Run tests
         run: cargo test --release --target ${{ matrix.target }} --workspace --exclude wxc_e2e_tests
 
+      # Tier-2 (BFS) is off by default — production binaries on Win 11
+      # 25H2 must NOT carry the `tier2_bfs` feature, since `bfscfg.exe`
+      # hangs that host. The feature still has to compile and test
+      # green so the dispatcher's T2 branch stays alive for hosts
+      # where T2 is safe (post-25H2 or with the kernel hotfix). This
+      # step adds the matrix entry the adversarial review flagged as
+      # missing.
+      - name: Run tier2_bfs feature tests (wxc_common)
+        run: cargo test --release --target ${{ matrix.target }} -p wxc_common --features tier2_bfs
+
       - uses: actions/upload-artifact@v4
         with:
           name: wxc-exec-${{ matrix.target }}

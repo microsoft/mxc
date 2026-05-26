@@ -4,11 +4,14 @@
 use std::fmt::Write;
 use std::fs;
 use std::process;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use clap::Parser;
 use wxc_common::appcontainer_runner::{delete_app_container_profile, AppContainerScriptRunner};
-use wxc_common::config_parser::{is_base_container_version, load_mxc_request, ParseError};
+use wxc_common::config_parser::{
+    is_base_container_version, load_mxc_request, load_request, ParseError,
+};
 use wxc_common::diagnostic::DiagnosticConfig;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use wxc_common::hyperlight_runner::HyperlightScriptRunner;
@@ -153,6 +156,10 @@ struct Cli {
     #[cfg(target_os = "windows")]
     #[arg(long = "internal-log-path", hide = true)]
     internal_log_path: Option<String>,
+
+    /// Run the fallback detector and emit JSON, without spawning a sandbox.
+    #[arg(long)]
+    probe: bool,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
@@ -224,24 +231,165 @@ fn print_error_envelope(error: &MxcError) {
     }
 }
 
+fn config_input(cli: &Cli) -> Option<(String, bool)> {
+    if let Some(b64) = cli.config_base64.as_ref() {
+        Some((b64.clone(), true))
+    } else if let Some(p) = cli.config.as_ref() {
+        Some((p.clone(), false))
+    } else {
+        cli.config_path.as_ref().map(|p| (p.clone(), false))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Graceful-exit DACL cleanup
+// ---------------------------------------------------------------------------
+//
+// `DaclManager`'s `Drop` is the only thing that restores host ACEs we
+// applied during a Tier 2 / Tier 3 run. We need that `Drop` to fire on
+// every code path that can leave main, including the abnormal ones.
+// There are three:
+//
+// 1. **Normal exit / `process::exit`** — destructors of stack-owned
+//    values run on the former and are SKIPPED on the latter. We deal
+//    with this by explicitly `drop(take_parked_dacl())`-ing before any
+//    `process::exit` site below.
+// 2. **Panic unwind** — destructors of stack-owned values run; the
+//    release profile uses the default `unwind` strategy (see
+//    `src/Cargo.toml`). But the `DaclManager` we extract from
+//    `Dispatched` lives inside a process-global static (so the Ctrl-C
+//    handler can reach it), and statics are NOT touched by unwinding.
+//    To restore on panic we install a stack-owned `ParkedDaclGuard` in
+//    `main` whose `Drop` calls `take_parked_dacl()` and drops the
+//    manager. The guard sits at function scope so the unwind path
+//    threads through it.
+// 3. **Ctrl-C / Ctrl-Break / console close / logoff / shutdown** — the
+//    default Windows handler calls `ExitProcess` directly, skipping
+//    every Rust destructor. We install a `SetConsoleCtrlHandler` that
+//    takes-and-drops the parked manager before yielding to the
+//    default handler.
+//
+// The mutex in the slot serializes the Ctrl-C handler and the guard
+// against each other, so the manager is taken (and therefore
+// `Drop`'d) at most once.
+//
+// Parent-process kill (`TerminateProcess`) still bypasses every
+// handler; any leak there is reaped by `recover_orphaned_state` on
+// the next wxc-exec startup (which we already run at the top of
+// `main`).
+
+static DACL_CLEANUP_SLOT: OnceLock<Mutex<Option<wxc_common::filesystem_dacl::DaclManager>>> =
+    OnceLock::new();
+
+fn dacl_cleanup_slot() -> &'static Mutex<Option<wxc_common::filesystem_dacl::DaclManager>> {
+    DACL_CLEANUP_SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Park the DACL manager in the global slot so the Ctrl-C handler can
+/// drop it if a signal arrives before the normal-exit path runs.
+fn park_dacl_for_cleanup(mgr: wxc_common::filesystem_dacl::DaclManager) {
+    let slot = dacl_cleanup_slot();
+    let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
+    *guard = Some(mgr);
+}
+
+/// Take the parked DACL manager (if any) so the caller can drop it,
+/// triggering ACE restore. Returns `None` if either nothing was parked
+/// or another path (the Ctrl-C handler) already took it.
+///
+/// Recovers from `PoisonError` the same way [`park_dacl_for_cleanup`]
+/// does (`into_inner`): a poisoned mutex must NOT silently swallow a
+/// parked manager — that would leak ACEs until the next-startup
+/// recovery scan reaps them.
+fn take_parked_dacl() -> Option<wxc_common::filesystem_dacl::DaclManager> {
+    DACL_CLEANUP_SLOT.get().and_then(|slot| {
+        let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
+        guard.take()
+    })
+}
+
+/// Stack-owned witness that ensures `take_parked_dacl()` runs on every
+/// path out of `main`, including panic unwind. The parked
+/// `DaclManager` lives in a process-global static (so the Ctrl-C
+/// handler can reach it), and Rust's unwinder doesn't touch statics —
+/// without this guard, a panic between `park_dacl_for_cleanup` and
+/// the explicit `drop(take_parked_dacl())` near the end of `main`
+/// would leave host ACEs in place until the next startup's recovery
+/// scan.
+///
+/// `Drop` is a no-op if nothing was ever parked or if the Ctrl-C
+/// handler already drained the slot.
+struct ParkedDaclGuard;
+
+impl Drop for ParkedDaclGuard {
+    fn drop(&mut self) {
+        drop(take_parked_dacl());
+    }
+}
+
+/// Windows console-control handler. Called by the OS on Ctrl-C, Ctrl-Break,
+/// console close, logoff, and shutdown. Takes the parked DACL manager and
+/// drops it — `Drop` runs `restore()` which removes the ACEs we applied.
+/// Returns `FALSE` so the default handler still runs (which terminates
+/// the process).
+///
+/// Acquires the slot with a bounded wait (≤5s), not `try_lock`. If the
+/// main thread is mid-`Drop` on the same manager — which can be doing a
+/// `SetNamedSecurityInfoW` — returning FALSE immediately lets the
+/// default handler call `ExitProcess`, terminating that drop mid-Win32
+/// and leaving the host DACL in an inconsistent state. The bounded
+/// wait blocks the default handler until either main finishes (lock
+/// released) or 5s elapses — whichever comes first. On timeout we
+/// proceed anyway; the recovery scan on the next `wxc-exec` startup
+/// reaps anything left behind.
+unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
+    if let Some(slot) = DACL_CLEANUP_SLOT.get() {
+        use std::time::{Duration, Instant};
+        // 5s mirrors the WaitForSingleObject pattern recommended for
+        // graceful-shutdown handlers; tuned to be longer than a worst-
+        // case `SetNamedSecurityInfoW` on a deep tree but well under
+        // the Windows default 10s shutdown-handler budget.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(mut guard) = slot.try_lock() {
+                // Either main already took the manager (guard is None)
+                // or it never parked one; dropping `Option::take` is
+                // a no-op in both cases. Either way, the contract — no
+                // restore thread running concurrently with the default
+                // handler's ExitProcess — is satisfied.
+                drop(guard.take());
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    // FALSE = "I did not fully handle this; run the next handler in the
+    // chain (i.e. the default handler that calls ExitProcess)".
+    windows::core::BOOL(0)
+}
+
+/// Install the console-control handler. Idempotent — calling twice
+/// registers the same handler twice, which is harmless because the
+/// take-and-drop is `Option::take`-based.
+fn install_dacl_ctrl_handler() {
+    use windows::Win32::System::Console::SetConsoleCtrlHandler;
+    // SAFETY: `dacl_ctrl_handler` has the correct ABI; the `Add=TRUE`
+    // call merely appends to the OS handler chain.
+    let _ = unsafe { SetConsoleCtrlHandler(Some(dacl_ctrl_handler), true) };
+}
+
 fn main() {
-    // Initialize COM/WinRT for backends that use WinRT APIs (Isolation Session).
-    // COINIT_MULTITHREADED is benign for backends that don't use COM.
-    //
-    // SAFETY: `CoInitializeEx` is sound to call once at process start before
-    // any WinRT or COM activation. `pvReserved` must be `None` per the API
-    // contract. The return value is intentionally ignored — repeat-init
-    // outcomes (`S_FALSE`, `RPC_E_CHANGED_MODE`) are benign here.
-    let _ = unsafe {
-        windows::Win32::System::Com::CoInitializeEx(
-            None,
-            windows::Win32::System::Com::COINIT_MULTITHREADED,
-        )
-    };
+    let cli = Cli::parse();
 
     // Best-effort: reap any orphaned DACL state files left behind by
-    // crashed prior MXC runs. Errors here are non-fatal and only surface
-    // via stderr.
+    // crashed prior MXC runs. Runs BEFORE the `--probe` arm because
+    // `wxc-exec --probe` is the canonical recovery trigger consumers
+    // (Win25H2Safe-Tests Phase 6, SDK warm-start) rely on. Errors here
+    // are non-fatal and only surface via stderr. On a healthy host
+    // with zero state files this is sub-millisecond.
     match wxc_common::filesystem_dacl::recover_orphaned_state() {
         Ok(report) => {
             if report.files_processed > 0 || !report.errors.is_empty() {
@@ -259,7 +407,65 @@ fn main() {
         Err(e) => eprintln!("DACL recovery failed: {e}"),
     }
 
-    let cli = Cli::parse();
+    // --probe is a detection-only fast path used by SDK
+    // `getPlatformSupport()` on every first call. It does not spawn a
+    // sandbox, never parks a DaclManager, and never calls into COM/WinRT.
+    // Run it AFTER recovery (so consumers that rely on `--probe`-as-
+    // reaper still get it) but BEFORE COM init / SetConsoleCtrlHandler
+    // (which probe doesn't need; deferring them shaves cold-start cost
+    // off the SDK warm path).
+    if cli.probe {
+        let policy = if let Some((data, is_b64)) = config_input(&cli) {
+            // Parse using the existing pipeline but route logger output to
+            // an in-memory buffer that we discard — the probe must not
+            // emit anything other than its JSON line on stdout.
+            let mut probe_logger = Logger::new(Mode::Buffer);
+            match load_request(&data, &mut probe_logger, is_b64) {
+                Ok(r) => r.policy,
+                Err(_) => {
+                    eprintln!("Error: failed to load probe config");
+                    eprint!("{}", probe_logger.get_buffer());
+                    process::exit(1);
+                }
+            }
+        } else {
+            wxc_common::models::ContainerPolicy::default()
+        };
+        let output = wxc_common::probe::run_probe(&policy);
+        match wxc_common::probe::to_json_pretty(&output) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("Error: probe serialization failed: {e}");
+                process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Initialize COM/WinRT for backends that use WinRT APIs (Isolation Session).
+    // COINIT_MULTITHREADED is benign for backends that don't use COM.
+    //
+    // SAFETY: `CoInitializeEx` is sound to call once at process start before
+    // any WinRT or COM activation. `pvReserved` must be `None` per the API
+    // contract. The return value is intentionally ignored — repeat-init
+    // outcomes (`S_FALSE`, `RPC_E_CHANGED_MODE`) are benign here.
+    let _ = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        )
+    };
+
+    // Install the Ctrl-C / Ctrl-Break handler that drops any parked
+    // DaclManager on signal. Cheap and idempotent.
+    install_dacl_ctrl_handler();
+
+    // Stack-owned witness so a panic anywhere below — between
+    // `park_dacl_for_cleanup` and the explicit `drop(take_parked_dacl())`
+    // near the end of `main` — still drains the slot and runs
+    // `restore()` during unwind. Without it the manager is parked in
+    // a static and unwinding skips destructors of static-owned values.
+    let _dacl_guard = ParkedDaclGuard;
 
     // --prepare-system-drive / --unprepare-system-drive: host DACL prep.
     // Modifies the DACL of the system drive root to grant the well-known
@@ -363,6 +569,9 @@ fn main() {
             process::exit(1);
         }
     }
+
+    // --probe is handled at the top of `main` (before COM init) for
+    // SDK first-call latency. See note there.
 
     // Determine config input and whether it's base64
     let (config_data, is_base64) = if let Some(ref b64) = cli.config_base64 {
@@ -500,30 +709,10 @@ fn main() {
         wxc_common::diagnostic::redacted_request_json(&request)
     );
 
-    // Drop-order contract — DO NOT REORDER, AND DO NOT ADD `process::exit`
-    // BETWEEN THIS DECLARATION AND THE EXPLICIT `drop(_dacl_guard)` LATER
-    // IN main() WITHOUT FIRST GOING THROUGH THAT DROP:
-    //
-    //   `_dacl_guard` is declared BEFORE `runner` so that, by Rust's
-    //   reverse-declaration destructor order, `runner` drops first (its
-    //   internal handles release the child) and the `DaclManager` Drop
-    //   runs afterwards, removing the host filesystem ACEs we applied.
-    //   Inverting the order would yank the ACEs while the child is still
-    //   running. The explicit `drop(runner); drop(_dacl_guard);` later
-    //   in main() is the `process::exit`-safe equivalent — `process::exit`
-    //   skips destructors, so any new exit added between dispatch and
-    //   that explicit drop must run `drop(_dacl_guard)` first or it will
-    //   leak ACEs permanently on the host filesystem.
-    //
-    //   Audit of exit sites at this commit: every `process::exit` after
-    //   `_dacl_guard = dispatched.dacl_manager;` is either (a) on the
-    //   dispatcher's `Err` arm where `_dacl_guard` is still `None`, or
-    //   (b) reached only after the explicit drops. Panic strategy is
-    //   `unwind` (default; no `panic = "abort"` in any `[profile.*]`),
-    //   so panics during `runner.run()` unwind through Drop and restore
-    //   ACEs naturally. If you change either invariant, this comment is
-    //   the place to update.
-    let mut _dacl_guard: Option<wxc_common::filesystem_dacl::DaclManager> = None;
+    // DaclManager parking for the BaseContainer/fallback path. Parked
+    // into a global slot (see `dacl_cleanup_slot`) so the Ctrl-C handler
+    // can drop it on signal as well as the normal-exit path below. The
+    // slot returns `None` if no DACL augmentation was required.
 
     // Run script in selected containment backend.
     // BaseContainer is used when --experimental is passed or schema version >= 0.5.
@@ -556,7 +745,7 @@ fn main() {
                 } else {
                     "--experimental".to_string()
                 };
-                let _ = writeln!(logger, "Using BaseContainer runner ({reason})");
+                let _ = writeln!(logger, "Using BaseContainer-fallback dispatcher ({reason})");
 
                 match wxc_common::dispatcher::dispatch_with_fallback(&request) {
                     Ok(dispatched) => {
@@ -569,11 +758,19 @@ fn main() {
                             dispatched.tier.as_str()
                         );
 
-                        _dacl_guard = dispatched.dacl_manager;
-                        dispatched.runner
+                        let (dispatched_runner, dacl_manager) = dispatched.into_runner_and_guard();
+                        if let Some(mgr) = dacl_manager {
+                            park_dacl_for_cleanup(mgr);
+                        }
+                        dispatched_runner
                     }
                     Err(e) => {
                         eprintln!("error: {e}");
+                        if let wxc_common::dispatcher::DispatchError::Dacl { warnings, .. } = &e {
+                            for w in warnings {
+                                eprintln!("  dacl warning: {w}");
+                            }
+                        }
                         eprint!("{}", logger.get_buffer());
                         process::exit(1);
                     }
@@ -698,13 +895,15 @@ fn main() {
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
 
-    // Explicitly drop the runner before the DACL guard so any
-    // runner-internal resources holding child handles release first, then
-    // the DaclManager's Drop restores the host filesystem ACEs we applied.
-    // (process::exit below skips destructors, so we must do this manually
-    // for prompt cleanup on the normal path.)
+    // Explicitly drop the runner before retrieving the parked DACL
+    // manager so any runner-internal resources holding child handles
+    // release first; then drop the manager so its `restore()` runs.
+    // (process::exit below skips destructors, so we must do this
+    // manually for prompt cleanup on the normal path. The Ctrl-C
+    // handler covers the abnormal path; recover_orphaned_state on the
+    // next startup covers everything else.)
     drop(runner);
-    drop(_dacl_guard);
+    drop(take_parked_dacl());
 
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);

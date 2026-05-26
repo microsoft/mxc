@@ -196,19 +196,82 @@ pub fn detect(
 
     // Tier 3 — AppContainer + DACL
     ensure_dacl_augmentation_allowed(policy)?;
-    verify_write_dac_all(
-        policy
-            .readwrite_paths
-            .iter()
-            .chain(policy.readonly_paths.iter())
-            .chain(policy.denied_paths.iter()),
-    )?;
+    // For RW / RO paths we only need `WRITE_DAC` if we'd actually have
+    // to add an ACE. When the path's existing DACL already grants the
+    // needed mask to the well-known AppContainer SIDs (typically
+    // installer-set on system paths like `C:\Program Files\…`), the
+    // per-run ACE is redundant — skip both the grant and the
+    // `WRITE_DAC` requirement. See `ensure_path_grantable_for_ac`.
+    // Denied paths always require `WRITE_DAC` because well-known SID
+    // grants don't help us subtract access.
+    for p in &policy.readwrite_paths {
+        ensure_path_grantable_for_ac(Path::new(p), rw_mask())?;
+    }
+    for p in &policy.readonly_paths {
+        ensure_path_grantable_for_ac(Path::new(p), ro_mask())?;
+    }
+    verify_write_dac_all(&policy.denied_paths)?;
     Ok(TierDecision {
         tier: IsolationTier::AppContainerDacl,
         needs_dacl_augmentation: true,
         bfscfg_path: None,
         warnings,
     })
+}
+
+/// Access mask the dispatcher would grant for a `readwritePaths` entry.
+/// Must stay in sync with
+/// [`crate::filesystem_dacl::DaclManager::grant_appcontainer_access`].
+fn rw_mask() -> u32 {
+    use windows::Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE};
+    FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0
+}
+
+/// Access mask the dispatcher would grant for a `readonlyPaths` entry.
+/// Must stay in sync with the RO branch of
+/// [`crate::filesystem_dacl::DaclManager::grant_appcontainer_access`].
+fn ro_mask() -> u32 {
+    use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+    FILE_GENERIC_READ.0
+}
+
+/// Returns `Ok(true)` if a per-run ACE on `path` is unnecessary because
+/// the path's existing DACL already grants `needed_mask` (or a
+/// superset) to the well-known AppContainer SIDs that every
+/// AppContainer process inherits. See
+/// [`crate::filesystem_dacl::compute_appcontainer_effective_access`].
+///
+/// Always returns `Ok(false)` for paths that don't exist or that fail
+/// the DACL lookup — the caller will fall through to the `WRITE_DAC`
+/// check, which produces a path-specific error.
+pub(crate) fn appcontainer_already_grants(path: &Path, needed_mask: u32) -> bool {
+    match crate::filesystem_dacl::compute_appcontainer_effective_access(path) {
+        Ok(effective) => (effective & needed_mask) == needed_mask,
+        Err(_) => false,
+    }
+}
+
+/// Verify that we can either add an ACE on `path` or skip it because
+/// the AppContainer already has `needed_mask` access via well-known
+/// SIDs. Returns the same [`FallbackError::WriteDacUnavailable`] as
+/// the original blanket check when neither applies.
+///
+/// Order matters for typical-case cost: the WRITE_DAC check is a
+/// single `CreateFileW`, while `appcontainer_already_grants` does a
+/// full `GetNamedSecurityInfoW` + DACL walk + 3 SID allocations. For
+/// the common installer-stamped path that *does* grant WRITE_DAC to
+/// the current user (the case before `ce7713d`), trying WRITE_DAC
+/// first short-circuits before we touch the DACL walk.
+fn ensure_path_grantable_for_ac(path: &Path, needed_mask: u32) -> Result<(), FallbackError> {
+    match check_write_dac_path(path) {
+        Ok(()) => Ok(()),
+        // Only fall through to the expensive walk when WRITE_DAC is
+        // unavailable (the system-path / unowned-installer case that
+        // motivated `ce7713d`). Other errors (e.g. ERROR_FILE_NOT_FOUND)
+        // surface to the caller unchanged.
+        Err(_) if appcontainer_already_grants(path, needed_mask) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn ensure_dacl_augmentation_allowed(policy: &ContainerPolicy) -> Result<(), FallbackError> {
@@ -283,7 +346,7 @@ fn forced_decision(
 /// Returns `true` when `processmodel.dll!Experimental_CreateProcessInSandbox`
 /// can be resolved — i.e. the BaseContainer (Tier 1) API is present on this
 /// machine.
-pub(crate) fn is_base_container_api_present() -> bool {
+pub fn is_base_container_api_present() -> bool {
     crate::base_container_runner::BaseContainerRunner::is_base_container_api_present().is_ok()
 }
 
@@ -295,18 +358,23 @@ pub(crate) fn is_base_container_api_present() -> bool {
 ///
 /// Resolution policy:
 ///
-/// - **Release builds** consult `GetWindowsDirectoryW` exclusively. The
-///   `SystemRoot` environment variable is deliberately ignored to deny
-///   an attacker who can scrub or rewrite the process environment a
-///   Tier 2 → Tier 3 downgrade primitive.
-/// - **Test builds** additionally honor `MXC_BFSCFG_PATH` as a narrow
-///   test seam. Its value is used verbatim as the resolved path; an
-///   empty value simulates "not present" by returning `Ok(None)`.
-///   Production `wxc-exec.exe` (both release and dev binaries) cannot
-///   read this variable at all — the seam is gated by `cfg(test)` so
-///   it compiles in only when building this crate's test binary,
-///   regardless of profile (so CI's `--profile release` test run
-///   exercises these paths).
+/// - **`tier2_bfs` feature OFF (default)** — returns `Ok(None)`
+///   unconditionally, before any disk or environment lookup. The
+///   detector's existing T2→T3 fallback then drops to Tier 3. This is
+///   the load-bearing safety guarantee: Tier 2 is compiled out, so no
+///   code path in this binary can resolve `bfscfg.exe`.
+/// - **`tier2_bfs` feature ON, release builds** consult
+///   `GetWindowsDirectoryW` exclusively. The `SystemRoot` environment
+///   variable is deliberately ignored to deny an attacker who can scrub
+///   or rewrite the process environment a Tier 2 → Tier 3 downgrade
+///   primitive.
+/// - **`tier2_bfs` feature ON, test builds** additionally honor
+///   `MXC_BFSCFG_PATH` as a narrow test seam. Its value is used
+///   verbatim as the resolved path; an empty value simulates "not
+///   present" by returning `Ok(None)`. The seam is gated by
+///   `cfg(test)` so it compiles in only when building this crate's
+///   test binary, regardless of profile (so CI's `--profile release`
+///   test run exercises these paths).
 /// - We deliberately do not look in `SysWOW64`: `bfscfg.exe` is shipped
 ///   only in the native System32 directory.
 ///
@@ -314,19 +382,26 @@ pub(crate) fn is_base_container_api_present() -> bool {
 /// Win32 API itself fails — on a healthy Windows host this should never
 /// happen.
 pub fn find_bfscfg_exe() -> Result<Option<PathBuf>, FallbackError> {
-    #[cfg(test)]
-    if let Ok(override_path) = std::env::var("MXC_BFSCFG_PATH") {
-        if override_path.is_empty() {
-            return Ok(None);
-        }
-        let p = PathBuf::from(override_path);
-        return Ok(if p.exists() { Some(p) } else { None });
+    #[cfg(not(feature = "tier2_bfs"))]
+    {
+        Ok(None)
     }
+    #[cfg(feature = "tier2_bfs")]
+    {
+        #[cfg(test)]
+        if let Ok(override_path) = std::env::var("MXC_BFSCFG_PATH") {
+            if override_path.is_empty() {
+                return Ok(None);
+            }
+            let p = PathBuf::from(override_path);
+            return Ok(if p.exists() { Some(p) } else { None });
+        }
 
-    let mut p = resolve_windows_directory()?;
-    p.push("System32");
-    p.push(crate::filesystem_bfs::BFSCFG_EXE);
-    Ok(if p.exists() { Some(p) } else { None })
+        let mut p = resolve_windows_directory()?;
+        p.push("System32");
+        p.push(crate::filesystem_bfs::BFSCFG_EXE);
+        Ok(if p.exists() { Some(p) } else { None })
+    }
 }
 
 /// Resolve the Windows install directory via `GetWindowsDirectoryW`.
@@ -334,6 +409,7 @@ pub fn find_bfscfg_exe() -> Result<Option<PathBuf>, FallbackError> {
 /// The OS populates the answer from boot configuration; it does not
 /// consult the process environment. Returns
 /// [`FallbackError::SystemRootUnresolved`] when the API itself fails.
+#[cfg(feature = "tier2_bfs")]
 fn resolve_windows_directory() -> Result<PathBuf, FallbackError> {
     use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
 
@@ -368,6 +444,7 @@ fn resolve_windows_directory() -> Result<PathBuf, FallbackError> {
     parse_utf16(&buf[..len])
 }
 
+#[cfg(feature = "tier2_bfs")]
 fn parse_utf16(slice: &[u16]) -> Result<PathBuf, FallbackError> {
     String::from_utf16(slice)
         .map(PathBuf::from)
@@ -457,7 +534,11 @@ mod tests {
     // honored uniformly across the dispatcher and fallback_detector
     // test modules. A per-module lock would let cross-module test
     // threads race on `MXC_FORCE_TIER` / `MXC_BFSCFG_PATH`.
-    use crate::test_env::{BfscfgPathGuard, ForceTierGuard, ENV_LOCK};
+    use crate::test_env::{ForceTierGuard, ENV_LOCK};
+    // `BfscfgPathGuard` is only meaningful when the `tier2_bfs` feature
+    // is compiled in; without it, `find_bfscfg_exe` ignores the env var.
+    #[cfg(feature = "tier2_bfs")]
+    use crate::test_env::BfscfgPathGuard;
 
     fn empty_policy() -> ContainerPolicy {
         ContainerPolicy::default()
@@ -568,6 +649,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn resolve_windows_directory_returns_existing_dir() {
         // `GetWindowsDirectoryW` always succeeds on any real Windows
@@ -581,6 +663,10 @@ mod tests {
         );
     }
 
+    // The `MXC_BFSCFG_PATH` test seam only takes effect when the
+    // `tier2_bfs` feature is enabled — without it, `find_bfscfg_exe`
+    // returns `Ok(None)` unconditionally and the override is dead.
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn mxc_bfscfg_path_empty_value_simulates_missing() {
         let _g = BfscfgPathGuard::set("");
@@ -590,6 +676,7 @@ mod tests {
             "empty MXC_BFSCFG_PATH must yield Ok(None), got {result:?}"
         );
     }
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn mxc_bfscfg_path_nonexistent_path_is_none() {
         let _g = BfscfgPathGuard::set("C:\\__mxc_does_not_exist__\\bfscfg.exe");
@@ -599,6 +686,7 @@ mod tests {
             "non-existent MXC_BFSCFG_PATH must yield Ok(None), got {result:?}"
         );
     }
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn mxc_bfscfg_path_existing_path_is_returned_verbatim() {
         // Use a file we know exists (this source file itself, via the
@@ -615,6 +703,19 @@ mod tests {
             result.as_deref(),
             Some(cmd_exe.as_path()),
             "MXC_BFSCFG_PATH must be returned verbatim when it exists"
+        );
+    }
+
+    /// With `tier2_bfs` off, `find_bfscfg_exe` must return `Ok(None)`
+    /// regardless of host state, `MXC_BFSCFG_PATH`, or anything else —
+    /// this is the load-bearing safety invariant.
+    #[cfg(not(feature = "tier2_bfs"))]
+    #[test]
+    fn find_bfscfg_exe_is_none_when_feature_off() {
+        let result = find_bfscfg_exe().expect("find_bfscfg_exe must not error with feature off");
+        assert!(
+            result.is_none(),
+            "find_bfscfg_exe must return None when tier2_bfs feature is off, got {result:?}"
         );
     }
 
@@ -651,5 +752,33 @@ mod tests {
             d.warnings.is_empty(),
             "forced decisions should not accumulate fallback-chain warnings"
         );
+    }
+
+    /// `appcontainer_already_grants` must return `false` on a plain
+    /// temp dir (no AC-group ACEs) and `true` after we stamp a
+    /// matching grant for `ALL APPLICATION PACKAGES`.
+    #[test]
+    fn appcontainer_already_grants_respects_explicit_grant() {
+        use crate::filesystem_dacl::DaclManager;
+        use crate::test_env::ScopedStateDir;
+        use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+
+        let _scope = ScopedStateDir::new();
+        let td = tempfile::tempdir().unwrap();
+        let mask = FILE_GENERIC_READ.0;
+
+        assert!(
+            !appcontainer_already_grants(td.path(), mask),
+            "fresh temp dir should not grant AC well-known SIDs"
+        );
+
+        let mut mgr = DaclManager::new().unwrap();
+        mgr.grant_appcontainer_access("S-1-15-2-1", &[], &[td.path().to_path_buf()])
+            .unwrap();
+        assert!(
+            appcontainer_already_grants(td.path(), mask),
+            "after explicit grant on ALL APPLICATION PACKAGES, AC should be covered"
+        );
+        // mgr.Drop restores, returning the path to its original state.
     }
 }

@@ -2811,6 +2811,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wxc_ui_probe"
+version = "0.1.0"
+
+[[package]]
 name = "wxc_windows_sandbox_daemon"
 version = "0.1.0"
 dependencies = [
