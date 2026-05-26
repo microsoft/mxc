@@ -33,8 +33,13 @@ jobs:
     - checkout: self
 
     # Keep all crate fetches going through the internal feed.
+    # Write to both project-level (for `cargo fuzz build`) and user-level
+    # (for `cargo install` which only reads $CARGO_HOME/config.toml).
     - powershell: |
-        Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
+        $feedConfig = Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"
+        Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + $feedConfig)
+        $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { "$env:USERPROFILE\.cargo" }
+        Add-Content -Path "$cargoHome\config.toml" -Value ("`n" + $feedConfig)
       displayName: Setup Cargo Config
 
     # Install nightly Rust via rustup-init. The toolchain itself runs on the
