@@ -33,9 +33,6 @@ trigger:
     - '.github/copilot-instructions.md'
     - '.github/instructions/**'
     - '**/*.md'
-    - 'LICENSE'
-    - '.gitignore'
-    - '.gitattributes'
     - '.editorconfig'
 
 name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
