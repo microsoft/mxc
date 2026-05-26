@@ -1162,6 +1162,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "linux_test_proxy"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "tokio",
+]
+
+[[package]]
 name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2764,6 +2777,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hyperlight-unikraft-host",
  "isolation_session_bindings",
+ "libc",
  "nanvix_common",
  "sandbox_spec",
  "semver",

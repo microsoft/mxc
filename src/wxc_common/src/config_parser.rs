@@ -780,9 +780,12 @@ fn convert_raw_config_inner(
     if let Some(net) = raw.network {
         if let Some(proxy_value) = net.proxy {
             let proxy_config = parse_proxy_config(&proxy_value)?;
-            if proxy_config.is_enabled() && containment != ContainmentBackend::ProcessContainer {
-                let msg =
-                    "Network proxy is only supported with the 'processcontainer' containment backend";
+            if proxy_config.is_enabled()
+                && containment != ContainmentBackend::ProcessContainer
+                && containment != ContainmentBackend::Bubblewrap
+            {
+                let msg = "Network proxy is only supported with the 'processcontainer' \
+                           or 'bubblewrap' containment backends";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -825,6 +828,25 @@ fn convert_raw_config_inner(
         }
         if let Some(v) = net.blocked_hosts {
             policy.blocked_hosts = v;
+        }
+
+        // Bubblewrap is unprivileged by design; iptables-based enforcement
+        // (firewall / both) requires CAP_NET_ADMIN, which defeats the
+        // backend's privilege story. Reject the combination explicitly so
+        // users get a clear error instead of an opaque runtime failure.
+        if containment == ContainmentBackend::Bubblewrap
+            && policy.network_proxy.is_enabled()
+            && matches!(
+                policy.network_enforcement_mode,
+                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+            )
+        {
+            let msg = "Bubblewrap: network.proxy cannot be combined with \
+                       network.enforcementMode='firewall' or 'both'. The cooperative \
+                       env-var proxy enforces hosts at the proxy layer; iptables-based \
+                       enforcement requires privilege and is mutually exclusive.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
         }
     }
 
@@ -1975,12 +1997,97 @@ mod tests {
 
     #[test]
     fn proxy_builtin_test_server_rejected_with_non_processcontainer() {
+        // lxc is not allowed -- proxy is gated to processcontainer + bubblewrap.
         let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_accepted_with_bubblewrap() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"builtinTestServer": true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn proxy_with_bubblewrap_and_firewall_enforcement_is_rejected() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "firewall",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("network.proxy cannot be combined with"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn proxy_with_bubblewrap_and_both_enforcement_is_rejected() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "both",
+                "blockedHosts": ["evil.example"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        assert!(load_request(&encoded, &mut logger, true).is_err());
+    }
+
+    #[test]
+    fn proxy_with_bubblewrap_and_capabilities_enforcement_is_accepted() {
+        // Capabilities mode never invokes iptables, so combining it with a
+        // proxy is fine and must NOT trigger the conflict guard.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "capabilities",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert_eq!(req.policy.allowed_hosts, vec!["example.com".to_string()]);
     }
 
     #[test]

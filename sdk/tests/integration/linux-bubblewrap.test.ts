@@ -1,15 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert';
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs';
 import {
   sdk,
   supportedVersions,
   isLinuxRoot,
+  isLinuxBubblewrap,
   debugSpawnOptions,
   spawnFromConfigAsync,
+  startLinuxTestProxy,
 } from './test-helpers.js';
+import type { ChildProcess } from 'node:child_process';
 
 // Bwrap fingerprint: when invoked with `--unshare-pid`, bubblewrap creates a
 // new PID namespace and stays as PID 1 in that namespace, acting as init
@@ -74,3 +80,97 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
   });
 });
 }
+
+// Network proxy tests use the cooperative env-var proxy, which is
+// unprivileged by design -- the entire reason the proxy path exists is to
+// avoid the root requirement of iptables-based enforcement. Gate on
+// "Linux + bwrap available" rather than "Linux + root". Pinned to schema
+// 0.6.0-alpha because Bubblewrap proxy support is only available in 0.6+.
+const PROXY_SCHEMA = '0.6.0-alpha';
+describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
+  skip: !isLinuxBubblewrap
+    ? 'Linux Bubblewrap proxy tests require Linux with bwrap installed'
+    : undefined,
+}, () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-sdk-bwrap-proxy-'));
+  const proxies: ChildProcess[] = [];
+
+  after(() => {
+    for (const p of proxies) {
+      try { p.kill('SIGTERM'); } catch { /* ignore */ }
+    }
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it('should route HTTPS traffic through an externally launched linux-test-proxy', async () => {
+    const { port, proxyProcess } = startLinuxTestProxy(tmpDir);
+    proxies.push(proxyProcess);
+
+    const config = sdk.createConfigFromPolicy(
+      { version: PROXY_SCHEMA },
+      'bubblewrap',
+      'bwrap-external-proxy',
+    );
+    config.process!.commandLine =
+      'curl -fsSL https://api.github.com/zen > /dev/null && echo PROXY_OK';
+    config.network = {
+      ...(config.network ?? {}),
+      defaultPolicy: 'allow',
+      proxy: { localhost: port },
+    };
+
+    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
+    assert.strictEqual(result.exitCode, 0, `external-proxy run failed: ${result.stdout}`);
+    assert.ok(result.stdout.includes('PROXY_OK'), `missing PROXY_OK in: ${result.stdout}`);
+  });
+
+  it('should launch a builtinTestServer proxy and route traffic through it', async () => {
+    const config = sdk.createConfigFromPolicy(
+      { version: PROXY_SCHEMA },
+      'bubblewrap',
+      'bwrap-builtin-proxy',
+    );
+    config.process!.commandLine =
+      'curl -fsSL https://api.github.com/zen > /dev/null && echo BUILTIN_OK';
+    config.network = {
+      ...(config.network ?? {}),
+      defaultPolicy: 'allow',
+      proxy: { builtinTestServer: true },
+    };
+
+    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
+    assert.strictEqual(result.exitCode, 0, `builtin-proxy run failed: ${result.stdout}`);
+    assert.ok(result.stdout.includes('BUILTIN_OK'), `missing BUILTIN_OK in: ${result.stdout}`);
+  });
+
+  it('should enforce allowedHosts at the proxy layer', async () => {
+    const config = sdk.createConfigFromPolicy(
+      { version: PROXY_SCHEMA },
+      'bubblewrap',
+      'bwrap-allowlist-proxy',
+    );
+    // Sentinel pattern: allowed host succeeds, disallowed host fails with 403
+    // from the proxy and curl exits non-zero. The script swallows that and
+    // prints BLOCKED_OK so we can assert both signals are present.
+    config.process!.commandLine =
+      'set -e; ' +
+      'curl -fsSL https://api.github.com/zen > /dev/null && echo SENTINEL_OK; ' +
+      'if curl -fsS --max-time 5 https://example.com > /dev/null 2>&1; then ' +
+      '  echo SENTINEL_BAD_LEAK; exit 1; ' +
+      'else ' +
+      '  echo BLOCKED_OK; ' +
+      'fi';
+    config.network = {
+      ...(config.network ?? {}),
+      defaultPolicy: 'allow',
+      proxy: { builtinTestServer: true },
+      allowedHosts: ['api.github.com'],
+    };
+
+    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
+    assert.strictEqual(result.exitCode, 0, `allowlist run failed: ${result.stdout}`);
+    assert.ok(result.stdout.includes('SENTINEL_OK'), `missing SENTINEL_OK in: ${result.stdout}`);
+    assert.ok(result.stdout.includes('BLOCKED_OK'), `disallowed host was not blocked: ${result.stdout}`);
+    assert.ok(!result.stdout.includes('SENTINEL_BAD_LEAK'), `allowlist leaked: ${result.stdout}`);
+  });
+});

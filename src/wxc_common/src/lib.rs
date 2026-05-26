@@ -71,10 +71,18 @@ pub mod sandbox_tracking;
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub mod isolation_session;
 
+// Linux-specific modules
+#[cfg(target_os = "linux")]
+pub mod linux_proxy_coordinator;
+
 /// Test-only helpers shared across unit-test modules.
 ///
 /// Gated by `#[cfg(test)]` so this module compiles in only when
 /// building the crate's own test binary (under any profile, including
 /// CI's `--profile release`). Production binaries never link this.
-#[cfg(test)]
+/// All current consumers (`dispatcher`, `fallback_detector`, `probe`,
+/// `filesystem_dacl`) are Windows-only, so the module is additionally
+/// gated on `target_os = "windows"` to avoid dead-code warnings under
+/// `-D warnings` when running `cargo clippy --all-targets` on Linux.
+#[cfg(all(test, target_os = "windows"))]
 pub(crate) mod test_env;

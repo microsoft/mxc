@@ -43,5 +43,8 @@ windows-future = { version = "0.3", optional = true }
 uuid = { workspace = true }
 windows-collections = { version = "0.3", optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"

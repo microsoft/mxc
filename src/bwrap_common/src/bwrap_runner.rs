@@ -10,16 +10,27 @@
 //! with stdout/stderr capture and optional timeout enforcement.
 //!
 //! For per-host network filtering (`allowedHosts`/`blockedHosts`) the runner
-//! reuses [`lxc_common::network_iptables::NetworkIptablesManager`] from the
-//! LXC backend — this requires root but is consistent with the LXC approach.
-//! When only `defaultPolicy: "block"` is set (no host lists), the runner uses
-//! `--unshare-net` for zero-overhead full isolation without root.
+//! supports two paths:
+//! - **Cooperative env-var proxy** (default, no privilege required): when
+//!   `network.proxy` is configured the runner launches an unprivileged HTTP
+//!   proxy via [`wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator`]
+//!   and the command builder injects `HTTP_PROXY` / `HTTPS_PROXY` /
+//!   `NO_PROXY` env vars into the sandbox.
+//! - **iptables firewall** (requires `CAP_NET_ADMIN` / root): when
+//!   `network.enforcementMode` is `firewall` or `both`, the runner reuses
+//!   [`lxc_common::network_iptables::NetworkIptablesManager`] from the LXC
+//!   backend.
+//!
+//! When only `defaultPolicy: "block"` is set (no host lists and no proxy),
+//! the runner uses `--unshare-net` for zero-overhead full isolation
+//! without root.
 
 use std::fmt::Write as FmtWrite;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use lxc_common::network_iptables::NetworkIptablesManager;
+use wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator;
 use wxc_common::logger::Logger;
 use wxc_common::models::{CodexRequest, NetworkEnforcementMode, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
@@ -78,16 +89,37 @@ impl ScriptRunner for BubblewrapScriptRunner {
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        // 1. Build the bwrap argument vector.
-        let args = bwrap_command::build_args(request);
+        // 1. Start the network proxy if configured. Must happen before
+        //    arg-building so the proxy's loopback address can be injected as
+        //    HTTP_PROXY / HTTPS_PROXY into the sandbox environment.
+        let mut proxy = LinuxProxyCoordinator::new();
+        if request.policy.network_proxy.is_enabled() {
+            if let Err(err) = proxy.start(
+                &request.policy.network_proxy,
+                "127.0.0.1",
+                &request.policy.allowed_hosts,
+                &request.policy.blocked_hosts,
+                logger,
+            ) {
+                return ScriptResponse::error(&format!(
+                    "Bubblewrap: failed to start network proxy: {}",
+                    err
+                ));
+            }
+        }
+
+        // 2. Build the bwrap argument vector.
+        let args = bwrap_command::build_args(request, proxy.address());
         let _ = writeln!(
             logger,
             "Bubblewrap: spawning bwrap with {} args",
             args.len()
         );
 
-        // 2. Determine whether iptables network rules are needed.
-        let needs_iptables = needs_iptables_rules(request);
+        // 3. Determine whether iptables network rules are needed. When the
+        //    cooperative proxy is active we skip iptables entirely (host
+        //    enforcement happens at the proxy layer).
+        let needs_iptables = needs_iptables_rules(request) && !proxy.is_active();
         let container_name = if request.container_id.is_empty() {
             format!("bwrap-{:08x}", std::process::id())
         } else {
@@ -103,11 +135,13 @@ impl ScriptRunner for BubblewrapScriptRunner {
             match mgr.apply_firewall_rules(&request.policy, logger) {
                 Ok(true) => {}
                 Ok(false) => {
+                    proxy.stop(logger);
                     return ScriptResponse::error(
                         "Bubblewrap: failed to apply iptables firewall rules.",
                     );
                 }
                 Err(e) => {
+                    proxy.stop(logger);
                     return ScriptResponse::error(&format!(
                         "Bubblewrap: network policy error: {}",
                         e
@@ -119,7 +153,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
             None
         };
 
-        // 3. Spawn `bwrap`.
+        // 4. Spawn `bwrap`.
         let mut command = Command::new("bwrap");
         command.args(&args);
         command
@@ -131,6 +165,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
             Ok(process) => process,
             Err(error) => {
                 cleanup_iptables(&mut fw_manager, logger);
+                proxy.stop(logger);
                 return ScriptResponse::error(&format!(
                     "Bubblewrap: failed to spawn bwrap: {}",
                     error
@@ -138,7 +173,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
             }
         };
 
-        // 4. Drain stdout/stderr in background threads to avoid pipe-buffer
+        // 5. Drain stdout/stderr in background threads to avoid pipe-buffer
         //    deadlock.
         let stdout_handle = child
             .stdout
@@ -149,7 +184,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
             .take()
             .map(|r| std::thread::spawn(move || read_to_string(r)));
 
-        // 5. Wait with optional timeout.
+        // 6. Wait with optional timeout.
         let timeout = if request.script_timeout == 0 {
             None
         } else {
@@ -162,6 +197,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
                 let _ = child.kill();
                 let _ = child.wait();
                 cleanup_iptables(&mut fw_manager, logger);
+                proxy.stop(logger);
                 return ScriptResponse {
                     exit_code: -1,
                     standard_out: join_reader(stdout_handle),
@@ -175,12 +211,14 @@ impl ScriptRunner for BubblewrapScriptRunner {
             }
             Err(WaitError::Io(error)) => {
                 cleanup_iptables(&mut fw_manager, logger);
+                proxy.stop(logger);
                 return ScriptResponse::error(&format!("Bubblewrap: wait failed: {}", error));
             }
         };
 
-        // 6. Collect output and clean up.
+        // 7. Collect output and clean up.
         cleanup_iptables(&mut fw_manager, logger);
+        proxy.stop(logger);
 
         ScriptResponse {
             exit_code: exit_status.code().unwrap_or(-1),

@@ -143,7 +143,7 @@
         },
         "proxy": {
           "type": "object",
-          "description": "Proxy configuration. Only supported with processcontainer backend.",
+          "description": "Proxy configuration. Supported with the 'processcontainer' (Windows) and 'bubblewrap' (Linux) backends. On Bubblewrap the proxy URL is exposed inside the sandbox as HTTP_PROXY / HTTPS_PROXY / NO_PROXY environment variables (cooperative env-var proxying), and is mutually exclusive with network.enforcementMode=='firewall'/'both'.",
           "oneOf": [
             {
               "properties": {
