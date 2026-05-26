@@ -36,6 +36,36 @@ These scripts are local helpers. Not every script is run by CI because several
 depend on local OS features such as Windows Sandbox, WHP, proxy setup, or stress
 test duration.
 
+### Manual smoke tests
+
+Manual smokes are visual-inspection scripts for rendering and event-propagation
+behavior that has no automated pass/fail oracle. They must run on a real
+`cmd.exe` console on the test host (not via PowerShell, not via PSSession),
+and the operator observes the output to confirm healthy behavior.
+
+| Script | Description | Prerequisites |
+|--------|-------------|---------------|
+| `run_isolation_session_resize_smoke.ps1` | Ruler-line loop inside an isolation session; resize the window and verify `cols=` / `rows=` track the resize and the trailing `|` stays at the actual right edge. Ctrl-C to exit. | `wxc-exec.exe` (built with `--features isolation_session`), real `cmd.exe` console, IsolationSession backend available |
+
+Invoke from `cmd.exe`:
+
+```cmd
+powershell -ExecutionPolicy Bypass -File test_scripts\run_isolation_session_resize_smoke.ps1
+```
+
+### Deployment helpers
+
+These scripts copy build artifacts onto a remote test VM. The TShell-based
+scripts must be sourced from inside an active TShell session
+(`Open-Device -vm <vm>`); the PowerShell Remoting script handles the session
+itself and takes a `-ComputerName` / `-VMName` plus `-Credential`.
+
+| Script | Copies | Transport |
+|--------|--------|-----------|
+| `push_exes_to_vm.ps1` | Native Rust binaries (Debug + Release) | TShell (active `Open-Device` session) |
+| `push_batch_and_config_files_to_vm.ps1` | `test_configs\`, `examples\`, runner batch files, helper scripts | TShell (active `Open-Device` session) |
+| `push_sdk_integration_tests_to_vm.ps1` | SDK integration test artifacts (`sdk\bin\x64`, compiled tests, `node_modules`, `package.json`, `run-tests.js`) | PowerShell Remoting (`-ComputerName`/`-VMName` + `-Credential`) |
+
 CI currently runs the MicroVM Rust E2E suite when WHP is available. Other
 executor E2E tests are local/prerequisite-gated and should be run on machines
 with the required Windows features and binaries.

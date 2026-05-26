@@ -12,27 +12,89 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-/// All required NanVix binary filenames.
-pub const REQUIRED_BINARIES: &[&str] = &[
-    "nanvixd.exe",
-    "kernel.elf",
-    "python.elf",
-    "cpython-ramfs.img",
-];
+/// All required NanVix binary filenames (flat, next to wxc-exec).
+pub const REQUIRED_BINARIES: &[&str] = &["nanvixd.exe", "nanvix_rootfs.img", "python3.initrd"];
 
-/// Binaries sourced from the `nanvix/nanvix` GitHub release.
-pub const NANVIX_REPO_BINARIES: &[&str] = &["nanvixd.exe", "kernel.elf"];
+/// Subdirectory holding kernel binary (nanvixd expects `./bin/kernel.elf`).
+pub const BIN_SUBDIR: &str = "bin";
 
-/// Binaries sourced from the `nanvix/cpython` GitHub release.
-pub const CPYTHON_REPO_BINARIES: &[&str] = &["python.elf", "cpython-ramfs.img"];
+/// Subdirectory holding WHP snapshot files.
+pub const SNAPSHOTS_SUBDIR: &str = "snapshots";
+
+/// Files that live in a `bin/` subdirectory (nanvixd expects ./bin/kernel.elf).
+pub const BIN_SUBDIR_FILES: &[&str] = &["kernel.elf"];
+
+/// Snapshot files that live in a `snapshots/` subdirectory next to the exe.
+pub const SNAPSHOT_FILES: &[&str] = &["kernel.vmem", "kernel.whp.cbor"];
+
+/// Binaries sourced from the `nanvix/nanvix-python` GitHub release.
+pub const NANVIX_PYTHON_REPO_BINARIES: &[&str] = REQUIRED_BINARIES;
+
+/// Number of bytes to retain from the end of nanvixd stderr when capturing
+/// it for diagnostics. Bounds host memory growth in the face of an
+/// untrusted/verbose child (availability / DoS hardening).
+pub const STDERR_TAIL_BYTES: usize = 8 * 1024;
+
+/// Render a bounded tail of nanvixd stderr bytes as a UTF-8 string,
+/// prefixed with `...(truncated)` when truncation occurred.
+///
+/// `bytes` may be the full stderr buffer (post-hoc trim) or a buffer that
+/// the caller already capped while streaming. The `truncated` flag tells
+/// us that streaming-time bytes were dropped even when the resulting
+/// buffer length is at or below [`STDERR_TAIL_BYTES`].
+pub fn format_stderr_tail(bytes: &[u8], truncated: bool) -> String {
+    if bytes.len() > STDERR_TAIL_BYTES {
+        // Trim at the byte level *before* UTF-8 decoding. Slicing into the
+        // `String` produced by `from_utf8_lossy` would panic if the byte
+        // offset fell inside a multi-byte codepoint; `from_utf8_lossy` on
+        // a raw byte slice tolerates a partial leading codepoint by
+        // emitting U+FFFD replacement characters instead.
+        let start = bytes.len() - STDERR_TAIL_BYTES;
+        let tail = String::from_utf8_lossy(&bytes[start..]);
+        format!("...(truncated){}", tail)
+    } else if truncated {
+        let text = String::from_utf8_lossy(bytes);
+        format!("...(truncated){}", text)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+/// Drain `reader` to completion, retaining only the last
+/// [`STDERR_TAIL_BYTES`] bytes. Returns `(tail, truncated)` where
+/// `truncated` is set when any earlier bytes were dropped.
+///
+/// Used to bound host memory growth when capturing nanvixd stderr from a
+/// potentially untrusted / verbose child (availability / DoS hardening).
+/// Read errors terminate the drain and return whatever was captured so
+/// far; this mirrors `read_to_end` failure semantics for our use case
+/// where stderr is best-effort diagnostic data.
+pub fn drain_stderr_tail<R: std::io::Read>(mut reader: R) -> (Vec<u8>, bool) {
+    let mut tail: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8 * 1024];
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                tail.extend_from_slice(&chunk[..n]);
+                if tail.len() > STDERR_TAIL_BYTES {
+                    let drop = tail.len() - STDERR_TAIL_BYTES;
+                    tail.drain(..drop);
+                    truncated = true;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    (tail, truncated)
+}
 
 /// Release configuration loaded from `versions.json`.
 #[derive(Debug, Deserialize)]
 pub struct ReleaseConfig {
-    /// Configuration for the `nanvix/nanvix` GitHub repo.
-    pub nanvix: RepoConfig,
-    /// Configuration for the `nanvix/cpython` GitHub repo.
-    pub cpython: RepoConfig,
+    /// Configuration for the `nanvix/nanvix-python` GitHub repo.
+    pub nanvix_python: RepoConfig,
 }
 
 /// Configuration for a single upstream GitHub repo release.
@@ -67,4 +129,191 @@ pub fn github_download_url(repo: &str, tag: &str, asset: &str) -> String {
         "https://github.com/{}/releases/download/{}/{}",
         repo, tag, asset
     )
+}
+
+/// Generate WHP snapshots by cold-booting nanvixd.
+///
+/// `snapshot_home` is used as the process working directory. nanvixd writes
+/// snapshot files to `<cwd>/snapshots/`, so the resulting files end up at
+/// `<snapshot_home>/snapshots/kernel.vmem` and `kernel.whp.cbor`.
+///
+/// `bin_dir` is the directory containing `kernel.elf` (passed as `-bin-dir`).
+///
+/// Returns `Ok(())` on success. On failure, returns a human-readable error
+/// message suitable for both build scripts (which panic) and runtime callers
+/// (which wrap in their own error type).
+pub fn generate_snapshot(
+    snapshot_home: &Path,
+    nanvixd: &Path,
+    bin_dir: &Path,
+    ramfs: &Path,
+    initrd: &Path,
+) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+
+    let output = Command::new(nanvixd)
+        .current_dir(snapshot_home)
+        .arg("-bin-dir")
+        .arg(bin_dir)
+        .arg("-ramfs")
+        .arg(ramfs)
+        .arg("-kernel-args")
+        .arg("snapshot")
+        .arg("--")
+        .arg(initrd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run nanvixd for snapshot generation: {}", e))?;
+
+    if !output.status.success() {
+        // Include a bounded tail of stderr so callers (build script panic
+        // or runtime preflight error) can surface actionable diagnostics
+        // without growing host memory unboundedly.
+        let tail = format_stderr_tail(&output.stderr, false);
+        let trimmed = tail.trim_end();
+        if trimmed.is_empty() {
+            return Err(format!(
+                "snapshot generation failed (exit code: {})",
+                output.status
+            ));
+        }
+        return Err(format!(
+            "snapshot generation failed (exit code: {})\nnanvixd stderr:\n{}",
+            output.status, trimmed
+        ));
+    }
+
+    let snap_dir = snapshot_home.join(SNAPSHOTS_SUBDIR);
+    for name in SNAPSHOT_FILES {
+        if !snap_dir.join(name).exists() {
+            return Err(format!(
+                "snapshot generation completed but '{}' not found in {:?}",
+                name, snap_dir
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Copy NanVix artifacts from the build cache (`src_dir`) to the target
+/// directory next to the output executable.
+///
+/// Copies flat binaries, `snapshots/` files, and `bin/` subdir files.
+/// Skips files that are already up-to-date (based on modification time).
+pub fn copy_artifacts_to_target(src_dir: &Path, target_dir: &Path) {
+    use std::fs;
+
+    // Flat binaries (nanvixd.exe, nanvix_rootfs.img, python3.initrd).
+    for name in REQUIRED_BINARIES {
+        let src = src_dir.join(name);
+        let dst = target_dir.join(name);
+        if src.exists() && (!dst.exists() || is_newer(&src, &dst)) {
+            eprintln!("nanvix: copying {} -> {}", src.display(), dst.display());
+            if let Err(e) = fs::copy(&src, &dst) {
+                let _ = fs::remove_file(&dst);
+                eprintln!("nanvix: WARNING: failed to copy {}: {}", name, e);
+            }
+        }
+    }
+
+    // Snapshot files (snapshots/kernel.vmem, snapshots/kernel.whp.cbor).
+    let snapshots_src = src_dir.join(SNAPSHOTS_SUBDIR);
+    let snapshots_dst = target_dir.join(SNAPSHOTS_SUBDIR);
+    if snapshots_src.exists() {
+        let _ = fs::create_dir_all(&snapshots_dst);
+        for name in SNAPSHOT_FILES {
+            let src = snapshots_src.join(name);
+            let dst = snapshots_dst.join(name);
+            if src.exists() && (!dst.exists() || is_newer(&src, &dst)) {
+                eprintln!("nanvix: copying snapshots/{} -> {}", name, dst.display());
+                if let Err(e) = fs::copy(&src, &dst) {
+                    let _ = fs::remove_file(&dst);
+                    eprintln!("nanvix: WARNING: failed to copy snapshots/{}: {}", name, e);
+                }
+            }
+        }
+    }
+
+    // bin/ subdir files (kernel.elf) — nanvixd expects ./bin/kernel.elf.
+    let bin_src = src_dir.join(BIN_SUBDIR);
+    let bin_dst = target_dir.join(BIN_SUBDIR);
+    if bin_src.exists() {
+        let _ = fs::create_dir_all(&bin_dst);
+        for name in BIN_SUBDIR_FILES {
+            let src = bin_src.join(name);
+            let dst = bin_dst.join(name);
+            if src.exists() && (!dst.exists() || is_newer(&src, &dst)) {
+                eprintln!("nanvix: copying bin/{} -> {}", name, dst.display());
+                if let Err(e) = fs::copy(&src, &dst) {
+                    let _ = fs::remove_file(&dst);
+                    eprintln!("nanvix: WARNING: failed to copy bin/{}: {}", name, e);
+                }
+            }
+        }
+    }
+}
+
+fn is_newer(src: &Path, dst: &Path) -> bool {
+    let src_time = src.metadata().and_then(|m| m.modified()).ok();
+    let dst_time = dst.metadata().and_then(|m| m.modified()).ok();
+    match (src_time, dst_time) {
+        (Some(s), Some(d)) => s > d,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_stderr_tail_short_buffer_no_prefix() {
+        let out = format_stderr_tail(b"hello", false);
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn format_stderr_tail_short_buffer_with_truncated_flag() {
+        let out = format_stderr_tail(b"hello", true);
+        assert_eq!(out, "...(truncated)hello");
+    }
+
+    #[test]
+    fn format_stderr_tail_trims_oversized_ascii_buffer() {
+        let big = vec![b'A'; STDERR_TAIL_BYTES + 16];
+        let out = format_stderr_tail(&big, false);
+        assert!(out.starts_with("...(truncated)"));
+        // 14 chars for the prefix + STDERR_TAIL_BYTES trailing ASCII bytes.
+        assert_eq!(out.len(), "...(truncated)".len() + STDERR_TAIL_BYTES);
+    }
+
+    /// Regression test for PR review comment r3283559877: an oversized
+    /// buffer containing multi-byte UTF-8 must not panic when the
+    /// truncation byte offset falls inside a codepoint.
+    #[test]
+    fn format_stderr_tail_oversized_multibyte_does_not_panic() {
+        // 4-byte UTF-8 emoji repeated until well past the cap.
+        let unit = "🦀"; // 4 bytes
+        let repeats = (STDERR_TAIL_BYTES / unit.len()) + 64;
+        let big = unit.repeat(repeats).into_bytes();
+        assert!(big.len() > STDERR_TAIL_BYTES);
+        let out = format_stderr_tail(&big, false);
+        assert!(out.starts_with("...(truncated)"));
+        // Ensure the result is still valid UTF-8 (String guarantees this);
+        // partial leading codepoints become U+FFFD via `from_utf8_lossy`.
+        assert!(out.len() >= "...(truncated)".len());
+    }
+
+    #[test]
+    fn format_stderr_tail_oversized_with_truncated_flag_uses_byte_trim() {
+        // When the buffer is oversized, the explicit `truncated` flag
+        // should not change behavior — byte-level trim still applies.
+        let big = vec![b'B'; STDERR_TAIL_BYTES + 1];
+        let out = format_stderr_tail(&big, true);
+        assert!(out.starts_with("...(truncated)"));
+        assert_eq!(out.len(), "...(truncated)".len() + STDERR_TAIL_BYTES);
+    }
 }

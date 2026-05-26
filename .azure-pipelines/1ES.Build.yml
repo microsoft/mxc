@@ -4,6 +4,11 @@
 trigger: none
 name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
 
+pr:
+- main
+- feature/*
+- user/*
+
 resources:
   repositories:
   - repository: 1ESPipelineTemplates
@@ -11,35 +16,40 @@ resources:
     name: 1ESPipelineTemplates/1ESPipelineTemplates
     ref: refs/tags/release
 
-# Parameters for ESRP signing info will be passed from the ADO UI.
 parameters:
   - name: officialBuild
     displayName: Build Official or Unofficial
     type: string
-    default: Official
+    default: Unofficial
     values:
       - Official
       - Unofficial
-
-  - name: ESRPInfo
-    type: object
-    default:
-      serviceName: ''
-      tenantId: ''
-      azureKeyVaultName: ''
-      authCertName: ''
-      signCertName: ''
-      clientId: ''
 
   - name: debug
     displayName: Enable debug output for SDK tests
     type: boolean
     default: false
 
+  # Reused by Rust/Mac/NpmSdk templates. Values come from MXC-ESRP-Signing
+  # on Official runs; sign steps are gated, so missing values on Unofficial
+  # runs are harmless.
+  - name: ESRPInfo
+    type: object
+    default:
+      serviceName: $(serviceName)
+      tenantId: $(tenantId)
+      azureKeyVaultName: $(azureKeyVaultName)
+      authCertName: $(authCertName)
+      signCertName: $(signCertName)
+      clientId: $(clientId)
+
 variables:
   # Prevents failure when no Rust tests are found; pipeline runs will still fail if present
   # tests do not pass.
-  NEXTEST_NO_TESTS: pass
+  - name: NEXTEST_NO_TESTS
+    value: pass
+  - ${{ if eq(parameters.officialBuild, 'Official') }}:
+    - group: MXC-ESRP-Signing
 
 extends:
   template: v1/1ES.${{parameters.officialBuild}}.PipelineTemplate.yml@1ESPipelineTemplates
@@ -81,8 +91,16 @@ extends:
 
             ESRPInfo: ${{ parameters.ESRPInfo }}
 
-    - stage: Package_MXC_NPM_SDK
-      displayName: 'Package Npm Sdk'
+        # macOS uses a separate template because it runs on a different
+        # pool (Microsoft-hosted). The produced artifact name follows the same
+        # scheme (mxc-binaries-<triplet>) so Package_MXC_NPM_SDK can consume it.
+        - template: .azure-pipelines/templates/Mac.Build.Job.yml@self
+          parameters:
+            isOfficialBuild: ${{ eq(parameters.officialBuild, 'Official') }}
+            ESRPInfo: ${{ parameters.ESRPInfo }}
+
+    - stage: Package_MXC
+      displayName: 'Package MXC'
       dependsOn: Build_Binaries
       jobs:
       - template: .azure-pipelines/templates/Package.NpmSdk.Job.yml@self
@@ -96,8 +114,12 @@ extends:
               sdkArch: x64
             - artifact: lxc-binaries-aarch64-unknown-linux-gnu
               sdkArch: arm64
+            - artifact: mxc-binaries-aarch64-apple-darwin
+              sdkArch: arm64
 
           ESRPInfo: ${{ parameters.ESRPInfo }}
+
+      - template: .azure-pipelines/templates/Mxc.Binary.Packaging.Job.yml@self
 
     - stage: SDK_Unit_Tests
       displayName: 'SDK Unit Tests'
@@ -109,7 +131,7 @@ extends:
 
     - stage: SDK_Integration_Tests
       displayName: 'SDK Integration Tests'
-      dependsOn: Package_MXC_NPM_SDK
+      dependsOn: Package_MXC
       jobs:
       - template: .azure-pipelines/templates/SDK.Integration.Test.Job.yml@self
         parameters:

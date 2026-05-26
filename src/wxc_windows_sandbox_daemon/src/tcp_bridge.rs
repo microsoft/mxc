@@ -176,25 +176,28 @@ pub async fn execute_on_guest(
             }
             buf.extend_from_slice(&tmp[..bytes_read]);
 
-            match decode_message(&buf).context("decode control")? {
-                DecodeResult::Message {
-                    message: ControlMessage::Exit(exit),
-                    consumed,
-                } => {
-                    buf.drain(..consumed);
-                    return Ok((exit.exit_code, exit.error_message, buf));
+            // Drain all complete messages before reading more data.
+            loop {
+                match decode_message(&buf).context("decode control")? {
+                    DecodeResult::Message {
+                        message: ControlMessage::Exit(exit),
+                        consumed,
+                    } => {
+                        buf.drain(..consumed);
+                        return Ok((exit.exit_code, exit.error_message, buf));
+                    }
+                    DecodeResult::Message {
+                        message: ControlMessage::Pong,
+                        consumed,
+                    } => {
+                        buf.drain(..consumed);
+                        // Continue inner loop to decode the next message.
+                    }
+                    DecodeResult::Message { message, .. } => {
+                        anyhow::bail!("unexpected control message: {:?}", message);
+                    }
+                    DecodeResult::Incomplete => break,
                 }
-                DecodeResult::Message {
-                    message: ControlMessage::Pong,
-                    consumed,
-                } => {
-                    buf.drain(..consumed);
-                    continue;
-                }
-                DecodeResult::Message { message, .. } => {
-                    anyhow::bail!("unexpected control message: {:?}", message);
-                }
-                DecodeResult::Incomplete => continue,
             }
         }
     };
@@ -285,7 +288,9 @@ pub async fn reconnect_data_streams(
         }
 
         // Need more data from the control channel.
-        let remaining = deadline - tokio::time::Instant::now();
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or(Duration::ZERO);
         let bytes_read = tokio::time::timeout(remaining, conn.control.read(&mut tmp))
             .await
             .context("timeout waiting for StreamsReady")?

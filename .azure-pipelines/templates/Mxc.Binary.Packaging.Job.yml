@@ -1,0 +1,61 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Bundles the per-arch build artifacts into a single mxc-release-binaries.zip
+# (x64/ + arm64/ folders containing executables and symbol files) for upload
+# to the GitHub Release page, until we publish to a symbol server. Runs in
+# parallel with the npm SDK packaging job.
+
+parameters:
+- name: targets
+  type: object
+  default:
+    - artifact: wxc-binaries-x86_64-pc-windows-msvc
+      sdkArch: x64
+    - artifact: wxc-binaries-aarch64-pc-windows-msvc
+      sdkArch: arm64
+    - artifact: lxc-binaries-x86_64-unknown-linux-gnu
+      sdkArch: x64
+    - artifact: lxc-binaries-aarch64-unknown-linux-gnu
+      sdkArch: arm64
+    - artifact: mxc-binaries-aarch64-apple-darwin
+      sdkArch: arm64
+
+jobs:
+- job: package_mxc_release_binaries
+  displayName: Package Mxc Release Binaries
+  pool:
+    name: Azure-Pipelines-1ESPT-ExDShared
+    image: ubuntu-latest
+    os: linux
+  variables:
+    stagingDirectory: $(Build.SourcesDirectory)/release-binaries-staging
+    outputDirectory: $(Build.SourcesDirectory)/out
+    artifactName: mxc-release-binaries
+
+  steps:
+    - checkout: none
+
+    # Download all per-arch artifacts into a flat <arch>/ layout matching the
+    # one that ships in the npm package.
+    - ${{ each target in parameters.targets }}:
+      - task: DownloadPipelineArtifact@2
+        displayName: Download ${{ target.artifact }}
+        inputs:
+          artifact: ${{ target.artifact }}
+          path: $(stagingDirectory)/${{ target.sdkArch }}
+
+    - task: ArchiveFiles@2
+      displayName: Archive mxc-release-binaries.zip
+      inputs:
+        rootFolderOrFile: '$(stagingDirectory)'
+        includeRootFolder: false
+        archiveType: zip
+        archiveFile: '$(outputDirectory)/release-binaries/mxc-release-binaries.zip'
+        replaceExistingArchive: true
+
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: Publish mxc-release-binaries artifact
+      inputs:
+        path: '$(outputDirectory)/release-binaries'
+        artifactName: $(artifactName)

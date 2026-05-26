@@ -8,6 +8,7 @@ set "BUILD_ALL=0"
 set "WITH_NANVIX=0"
 set "WITH_WSLC=0"
 set "WITH_ISOLATION_SESSION=0"
+set "WITH_HYPERLIGHT=0"
 
 :: Parse arguments
 :parse_args
@@ -20,6 +21,7 @@ if /i "%~1"=="--all"     ( set "BUILD_ALL=1"           & shift & goto :parse_arg
 if /i "%~1"=="--with-microvm" ( set "WITH_NANVIX=1"    & shift & goto :parse_args )
 if /i "%~1"=="--with-wslc"    ( set "WITH_WSLC=1"      & shift & goto :parse_args )
 if /i "%~1"=="--with-isolation-session" ( set "WITH_ISOLATION_SESSION=1" & shift & goto :parse_args )
+if /i "%~1"=="--with-hyperlight" ( set "WITH_HYPERLIGHT=1" & shift & goto :parse_args )
 if /i "%~1"=="--help"    ( goto :usage )
 if /i "%~1"=="-h"        ( goto :usage )
 echo Unknown argument: %~1
@@ -41,16 +43,31 @@ if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
 if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
 if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
+if "%WITH_HYPERLIGHT%"=="1" set "CARGO_FLAGS=--features hyperlight %CARGO_FLAGS%"
 
 :: Build Rust
 echo.
 echo Building WXC (Rust) [%BUILD_CONFIG%]...
 pushd src
+
+:: Ensure the rustup targets are installed for the pinned toolchain
+:: (src\rust-toolchain.toml). No-op if rustup is missing or the target
+:: is already present.
+where rustup >nul 2>&1
+if not errorlevel 1 (
+    if "%BUILD_ALL%"=="1" (
+        rustup target add x86_64-pc-windows-msvc >nul 2>&1
+        rustup target add aarch64-pc-windows-msvc >nul 2>&1
+    ) else (
+        rustup target add %BUILD_ARCH% >nul 2>&1
+    )
+)
+
 if "%BUILD_ALL%"=="1" (
     echo   Target: x86_64-pc-windows-msvc
     cargo build %CARGO_FLAGS% x86_64-pc-windows-msvc || goto :error
     echo   Target: aarch64-pc-windows-msvc
-    cargo build %CARGO_FLAGS% aarch64-pc-windows-msvc || goto :error 
+    cargo build %CARGO_FLAGS% aarch64-pc-windows-msvc || goto :error
 ) else (
     echo   Target: %BUILD_ARCH%
     cargo build %CARGO_FLAGS% %BUILD_ARCH% || goto :error
@@ -119,6 +136,50 @@ popd
 
 echo.
 echo Build complete.
+
+:: Non-blocking prerequisite check for E2E tests.
+:: We check whether the *first* python.exe in PATH is the user's App Execution
+:: Alias reparse point at %LOCALAPPDATA%\Microsoft\WindowsApps\python.exe.
+:: When that alias resolves first, sandbox containers cannot launch python.exe
+:: (CreateProcessW returns 0x80070057).
+echo.
+echo === Checking E2E test prerequisites ===
+set "PREREQ_WARN=0"
+
+:: Check Python is available and first match is not the App Execution Alias
+where python.exe >nul 2>&1
+if errorlevel 1 (
+    echo   WARNING: python.exe not found. E2E tests require a system-wide Python install.
+    set "PREREQ_WARN=1"
+) else (
+    for /f "tokens=*" %%P in ('where python.exe') do (
+        if /i "%%P"=="%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe" (
+            echo   WARNING: python.exe first resolves to an App Execution Alias.
+            echo            The alias reparse point cannot be launched inside sandbox containers.
+            set "PREREQ_WARN=1"
+        )
+        goto :python_check_done
+    )
+)
+:python_check_done
+
+:: Check pwsh.exe exists at the expected path used by test configs
+if not exist "C:\Program Files\PowerShell\7\pwsh.exe" (
+    echo   WARNING: PowerShell 7 not found at C:\Program Files\PowerShell\7\pwsh.exe.
+    echo            pwsh sandbox tests will fail.
+    set "PREREQ_WARN=1"
+)
+
+if "%PREREQ_WARN%"=="0" (
+    echo   All E2E test prerequisites met.
+) else (
+    echo.
+    echo   To install Python and disable the alias, run from an elevated PowerShell prompt:
+    echo     .\scripts\setup-test-prereqs.ps1
+)
+
+:done
+
 exit /b 0
 
 :error
@@ -140,6 +201,7 @@ echo   --all             Build for both x64 and ARM64
 echo   --with-microvm    Download and include NanVix micro-VM binaries
 echo   --with-wslc       Build with WSL Container (WSLC SDK) support
 echo   --with-isolation-session   Build with IsolationSession backend (IsoEnvBroker)
+echo   --with-hyperlight         Build with Hyperlight (micro-VM) backend (x86_64 only)
 echo   -h, --help        Show this help
 echo.
 echo Default: builds release for the current machine architecture.

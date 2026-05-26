@@ -1,0 +1,21 @@
+{
+    "$schema": "../schemas/dev/mxc-config.schema.0.6.0-dev.json",
+    "version": "0.6.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo 'Testing filesystem access control...' && echo '' && echo 'Test 1: Write to allowed path (/tmp/mxc_sandbox)' && mkdir -p /tmp/mxc_sandbox && echo 'Hello from sandbox' > /tmp/mxc_sandbox/output.txt && echo '  SUCCESS: File written' && cat /tmp/mxc_sandbox/output.txt && echo '' && echo 'Test 2: Read from denied path (/etc/shadow-like)' && cat /private/var/db/dslocal/nodes/Default/users/root.plist 2>/dev/null && echo '  ERROR: Should not have succeeded!' || echo '  SUCCESS: Read access denied as expected' && echo '' && echo 'Test 3: Write to denied path (/Users)' && touch /Users/test_forbidden.txt 2>/dev/null && echo '  ERROR: Should not have succeeded!' || echo '  SUCCESS: Write access denied as expected' && echo '' && echo 'Filesystem access control test complete!'",
+        "timeout": 15000
+    },
+    "filesystem": {
+        "readwritePaths": ["/tmp"],
+        "deniedPaths": ["/Users"]
+    },
+    "network": {
+        "defaultPolicy": "block"
+    },
+    "experimental": {
+        "seatbelt": {
+            "mode": "exec"
+        }
+    }
+}

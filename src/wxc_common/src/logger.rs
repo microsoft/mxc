@@ -125,14 +125,10 @@ impl Logger {
                     }
                 }
             }
-            Err(e) => {
-                eprintln!(
-                    "[MXC Diagnostics] Could not connect to diagnostic console at {pipe_path}: {e}"
-                );
-                eprintln!(
-                    "[MXC Diagnostics] Hint: Start mxc-diagnostic-console.exe first, \
-                     or disable console logging."
-                );
+            Err(_) => {
+                // Diagnostic console is not running -- this is fine; continue silently.
+                // The user asked for console output (MXC_DIAG_CONSOLE=1) but the
+                // console process hasn't been started yet.
             }
         }
 
@@ -260,20 +256,19 @@ impl Logger {
     /// encountered, flush the completed line(s) to the pipe sink.
     fn diag_accumulate(&mut self, text: &str) {
         #[cfg(target_os = "windows")]
-        if self.diag_pipe.is_none() {
-            return;
+        if self.diag_pipe.is_some() {
+            self.diag_line_buf.push_str(text);
+
+            // Flush each complete line.
+            while let Some(newline_pos) = self.diag_line_buf.find('\n') {
+                let line = self.diag_line_buf[..newline_pos].to_string();
+                self.diag_line_buf.drain(..=newline_pos);
+                self.diag_flush_line(&line);
+            }
         }
+        // Non-Windows: diagnostic pipe sink isn't implemented; accept & discard.
         #[cfg(not(target_os = "windows"))]
-        return;
-
-        self.diag_line_buf.push_str(text);
-
-        // Flush each complete line.
-        while let Some(newline_pos) = self.diag_line_buf.find('\n') {
-            let line = self.diag_line_buf[..newline_pos].to_string();
-            self.diag_line_buf.drain(..=newline_pos);
-            self.diag_flush_line(&line);
-        }
+        let _ = text;
     }
 
     /// Send one complete line to the pipe sink.
@@ -290,6 +285,8 @@ impl Logger {
                 }
             }
         }
+        #[cfg(not(target_os = "windows"))]
+        let _ = line;
     }
 
     /// Flush and close diagnostic sinks.

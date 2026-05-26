@@ -13,11 +13,12 @@
 
 mod etw;
 
-use std::io::Read;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::io::{BufWriter, Read, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 
@@ -73,6 +74,16 @@ pub fn display_mode() -> DisplayMode {
     }
 }
 
+/// Whether `--collect` mode is active.
+static COLLECT_MODE_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Shutdown signal set by the Ctrl+C handler to trigger graceful finalization.
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+pub fn collect_mode() -> bool {
+    COLLECT_MODE_FLAG.load(Ordering::Relaxed)
+}
+
 /// Events sent from reader threads to the display thread.
 enum DisplayEvent {
     /// A new client connected with the given PID.
@@ -82,7 +93,15 @@ enum DisplayEvent {
     /// A client disconnected.
     Disconnected { pid: u32 },
     /// An ETW event from the Tessera provider.
-    EtwEvent { pid: u32, text: String },
+    EtwEvent {
+        pid: u32,
+        text: String,
+        /// Full (verbose) rendering for the verbose log (only populated in collect mode).
+        verbose_text: Option<String>,
+        /// Minified rendering for the minified log (only in collect mode;
+        /// inner `None` means the event was suppressed in minified mode).
+        minified_text: Option<Option<String>>,
+    },
 }
 
 /// Check whether the current process is running elevated (as admin).
@@ -123,6 +142,11 @@ struct Cli {
     /// Show all ETW event properties (default: minified)
     #[arg(long)]
     verbose: bool,
+
+    /// Collect logs to files. Captures both verbose and minified output to a
+    /// timestamped folder in %TEMP%, then zips the folder on exit (Ctrl+C).
+    #[arg(long)]
+    collect: bool,
 }
 
 fn main() {
@@ -133,6 +157,29 @@ fn main() {
     } else {
         DISPLAY_MODE.store(DisplayMode::Minified as u8, Ordering::Relaxed);
     }
+
+    if cli.collect {
+        COLLECT_MODE_FLAG.store(true, Ordering::Relaxed);
+    }
+
+    // Create the collection directory (if --collect).
+    let collect_dir = if cli.collect {
+        match create_collect_dir() {
+            Ok(dir) => {
+                println!(
+                    "\x1b[1;32m[collect]\x1b[0m Collecting logs to: {}",
+                    dir.display()
+                );
+                Some(dir)
+            }
+            Err(e) => {
+                eprintln!("\x1b[1;31m[collect]\x1b[0m Failed to create collection directory: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
 
     // Compute the per-user pipe name (includes current user's SID).
     let pipe_name = wxc_common::diagnostic::diagnostic_pipe_name();
@@ -147,6 +194,9 @@ fn main() {
     println!("\x1b[1;36m=== MXC Diagnostic Console ===\x1b[0m");
     println!("{DIM}Listening on {pipe_name}{RESET}");
     println!("{DIM}Display mode: {mode_label}{RESET}");
+    if cli.collect {
+        println!("{DIM}Collection: enabled (Ctrl+C to stop and finalize){RESET}");
+    }
     println!("{DIM}Press Ctrl+C to exit{RESET}");
     println!();
 
@@ -219,12 +269,12 @@ fn main() {
         Ok(()) => {
             println!("\x1b[93m[ETW]\x1b[0m Listening for providers:");
             println!(
-                "\x1b[93m[ETW]\x1b[0m   Tessera     \
-                 {{f6ec123e-314e-400b-9e0a-151365e23083}}"
+                "\x1b[93m[ETW]\x1b[0m   ProcessModel \
+                 {{f6ec123e-314e-400b-9e0a-151365e23083}} (Sandboxing)"
             );
             println!(
                 "\x1b[93m[ETW]\x1b[0m   Kernel-General \
-                 {{a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}} (AccessCheckLog only)"
+                 {{a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}} (Learning Mode messages)"
             );
         }
         Err(e) => {
@@ -239,7 +289,7 @@ fn main() {
 
     // Display thread: formats and prints events.
     let _display_handle = thread::spawn(move || {
-        display_loop(rx);
+        display_loop(rx, collect_dir);
     });
 
     // Accept loop: create pipe instances and wait for clients.
@@ -456,58 +506,174 @@ struct PidInfo {
 }
 
 /// Display loop: reads events from the channel and prints them.
-fn display_loop(rx: mpsc::Receiver<DisplayEvent>) {
+/// When `collect_dir` is `Some`, also writes ANSI-stripped output to log files.
+fn display_loop(rx: mpsc::Receiver<DisplayEvent>, collect_dir: Option<PathBuf>) {
     let mut pid_info_map: Vec<PidInfo> = Vec::new();
     let mut next_color: usize = 0;
 
-    for event in rx {
-        let ts = format_timestamp();
-        match event {
-            DisplayEvent::Connected { pid } => {
-                let color_idx = next_color % PID_COLORS.len();
-                let exe = process_exe_name(pid);
-                pid_info_map.push(PidInfo {
-                    pid,
-                    color_idx,
-                    exe_name: exe.clone(),
-                });
-                next_color += 1;
-                let color = PID_COLORS[color_idx];
-                println!(
-                    "{DIM}[{ts}]{RESET} {color}>>>{RESET} {color}{exe}:{pid}{RESET} connected"
-                );
-            }
-            DisplayEvent::Message { pid, text } => {
-                let (color, exe) = get_pid_info(&pid_info_map, pid);
-                for line in text.lines() {
-                    if line.starts_with("WARNING:") {
-                        println!("{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;33m{line}\x1b[0m");
-                    } else if line.starts_with("SECTION:") {
-                        println!("{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;36m{line}\x1b[0m");
-                    } else if line.starts_with("ERROR:") || line.starts_with("Error:") {
-                        println!("{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;31m{line}\x1b[0m");
-                    } else {
-                        println!("{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} {line}");
+    // Open log files if collecting.
+    let mut log_writers: Option<(BufWriter<std::fs::File>, BufWriter<std::fs::File>)> =
+        collect_dir.as_ref().map(|dir| {
+            let verbose_file = std::fs::File::create(dir.join("verbose.log"))
+                .expect("Failed to create verbose.log");
+            let minified_file = std::fs::File::create(dir.join("minified.log"))
+                .expect("Failed to create minified.log");
+            (BufWriter::new(verbose_file), BufWriter::new(minified_file))
+        });
+
+    let mut flush_counter: u32 = 0;
+
+    loop {
+        let event = if collect_dir.is_some() {
+            // Use recv_timeout so we can check the SHUTDOWN flag.
+            match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(ev) => ev,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if SHUTDOWN.load(Ordering::Relaxed) {
+                        // Drain remaining events before exiting.
+                        while let Ok(ev) = rx.try_recv() {
+                            process_display_event(
+                                ev,
+                                &mut pid_info_map,
+                                &mut next_color,
+                                &mut log_writers,
+                            );
+                        }
+                        break;
                     }
+                    // Periodic flush while idle.
+                    if let Some((ref mut v, ref mut m)) = log_writers {
+                        let _ = v.flush();
+                        let _ = m.flush();
+                    }
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(ev) => ev,
+                Err(_) => break,
+            }
+        };
+
+        process_display_event(event, &mut pid_info_map, &mut next_color, &mut log_writers);
+
+        // Periodic flush every 50 events.
+        flush_counter += 1;
+        if flush_counter >= 50 {
+            flush_counter = 0;
+            if let Some((ref mut v, ref mut m)) = log_writers {
+                let _ = v.flush();
+                let _ = m.flush();
+            }
+        }
+    }
+
+    // Final flush and finalization.
+    if let Some((ref mut v, ref mut m)) = log_writers {
+        let _ = v.flush();
+        let _ = m.flush();
+    }
+    drop(log_writers);
+
+    if let Some(dir) = collect_dir {
+        finalize_collection(&dir);
+        std::process::exit(0);
+    }
+}
+
+/// Process a single display event: print to console and optionally write to log files.
+fn process_display_event(
+    event: DisplayEvent,
+    pid_info_map: &mut Vec<PidInfo>,
+    next_color: &mut usize,
+    log_writers: &mut Option<(BufWriter<std::fs::File>, BufWriter<std::fs::File>)>,
+) {
+    let ts = format_timestamp();
+    match event {
+        DisplayEvent::Connected { pid } => {
+            let color_idx = *next_color % PID_COLORS.len();
+            let exe = process_exe_name(pid);
+            pid_info_map.push(PidInfo {
+                pid,
+                color_idx,
+                exe_name: exe.clone(),
+            });
+            *next_color += 1;
+            let color = PID_COLORS[color_idx];
+            let line =
+                format!("{DIM}[{ts}]{RESET} {color}>>>{RESET} {color}{exe}:{pid}{RESET} connected");
+            println!("{line}");
+            if let Some((ref mut v, ref mut m)) = log_writers {
+                let plain = format!("[{ts}] >>> {exe}:{pid} connected\n");
+                let _ = v.write_all(plain.as_bytes());
+                let _ = m.write_all(plain.as_bytes());
+            }
+        }
+        DisplayEvent::Message { pid, text } => {
+            let (color, exe) = get_pid_info(pid_info_map, pid);
+            for line in text.lines() {
+                if line.starts_with("WARNING:") {
+                    println!(
+                        "{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;33m{line}\x1b[0m"
+                    );
+                } else if line.contains("SECTION:") {
+                    println!(
+                        "{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;36m{line}\x1b[0m"
+                    );
+                } else if line.starts_with("ERROR:") || line.starts_with("Error:") {
+                    println!(
+                        "{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;31m{line}\x1b[0m"
+                    );
+                } else {
+                    println!("{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} {line}");
+                }
+                if let Some((ref mut v, ref mut m)) = log_writers {
+                    let plain = format!("[{ts}] [{exe}:{pid}] {line}\n");
+                    let _ = v.write_all(plain.as_bytes());
+                    let _ = m.write_all(plain.as_bytes());
                 }
             }
-            DisplayEvent::Disconnected { pid } => {
-                let (color, exe) = get_pid_info(&pid_info_map, pid);
-                println!(
-                    "{DIM}[{ts}]{RESET} {color}<<<{RESET} {color}{exe}:{pid}{RESET} disconnected"
-                );
+        }
+        DisplayEvent::Disconnected { pid } => {
+            let (color, exe) = get_pid_info(pid_info_map, pid);
+            let line = format!(
+                "{DIM}[{ts}]{RESET} {color}<<<{RESET} {color}{exe}:{pid}{RESET} disconnected"
+            );
+            println!("{line}");
+            if let Some((ref mut v, ref mut m)) = log_writers {
+                let plain = format!("[{ts}] <<< {exe}:{pid} disconnected\n");
+                let _ = v.write_all(plain.as_bytes());
+                let _ = m.write_all(plain.as_bytes());
             }
-            DisplayEvent::EtwEvent { pid, text } => {
-                // ETW events may come from kernel PIDs not in our pipe map.
-                let (color, exe) = get_pid_info(&pid_info_map, pid);
-                let label = if exe == "?" {
-                    // Try to resolve on the fly for ETW-only PIDs.
-                    let resolved = process_exe_name(pid);
-                    format!("{resolved}:{pid}")
-                } else {
-                    format!("{exe}:{pid}")
-                };
-                println!("{DIM}[{ts}]{RESET} \x1b[93m[ETW]\x1b[0m {color}[{label}]{RESET} {text}");
+        }
+        DisplayEvent::EtwEvent {
+            pid,
+            text,
+            verbose_text,
+            minified_text,
+        } => {
+            let (color, exe) = get_pid_info(pid_info_map, pid);
+            let label = if exe == "?" {
+                let resolved = process_exe_name(pid);
+                format!("{resolved}:{pid}")
+            } else {
+                format!("{exe}:{pid}")
+            };
+            println!("{DIM}[{ts}]{RESET} \x1b[93m[ETW]\x1b[0m {color}[{label}]{RESET} {text}");
+
+            if let Some((ref mut v, ref mut m)) = log_writers {
+                // Write verbose text to verbose.log.
+                if let Some(ref vt) = verbose_text {
+                    let plain = format!("[{ts}] [ETW] [{label}] {}\n", strip_ansi(vt));
+                    let _ = v.write_all(plain.as_bytes());
+                }
+                // Write minified text to minified.log (skip if suppressed).
+                if let Some(Some(ref mt)) = minified_text {
+                    let plain = format!("[{ts}] [ETW] [{label}] {}\n", strip_ansi(mt));
+                    let _ = m.write_all(plain.as_bytes());
+                }
             }
         }
     }
@@ -558,6 +724,114 @@ fn format_timestamp() -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
 }
 
+/// Strip ANSI escape codes from a string for plain-text log output.
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip until we hit a letter (the terminator of an ANSI sequence).
+            for c2 in chars.by_ref() {
+                if c2.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Create the timestamped collection directory in %TEMP%.
+fn create_collect_dir() -> Result<PathBuf, String> {
+    let temp = std::env::temp_dir();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let time_of_day = secs % 86400;
+    let days = secs / 86400;
+
+    // Approximate date from days since epoch.
+    let (year, month, day) = days_to_ymd(days);
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+    let pid = std::process::id();
+
+    let dir_name = format!(
+        "mxc-diagnostics-{year:04}{month:02}{day:02}-{hours:02}{minutes:02}{seconds:02}-{pid}"
+    );
+    let dir = temp.join(dir_name);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all: {e}"))?;
+    Ok(dir)
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Civil calendar algorithm (simplified Euclidean).
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Finalize collection: zip the folder and print results.
+fn finalize_collection(dir: &std::path::Path) {
+    println!();
+    println!("\x1b[1;32m[collect]\x1b[0m Finalizing collection...");
+
+    let zip_path = dir.with_extension("zip");
+
+    // Use PowerShell Compress-Archive to create the zip.
+    let source = format!("{}\\*", dir.display());
+    let dest = format!("{}", zip_path.display());
+
+    let result = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "Compress-Archive -Path '{}' -DestinationPath '{}' -Force",
+                source, dest
+            ),
+        ])
+        .status();
+
+    let zip_ok = match result {
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            eprintln!("\x1b[1;33m[collect]\x1b[0m Compress-Archive exited with status: {status}");
+            false
+        }
+        Err(e) => {
+            eprintln!("\x1b[1;33m[collect]\x1b[0m Failed to run PowerShell: {e}");
+            false
+        }
+    };
+
+    println!();
+    println!("\x1b[1;36m=== Collection Complete ===\x1b[0m");
+    println!("  Log folder:  {}", dir.display());
+    println!("    verbose.log   (all ETW event properties)");
+    println!("    minified.log  (reduced ETW event properties)");
+    if zip_ok {
+        println!("  Archive:     {}", zip_path.display());
+    } else {
+        println!("  Archive:     (zip creation failed; logs are still in the folder above)");
+    }
+    println!();
+}
+
 /// Enable ANSI virtual terminal processing on the Windows console.
 fn enable_virtual_terminal() {
     use windows::Win32::System::Console::{
@@ -583,6 +857,16 @@ fn register_ctrl_handler() {
     unsafe extern "system" fn handler(ctrl_type: u32) -> windows_core::BOOL {
         if ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_CLOSE_EVENT {
             etw::stop_etw_listener();
+
+            if COLLECT_MODE_FLAG.load(Ordering::Relaxed) {
+                // First Ctrl+C: signal graceful shutdown and suppress default termination.
+                // Second Ctrl+C: allow default termination (hard exit).
+                if SHUTDOWN.swap(true, Ordering::SeqCst) {
+                    // Already set -- this is the second interrupt. Hard exit.
+                    return windows_core::BOOL(0);
+                }
+                return windows_core::BOOL(1);
+            }
         }
         // Return FALSE so the default handler terminates the process.
         windows_core::BOOL(0)

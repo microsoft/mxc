@@ -1,0 +1,16 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "CLI-Experimental-Hello",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd.exe /c echo experimental hello test"
+  },
+  "experimental": {
+    "test": {
+      "message": "Test feature from AppContainer experimental!"
+    }
+  },
+  "ui": {
+    "disable": false
+  }
+}

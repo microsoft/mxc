@@ -5,7 +5,8 @@
 //!
 //! Listens for events from:
 //! - **Tessera** TraceLogging provider (all events)
-//! - **Microsoft-Windows-Kernel-General** (learning-mode AccessCheckLog only, event ID 0xe)
+//! - **Microsoft-Windows-Kernel-General** (all events -- AccessCheckLog, AppContainerTokenCheckLog,
+//!   TokenSidManagementLog, learning-mode violations, etc.)
 //!
 //! Starts a trace session, enables the providers, and delivers decoded events
 //! to the diagnostic console's display channel. Requires administrator privileges.
@@ -24,7 +25,7 @@ use windows::Win32::System::Diagnostics::Etw::{
     TRACE_EVENT_INFO, TRACE_LEVEL_VERBOSE, WNODE_FLAG_TRACED_GUID,
 };
 
-use super::{display_mode, DisplayEvent, DisplayMode};
+use super::{collect_mode, display_mode, DisplayEvent, DisplayMode};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -39,16 +40,14 @@ const TESSERA_PROVIDER: GUID = GUID {
 };
 
 /// Microsoft-Windows-Kernel-General provider GUID: {a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}
-/// Used to capture learning-mode access check events (event ID 0xe / 14).
+/// Used to capture learning-mode diagnostics (AccessCheckLog, AppContainerTokenCheckLog,
+/// TokenSidManagementLog, learning-mode violations, etc.).
 const KERNEL_GENERAL_PROVIDER: GUID = GUID {
     data1: 0xa68ca8b7,
     data2: 0x004f,
     data3: 0xd7b6,
     data4: [0xa6, 0x98, 0x07, 0xe2, 0xde, 0x0f, 0x1f, 0x5d],
 };
-
-/// Event ID for SepAccessCheck learning-mode log (AccessCheckLog).
-const ACCESS_CHECK_LOG_EVENT_ID: u16 = 0xe;
 
 const SESSION_NAME: &str = "MXC-Diagnostics-ETW";
 
@@ -87,7 +86,7 @@ unsafe impl Send for SendPtr {}
 /// Start the ETW listener for diagnostic providers.
 ///
 /// Enables the Tessera TraceLogging provider and the Kernel-General provider
-/// (filtered to AccessCheckLog events for learning-mode diagnostics).
+/// (all events for learning-mode diagnostics).
 /// Spawns a background thread that calls `ProcessTrace` (blocking). Returns
 /// immediately on success. Events are delivered via `tx`.
 pub fn start_etw_listener(tx: mpsc::Sender<DisplayEvent>) -> Result<(), String> {
@@ -197,7 +196,7 @@ fn enable_provider(session_handle: u64) -> Result<(), String> {
         ));
     }
 
-    // Enable the Kernel-General provider for learning-mode access check events.
+    // Enable the Kernel-General provider for learning-mode diagnostic events.
     let status = unsafe {
         EnableTraceEx2(
             h,
@@ -300,45 +299,71 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
     if provider == TESSERA_PROVIDER {
         // Tessera: accept all events.
     } else if provider == KERNEL_GENERAL_PROVIDER {
-        // Kernel-General: only accept AccessCheckLog (event ID 0xe).
-        if event.EventHeader.EventDescriptor.Id != ACCESS_CHECK_LOG_EVENT_ID {
-            return;
-        }
+        // Kernel-General: accept all events (AccessCheckLog, AppContainerTokenCheckLog,
+        // TokenSidManagementLog, learning-mode violations, etc.).
     } else {
         return;
     }
 
     let tx = unsafe { &*(event.UserContext as *const mpsc::Sender<DisplayEvent>) };
-    let text = match decode_event(event_record) {
-        Some(t) => t,
-        None => return, // Suppressed by display mode filtering.
-    };
-    let _ = tx.send(DisplayEvent::EtwEvent {
-        pid: event.EventHeader.ProcessId,
-        text,
-    });
+    let pid = event.EventHeader.ProcessId;
+    let collecting = collect_mode();
+    let current_mode = display_mode();
+
+    if let Some(parts) = decode_event_parts(event_record) {
+        let console_text = format_event_output(&parts, current_mode);
+
+        let (verbose_text, minified_text) = if collecting {
+            let verbose = format_event_output(&parts, DisplayMode::Full)
+                .unwrap_or_else(|| fallback_event_text(event_record));
+            let minified = format_event_output(&parts, DisplayMode::Minified);
+            (Some(verbose), Some(minified))
+        } else {
+            (None, None)
+        };
+
+        // In collect mode, send even if console_text is None (suppressed) since
+        // the verbose log still wants this event.
+        if console_text.is_some() || collecting {
+            let _ = tx.send(DisplayEvent::EtwEvent {
+                pid,
+                text: console_text.unwrap_or_else(|| fallback_event_text(event_record)),
+                verbose_text,
+                minified_text,
+            });
+        }
+    } else {
+        let fallback = fallback_event_text(event_record);
+        let (verbose_text, minified_text) = if collecting {
+            (Some(fallback.clone()), Some(Some(fallback.clone())))
+        } else {
+            (None, None)
+        };
+        let _ = tx.send(DisplayEvent::EtwEvent {
+            pid,
+            text: fallback,
+            verbose_text,
+            minified_text,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Event decoding
 // ---------------------------------------------------------------------------
 
-fn decode_event(event_record: *mut EVENT_RECORD) -> Option<String> {
-    match decode_with_tdh(event_record) {
-        Some(s) => Some(s),
-        None => {
-            let event = unsafe { &*event_record };
-            Some(format!(
-                "Event(Id={}, Level={}, DataLen={})",
-                event.EventHeader.EventDescriptor.Id,
-                event.EventHeader.EventDescriptor.Level,
-                event.UserDataLength,
-            ))
-        }
-    }
+/// Decoded ETW event parts (expensive TDH call done once, formatting done separately).
+struct DecodedEventParts {
+    event_name: Option<String>,
+    event_id: u16,
+    provider: GUID,
+    level_tag: &'static str,
+    props: Vec<(String, String)>,
 }
 
-fn decode_with_tdh(event_record: *mut EVENT_RECORD) -> Option<String> {
+/// Decode the raw event record via TDH into reusable parts.
+/// Returns `None` only when TDH decoding fails entirely.
+fn decode_event_parts(event_record: *mut EVENT_RECORD) -> Option<DecodedEventParts> {
     let mut buf_size: u32 = 0;
     let status = unsafe { TdhGetEventInformation(event_record, None, None, &mut buf_size) };
 
@@ -358,20 +383,20 @@ fn decode_with_tdh(event_record: *mut EVENT_RECORD) -> Option<String> {
 
     let info = unsafe { &*info_ptr };
 
-    // EventNameOffset is in Anonymous1 (union with ActivityIDNameOffset).
     let event_name_offset = unsafe { info.Anonymous1.EventNameOffset };
     let event_name = wide_str_at(&buffer, event_name_offset)
         .or_else(|| wide_str_at(&buffer, info.TaskNameOffset))
         .unwrap_or_default();
 
     let event_name = if event_name.is_empty() {
-        // No name available; don't synthesize a noisy "Event#N" label.
         None
     } else {
         Some(event_name)
     };
 
     let level = unsafe { (*event_record).EventHeader.EventDescriptor.Level };
+    let event_id = unsafe { (*event_record).EventHeader.EventDescriptor.Id };
+    let provider = unsafe { (*event_record).EventHeader.ProviderId };
     let level_tag = match level {
         1 => "\x1b[91mCRIT\x1b[0m",
         2 => "\x1b[91mERR\x1b[0m",
@@ -383,7 +408,39 @@ fn decode_with_tdh(event_record: *mut EVENT_RECORD) -> Option<String> {
 
     let props = decode_properties(&buffer, info, event_record);
 
-    let props = minify_access_check_props(props)?;
+    Some(DecodedEventParts {
+        event_name,
+        event_id,
+        provider,
+        level_tag,
+        props,
+    })
+}
+
+/// Learning mode violation event ID from Kernel-General.
+const LEARNING_MODE_VIOLATION_EVENT_ID: u16 = 27;
+
+/// Human-readable names for learning mode violation categories.
+fn learning_mode_category_name(category: &str) -> &str {
+    match category {
+        "0" => "None",
+        "1" => "ConvertToGui",
+        "2" => "UiOperation",
+        _ => category,
+    }
+}
+
+/// Format decoded event parts into a display string for the given mode.
+/// Returns `None` when the event should be suppressed (e.g. empty ObjectType in minified mode).
+fn format_event_output(parts: &DecodedEventParts, mode: DisplayMode) -> Option<String> {
+    // Special handling for learning mode violation events (Kernel-General, Event ID 27).
+    if parts.provider == KERNEL_GENERAL_PROVIDER
+        && parts.event_id == LEARNING_MODE_VIOLATION_EVENT_ID
+    {
+        return Some(format_learning_mode_violation(&parts.props, mode));
+    }
+
+    let props = minify_kernel_general_props(parts.props.clone(), mode)?;
 
     let props_str = if props.is_empty() {
         String::new()
@@ -392,14 +449,77 @@ fn decode_with_tdh(event_record: *mut EVENT_RECORD) -> Option<String> {
         format!(" {{ {} }}", joined.join(", "))
     };
 
-    let name_part = event_name.as_deref().unwrap_or("");
+    let name_part = parts.event_name.as_deref().unwrap_or("");
 
-    match (level_tag.is_empty(), name_part.is_empty()) {
+    match (parts.level_tag.is_empty(), name_part.is_empty()) {
         (true, true) => Some(props_str.trim_start().to_string()),
         (true, false) => Some(format!("{name_part}{props_str}")),
-        (false, true) => Some(format!("[{level_tag}]{props_str}")),
-        (false, false) => Some(format!("[{level_tag}] {name_part}{props_str}")),
+        (false, true) => Some(format!("[{}]{props_str}", parts.level_tag)),
+        (false, false) => Some(format!("[{}] {name_part}{props_str}", parts.level_tag)),
     }
+}
+
+/// Format a learning mode violation event (Event ID 27) with warning colors and category name.
+fn format_learning_mode_violation(props: &[(String, String)], mode: DisplayMode) -> String {
+    let yellow = "\x1b[33m";
+    let orange = "\x1b[38;5;208m";
+    let reset = "\x1b[0m";
+
+    // Replace the Category number with its human-readable name, colored orange.
+    let formatted_props: Vec<(String, String)> = props
+        .iter()
+        .map(|(k, v)| {
+            if k == "Category" {
+                let raw = v.trim_matches('"');
+                let name = learning_mode_category_name(raw);
+                (k.clone(), format!("{orange}{name}{reset}"))
+            } else {
+                (k.clone(), v.clone())
+            }
+        })
+        .collect();
+
+    // In minified mode, show a reduced set of properties.
+    let display_props = if mode == DisplayMode::Minified {
+        const MINIFIED_FIELDS: &[&str] = &["ProcessName", "Category", "Denied"];
+        let mut filtered: Vec<(String, String)> = formatted_props
+            .into_iter()
+            .filter(|(k, _)| MINIFIED_FIELDS.contains(&k.as_str()))
+            .collect();
+        // Strip ProcessName to just the exe name.
+        for (k, v) in &mut filtered {
+            if k == "ProcessName" {
+                let stripped = v.trim_matches('"').rsplit('\\').next().unwrap_or(v);
+                *v = format!("\"{stripped}\"");
+            }
+        }
+        filtered
+    } else {
+        formatted_props
+    };
+
+    let props_str = if display_props.is_empty() {
+        String::new()
+    } else {
+        let joined: Vec<String> = display_props
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        format!(" {{ {} }}", joined.join(", "))
+    };
+
+    format!("{yellow}[LearningModeViolation]{reset}{props_str}")
+}
+
+/// Produce a generic fallback string for events that TDH cannot decode.
+fn fallback_event_text(event_record: *mut EVENT_RECORD) -> String {
+    let event = unsafe { &*event_record };
+    format!(
+        "Event(Id={}, Level={}, DataLen={})",
+        event.EventHeader.EventDescriptor.Id,
+        event.EventHeader.EventDescriptor.Level,
+        event.UserDataLength,
+    )
 }
 
 fn decode_properties(
@@ -459,11 +579,15 @@ fn decode_properties(
 /// ObjectType="File" or ObjectType="Key", in the order they should appear.
 const MINIFIED_FILE_FIELDS: &[&str] = &["LowBoxNumber", "ProcessName", "ObjectName"];
 
-/// In minified mode, reduce AccessCheckLog File/Key events to a useful subset
-/// of properties and strip ProcessName to just the executable name.
-/// Returns `None` to suppress the event entirely (e.g. empty ObjectType).
-fn minify_access_check_props(props: Vec<(String, String)>) -> Option<Vec<(String, String)>> {
-    if display_mode() != DisplayMode::Minified {
+/// In minified mode, reduce Kernel-General events to a useful subset of properties.
+/// For AccessCheckLog File/Key events: strip to LowBoxNumber, ProcessName, ObjectName.
+/// For other events: pass all properties through unmodified.
+/// Returns `None` to suppress the event entirely (e.g. empty ObjectType in AccessCheckLog).
+fn minify_kernel_general_props(
+    props: Vec<(String, String)>,
+    mode: DisplayMode,
+) -> Option<Vec<(String, String)>> {
+    if mode != DisplayMode::Minified {
         return Some(props);
     }
 

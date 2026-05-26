@@ -5,11 +5,11 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
-import { FileLogger } from './logger';
-import { ContainerConfig, ContainmentType, ExperimentalBackends, SandboxingMethod } from './types';
-import { findWxcExecutable, findLxcExecutable, getPlatformSupport } from './platform';
-import { SandboxSpawnOptions } from './sandbox';
-import { diagLog } from './diagnostic';
+import { FileLogger } from './logger.js';
+import { ContainerConfig, ContainmentBackend, ContainmentTypes, ExperimentalBackends, LegacyContainmentAliases } from './types.js';
+import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupport } from './platform.js';
+import { SandboxSpawnOptions } from './sandbox.js';
+import { diagLog } from './diagnostic.js';
 
 /** SDK version read from package.json at module load time. */
 export const SDK_VERSION: string = (() => {
@@ -62,8 +62,70 @@ export function makeLogFilePath(dir: string): string {
 }
 
 /**
- * Resolves the executable path and builds CLI arguments for a sandbox invocation.
- * Shared setup used by both PTY and non-PTY spawn paths.
+ * Resolves the executor binary and builds the common CLI arguments for any
+ * MXC request envelope (one-shot or state-aware). Performs platform support
+ * and binary-presence checks; does not validate envelope contents — callers
+ * apply request-specific validation before delegating to this helper.
+ */
+export function resolveBinaryAndCommonArgs(
+  envelopeJson: string,
+  options: SandboxSpawnOptions,
+): { executablePath: string; args: string[] } {
+  const platformSupport = getPlatformSupport();
+  if (!platformSupport.isSupported && !options.skipPlatformCheck) {
+    throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
+  }
+
+  const platform = os.platform();
+  let executablePath: string;
+
+  if (options.executablePath) {
+    if (!fs.existsSync(options.executablePath)) {
+      throw new Error(`File not found: ${options.executablePath}`);
+    }
+    executablePath = options.executablePath;
+  } else if (platform === 'linux') {
+    const p = findLxcExecutable();
+    if (!p) {
+      throw new Error(
+        'lxc-exec not found. Ensure it is built and available in a standard location.'
+      );
+    }
+    executablePath = p;
+  } else if (platform === 'darwin') {
+    const p = findSeatbeltExecutable();
+    if (!p) {
+      throw new Error(
+        'mxc-exec-mac not found. Ensure it is built and available in a standard location.'
+      );
+    }
+    executablePath = p;
+  } else {
+    const p = findWxcExecutable();
+    if (!p) {
+      throw new Error(
+        'wxc-exec.exe not found. Set options.executablePath or ensure it exists in a standard location.'
+      );
+    }
+    executablePath = p;
+  }
+
+  const args: string[] = [];
+  const envelopeBase64 = Buffer.from(envelopeJson, 'utf-8').toString('base64');
+  args.push('--config-base64', envelopeBase64);
+
+  if (options.dryRun) args.push('--dry-run');
+  if (options.debug) args.push('--debug');
+  if (options.experimental) args.push('--experimental');
+
+  return { executablePath, args };
+}
+
+/**
+ * Resolves the executable path and builds CLI arguments for a one-shot
+ * sandbox invocation. Validates one-shot-specific invariants (commandLine
+ * required, experimental gating, containment-vs-platform compatibility)
+ * before delegating to the shared `resolveBinaryAndCommonArgs`.
  */
 export function resolveExecutableAndArgs(
   config: ContainerConfig,
@@ -75,24 +137,39 @@ export function resolveExecutableAndArgs(
 
   // Check experimental mode before anything else so the caller gets a clear
   // message about the missing flag rather than a platform/binary error.
-  if (ExperimentalBackends.includes(config.containment as ContainmentType) && !options.experimental) {
+  if (config.containment && ExperimentalBackends.includes(config.containment) && !options.experimental) {
     throw new Error(
       `'${config.containment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
     );
   }
 
   const platformSupport = getPlatformSupport();
-  if (!platformSupport.isSupported) {
+  const isExperimental = !!config.containment &&
+    (ExperimentalBackends as readonly string[]).includes(config.containment);
+  if (!platformSupport.isSupported && !isExperimental && !options.skipPlatformCheck) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
+  // Hard platform requirement: microvm needs WHP/Hyper-V on Windows. This guard
+  // runs even when `skipPlatformCheck` is set because it's not a build-version
+  // check — the backend literally cannot run on non-Windows hosts.
+  if (config.containment === 'microvm' && os.platform() !== 'win32') {
+    throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
+  }
+
   // Validate containment against platform
-  if (config.containment) {
-    if (config.containment === 'microvm' && os.platform() !== 'win32') {
-      throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
-    }
-    if (!(ExperimentalBackends as readonly string[]).includes(config.containment) &&
-        !platformSupport.availableMethods.includes(config.containment as SandboxingMethod)) {
+  if (config.containment && !options.skipPlatformCheck) {
+    // Abstract intents (process, microvm) are resolved by the native binary
+    // at run time, so the SDK accepts them without checking against the
+    // host's concrete backend list.
+    const isIntent = (ContainmentTypes as readonly string[]).includes(config.containment);
+    // Legacy wire values accepted by the native binary via serde aliases
+    // (e.g. "appcontainer" → processcontainer, "macos_sandbox" → seatbelt).
+    const resolved = LegacyContainmentAliases[config.containment];
+    const isAvailable = platformSupport.availableMethods.includes(
+      (resolved ?? config.containment) as ContainmentBackend
+    );
+    if (!isIntent && !isExperimental && !isAvailable) {
       throw new Error(
         `Containment backend '${config.containment}' is not available on this platform. ` +
         `Available methods: ${platformSupport.availableMethods.join(', ')}`
@@ -100,48 +177,7 @@ export function resolveExecutableAndArgs(
     }
   }
 
-  const platform = os.platform();
-  let executablePath: string | null;
-
-  if (options.executablePath) {
-    if (!fs.existsSync(options.executablePath)) {
-      throw new Error(`File not found: ${options.executablePath}`);
-    }
-    executablePath = options.executablePath;
-  } else if (platform === 'linux') {
-    executablePath = findLxcExecutable();
-    if (!executablePath) {
-      throw new Error(
-        'lxc-exec not found. Ensure it is built and available in a standard location.'
-      );
-    }
-  } else {
-    executablePath = findWxcExecutable();
-    if (!executablePath) {
-      throw new Error(
-        'wxc-exec.exe not found. Set options.executablePath or ensure it exists in a standard location.'
-      );
-    }
-  }
-
-  const args: string[] = [];
-  const configJson = JSON.stringify(config);
-  const configBase64 = Buffer.from(configJson, 'utf-8').toString('base64');
-  args.push('--config-base64', configBase64);
-
-  if (options.dryRun) {
-    args.push('--dry-run');
-  }
-
-  if (options.debug) {
-    args.push('--debug');
-  }
-
-  if (options.experimental) {
-    args.push('--experimental');
-  }
-
-  return { executablePath, args };
+  return resolveBinaryAndCommonArgs(JSON.stringify(config), options);
 }
 
 /**
@@ -176,6 +212,10 @@ export function prepareSpawn(
 
   try {
     const { executablePath, args } = resolveExecutableAndArgs(config, options);
+    // Pass the SDK log file to wxc-exec so Rust-side diagnostics go to the same file.
+    if (logFile) {
+      args.push('--log-file', logFile);
+    }
     logger?.log('info', 'mxc.binary.resolved', { resolved: !!executablePath });
     return { executablePath, args, logger, logFile, startTime };
   } catch (err) {

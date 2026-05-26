@@ -58,7 +58,7 @@ pub fn run_state_aware(
     match backend {
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         ContainmentBackend::IsolationSession => {
-            let mut runner = crate::isolation_session_runner::IsolationSessionRunner::new();
+            let mut runner = crate::isolation_session::IsolationSessionRunner::new();
             dispatch_state_aware(&mut runner, parsed, dry_run)
         }
         other => Err(MxcError::unsupported_phase(format!(

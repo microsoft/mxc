@@ -10,13 +10,15 @@ import {
   getSdkBinDir,
   EXPECTED_WINDOWS_BINARIES,
   EXPECTED_LINUX_BINARIES,
+  EXPECTED_MACOS_BINARIES,
   ALL_KNOWN_BINARIES,
   platformName,
-} from './test-helpers';
+} from './test-helpers.js';
 
 const expectedBinaries: Record<string, string[]> = {
   win32: EXPECTED_WINDOWS_BINARIES,
   linux: EXPECTED_LINUX_BINARIES,
+  darwin: EXPECTED_MACOS_BINARIES,
 };
 
 describe('SDK package binaries', () => {

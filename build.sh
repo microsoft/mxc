@@ -13,6 +13,8 @@ CLI_DIR="$SCRIPT_DIR/cli"
 BUILD_TYPE="release"
 BUILD_SDK=true
 
+WITH_HYPERLIGHT=false
+
 while [[ $# -gt 0 ]]; do
     case $1 in
         --debug)
@@ -23,13 +25,18 @@ while [[ $# -gt 0 ]]; do
             BUILD_SDK=false
             shift
             ;;
+        --with-hyperlight)
+            WITH_HYPERLIGHT=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: build.sh [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --debug       Build in debug mode (default: release)"
-            echo "  --rust-only   Only build Rust binaries, skip SDK/CLI"
-            echo "  -h, --help    Show this help message"
+            echo "  --debug             Build in debug mode (default: release)"
+            echo "  --rust-only         Only build Rust binaries, skip SDK/CLI"
+            echo "  --with-hyperlight   Build with Hyperlight (micro-VM) backend (x86_64 only)"
+            echo "  -h, --help          Show this help message"
             exit 0
             ;;
         *)
@@ -57,11 +64,27 @@ echo ""
 echo "=== Building Rust binaries ($BUILD_TYPE) ==="
 cd "$SRC_DIR"
 
-if [ "$BUILD_TYPE" = "release" ]; then
-    cargo build --release -p lxc
-else
-    cargo build -p lxc
+# Packages to build and lint — kept in one place so build and clippy stay in sync.
+LXC_PACKAGES=(-p lxc -p lxc_common -p wxc_common)
+
+CARGO_FEATURES=()
+if [ "$WITH_HYPERLIGHT" = true ]; then
+    CARGO_FEATURES=(--features hyperlight)
 fi
+
+if [ "$BUILD_TYPE" = "release" ]; then
+    cargo build --release "${LXC_PACKAGES[@]}" "${CARGO_FEATURES[@]}"
+else
+    cargo build "${LXC_PACKAGES[@]}" "${CARGO_FEATURES[@]}"
+fi
+
+echo "  Check formatting"
+cargo fmt --all -- --check
+
+echo "  Check linting"
+# Scope clippy to Linux-compatible crates only. --workspace includes Windows-only
+# crates (wxc, wslc_common, etc.) whose dependencies fail to compile on Linux.
+cargo clippy "${LXC_PACKAGES[@]}" --all-targets "${CARGO_FEATURES[@]}" -- -D warnings
 
 echo "Rust build complete."
 

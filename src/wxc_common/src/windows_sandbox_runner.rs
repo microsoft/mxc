@@ -173,6 +173,7 @@ impl WindowsSandboxScriptRunner {
                         } else {
                             result.error_message
                         },
+                        ..Default::default()
                     }
                 }
                 Err(err) => ScriptResponse::error(&err),

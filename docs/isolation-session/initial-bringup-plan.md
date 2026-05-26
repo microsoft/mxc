@@ -21,12 +21,12 @@ Add an **IsolationSession runner** to `wxc-exec.exe`, behind `--experimental`.
 When the JSON config specifies `"containment": "isolation_session"` and the
 experimental flag is set, the binary routes to a new `IsolationSessionRunner`
 (implementing the existing `ScriptRunner` trait). The runner orchestrates the
-full lifecycle against the OS-side IsoEnvBroker Session API: register the
+full lifecycle against the OS-side Isolation Session API: register the
 calling app, provision an agent user, start a session, run the script
 (capturing stdout / stderr / exit code into `ScriptResponse`), then stop the
 session, deprovision the agent, and unregister. All of this happens through
 Rust bindings auto-generated from a private WinMD; the OS-side API is gated
-on `Feature_IsoBrokerSessionApis`.
+on an internal Windows feature flag.
 
 This v0.1 implementation is a **one-shot runner** — every `wxc-exec`
 invocation pays the full lifecycle cost. A two-layer architecture
@@ -156,9 +156,9 @@ Run with: `wxc-exec.exe --experimental config.json`.
 ## OS API Dependency
 
 The runner calls into the WinRT API namespaced
-`Windows.AI.IsolationEnvironment.Session`, exposed by the IsoEnvBroker
-service (running as SYSTEM via `svchost.exe`). The API is gated on
-`Feature_IsoBrokerSessionApis`.
+`Windows.AI.IsolationEnvironment.Session`, exposed by the OS-side Isolation
+Session service (running as SYSTEM via `svchost.exe`). The API is gated
+on an internal Windows feature flag.
 
 Activation goes through
 `RoGetActivationFactory(RuntimeClass_Windows_AI_IsolationEnvironment_Session_IsolationSessionClient)`.
@@ -253,15 +253,15 @@ matching `windows` crate version").
 | Category | Count | Location | What it verifies |
 |---|---:|---|---|
 | Config parsing | ~8 | `config_parser.rs` | `"isolation_session"` containment value, `experimental.isolation_session` section, `configurationId` values + defaults |
-| Policy validation | ~7 | `isolation_session_runner.rs` | Each unsupported policy field (filesystem, network, etc.) produces the correct error message |
+| Policy validation | ~15 | `isolation_session_runner.rs` | Phase-specific behaviour: provision accepts `readwritePaths` / `readonlyPaths` and rejects `deniedPaths`; non-provision phases reject every filesystem field; network and proxy are rejected at every phase |
 | Option building | ~6 | `isolation_session_runner.rs` | `CodexRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
-| Feature unavailable | 1 | `isolation_session_runner.rs` | Runner returns a clean error on machines without `Feature_IsoBrokerSessionApis`, so the test passes everywhere |
+| Feature unavailable | 1 | `isolation_session_runner.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
 
 These ~22 backend-specific tests run alongside the existing workspace tests
 (287 total currently passing). The feature-unavailable test is what runs in
-CI, since CI machines do not have an IsoEnvBroker-capable Windows build.
+CI, since CI machines do not have a Windows build with the IsolationSession feature enabled.
 
-**Integration tests (require a host with `Feature_IsoBrokerSessionApis`):**
+**Integration tests (require a Windows host with the IsolationSession feature enabled):**
 
 Two end-to-end configs live under `test_configs/`:
 
@@ -290,7 +290,7 @@ test script to the host, then run the script directly in `cmd.exe` or
 PowerShell on that host.
 
 CI does not run these tests today — there is no CI agent provisioned with
-the IsoEnvBroker service. The feature-unavailable behavior is what runs
+the OS-side Isolation Session service. The feature-unavailable behavior is what runs
 in CI (via the automated unit test in `cargo test`).
 
 ## Known Issues observed in v0.1
@@ -309,7 +309,7 @@ The following were observed during VM testing and are accepted for v0.1.
   non-functional even when present.
 - **Intermittent `IdentityNotFound` (status 4) immediately after VM boot.**
   Observed once, resolved by a VM restart. Cause unconfirmed; suspected to
-  be an IsoEnvBroker service initialization race. Re-runs on a settled VM
+  be an Isolation Session service initialization race. Re-runs on a settled VM
   are reliable.
 
 ## Risks
@@ -317,7 +317,7 @@ The following were observed during VM testing and are accepted for v0.1.
 | Risk | Mitigation |
 |---|---|
 | Bindings tied to a specific OS API version | `GENERATION_INFO.toml` records the OS branch + commit; `build.rs` version-checks the `windows` crate; regeneration is one command |
-| OS API not present on older Windows builds | `Feature_IsoBrokerSessionApis` is OS-side; runner reports a clean error when the activation factory fails. Feature-unavailable test exercises this on CI |
+| OS API not present on older Windows builds | the IsolationSession feature is OS-side; runner reports a clean error when the activation factory fails. Feature-unavailable test exercises this on CI |
 | New Cargo feature increases coupling | The `isolation_session` feature is off by default in the workspace; default builds and existing CI are unaffected |
 | Manual VM testing required | The OS-side service has the same constraint for any consumer (it rejects network-logon tokens). Automated suite covers what it can without the OS-side service |
 | One-shot lifecycle is heavy (full register → provision → start per call) | Accepted for v0.1; experimental flag indicates rough edges. Stateful API is the planned mitigation |
@@ -328,7 +328,7 @@ The following were observed during VM testing and are accepted for v0.1.
 
 **For end users:**
 
-- A Windows build with `Feature_IsoBrokerSessionApis` enabled.
+- A Windows build with the IsolationSession feature enabled.
 - `IsolationProxy.exe` present in `%SystemRoot%\System32\` (ships with
   Windows as part of the OS-side service).
 - WinRT initialized as MTA (handled by `wxc-exec`).

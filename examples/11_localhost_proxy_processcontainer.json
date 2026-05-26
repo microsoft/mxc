@@ -1,0 +1,17 @@
+{
+  "version": "0.4.0-alpha",
+  "containerId": "CLI-Proxy-Example",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"import urllib.request\n\nprint('Test 1: Requesting api.github.com...')\ntry:\n    response = urllib.request.urlopen('https://api.github.com', timeout=15)\n    print(f'  SUCCESS: status {response.status}')\nexcept Exception as e:\n    print(f'  ERROR: {e}')\n\nprint()\nprint('Test 2: Requesting httpbin.org...')\ntry:\n    response = urllib.request.urlopen('https://httpbin.org/get', timeout=15)\n    print(f'  SUCCESS: status {response.status}')\nexcept Exception as e:\n    print(f'  ERROR: {e}')\n\nprint()\nprint('Done.')\"",
+    "timeout": 45000
+  },
+  "processContainer": {
+    "capabilities": ["internetClient"]
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "allowedHosts": ["api.github.com"],
+    "proxy": { "localhost": 8080 }
+  }
+}

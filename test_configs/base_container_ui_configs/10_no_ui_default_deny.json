@@ -1,10 +1,10 @@
 {
   "version": "0.4.0-alpha",
   "containerId": "UI-Test-10",
-  "containment": "appcontainer",
+  "containment": "processcontainer",
   "process": {
     "commandLine": "cmd.exe /c echo PASS: default-deny process ran",
     "timeout": 15000
   },
-  "appContainer": { "capabilities": [] }
+  "processContainer": { "capabilities": [] }
 }

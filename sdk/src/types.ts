@@ -32,17 +32,70 @@ export interface LifecycleConfig {
 }
 
 /**
- * Containment type abstraction for createConfigFromPolicy.
- * Maps to platform-specific backends:
- * - "process": BaseProcessContainer (Windows) / LXC (Linux) / macOS sandbox (macOS)
- * - "microvm": MicroVM/Nanvix backend (Windows only, experimental)
+ * Abstract containment intent. Names the *kind* of isolation the caller
+ * wants; the native binary resolves it to a concrete
+ * {@link ContainmentBackend} per host capability.
+ *
+ * Today's intents:
+ * - "process": OS-native process-level isolation. Resolves to
+ *   `processcontainer` (Windows), `bubblewrap` (Linux), or `seatbelt`
+ *   (macOS). On Linux, `lxc` remains available as an explicit concrete
+ *   backend but is no longer the default for the abstract `"process"`
+ *   intent.
+ * - "vm": full hardware-virtualised VM isolation. Resolves to
+ *   `windows_sandbox` on Windows; no concrete VM backend exists on other
+ *   platforms today.
+ * - "microvm": lightweight-VM isolation. Resolves to the current MicroVM
+ *   runner (Windows only, experimental); intended to expand as additional
+ *   microvm backends (e.g. NanVix) are added.
+ *
+ * Concrete-only backends (such as `"wslc"`) live on
+ * {@link ContainmentBackend} until there is a meaningful abstraction over
+ * multiple implementations of the same kind.
  */
-export type ContainmentType = "process" | "wslc" | "microvm";
+export type ContainmentType = "process" | "vm" | "microvm";
 
 /**
- * Containment backends that require the --experimental flag.
+ * Runtime list of {@link ContainmentType} values. Kept in sync with the
+ * `ContainmentType` union via the type annotation. Use this to recognise
+ * abstract intents at run time (the union itself only exists at compile
+ * time).
  */
-export const ExperimentalBackends: readonly ContainmentType[] = ['microvm', 'wslc'];
+export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm', 'microvm'];
+
+/**
+ * Deprecated wire values accepted by the native binary via serde aliases.
+ * Maps each legacy name to the canonical {@link ContainmentBackend} value
+ * so the SDK validator can resolve them before the platform check. Configs
+ * using these values still reach wxc-exec unchanged — the Rust parser
+ * handles the final mapping at run time.
+ */
+export const LegacyContainmentAliases: Readonly<Record<string, ContainmentBackend>> = {
+  appcontainer: 'processcontainer',
+  macos_sandbox: 'seatbelt',
+};
+
+/**
+ * Concrete containment backend. Each value names a specific runner
+ * implementation in the native binary. Prefer a {@link ContainmentType}
+ * value unless you specifically need to force a particular backend.
+ */
+export type ContainmentBackend =
+  | 'processcontainer'
+  | 'windows_sandbox'
+  | 'wslc'
+  | 'lxc'
+  | 'microvm'
+  | 'hyperlight'
+  | 'seatbelt'
+  | 'isolation_session'
+  | 'bubblewrap';
+
+/**
+ * Containment values (abstract intent or concrete backend) that require
+ * the `--experimental` flag.
+ */
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'hyperlight', 'wslc', 'seatbelt', 'bubblewrap'];
 
 /**
  * Clipboard access policy levels
@@ -64,7 +117,7 @@ export interface UiConfig {
 
 /**
  * BaseProcess-specific UI configuration (Windows only).
- * Lives under appContainer.ui in ContainerConfig.
+ * Lives under processContainer.ui in ContainerConfig.
  */
 export interface BaseProcessUiConfig {
   /** UI isolation level for the desktop */
@@ -78,9 +131,15 @@ export interface BaseProcessUiConfig {
 }
 
 /**
- * AppContainer configuration for Windows sandbox
+ * ProcessContainer configuration for the Windows process-level backend.
+ *
+ * `processcontainer` is the abstraction layer; the runner picks between
+ * the legacy AppContainer implementation (which honors `capabilities`,
+ * `leastPrivilege`) and the newer BaseContainer implementation (which
+ * honors `ui`) at run time based on the host OS and the `--experimental`
+ * flag.
  */
-export interface AppContainerConfig {
+export interface ProcessContainerConfig {
   /** AppContainer profile name (default: "CLI"). Deprecated: use containerId instead. */
   name?: string;
   /** Use least privilege mode with PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT (default: false) */
@@ -171,14 +230,24 @@ export interface ContainerConfig {
   version: string;
   /** Externally assigned container identifier */
   containerId?: string;
-  /** Containment backend */
-  containment?: 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'macos_sandbox';
+  /** Containment intent (preferred) or concrete backend (override). */
+  containment?: ContainmentType | ContainmentBackend;
   /** Container lifecycle settings */
   lifecycle?: LifecycleConfig;
   /** Process execution settings (required) */
   process?: ProcessConfig;
-  /** AppContainer configuration */
-  appContainer?: AppContainerConfig;
+  /** ProcessContainer configuration */
+  processContainer?: ProcessContainerConfig;
+  /**
+   * Legacy alias of {@link processContainer}. Retained so callers
+   * migrating from pre-0.6 SDK versions can keep their existing code
+   * compiling; the native binary parses both names into the same slot
+   * via a serde alias.
+   *
+   * @deprecated Use {@link processContainer} instead. This alias may be
+   * removed in a future minor release.
+   */
+  appContainer?: ProcessContainerConfig;
   /** LXC container configuration (Linux only) */
   lxc?: LxcConfig;
   /** Filesystem access configuration */
@@ -190,7 +259,7 @@ export interface ContainerConfig {
     /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
     /** macOS sandbox configuration (macOS only) */
-    macos_sandbox?: MacosSandboxConfig;
+    seatbelt?: SeatbeltConfig;
   };
   /** Cross-platform UI configuration */
   ui?: UiConfig;
@@ -261,27 +330,56 @@ export interface LxcConfig {
 }
 
 /**
- * macOS sandbox configuration (experimental). Used under
- * `experimental.macos_sandbox` when containment is 'macos_sandbox'.
+ * macOS Seatbelt sandbox configuration (experimental). Used under
+ * `experimental.seatbelt` when containment is `'seatbelt'`.
  */
-export interface MacosSandboxConfig {
-  /**
-   * Which sandbox entry point to use:
-   * - "exec" (default): spawn /usr/bin/sandbox-exec.
-   * - "inproc": call sandbox_init_with_parameters in the child after fork
-   *   (lower latency; relies on a private macOS API).
-   */
-  mode?: 'exec' | 'inproc';
+export interface SeatbeltConfig {
   /**
    * Optional override of the generated TinyScheme sandbox profile.
    */
   profileOverride?: string;
+  /**
+   * Allow the inner process to allocate its own pseudo-terminals via
+   * `posix_openpt` (needed by tests, `git`, `gh`, REPLs, and any tool
+   * that wraps commands in a pty). Adds `(allow pseudo-tty)` and
+   * read/write/ioctl on `/dev/ptmx` to the generated profile. Defaults
+   * to `true`; set to `false` for the tightest possible sandbox when
+   * the inner command does not need to allocate new ttys.
+   */
+  nestedPty?: boolean;
+  /**
+   * Allow the inner process to use the macOS Keychain (e.g. via
+   * `keytar` or `Security.framework`) end-to-end. Adds Mach lookup for
+   * `securityd`, `trustd`, `ocspd`, `cfprefsd`, `xpcd`, and the
+   * `com.apple.lsd.*` family; read access to `/private/var/db/mds` and
+   * `/private/var/protected/trustd`; and read+write access to
+   * `~/Library/Keychains` and `/private/var/folders` (XPC cache).
+   * Defaults to `false`; opt in only when the inner workload genuinely
+   * needs Keychain access.
+   */
+  keychainAccess?: boolean;
 }
 
 /**
  * Sandboxing methods available on the platform
+ *
+ * @deprecated Prefer {@link ContainmentBackend} (concrete) or
+ * {@link ContainmentType} (abstract). This alias is retained for
+ * backward compatibility and may be removed in a future minor release.
  */
-export type SandboxingMethod = 'appcontainer' | 'windows_sandbox' | 'wslc' | 'lxc' | 'vm' | 'microvm' | 'macos_sandbox';
+export type SandboxingMethod = ContainmentType | ContainmentBackend;
+
+/**
+ * Isolation tier selected by the runtime fallback detector.
+ *
+ * - `base-container`: full BaseContainer (Experimental_CreateProcessInSandbox)
+ * - `appcontainer-bfs`: AppContainer + BFS filesystem isolation
+ * - `appcontainer-dacl`: AppContainer + host DACL augmentation (last-resort fallback)
+ */
+export type IsolationTier =
+  | 'base-container'
+  | 'appcontainer-bfs'
+  | 'appcontainer-dacl';
 
 /**
  * Platform support information
@@ -292,5 +390,15 @@ export interface PlatformSupport {
   /** Reason why the platform is not supported (if applicable) */
   reason?: string;
   /** Available sandboxing methods on this platform */
-  availableMethods: SandboxingMethod[];
+  availableMethods: ContainmentBackend[];
+  /**
+   * Tier that would be selected for an empty policy on this system.
+   * Omitted on non-Windows platforms or when the probe fails.
+   */
+  isolationTier?: IsolationTier;
+  /**
+   * Tier degradation warnings (one per fall-through during selection).
+   * Omitted on non-Windows platforms or when the probe fails.
+   */
+  isolationWarnings?: string[];
 }

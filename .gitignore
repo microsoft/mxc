@@ -39,4 +39,10 @@ output
 **/target/
 
 # Copilot
+.copilot/TEST_COVERAGE_ANALYSIS.md
 .copilot/
+*.pdb
+pathrel_test.exe
+
+# Claude
+.claude/

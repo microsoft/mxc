@@ -5,8 +5,8 @@ For a more comprehensive list of examples, look in the examples\ directory.
 ### Basic Hello World
 ```json
 {
-  "script": "python -c \"import sys; print('Hello from WXC!'); print(f'Python version: {sys.version}');\"",
-  "appContainer": {
+  "script": "python -c \"import sys; print('Hello from MXC!'); print(f'Python version: {sys.version}');\"",
+  "processContainer": {
     "name": "CLI-HelloWorld"
   }
 }
@@ -16,7 +16,7 @@ For a more comprehensive list of examples, look in the examples\ directory.
 ```json
 {
   "script": "python -c \"open('C:\\\\temp\\\\output.txt', 'w').write('test')\"",
-  "appContainer": {
+  "processContainer": {
     "name": "CLI-Filesystem-Test"
   },
   "filesystem": {
@@ -45,8 +45,8 @@ For a more comprehensive list of examples, look in the examples\ directory.
 
 ### Network Proxy
 
-Route AppContainer traffic through a localhost proxy. Supported with the
-`appcontainer` containment backend only. Two mutually exclusive modes are available:
+Route process-container traffic through a localhost proxy. Supported with the
+`processcontainer` containment backend only. Two mutually exclusive modes are available:
 
 **External proxy** — connect to an already-running localhost proxy:
 
@@ -54,7 +54,7 @@ Route AppContainer traffic through a localhost proxy. Supported with the
 {
   "script": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
   "timeout": 30000,
-  "appContainer": {
+  "processContainer": {
     "name": "CLI-Proxy",
     "capabilities": ["internetClient"]
   },
@@ -64,14 +64,14 @@ Route AppContainer traffic through a localhost proxy. Supported with the
 }
 ```
 
-**Builtin test server** — wxc launches its own minimal HTTP CONNECT proxy on
+**Builtin test server** — `wxc-exec` launches its own minimal HTTP CONNECT proxy on
 an OS-assigned port (for integration testing only, not production):
 
 ```json
 {
   "script": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
   "timeout": 30000,
-  "appContainer": {
+  "processContainer": {
     "name": "CLI-BuiltinProxy",
     "capabilities": ["internetClient"]
   },

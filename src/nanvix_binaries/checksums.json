@@ -1,6 +1,6 @@
 {
-    "nanvixd.exe": "0b46b0b4b181ff593cfc77ecb279a298f2ade7852279c8a9a23f7b9ca62a6bda",
-    "kernel.elf": "7e3e61de8bc622a62d2ec761ef5bd5bea6b6cc16b377792a077b0a30e61d8fb0",
-    "python.elf": "f183de3d80c99d14ce86aa08af53c9dfdb2f1b713c0e92a9960a1b7845cb57b2",
-    "cpython-ramfs.img": "0a433935d661e0c51666631d9ddff069ed789405e6dd8fccb57884396d883089"
+  "nanvixd.exe": "9172542c250c7cc3eb1bba00fb027543f2a309e5b0152f5f9dee9e6484ed21ec",
+  "nanvix_rootfs.img": "0d45a1f0a29e0d6fc9f297016c02a798738d5288acacb46e770eb9103e1ca0b9",
+  "python3.initrd": "9e20583c70b2b6feb43ccbd477657d78f5cd1a061e962bacb7b13079fbdede92",
+  "kernel.elf": "4e75f32192b63c034846f7f802e3e3cfe7d6df57b3a0c8d6bd5927fc4ead0b2d"
 }

@@ -22,12 +22,6 @@ concurrency story, and error mapping.
 
 ### Out of scope (for this initial plan)
 
-- **TypeScript SDK exposure.** State-aware lands in `wxc-exec.exe` only.
-  SDK exposure (the `provisionSandbox` / `startSandbox` / `execInSandbox` /
-  etc. surface) is a separate work item — same staging as the original
-  IsolationSession bringup (one-shot wire-format first, SDK exposure later).
-  When SDK exposure lands, a companion plan doc covers the TypeScript layer
-  and its exception classes.
 - **Explicit `AbortSignal` plumbing.** v1 cancellation is OS-level: the
   caller kills `wxc-exec.exe`, the OS-side service's per-process timer or
   the existing 3-tier shutdown (close stdin → `SendCtrlClose` → `Terminate`)
@@ -43,7 +37,7 @@ without metadata use `()`.
 
 | Phase | `*Config` | `*Metadata` |
 |---|---|---|
-| provision | `()` | `IsolationSessionProvisionMetadata` |
+| provision | `IsolationSessionProvisionConfig` | `IsolationSessionProvisionMetadata` |
 | start | `IsolationSessionConfig` | `()` |
 | exec | `()` | (n/a — exec returns an exit code, not metadata) |
 | stop | `()` | `()` |
@@ -51,17 +45,26 @@ without metadata use `()`.
 
 ### Provision
 
-**Config (none).** Provision takes no per-phase config. The agent user
-account name is OS-assigned (`<CallingUser>-IEB-<NNN>`).
+**Config (`IsolationSessionProvisionConfig`):**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `user` | `IsolationSessionUser` (object) \| absent | absent | Optional Entra cloud-agent credentials. When present, provision routes through `IIsoSessionOps2::AddUserAsync2` and the resulting sandbox is Entra-backed. When absent, provision uses the v1 `AddUserAsync` path and produces a local-agent sandbox. The bundle is `{ upn: string, wamToken: string }`; both fields required when supplied. `wamToken` is passed verbatim to the OS-side service and never stored by MXC. The wire path is `experimental.isolation_session.provision.user`. |
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
 
 | Field | Type | Description |
 |---|---|---|
-| `agentUserName` | string | The OS-assigned agent account name returned by `AddUserAsync`. Diagnostic only — not used as an addressing key. |
+| `agentUserName` | string | The OS-assigned agent account name returned by `AddUserAsync` / `AddUserAsync2`. Diagnostic only — not used as an addressing key. Format is OS-internal and not stable across builds. |
 
-The provisioned `sandboxId` shape is `iso:wxc-<8-hex>`, where the 8-hex
-suffix is `mint_random_token()`. Example: `iso:wxc-1b65bd11`.
+The provisioned `sandboxId` shape depends on whether `user` was supplied:
+
+- **Local sandbox** (no `user`): `iso:wxc-<8-hex>`, where the 8-hex suffix is
+  `mint_random_token()`. Example: `iso:wxc-1b65bd11`.
+- **Entra sandbox** (`user` supplied): `iso:<UPN>`. The UPN is the OS-layer
+  `provisionId` for Entra agents — no separate identifier exists — so encoding
+  it as the tail keeps every later phase stateless. Example:
+  `iso:alice@contoso.com`.
 
 ### Start
 
@@ -70,10 +73,14 @@ suffix is `mint_random_token()`. Example: `iso:wxc-1b65bd11`.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `configurationId` | `"small" \| "medium" \| "large" \| "composable"` | `"composable"` | Maps to the OS-side `IsoSessionConfigId`. `composable` is the lightweight, ConPTY-friendly default; `small` triggers a known cache-teardown bug on the current OS build (see [Known issues](#known-issues)) and is not recommended. |
+| `user` | `IsolationSessionUser` (object) \| absent | absent | Required when starting an Entra sandbox (one whose `sandboxId` tail contains `@`); rejected for local sandboxes. When required, `user.upn` must match the `sandboxId` tail (case-insensitive) and `wamToken` must be non-empty — `validate_start` enforces this matrix and surfaces mismatches as `malformed_request`. Routes start through `IIsoSessionOps2::StartSessionAsync2`. The wire path is `experimental.isolation_session.start.user`. |
 
 This is the same `IsolationSessionConfig` shape used by the one-shot
-`experimental.isolation_session` block — there is no separate state-aware
-type. The wire path is `experimental.isolation_session.start.configurationId`.
+`experimental.isolation_session` block, with one mode difference: `user` is
+honoured here at state-aware start, but rejected on the one-shot path
+(`validate_runner` returns `policy_validation` if a one-shot request carries
+it). The wire path for `configurationId` is
+`experimental.isolation_session.start.configurationId`.
 
 **Metadata (none).** Start returns an empty `result: {}` envelope on success.
 
@@ -104,19 +111,28 @@ subsequent op against it surfaces `stale_id`.
 
 ## Cross-cutting policy honor matrix
 
-IsolationSession's underlying OS-side service does not expose filesystem,
-network, or UI policy knobs. Every state-aware phase rejects these fields
-up-front via the trait's `validate_<phase>` hooks, mirroring the one-shot
-path's `validate_runner` rejection.
+IsolationSession honors `readwritePaths` and `readonlyPaths` at provision
+(applied via `ShareFolderBatchAsync`), and rejects everything else at
+every phase. The grant lifecycle is bound to the agent user, so
+filesystem policy is bound to provision and immutable thereafter — every
+non-provision phase rejects any non-empty filesystem field. The OS-side
+service has no equivalent for `deniedPaths`, network, or UI policy, so
+those are rejected at every phase including provision.
 
 | Field | provision | start | exec | stop | deprovision |
 |---|---|---|---|---|---|
-| `policy.filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected | rejected | rejected | rejected | rejected |
+| `policy.filesystem.{readwritePaths,readonlyPaths}` | **honored** | rejected | rejected | rejected | rejected |
+| `policy.filesystem.deniedPaths` | rejected | rejected | rejected | rejected | rejected |
 | `policy.network.{allowedHosts,blockedHosts,defaultPolicy}` | rejected | rejected | rejected | rejected | rejected |
 | `policy.network.proxy` | rejected | rejected | rejected | rejected | rejected |
 | `policy.ui` | rejected | rejected | rejected | rejected | rejected |
+| `experimental.isolation_session.{provision,start}.user` | **honored** | **honored** | n/a | n/a | n/a |
 
-Rejection surfaces as wire-format `error.code = "policy_validation"`.
+Rejection of `policy.*` fields surfaces as `error.code = "policy_validation"`.
+Rejection of malformed `user` shape (UPN missing `@`, empty `wamToken`) surfaces
+as `policy_validation`; rejection at start due to a sandboxId/user inconsistency
+(missing user for Entra sandbox, user supplied for local sandbox, or UPN
+mismatch) surfaces as `malformed_request`.
 
 ## Mode-specific fields
 
@@ -131,18 +147,38 @@ Rejection surfaces as wire-format `error.code = "policy_validation"`.
   `experimental.isolation_session.start.configurationId` (state-aware) —
   same enum (`small` / `medium` / `large` / `composable`).
 
-### Fields valid in one-shot only
+### Policy fields and mode parity
 
-- `policy.filesystem`, `policy.network`, `policy.ui`, `policy.network.proxy`
-  — rejected by both modes (one-shot via `ScriptRunner::validate_runner`;
-  state-aware via `validate_<phase>` hooks).
+Both modes share the same policy-honor matrix above:
+
+- `policy.filesystem.readwritePaths` / `readonlyPaths` are honored at
+  provision (state-aware) or at the start of the lifecycle (one-shot,
+  via `ScriptRunner::validate_runner` then `share_folders` in
+  `IsolationSessionRunner::execute`). Rejected at all later state-aware
+  phases.
+  - Before forwarding to `ShareFolderBatchAsync`, `share_folders` runs
+    the entries through a small filter (`filter_protected_paths` in
+    `isolation_session_runner.rs`, bracketed by `BEGIN:` / `END:`
+    markers) that silently drops a fixed set of system-folder paths —
+    drive roots, `SystemRoot`, parent of `USERPROFILE`, `ProgramFiles`,
+    `ProgramFiles(x86)`, and `ProgramData`. The mitigation exists
+    because `ShareFolderBatchAsync` applies ACEs with subtree
+    inheritance; the proper fix belongs in the OS API. See the region
+    comment for removal conditions.
+- `policy.filesystem.deniedPaths`, `policy.network`, `policy.ui`, and
+  `policy.network.proxy` are rejected at every phase (one-shot via
+  `validate_runner`, state-aware via `validate_<phase>` hooks).
 
 ### Fields valid in state-aware only
 
 - `phase` — the discriminator. Required for state-aware; absent for one-shot.
 - `sandboxId` — required for non-provision phases.
 - `experimental.isolation_session.<phase>` — typed per-phase config blocks
-  (only `start` is populated in v1; the others use `()`).
+  (`provision` carries optional `user`; `start` carries `configurationId` and
+  optional `user`; `exec` / `stop` / `deprovision` use `()`).
+- `experimental.isolation_session.{provision,start}.user` — Entra cloud-agent
+  credentials. Honoured here; the same field on a one-shot `experimental.isolation_session`
+  is rejected with `policy_validation`.
 
 ## Idempotence per phase
 
@@ -190,7 +226,7 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 
 | `IsolationSessionError` variant | Wire `error.code` | Trigger |
 |---|---|---|
-| `Policy(...)` | `policy_validation` | Caller-supplied `policy.filesystem` / `policy.network` / `policy.ui` / `policy.network_proxy` at any phase (rejected by `validate_<phase>` hooks). |
+| `Policy(...)` | `policy_validation` | Caller-supplied policy field that this phase does not accept — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot). |
 | `ServiceUnavailable(...)` | `backend_unavailable` | `IsoSessionOps` activation failure: `IsoSessionApp.dll` not registered, or `Feature_IsoBrokerSessionApis` disabled at the OS-side. HRESULTs `CLASS_E_CLASSNOTAVAILABLE` (`0x80040111`) or `REGDB_E_CLASSNOTREG` (`0x80040154`). |
 | `Stale(...)` | `stale_id` | OS-side `AgentManager::FindActiveAgentUserByProvisionId` returns `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` (`0x80070490`) — the `provisionId` is missing from both the in-memory cache and the persisted registry. After `deprovision`, every non-provision op against the dead `sandboxId` triggers this. |
 | `Lifecycle(...)` | `backend_error` | Any other HRESULT from a lifecycle op. The error message embeds the operation name, HRESULT, OS-side message, and remediation hint where present. |
@@ -237,6 +273,8 @@ single-sandbox-per-consumer model is the workaround.
 
 - [State-aware design (full)](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
 - [State-aware design (overview)](../state-aware-lifecycle/mxc-state-aware-sandbox-api-overview.md)
+- [TypeScript initial plan](state-aware-typescript-initial-plan.md) — SDK companion
+  to this doc; covers SDK API surface, types, and TS usage examples.
 - [Initial bringup plan (one-shot)](initial-bringup-plan.md) — the
   predecessor doc for IsolationSession's first integration; this doc
   covers state-aware on top of that foundation.

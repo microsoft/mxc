@@ -1,6 +1,6 @@
-const { readdirSync } = require('fs');
-const { join } = require('path');
-const { execFileSync } = require('child_process');
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 const files = readdirSync('dist')
   .filter(f => f.endsWith('.test.js'))

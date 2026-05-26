@@ -2,6 +2,8 @@
 
 ## Prerequisites
 
+The Rust toolchain version is pinned in [`src/rust-toolchain.toml`](../src/rust-toolchain.toml) to match what CI uses (currently 1.93). The pin is honored automatically by `rustup` — running any `cargo` command from `src/` (or below) downloads and selects that channel on first use. To opt out for one-off testing on a different toolchain, use `cargo +<channel> ...` or set `RUSTUP_TOOLCHAIN`. When bumping the pinned version, bump the matching `version: 'ms-prod-1.<N>'` lines in the two `.azure-pipelines/templates/*.Build.Job.yml` files in the same commit.
+
 LSP servers are configured in `.github/lsp.json` for Rust and TypeScript. Install them before use:
 
 ```
@@ -28,6 +30,17 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 ./build.sh --rust-only     # Only Rust binaries, skip SDK/CLI
 ```
 
+### Full build (macOS)
+
+```
+./build-mac.sh             # Release build for native architecture (seatbelt backend)
+./build-mac.sh --debug     # Debug build
+./build-mac.sh --all       # Build for both aarch64 and x86_64
+./build-mac.sh --rust-only # Only Rust binaries, skip SDK
+```
+
+Requires Xcode Command Line Tools and Rust. Produces an unsigned `mxc-exec-mac` binary (codesigning + notarization happen at release time). Schema `0.6.0-dev` or later required for macOS/Seatbelt backend.
+
 ### Individual components
 
 ```
@@ -35,6 +48,7 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 cargo build --release --target x86_64-pc-windows-msvc
 cargo build --release --target aarch64-pc-windows-msvc
 cargo build --release -p lxc          # Linux only — builds lxc-exec
+cargo build --release -p mxc_darwin --target aarch64-apple-darwin  # macOS only — builds mxc-exec-mac
 
 # SDK (from sdk/)
 npm install && npm run build
@@ -75,6 +89,7 @@ test_scripts\run_basicac_test.ps1            # Single AppContainer test
 test_scripts\run_isolation_session_tests.ps1                # IsolationSession one-shot E2E (requires host with the OS-side IsoSessionOps service)
 test_scripts\run_isolation_session_state_aware_tests.ps1    # IsolationSession state-aware lifecycle E2E (multi-invocation provision/start/exec/stop/deprovision, same host requirements)
 test_scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
+test_scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap)
 
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
@@ -95,8 +110,11 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 | BaseContainer (OS sandbox API) | `wxc-exec.exe` | Windows | `base_container_runner.rs` — calls `Experimental_CreateProcessInSandbox` via FlatBuffer |
 | Windows Sandbox | `wxc-exec.exe` | Windows | `windows_sandbox_runner.rs` |
 | MicroVM (NanVix) | `wxc-exec.exe` | Windows | `nanvix_runner.rs` — feature-gated behind `microvm` |
-| IsolationSession | `wxc-exec.exe` | Windows | `isolation_session_runner.rs` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Supports both one-shot (single-invocation lifecycle, via `ScriptRunner`) and state-aware (multi-invocation provision/start/exec/stop/deprovision, via `StatefulSandboxBackend`) modes. Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
+| Hyperlight | `wxc-exec.exe` | Windows | `hyperlight_runner.rs` — Hyperlight + Unikraft micro-VM backend |
+| IsolationSession | `wxc-exec.exe` | Windows | `isolation_session_runner.rs` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Supports both one-shot (single-invocation lifecycle, via `ScriptRunner`) and state-aware (multi-invocation provision/start/exec/stop/deprovision, via `StatefulSandboxBackend`) modes. Honors `readwritePaths` and `readonlyPaths` at provision via `ShareFolderBatchAsync` (rejects `deniedPaths` since the API has no Deny ACE primitive); filesystem policy is immutable post-provision and rejected at later phases. State-aware additionally accepts an optional `user` bundle (`upn`, `wamToken`) at provision and start to provision Entra cloud-agent sandboxes; one-shot rejects the bundle, and hosts that don't support Entra agents surface `backend_unavailable`. Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
 | LXC | `lxc-exec` | Linux | `lxc/src/main.rs` + `lxc_common/` |
+| Seatbelt | `mxc-exec-mac` | macOS | `mxc_darwin/src/main.rs` + `seatbelt_common/` — uses macOS App Sandbox (Seatbelt) profiles for process containment. Requires schema `0.6.0-dev`+. See `docs/macos-support/seatbelt-backend.md`. |
+| Bubblewrap | `lxc-exec` | Linux | `bwrap_common/src/bwrap_runner.rs` — unprivileged sandboxing via Linux user namespaces and `bwrap`. Experimental — requires `--experimental`. Uses shared filesystem/network policy fields; per-host network filtering via `NetworkIptablesManager` from `lxc_common`. See `docs/bwrap-support/bubblewrap-backend.md`. |
 
 ### Config flow
 
@@ -106,30 +124,46 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 
 ### TypeScript layers
 
-- **SDK** (`sdk/`, `@microsoft/mxc-sdk`) — the public API. `spawnSandbox()` builds a `ContainerConfig` from a `SandboxPolicy`, serializes to base64, and spawns the correct native binary (`wxc-exec.exe` or `lxc-exec`) via `node-pty`. Platform detection is in `platform.ts`.
-- **CLI** (`cli/`, `mxc-cli`) — thin Commander.js wrapper around the SDK. Depends on `@microsoft/mxc-sdk` via `file:../sdk`.
+- **SDK** (`sdk/`, `@microsoft/mxc-sdk`) — the public API. The one-shot surface (`spawnSandbox` / `spawnSandboxFromConfig` / `spawnSandboxAsync`) builds a `ContainerConfig` from a `SandboxPolicy`, serialises to base64, and spawns the correct native binary (`wxc-exec.exe`, `lxc-exec`, or `mxc-exec-mac`) via `node-pty`. The state-aware surface (`provisionSandbox` / `startSandbox` / `execInSandbox` / `execInSandboxAsync` / `stopSandbox` / `deprovisionSandbox`, in `sdk/src/state-aware.ts`) drives a sandbox through a multi-call lifecycle against `StateAwareContainmentBackend` backends; per-(backend, phase) typed `*Config` interfaces and a branded `SandboxId<C>` live in `sdk/src/state-aware-types.ts`. Typed wire-format errors live in `sdk/src/errors.ts` (closed `ErrorCode` union plus a single `MxcError` class carrying `code: ErrorCode`, mirroring the Rust `MxcError` shape). Platform detection is in `platform.ts`.
 
-The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (npm-packaged) and `src/target/<target-triple>/{release,debug}/` (local dev). The `build.bat`/`build.sh` scripts copy binaries into the SDK bin directory.
+The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (npm-packaged) and `src/target/<target-triple>/{release,debug}/` (local dev). The `build.bat`/`build.sh`/`build-mac.sh` scripts copy binaries into the SDK bin directory.
 
 ### Schema system
 
-- **Stable schema**: `schemas/stable/mxc-config.schema.0.4.0-alpha.json` — immutable after release
-- **Dev schema**: `schemas/dev/mxc-config.schema.0.5.0-dev.json` — includes `experimental` section
-- Current schema version: `0.4.0-alpha`
+- **Stable schemas**: `schemas/stable/mxc-config.schema.0.4.0-alpha.json` and `schemas/stable/mxc-config.schema.0.5.0-alpha.json` — immutable after release
+- **Dev schema**: `schemas/dev/mxc-config.schema.0.6.0-dev.json`
+- Current schema version: `0.5.0-alpha`
 - Config files can reference schemas via `"$schema"` for editor validation
 
 ### Key documentation (`docs/`)
 
+Core references:
+
 - `docs/schema.md` — full JSON configuration schema reference
 - `docs/versioning.md` — schema versioning design, experimental feature lifecycle, and promotion process
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
-- `docs/lxc-backend.md` — LXC container backend details
-- `docs/windows-sandbox.md` / `docs/windows-sandbox-reference.md` — Windows Sandbox backend
+- `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
+- `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
+- `docs/host-prep.md` — `wxc-exec --prepare-system-drive` / `--unprepare-system-drive` host setup (metadata-only ACEs on the system-drive root for the AppContainer well-known SIDs, so `cmd.exe` / `pwsh.exe` / `node.exe` can stat `C:\` inside an AppContainer). Hand-test helpers live in `scripts/host-prep/`.
+- `docs/sandbox-policy/v1/policy.md` — sandbox policy v1 specification
+
+Per-backend guides:
+
+- `docs/base-process-container/guide.md` — process container (Windows AppContainer / BaseContainer)
+- `docs/base-process-container/UIPolicy_Schema.md` — UI policy schema (JOB_OBJECT_UILIMIT_* mappings)
+- `docs/lxc-support/lxc-backend.md` — LXC container backend (Linux)
+- `docs/macos-support/seatbelt-backend.md` — macOS Seatbelt backend (experimental)
+- `docs/windows-sandbox/windows-sandbox.md` / `docs/windows-sandbox/windows-sandbox-reference.md` — Windows Sandbox backend
+- `docs/wsl/wsl-container-getting-started.md` / `docs/wsl/wsl-container-support-plan.md` — WSL Container (WSLC SDK)
+- `docs/nanvix-microvm/nanvix.md` / `docs/nanvix-microvm/nanvix-integration-plan.md` — MicroVM via NanVix
+
+State-aware lifecycle:
+
 - `docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md` — state-aware sandbox lifecycle API (cross-backend wire format, Rust `StatefulSandboxBackend` trait, and dispatcher contract)
 - `docs/state-aware-lifecycle/mxc-state-aware-sandbox-api-overview.md` — companion overview to the full state-aware design
 - `docs/isolation-session/initial-bringup-plan.md` — IsolationSession backend, one-shot bringup (experimental, isolated user account per execution via the OS-side service)
-- `docs/isolation-session/state-aware-rust-initial-plan.md` — IsolationSession state-aware lifecycle, Rust-layer initial plan (per-phase config / metadata, policy honor matrix, idempotence, concurrency, error mapping)
-- `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
+- `docs/isolation-session/state-aware-rust-initial-plan.md` — IsolationSession state-aware lifecycle, Rust-layer plan (per-phase config / metadata, policy honor matrix, idempotence, concurrency, error mapping)
+- `docs/isolation-session/state-aware-typescript-initial-plan.md` — IsolationSession state-aware lifecycle, TypeScript SDK plan
 
 ## Key Conventions
 
@@ -146,6 +180,7 @@ New features go under the `experimental` JSON section and are only active when `
 
 - `wxc_common` is the shared library — all config parsing, models, error types, and runner implementations live here
 - `wxc` and `lxc` are thin binary crates that wire up CLI args (`clap`) and dispatch to `wxc_common`
+- `mxc_pty` is the shared pty bridge used by the unix-side backends (`lxc_common::lxc_bindings::attach_run` on Linux and `seatbelt_common::seatbelt_runner` on macOS) so the inner shell sees a real TTY and host stdio is streamed live
 - Platform-specific modules in `wxc_common` use `#[cfg(target_os = "windows")]` / `#[cfg(target_os = "linux")]`
 - Workspace edition is 2021; shared dependencies are declared in the root `Cargo.toml` `[workspace.dependencies]`
 
@@ -174,12 +209,12 @@ When changing behavior covered by existing documentation, update the relevant do
 - **New experimental features** → follow `docs/authoring-a-new-feature.md`, which includes schema, Rust, and test config steps
 - **SDK API changes** (new exports, changed signatures, new options) → update `sdk/README.md` and the JSDoc in `sdk/src/index.ts`
 - **CLI command changes** → update `cli/README.md` and `cli/ARCHITECTURE.md`
-- **New containment backends or major backend changes** → update the relevant doc in `docs/` (e.g., `lxc-backend.md`, `windows-sandbox.md`)
+- **New containment backends or major backend changes** → update the relevant doc in `docs/` (e.g., `lxc-support/lxc-backend.md`, `windows-sandbox/windows-sandbox.md`)
 - **Versioning or promotion changes** → update `docs/versioning.md`
 
 ### Policy versioning
 
-The `SandboxPolicy.version` in the SDK must match the JSON schema version (currently `0.4.0-alpha`). The SDK validates this in `sandbox.ts` — if the policy version is newer than `SUPPORTED_VERSION`, it throws. See `docs/versioning.md` for the full design.
+The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.4.0-alpha` minimum, `0.6.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. See `docs/versioning.md` for the full design.
 
 ## Creating Issues
 

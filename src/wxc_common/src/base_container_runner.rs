@@ -22,18 +22,44 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
+use crate::launch_diagnostics::{diagnose_create_process_failure, diagnose_process_exit};
+use crate::log_symbols::{
+    EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
+};
 use crate::logger::Logger;
 use crate::models::{
-    BaseProcessUiConfig, ClipboardPolicy, CodexRequest, NetworkEnforcementMode, NetworkPolicy,
-    ProxyAddress, ScriptResponse, UiPolicy,
+    CodexRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ScriptResponse,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
+use crate::sandbox_tracking::{self, TrackingEntry};
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::string_util;
 use sandbox_spec::base_container_layout::{
-    finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs, NetworkPolicy as FbsNetworkPolicy,
-    NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
+    finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs, IntegrityLevel,
+    NetworkPolicy as FbsNetworkPolicy, NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
 };
+
+use windows::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
+
+/// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
+///
+/// Entries are sorted case-insensitively by key as required by `CreateProcessW`.
+fn encode_env_block(env_vars: &[String]) -> Vec<u16> {
+    let mut entries: Vec<(&str, &str)> =
+        env_vars.iter().filter_map(|e| e.split_once('=')).collect();
+
+    entries.sort_by(|(a, _), (b, _)| a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase()));
+
+    let mut block = Vec::new();
+    for (key, value) in &entries {
+        for ch in format!("{}={}", key, value).encode_utf16() {
+            block.push(ch);
+        }
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
 
 /// Function pointer type matching `Experimental_CreateProcessInSandbox` from processmodel.dll.
 type PfnCreateProcessInSandbox = unsafe extern "system" fn(
@@ -59,12 +85,25 @@ pub struct BaseContainerRunner {
     proxy_coordinator: ProxyCoordinator,
 }
 
-/// Windows error code for a function that exists but is not implemented
-/// (e.g., disabled via feature-enablement mechanisms).
-const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
-
 /// SandboxSpec FlatBuffer schema version embedded in every spec payload.
 const SANDBOX_SPEC_VERSION: &str = "0.1.0";
+
+/// Sandbox cleanup stub. The actual cleanup (DeleteAppContainerProfile, BFS
+/// policy removal, registry tracking deletion) is currently disabled because
+/// wxc-exec only tracks the main AppContainer process handle -- child processes
+/// may still be running when we reach this point. The tracking entry and
+/// ephemeral identity features remain active for diagnostics and future use.
+fn run_sandbox_cleanup(
+    _identity: &str,
+    _sid_string: &str,
+    _proxy_enabled: bool,
+    logger: &mut Logger,
+) {
+    let _ = writeln!(
+        logger,
+        "{EMOJI_SECTION} SECTION: Lifecycle cleanup (skipping -- child process tracking not yet implemented)"
+    );
+}
 
 impl BaseContainerRunner {
     pub fn new() -> Self {
@@ -82,95 +121,6 @@ impl BaseContainerRunner {
     /// the feature is disabled (e.g., via internal feature-enablement mechanisms).
     pub fn is_base_container_api_present() -> Result<(), String> {
         Self::load_api().map(|_| ())
-    }
-
-    /// JOB_OBJECT_UILIMIT_* flag constants (from UIPolicy_Schema.md).
-    const UILIMIT_HANDLES: u64 = 0x0001;
-    const UILIMIT_READCLIPBOARD: u64 = 0x0002;
-    const UILIMIT_WRITECLIPBOARD: u64 = 0x0004;
-    const UILIMIT_SYSTEMPARAMETERS: u64 = 0x0008;
-    const UILIMIT_DISPLAYSETTINGS: u64 = 0x0010;
-    const UILIMIT_GLOBALATOMS: u64 = 0x0020;
-    const UILIMIT_DESKTOP: u64 = 0x0040;
-    const UILIMIT_EXITWINDOWS: u64 = 0x0080;
-    const UILIMIT_IME: u64 = 0x0100;
-    const UILIMIT_INJECTION: u64 = 0x0200;
-
-    /// Build the JOB_OBJECT_UILIMIT_* bitmask from the cross-platform UI policy
-    /// and the BaseProcessContainer-specific UI config.
-    /// Mapping follows docs/UIPolicy_Schema.md.
-    fn ui_restrictions_bitmask(ui: &UiPolicy, base_proc_ui: &BaseProcessUiConfig) -> u64 {
-        // When UI is fully disabled: DisallowWin32kSystemCalls handles everything
-        // except atoms (NT executive syscalls, not Win32k). Only set GLOBALATOMS.
-        if ui.disable {
-            return Self::UILIMIT_GLOBALATOMS;
-        }
-
-        let mut mask: u64 = 0;
-
-        // Cross-platform: clipboard (default: "none" = block both)
-        match ui.clipboard {
-            ClipboardPolicy::All => {}
-            ClipboardPolicy::Read => {
-                mask |= Self::UILIMIT_WRITECLIPBOARD;
-            }
-            ClipboardPolicy::Write => {
-                mask |= Self::UILIMIT_READCLIPBOARD;
-            }
-            // "none" or unrecognized → default-deny: block both
-            _ => {
-                mask |= Self::UILIMIT_READCLIPBOARD | Self::UILIMIT_WRITECLIPBOARD;
-            }
-        }
-
-        // Cross-platform: input injection
-        if !ui.injection {
-            mask |= Self::UILIMIT_INJECTION;
-        }
-
-        // Backend-specific: isolation level (default: "container" = HANDLES + GLOBALATOMS)
-        match base_proc_ui.isolation.as_str() {
-            "desktop" => {
-                // No isolation flags
-            }
-            "handles" => {
-                mask |= Self::UILIMIT_HANDLES;
-            }
-            "atoms" => {
-                mask |= Self::UILIMIT_GLOBALATOMS;
-            }
-            // "container" or unrecognized → default-deny: full isolation
-            _ => {
-                mask |= Self::UILIMIT_HANDLES | Self::UILIMIT_GLOBALATOMS;
-            }
-        }
-
-        // Backend-specific: desktop system control
-        if !base_proc_ui.desktop_system_control {
-            mask |= Self::UILIMIT_DESKTOP | Self::UILIMIT_EXITWINDOWS;
-        }
-
-        // Backend-specific: system settings (default: "none" = block all)
-        match base_proc_ui.system_settings.as_str() {
-            "all" => {}
-            "parameters" => {
-                mask |= Self::UILIMIT_DISPLAYSETTINGS;
-            }
-            "display" => {
-                mask |= Self::UILIMIT_SYSTEMPARAMETERS;
-            }
-            // "none" or unrecognized → default-deny: block all
-            _ => {
-                mask |= Self::UILIMIT_SYSTEMPARAMETERS | Self::UILIMIT_DISPLAYSETTINGS;
-            }
-        }
-
-        // Backend-specific: IME
-        if !base_proc_ui.ime {
-            mask |= Self::UILIMIT_IME;
-        }
-
-        mask
     }
 
     /// Build a FlatBuffer `SandboxSpec` from the container policy in the request.
@@ -264,8 +214,12 @@ impl BaseContainerRunner {
         };
 
         // UI restrictions
-        let ui_restrictions =
-            Self::ui_restrictions_bitmask(&request.policy.ui, &request.policy.base_process_ui);
+        let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
+            &crate::ui_policy::resolve_ui_restrictions(
+                &request.policy.ui,
+                &request.policy.base_process_ui,
+            ),
+        ) as u64;
 
         let spec = SandboxSpec::create(
             &mut builder,
@@ -285,6 +239,126 @@ impl BaseContainerRunner {
 
         finish_sandbox_spec_buffer(&mut builder, spec);
         builder.finished_data().to_vec()
+    }
+
+    /// Log the contents of a built sandbox spec FlatBuffer for debug verification.
+    ///
+    /// Reads back token, network, and UI restriction fields from the serialised
+    /// spec and writes a structured summary to the logger.
+    fn log_sandbox_spec(spec_bytes: &[u8], logger: &mut Logger) {
+        let spec = match sandbox_spec::base_container_layout::root_as_sandbox_spec(spec_bytes) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let _ = writeln!(
+            logger,
+            "sandbox spec built (version={}, {} bytes)",
+            spec.version(),
+            spec_bytes.len()
+        );
+
+        // Token
+        let _ = writeln!(logger, "[token]");
+        let integrity_emoji = if spec.integrity() == IntegrityLevel::system_default {
+            EMOJI_NEUTRAL
+        } else {
+            EMOJI_WARNING
+        };
+        let _ = writeln!(
+            logger,
+            "  integrity:       {} {:?}",
+            integrity_emoji,
+            spec.integrity()
+        );
+        let app_container_emoji = if spec.app_container() {
+            EMOJI_NEUTRAL
+        } else {
+            EMOJI_WARNING
+        };
+        let _ = writeln!(
+            logger,
+            "  app_container:   {} {} (least_privilege: {})",
+            app_container_emoji,
+            if spec.app_container() { "on" } else { "off" },
+            if spec.least_privilege() { "on" } else { "off" }
+        );
+        if let Some(caps) = spec.capabilities() {
+            let _ = writeln!(logger, "  capabilities:    {}", caps);
+        }
+
+        // Network
+        let _ = writeln!(logger, "[network]");
+        let proxy_url = spec
+            .network_policy()
+            .and_then(|np| np.proxy())
+            .and_then(|proxy| proxy.url());
+        if let Some(url) = proxy_url {
+            let _ = writeln!(logger, "  network_policy.proxy.url: {}", url);
+        } else {
+            let _ = writeln!(logger, "  <unspecified>");
+        }
+
+        // UI restrictions
+        let _ = writeln!(logger, "[ui subsystem]");
+        let _ = writeln!(
+            logger,
+            "  win32k_system_calls: {} {}",
+            if spec.disallow_win32k_system_calls() {
+                EMOJI_BLOCKED
+            } else {
+                EMOJI_ALLOWED
+            },
+            if spec.disallow_win32k_system_calls() {
+                "blocked"
+            } else {
+                "allowed"
+            }
+        );
+        let r = spec.ui_restrictions();
+        let flags: &[(&str, u64)] = &[
+            ("handles", 0x0001),
+            ("read_clip", 0x0002),
+            ("write_clip", 0x0004),
+            ("sys_params", 0x0008),
+            ("display", 0x0010),
+            ("atoms", 0x0020),
+            ("desktop", 0x0040),
+            ("exit_windows", 0x0080),
+            ("ime", 0x0100),
+            ("injection", 0x0200),
+        ];
+        let allowed: Vec<&str> = flags
+            .iter()
+            .filter(|(_, bit)| r & bit == 0)
+            .map(|(name, _)| *name)
+            .collect();
+        let blocked: Vec<&str> = flags
+            .iter()
+            .filter(|(_, bit)| r & bit != 0)
+            .map(|(name, _)| *name)
+            .collect();
+        let allowed_str = if allowed.is_empty() {
+            "<none>".to_string()
+        } else {
+            allowed.join(", ")
+        };
+        let blocked_str = if blocked.is_empty() {
+            "<none>".to_string()
+        } else {
+            blocked.join(", ")
+        };
+        let _ = writeln!(
+            logger,
+            "  uilimits allowed {EMOJI_ALLOWED}: {}",
+            allowed_str
+        );
+        let _ = writeln!(
+            logger,
+            "  uilimits blocked {EMOJI_BLOCKED}: {} (0x{:04X})",
+            blocked_str,
+            spec.ui_restrictions()
+        );
     }
 
     /// Load `processmodel.dll` and resolve the `Experimental_CreateProcessInSandbox` export.
@@ -346,7 +420,10 @@ impl ScriptRunner for BaseContainerRunner {
     }
 
     fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        let _ = writeln!(logger, "SECTION: Backend runner 'BaseContainer'");
+        let _ = writeln!(
+            logger,
+            "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
+        );
 
         let run_start = std::time::Instant::now();
 
@@ -382,60 +459,14 @@ impl ScriptRunner for BaseContainerRunner {
             );
         }
 
-        let _ = writeln!(logger, "SECTION: Build sandbox spec");
+        let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Build sandbox spec");
 
         // 1. Build the FlatBuffer sandbox spec from the request policy.
         let spec_bytes = Self::build_sandbox_spec(&request);
 
-        // Print proxy URL in debug mode
-        if let Some(ref addr) = request.policy.network_proxy.address {
-            let _ = writeln!(logger, "proxy URL in spec: {}", addr.to_url());
-        }
+        Self::log_sandbox_spec(&spec_bytes, logger);
 
-        let ui_restrictions =
-            Self::ui_restrictions_bitmask(&request.policy.ui, &request.policy.base_process_ui);
-        let _ = writeln!(
-            logger,
-            "sandbox spec built (version={}, {} bytes)",
-            SANDBOX_SPEC_VERSION,
-            spec_bytes.len()
-        );
-
-        // Print flags in debug mode
-        let _ = writeln!(
-            logger,
-            "BaseContainer: disallow_win32k_system_calls={}, ui_restrictions=0x{:04X}",
-            request.policy.ui.disable, ui_restrictions
-        );
-        let _ = writeln!(
-            logger,
-            "ui.clipboard={:?}, ui.injection={}",
-            request.policy.ui.clipboard, request.policy.ui.injection
-        );
-        let _ = writeln!(
-            logger,
-            "base_process_ui: isolation={}, desktopSystemControl={}, systemSettings={}, ime={}",
-            request.policy.base_process_ui.isolation,
-            request.policy.base_process_ui.desktop_system_control,
-            request.policy.base_process_ui.system_settings,
-            request.policy.base_process_ui.ime
-        );
-        let _ = writeln!(
-            logger,
-            "UILIMIT flags: HANDLES={} READCLIP={} WRITECLIP={} SYSPARAM={} DISPLAY={} ATOMS={} DESKTOP={} EXIT={} IME={} INJECT={}",
-            ui_restrictions & Self::UILIMIT_HANDLES != 0,
-            ui_restrictions & Self::UILIMIT_READCLIPBOARD != 0,
-            ui_restrictions & Self::UILIMIT_WRITECLIPBOARD != 0,
-            ui_restrictions & Self::UILIMIT_SYSTEMPARAMETERS != 0,
-            ui_restrictions & Self::UILIMIT_DISPLAYSETTINGS != 0,
-            ui_restrictions & Self::UILIMIT_GLOBALATOMS != 0,
-            ui_restrictions & Self::UILIMIT_DESKTOP != 0,
-            ui_restrictions & Self::UILIMIT_EXITWINDOWS != 0,
-            ui_restrictions & Self::UILIMIT_IME != 0,
-            ui_restrictions & Self::UILIMIT_INJECTION != 0,
-        );
-
-        let _ = writeln!(logger, "SECTION: Load API");
+        let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Load API");
 
         // 2. Dynamically load the API from processmodel.dll.
         let create_process_in_sandbox = match Self::load_api() {
@@ -447,7 +478,7 @@ impl ScriptRunner for BaseContainerRunner {
             "loaded Experimental_CreateProcessInSandbox from processmodel.dll"
         );
 
-        let _ = writeln!(logger, "SECTION: Launch process");
+        let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Launch process");
 
         // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
         let mut cmd_wide = string_util::to_wide(&request.script_code);
@@ -461,13 +492,68 @@ impl ScriptRunner for BaseContainerRunner {
             cwd_wide.as_ptr()
         };
 
-        // Identity -- used by the sandbox engine to name the AppContainer profile.
-        let identity = if request.container_id.is_empty() {
-            "MxcBaseContainer".to_string()
+        // Identity: when destroy_on_exit is true we generate a random ephemeral
+        // identity so each sandbox gets a unique, cleanable AppContainer profile.
+        // Otherwise we honour whatever the caller passed in (or the default).
+        let (identity, sid_string) = if request.lifecycle.destroy_on_exit {
+            let ephemeral = sandbox_tracking::generate_sandbox_identity();
+            let _ = writeln!(
+                logger,
+                "{EMOJI_WARNING} destroy_on_exit=true: overriding caller identity '{}' -> '{}' for ephemeral cleanup",
+                request.container_id, ephemeral
+            );
+
+            // Derive the AppContainer SID for registry tracking.
+            // This is deterministic and does not require the profile to exist yet.
+            let sid = match sandbox_tracking::derive_sid_string(&ephemeral) {
+                Ok(s) => {
+                    let _ = writeln!(logger, "derived SID: {}", s);
+                    s
+                }
+                Err(e) => {
+                    let _ = writeln!(logger, "warning: could not derive SID: {}", e);
+                    String::new()
+                }
+            };
+
+            // Write registry tracking entry before launch so it survives crashes.
+            if !sid.is_empty() {
+                let entry = TrackingEntry {
+                    identity: ephemeral.clone(),
+                    sid_string: sid.clone(),
+                    destroy_on_exit: true,
+                    requested_identity: request.container_id.clone(),
+                };
+                if let Err(e) = sandbox_tracking::write_tracking_entry(&entry, logger) {
+                    let _ = writeln!(logger, "warning: tracking entry write failed: {}", e);
+                }
+            }
+
+            (ephemeral, sid)
         } else {
-            request.container_id.clone()
+            let id = if request.container_id.is_empty() {
+                sandbox_tracking::generate_sandbox_identity()
+            } else {
+                request.container_id.clone()
+            };
+            let _ = writeln!(
+                logger,
+                "destroy_on_exit=false; using identity '{}', no tracking",
+                id
+            );
+            (id, String::new())
         };
         let identity_wide = string_util::to_wide(&identity);
+
+        // Register Ctrl+C handler early so cleanup runs if wxc-exec is interrupted
+        // during or after the create call.
+        if request.lifecycle.destroy_on_exit {
+            sandbox_tracking::register_ctrl_c_cleanup(
+                &identity,
+                &sid_string,
+                request.policy.network_proxy.is_enabled(),
+            );
+        }
 
         // STARTUPINFOW -- minimal, no handle inheritance (not yet supported by the API).
         let si = STARTUPINFOW {
@@ -476,8 +562,54 @@ impl ScriptRunner for BaseContainerRunner {
         };
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
+        // Environment block for the sandboxed child.
+        // If the caller specified explicit env vars, use only those.
+        // Otherwise, pass NULL to let the OS provide the default environment
+        // for the sandbox (CreateProcessInSandbox handles this internally).
+        let env_block: Option<Vec<u16>> = if request.env.is_empty() {
+            // TODO: consider calling CreateEnvironmentBlock(NULL, FALSE) here
+            // for a cleansed default env if the OS API doesn't do it for us.
+            None
+        } else {
+            Some(encode_env_block(&request.env))
+        };
+
+        let env_ptr = env_block
+            .as_ref()
+            .map(|b| b.as_ptr() as *const c_void)
+            .unwrap_or(ptr::null());
+        let creation_flags = if env_block.is_some() {
+            CREATE_UNICODE_ENVIRONMENT.0
+        } else {
+            0
+        };
+
         let _ = writeln!(logger, "launching: {}", request.script_code);
         let _ = writeln!(logger, "identity: {identity}");
+
+        // Log the derived AppContainerSID for diagnostic correlation.
+        let ac_sid_str = derive_sid_string_from_name(&identity);
+        let _ = writeln!(logger, "AppContainerSID: {ac_sid_str}");
+
+        // Pre-launch check: abort if policy paths are on ReFS (Dev Drive) volumes
+        // where BFS cannot enforce filesystem policy.
+        if let Some(diag) = crate::launch_diagnostics::check_refs_volumes(
+            &request.policy.readonly_paths,
+            &request.policy.readwrite_paths,
+        ) {
+            let _ = writeln!(
+                logger,
+                "Error: Pre-launch diagnostic [{}]: {}",
+                diag.kind, diag.message
+            );
+            return ScriptResponse {
+                exit_code: -1,
+                error_message: diag.message.clone(),
+                standard_err: diag.message,
+                failure_phase: FailurePhase::LaunchFailed,
+                ..Default::default()
+            };
+        }
 
         // 4. Call Experimental_CreateProcessInSandbox.
         let success = unsafe {
@@ -487,8 +619,8 @@ impl ScriptRunner for BaseContainerRunner {
                 ptr::null(),             // processAttributes (must be NULL)
                 ptr::null(),             // threadAttributes  (must be NULL)
                 0,                       // inheritHandles    (must be FALSE)
-                0,                       // creationFlags
-                ptr::null(),             // environment       (must be NULL)
+                creation_flags,          // creationFlags
+                env_ptr,                 // environment
                 cwd_ptr,                 // currentDirectory
                 &si,                     // startupInfo
                 identity_wide.as_ptr(),  // identity
@@ -508,23 +640,49 @@ impl ScriptRunner for BaseContainerRunner {
                     let _ = CloseHandle(pi.hThread);
                 }
             }
-            let err = unsafe { GetLastError() };
-            if err.0 == ERROR_CALL_NOT_IMPLEMENTED {
-                return ScriptResponse::error(
-                    "Experimental_CreateProcessInSandbox returned ERROR_CALL_NOT_IMPLEMENTED. \
-                     The BaseContainer feature may be disabled on this OS build \
-                     (e.g., via feature-enablement mechanisms). \
-                     Use schema version '0.4.0-alpha' to fall back to the AppContainer backend.",
+            // The OS may have created the AppContainer profile before failing,
+            // so run the same cleanup logic used on normal exit.
+            if request.lifecycle.destroy_on_exit {
+                run_sandbox_cleanup(
+                    &identity,
+                    &sid_string,
+                    request.policy.network_proxy.is_enabled(),
+                    logger,
                 );
             }
-            return ScriptResponse::error(&format!(
-                "Experimental_CreateProcessInSandbox failed: {err:?}"
-            ));
+
+            //
+            // Diagnose the launch failure (FailurePhase::LaunchFailed).
+            //
+            let err = unsafe { GetLastError() };
+            let diag = diagnose_create_process_failure(
+                err.0,
+                &request.script_code,
+                &request.policy.readonly_paths,
+            );
+
+            let extended_error = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
+            let _ = writeln!(logger, "Error: {extended_error}");
+
+            let _ = writeln!(
+                logger,
+                "Error: Launch diagnostic [{}]: {}",
+                diag.kind, diag.message
+            );
+
+            return ScriptResponse {
+                exit_code: -1,
+                error_message: diag.message.clone(),
+                standard_err: diag.message,
+                extended_error,
+                failure_phase: FailurePhase::LaunchFailed,
+                ..Default::default()
+            };
         }
 
         let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
 
-        let _ = writeln!(logger, "SECTION: Wait for exit");
+        let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Wait for exit");
 
         // 5. Wait for the child process to exit.
         let timeout_ms = get_timeout_milliseconds(request.script_timeout);
@@ -551,29 +709,96 @@ impl ScriptRunner for BaseContainerRunner {
 
         let _ = writeln!(logger, "process exited with code {exit_code}");
 
+        // 6. Sandbox cleanup: delete AppContainer profile and tracking entry.
+        //    Deferred if a network proxy is configured (proxy state can't be cleaned up yet).
+        if request.lifecycle.destroy_on_exit {
+            run_sandbox_cleanup(
+                &identity,
+                &sid_string,
+                request.policy.network_proxy.is_enabled(),
+                logger,
+            );
+            // Unregister so a late Ctrl+C doesn't double-cleanup.
+            sandbox_tracking::unregister_ctrl_c_cleanup();
+        }
+
         let _ = writeln!(
             logger,
-            "SECTION: Done ({:.3}s)",
+            "{EMOJI_SECTION} SECTION: Done ({:.3}s)",
             run_start.elapsed().as_secs_f64()
         );
 
         // Stop the builtin test proxy if it was started.
         self.proxy_coordinator.stop(logger);
 
+        //
+        // Diagnose the application failure (FailurePhase::ProcessExited).
+        //
+        let (error_message, failure_phase) = if exit_code != 0 {
+            if let Some(diag) = diagnose_process_exit(
+                &request.script_code,
+                &request.policy.readonly_paths,
+                &request.policy.readwrite_paths,
+                exit_code,
+            ) {
+                let _ = writeln!(
+                    logger,
+                    "Error: Launch diagnostic [{}]: {}",
+                    diag.kind, diag.message
+                );
+                (diag.message, FailurePhase::ProcessExited)
+            } else {
+                (String::new(), FailurePhase::ProcessExited)
+            }
+        } else {
+            (String::new(), FailurePhase::None)
+        };
+
         ScriptResponse {
             exit_code: exit_code as i32,
             standard_out: String::new(),
-            standard_err: String::new(),
-            error_message: String::new(),
+            standard_err: error_message.clone(),
+            error_message,
+            failure_phase,
+            ..Default::default()
         }
+    }
+}
+
+/// Derive the AppContainer SID string from a container identity name.
+/// Best-effort: returns a placeholder if derivation fails.
+fn derive_sid_string_from_name(name: &str) -> String {
+    use windows::Win32::Security::FreeSid;
+    use windows::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
+
+    let wide_name = string_util::to_wide(name);
+    let pcwstr_name = PCWSTR(wide_name.as_ptr());
+
+    match unsafe { DeriveAppContainerSidFromAppContainerName(pcwstr_name) } {
+        Ok(sid) => {
+            let s = unsafe { string_util::sid_to_string(sid.0, "unknown-sid") };
+            // SAFETY: SID returned by DeriveAppContainerSidFromAppContainerName
+            // must be freed with FreeSid.
+            unsafe {
+                FreeSid(sid);
+            }
+            s
+        }
+        Err(_) => "unknown-sid".to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ProxyConfig;
+    use crate::job_object::to_job_object_uilimit_mask;
+    use crate::models::{ClipboardPolicy, ProxyConfig, UiPolicy};
+    use crate::ui_policy::EffectiveUiRestrictions;
     use sandbox_spec::base_container_layout;
+
+    fn expected_mask(r: EffectiveUiRestrictions) -> u64 {
+        to_job_object_uilimit_mask(&r) as u64
+    }
 
     #[test]
     fn build_sandbox_spec_produces_valid_flatbuffer() {
@@ -598,10 +823,22 @@ mod tests {
         assert!(spec.least_privilege());
         assert_eq!(spec.capabilities(), Some("internetClient,registryRead"));
         assert!(spec.disallow_win32k_system_calls());
+        // disable=true sets all non-IME restrictions; ime=false (default) adds IME
         assert_eq!(
             spec.ui_restrictions(),
-            BaseContainerRunner::UILIMIT_GLOBALATOMS
-        ); // default: disable=true → only GLOBALATOMS
+            expected_mask(EffectiveUiRestrictions {
+                block_clipboard_read: true,
+                block_clipboard_write: true,
+                block_input_injection: true,
+                block_input_method_changes: true,
+                block_external_ui_objects: true,
+                block_global_ui_namespace: true,
+                block_desktop_switching: true,
+                block_logoff_or_shutdown: true,
+                block_system_parameter_changes: true,
+                block_display_settings_changes: true,
+            })
+        );
 
         let rw = spec.fs_read_write().unwrap();
         assert_eq!(rw.len(), 1);
@@ -647,8 +884,6 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_ui_disabled() {
-        use crate::models::UiPolicy;
-
         let mut request = CodexRequest::default();
         request.policy.ui = UiPolicy {
             disable: true,
@@ -659,10 +894,21 @@ mod tests {
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
 
         assert!(spec.disallow_win32k_system_calls());
-        // disable=true → only GLOBALATOMS (Win32k disable handles the rest)
+        // disable=true sets all non-IME restrictions; ime=false (default) adds IME
         assert_eq!(
             spec.ui_restrictions(),
-            BaseContainerRunner::UILIMIT_GLOBALATOMS
+            expected_mask(EffectiveUiRestrictions {
+                block_clipboard_read: true,
+                block_clipboard_write: true,
+                block_input_injection: true,
+                block_input_method_changes: true,
+                block_external_ui_objects: true,
+                block_global_ui_namespace: true,
+                block_desktop_switching: true,
+                block_logoff_or_shutdown: true,
+                block_system_parameter_changes: true,
+                block_display_settings_changes: true,
+            })
         );
     }
 
@@ -681,15 +927,20 @@ mod tests {
         assert!(!spec.disallow_win32k_system_calls());
         // WRITECLIPBOARD + backend defaults (isolation=container: HANDLES+GLOBALATOMS,
         // desktopSystemControl=false: DESKTOP+EXITWINDOWS, systemSettings=none: SYSTEMPARAMETERS+DISPLAYSETTINGS, ime=false: IME)
-        let expected = BaseContainerRunner::UILIMIT_WRITECLIPBOARD
-            | BaseContainerRunner::UILIMIT_HANDLES
-            | BaseContainerRunner::UILIMIT_GLOBALATOMS
-            | BaseContainerRunner::UILIMIT_DESKTOP
-            | BaseContainerRunner::UILIMIT_EXITWINDOWS
-            | BaseContainerRunner::UILIMIT_SYSTEMPARAMETERS
-            | BaseContainerRunner::UILIMIT_DISPLAYSETTINGS
-            | BaseContainerRunner::UILIMIT_IME;
-        assert_eq!(spec.ui_restrictions(), expected);
+        assert_eq!(
+            spec.ui_restrictions(),
+            expected_mask(EffectiveUiRestrictions {
+                block_clipboard_write: true,
+                block_external_ui_objects: true,
+                block_global_ui_namespace: true,
+                block_desktop_switching: true,
+                block_logoff_or_shutdown: true,
+                block_system_parameter_changes: true,
+                block_display_settings_changes: true,
+                block_input_method_changes: true,
+                ..Default::default()
+            })
+        );
     }
 
     #[test]
@@ -706,15 +957,20 @@ mod tests {
 
         assert!(!spec.disallow_win32k_system_calls());
         // INJECTION + backend defaults
-        let expected = BaseContainerRunner::UILIMIT_INJECTION
-            | BaseContainerRunner::UILIMIT_HANDLES
-            | BaseContainerRunner::UILIMIT_GLOBALATOMS
-            | BaseContainerRunner::UILIMIT_DESKTOP
-            | BaseContainerRunner::UILIMIT_EXITWINDOWS
-            | BaseContainerRunner::UILIMIT_SYSTEMPARAMETERS
-            | BaseContainerRunner::UILIMIT_DISPLAYSETTINGS
-            | BaseContainerRunner::UILIMIT_IME;
-        assert_eq!(spec.ui_restrictions(), expected);
+        assert_eq!(
+            spec.ui_restrictions(),
+            expected_mask(EffectiveUiRestrictions {
+                block_input_injection: true,
+                block_external_ui_objects: true,
+                block_global_ui_namespace: true,
+                block_desktop_switching: true,
+                block_logoff_or_shutdown: true,
+                block_system_parameter_changes: true,
+                block_display_settings_changes: true,
+                block_input_method_changes: true,
+                ..Default::default()
+            })
+        );
     }
 
     #[test]
@@ -742,74 +998,5 @@ mod tests {
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
         assert!(spec.network_policy().is_none());
-    }
-
-    #[test]
-    fn ui_bitmask_disabled() {
-        use crate::models::BaseProcessUiConfig;
-        let ui = UiPolicy {
-            disable: true,
-            ..Default::default()
-        };
-        let bp = BaseProcessUiConfig::default();
-        // disable=true → only GLOBALATOMS
-        assert_eq!(
-            BaseContainerRunner::ui_restrictions_bitmask(&ui, &bp),
-            BaseContainerRunner::UILIMIT_GLOBALATOMS
-        );
-    }
-
-    #[test]
-    fn ui_bitmask_default_deny() {
-        use crate::models::BaseProcessUiConfig;
-        // UiPolicy default: disable=true → only GLOBALATOMS
-        assert_eq!(
-            BaseContainerRunner::ui_restrictions_bitmask(
-                &UiPolicy::default(),
-                &BaseProcessUiConfig::default()
-            ),
-            BaseContainerRunner::UILIMIT_GLOBALATOMS
-        );
-    }
-
-    #[test]
-    fn ui_bitmask_clipboard_read_with_default_backend() {
-        use crate::models::BaseProcessUiConfig;
-        let ui = UiPolicy {
-            disable: false,
-            clipboard: ClipboardPolicy::Read,
-            injection: true,
-        };
-        let bp = BaseProcessUiConfig::default(); // isolation=container, desktopSystemControl=false, systemSettings=none, ime=false
-        let expected = BaseContainerRunner::UILIMIT_WRITECLIPBOARD
-            | BaseContainerRunner::UILIMIT_HANDLES
-            | BaseContainerRunner::UILIMIT_GLOBALATOMS
-            | BaseContainerRunner::UILIMIT_DESKTOP
-            | BaseContainerRunner::UILIMIT_EXITWINDOWS
-            | BaseContainerRunner::UILIMIT_SYSTEMPARAMETERS
-            | BaseContainerRunner::UILIMIT_DISPLAYSETTINGS
-            | BaseContainerRunner::UILIMIT_IME;
-        assert_eq!(
-            BaseContainerRunner::ui_restrictions_bitmask(&ui, &bp),
-            expected
-        );
-    }
-
-    #[test]
-    fn ui_bitmask_no_backend_restrictions() {
-        use crate::models::BaseProcessUiConfig;
-        let ui = UiPolicy {
-            disable: false,
-            clipboard: ClipboardPolicy::All,
-            injection: true,
-        };
-        let bp = BaseProcessUiConfig {
-            isolation: "desktop".to_string(),
-            desktop_system_control: true,
-            system_settings: "all".to_string(),
-            ime: true,
-        };
-        // No cross-platform restrictions + no backend restrictions = 0
-        assert_eq!(BaseContainerRunner::ui_restrictions_bitmask(&ui, &bp), 0);
     }
 }

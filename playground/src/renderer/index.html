@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<!--
+  Copyright (c) Microsoft Corporation.
+  Licensed under the MIT License.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline';">
+  <title>MXC Playground v0.1.0-alpha.1</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ========== WELCOME VIEW ========== -->
+  <div id="welcomeView" class="welcome-view hidden">
+    <div class="welcome-content">
+      <div class="welcome-logo">🔒</div>
+      <h1 class="welcome-title">MXC Playground</h1>
+      <p class="welcome-subtitle">Test scripts inside secure Windows sandboxes. Choose a pre-made scenario or write your own command — then see what gets allowed and what gets blocked.</p>
+
+      <div class="welcome-cards">
+        <div class="welcome-card">
+          <div class="welcome-card-icon">🎯</div>
+          <div class="welcome-card-title">Pick a scenario</div>
+          <div class="welcome-card-desc">Choose from ready-made tests or write your own</div>
+        </div>
+        <div class="welcome-card">
+          <div class="welcome-card-icon">🔐</div>
+          <div class="welcome-card-title">Set policy</div>
+          <div class="welcome-card-desc">Control what the script can access</div>
+        </div>
+        <div class="welcome-card">
+          <div class="welcome-card-icon">▶️</div>
+          <div class="welcome-card-title">Run and observe</div>
+          <div class="welcome-card-desc">Watch the results in real time</div>
+        </div>
+      </div>
+
+      <div class="welcome-actions">
+        <button id="btnTrySample" class="btn btn-primary btn-large">▶ Try a Sample</button>
+        <button id="btnStartScratch" class="btn btn-secondary btn-large">Start from Scratch</button>
+      </div>
+
+      <label class="welcome-checkbox">
+        <input type="checkbox" id="welcomeShowStartup">
+        <span>Show this on startup</span>
+      </label>
+
+      <div class="welcome-footer">
+        <a href="#" id="welcomeLearnMore">Learn more about MXC →</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== MAIN VIEW ========== -->
+  <div id="mainView" class="main-view">
+
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="topbar-logo">🔒 MXC Playground v0.1.0-α1</span>
+        <button id="btnHelp" class="btn-help-inline" title="Quick Start Guide">Help</button>
+      </div>
+      <div class="topbar-right">
+        <label class="dev-toggle">
+          <input type="checkbox" id="experimentalToggle" checked>
+          <span class="dev-toggle-label">Experimental</span>
+          <span class="topbar-info" title="Pass --experimental flag to wxc-exec. Enables experimental features.">ℹ️</span>
+        </label>
+        <label class="dev-toggle">
+          <input type="checkbox" id="debugToggle">
+          <span class="dev-toggle-label">Debug Mode</span>
+          <span class="topbar-info" title="Show debug output from wxc-exec and the MXC SDK">ℹ️</span>
+        </label>
+        <label class="dev-toggle">
+          <input type="checkbox" id="devModeToggle" checked>
+          <span class="dev-toggle-label">Developer View</span>
+        </label>
+        <span id="platformBadge" class="platform-badge"></span>
+      </div>
+    </header>
+
+    <!-- Content area -->
+    <div class="content-area">
+
+      <!-- Left sidebar -->
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-scroll">
+
+        <!-- Section 1: Scenario -->
+        <section class="sidebar-section">
+          <div class="section-header">
+            <h2 class="section-title">Scenario</h2>
+          </div>
+          <div class="section-body">
+            <div class="field-row" style="margin-bottom: 8px;">
+              <label class="field-label">Schema Version</label>
+              <select id="versionSelect" class="scenario-select">
+                <option value="0.5.0-dev" selected>0.5.0-dev (latest)</option>
+                <option value="0.4.0-alpha">0.4.0-alpha</option>
+              </select>
+            </div>
+            <div class="field-row" style="margin-bottom: 8px;">
+              <label class="field-label">Containment</label>
+              <select id="containmentSelect" class="scenario-select">
+                <option value="appcontainer">🛡️ Base Process Container</option>
+                <option value="windows_sandbox">🧪 Windows Sandbox</option>
+                <option value="microvm">🧪 MicroVM (NanVix)</option>
+                <option value="hyperlight">🧪 Hyperlight</option>
+                <option value="wslc">🧪 WSLC</option>
+              </select>
+              <div id="experimentalCaution" class="experimental-caution hidden">
+                ⚠️ Experimental — still being developed. Use MXC JSON Config with your own configuration.
+                <a href="https://github.com/microsoft/mxc/tree/main/test_configs" target="_blank" class="caution-link">View sample configs →</a>
+              </div>
+            </div>
+            <div class="field-row" id="runtimeRow">
+              <label class="field-label">Runtime</label>
+              <div class="field-row-inline">
+                <select id="shellSelect" class="perm-select" style="flex:1;">
+                  <option value="cmd" selected>⬛ cmd.exe</option>
+                  <option value="ps51">🔷 PowerShell 5.1</option>
+                  <option value="ps7">🟦 PowerShell 7+</option>
+                  <option value="python">🐍 Python</option>
+                  <option value="networking" hidden>🌐 Networking</option>
+                  <option value="filesystem" hidden>📁 Filesystem</option>
+                  <option value="custom">✏️ Custom</option>
+                  <option value="rawjson">📋 MXC JSON Config</option>
+                </select>
+                <button id="btnRefreshShells" class="btn-refresh" title="Refresh shell availability">🔄</button>
+              </div>
+            </div>
+            <div id="refreshStatus" class="hidden" style="font-size:11px; color:var(--text-muted); padding:4px 0; position:relative;">
+              <span id="refreshStatusText"></span>
+              <button id="btnDismissRefresh" style="position:absolute; top:2px; right:0; background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:12px; padding:0 4px;" title="Dismiss">✕</button>
+            </div>
+            <div id="pythonAclWarning" class="experimental-caution hidden">
+              ⚠️ Python is installed per-user and lacks sandbox ACL permissions. Scripts will fail with access denied.
+              <button id="btnFixPythonAcl" class="btn btn-small" style="margin-top:4px;">🔧 Fix permissions (requires admin)</button>
+              <div id="pythonAclStatus" style="font-size:11px; margin-top:4px;"></div>
+            </div>
+            <div id="categoryRow" class="field-row">
+              <label class="field-label">Test</label>
+              <select id="scenarioSelect" class="perm-select"></select>
+            </div>
+            <div id="scenarioInfo" class="scenario-info">
+              <div id="scenarioDesc" class="scenario-desc"></div>
+              <span id="scenarioOutcome" class="outcome-badge"></span>
+            </div>
+            <div id="scriptSection" class="script-section hidden">
+              <label class="field-label">Script (inline command)</label>
+              <textarea id="scriptText" class="script-textarea" rows="4" spellcheck="false" placeholder='e.g. cmd.exe /c echo hello  or  powershell.exe -Command "Get-Date"'></textarea>
+              <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">
+                Enter a single command line. For script files, use the full path (e.g., <code>powershell.exe -File C:\scripts\test.ps1</code>).
+              </div>
+            </div>
+            <div id="rawJsonSection" class="script-section hidden">
+              <button id="btnOpenJsonEditor" class="btn btn-run" style="width:100%;">📋 Open JSON Editor</button>
+              <div style="font-size:11px; color:var(--text-muted); margin-top:6px;">
+                ⚠️ MXC JSON mode skips policy generation. Config is passed to spawnSandboxFromConfig.
+              </div>
+              <div id="dropZone" class="drop-zone">
+                <span class="drop-zone-icon">＋</span>
+                <span>Drag & drop a .json config file here</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Section 2: Policy -->
+        <section class="sidebar-section" id="policySectionWrapper">
+          <div class="section-header section-header-toggle" id="permissionsToggle">
+            <h2 class="section-title">Policy</h2>
+            <span class="section-chevron" id="permissionsChevron">▸</span>
+          </div>
+          <div id="permissionsSummaryLine" class="permissions-summary">
+            Files: off · Network: off · Desktop: on
+          </div>
+          <div id="permissionsBody" class="section-body hidden">
+
+            <!-- File Access -->
+            <div class="perm-group">
+              <div class="perm-header">
+                <span class="perm-icon">📁</span>
+                <span class="perm-label">File Access</span>
+                <span class="topbar-info" title="Controls which folders the sandboxed script can read from and write to. Disabled = no filesystem access beyond system defaults.">ℹ️</span>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="fsToggle">
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+              <div id="fsDetails" class="perm-details hidden">
+                <div class="perm-sub">
+                  <label class="field-label">Writable folders</label>
+                  <div id="rwPathList" class="path-list"></div>
+                  <div class="path-actions">
+                    <button class="btn btn-small" id="rwBrowse">Browse</button>
+                    <input type="text" id="rwManualInput" class="perm-input" placeholder="C:\path\to\folder" style="flex:1; margin: 0 4px;">
+                    <button class="btn btn-small" id="rwManual">Add</button>
+                  </div>
+                </div>
+                <div class="perm-sub">
+                  <label class="field-label">Read-only folders</label>
+                  <div id="roPathList" class="path-list"></div>
+                  <div class="path-actions">
+                    <button class="btn btn-small" id="roBrowse">Browse</button>
+                    <input type="text" id="roManualInput" class="perm-input" placeholder="C:\path\to\folder" style="flex:1; margin: 0 4px;">
+                    <button class="btn btn-small" id="roManual">Add</button>
+                  </div>
+                </div>
+                <div class="perm-checkboxes">
+                  <label class="checkbox-row" title="Adds tool directories like Python, Node so executables can be found">
+                    <input type="checkbox" id="fsIncludeTools">
+                    <span>Include common tools</span>
+                  </label>
+                  <label class="checkbox-row" title="Allows writing to the temp folder">
+                    <input type="checkbox" id="fsIncludeTemp">
+                    <span>Include temp directory</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <!-- Network Access -->
+            <div class="perm-group">
+              <div class="perm-header">
+                <span class="perm-icon">🌐</span>
+                <span class="perm-label">Network Access</span>
+                <span class="topbar-info" title="Controls outbound network connections. Disabled = all network traffic blocked.">ℹ️</span>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="netToggle">
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+              <div id="netDetails" class="perm-details hidden">
+                <p class="perm-note">The script can make outbound HTTP/HTTPS connections</p>
+                <div class="perm-detail" id="proxySection" style="display:none; margin-top:8px;">
+                  <label class="perm-label">Proxy</label>
+                  <select id="proxySelect" class="perm-select">
+                    <option value="none">None</option>
+                    <option value="builtin">Built-in test server</option>
+                    <option value="localhost">Localhost port</option>
+                    <option value="url">URL</option>
+                  </select>
+                  <input type="number" id="proxyPort" class="perm-input" placeholder="Port" style="display:none; width:100px; margin-top:4px;" min="1" max="65535">
+                  <input type="text" id="proxyUrl" class="perm-input" placeholder="http://proxy:8080" style="display:none; width:200px; margin-top:4px;">
+                </div>
+              </div>
+            </div>
+
+            <!-- Desktop UI Access (0.5.0+ only) -->
+            <div class="perm-group" id="uiGroupWrapper">
+              <div class="perm-header">
+                <span class="perm-icon">🖥️</span>
+                <span class="perm-label">Desktop UI Access</span>
+                <span class="topbar-info" title="Controls access to the Win32k subsystem (windows, desktop, UI). Disabled = Win32k blocked. Some scripts may need this enabled to run.">ℹ️</span>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="uiToggle" checked>
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+              <div id="uiDetails" class="perm-details">
+                <p id="uiNoteOn" class="perm-note">Script can use Win32k (windows, desktop features)</p>
+                <p id="uiNoteOff" class="perm-note perm-warning hidden">⚠️ Win32k disabled — some scripts may fail if they depend on UI subsystems</p>
+                <div id="uiClipboardRow" class="perm-sub">
+                  <label class="field-label">Clipboard</label>
+                  <select id="uiClipboard" class="perm-select">
+                    <option value="none">None</option>
+                    <option value="read">Read only</option>
+                    <option value="write">Write only</option>
+                    <option value="all">Full access</option>
+                  </select>
+                </div>
+                <label class="checkbox-row perm-sub">
+                  <input type="checkbox" id="uiInjection">
+                  <span>Allow input injection ⚠️</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Timeout -->
+            <div class="perm-row">
+              <div class="perm-header">
+                <span class="perm-icon">⏱️</span>
+                <span class="perm-label">Timeout</span>
+              </div>
+              <div class="perm-sub">
+                <label class="field-label">Seconds (0 = no timeout)</label>
+                <input type="number" id="timeoutInput" class="perm-input" value="30" min="0" step="5" style="width:100px">
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Section 3: Advanced -->
+        <section class="sidebar-section" id="advancedSectionWrapper">
+          <div class="section-header section-header-toggle" id="advancedToggle">
+            <h2 class="section-title">Advanced</h2>
+            <span class="section-chevron" id="advancedChevron">▸</span>
+          </div>
+          <div id="advancedBody" class="section-body hidden">
+            <div id="advancedProcessUI" class="advanced-process-ui">
+              <div class="advanced-row">
+                <label class="field-label">Isolation</label>
+                <select id="uiIsolation" class="perm-select">
+                  <option value="desktop">desktop</option>
+                  <option value="handles">handles</option>
+                  <option value="atoms">atoms</option>
+                  <option value="container">container</option>
+                </select>
+              </div>
+              <label class="checkbox-row">
+                <input type="checkbox" id="uiDesktopControl">
+                <span>Desktop system control</span>
+              </label>
+              <div class="advanced-row">
+                <label class="field-label">System settings</label>
+                <select id="uiSystemSettings" class="perm-select">
+                  <option value="none">none</option>
+                  <option value="parameters">parameters</option>
+                  <option value="display">display</option>
+                  <option value="all">all</option>
+                </select>
+              </div>
+              <label class="checkbox-row">
+                <input type="checkbox" id="uiIME">
+                <span>IME (Input Method Editor)</span>
+              </label>
+            </div>
+          </div>
+        </section>
+        </div><!-- end sidebar-scroll -->
+
+        <!-- Run button area -->
+        <div class="sidebar-run">
+          <button id="btnRun" class="btn btn-run">▶ Run in Sandbox</button>
+          <button id="btnRunAll" class="btn btn-run-all">▶▶ Run All cmd Tests</button>
+          <button id="btnKill" class="btn btn-kill hidden">■ Stop</button>
+          <div id="runSummary" class="run-summary">Network: off · Files: off · Desktop: on</div>
+        </div>
+      </aside>
+
+      <!-- Main area -->
+      <main class="main-area">
+
+        <!-- Result card -->
+        <div id="resultCard" class="result-card result-idle">
+          <div id="resultIcon" class="result-icon">💡</div>
+          <div class="result-body">
+            <div id="resultTitle" class="result-title">Select a scenario and click Run in Sandbox</div>
+            <div id="resultDetail" class="result-detail"></div>
+          </div>
+        </div>
+        <div id="resultActions" class="result-actions hidden"></div>
+
+        <!-- Terminal -->
+        <div class="terminal-wrapper">
+          <div class="terminal-header" id="terminalToggle">
+            <span>📋 Logs</span>
+            <span class="terminal-chevron" id="terminalChevron">▾</span>
+          </div>
+          <div id="terminal" class="terminal"></div>
+        </div>
+
+        <!-- Bottom bar: JSON tabs (hidden — dev sidebar replaces this) -->
+        <div class="json-bar" style="display:none;">
+          <div class="json-tabs">
+            <button class="json-tab" id="tabPolicy" data-tab="policy">Policy JSON</button>
+            <button class="json-tab" id="tabConfig" data-tab="config">Config JSON</button>
+          </div>
+          <div id="jsonPanel" class="json-panel hidden">
+            <div class="json-actions">
+              <button class="btn btn-small" id="jsonCopy">Copy</button>
+            </div>
+            <pre id="jsonContent" class="json-content"></pre>
+          </div>
+        </div>
+      </main>
+
+      <!-- Dev sidebar (hidden by default) -->
+      <aside id="devSidebar" class="dev-sidebar">
+        <div class="dev-sidebar-header">
+          <span>🛠 Developer View</span>
+        </div>
+        <div class="dev-section">
+          <div class="dev-section-title">Sandbox Policy <button class="btn-copy" id="copyPolicy" title="Copy to clipboard">📋</button></div>
+          <pre id="devPolicyJson" class="dev-json"></pre>
+        </div>
+        <div class="dev-section">
+          <div class="dev-section-title">Container Config <button class="btn-copy" id="copyConfig" title="Copy to clipboard">📋</button></div>
+          <pre id="devConfigJson" class="dev-json"></pre>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- ========== JSON EDITOR DIALOG ========== -->
+  <dialog id="jsonEditorDialog" class="json-editor-dialog">
+    <div class="dialog-header">
+      <h2>Container Config JSON</h2>
+      <button class="dialog-close" id="jsonEditorClose">✕</button>
+    </div>
+    <div class="json-editor-body">
+      <div class="json-editor-note">
+        ⚠️ MXC JSON mode skips policy generation — the config is passed to spawnSandboxFromConfig.
+      </div>
+      <textarea id="rawJsonText" class="json-editor-textarea" spellcheck="false" placeholder="Paste or type your MXC ContainerConfig JSON here..."></textarea>
+      <div class="json-editor-preview">
+        <div class="json-editor-preview-title">Validation</div>
+        <pre id="jsonEditorPreview" class="dev-json"></pre>
+      </div>
+      <div class="json-editor-actions">
+        <button id="jsonEditorRun" class="btn btn-run">▶ Run</button>
+        <button id="jsonEditorApply" class="btn btn-secondary">Apply & Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ========== HELP DIALOG ========== -->
+  <dialog id="helpDialog">
+    <div class="dialog-header">
+      <h2>MXC Playground — Quick Start</h2>
+      <button class="dialog-close" id="helpClose">✕</button>
+    </div>
+    <div class="help-content">
+      <div class="help-section">
+        <h3>What is MXC?</h3>
+        <p>MXC runs scripts inside isolated containers, controlling access to files, network, and desktop features.</p>
+      </div>
+      <div class="help-section">
+        <h3>Getting Started</h3>
+        <ol>
+          <li><strong>Choose containment</strong> — Select a containment type. Process Container is the default and supports pre-made scenarios.</li>
+          <li><strong>Pick a runtime</strong> — cmd.exe, PowerShell, Python, Custom, or MXC JSON Config. Not installed? Follow the install instructions shown.</li>
+          <li><strong>Select a test</strong> — Pre-made scenarios auto-configure policy. ✓ = should succeed, ✗ = should be blocked.</li>
+          <li><strong>Run</strong> — Click "▶ Run in Sandbox" to run one test, or "▶▶ Run All Tests" to run all tests for the selected runtime.</li>
+        </ol>
+      </div>
+      <div class="help-section">
+        <h3>Runtime Installation</h3>
+        <ul>
+          <li>🐍 <strong>Python</strong> — Install via <code>winget install Python.Python.3.14</code>. Works out of the box.</li>
+          <li>🟦 <strong>PowerShell 7+</strong> — Supports MSI package installed version. MSIX and Microsoft Store versions are not yet supported. <a href="https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows?view=powershell-7.6#install-the-msi-package" target="_blank" style="color:var(--accent);">Install MSI package →</a></li>
+        </ul>
+      </div>
+      <div class="help-section">
+        <h3>Containment Types</h3>
+        <ul>
+          <li>🛡️ <strong>Base Process Container</strong> — Default for 0.5.0-dev. Uses CreateProcessInSandbox. Supports all pre-made scenarios.</li>
+          <li>🛡️ <strong>AppContainer</strong> — Default for 0.4.0-alpha. Standard Windows AppContainer isolation.</li>
+          <li>🧪 <strong>Windows Sandbox / MicroVM / WSLC</strong> — Experimental. Select from the Containment dropdown — these only support MXC JSON Config mode (paste your own config).</li>
+        </ul>
+      </div>
+      <div class="help-section">
+        <h3>Top Bar Controls</h3>
+        <ul>
+          <li>🧪 <strong>Experimental</strong> — On by default. Passes <code>--experimental</code> to wxc-exec to enable experimental features.</li>
+          <li>🐛 <strong>Debug Mode</strong> — Shows detailed wxc-exec output.</li>
+          <li>👁️ <strong>Developer View</strong> — Live Sandbox Policy and Container Config JSON on the right.</li>
+        </ul>
+      </div>
+      <div class="help-section">
+        <h3>Notes</h3>
+        <ul>
+          <li>📝 Scripts are inline commands. For .ps1/.py files, use full paths.</li>
+        </ul>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -7,15 +7,31 @@ members = [
     "wxc_windows_sandbox_guest",
     "wxc_windows_sandbox_daemon",
     "wxc_winhttp_proxy_shim",
+    "wxc_ui_probe",
     "wxc_e2e_tests",
     "lxc",
     "lxc_common",
     "wslc_common",
+    "bwrap_common",
     "isolation_session_bindings",
+    "seatbelt_common",
+    "mxc_darwin",
+    "mxc_pty",
     "generated/base_container_specification",
     "mxc_diagnostic_console",
 ]
+exclude = ["fuzz"]
 resolver = "3"
+
+# Full debug info so we can analyse customer crash dumps in WinDbg until we
+# publish to a symbol server. `strip = "debuginfo"` removes embedded debug
+# sections from the binary itself (mainly relevant on Linux — Windows pdbs
+# are already split by `split-debuginfo = "packed"`). Full debug info still
+# ships via the side-by-side .pdb / .dwp files.
+[profile.release]
+debug = "full"
+split-debuginfo = "packed"
+strip = "debuginfo"
 
 [workspace.package]
 edition = "2021"
@@ -26,6 +42,7 @@ windows = { version = "0.62", features = [
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Console",
+    "Win32_System_Environment",
     "Win32_System_Ole",
     "Win32_System_Threading",
     "Win32_System_Pipes",
@@ -45,8 +62,11 @@ windows = { version = "0.62", features = [
     "Win32_System_Diagnostics_Etw",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
     "Win32_System_Time",
     "Win32_System_SystemServices",
+    "Win32_System_SystemInformation",
+    "Win32_System_JobObjects",
 ] }
 windows-core = "0.62"
 serde = { version = "1", features = ["derive"] }
@@ -60,10 +80,12 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 getrandom = "0.2"
 libc = "0.2"
-nix = { version = "0.29", features = ["mount", "sched", "signal", "net", "process", "user"] }
+nix = { version = "0.29", features = ["fs", "mount", "sched", "signal", "net", "process", "user", "term"] }
 lxc_common = { path = "lxc_common" }
+bwrap_common = { path = "bwrap_common" }
 wslc_common = { path = "wslc_common" }
 isolation_session_bindings = { path = "isolation_session_bindings" }
+mxc_pty = { path = "mxc_pty" }
 flatbuffers = "25"
 sandbox_spec = { path = "generated/base_container_specification" }
 widestring = "1"

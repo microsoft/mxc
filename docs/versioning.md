@@ -48,32 +48,28 @@ Per [semver.org](https://semver.org/):
 ```
 mxc/schemas/
 ├── stable/
-│   └── mxc-config.schema.0.4.0-alpha.json  (shipped — current stable)
+│   ├── mxc-config.schema.0.4.0-alpha.json
+│   └── mxc-config.schema.0.5.0-alpha.json  (shipped — current stable)
 └── dev/
-    ├── mxc-config.schema.0.5.0-dev.json   (in-flight — includes experimental section definition)
-    └── mxc-config.schema.0.6.0-dev.json   (current — tightens default network posture to deny-by-default)
+    └── mxc-config.schema.0.6.0-dev.json    (current — work in progress)
 ```
 
 The dev schema file (`mxc-config.schema.X.Y.Z-dev.json`) must define the `experimental`
-section structure so that editors can validate experimental configs. Stable
-schemas in `stable/` do not include the experimental section.
+section structure so that editors can validate experimental configs.
 
 ### Shipped vs Experimental
 
-The current stable schema version is `0.4.0-alpha`. The parser also accepts
-`0.5.0-alpha` and `0.6.0-alpha`. Use `0.6.0-alpha` for new configs that want
-the deny-by-default network posture; existing `0.5.0-alpha` configs continue
-to validate, but `wxc-exec` is the trust boundary and falls back to
-`block` whenever `network.defaultPolicy` is absent or unrecognized, regardless
-of the declared schema version:
+The current stable schema versions are `0.4.0-alpha` and `0.5.0-alpha`. The parser
+also accepts `0.6.0-alpha`, which should be used for configs that include
+experimental features:
 
 ```json
 {
-  "version": "0.5.0-alpha",
+  "version": "0.6.0-alpha",
   "process": { ... },
   "filesystem": { ... },
   "network": { ... },
-  "appContainer": { ... },
+  "processContainer": { ... },
   "lxc": { ... },
 
   "experimental": {
@@ -320,7 +316,7 @@ silently fall back — explicit migration is required.
 4. **Per-feature vs global experimental flag:** Should `--experimental` be a
    global toggle (all experimental features on/off), or per-feature
    (`--experimental compartments --experimental gpu-isolation`)? Per-feature
-   gives more control but adds complexity to the CLI and SDK interfaces.
+   gives more control but adds complexity to the executor and SDK interfaces.
 
 5. **Shipping experimental features to customers:** Should experimental features
    be shippable to specific customers (e.g., Anthropic, Nemoclaw), or strictly

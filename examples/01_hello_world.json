@@ -1,11 +1,11 @@
 {
   "version": "0.4.0-alpha",
   "containerId": "CLI-HelloWorld",
-  "containment": "appcontainer",
+  "containment": "processcontainer",
   "process": {
-    "commandLine": "python -c \"import sys; print('Hello from WXC!'); print(f'Python version: {sys.version}'); print('Script executed successfully in AppContainer')\""
+    "commandLine": "python -c \"import sys; print('Hello from MXC!'); print(f'Python version: {sys.version}'); print('Script executed successfully in AppContainer')\""
   },
-  "appContainer": {
+  "processContainer": {
     "capabilities": ["permissiveLearningMode"]
   }
 }

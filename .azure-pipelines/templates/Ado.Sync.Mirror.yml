@@ -1,0 +1,95 @@
+# Sync branches in a mirror repository to a base repo by running this pipeline
+# from the mirror repo, and supplying the base repo as a parameter
+name: $(BuildDefinitionName)_$(date:yyMMdd)$(rev:.r)
+
+parameters:
+- name: SourceToTargetBranches
+  type: object
+  default:
+    main: main
+
+resources:
+  repositories:
+  - repository: 1ESPipelineTemplates
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
+
+  - repository: SourceRepo
+    type: github
+    endpoint: MXC-GitHub-Connection
+    name: microsoft/mxc
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    sdl:
+      sourceRepositoriesToScan:
+        exclude:
+        - repository: SourceRepo
+
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: windows-2022
+      os: windows
+
+    customBuildTags:
+    - ES365AIMigrationTooling
+
+    stages:
+    - stage: stage
+      jobs:
+      - job: SyncMirror
+        dependsOn: []
+        strategy:
+          matrix:
+            ${{ each branches in parameters.SourceToTargetBranches }}:
+              ${{ branches.key }}:
+                SourceBranch: ${{ branches.key }}
+                TargetBranch: ${{ branches.value }}
+
+        steps:
+        - checkout: self
+          persistCredentials: true
+          path: mirror
+
+        - checkout: SourceRepo
+          path: source
+
+        - task: PowerShell@2
+          displayName: Sync mirror branch
+          inputs:
+            targetType: inline
+            script: |
+              $ErrorActionPreference = "Stop"
+
+              $sourceBranch = "$(SourceBranch)"
+              $targetBranch = "$(TargetBranch)"
+              $mirrorPath = "$(Pipeline.Workspace)\mirror"
+              $sourcePath = "$(Pipeline.Workspace)\source"
+
+              Write-Host "SourceBranch $sourceBranch"
+              Write-Host "TargetBranch $targetBranch"
+              Write-Host "MirrorPath $mirrorPath"
+              Write-Host "SourcePath $sourcePath"
+
+              Write-Host "=== source repo ==="
+              cd $sourcePath
+              git remote -v
+              git fetch origin $sourceBranch
+              git checkout $sourceBranch
+              git pull origin $sourceBranch
+
+              Write-Host "=== mirror repo ==="
+              cd $mirrorPath
+              git remote -v
+
+              git fetch origin $targetBranch
+              git checkout $targetBranch
+              git pull origin $targetBranch
+
+              git remote add sourcerepo $sourcePath
+              git fetch sourcerepo $sourceBranch
+              git merge "sourcerepo/$sourceBranch" --no-edit
+
+              git push origin HEAD:$targetBranch
