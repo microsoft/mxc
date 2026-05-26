@@ -73,7 +73,7 @@ use crate::appcontainer_runner::{derive_sid_string, AppContainerScriptRunner, Fi
 use crate::base_container_runner::BaseContainerRunner;
 use crate::error::WxcError;
 use crate::fallback_detector::{self, FallbackError, IsolationTier};
-use crate::filesystem_dacl::{DaclError, DaclManager};
+use crate::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
 use crate::models::CodexRequest;
 use crate::script_runner::ScriptRunner;
 
@@ -197,20 +197,6 @@ fn container_name(request: &CodexRequest) -> String {
 fn paths_to_pathbufs(paths: &[String]) -> Vec<PathBuf> {
     paths.iter().map(PathBuf::from).collect()
 }
-
-/// Access masks that mirror what
-/// `DaclManager::grant_appcontainer_access` stamps. Kept here (not
-/// imported from `fallback_detector`) because the filter is part of
-/// the dispatcher's apply-side contract; the detector has its own
-/// mirror that must match.
-const T3_RW_MASK: u32 = {
-    use windows::Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE};
-    FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0
-};
-const T3_RO_MASK: u32 = {
-    use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
-    FILE_GENERIC_READ.0
-};
 
 /// Drop paths that already grant `needed_mask` to the well-known
 /// AppContainer SIDs (`ALL APPLICATION PACKAGES`,
@@ -347,11 +333,11 @@ pub fn dispatch_with_fallback(request: &CodexRequest) -> Result<Dispatched, Disp
             // access, which well-known group grants can't do.
             let readwrite = filter_paths_needing_grant(
                 paths_to_pathbufs(&request.policy.readwrite_paths),
-                T3_RW_MASK,
+                RW_MASK,
             );
             let readonly = filter_paths_needing_grant(
                 paths_to_pathbufs(&request.policy.readonly_paths),
-                T3_RO_MASK,
+                RO_MASK,
             );
             let denied = paths_to_pathbufs(&request.policy.denied_paths);
             let sid = derive_sid_string(&container_name(request)).map_err(DispatchError::Sid)?;
@@ -544,7 +530,7 @@ mod tests {
     /// token's well-known-SID set — and assert
     /// `filter_paths_needing_grant` drops the path. A tempdir without
     /// any stamp must survive the filter because %TEMP%'s shadow
-    /// ACLs do not grant the well-known AC SIDs `T3_RW_MASK`.
+    /// ACLs do not grant the well-known AC SIDs `RW_MASK`.
     #[test]
     fn filter_paths_needing_grant_drops_well_known_grant() {
         use crate::test_env::ScopedStateDir;
@@ -567,7 +553,7 @@ mod tests {
             td_grant.path().to_path_buf(),
             td_no_grant.path().to_path_buf(),
         ];
-        let kept = filter_paths_needing_grant(input, T3_RW_MASK);
+        let kept = filter_paths_needing_grant(input, RW_MASK);
         assert!(
             !kept.iter().any(|p| p == td_grant.path()),
             "grant-stamped path should be filtered out: kept={kept:?}"
