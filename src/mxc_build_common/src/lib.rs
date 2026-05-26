@@ -35,7 +35,7 @@ pub fn embed_version_info(file_description: &str, original_filename: &str) {
 
 #[cfg(windows)]
 fn embed_version_info_windows(file_description: &str, original_filename: &str) {
-    const PRODUCT_NAME: &str = "Microsoft eXecution Containers (MXC)";
+    const PRODUCT_NAME: &str = "Microsoft Execution Containers";
 
     let version = std::env::var("CARGO_PKG_VERSION").unwrap();
     let commit = git_short_hash();
