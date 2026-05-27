@@ -2209,14 +2209,17 @@ mod tests {
     #[test]
     fn external_proxy_with_bubblewrap_and_no_host_policy_is_accepted() {
         // Pure delegate-to-external-proxy with no MXC-side host policy is
-        // the supported external-proxy use case.
+        // the supported external-proxy use case. Under deny-by-default,
+        // callers must explicitly set `defaultPolicy: "allow"` to opt
+        // into trusting the external proxy with full policy delegation.
         let json = r#"{
             "version": "0.6.0-alpha",
             "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
-                "proxy": {"url": "http://127.0.0.1:8080"}
+                "proxy": {"url": "http://127.0.0.1:8080"},
+                "defaultPolicy": "allow"
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());
