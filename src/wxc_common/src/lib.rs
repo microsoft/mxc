@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 // Platform-agnostic modules (shared by wxc-exec and lxc-exec)
+pub mod cmdline;
 pub mod config_parser;
 pub mod encoding;
 pub mod error;
