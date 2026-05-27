@@ -7,7 +7,7 @@ import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
 import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } from './types.js';
-import { prepareSpawn, diagLogVersion } from './helper.js';
+import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromCode } from './errors.js';
 
@@ -87,36 +87,6 @@ function buildWslcContainerConfig(
 }
 
 /**
- * Apply iptables-mode network enforcement on configs that use
- * Bubblewrap or LXC and have per-host filtering.
- *
- * Without setting `enforcementMode: 'firewall'` explicitly, the Linux
- * runner falls back to `Capabilities`, silently drops `allowedHosts` /
- * `blockedHosts`, and never invokes iptables.
- *
- * Shared between the explicit `'bubblewrap'` / `'lxc'` builders and the
- * abstract `'process'` branch on Linux (which resolves to Bubblewrap
- * server-side).
- *
- * NOTE: when `network.proxy` is configured on Bubblewrap, host filtering
- * is enforced at the proxy layer (unprivileged, no CAP_NET_ADMIN). The
- * Rust config parser explicitly rejects `bubblewrap + proxy + firewall`
- * since the iptables path requires privilege the bwrap backend
- * deliberately avoids. Callers in that mode must leave enforcementMode
- * at its default.
- */
-function applyIptablesNetworkEnforcement(config: ContainerConfig): void {
-    if (config.network) {
-        const hasProxy = !!config.network.proxy;
-        const hasHostRules =
-            !!(config.network.allowedHosts?.length || config.network.blockedHosts?.length);
-        if (hasHostRules && !hasProxy) {
-            config.network.enforcementMode = 'firewall';
-        }
-    }
-}
-
-/**
  * Builds the Bubblewrap (bwrap) portion of a ContainerConfig.
  * Bubblewrap is Linux-only and uses shared cross-backend fields only —
  * no backend-specific config block. Network enforcement via iptables
@@ -126,7 +96,7 @@ function buildBubblewrapConfig(
     config: ContainerConfig,
 ): ContainerConfig {
     config.containment = 'bubblewrap';
-    applyIptablesNetworkEnforcement(config);
+    applyLinuxNetworkPolicy(config);
     return config;
 }
 
@@ -143,7 +113,7 @@ function buildLinuxProcessConfig(
         release: '3.23',
         destroyOnExit: true,
     };
-    applyIptablesNetworkEnforcement(config);
+    applyLinuxNetworkPolicy(config);
     return config;
 }
 
@@ -390,7 +360,7 @@ export function createConfigFromPolicy(
             //
             // Network enforcement still needs the same iptables firewall mode
             // as explicit `'bubblewrap'` when host filtering is in play.
-            applyIptablesNetworkEnforcement(config);
+            applyLinuxNetworkPolicy(config);
             diagLog(`createConfigFromPolicy: containment=process (linux, resolves to bubblewrap), id=${containerId}`);
             return config;
         }

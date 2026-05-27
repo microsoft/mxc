@@ -909,7 +909,7 @@ describe('createConfigFromPolicy', () => {
       assert.deepStrictEqual(config.filesystem!.readwritePaths, ['/workspace']);
       assert.deepStrictEqual(config.filesystem!.readonlyPaths, ['/data']);
       assert.deepStrictEqual(config.filesystem!.deniedPaths, ['/secrets']);
-      // Per applyIptablesNetworkEnforcement, host filtering forces firewall mode.
+      // Per applyLinuxNetworkPolicy, host filtering forces firewall mode.
       assert.strictEqual(config.network!.enforcementMode, 'firewall');
     });
   });

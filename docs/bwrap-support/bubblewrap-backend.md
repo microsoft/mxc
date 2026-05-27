@@ -204,11 +204,15 @@ Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
 
 ### Caveats
 
-- **Cooperative model**: only well-behaved clients that honor `HTTP_PROXY`
-  / `HTTPS_PROXY` are filtered. Tools that bypass these env vars (raw
-  sockets, custom HTTP clients, statically-linked binaries that ignore the
-  env) are **not enforced**. This is a deliberate trade-off for
-  zero-privilege operation. For strict whole-network isolation, omit
+- **Cooperative model**: the runner enforces by injecting
+  `HTTP_PROXY` / `HTTPS_PROXY` into the sandbox environment, so only
+  well-behaved clients that honor those vars are routed through the
+  proxy. Tools that bypass them (raw sockets, custom HTTP clients,
+  statically-linked binaries that ignore the env) are **not enforced**.
+  This applies to **both** the builtin test proxy and external (BYO)
+  proxy modes — the limitation is in the env-var injection mechanism,
+  not in the proxy itself; a BYO proxy can do whatever it likes for
+  cooperating clients. For strict whole-network isolation, omit
   `network.proxy` so the runner can apply `--unshare-net` instead.
 - **Mutually exclusive with iptables enforcement**: setting
   `network.proxy` together with `network.enforcementMode` of `"firewall"`

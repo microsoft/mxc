@@ -81,7 +81,7 @@ fn create_private_temp_dir(unique_id: &str) -> Result<PathBuf, WxcError> {
     })?;
 
     // Best-effort 0700 chmod so other users cannot snoop the ready file.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
@@ -582,7 +582,7 @@ mod tests {
         let dir = create_private_temp_dir(&id).unwrap();
         assert!(dir.exists());
 
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         {
             use std::os::unix::fs::PermissionsExt;
             let meta = fs::metadata(&dir).unwrap();
