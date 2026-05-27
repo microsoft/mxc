@@ -704,8 +704,7 @@ fn run_action(
 mod tests {
     // These tests cover the apply/revoke pair against a tempdir
     // (redirected via MXC_PREPARE_PATH_OVERRIDE). They do *not*
-    // exercise the elevation flow, which requires UAC and is verified
-    // manually with the PowerShell scripts in `scripts/host-prep/`.
+    // exercise the elevation flow, which requires UAC.
 
     use super::*;
     use std::sync::Mutex;
