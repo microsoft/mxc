@@ -1417,6 +1417,7 @@ mod tests {
     fn full_config() {
         let json = r#"{
             "containerId": "TestProfile",
+            "containment": "processcontainer",
             "process": {
                 "commandLine": "dir",
                 "cwd": "C:\\temp",
@@ -1522,7 +1523,7 @@ mod tests {
     #[test]
     fn learning_mode_adds_capability_in_debug() {
         let json =
-            r#"{"process": {"commandLine": "echo x"}, "processContainer": {"learningMode": true}}"#;
+            r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"learningMode": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1537,7 +1538,7 @@ mod tests {
     #[cfg(not(debug_assertions))]
     #[test]
     fn learning_mode_stripped_in_release() {
-        let json = r#"{"process": {"commandLine": "echo x"}, "processContainer": {"capabilities": ["permissiveLearningMode"]}}"#;
+        let json = r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"capabilities": ["permissiveLearningMode"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1566,6 +1567,7 @@ mod tests {
     fn process_container_capabilities() {
         let json = r#"{
             "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
             "processContainer": {
                 "capabilities": ["internetClient", "privateNetworkClientServer", "documentsLibrary"]
             }
@@ -1582,7 +1584,7 @@ mod tests {
 
     #[test]
     fn least_privilege_mode() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "processContainer": {"leastPrivilege": true}}"#;
+        let json = r#"{"process": {"commandLine": "print('test')"}, "containment": "processcontainer", "processContainer": {"leastPrivilege": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -1710,6 +1712,7 @@ mod tests {
     fn base64_complex_config() {
         let json = r#"{
             "containerId": "TestContainer",
+            "containment": "processcontainer",
             "process": {
                 "commandLine": "import sys\nprint(sys.version)",
                 "timeout": 10000
@@ -2796,6 +2799,7 @@ mod tests {
         // `processContainer` parsing path.
         let json = r#"{
             "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
             "appContainer": {
                 "leastPrivilege": true,
                 "capabilities": ["internetClient"]
