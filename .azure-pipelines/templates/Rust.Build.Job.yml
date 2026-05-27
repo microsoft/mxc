@@ -58,6 +58,7 @@ jobs:
         workingDirectory: $(Build.SourcesDirectory)/src/lxc
         signPattern: |
           lxc-exec
+          linux-test-proxy
 
       ${{ if eq(item.arch, 'x64') }}:
         isX64: true
@@ -121,6 +122,15 @@ jobs:
           useNextest: false
           testAllTargets: false
           buildAllTargets: false
+
+      # linux_test_proxy is a separate workspace member (not a dep of lxc), so
+      # the workspace-member-scoped build above doesn't pick it up. Build it
+      # explicitly here so it lands alongside lxc-exec in the target dir and
+      # gets copied into the artifact via signPattern.
+      - script: |
+          cargo build --release --target $(triplet) -p linux_test_proxy --manifest-path $(Build.SourcesDirectory)/src/Cargo.toml
+        displayName: Build linux-test-proxy
+        condition: eq('${{ item.os }}', 'linux')
 
       - task: EsrpCodeSigning@5
         displayName: Code Sign

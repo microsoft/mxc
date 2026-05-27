@@ -61,6 +61,11 @@ jobs:
     - script: chmod +x $(sdkDirectory)/bin/*/lxc-exec
       displayName: Restore execute permission on lxc-exec
 
+    - script: |
+        set -euo pipefail
+        find $(sdkDirectory)/bin -name linux-test-proxy -exec chmod +x {} +
+      displayName: Restore execute permission on linux-test-proxy
+
     # Drop symbol files from the npm package — symbols ship separately.
     - script: rm -rf $(sdkDirectory)/bin/*/symbols
       displayName: Strip symbols/ from npm package
