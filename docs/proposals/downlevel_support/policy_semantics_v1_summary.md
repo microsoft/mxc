@@ -143,17 +143,25 @@ agent sees that a denied directory exists but cannot enumerate its
 children. This is intentional: the directory's existence is host-
 namespace information, but its contents are not.
 
-### D6 — Path-based, not object-based
+### D6 — Object-based
 
-The policy applies to **named paths**. If a denied object is also
-reachable via another path (hardlink alias, junction target,
-volume-GUID, file-ID), that other path is governed independently.
-To deny multiple routes, list multiple paths.
+An entry's intent applies to the **object** the named path
+reaches. If the same object is reachable through multiple paths
+— junctions, mount points, hardlinks, drive-letter aliases,
+bind mounts, firmlinks, volume-GUID prefixes — the policy
+applies uniformly. Writing `RW C:\etc\src\git\myrepo` and
+`RO D:\git\myrepo` for the same underlying repo (because `D:\`
+is mounted under `C:\etc\src`) is a validation error: the user
+has named the same target twice with conflicting intents.
 
-This is a simplification from round 1 (which required strict
-object-level hiding regardless of route). Under round 2, the
-language matches what bindflt and ProjFS naturally provide; aliasing
-via non-name routes is not language-mediated.
+This matches the underlying access-control mechanism on every
+supported OS: NTFS DACLs on Windows, POSIX permissions and ACLs
+on Linux and macOS. The language doesn't promise path-based
+behavior the runtime can't deliver.
+
+Naming and visibility — projecting one object at multiple
+paths, hiding paths from the agent — is a separate concern
+(namespace policy), deferred to a future iteration.
 
 ### D7 — Implicit traversal is name-resolution-only
 
@@ -349,9 +357,6 @@ deferred.
   distinct from this FS access policy.
 - **Leaf marker `[L]`.** v1 has subtree-only entries. Adding `[L]`
   back later is a strictly-additive change.
-- **Object-level identity guarantees.** v1 is path-based; aliases
-  must be listed explicitly. A future iteration could mediate
-  aliases if a use case demands it.
 - **Policy behaviour for paths deleted-and-recreated mid-run.** v1
   statement: policy applies to whatever object exists at the path
   at any given moment.
@@ -366,7 +371,7 @@ resolved or no longer applicable:
 
 | Risk | Status under round 2 |
 |---|---|
-| R1 / R3 — object-level hiding via non-name routes | Resolved (D6 is path-based) |
+| R1 / R3 — object-level enforcement via non-name routes | Resolved (D6 is object-based) |
 | R2 — implicit traversal needing ancestor ACEs | Resolved (`SeChangeNotifyPrivilege` works as expected on 23H2+) |
 | R4 — hidden returning ACCESS_DENIED instead of not-found | Not applicable (`ACCESS_DENIED` is the spec'd behavior) |
 | R5 — enumeration filtering for deny inside RW | Not applicable (denied paths are visible in enumeration) |

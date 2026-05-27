@@ -66,10 +66,6 @@ copilot --resume d739a782-d102-4c2b-b4f9-31b461abef5a
   host effects in v1.
 - **Cross-principal policies.** The policy author is implicitly the
   invoking user.
-- **Object-level identity guarantees across paths.** v1 is
-  path-based (F11). Aliasing (hardlinks, junctions, volume-GUID
-  prefixes) is not mediated by the policy; if you want to deny via
-  multiple paths, list all of them.
 
 ## Foundational rules
 
@@ -152,15 +148,26 @@ wins over a less-specific `D`.
 If two entries on different lists cover the same exact canonical
 path, the policy is **invalid** (validation error) — see F7.
 
-### F7 — Same-path multi-list is a validation error
+### F7 — Same-object multi-list is a validation error
 
-If two entries on different lists reference the same canonical path,
-the policy is rejected. The user is contradicting themselves; the
-runtime should not silently downgrade.
+If two entries on different lists reference the same canonical
+object, the policy is rejected. The user is contradicting
+themselves; the runtime should not silently downgrade.
 
-### F8 — Canonical paths
+Object identity is determined per F8: paths are lexically
+normalized and then resolved to the underlying host object.
+Aliases discoverable at policy-load time (mount points,
+junctions, hardlinks) produce same-object conflicts. Aliases
+introduced after policy-load (e.g., a hardlink the agent
+creates during the run) are not statically detectable but are
+covered by F11's object-based enforcement at runtime.
 
-Before applying F6/F7, every path in the policy is canonicalized:
+### F8 — Canonical paths and object identity
+
+Before applying F6/F7, every path in the policy is canonicalized
+in two stages.
+
+**Lexical normalization**, applied to each path string:
 
 - drive-letter case normalized (upper-case);
 - path-separator characters normalized;
@@ -169,9 +176,25 @@ Before applying F6/F7, every path in the policy is canonicalized:
 - `.` and `..` segments collapsed per OS rules;
 - environment-variable references resolved (e.g. `%USERPROFILE%`).
 
-Symbolic links and junctions are **not** resolved at canonicalization
-time. The policy references the path as written; reparse-point
-traversal is the runtime's concern.
+**Object resolution**, applied to the lexically-normalized
+result for policy-lookup purposes:
+
+- symbolic links, junctions, mount points, and hardlinks in
+  effect at policy-load time are resolved to a canonical object
+  identity (e.g. `(VolumeId, FileId)` on Windows,
+  `(st_dev, st_ino)` on Linux and macOS);
+- two entries whose paths resolve to the same object identity
+  are treated as referring to the same target under F6/F7.
+
+The agent's runtime view of paths is **not** rewritten. The
+agent continues to address objects through whatever path strings
+it knows; object resolution is for policy-lookup matching only.
+
+Object resolution is best-effort. Aliases that come into
+existence after policy-load (a hardlink the agent creates, a
+mount that appears later) are not statically detectable. Such
+aliases are still governed by F11 at runtime because every
+supported OS enforces access on object identity.
 
 ### F9 — Implicit traversal
 
@@ -223,16 +246,28 @@ The path itself remains present in the namespace; only operations
 on it are refused. This is structurally identical to how Windows
 DACL deny ACEs behave.
 
-### F11 — Path-based, not object-based
+### F11 — Object-based
 
-The policy applies to **named paths**. If a denied object is also
-reachable via another path (hardlink alias, junction target, alternate
-mount point, volume-GUID prefix, file-ID open), that other path is
-governed independently. If the user wants both names denied, they
-must list both.
+An entry's intent applies to the host **object** (the file or
+directory) reached by the named path. If the same object is
+reachable through multiple paths — junctions, mount points,
+hardlinks, drive-letter aliases for the same volume, bind mounts,
+firmlinks, volume-GUID prefixes, file-ID opens — the policy
+applies uniformly to the object regardless of which path the
+agent uses to reach it.
 
-Under our composition, this is what bindflt and ProjFS naturally
-provide. Aliasing-via-non-name-route is not language-mediated.
+This matches the underlying access-control mechanism on every
+supported OS: NTFS DACLs on Windows, POSIX permissions and ACLs
+on Linux and macOS. All are object-based at their innermost
+enforcement layer; the language matches that rather than
+promising path-based behavior the runtime cannot deliver.
+
+Naming and visibility — what paths reach which objects, whether
+any path is rewritten or hidden from the agent — is a separate
+concern (namespace policy), deferred to a future iteration.
+Mandatory access control layers (SELinux, AppArmor, Seatbelt)
+similarly sit above this policy and are configured
+independently.
 
 ### F12 — Provenance is irrelevant
 
@@ -365,7 +400,7 @@ RW C:\Users\gudge\temp
 | write(descendant) | N (`ACCESS_DENIED`) | n/a |
 | `CreateFile CREATE_NEW` at P | `ACCESS_DENIED` | `ACCESS_DENIED` |
 | enumeration of `parent(P)` | **includes P** by name | **includes P** by name |
-| open via alternate path (hardlink alias, file-ID, `\\?\Volume{…}`) | host DACL applies (per F11) | host DACL applies |
+| open via alternate path (hardlink alias, file-ID, `\\?\Volume{…}`) | resolves to same denied object; `ACCESS_DENIED` (F11) | resolves to same denied object; `ACCESS_DENIED` (F11) |
 
 Subtle case for `D` on a directory + descendants: the descendant
 *names* are not discoverable through enumeration because
@@ -722,15 +757,15 @@ The language semantics above are intentionally enforcement-agnostic.
 This section catalogues the known runtime-enforcement risks and
 their status under round-2 decisions.
 
-### R1 / R3 — Object-level hiding via non-name routes
+### R1 / R3 — Object-level enforcement via non-name routes
 
-**Resolved.** Under F11 the policy is path-based, not object-based.
-Alternative routes to a denied object (hardlink alias, junction
-target, file-ID, volume-GUID, 8.3 short name) are governed
-independently; the user lists multiple paths if they want multiple
-routes denied. The risk that bindflt/ProjFS can't enforce
-object-level hiding is no longer applicable — the language doesn't
-demand it.
+**Resolved.** Under F11 the policy is object-based. Alternative
+routes to an object (hardlink alias, junction target, file-ID,
+volume-GUID, 8.3 short name, bind mounts on Linux, firmlinks on
+macOS) all resolve to the same object identity and receive the
+same access decision. This is the natural behavior of the
+underlying DAC layer on every supported OS, so no additional
+enforcement machinery is required at this level.
 
 ### R2 — Implicit traversal needing ancestor ACEs
 
@@ -763,7 +798,7 @@ this case cannot be expressed.
 
 | Risk | Description | Status |
 |---|---|---|
-| R1 / R3 | Object-level hiding via file ID, hardlink alias, etc. | Resolved (F11 path-based) |
+| R1 / R3 | Object-level enforcement via non-name routes | Resolved (F11 object-based) |
 | R2 | Implicit traversal needing ancestor ACEs | Resolved (`SeChangeNotifyPrivilege`) |
 | R4 | Hidden returning ACCESS_DENIED instead of not-found | Not applicable (ACCESS_DENIED is spec'd) |
 | R5 | Enumeration filtering for deny inside RW | Not applicable (no filtering needed) |
