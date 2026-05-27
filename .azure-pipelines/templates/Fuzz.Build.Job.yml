@@ -39,6 +39,8 @@ jobs:
         Invoke-WebRequest -UseBasicParsing -Uri 'https://win.rustup.rs/x86_64' -OutFile $rustupInit
         & $rustupInit -y --profile minimal --default-toolchain $(rustNightly) --default-host x86_64-pc-windows-msvc
         if ($LASTEXITCODE -ne 0) { throw "rustup-init failed" }
+        # Ensure nightly is the default even if agent has a pre-existing stable toolchain.
+        rustup default $(rustNightly)
         Write-Host "##vso[task.prependpath]$env:USERPROFILE\.cargo\bin"
       displayName: Install Rust nightly
 
@@ -70,11 +72,11 @@ jobs:
         cd $(fuzzDir)
         foreach ($t in 'config_parser','base64_decode') {
           Write-Host "===== building $t ====="
-          cargo fuzz build $t --release
+          cargo +$(rustNightly) fuzz build $t --release
           if ($LASTEXITCODE -ne 0) { throw "fuzz build failed for $t" }
         }
         Write-Host "===== building validator ====="
-        cargo fuzz build validator --release --features hyperlight,isolation_session
+        cargo +$(rustNightly) fuzz build validator --release --features hyperlight,isolation_session
         if ($LASTEXITCODE -ne 0) { throw "fuzz build failed for validator" }
       displayName: Build fuzz targets (ASAN)
 
