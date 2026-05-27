@@ -1,5 +1,4 @@
 {
-  "$comment": "OneFuzz job manifest for the mxc_fuzz crate. Validated by the OIP tool in the Fuzz pipeline. SDL work item: 62294501.",
   "ConfigVersion": 3,
   "Entries": [
     {
