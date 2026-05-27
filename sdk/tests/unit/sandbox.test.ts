@@ -982,4 +982,75 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       resolveExecutableAndArgs(makeConfig('lxc'), { executablePath: fakeExe }),
     );
   });
+
+  // Legacy wire-value aliases (PR #268 deprecation window). The native binary
+  // accepts these via serde aliases; the SDK validator must mirror that so
+  // existing 0.4.0-/0.5.0-alpha configs are not rejected before they reach
+  // wxc-exec. See also Rust parser tests
+  // `legacy_appcontainer_wire_value_aliases_processcontainer` and
+  // `legacy_macos_sandbox_wire_value_aliases_seatbelt`.
+  describe('legacy containment aliases', () => {
+    it('should accept "appcontainer" as an alias of processcontainer (Windows)', function (this: { skip: (reason?: string) => void }) {
+      if (process.platform !== 'win32') {
+        this.skip('processcontainer is Windows-only');
+        return;
+      }
+      assert.doesNotThrow(() =>
+        resolveExecutableAndArgs(makeConfig('appcontainer'), { executablePath: fakeExe }),
+      );
+    });
+
+    it('should reject "appcontainer" on non-Windows hosts with the canonical error', function (this: { skip: (reason?: string) => void }) {
+      if (process.platform === 'win32') {
+        this.skip('appcontainer is the native value on Windows');
+        return;
+      }
+      assert.throws(
+        () => resolveExecutableAndArgs(makeConfig('appcontainer'), { executablePath: fakeExe }),
+        { message: /'appcontainer' is not available on this platform/ },
+      );
+    });
+
+    it('should require experimental mode for "macos_sandbox" (mirrors seatbelt gating)', () => {
+      // Regression: pre-fix, ExperimentalBackends.includes('macos_sandbox') was
+      // false, so the legacy alias bypassed the experimental gate entirely.
+      // The gate must look at the resolved backend, not the raw wire value.
+      assert.throws(
+        () => resolveExecutableAndArgs(makeConfig('macos_sandbox'), { executablePath: fakeExe }),
+        { message: /experimental mode/ },
+      );
+    });
+
+    it('should accept "macos_sandbox" on macOS with the experimental flag set', function (this: { skip: (reason?: string) => void }) {
+      if (process.platform !== 'darwin') {
+        this.skip('seatbelt is macOS-only');
+        return;
+      }
+      assert.doesNotThrow(() =>
+        resolveExecutableAndArgs(makeConfig('macos_sandbox'), {
+          executablePath: fakeExe,
+          experimental: true,
+        }),
+      );
+    });
+
+    it('should forward the legacy wire value to the binary unchanged', () => {
+      // The SDK resolves the alias only for its own validation; the on-wire
+      // string sent to wxc-exec must still be the legacy form, because the
+      // Rust serde alias is the canonical resolution point. Re-decoding the
+      // base64 envelope confirms the wire form is preserved.
+      const { args } = resolveExecutableAndArgs(
+        // Force the validator to accept regardless of host: macOS would
+        // otherwise fail on the experimental gate; Windows/Linux on platform
+        // availability for non-native legacy values.
+        makeConfig('appcontainer'),
+        { executablePath: fakeExe, skipPlatformCheck: true },
+      );
+      const idx = args.indexOf('--config-base64');
+      assert.ok(idx >= 0, '--config-base64 should be present in args');
+      const decoded = Buffer.from(args[idx + 1], 'base64').toString('utf-8');
+      const envelope = JSON.parse(decoded);
+      assert.strictEqual(envelope.containment, 'appcontainer');
+    });
+  });
 });

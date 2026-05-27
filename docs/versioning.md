@@ -298,6 +298,41 @@ stable section, configs that still reference it under `experimental` will receiv
 an error: "feature X has moved to the stable section." The parser will not
 silently fall back — explicit migration is required.
 
+## Deprecation Aliases
+
+When a wire value is renamed (e.g. `appcontainer` → `processcontainer` in
+[#268](https://github.com/microsoft/mxc/pull/268)), the legacy spelling enters a
+deprecation window where both forms are accepted on the wire.
+
+**Policy:** deprecation aliases are **version-agnostic**. The native parser
+accepts the legacy form regardless of `config.version`, and the SDK validator
+mirrors that behavior. We do *not* gate alias acceptance on schema version (i.e.
+"`appcontainer` only allowed for `0.4.0-alpha`/`0.5.0-alpha`") because:
+
+1. **Two layers must agree.** Schema-version gating would mean a config accepted
+   by the binary could be rejected by the SDK validator (or vice versa) based
+   on a string in `config.version`. That class of "works through one entry point
+   but not another" bug is exactly what [#390](https://github.com/microsoft/mxc/issues/390)
+   surfaced.
+2. **Authors don't always control `config.version`.** Configs flowing from
+   external sources (governance services, third-party tooling) may legitimately
+   declare `0.6.0-alpha` while still using legacy vocabulary their generator
+   has not yet been updated for.
+3. **The deprecation window is short.** The stated intent at rename time is
+   removal in a future minor release; gating buys little and costs review
+   complexity in every layer that re-checks containment.
+
+**Observability.** Each legacy-value encounter emits a one-line deprecation hint
+via the existing diagnostic channel (Rust: `Logger`; TypeScript SDK: `diagLog`,
+dedup'd per legacy value per process). The hint names the canonical replacement.
+No throw, no stderr write — the deprecation is observable only to callers who
+opt into the diagnostic stream.
+
+**Removal.** When an alias is removed in a future release, the change goes
+through the same promotion-style migration: a single release that turns the
+silent accept-and-warn into an explicit `unsupported_containment` error.
+Document the removal in the schema bump that drops it.
+
 ## Open Questions
 
 1. **Experimental features on the OS side:** Does

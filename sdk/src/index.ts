@@ -32,7 +32,6 @@ export {
   IsolationTier,
   ContainmentType,
   ContainmentTypes,
-  LegacyContainmentAliases,
   ContainmentBackend,
   ExperimentalBackends,
   ContainerConfig,

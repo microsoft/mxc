@@ -35,6 +35,31 @@ export function diagLogVersion(): void {
     }
 }
 
+const legacyContainmentWarned = new Set<string>();
+
+/**
+ * Emit a one-shot deprecation hint via the diagnostic console when a caller
+ * uses a legacy containment wire value. Dedup'd per legacy value per process
+ * so the message doesn't flood the diag stream on repeated spawns.
+ *
+ * Exposed for tests so the latch can be reset between describes.
+ */
+export function warnLegacyContainmentOnce(legacy: string, canonical: string): void {
+    if (!legacyContainmentWarned.has(legacy)) {
+        legacyContainmentWarned.add(legacy);
+        diagLog(
+            `Containment value '${legacy}' is deprecated; use '${canonical}' instead. ` +
+            `The legacy spelling is accepted via a backward-compatibility alias and may be ` +
+            `removed in a future SDK release.`
+        );
+    }
+}
+
+/** @internal Reset the legacy-containment dedup latch. Intended for unit tests. */
+export function _resetLegacyContainmentWarnedForTesting(): void {
+    legacyContainmentWarned.clear();
+}
+
 /**
  * Result of preparing a sandbox spawn — includes the resolved binary,
  * CLI arguments, and optional diagnostic logger.
@@ -135,17 +160,33 @@ export function resolveExecutableAndArgs(
     throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
   }
 
+  // Resolve deprecated wire values (e.g. "appcontainer" → "processcontainer",
+  // "macos_sandbox" → "seatbelt") once, and drive every containment check
+  // from the resolved value. The native binary accepts both spellings via
+  // serde aliases, so the wire payload is forwarded unchanged below — this
+  // resolution is purely for SDK-side validation. Without it, legacy values
+  // bypass the experimental-mode gate (because they are not in
+  // ExperimentalBackends under their alias) and produce a confusing
+  // "not available on this platform" error instead.
+  const rawContainment = config.containment;
+  const effectiveContainment = rawContainment
+    ? (LegacyContainmentAliases[rawContainment] ?? rawContainment)
+    : undefined;
+  if (rawContainment && effectiveContainment !== rawContainment) {
+    warnLegacyContainmentOnce(rawContainment, effectiveContainment as ContainmentBackend);
+  }
+
   // Check experimental mode before anything else so the caller gets a clear
   // message about the missing flag rather than a platform/binary error.
-  if (config.containment && ExperimentalBackends.includes(config.containment) && !options.experimental) {
+  if (effectiveContainment && ExperimentalBackends.includes(effectiveContainment) && !options.experimental) {
     throw new Error(
-      `'${config.containment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
+      `'${rawContainment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
     );
   }
 
   const platformSupport = getPlatformSupport();
-  const isExperimental = !!config.containment &&
-    (ExperimentalBackends as readonly string[]).includes(config.containment);
+  const isExperimental = !!effectiveContainment &&
+    (ExperimentalBackends as readonly string[]).includes(effectiveContainment);
   if (!platformSupport.isSupported && !isExperimental && !options.skipPlatformCheck) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
@@ -153,25 +194,22 @@ export function resolveExecutableAndArgs(
   // Hard platform requirement: microvm needs WHP/Hyper-V on Windows. This guard
   // runs even when `skipPlatformCheck` is set because it's not a build-version
   // check — the backend literally cannot run on non-Windows hosts.
-  if (config.containment === 'microvm' && os.platform() !== 'win32') {
+  if (effectiveContainment === 'microvm' && os.platform() !== 'win32') {
     throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
   }
 
   // Validate containment against platform
-  if (config.containment && !options.skipPlatformCheck) {
+  if (effectiveContainment && !options.skipPlatformCheck) {
     // Abstract intents (process, microvm) are resolved by the native binary
     // at run time, so the SDK accepts them without checking against the
     // host's concrete backend list.
-    const isIntent = (ContainmentTypes as readonly string[]).includes(config.containment);
-    // Legacy wire values accepted by the native binary via serde aliases
-    // (e.g. "appcontainer" → processcontainer, "macos_sandbox" → seatbelt).
-    const resolved = LegacyContainmentAliases[config.containment];
+    const isIntent = (ContainmentTypes as readonly string[]).includes(effectiveContainment);
     const isAvailable = platformSupport.availableMethods.includes(
-      (resolved ?? config.containment) as ContainmentBackend
+      effectiveContainment as ContainmentBackend
     );
     if (!isIntent && !isExperimental && !isAvailable) {
       throw new Error(
-        `Containment backend '${config.containment}' is not available on this platform. ` +
+        `Containment backend '${rawContainment}' is not available on this platform. ` +
         `Available methods: ${platformSupport.availableMethods.join(', ')}`
       );
     }
