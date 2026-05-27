@@ -31,12 +31,15 @@
 
 [CmdletBinding()]
 param(
-    [string]$RepoRoot       = $PSScriptRoot,
-    [string]$CargoRoot      = (Join-Path $PSScriptRoot 'src'),
-    [string]$WxcDebug       = (Join-Path $PSScriptRoot 'src\target\debug\wxc-exec.exe'),
-    [string]$WxcRelease     = (Join-Path $PSScriptRoot 'src\target\release\wxc-exec.exe'),
-    [string]$UiProbeDebug   = (Join-Path $PSScriptRoot 'src\target\debug\wxc-ui-probe.exe'),
-    [string]$UiProbeRelease = (Join-Path $PSScriptRoot 'src\target\release\wxc-ui-probe.exe'),
+    # Defaults assume the script lives at <repo>\test_scripts\; the
+    # cargo workspace and built binaries are under <repo>\src\. Override
+    # any of these explicitly if the layout differs.
+    [string]$RepoRoot       = (Split-Path -Parent $PSScriptRoot),
+    [string]$CargoRoot      = (Join-Path $RepoRoot 'src'),
+    [string]$WxcDebug       = (Join-Path $RepoRoot 'src\target\debug\wxc-exec.exe'),
+    [string]$WxcRelease     = (Join-Path $RepoRoot 'src\target\release\wxc-exec.exe'),
+    [string]$UiProbeDebug   = (Join-Path $RepoRoot 'src\target\debug\wxc-ui-probe.exe'),
+    [string]$UiProbeRelease = (Join-Path $RepoRoot 'src\target\release\wxc-ui-probe.exe'),
     [string]$ScratchRoot    = (Join-Path $env:TEMP 'mxc-25h2-tests'),
     # Default results/log files live in $env:TEMP but OUTSIDE $ScratchRoot
     # so `Initialize-Scratch`'s recursive nuke can't conflict with the
