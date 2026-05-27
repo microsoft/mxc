@@ -20,9 +20,24 @@ mod linux_main {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use clap::Parser;
+    use clap::{Parser, ValueEnum};
 
     use crate::proxy;
+
+    #[derive(Copy, Clone, Debug, ValueEnum)]
+    pub enum DefaultPolicyArg {
+        Allow,
+        Block,
+    }
+
+    impl From<DefaultPolicyArg> for proxy::DefaultPolicy {
+        fn from(value: DefaultPolicyArg) -> Self {
+            match value {
+                DefaultPolicyArg::Allow => proxy::DefaultPolicy::Allow,
+                DefaultPolicyArg::Block => proxy::DefaultPolicy::Block,
+            }
+        }
+    }
 
     #[derive(Parser)]
     #[command(
@@ -40,8 +55,8 @@ mod linux_main {
         #[arg(long = "bind-address", default_value = "127.0.0.1")]
         pub bind_address: String,
 
-        /// Hosts permitted by the proxy. May be repeated. When empty, all
-        /// hosts are permitted (subject to `--block-host`).
+        /// Hosts permitted by the proxy. May be repeated. When empty, the
+        /// default policy (see `--default-policy`) decides.
         #[arg(long = "allow-host")]
         pub allow_host: Vec<String>,
 
@@ -49,6 +64,15 @@ mod linux_main {
         /// over allow.
         #[arg(long = "block-host")]
         pub block_host: Vec<String>,
+
+        /// Policy applied when the allow list is empty.
+        ///
+        /// - `allow` — permit any host that isn't explicitly blocked.
+        /// - `block` — deny any host that isn't explicitly allowed.
+        ///
+        /// Ignored when `--allow-host` is non-empty (only listed hosts pass).
+        #[arg(long = "default-policy", value_enum, default_value_t = DefaultPolicyArg::Allow)]
+        pub default_policy: DefaultPolicyArg,
     }
 
     pub async fn run() -> std::process::ExitCode {
@@ -73,6 +97,7 @@ mod linux_main {
         let filter = Arc::new(proxy::HostFilter::new(
             cli.allow_host.clone(),
             cli.block_host.clone(),
+            cli.default_policy.into(),
         ));
 
         let port = match proxy::start(&cli.bind_address, filter).await {

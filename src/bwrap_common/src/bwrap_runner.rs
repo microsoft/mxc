@@ -92,6 +92,12 @@ impl ScriptRunner for BubblewrapScriptRunner {
         // 1. Start the network proxy if configured. Must happen before
         //    arg-building so the proxy's loopback address can be injected as
         //    HTTP_PROXY / HTTPS_PROXY into the sandbox environment.
+        //
+        //    Pass the request's `default_network_policy` through so that a
+        //    config of `{ defaultPolicy: "block", proxy: {...}, allowedHosts:
+        //    [] }` actually denies-by-default at the proxy layer (otherwise
+        //    the empty allow list + no iptables + no --unshare-net would let
+        //    everything through).
         let mut proxy = LinuxProxyCoordinator::new();
         if request.policy.network_proxy.is_enabled() {
             if let Err(err) = proxy.start(
@@ -99,6 +105,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
                 "127.0.0.1",
                 &request.policy.allowed_hosts,
                 &request.policy.blocked_hosts,
+                request.policy.default_network_policy.clone(),
                 logger,
             ) {
                 return ScriptResponse::error(&format!(

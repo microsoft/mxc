@@ -42,7 +42,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::error::WxcError;
 use crate::logger::Logger;
-use crate::models::{ProxyAddress, ProxyConfig};
+use crate::models::{NetworkPolicy, ProxyAddress, ProxyConfig};
 
 /// Maximum time to wait for the test proxy to write its ready file.
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -193,12 +193,15 @@ impl LinuxProxyCoordinator {
     ///
     /// - If `proxy_config.builtin_test_server` is `true`, launches the
     ///   bundled `linux-test-proxy` binary on `bind_address:0` and reads
-    ///   the assigned port from the proxy's ready file. `allowed_hosts`
-    ///   and `blocked_hosts` are passed to the test proxy as
-    ///   `--allow-host` / `--block-host` flags.
+    ///   the assigned port from the proxy's ready file. `allowed_hosts`,
+    ///   `blocked_hosts`, and `default_policy` are passed to the test
+    ///   proxy as `--allow-host` / `--block-host` / `--default-policy`
+    ///   flags so the cooperative env-var proxy honors the request's
+    ///   `defaultPolicy: "block"` semantics (deny-by-default).
     /// - Otherwise, uses the externally provided `proxy_config.address`.
-    ///   `allowed_hosts` / `blocked_hosts` are ignored in this case: the
-    ///   external proxy is assumed to apply its own policy.
+    ///   `allowed_hosts` / `blocked_hosts` / `default_policy` are ignored
+    ///   in this case: the external proxy is assumed to apply its own
+    ///   policy.
     /// - If the proxy config is disabled (`is_enabled()` returns `false`),
     ///   this is a no-op and the coordinator remains inactive.
     ///
@@ -210,6 +213,7 @@ impl LinuxProxyCoordinator {
         bind_address: &str,
         allowed_hosts: &[String],
         blocked_hosts: &[String],
+        default_policy: NetworkPolicy,
         logger: &mut Logger,
     ) -> Result<(), WxcError> {
         if self.is_active() {
@@ -223,8 +227,13 @@ impl LinuxProxyCoordinator {
         }
 
         let address = if proxy_config.builtin_test_server {
-            let port =
-                self.launch_test_proxy(bind_address, allowed_hosts, blocked_hosts, logger)?;
+            let port = self.launch_test_proxy(
+                bind_address,
+                allowed_hosts,
+                blocked_hosts,
+                default_policy,
+                logger,
+            )?;
             ProxyAddress::new(bind_address.to_string(), port)
         } else if let Some(ref addr) = proxy_config.address {
             addr.clone()
@@ -256,6 +265,7 @@ impl LinuxProxyCoordinator {
         bind_address: &str,
         allow_hosts: &[String],
         block_hosts: &[String],
+        default_policy: NetworkPolicy,
         logger: &mut Logger,
     ) -> Result<u16, WxcError> {
         logger.log_line(
@@ -275,11 +285,18 @@ impl LinuxProxyCoordinator {
             }
         };
 
+        let default_policy_arg = match default_policy {
+            NetworkPolicy::Allow => "allow",
+            NetworkPolicy::Block => "block",
+        };
+
         let mut cmd = Command::new(&proxy_exe);
         cmd.arg("--ready-file")
             .arg(&ready_file)
             .arg("--bind-address")
-            .arg(bind_address);
+            .arg(bind_address)
+            .arg("--default-policy")
+            .arg(default_policy_arg);
         for host in allow_hosts {
             cmd.arg("--allow-host").arg(host);
         }
@@ -470,7 +487,15 @@ mod tests {
         let mut logger = make_logger();
         let cfg = ProxyConfig::default();
         assert!(!cfg.is_enabled());
-        c.start(&cfg, "127.0.0.1", &[], &[], &mut logger).unwrap();
+        c.start(
+            &cfg,
+            "127.0.0.1",
+            &[],
+            &[],
+            NetworkPolicy::Allow,
+            &mut logger,
+        )
+        .unwrap();
         assert!(!c.is_active());
     }
 
@@ -484,7 +509,15 @@ mod tests {
         };
         assert!(cfg.is_enabled());
 
-        c.start(&cfg, "127.0.0.1", &[], &[], &mut logger).unwrap();
+        c.start(
+            &cfg,
+            "127.0.0.1",
+            &[],
+            &[],
+            NetworkPolicy::Allow,
+            &mut logger,
+        )
+        .unwrap();
         assert!(c.is_active());
         let addr = c.address().unwrap();
         assert_eq!(addr.port(), 8888);
@@ -502,9 +535,24 @@ mod tests {
             ..Default::default()
         };
 
-        c.start(&cfg, "127.0.0.1", &[], &[], &mut logger).unwrap();
+        c.start(
+            &cfg,
+            "127.0.0.1",
+            &[],
+            &[],
+            NetworkPolicy::Allow,
+            &mut logger,
+        )
+        .unwrap();
         let err = c
-            .start(&cfg, "127.0.0.1", &[], &[], &mut logger)
+            .start(
+                &cfg,
+                "127.0.0.1",
+                &[],
+                &[],
+                NetworkPolicy::Allow,
+                &mut logger,
+            )
             .unwrap_err();
         match err {
             WxcError::NetworkProxy(msg) => assert!(msg.contains("already active")),

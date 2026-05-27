@@ -87,21 +87,30 @@ function buildWslcContainerConfig(
 }
 
 /**
- * Applies iptables-based network enforcement to `config.network`:
- * when host filtering is requested, force `enforcementMode = 'firewall'`
- * so the Linux runner actually applies iptables rules. Without this,
- * `network_enforcement_mode` falls back to the parser default of
- * `Capabilities` and the runner silently skips iptables, dropping
- * `allowedHosts` / `blockedHosts` on the floor.
+ * Apply iptables-mode network enforcement on configs that use
+ * Bubblewrap or LXC and have per-host filtering.
+ *
+ * Without setting `enforcementMode: 'firewall'` explicitly, the Linux
+ * runner falls back to `Capabilities`, silently drops `allowedHosts` /
+ * `blockedHosts`, and never invokes iptables.
  *
  * Shared between the explicit `'bubblewrap'` / `'lxc'` builders and the
  * abstract `'process'` branch on Linux (which resolves to Bubblewrap
- * server-side) so the wire-format `network` block is identical regardless
- * of which intent the caller used.
+ * server-side).
+ *
+ * NOTE: when `network.proxy` is configured on Bubblewrap, host filtering
+ * is enforced at the proxy layer (unprivileged, no CAP_NET_ADMIN). The
+ * Rust config parser explicitly rejects `bubblewrap + proxy + firewall`
+ * since the iptables path requires privilege the bwrap backend
+ * deliberately avoids. Callers in that mode must leave enforcementMode
+ * at its default.
  */
 function applyIptablesNetworkEnforcement(config: ContainerConfig): void {
     if (config.network) {
-        if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
+        const hasProxy = !!config.network.proxy;
+        const hasHostRules =
+            !!(config.network.allowedHosts?.length || config.network.blockedHosts?.length);
+        if (hasHostRules && !hasProxy) {
             config.network.enforcementMode = 'firewall';
         }
     }
@@ -303,8 +312,19 @@ export function createConfigFromPolicy(
 
     // Network mapping (cross-platform) — default-deny: block if not explicitly allowed
     if (policy.network) {
+        // Linux: only Bubblewrap supports network.proxy (cooperative env-var
+        // proxy, no privilege required). LXC and explicit non-bubblewrap
+        // containments do not. Abstract `'process'` on Linux resolves to
+        // Bubblewrap server-side so the proxy field is permitted there too.
         if (policy.network.proxy && platform === 'linux') {
-            throw new Error('Proxy configuration is not supported on Linux');
+            const linuxProxySupported =
+                containment === 'bubblewrap' || containment === 'process';
+            if (!linuxProxySupported) {
+                throw new Error(
+                    `Proxy configuration is not supported on Linux containment='${containment}'. ` +
+                    `Use containment 'bubblewrap' (or the abstract 'process') for proxy-based host filtering.`,
+                );
+            }
         }
         if (policy.network.proxy && platform === 'darwin') {
             throw new Error('Proxy configuration is not supported on macOS');

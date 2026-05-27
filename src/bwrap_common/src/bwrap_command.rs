@@ -119,23 +119,19 @@ pub fn build_args(request: &CodexRequest, proxy_address: Option<&ProxyAddress>) 
     // enforcement happens. Tools that bypass these variables (raw sockets)
     // are NOT enforced -- this is a documented limitation of the
     // unprivileged proxy model.
+    //
+    // We deliberately do NOT set NO_PROXY here. Bubblewrap with a proxy
+    // keeps the host network namespace shared, so without a NO_PROXY entry
+    // a cooperating client doing `CONNECT 127.0.0.1:5432` (e.g. local
+    // Postgres) still goes via the proxy, where the configured
+    // allowed/blocked-hosts policy applies. Exempting loopback via
+    // NO_PROXY would silently bypass that filtering for host-loopback
+    // destinations.
     if let Some(addr) = proxy_address {
         let url = addr.to_url();
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
             args.extend(["--setenv".into(), key.into(), url.clone()]);
         }
-        // Exempt loopback so the proxy itself and local-only services are
-        // reached directly.
-        args.extend([
-            "--setenv".into(),
-            "NO_PROXY".into(),
-            "localhost,127.0.0.1".into(),
-        ]);
-        args.extend([
-            "--setenv".into(),
-            "no_proxy".into(),
-            "localhost,127.0.0.1".into(),
-        ]);
     }
 
     // -- Command -----------------------------------------------------------
@@ -335,15 +331,8 @@ mod tests {
         let addr = ProxyAddress::new("127.0.0.1".into(), 7777);
         let args = build_args(&r, Some(&addr));
 
-        // Each managed key must be set via --setenv.
-        for key in &[
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "NO_PROXY",
-            "no_proxy",
-        ] {
+        // Each HTTP/HTTPS proxy key must be set via --setenv.
+        for key in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
             let pos = args
                 .iter()
                 .position(|a| a == *key)
@@ -354,6 +343,23 @@ mod tests {
         // Value points at the loopback proxy URL.
         let http_pos = args.iter().position(|a| a == "HTTP_PROXY").unwrap();
         assert_eq!(args[http_pos + 1], "http://127.0.0.1:7777");
+    }
+
+    #[test]
+    fn proxy_active_does_not_exempt_loopback_via_no_proxy() {
+        // Setting NO_PROXY=localhost,127.0.0.1 would let cooperating HTTP
+        // clients bypass the proxy for host-loopback destinations.
+        // Bubblewrap+proxy keeps the host netns shared, so that bypass
+        // would silently defeat allowedHosts/blockedHosts for loopback.
+        let r = base_request();
+        let addr = ProxyAddress::new("127.0.0.1".into(), 7777);
+        let args = build_args(&r, Some(&addr));
+
+        assert!(
+            !args.iter().any(|a| a == "NO_PROXY" || a == "no_proxy"),
+            "proxy mode must not emit NO_PROXY/no_proxy --setenv pairs: {:?}",
+            args,
+        );
     }
 
     #[test]

@@ -21,6 +21,20 @@ use tokio::net::{TcpListener, TcpStream};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Default policy applied when the `allow` list is empty.
+///
+/// - `Allow` — permit any host that isn't explicitly blocked.
+/// - `Block` — deny any host that isn't explicitly allowed.
+///
+/// When the `allow` list is non-empty, the default policy is irrelevant: only
+/// listed hosts are permitted (subject to `block` taking precedence).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DefaultPolicy {
+    #[default]
+    Allow,
+    Block,
+}
+
 /// Host-name filter applied at the proxy layer.
 ///
 /// Matching is case-insensitive and uses exact host comparison (no suffix
@@ -28,20 +42,22 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 ///
 /// Behavior:
 /// - If `block` contains the host, the request is denied.
-/// - If `allow` is non-empty and the host is not in `allow`, the request is
-///   denied.
-/// - Otherwise the request is allowed.
+/// - Otherwise, if `allow` is non-empty: the host must be in `allow`.
+/// - Otherwise (empty `allow`): the request is permitted iff `default` is
+///   [`DefaultPolicy::Allow`].
 #[derive(Debug, Default)]
 pub struct HostFilter {
     allow: Vec<String>,
     block: Vec<String>,
+    default: DefaultPolicy,
 }
 
 impl HostFilter {
-    pub fn new(allow: Vec<String>, block: Vec<String>) -> Self {
+    pub fn new(allow: Vec<String>, block: Vec<String>, default: DefaultPolicy) -> Self {
         Self {
             allow: allow.into_iter().map(|h| h.to_lowercase()).collect(),
             block: block.into_iter().map(|h| h.to_lowercase()).collect(),
+            default,
         }
     }
 
@@ -51,10 +67,11 @@ impl HostFilter {
         if self.block.iter().any(|h| h == &host) {
             return false;
         }
-        if !self.allow.is_empty() && !self.allow.iter().any(|h| h == &host) {
-            return false;
+        if !self.allow.is_empty() {
+            return self.allow.iter().any(|h| h == &host);
         }
-        true
+        // Empty allow list: the default policy decides.
+        self.default == DefaultPolicy::Allow
     }
 }
 
@@ -244,42 +261,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allow_list_empty_permits_everything() {
-        let f = HostFilter::new(vec![], vec![]);
+    fn allow_list_empty_permits_everything_when_default_allow() {
+        let f = HostFilter::new(vec![], vec![], DefaultPolicy::Allow);
         assert!(f.permits("example.com"));
         assert!(f.permits("api.github.com"));
     }
 
     #[test]
+    fn allow_list_empty_denies_everything_when_default_block() {
+        let f = HostFilter::new(vec![], vec![], DefaultPolicy::Block);
+        assert!(!f.permits("example.com"));
+        assert!(!f.permits("api.github.com"));
+    }
+
+    #[test]
     fn allow_list_permits_only_listed_hosts() {
-        let f = HostFilter::new(vec!["api.github.com".into()], vec![]);
+        let f = HostFilter::new(vec!["api.github.com".into()], vec![], DefaultPolicy::Allow);
+        assert!(f.permits("api.github.com"));
+        assert!(!f.permits("example.com"));
+    }
+
+    #[test]
+    fn allow_list_permits_only_listed_hosts_under_default_block() {
+        // Non-empty allow list with default=block behaves the same as with
+        // default=allow: only listed hosts are permitted.
+        let f = HostFilter::new(vec!["api.github.com".into()], vec![], DefaultPolicy::Block);
         assert!(f.permits("api.github.com"));
         assert!(!f.permits("example.com"));
     }
 
     #[test]
     fn block_list_denies_listed_hosts() {
-        let f = HostFilter::new(vec![], vec!["evil.example.com".into()]);
+        let f = HostFilter::new(
+            vec![],
+            vec!["evil.example.com".into()],
+            DefaultPolicy::Allow,
+        );
         assert!(!f.permits("evil.example.com"));
         assert!(f.permits("api.github.com"));
     }
 
     #[test]
     fn block_list_takes_precedence_over_allow_list() {
-        let f = HostFilter::new(vec!["api.github.com".into()], vec!["api.github.com".into()]);
+        let f = HostFilter::new(
+            vec!["api.github.com".into()],
+            vec!["api.github.com".into()],
+            DefaultPolicy::Allow,
+        );
         assert!(!f.permits("api.github.com"));
     }
 
     #[test]
+    fn block_list_takes_precedence_over_default_allow() {
+        let f = HostFilter::new(
+            vec![],
+            vec!["evil.example.com".into()],
+            DefaultPolicy::Allow,
+        );
+        assert!(!f.permits("evil.example.com"));
+    }
+
+    #[test]
     fn matching_is_case_insensitive() {
-        let f = HostFilter::new(vec!["API.GitHub.com".into()], vec![]);
+        let f = HostFilter::new(vec!["API.GitHub.com".into()], vec![], DefaultPolicy::Allow);
         assert!(f.permits("api.github.com"));
         assert!(f.permits("API.GITHUB.COM"));
     }
 
     #[test]
     fn host_with_port_is_handled() {
-        let f = HostFilter::new(vec!["api.github.com".into()], vec![]);
+        let f = HostFilter::new(vec!["api.github.com".into()], vec![], DefaultPolicy::Allow);
         assert!(f.permits("api.github.com:443"));
         assert!(!f.permits("example.com:80"));
     }
