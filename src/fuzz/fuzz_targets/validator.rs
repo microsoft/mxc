@@ -34,6 +34,7 @@ fuzz_target!(|data: &[u8]| {
         // Dispatch to runner-specific validation based on backend.
         #[cfg(target_os = "windows")]
         match req.containment {
+            #[cfg(feature = "microvm")]
             ContainmentBackend::MicroVm => {
                 let runner = wxc_common::nanvix_runner::NanVixScriptRunner::new();
                 let _ = runner.validate_runner(&req);
@@ -46,7 +47,7 @@ fuzz_target!(|data: &[u8]| {
             #[cfg(feature = "isolation_session")]
             ContainmentBackend::IsolationSession => {
                 let runner =
-                    wxc_common::isolation_session_runner::IsolationSessionRunner::new();
+                    wxc_common::isolation_session::IsolationSessionRunner::new();
                 let _ = runner.validate_runner(&req);
             }
             _ => {}
