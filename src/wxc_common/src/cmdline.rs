@@ -101,9 +101,9 @@ fn append_windows_create_process(out: &mut String, arg: &str) {
 }
 
 fn append_windows_cmd(out: &mut String, arg: &str) -> Result<(), CommandLineError> {
-    if arg.contains('%') || arg.contains('!') {
+    if arg.contains('%') || arg.contains('!') || arg.contains('"') {
         return Err(CommandLineError::new(
-            "CLI command arguments for cmd.exe-backed sandboxes must not contain '%' or '!'",
+            "CLI command arguments for cmd.exe-backed sandboxes must not contain '%', '!', or '\"'",
         ));
     }
     append_windows_quoted(out, arg, needs_windows_cmd_quotes);
@@ -297,6 +297,17 @@ mod tests {
 
         assert!(percent_err.to_string().contains("must not contain"));
         assert!(bang_err.to_string().contains("must not contain"));
+    }
+
+    #[test]
+    fn windows_cmd_context_rejects_embedded_quotes() {
+        let err = cmdline_from_argv_for_context(
+            &s(&["echo", "\"&whoami"]),
+            CommandLineContext::WindowsCommandProcessor,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("must not contain"));
     }
 
     #[test]

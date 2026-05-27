@@ -163,18 +163,12 @@ struct Cli {
     probe: bool,
 
     /// Command to run inside the container, overriding `process.commandLine`
-    /// from the policy. Everything after the config path is captured as the
-    /// command; a leading `--` separator is optional but useful when the
-    /// command itself starts with `-`. Examples:
-    ///   wxc-exec policy.json py foo.py
+    /// from the policy. The command must follow a `--` separator so normal
+    /// CLI flags remain usable after the config path. Examples:
     ///   wxc-exec policy.json -- python --version
     /// When provided, `process.commandLine` in the policy file becomes
     /// optional and is overridden.
-    #[arg(
-        value_name = "COMMAND",
-        trailing_var_arg = true,
-        allow_hyphen_values = true
-    )]
+    #[arg(value_name = "COMMAND", last = true, allow_hyphen_values = true)]
     command: Vec<String>,
 }
 
@@ -222,7 +216,9 @@ fn has_cli_command(cli: &Cli) -> bool {
 
 fn command_line_context_for_backend(backend: &ContainmentBackend) -> CommandLineContext {
     match backend {
-        ContainmentBackend::IsolationSession => CommandLineContext::WindowsCommandProcessor,
+        ContainmentBackend::IsolationSession | ContainmentBackend::WindowsSandbox => {
+            CommandLineContext::WindowsCommandProcessor
+        }
         ContainmentBackend::Wslc
         | ContainmentBackend::Lxc
         | ContainmentBackend::Seatbelt
@@ -230,8 +226,7 @@ fn command_line_context_for_backend(backend: &ContainmentBackend) -> CommandLine
         ContainmentBackend::ProcessContainer
         | ContainmentBackend::Vm
         | ContainmentBackend::MicroVm
-        | ContainmentBackend::Hyperlight
-        | ContainmentBackend::WindowsSandbox => CommandLineContext::WindowsCreateProcess,
+        | ContainmentBackend::Hyperlight => CommandLineContext::WindowsCreateProcess,
     }
 }
 
@@ -1117,20 +1112,13 @@ mod tests {
     }
 
     #[test]
-    fn cli_captures_trailing_command_after_config_path() {
-        let cli = parse_cli(&["wxc-exec", "policy.json", "python", "--version"]);
+    fn cli_parses_flags_after_config_path_without_command_override() {
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--experimental", "--debug"]);
 
         assert_eq!(cli.config_path.as_deref(), Some("policy.json"));
-        assert_eq!(
-            cli.command,
-            vec!["python".to_string(), "--version".to_string()]
-        );
-        assert_eq!(
-            command_override_from_cli(&cli, CommandLineContext::WindowsCreateProcess)
-                .unwrap()
-                .as_deref(),
-            Some("python --version")
-        );
+        assert!(cli.experimental);
+        assert!(cli.debug);
+        assert!(cli.command.is_empty());
     }
 
     #[test]
@@ -1152,24 +1140,6 @@ mod tests {
 
     #[test]
     fn cli_captures_command_after_named_config() {
-        let cli = parse_cli(&["wxc-exec", "--config", "policy.json", "python", "--version"]);
-
-        assert_eq!(cli.config.as_deref(), Some("policy.json"));
-        assert_eq!(cli.config_path.as_deref(), None);
-        assert_eq!(
-            cli.command,
-            vec!["python".to_string(), "--version".to_string()]
-        );
-        assert_eq!(
-            command_override_from_cli(&cli, CommandLineContext::WindowsCreateProcess)
-                .unwrap()
-                .as_deref(),
-            Some("python --version")
-        );
-    }
-
-    #[test]
-    fn cli_captures_command_after_named_config_separator() {
         let cli = parse_cli(&[
             "wxc-exec",
             "--config",
@@ -1194,12 +1164,40 @@ mod tests {
     }
 
     #[test]
+    fn cli_captures_command_after_named_config_separator() {
+        let cli = parse_cli(&[
+            "wxc-exec",
+            "--config",
+            "policy.json",
+            "--experimental",
+            "--",
+            "python",
+            "--version",
+        ]);
+
+        assert_eq!(cli.config.as_deref(), Some("policy.json"));
+        assert!(cli.experimental);
+        assert_eq!(cli.config_path.as_deref(), None);
+        assert_eq!(
+            cli.command,
+            vec!["python".to_string(), "--version".to_string()]
+        );
+        assert_eq!(
+            command_override_from_cli(&cli, CommandLineContext::WindowsCreateProcess)
+                .unwrap()
+                .as_deref(),
+            Some("python --version")
+        );
+    }
+
+    #[test]
     fn cli_captures_command_after_config_base64() {
         let encoded = encoded_policy(r#"{ "process": { "commandLine": "policy" } }"#);
         let cli = parse_cli(&[
             "wxc-exec",
             "--config-base64",
             &encoded,
+            "--",
             "python",
             "--version",
         ]);
@@ -1255,8 +1253,16 @@ mod tests {
     }
 
     #[test]
+    fn windows_sandbox_cli_command_uses_cmd_context() {
+        assert_eq!(
+            command_line_context_for_backend(&ContainmentBackend::WindowsSandbox),
+            CommandLineContext::WindowsCommandProcessor
+        );
+    }
+
+    #[test]
     fn cli_command_overrides_policy_command_line_in_resolved_request() {
-        let cli = parse_cli(&["wxc-exec", "policy.json", "cli-app.exe", "--from-cli"]);
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--", "cli-app.exe", "--from-cli"]);
         let command_override =
             command_override_from_cli(&cli, CommandLineContext::WindowsCreateProcess).unwrap();
         let mut logger = test_logger();
@@ -1299,6 +1305,7 @@ mod tests {
         let cli = parse_cli(&[
             "wxc-exec",
             "policy.json",
+            "--",
             "cli-app.exe",
             "--message",
             "hello world",
@@ -1359,7 +1366,7 @@ mod tests {
 
     #[test]
     fn isolation_session_cli_command_quotes_shell_metacharacters() {
-        let cli = parse_cli(&["wxc-exec", "policy.json", "echo", "safe&whoami"]);
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--", "echo", "safe&whoami"]);
         let command_override =
             command_override_from_cli(&cli, CommandLineContext::WindowsCommandProcessor)
                 .unwrap()
@@ -1370,7 +1377,7 @@ mod tests {
 
     #[test]
     fn wslc_cli_command_uses_posix_shell_quoting() {
-        let cli = parse_cli(&["wxc-exec", "policy.json", "echo", "safe&whoami"]);
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--", "echo", "safe&whoami"]);
         let command_override = command_override_from_cli(&cli, CommandLineContext::PosixShell)
             .unwrap()
             .unwrap();
