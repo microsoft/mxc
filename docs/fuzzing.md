@@ -76,8 +76,15 @@ template (`.azure-pipelines/templates/Fuzz.Build.Job.yml`):
    `Mxc-Azure-Feed`, so all crate sources still come from the internal feed).
 2. Installs `cargo-fuzz`.
 3. Builds the three fuzz targets with `-Z sanitizer=address`.
-4. Stages an OneFuzz drop directory: one subdir per fuzzer with the `.exe`,
-   the ASAN runtime DLL, and the seed corpus.
+4. Stages an OneFuzz drop directory. The OneFuzzConfig v3 schema requires
+   a **flat layout**: `OneFuzzConfig.json` at the drop root with each
+   fuzzer's `.exe` / `.pdb` and the shared ASAN runtime DLL alongside it
+   (referenced by simple name in each entry's `Fuzzer.FuzzingHarnessExecutableName`
+   and `JobDependencies`). Seeds are **not** shipped in the drop in v3 —
+   they must live in an Azure storage container referenced via
+   `OneFuzzJobs[].SeedCorpusContainer` (`onefuzz containers create
+   mxc-seeds-<target>` + SAS upload). Until those containers are
+   provisioned, fuzzers bootstrap their corpus from scratch.
 5. Publishes the drop dir as a pipeline artifact (for debugging).
 6. Submits via `onefuzz-task@0` (skipped on PR builds).
 

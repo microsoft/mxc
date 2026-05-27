@@ -3,25 +3,19 @@
   "Entries": [
     {
       "JobNotificationEmail": "anisk@microsoft.com",
-      "FuzzerProperties": {
-        "Fuzzer": {
-          "$type": "libfuzzer"
-        },
-        "FuzzerExe": "config_parser\\config_parser.exe",
-        "JobDependencies": [
-          "config_parser\\clang_rt.asan_dynamic-x86_64.dll"
-        ],
-        "Seeds": [
-          {
-            "Path": "config_parser\\corpus"
-          }
-        ]
+      "Fuzzer": {
+        "$type": "libfuzzer",
+        "FuzzingHarnessExecutableName": "config_parser.exe"
       },
+      "JobDependencies": [
+        "config_parser.exe",
+        "config_parser.pdb",
+        "clang_rt.asan_dynamic-x86_64.dll"
+      ],
       "OneFuzzJobs": [
         {
           "ProjectName": "MXC",
-          "TargetName": "config_parser",
-          "EnableMicrosoftTelemetry": true
+          "TargetName": "config_parser"
         }
       ],
       "AdoTemplate": {
@@ -30,35 +24,25 @@
         "AreaPath": "OS\\Windows Client and Services\\WinPD\\AgOS-Agentic Platform\\Agent Runtime\\Tessera",
         "IterationPath": "OS\\Future",
         "AssignedTo": "anisk@microsoft.com",
-        "TemplateName": "Bug"
+        "Type": "Bug"
       },
-      "CodeReviewers": {
-        "Required": ["anisk@microsoft.com"],
-        "Optional": []
-      },
-      "SdlTaskId": 62294501
+      "SdlWorkItemId": 62294501
     },
     {
       "JobNotificationEmail": "anisk@microsoft.com",
-      "FuzzerProperties": {
-        "Fuzzer": {
-          "$type": "libfuzzer"
-        },
-        "FuzzerExe": "base64_decode\\base64_decode.exe",
-        "JobDependencies": [
-          "base64_decode\\clang_rt.asan_dynamic-x86_64.dll"
-        ],
-        "Seeds": [
-          {
-            "Path": "base64_decode\\corpus"
-          }
-        ]
+      "Fuzzer": {
+        "$type": "libfuzzer",
+        "FuzzingHarnessExecutableName": "base64_decode.exe"
       },
+      "JobDependencies": [
+        "base64_decode.exe",
+        "base64_decode.pdb",
+        "clang_rt.asan_dynamic-x86_64.dll"
+      ],
       "OneFuzzJobs": [
         {
           "ProjectName": "MXC",
-          "TargetName": "base64_decode",
-          "EnableMicrosoftTelemetry": true
+          "TargetName": "base64_decode"
         }
       ],
       "AdoTemplate": {
@@ -67,35 +51,25 @@
         "AreaPath": "OS\\Windows Client and Services\\WinPD\\AgOS-Agentic Platform\\Agent Runtime\\Tessera",
         "IterationPath": "OS\\Future",
         "AssignedTo": "anisk@microsoft.com",
-        "TemplateName": "Bug"
+        "Type": "Bug"
       },
-      "CodeReviewers": {
-        "Required": ["anisk@microsoft.com"],
-        "Optional": []
-      },
-      "SdlTaskId": 62294501
+      "SdlWorkItemId": 62294501
     },
     {
       "JobNotificationEmail": "anisk@microsoft.com",
-      "FuzzerProperties": {
-        "Fuzzer": {
-          "$type": "libfuzzer"
-        },
-        "FuzzerExe": "validator\\validator.exe",
-        "JobDependencies": [
-          "validator\\clang_rt.asan_dynamic-x86_64.dll"
-        ],
-        "Seeds": [
-          {
-            "Path": "validator\\corpus"
-          }
-        ]
+      "Fuzzer": {
+        "$type": "libfuzzer",
+        "FuzzingHarnessExecutableName": "validator.exe"
       },
+      "JobDependencies": [
+        "validator.exe",
+        "validator.pdb",
+        "clang_rt.asan_dynamic-x86_64.dll"
+      ],
       "OneFuzzJobs": [
         {
           "ProjectName": "MXC",
-          "TargetName": "validator",
-          "EnableMicrosoftTelemetry": true
+          "TargetName": "validator"
         }
       ],
       "AdoTemplate": {
@@ -104,13 +78,9 @@
         "AreaPath": "OS\\Windows Client and Services\\WinPD\\AgOS-Agentic Platform\\Agent Runtime\\Tessera",
         "IterationPath": "OS\\Future",
         "AssignedTo": "anisk@microsoft.com",
-        "TemplateName": "Bug"
+        "Type": "Bug"
       },
-      "CodeReviewers": {
-        "Required": ["anisk@microsoft.com"],
-        "Optional": []
-      },
-      "SdlTaskId": 62294501
+      "SdlWorkItemId": 62294501
     }
   ]
 }
