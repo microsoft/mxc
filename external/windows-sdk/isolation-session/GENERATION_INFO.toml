@@ -1,5 +1,5 @@
 # Provenance information for the generated isolation_session_bindings crate.
-# Updated manually after running the generation tool; verified by the bindings crate's build.rs.
+# Updated manually after regenerating the bindings; verified by the bindings crate's build.rs.
 
 [tool]
 windows_bindgen_version = "0.62.1"
