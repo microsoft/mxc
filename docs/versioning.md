@@ -218,10 +218,8 @@ fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse
        "properties": { "experimental": { "required": ["wslc"] } }
      },
      "then": {
-       "anyOf": [
-         { "not": { "required": ["containment"] } },
-         { "properties": { "containment": { "enum": ["wslc"] } } }
-       ]
+       "required": ["containment"],
+       "properties": { "containment": { "enum": ["wslc"] } }
      }
    }
    ```
@@ -232,20 +230,16 @@ fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse
    {
      "if": { "required": ["wslc"] },
      "then": {
-       "anyOf": [
-         { "not": { "required": ["containment"] } },
-         { "properties": { "containment": { "enum": ["wslc"] } } }
-       ]
+       "required": ["containment"],
+       "properties": { "containment": { "enum": ["wslc"] } }
      }
    }
    ```
 
-   The `then` branch is unchanged. Its `anyOf` reads as "containment must
-   either be absent (let the parser pick the per-OS default) or be explicitly
-   set to the matching concrete value" — i.e. it permits the section under
-   either a matching `containment` or a defaulted one, and rejects only the
-   case where `containment` is set to a *different* concrete backend. The
-   Rust parser then re-validates against the resolved default at run time.
+   The `then` branch is unchanged: a backend section requires `containment`
+   to be set, and the value must be either the concrete backend name or any
+   abstract intent that resolves to it on at least one platform (for
+   example, `processContainer` accepts both `processcontainer` and `process`).
 
 ## Data Flow
 

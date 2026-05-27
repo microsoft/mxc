@@ -621,6 +621,57 @@ fn validate_single_backend_section(
     Err(WxcError::ConfigParse(msg))
 }
 
+/// Returns the experimental-block key that owns the given concrete
+/// containment in the *state-aware* shape (per-backend config nested under
+/// `experimental.<backend>`). Returns `None` for backends with no nested
+/// experimental section.
+fn state_aware_experimental_owner(containment: &ContainmentBackend) -> Option<&'static str> {
+    match containment {
+        ContainmentBackend::WindowsSandbox => Some("windows_sandbox"),
+        ContainmentBackend::Wslc => Some("wslc"),
+        ContainmentBackend::Seatbelt => Some("seatbelt"),
+        ContainmentBackend::IsolationSession => Some("isolation_session"),
+        _ => None,
+    }
+}
+
+/// State-aware mirror of `validate_single_backend_section`: inspects the raw
+/// `experimental` JSON for foreign backend keys.
+fn validate_state_aware_experimental(
+    containment: &ContainmentBackend,
+    experimental_raw: Option<&serde_json::Value>,
+    logger: &mut Logger,
+) -> Result<(), WxcError> {
+    let Some(serde_json::Value::Object(map)) = experimental_raw else {
+        return Ok(());
+    };
+
+    const BACKEND_KEYS: &[&str] = &["windows_sandbox", "wslc", "seatbelt", "isolation_session"];
+    let owned = state_aware_experimental_owner(containment);
+    let foreign: Vec<&'static str> = BACKEND_KEYS
+        .iter()
+        .copied()
+        .filter(|key| map.contains_key(*key) && Some(*key) != owned)
+        .collect();
+
+    if foreign.is_empty() {
+        return Ok(());
+    }
+
+    let foreign_qualified: Vec<String> = foreign
+        .iter()
+        .map(|key| format!("experimental.{key}"))
+        .collect();
+    let msg = format!(
+        "Multiple containment backends configured: state-aware request includes \
+         experimental backend section(s) that do not match 'containment': {}. \
+         Only one backend section is allowed; remove the unused section(s).",
+        foreign_qualified.join(", "),
+    );
+    logger.log_line(&msg);
+    Err(WxcError::ConfigParse(msg))
+}
+
 fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
     convert_raw_config_inner(raw, logger, true)
 }
@@ -1077,8 +1128,17 @@ fn convert_raw_state_aware(
 
     let containment = match raw.containment.as_deref() {
         None => None,
-        Some(s) => Some(parse_containment_str(s, logger)?),
+        Some(wire) => Some(parse_containment_str(wire, logger)?),
     };
+
+    // Mutual-exclusivity in the state-aware shape: per-backend config is
+    // nested under `experimental.<backend>` (e.g. `experimental.isolation_session`
+    // with optional per-phase sub-objects). Reject configs whose `experimental`
+    // block carries a backend key that doesn't match the resolved
+    // `containment`, mirroring the one-shot check.
+    if let Some(backend) = containment.as_ref() {
+        validate_state_aware_experimental(backend, raw.experimental.as_ref(), logger)?;
+    }
 
     // Build a RawConfig surrogate so the inner CodexRequest is populated by the
     // same conversion path one-shot uses for cross-cutting wire fields.
@@ -2789,9 +2849,8 @@ mod tests {
     fn assert_multi_backend_rejected(containment: &str, extra_json: &str, expected_extra: &str) {
         let encoded = make_multi_backend_config(containment, extra_json);
         let mut logger = test_logger();
-        let err = load_request(&encoded, &mut logger, true)
-            .err()
-            .expect("expected rejection but got Ok");
+        let err =
+            load_request(&encoded, &mut logger, true).expect_err("expected rejection but got Ok");
         let msg = format!("{err:?}");
         assert!(
             msg.contains("Multiple containment backends configured"),
@@ -2878,6 +2937,34 @@ mod tests {
         assert_config_accepted(
             "lxc",
             r#""lxc": {"distribution": "alpine", "release": "3.20"}, "experimental": {"test": {"message": "hello"}}"#,
+        );
+    }
+
+    // State-aware path: an `experimental` block whose backend key doesn't
+    // match the resolved `containment` is rejected the same way as in the
+    // one-shot path.
+    #[test]
+    fn state_aware_foreign_experimental_backend_rejected() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {
+                "isolation_session": {},
+                "wslc": {"image": "alpine:latest"}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_mxc_request(&encoded, &mut logger, true)
+            .expect_err("state-aware config with foreign experimental backend should be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("Multiple containment backends configured"),
+            "error did not mention multi-backend rejection: {msg}"
+        );
+        assert!(
+            msg.contains("experimental.wslc"),
+            "error did not name the foreign section: {msg}"
         );
     }
 }
