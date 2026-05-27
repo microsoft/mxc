@@ -386,6 +386,10 @@ pub struct ContainerPolicy {
     pub fallback: FallbackPolicy,
     pub default_network_policy: NetworkPolicy,
     pub network_enforcement_mode: NetworkEnforcementMode,
+    /// When true, the sandboxed process may bind() + listen() on local IPs
+    /// and accept incoming connections. Independent of `default_network_policy`
+    /// (which governs outbound traffic).
+    pub allow_local_network: bool,
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
     #[serde(skip)]

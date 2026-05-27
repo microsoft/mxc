@@ -639,6 +639,37 @@ describe('createConfigFromPolicy', () => {
       }
     });
 
+    it('should propagate allowLocalNetwork to network.allowLocalNetwork on macOS', () => {
+      // server.listen() on macOS needs Seatbelt's `network-inbound` rule,
+      // which the runner emits when ContainerPolicy.allow_local_network is
+      // true. The SDK is responsible for forwarding allowLocalNetwork through
+      // the wire format so the Rust profile builder sees it.
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.5.0-alpha',
+          network: { allowOutbound: true, allowLocalNetwork: true },
+        });
+        assert.strictEqual(config.containment, 'seatbelt');
+        assert.strictEqual(config.network!.allowLocalNetwork, true);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should omit allowLocalNetwork when not set on macOS', () => {
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.5.0-alpha',
+          network: { allowOutbound: true },
+        });
+        assert.strictEqual(config.network!.allowLocalNetwork, undefined);
+      } finally {
+        restore();
+      }
+    });
+
     it('should reject proxy configuration on macOS', () => {
       mockDarwin();
       try {
