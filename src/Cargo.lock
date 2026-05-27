@@ -498,7 +498,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -525,7 +525,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -801,7 +801,7 @@ dependencies = [
 [[package]]
 name = "hyperlight-common"
 version = "0.15.0"
-source = "git+https://github.com/hyperlight-dev/hyperlight?branch=disk_snapshot_copy#621cc03beadae3d9158e72d07d3d156abf2b21fd"
+source = "git+https://github.com/danbugs/hyperlight?rev=5cf37d92#5cf37d92262c918e7d633577a6cf946fb1f069bd"
 dependencies = [
  "anyhow",
  "flatbuffers",
@@ -815,7 +815,7 @@ dependencies = [
 [[package]]
 name = "hyperlight-host"
 version = "0.15.0"
-source = "git+https://github.com/hyperlight-dev/hyperlight?branch=disk_snapshot_copy#621cc03beadae3d9158e72d07d3d156abf2b21fd"
+source = "git+https://github.com/danbugs/hyperlight?rev=5cf37d92#5cf37d92262c918e7d633577a6cf946fb1f069bd"
 dependencies = [
  "anyhow",
  "bitflags 2.11.1",
@@ -855,8 +855,8 @@ dependencies = [
 
 [[package]]
 name = "hyperlight-unikraft-host"
-version = "0.8.0"
-source = "git+https://github.com/hyperlight-dev/hyperlight-unikraft?tag=v0.8.0#b15806cc03140b139bac9375cf88739d5937151f"
+version = "0.9.0"
+source = "git+https://github.com/hyperlight-dev/hyperlight-unikraft?tag=v0.9.0#05c79a72845d88f1b9e5ae4b47e62991235716d4"
 dependencies = [
  "anyhow",
  "base64",
@@ -1692,7 +1692,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1985,7 +1985,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2405,7 +2405,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
