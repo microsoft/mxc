@@ -2762,106 +2762,99 @@ mod tests {
 
     // ====== Single-backend-section enforcement ======
 
-    fn assert_multi_backend_rejected(json: &str, expected_extra: &str) {
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let err = load_request(&encoded, &mut logger, true)
-            .expect_err("config with multiple backend sections should be rejected");
-        let msg = format!("{err:?}");
-        assert!(
-            msg.contains("Multiple containment backends configured"),
-            "error did not mention multi-backend rejection: {msg}"
+    /// Splices a backend fragment into a minimal one-shot config and returns
+    /// the base64-encoded payload `load_request` expects.
+    fn make_multi_backend_config(containment: &str, extra_json: &str) -> String {
+        let json = format!(
+            r#"{{ "containment": "{containment}", "process": {{"commandLine": "echo hi"}}, {extra_json} }}"#
         );
-        assert!(
-            msg.contains(expected_extra),
-            "error did not name the foreign section '{expected_extra}': {msg}"
-        );
+        base64_encode(json.as_bytes())
     }
 
     #[test]
-    fn lxc_containment_with_processcontainer_section_rejected() {
-        let json = r#"{
-            "containment": "lxc",
-            "process": {"commandLine": "echo hi"},
-            "lxc": {"distribution": "alpine", "release": "3.20"},
-            "processContainer": {"leastPrivilege": true}
-        }"#;
-        assert_multi_backend_rejected(json, "processContainer");
+    fn multi_backend_sections_are_rejected() {
+        // (case label, containment, JSON fragment with the foreign + owning
+        // section(s), substring expected in the error message).
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "lxc + processContainer",
+                "lxc",
+                r#""lxc": {"distribution": "alpine", "release": "3.20"}, "processContainer": {"leastPrivilege": true}"#,
+                "processContainer",
+            ),
+            (
+                // `appContainer` is a deprecated alias for `processContainer`;
+                // the check applies to the canonical key after aliasing.
+                "lxc + legacy appContainer alias",
+                "lxc",
+                r#""lxc": {"distribution": "alpine", "release": "3.20"}, "appContainer": {"leastPrivilege": true}"#,
+                "processContainer",
+            ),
+            (
+                "processcontainer + lxc",
+                "processcontainer",
+                r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
+                "lxc",
+            ),
+            (
+                // Per-backend blocks nested under `experimental` are subject
+                // to the same check as top-level blocks.
+                "processcontainer + experimental.seatbelt",
+                "processcontainer",
+                r#""experimental": {"seatbelt": {"guiAccess": true}}"#,
+                "experimental.seatbelt",
+            ),
+            (
+                // Sectionless backend: bubblewrap doesn't own any per-backend
+                // block, so any backend block is foreign.
+                "bubblewrap + lxc",
+                "bubblewrap",
+                r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
+                "lxc",
+            ),
+        ];
+
+        for (label, containment, extra_json, expected_extra) in cases {
+            let encoded = make_multi_backend_config(containment, extra_json);
+            let mut logger = test_logger();
+            let err = load_request(&encoded, &mut logger, true)
+                .err()
+                .unwrap_or_else(|| panic!("[{label}] expected rejection but got Ok"));
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("Multiple containment backends configured"),
+                "[{label}] error did not mention multi-backend rejection: {msg}"
+            );
+            assert!(
+                msg.contains(expected_extra),
+                "[{label}] error did not name the foreign section '{expected_extra}': {msg}"
+            );
+        }
     }
 
     #[test]
-    fn lxc_containment_with_legacy_app_container_alias_rejected() {
-        // `appContainer` is a deprecated alias for `processContainer`; the
-        // single-backend check applies to the canonical key after aliasing,
-        // so this combination is still rejected.
-        let json = r#"{
-            "containment": "lxc",
-            "process": {"commandLine": "echo hi"},
-            "lxc": {"distribution": "alpine", "release": "3.20"},
-            "appContainer": {"leastPrivilege": true}
-        }"#;
-        assert_multi_backend_rejected(json, "processContainer");
-    }
+    fn matching_or_neutral_sections_are_accepted() {
+        // (case label, containment, JSON fragment that the parser should accept).
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "lxc + matching lxc section",
+                "lxc",
+                r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
+            ),
+            (
+                // `experimental.test` is a generic test feature, not a backend
+                // block, so it should not trigger the multi-backend check.
+                "lxc + experimental.test (non-backend)",
+                "lxc",
+                r#""lxc": {"distribution": "alpine", "release": "3.20"}, "experimental": {"test": {"message": "hello"}}"#,
+            ),
+        ];
 
-    #[test]
-    fn processcontainer_containment_with_lxc_section_rejected() {
-        let json = r#"{
-            "containment": "processcontainer",
-            "process": {"commandLine": "echo hi"},
-            "lxc": {"distribution": "alpine", "release": "3.20"}
-        }"#;
-        assert_multi_backend_rejected(json, "lxc");
-    }
-
-    #[test]
-    fn experimental_backend_section_for_other_containment_rejected() {
-        // Per-backend blocks nested under `experimental` (here: seatbelt)
-        // are subject to the same single-backend check as top-level blocks.
-        let json = r#"{
-            "containment": "processcontainer",
-            "process": {"commandLine": "echo hi"},
-            "experimental": {"seatbelt": {"guiAccess": true}}
-        }"#;
-        assert_multi_backend_rejected(json, "experimental.seatbelt");
-    }
-
-    #[test]
-    fn bubblewrap_containment_with_lxc_section_rejected() {
-        // Bubblewrap has no per-backend section, so any backend block is foreign.
-        let json = r#"{
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo hi"},
-            "lxc": {"distribution": "alpine", "release": "3.20"}
-        }"#;
-        assert_multi_backend_rejected(json, "lxc");
-    }
-
-    #[test]
-    fn lxc_containment_with_only_lxc_section_accepted() {
-        // Sanity check: the matching section is still accepted.
-        let json = r#"{
-            "containment": "lxc",
-            "process": {"commandLine": "echo hi"},
-            "lxc": {"distribution": "alpine", "release": "3.20"}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Lxc);
-    }
-
-    #[test]
-    fn experimental_test_section_does_not_count_as_backend() {
-        // `experimental.test` is a generic test feature, not a backend block,
-        // so it should not trigger the multi-backend check.
-        let json = r#"{
-            "containment": "lxc",
-            "process": {"commandLine": "echo hi"},
-            "lxc": {"distribution": "alpine", "release": "3.20"},
-            "experimental": {"test": {"message": "hello"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        load_request(&encoded, &mut logger, true).unwrap();
+        for (label, containment, extra_json) in cases {
+            let encoded = make_multi_backend_config(containment, extra_json);
+            let mut logger = test_logger();
+            load_request(&encoded, &mut logger, true)
+                .unwrap_or_else(|e| panic!("[{label}] expected accept, got error: {e:?}"));
+        }
     }
 }
