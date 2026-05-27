@@ -55,6 +55,7 @@ fn embed_version_info_windows(file_description: &str, original_filename: &str) {
 }
 
 /// Return the short git commit hash, or `"unknown"` when git is unavailable.
+#[cfg(windows)]
 fn git_short_hash() -> String {
     Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
