@@ -32,19 +32,8 @@ jobs:
   steps:
     - checkout: self
 
-    # Keep all crate fetches going through the internal feed.
-    # Write to both project-level (for `cargo fuzz build`) and user-level
-    # (for `cargo install` which only reads $CARGO_HOME/config.toml).
-    - powershell: |
-        $feedConfig = Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"
-        Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + $feedConfig)
-        $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { "$env:USERPROFILE\.cargo" }
-        New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null
-        Add-Content -Path "$cargoHome\config.toml" -Value ("`n" + $feedConfig)
-      displayName: Setup Cargo Config
-
     # Install nightly Rust via rustup-init. The toolchain itself runs on the
-    # hosted agent only -- crates come from Mxc-Azure-Feed (see above).
+    # hosted agent only -- crates come from Mxc-Azure-Feed (see below).
     - powershell: |
         $rustupInit = "$env:TEMP\rustup-init.exe"
         Invoke-WebRequest -UseBasicParsing -Uri 'https://win.rustup.rs/x86_64' -OutFile $rustupInit
@@ -52,6 +41,18 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw "rustup-init failed" }
         Write-Host "##vso[task.prependpath]$env:USERPROFILE\.cargo\bin"
       displayName: Install Rust nightly
+
+    # Keep all crate fetches going through the internal feed.
+    # Write to both project-level (for `cargo fuzz build`) and user-level
+    # (for `cargo install` which only reads $CARGO_HOME/config.toml).
+    # Runs AFTER rustup-init so the config isn't overwritten.
+    - powershell: |
+        $feedConfig = Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"
+        Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + $feedConfig)
+        $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { "$env:USERPROFILE\.cargo" }
+        New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null
+        Add-Content -Path "$cargoHome\config.toml" -Value ("`n" + $feedConfig)
+      displayName: Setup Cargo Config
 
     - powershell: |
         rustc --version
