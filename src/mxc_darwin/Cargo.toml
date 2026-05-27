@@ -7,6 +7,9 @@ edition.workspace = true
 name = "mxc-exec-mac"
 path = "src/main.rs"
 
+[build-dependencies]
+mxc_build_common.workspace = true
+
 [dependencies]
 wxc_common = { workspace = true }
 seatbelt_common = { path = "../seatbelt_common" }
