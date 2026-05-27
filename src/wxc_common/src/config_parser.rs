@@ -2783,90 +2783,101 @@ mod tests {
         base64_encode(json.as_bytes())
     }
 
-    #[test]
-    fn multi_backend_sections_are_rejected() {
-        // (case label, containment, JSON fragment with the foreign + owning
-        // section(s), substring expected in the error message).
-        let cases: &[(&str, &str, &str, &str)] = &[
-            (
-                "lxc + processContainer",
-                "lxc",
-                r#""lxc": {"distribution": "alpine", "release": "3.20"}, "processContainer": {"leastPrivilege": true}"#,
-                "processContainer",
-            ),
-            (
-                // `appContainer` is a deprecated alias for `processContainer`;
-                // the check applies to the canonical key after aliasing.
-                "lxc + legacy appContainer alias",
-                "lxc",
-                r#""lxc": {"distribution": "alpine", "release": "3.20"}, "appContainer": {"leastPrivilege": true}"#,
-                "processContainer",
-            ),
-            (
-                "processcontainer + lxc",
-                "processcontainer",
-                r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
-                "lxc",
-            ),
-            (
-                // Per-backend blocks nested under `experimental` are subject
-                // to the same check as top-level blocks.
-                "processcontainer + experimental.seatbelt",
-                "processcontainer",
-                r#""experimental": {"seatbelt": {"guiAccess": true}}"#,
-                "experimental.seatbelt",
-            ),
-            (
-                // Sectionless backend: bubblewrap doesn't own any per-backend
-                // block, so any backend block is foreign.
-                "bubblewrap + lxc",
-                "bubblewrap",
-                r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
-                "lxc",
-            ),
-        ];
+    /// Runs the parser against a config that should be rejected by the
+    /// single-backend-section check and asserts the error mentions both the
+    /// generic rejection phrase and the foreign section name.
+    fn assert_multi_backend_rejected(containment: &str, extra_json: &str, expected_extra: &str) {
+        let encoded = make_multi_backend_config(containment, extra_json);
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true)
+            .err()
+            .expect("expected rejection but got Ok");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("Multiple containment backends configured"),
+            "error did not mention multi-backend rejection: {msg}"
+        );
+        assert!(
+            msg.contains(expected_extra),
+            "error did not name the foreign section '{expected_extra}': {msg}"
+        );
+    }
 
-        for (label, containment, extra_json, expected_extra) in cases {
-            let encoded = make_multi_backend_config(containment, extra_json);
-            let mut logger = test_logger();
-            let err = load_request(&encoded, &mut logger, true)
-                .err()
-                .unwrap_or_else(|| panic!("[{label}] expected rejection but got Ok"));
-            let msg = format!("{err:?}");
-            assert!(
-                msg.contains("Multiple containment backends configured"),
-                "[{label}] error did not mention multi-backend rejection: {msg}"
-            );
-            assert!(
-                msg.contains(expected_extra),
-                "[{label}] error did not name the foreign section '{expected_extra}': {msg}"
-            );
-        }
+    /// Runs the parser against a config that should be accepted by the
+    /// single-backend-section check and panics with the parser error if not.
+    fn assert_config_accepted(containment: &str, extra_json: &str) {
+        let encoded = make_multi_backend_config(containment, extra_json);
+        let mut logger = test_logger();
+        load_request(&encoded, &mut logger, true)
+            .unwrap_or_else(|e| panic!("expected accept, got error: {e:?}"));
     }
 
     #[test]
-    fn matching_or_neutral_sections_are_accepted() {
-        // (case label, containment, JSON fragment that the parser should accept).
-        let cases: &[(&str, &str, &str)] = &[
-            (
-                "lxc + matching lxc section",
-                "lxc",
-                r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
-            ),
-            (
-                // `experimental.test` is a generic test feature, not a backend
-                // block, so it should not trigger the multi-backend check.
-                "lxc + experimental.test (non-backend)",
-                "lxc",
-                r#""lxc": {"distribution": "alpine", "release": "3.20"}, "experimental": {"test": {"message": "hello"}}"#,
-            ),
-        ];
+    fn lxc_containment_with_processcontainer_section_rejected() {
+        assert_multi_backend_rejected(
+            "lxc",
+            r#""lxc": {"distribution": "alpine", "release": "3.20"}, "processContainer": {"leastPrivilege": true}"#,
+            "processContainer",
+        );
+    }
 
-        for (label, containment, extra_json) in cases {
-            let encoded = make_multi_backend_config(containment, extra_json);
-            let mut logger = test_logger();
-            load_request(&encoded, &mut logger, true)
-                .unwrap_or_else(|e| panic!("[{label}] expected accept, got error: {e:?}"));
-        }
+    // `appContainer` is a deprecated alias for `processContainer`; the check
+    // applies to the canonical key after aliasing.
+    #[test]
+    fn lxc_containment_with_legacy_app_container_alias_rejected() {
+        assert_multi_backend_rejected(
+            "lxc",
+            r#""lxc": {"distribution": "alpine", "release": "3.20"}, "appContainer": {"leastPrivilege": true}"#,
+            "processContainer",
+        );
+    }
+
+    #[test]
+    fn processcontainer_containment_with_lxc_section_rejected() {
+        assert_multi_backend_rejected(
+            "processcontainer",
+            r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
+            "lxc",
+        );
+    }
+
+    // Per-backend blocks nested under `experimental` are subject to the same
+    // check as top-level blocks.
+    #[test]
+    fn experimental_backend_section_for_other_containment_rejected() {
+        assert_multi_backend_rejected(
+            "processcontainer",
+            r#""experimental": {"seatbelt": {"guiAccess": true}}"#,
+            "experimental.seatbelt",
+        );
+    }
+
+    // Sectionless backend: bubblewrap doesn't own any per-backend block, so
+    // any backend block is foreign.
+    #[test]
+    fn bubblewrap_containment_with_lxc_section_rejected() {
+        assert_multi_backend_rejected(
+            "bubblewrap",
+            r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
+            "lxc",
+        );
+    }
+
+    #[test]
+    fn lxc_containment_with_matching_lxc_section_accepted() {
+        assert_config_accepted(
+            "lxc",
+            r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
+        );
+    }
+
+    // `experimental.test` is a generic test feature, not a backend block,
+    // so it should not trigger the multi-backend check.
+    #[test]
+    fn experimental_test_section_does_not_count_as_backend() {
+        assert_config_accepted(
+            "lxc",
+            r#""lxc": {"distribution": "alpine", "release": "3.20"}, "experimental": {"test": {"message": "hello"}}"#,
+        );
     }
 }
