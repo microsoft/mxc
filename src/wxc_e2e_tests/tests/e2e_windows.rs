@@ -748,7 +748,11 @@ fn hyperlight_suite() {
             }
         });
 
-        let result = run_wxc_state_aware("hyperlight-fs-readonly", &config, &["--debug", "--experimental"]);
+        let result = run_wxc_state_aware(
+            "hyperlight-fs-readonly",
+            &config,
+            &["--debug", "--experimental"],
+        );
         let combined = result.combined_output();
 
         if result.code != Some(0) {
@@ -761,9 +765,14 @@ fn hyperlight_suite() {
                 "hyperlight-fs-readonly: could not read from readonly mount\n--- combined ---\n{combined}"
             ));
         } else if !rw_dir.join("output.txt").exists() {
-            failures.push("hyperlight-fs-readonly: readwrite mount did not produce output.txt".to_string());
+            failures.push(
+                "hyperlight-fs-readonly: readwrite mount did not produce output.txt".to_string(),
+            );
         } else if ro_dir.join("forbidden.txt").exists() {
-            failures.push("hyperlight-fs-readonly: readonly mount was writable — forbidden.txt was created".to_string());
+            failures.push(
+                "hyperlight-fs-readonly: readonly mount was writable — forbidden.txt was created"
+                    .to_string(),
+            );
         } else if !combined.contains("READONLY_ENFORCED") {
             failures.push(format!(
                 "hyperlight-fs-readonly: guest did not confirm enforcement\n--- combined ---\n{combined}"
