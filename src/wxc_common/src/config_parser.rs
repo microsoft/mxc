@@ -534,17 +534,17 @@ fn present_backend_sections(raw: &RawConfig) -> Vec<&'static str> {
     if raw.lxc.is_some() {
         sections.push("lxc");
     }
-    if let Some(exp) = raw.experimental.as_ref() {
-        if exp.windows_sandbox.is_some() {
+    if let Some(experimental) = raw.experimental.as_ref() {
+        if experimental.windows_sandbox.is_some() {
             sections.push("experimental.windows_sandbox");
         }
-        if exp.wslc.is_some() {
+        if experimental.wslc.is_some() {
             sections.push("experimental.wslc");
         }
-        if exp.seatbelt.is_some() {
+        if experimental.seatbelt.is_some() {
             sections.push("experimental.seatbelt");
         }
-        if exp.isolation_session.is_some() {
+        if experimental.isolation_session.is_some() {
             sections.push("experimental.isolation_session");
         }
     }
@@ -554,8 +554,8 @@ fn present_backend_sections(raw: &RawConfig) -> Vec<&'static str> {
 /// Returns the per-backend section "owned" by the given concrete containment,
 /// if any. Abstract intents and backends without a per-backend section return
 /// `None`, in which case no backend section is permitted.
-fn owned_backend_section(c: &ContainmentBackend) -> Option<&'static str> {
-    match c {
+fn owned_backend_section(containment: &ContainmentBackend) -> Option<&'static str> {
+    match containment {
         ContainmentBackend::ProcessContainer => Some("processContainer"),
         ContainmentBackend::Lxc => Some("lxc"),
         ContainmentBackend::WindowsSandbox => Some("experimental.windows_sandbox"),
@@ -583,7 +583,7 @@ fn validate_single_backend_section(
     let extras: Vec<&'static str> = present_sections
         .iter()
         .copied()
-        .filter(|s| Some(*s) != owned)
+        .filter(|section| Some(*section) != owned)
         .collect();
     if extras.is_empty() {
         return Ok(());
@@ -2809,7 +2809,7 @@ mod tests {
         let encoded = make_multi_backend_config(containment, extra_json);
         let mut logger = test_logger();
         load_request(&encoded, &mut logger, true)
-            .unwrap_or_else(|e| panic!("expected accept, got error: {e:?}"));
+            .unwrap_or_else(|err| panic!("expected accept, got error: {err:?}"));
     }
 
     #[test]
