@@ -76,14 +76,20 @@ impl HostFilter {
 }
 
 fn strip_port(host_port: &str) -> &str {
-    // For IPv6 literals (e.g. "[::1]:443") drop the bracketed prefix's port.
-    // For plain "host:port" or bare "host" forms, split on the last ':'.
+    // Bracketed IPv6 form: "[::1]" or "[::1]:443" -> "::1". Always return the
+    // inner address so it can be matched against an allowlist entry stored
+    // without brackets (e.g. `allowedHosts: ["::1"]`).
+    if let Some(stripped) = host_port.strip_prefix('[') {
+        if let Some(end) = stripped.find(']') {
+            return &stripped[..end];
+        }
+    }
+    // Plain "host:port" or unbracketed IPv6 (which has multiple colons).
     if let Some(idx) = host_port.rfind(':') {
-        // Avoid stripping a colon that's part of an IPv6 literal without
-        // a closing bracket — extremely rare for HTTP CONNECT authorities
-        // but defensive nonetheless.
-        if !host_port[..idx].contains(']') && host_port[..idx].contains(':') {
-            return host_port; // looks like raw IPv6, leave intact
+        // If the prefix before the rightmost colon already contains a colon,
+        // this is an unbracketed IPv6 literal with no port — leave intact.
+        if host_port[..idx].contains(':') {
+            return host_port;
         }
         return &host_port[..idx];
     }
@@ -337,8 +343,25 @@ mod tests {
 
     #[test]
     fn strip_port_handles_ipv6_literal() {
-        assert_eq!(strip_port("[::1]:443"), "[::1]");
+        // Bracketed IPv6 with port -> bare address (matches an allowlist
+        // entry of "::1" or "fe80::1").
+        assert_eq!(strip_port("[::1]:443"), "::1");
+        assert_eq!(strip_port("[::1]"), "::1");
+        assert_eq!(strip_port("[fe80::1]:8080"), "fe80::1");
+        // Unbracketed IPv6 has no port and must be preserved verbatim.
+        assert_eq!(strip_port("::1"), "::1");
+        // Plain hostname:port and bare hostname.
         assert_eq!(strip_port("api.github.com:443"), "api.github.com");
         assert_eq!(strip_port("api.github.com"), "api.github.com");
+    }
+
+    #[test]
+    fn ipv6_literal_allowlist_matches_bracketed_form() {
+        // A user-supplied allowlist entry of "::1" should permit a CONNECT
+        // to the bracketed form "[::1]:443" emitted by HTTP clients.
+        let f = HostFilter::new(vec!["::1".into()], vec![], DefaultPolicy::Allow);
+        assert!(f.permits("[::1]:443"));
+        assert!(f.permits("[::1]"));
+        assert!(!f.permits("[fe80::1]:443"));
     }
 }

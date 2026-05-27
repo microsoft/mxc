@@ -64,16 +64,24 @@ impl BubblewrapScriptRunner {
 
 impl ScriptRunner for BubblewrapScriptRunner {
     fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
-        if !Self::is_bwrap_available() {
-            return Err(ScriptResponse::error(
-                "Bubblewrap (bwrap) is not installed or not on PATH. \
-                 Install it via your package manager (e.g., apt install bubblewrap).",
-            ));
-        }
-
+        // User-input validation runs before the environmental `bwrap`
+        // probe so config errors are reported deterministically even on
+        // hosts without bwrap installed.
         if request.script_code.is_empty() {
             return Err(ScriptResponse::error(
                 "script_code is empty — nothing to execute.",
+            ));
+        }
+
+        // The bundled `linux-test-proxy` is a testing-only HTTP proxy with
+        // a deliberately permissive feature set (no auth, no body limits,
+        // no hop-by-hop header handling). Gate it behind --experimental so
+        // it cannot be enabled from a stock production config.
+        if request.policy.network_proxy.builtin_test_server && !request.experimental_enabled {
+            return Err(ScriptResponse::error(
+                "network.proxy.builtinTestServer is a testing-only feature and requires \
+                 --experimental. For production, point network.proxy at a real HTTP \
+                 proxy via 'localhost' or 'url'.",
             ));
         }
 
@@ -83,6 +91,13 @@ impl ScriptRunner for BubblewrapScriptRunner {
                 "script_timeout {}ms is below the minimum of {}ms",
                 request.script_timeout, POLL_INTERVAL_MS
             )));
+        }
+
+        if !Self::is_bwrap_available() {
+            return Err(ScriptResponse::error(
+                "Bubblewrap (bwrap) is not installed or not on PATH. \
+                 Install it via your package manager (e.g., apt install bubblewrap).",
+            ));
         }
 
         Ok(())
@@ -300,5 +315,49 @@ fn wait_with_timeout(
             }
             Err(e) => return Err(WaitError::Io(e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wxc_common::models::ProxyConfig;
+
+    fn base_request() -> CodexRequest {
+        CodexRequest {
+            script_code: "echo hi".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_rejects_builtin_test_server_without_experimental() {
+        let mut req = base_request();
+        req.policy.network_proxy = ProxyConfig {
+            address: None,
+            builtin_test_server: true,
+        };
+        req.experimental_enabled = false;
+
+        let runner = BubblewrapScriptRunner::new();
+        let err = runner.validate_runner(&req).unwrap_err();
+        assert!(
+            err.error_message.contains("builtinTestServer")
+                && err.error_message.contains("--experimental"),
+            "expected experimental-gate error, got: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_script_before_environment_probe() {
+        // Empty script_code is a user-input error and must be surfaced
+        // even on hosts without bwrap installed (independent of CI image).
+        let mut req = base_request();
+        req.script_code = String::new();
+
+        let runner = BubblewrapScriptRunner::new();
+        let err = runner.validate_runner(&req).unwrap_err();
+        assert!(err.error_message.contains("script_code is empty"));
     }
 }

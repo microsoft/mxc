@@ -79,6 +79,13 @@ mod linux_main {
         // 1. Tie our lifetime to the parent so a crash of `lxc-exec` cannot
         //    leave us behind. Must happen before any work — and we must check
         //    for the parent-already-dead race immediately after.
+        //
+        //    NOTE: `PR_SET_PDEATHSIG` is a per-thread setting and applies to
+        //    the thread that invokes `prctl`. We rely on `#[tokio::main]`
+        //    keeping THIS thread (the runtime's driver) alive for the whole
+        //    process lifetime. Do NOT move this prctl call into a spawned
+        //    tokio task; that would silently break the parent-death guarantee
+        //    when the spawning thread parks or migrates.
         unsafe {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0);
             if libc::getppid() == 1 {
