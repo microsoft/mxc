@@ -72,6 +72,15 @@ function Invoke-EventDaclParser {
     foreach ($ev in $Events) {
         [xml] $xmlEvent = $ev.ToXml()
 
+        # Event ID 27 is a UI event. It doesn't contribute to filesystem or
+        # capability config, but it tells us we need to enable UI later.
+        # It currently only means 
+        if ($ev.Id -eq 27) {
+            Write-VHost "UI Injection event observed"
+            $needUI = $true
+            continue
+        }
+
         # If the event carries a DACL ACE blob, feed it through extract_caps.ps1
         # and merge any matched capability names into the result set. Some
         # event payloads don't have a populated ComplexData[4] node, so we
@@ -82,14 +91,6 @@ function Invoke-EventDaclParser {
             if ($caps) {
                 foreach ($c in $caps) { [void]$requestedCapabilities.Add($c) }
             }
-        }
-
-        # Event ID 27 is a UI event. It doesn't contribute to filesystem or
-        # capability config, but it tells us we need to enable UI later.
-        if ($ev.Id -eq 27) {
-            Write-VHost "UI EVENT FOUND"
-            $needUI = $true
-            continue
         }
 
         # Remaining events are EventID=14 file-access failures. Pull the

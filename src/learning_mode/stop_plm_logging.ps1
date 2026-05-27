@@ -295,11 +295,19 @@ if ($ConfigPath -and (($ValidAccessEvents.Count -gt 0) -or ($AllRequestedCapabil
         }
     }
 
-    # Show UI and allow keyboard+mouse input.
     if ($NeedUI) 
     {
-        config.ui.disable = $false
-        config.ui.injection = $true
+        if (-not $config.PSObject.Properties['ui']) {
+            $config | Add-Member -NotePropertyName ui -NotePropertyValue ([pscustomobject]@{})
+        }
+        if (-not $config.ui.PSObject.Properties['injection']) {
+            $config.ui | Add-Member -NotePropertyName injection -NotePropertyValue $true
+        }
+        else {
+            $config.ui.injection = $true
+        }
+
+        Write-Host ("Added to UI injection") -ForegroundColor Cyan
     }
 
     # Write out new config next to original with adjusted_ prefix.
