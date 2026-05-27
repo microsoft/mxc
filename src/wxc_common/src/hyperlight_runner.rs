@@ -315,16 +315,13 @@ impl HyperlightScriptRunner {
 
     /// Translate MXC's network policy fields into a pyhl `NetworkPolicy`.
     ///
-    /// - `default_network_policy == Block` → `None` (networking disabled)
     /// - `allowed_hosts` non-empty → `AllowList` (only listed hosts reachable)
     /// - `blocked_hosts` non-empty → `BlockList` (listed hosts denied, rest allowed)
+    /// - `default_network_policy == Block`, no host lists → `None` (networking disabled)
     /// - `default_network_policy == Allow`, no host lists → `AllowAll`
     fn network_policy_from_request(
         request: &CodexRequest,
     ) -> Result<Option<hyperlight_unikraft::NetworkPolicy>, PyhlError> {
-        if request.policy.default_network_policy == NetworkPolicy::Block {
-            return Ok(None);
-        }
         if !request.policy.allowed_hosts.is_empty() {
             let allow_list = AllowList::from_hosts(&request.policy.allowed_hosts)
                 .map_err(|e| PyhlError::Preflight(format!("resolve allowed_hosts: {e:#}")))?;
@@ -338,6 +335,9 @@ impl HyperlightScriptRunner {
             return Ok(Some(hyperlight_unikraft::NetworkPolicy::BlockList(
                 block_list,
             )));
+        }
+        if request.policy.default_network_policy == NetworkPolicy::Block {
+            return Ok(None);
         }
         Ok(Some(hyperlight_unikraft::NetworkPolicy::AllowAll))
     }
@@ -781,7 +781,13 @@ mod tests {
 
     #[test]
     fn network_policy_allow_all_when_default_allow() {
-        let request = CodexRequest::default();
+        let request = CodexRequest {
+            policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let policy = HyperlightScriptRunner::network_policy_from_request(&request).unwrap();
         assert!(matches!(
             policy,
