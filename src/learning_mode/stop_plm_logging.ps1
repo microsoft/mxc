@@ -300,14 +300,14 @@ if ($ConfigPath -and (($ValidAccessEvents.Count -gt 0) -or ($AllRequestedCapabil
         if (-not $config.PSObject.Properties['ui']) {
             $config | Add-Member -NotePropertyName ui -NotePropertyValue ([pscustomobject]@{})
         }
-        if (-not $config.ui.PSObject.Properties['injection']) {
-            $config.ui | Add-Member -NotePropertyName injection -NotePropertyValue $true
+        if (-not $config.ui.PSObject.Properties['disable']) {
+            $config.ui | Add-Member -NotePropertyName disable -NotePropertyValue $true
         }
         else {
-            $config.ui.injection = $true
+            $config.ui.disable = $false
         }
 
-        Write-Host ("Added to UI injection") -ForegroundColor Cyan
+        Write-Host ("Enabling access to GUI subsystem ") -ForegroundColor Cyan
     }
 
     # Write out new config next to original with adjusted_ prefix.
