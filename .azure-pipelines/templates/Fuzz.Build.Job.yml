@@ -45,7 +45,6 @@ jobs:
     # Keep all crate fetches going through the internal feed.
     # Write to both project-level (for `cargo fuzz build`) and user-level
     # (for `cargo install` which only reads $CARGO_HOME/config.toml).
-    # Runs AFTER rustup-init so the config isn't overwritten.
     - powershell: |
         $feedConfig = Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"
         Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + $feedConfig)
@@ -53,6 +52,10 @@ jobs:
         New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null
         Add-Content -Path "$cargoHome\config.toml" -Value ("`n" + $feedConfig)
       displayName: Setup Cargo Config
+
+    - task: CargoAuthenticate@0
+      inputs:
+        configFile: '$(Build.SourcesDirectory)/.cargo/config.toml'
 
     - powershell: |
         rustc --version
