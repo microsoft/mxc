@@ -572,7 +572,10 @@ impl IsolationSessionManager {
 /// `STILL_ACTIVE` so a transient read failure does not short-circuit the
 /// escalation.
 fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, IsolationSessionError> {
-    const STILL_ACTIVE: i32 = 0x103;
+    // `STILL_ACTIVE` (0x103) is exposed by the `windows` crate as
+    // `STATUS_PENDING: NTSTATUS` — same numeric value, different name.
+    use windows::Win32::Foundation::STATUS_PENDING;
+    const STILL_ACTIVE: i32 = STATUS_PENDING.0;
     let mut exit_code = process
         .ExitCode()
         .map_err(|e| lifecycle_err(format!("get ExitCode failed: {}", e)))?;

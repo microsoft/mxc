@@ -1,0 +1,29 @@
+# Pin the Rust toolchain used for local development to match CI.
+#
+# CI uses `ms-prod-1.93` (Microsoft's internal Rust 1.93 distribution
+# from the Mxc-Azure-Feed) — see
+# `.azure-pipelines/templates/Rust.Build.Job.yml` and
+# `.azure-pipelines/templates/Mac.Build.Job.yml`. Public rustup users
+# get the equivalent open-source channel `1.93` here.
+#
+# Why pin: clippy lints can appear, be downgraded, be reworded, or
+# change defaults between Rust releases. Without this pin, a developer
+# on a newer rustup toolchain can pass local
+# `cargo clippy --all-targets --all-features --release -- -D warnings`
+# and still hit failures in CI on lints introduced in (or differently
+# defaulted by) the older toolchain. Pinning eliminates that skew
+# entirely.
+#
+# Bumping: bump the `version: 'ms-prod-1.<N>'` lines in the two
+# `.azure-pipelines/templates/*.Build.Job.yml` files and `channel`
+# here in the same commit. Then run the standard pre-push ladder
+# (see `.github/copilot-instructions.md` § Verification) against the
+# new toolchain.
+#
+# Opt-out: `cargo +<channel> ...` or `RUSTUP_TOOLCHAIN=<channel> ...`
+# for one-off testing on a different toolchain.
+
+[toolchain]
+channel = "1.93"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

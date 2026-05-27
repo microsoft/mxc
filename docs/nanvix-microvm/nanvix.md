@@ -1,12 +1,20 @@
-# MicroVM Backend (NanVix)
+# Nanvix MicroVM Backend
 
-The MicroVM backend runs Python code inside a NanVix microkernel VM with hardware-enforced isolation via Windows Hypervisor Platform (WHP).
+Nanvix MicroVM is an experimental containment backend for MxC. It is powered by the
+[Nanvix OS/VM](https://aka.ms/nanvix) and runs untrusted code with hardware-enforced isolation
+via the Windows Hypervisor Platform (WHP).
+
+## Key Features
+
+- **Fast cold-start** — ~100 ms from process spawn to guest code execution
+- **Low Memory Footprint** — Resident memory size of ~100 MB
+- **Hardware-Enforced Isolation** — Runs guest code inside a lightweight virtual machine (VM)
 
 ## Requirements
 
 - Windows with WHP enabled (`bcdedit /set hypervisorlaunchtype auto`)
-- NanVix runtime binaries (`nanvixd.exe`, `kernel.elf`, `python3.12`, `nanvix_rootfs.img`) placed next to `wxc-exec.exe`
-- `--experimental` flag (MicroVM is an experimental feature)
+- Nanvix runtime binaries (`nanvixd.exe`, `kernel.elf`, `python3.12`, `nanvix_rootfs.img`) placed next to `wxc-exec.exe`
+- `--experimental` flag (Nanvix MicroVM is an experimental feature)
 
 ## Quick Start
 
@@ -42,7 +50,7 @@ const child = spawnSandboxFromConfig(config, {
 ### readwrite_paths
 
 Host directories or files listed in `readwritePaths` are copied into a private
-per-run staging directory before boot. NanVix mounts are snapshot-based — host
+per-run staging directory before boot. Nanvix mounts are snapshot-based — host
 files are **not** modified while the guest is running. No junctions or live host
 mounts are used.
 
@@ -64,7 +72,7 @@ guest mount equivalents at staging time. The script uses the original host paths
 and the staging layer translates them before the code reaches the VM.
 
 | Host path          | Guest path                  |
-| -------------------- | ----------------------------- |
+| ------------------ | --------------------------- |
 | `C:\Users\me\work` | `/mnt/rw/c/Users/me/work`   |
 | `C:\data\ref-data` | `/mnt/rw/c/data/ref-data`   |
 
@@ -94,22 +102,18 @@ Not supported for MicroVM. If `deniedPaths` is specified, the config is rejected
 
 ## Constraints
 
-
 | Constraint                              | Value                                       |
-| ----------------------------------------- | --------------------------------------------- |
-| Total filesystem policy content         | ≤ 16 MB                                    |
+| --------------------------------------- | ------------------------------------------- |
 | Single file size                        | < 4 GB (FAT32 limit)                        |
 | Guest RAM                               | 256 MB                                      |
 | Symlinks/reparse points in source paths | Not supported (rejected at preflight)       |
 | Junctions for staging                   | Not used                                    |
 | `workingDirectory`                      | Not supported (guest CWD is `/`)            |
-| Network policy                          | Not supported (NanVix has no network stack) |
-
+| Network policy                          | Not supported (Nanvix has no network stack) |
 
 ## Not Supported
 
-
-| Workload                       | Error                               |
-| -------------------------------- | ------------------------------------- |
-| Network I/O                    | `OSError: Function not implemented` |
+| Workload                        | Error                               |
+| ------------------------------- | ----------------------------------- |
+| Network I/O                     | `OSError: Function not implemented` |
 | File writing outside `/mnt/rw/` | `OSError: Read-only file system`    |

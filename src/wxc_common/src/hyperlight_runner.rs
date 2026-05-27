@@ -47,9 +47,9 @@
 //! `policy.readwritePaths` and `policy.readonlyPaths` are translated to
 //! [`Preopen`] entries — the guest sees the host directories at
 //! `/host/<basename>` and can read/write through them via `lib/hostfs`.
-//! There is currently no hostfs-level RO enforcement; `readonlyPaths` are
-//! mounted writable and policy expectations rely on the caller not
-//! writing (documented limitation until hostfs learns read-only mounts).
+//! `readonlyPaths` are mounted with `Preopen::read_only()`, which blocks
+//! all write operations (`fs_write`, `fs_mkdir`, `fs_unlink`, etc.) at
+//! the host-function level.
 //!
 //! `policy.deniedPaths` is honored: any path that appears in the denied
 //! list is rejected at preflight — including paths that also appear in
@@ -201,7 +201,7 @@ pub fn setup(force: bool, logger: &mut Logger) -> Result<PathBuf, String> {
     let opts = pyhl::InstallOptions {
         home: &home,
         source: pyhl::InstallSource::Ghcr {
-            tag: Some("v0.6.0"),
+            tag: Some("v0.8.0"),
         },
         mounts: &[],
         network: None,
@@ -347,18 +347,16 @@ impl HyperlightScriptRunner {
     /// `/host/<basename>` — matches the `pyhl` CLI's `--mount <host>` default
     /// shape so scripts can find mounts predictably.
     ///
-    /// `readonlyPaths` are mounted writable today (hostfs has no RO
-    /// mode). Documented in the module header as a known limitation.
+    /// `readonlyPaths` are mounted with `Preopen::read_only()`, blocking
+    /// all write operations at the host-function level.
     fn preopens_from_policy(request: &CodexRequest) -> Result<Vec<Preopen>, PyhlError> {
         let mut preopens = Vec::new();
         let mut seen_guest_paths = std::collections::HashSet::new();
 
-        for host in request
-            .policy
-            .readwrite_paths
-            .iter()
-            .chain(request.policy.readonly_paths.iter())
-        {
+        let rw_iter = request.policy.readwrite_paths.iter().map(|p| (p, false));
+        let ro_iter = request.policy.readonly_paths.iter().map(|p| (p, true));
+
+        for (host, read_only) in rw_iter.chain(ro_iter) {
             let host_path = PathBuf::from(host);
 
             // Auto-create the mount dir if it doesn't exist yet.
@@ -400,11 +398,14 @@ impl HyperlightScriptRunner {
                      rename one of the host directories"
                 )));
             }
-            let pre = Preopen::new(&host_path, &guest_path).map_err(|e| {
+            let mut pre = Preopen::new(&host_path, &guest_path).map_err(|e| {
                 PyhlError::Preflight(format!(
                     "build Preopen for {host:?} -> {guest_path:?}: {e:#}"
                 ))
             })?;
+            if read_only {
+                pre = pre.read_only();
+            }
             preopens.push(pre);
         }
 

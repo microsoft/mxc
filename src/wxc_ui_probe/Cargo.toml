@@ -1,0 +1,8 @@
+[package]
+name = "wxc_ui_probe"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "wxc-ui-probe"
+path = "src/main.rs"

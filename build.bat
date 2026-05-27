@@ -49,11 +49,25 @@ if "%WITH_HYPERLIGHT%"=="1" set "CARGO_FLAGS=--features hyperlight %CARGO_FLAGS%
 echo.
 echo Building WXC (Rust) [%BUILD_CONFIG%]...
 pushd src
+
+:: Ensure the rustup targets are installed for the pinned toolchain
+:: (src\rust-toolchain.toml). No-op if rustup is missing or the target
+:: is already present.
+where rustup >nul 2>&1
+if not errorlevel 1 (
+    if "%BUILD_ALL%"=="1" (
+        rustup target add x86_64-pc-windows-msvc >nul 2>&1
+        rustup target add aarch64-pc-windows-msvc >nul 2>&1
+    ) else (
+        rustup target add %BUILD_ARCH% >nul 2>&1
+    )
+)
+
 if "%BUILD_ALL%"=="1" (
     echo   Target: x86_64-pc-windows-msvc
     cargo build %CARGO_FLAGS% x86_64-pc-windows-msvc || goto :error
     echo   Target: aarch64-pc-windows-msvc
-    cargo build %CARGO_FLAGS% aarch64-pc-windows-msvc || goto :error 
+    cargo build %CARGO_FLAGS% aarch64-pc-windows-msvc || goto :error
 ) else (
     echo   Target: %BUILD_ARCH%
     cargo build %CARGO_FLAGS% %BUILD_ARCH% || goto :error

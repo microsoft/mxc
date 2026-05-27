@@ -370,6 +370,18 @@ export interface SeatbeltConfig {
 export type SandboxingMethod = ContainmentType | ContainmentBackend;
 
 /**
+ * Isolation tier selected by the runtime fallback detector.
+ *
+ * - `base-container`: full BaseContainer (Experimental_CreateProcessInSandbox)
+ * - `appcontainer-bfs`: AppContainer + BFS filesystem isolation
+ * - `appcontainer-dacl`: AppContainer + host DACL augmentation (last-resort fallback)
+ */
+export type IsolationTier =
+  | 'base-container'
+  | 'appcontainer-bfs'
+  | 'appcontainer-dacl';
+
+/**
  * Platform support information
  */
 export interface PlatformSupport {
@@ -379,4 +391,14 @@ export interface PlatformSupport {
   reason?: string;
   /** Available sandboxing methods on this platform */
   availableMethods: ContainmentBackend[];
+  /**
+   * Tier that would be selected for an empty policy on this system.
+   * Omitted on non-Windows platforms or when the probe fails.
+   */
+  isolationTier?: IsolationTier;
+  /**
+   * Tier degradation warnings (one per fall-through during selection).
+   * Omitted on non-Windows platforms or when the probe fails.
+   */
+  isolationWarnings?: string[];
 }

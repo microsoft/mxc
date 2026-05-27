@@ -102,7 +102,7 @@ pub enum FallbackError {
 ///
 /// The algorithm matches the design doc:
 ///
-/// 1. If `MXC_FORCE_TIER` is set in a debug build, honor it (test seam).
+/// 1. If `MXC_FORCE_TIER` is set in a test build, honor it (test seam).
 /// 2. Try Tier 1 (BaseContainer) when `prefer_base_container` is true and the
 ///    API surface is detected.
 /// 3. Otherwise try Tier 2 (AppContainer + BFS) when there's no filesystem
@@ -131,7 +131,18 @@ pub fn detect(
     // Test-only injection seam. An invalid value is silently ignored and we
     // proceed with the real probe chain — that lets tests assert
     // pass-through behavior without any error plumbing.
-    #[cfg(debug_assertions)]
+    //
+    // Gate is `cfg(test)`, not `cfg(debug_assertions)`: production
+    // `wxc-exec.exe` builds (release *and* dev binaries) must not honor
+    // `MXC_FORCE_TIER` from the environment. `cfg(test)` ensures the
+    // seam is compiled in only when the crate is built as a test binary
+    // — which is exactly the case for unit tests under any profile,
+    // including CI's `cargo test --profile release` invocation. The
+    // dispatcher/fallback unit tests in this crate's `mod tests` thus
+    // actually exercise tier selection under release-profile CI runs
+    // (previously the seam was elided by `cfg(debug_assertions)` and
+    // the tests silently no-op'd).
+    #[cfg(test)]
     if let Ok(forced) = std::env::var("MXC_FORCE_TIER") {
         if let Some(tier) = parse_force_tier(&forced) {
             return forced_decision(tier, policy, denied);
@@ -185,19 +196,66 @@ pub fn detect(
 
     // Tier 3 — AppContainer + DACL
     ensure_dacl_augmentation_allowed(policy)?;
-    verify_write_dac_all(
-        policy
-            .readwrite_paths
-            .iter()
-            .chain(policy.readonly_paths.iter())
-            .chain(policy.denied_paths.iter()),
-    )?;
+    // For RW / RO paths we only need `WRITE_DAC` if we'd actually have
+    // to add an ACE. When the path's existing DACL already grants the
+    // needed mask to the well-known AppContainer SIDs (typically
+    // installer-set on system paths like `C:\Program Files\…`), the
+    // per-run ACE is redundant — skip both the grant and the
+    // `WRITE_DAC` requirement. See `ensure_path_grantable_for_ac`.
+    // Denied paths always require `WRITE_DAC` because well-known SID
+    // grants don't help us subtract access.
+    for p in &policy.readwrite_paths {
+        ensure_path_grantable_for_ac(Path::new(p), crate::filesystem_dacl::RW_MASK)?;
+    }
+    for p in &policy.readonly_paths {
+        ensure_path_grantable_for_ac(Path::new(p), crate::filesystem_dacl::RO_MASK)?;
+    }
+    verify_write_dac_all(&policy.denied_paths)?;
     Ok(TierDecision {
         tier: IsolationTier::AppContainerDacl,
         needs_dacl_augmentation: true,
         bfscfg_path: None,
         warnings,
     })
+}
+
+/// Returns `Ok(true)` if a per-run ACE on `path` is unnecessary because
+/// the path's existing DACL already grants `needed_mask` (or a
+/// superset) to the well-known AppContainer SIDs that every
+/// AppContainer process inherits. See
+/// [`crate::filesystem_dacl::compute_appcontainer_effective_access`].
+///
+/// Always returns `Ok(false)` for paths that don't exist or that fail
+/// the DACL lookup — the caller will fall through to the `WRITE_DAC`
+/// check, which produces a path-specific error.
+pub(crate) fn appcontainer_already_grants(path: &Path, needed_mask: u32) -> bool {
+    match crate::filesystem_dacl::compute_appcontainer_effective_access(path) {
+        Ok(effective) => (effective & needed_mask) == needed_mask,
+        Err(_) => false,
+    }
+}
+
+/// Verify that we can either add an ACE on `path` or skip it because
+/// the AppContainer already has `needed_mask` access via well-known
+/// SIDs. Returns the same [`FallbackError::WriteDacUnavailable`] as
+/// the original blanket check when neither applies.
+///
+/// Order matters for typical-case cost: the WRITE_DAC check is a
+/// single `CreateFileW`, while `appcontainer_already_grants` does a
+/// full `GetNamedSecurityInfoW` + DACL walk + 3 SID allocations. For
+/// the common installer-stamped path that *does* grant WRITE_DAC to
+/// the current user (the case before `ce7713d`), trying WRITE_DAC
+/// first short-circuits before we touch the DACL walk.
+fn ensure_path_grantable_for_ac(path: &Path, needed_mask: u32) -> Result<(), FallbackError> {
+    match check_write_dac_path(path) {
+        Ok(()) => Ok(()),
+        // Only fall through to the expensive walk when WRITE_DAC is
+        // unavailable (the system-path / unowned-installer case that
+        // motivated `ce7713d`). Other errors (e.g. ERROR_FILE_NOT_FOUND)
+        // surface to the caller unchanged.
+        Err(_) if appcontainer_already_grants(path, needed_mask) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn ensure_dacl_augmentation_allowed(policy: &ContainerPolicy) -> Result<(), FallbackError> {
@@ -231,7 +289,7 @@ fn check_write_dac_path(path: &Path) -> Result<(), FallbackError> {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 fn parse_force_tier(s: &str) -> Option<IsolationTier> {
     match s {
         "base-container" => Some(IsolationTier::BaseContainer),
@@ -241,7 +299,7 @@ fn parse_force_tier(s: &str) -> Option<IsolationTier> {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 fn forced_decision(
     tier: IsolationTier,
     policy: &ContainerPolicy,
@@ -272,7 +330,7 @@ fn forced_decision(
 /// Returns `true` when `processmodel.dll!Experimental_CreateProcessInSandbox`
 /// can be resolved — i.e. the BaseContainer (Tier 1) API is present on this
 /// machine.
-pub(crate) fn is_base_container_api_present() -> bool {
+pub fn is_base_container_api_present() -> bool {
     crate::base_container_runner::BaseContainerRunner::is_base_container_api_present().is_ok()
 }
 
@@ -284,14 +342,23 @@ pub(crate) fn is_base_container_api_present() -> bool {
 ///
 /// Resolution policy:
 ///
-/// - **Release builds** consult `GetWindowsDirectoryW` exclusively. The
-///   `SystemRoot` environment variable is deliberately ignored to deny
-///   an attacker who can scrub or rewrite the process environment a
-///   Tier 2 → Tier 3 downgrade primitive.
-/// - **Debug builds** additionally honor `MXC_BFSCFG_PATH` as a narrow
-///   test seam. Its value is used verbatim as the resolved path; an
-///   empty value simulates "not present" by returning `Ok(None)`. The
-///   release build cannot read this variable at all.
+/// - **`tier2_bfs` feature OFF (default)** — returns `Ok(None)`
+///   unconditionally, before any disk or environment lookup. The
+///   detector's existing T2→T3 fallback then drops to Tier 3. This is
+///   the load-bearing safety guarantee: Tier 2 is compiled out, so no
+///   code path in this binary can resolve `bfscfg.exe`.
+/// - **`tier2_bfs` feature ON, release builds** consult
+///   `GetWindowsDirectoryW` exclusively. The `SystemRoot` environment
+///   variable is deliberately ignored to deny an attacker who can scrub
+///   or rewrite the process environment a Tier 2 → Tier 3 downgrade
+///   primitive.
+/// - **`tier2_bfs` feature ON, test builds** additionally honor
+///   `MXC_BFSCFG_PATH` as a narrow test seam. Its value is used
+///   verbatim as the resolved path; an empty value simulates "not
+///   present" by returning `Ok(None)`. The seam is gated by
+///   `cfg(test)` so it compiles in only when building this crate's
+///   test binary, regardless of profile (so CI's `--profile release`
+///   test run exercises these paths).
 /// - We deliberately do not look in `SysWOW64`: `bfscfg.exe` is shipped
 ///   only in the native System32 directory.
 ///
@@ -299,19 +366,26 @@ pub(crate) fn is_base_container_api_present() -> bool {
 /// Win32 API itself fails — on a healthy Windows host this should never
 /// happen.
 pub fn find_bfscfg_exe() -> Result<Option<PathBuf>, FallbackError> {
-    #[cfg(debug_assertions)]
-    if let Ok(override_path) = std::env::var("MXC_BFSCFG_PATH") {
-        if override_path.is_empty() {
-            return Ok(None);
-        }
-        let p = PathBuf::from(override_path);
-        return Ok(if p.exists() { Some(p) } else { None });
+    #[cfg(not(feature = "tier2_bfs"))]
+    {
+        Ok(None)
     }
+    #[cfg(feature = "tier2_bfs")]
+    {
+        #[cfg(test)]
+        if let Ok(override_path) = std::env::var("MXC_BFSCFG_PATH") {
+            if override_path.is_empty() {
+                return Ok(None);
+            }
+            let p = PathBuf::from(override_path);
+            return Ok(if p.exists() { Some(p) } else { None });
+        }
 
-    let mut p = resolve_windows_directory()?;
-    p.push("System32");
-    p.push(crate::filesystem_bfs::BFSCFG_EXE);
-    Ok(if p.exists() { Some(p) } else { None })
+        let mut p = resolve_windows_directory()?;
+        p.push("System32");
+        p.push(crate::filesystem_bfs::BFSCFG_EXE);
+        Ok(if p.exists() { Some(p) } else { None })
+    }
 }
 
 /// Resolve the Windows install directory via `GetWindowsDirectoryW`.
@@ -319,6 +393,7 @@ pub fn find_bfscfg_exe() -> Result<Option<PathBuf>, FallbackError> {
 /// The OS populates the answer from boot configuration; it does not
 /// consult the process environment. Returns
 /// [`FallbackError::SystemRootUnresolved`] when the API itself fails.
+#[cfg(feature = "tier2_bfs")]
 fn resolve_windows_directory() -> Result<PathBuf, FallbackError> {
     use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
 
@@ -353,6 +428,7 @@ fn resolve_windows_directory() -> Result<PathBuf, FallbackError> {
     parse_utf16(&buf[..len])
 }
 
+#[cfg(feature = "tier2_bfs")]
 fn parse_utf16(slice: &[u16]) -> Result<PathBuf, FallbackError> {
     String::from_utf16(slice)
         .map(PathBuf::from)
@@ -377,11 +453,9 @@ pub(crate) fn has_write_dac(path: &Path) -> Result<bool, std::io::Error> {
     use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING,
+        FILE_SHARE_WRITE, OPEN_EXISTING, WRITE_DAC,
     };
     use windows_core::PCWSTR;
-
-    const WRITE_DAC: u32 = 0x0004_0000;
 
     let path_str = path
         .to_str()
@@ -394,7 +468,7 @@ pub(crate) fn has_write_dac(path: &Path) -> Result<bool, std::io::Error> {
     let handle = unsafe {
         CreateFileW(
             PCWSTR(wide.as_ptr()),
-            WRITE_DAC,
+            WRITE_DAC.0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             None,
             OPEN_EXISTING,
@@ -437,61 +511,25 @@ pub(crate) fn has_write_dac(path: &Path) -> Result<bool, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(debug_assertions)]
     use crate::models::ContainerPolicy;
-    #[cfg(debug_assertions)]
-    use std::sync::Mutex;
+    // Shared ENV_LOCK + guards live in `crate::test_env` so they're
+    // honored uniformly across the dispatcher and fallback_detector
+    // test modules. A per-module lock would let cross-module test
+    // threads race on `MXC_FORCE_TIER` / `MXC_BFSCFG_PATH`.
+    use crate::test_env::{ForceTierGuard, ENV_LOCK};
+    // `BfscfgPathGuard` is only meaningful when the `tier2_bfs` feature
+    // is compiled in; without it, `find_bfscfg_exe` ignores the env var.
+    #[cfg(feature = "tier2_bfs")]
+    use crate::test_env::BfscfgPathGuard;
 
-    /// Serializes tests that mutate `MXC_FORCE_TIER` because env vars are
-    /// process-global. We don't have `serial_test` as a dev-dep so we roll
-    /// our own. Gated with the force-tier mechanism itself.
-    #[cfg(debug_assertions)]
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    #[cfg(debug_assertions)]
-    struct ForceTierGuard {
-        // Holding the lock inside the guard ensures the env-var clear in
-        // `Drop` happens *before* the lock is released. The previous
-        // `(Self, MutexGuard)` tuple shape released the lock first (rev.
-        // declaration order), allowing concurrent tests to observe stale
-        // `MXC_FORCE_TIER`.
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-    #[cfg(debug_assertions)]
-    impl ForceTierGuard {
-        fn set(value: &str) -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            // SAFETY: env-var mutation in tests; serialized by ENV_LOCK.
-            unsafe {
-                std::env::set_var("MXC_FORCE_TIER", value);
-            }
-            ForceTierGuard { _lock: lock }
-        }
-    }
-    #[cfg(debug_assertions)]
-    impl Drop for ForceTierGuard {
-        fn drop(&mut self) {
-            // SAFETY: serialized by ENV_LOCK still held in `_lock`; the lock
-            // is released only after this `Drop` returns.
-            unsafe {
-                std::env::remove_var("MXC_FORCE_TIER");
-            }
-        }
-    }
-
-    #[cfg(debug_assertions)]
     fn empty_policy() -> ContainerPolicy {
         ContainerPolicy::default()
     }
-
-    #[cfg(debug_assertions)]
     fn policy_with_denied() -> ContainerPolicy {
         let mut p = ContainerPolicy::default();
         p.denied_paths.push("C:\\Windows".to_string());
         p
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn empty_policy_t1_when_bc_present_and_preferred() {
         let _g = ForceTierGuard::set("base-container");
@@ -501,8 +539,6 @@ mod tests {
         assert!(!d.needs_dacl_augmentation);
         assert!(d.warnings.is_empty());
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn empty_policy_no_filesystem_t2_path() {
         let _g = ForceTierGuard::set("appcontainer-bfs");
@@ -511,8 +547,6 @@ mod tests {
         assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
         assert!(!d.needs_dacl_augmentation);
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn denied_paths_disabled_blocks_t1() {
         let _g = ForceTierGuard::set("base-container");
@@ -523,8 +557,6 @@ mod tests {
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn denied_paths_disabled_blocks_t2() {
         let _g = ForceTierGuard::set("appcontainer-bfs");
@@ -535,8 +567,6 @@ mod tests {
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn denied_paths_disabled_blocks_t3() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
@@ -547,8 +577,6 @@ mod tests {
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn force_tier_env_var_parses_all_three_values() {
         assert!(matches!(
@@ -564,8 +592,6 @@ mod tests {
             Some(IsolationTier::AppContainerDacl)
         ));
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn force_tier_env_var_invalid_value_falls_through_to_real_probes() {
         // An unrecognized value must NOT raise an error. The detector should
@@ -583,9 +609,7 @@ mod tests {
     fn find_bfscfg_exe_smoke() {
         // Tests run in parallel by default and other tests below mutate
         // `MXC_BFSCFG_PATH`. We must therefore observe the unset state
-        // under `ENV_LOCK` so we don't race them. In release builds the
-        // override is ignored entirely, so the lock is debug-only.
-        #[cfg(debug_assertions)]
+        // under `ENV_LOCK` so we don't race them.
         let _lock = {
             let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
             // SAFETY: env-var mutation in tests; serialized by ENV_LOCK.
@@ -607,6 +631,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn resolve_windows_directory_returns_existing_dir() {
         // `GetWindowsDirectoryW` always succeeds on any real Windows
@@ -620,35 +645,10 @@ mod tests {
         );
     }
 
-    /// Guard for `MXC_BFSCFG_PATH` mirroring `ForceTierGuard`. Holds
-    /// `ENV_LOCK` for the duration of the test so concurrent threads
-    /// don't observe stale values.
-    #[cfg(debug_assertions)]
-    struct BfscfgPathGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-    #[cfg(debug_assertions)]
-    impl BfscfgPathGuard {
-        fn set(value: &str) -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            // SAFETY: env-var mutation in tests; serialized by ENV_LOCK.
-            unsafe {
-                std::env::set_var("MXC_BFSCFG_PATH", value);
-            }
-            BfscfgPathGuard { _lock: lock }
-        }
-    }
-    #[cfg(debug_assertions)]
-    impl Drop for BfscfgPathGuard {
-        fn drop(&mut self) {
-            // SAFETY: serialized by ENV_LOCK still held in `_lock`.
-            unsafe {
-                std::env::remove_var("MXC_BFSCFG_PATH");
-            }
-        }
-    }
-
-    #[cfg(debug_assertions)]
+    // The `MXC_BFSCFG_PATH` test seam only takes effect when the
+    // `tier2_bfs` feature is enabled — without it, `find_bfscfg_exe`
+    // returns `Ok(None)` unconditionally and the override is dead.
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn mxc_bfscfg_path_empty_value_simulates_missing() {
         let _g = BfscfgPathGuard::set("");
@@ -658,8 +658,7 @@ mod tests {
             "empty MXC_BFSCFG_PATH must yield Ok(None), got {result:?}"
         );
     }
-
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn mxc_bfscfg_path_nonexistent_path_is_none() {
         let _g = BfscfgPathGuard::set("C:\\__mxc_does_not_exist__\\bfscfg.exe");
@@ -669,8 +668,7 @@ mod tests {
             "non-existent MXC_BFSCFG_PATH must yield Ok(None), got {result:?}"
         );
     }
-
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "tier2_bfs")]
     #[test]
     fn mxc_bfscfg_path_existing_path_is_returned_verbatim() {
         // Use a file we know exists (this source file itself, via the
@@ -687,6 +685,19 @@ mod tests {
             result.as_deref(),
             Some(cmd_exe.as_path()),
             "MXC_BFSCFG_PATH must be returned verbatim when it exists"
+        );
+    }
+
+    /// With `tier2_bfs` off, `find_bfscfg_exe` must return `Ok(None)`
+    /// regardless of host state, `MXC_BFSCFG_PATH`, or anything else —
+    /// this is the load-bearing safety invariant.
+    #[cfg(not(feature = "tier2_bfs"))]
+    #[test]
+    fn find_bfscfg_exe_is_none_when_feature_off() {
+        let result = find_bfscfg_exe().expect("find_bfscfg_exe must not error with feature off");
+        assert!(
+            result.is_none(),
+            "find_bfscfg_exe must return None when tier2_bfs feature is off, got {result:?}"
         );
     }
 
@@ -711,8 +722,6 @@ mod tests {
             "expected error for non-existent path, got {res:?}"
         );
     }
-
-    #[cfg(debug_assertions)]
     #[test]
     fn compute_decision_with_force_tier_carries_warnings_empty() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
@@ -725,5 +734,33 @@ mod tests {
             d.warnings.is_empty(),
             "forced decisions should not accumulate fallback-chain warnings"
         );
+    }
+
+    /// `appcontainer_already_grants` must return `false` on a plain
+    /// temp dir (no AC-group ACEs) and `true` after we stamp a
+    /// matching grant for `ALL APPLICATION PACKAGES`.
+    #[test]
+    fn appcontainer_already_grants_respects_explicit_grant() {
+        use crate::filesystem_dacl::DaclManager;
+        use crate::test_env::ScopedStateDir;
+        use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+
+        let _scope = ScopedStateDir::new();
+        let td = tempfile::tempdir().unwrap();
+        let mask = FILE_GENERIC_READ.0;
+
+        assert!(
+            !appcontainer_already_grants(td.path(), mask),
+            "fresh temp dir should not grant AC well-known SIDs"
+        );
+
+        let mut mgr = DaclManager::new().unwrap();
+        mgr.grant_appcontainer_access("S-1-15-2-1", &[], &[td.path().to_path_buf()])
+            .unwrap();
+        assert!(
+            appcontainer_already_grants(td.path(), mask),
+            "after explicit grant on ALL APPLICATION PACKAGES, AC should be covered"
+        );
+        // mgr.Drop restores, returning the path to its original state.
     }
 }

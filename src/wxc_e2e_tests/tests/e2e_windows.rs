@@ -707,6 +707,84 @@ fn hyperlight_suite() {
         let _ = std::fs::remove_dir_all(&mount_dir);
     }
 
+    // Read-only mount enforcement test.
+    {
+        println!("--- hostfs readonly enforcement (hyperlight_fs_readonly) ---");
+        let ro_dir = std::env::temp_dir().join("hyperlight-fs-ro-e2e");
+        let rw_dir = std::env::temp_dir().join("hyperlight-fs-rw-e2e");
+        let _ = std::fs::remove_dir_all(&ro_dir);
+        let _ = std::fs::remove_dir_all(&rw_dir);
+        std::fs::create_dir_all(&ro_dir).unwrap();
+        std::fs::create_dir_all(&rw_dir).unwrap();
+        std::fs::write(ro_dir.join("input.txt"), "readonly content\n").unwrap();
+
+        let ro_basename = ro_dir.file_name().unwrap().to_string_lossy();
+        let rw_basename = rw_dir.file_name().unwrap().to_string_lossy();
+
+        let script = format!(
+            "import os\n\
+             ro = '/host/{ro_basename}'\n\
+             rw = '/host/{rw_basename}'\n\
+             with open(f'{{ro}}/input.txt') as f:\n\
+             \x20   print(f'read: {{f.read().strip()}}')\n\
+             with open(f'{{rw}}/output.txt', 'w') as f:\n\
+             \x20   f.write('rw ok')\n\
+             print('wrote to rw')\n\
+             try:\n\
+             \x20   with open(f'{{ro}}/forbidden.txt', 'w') as f:\n\
+             \x20       f.write('should fail')\n\
+             \x20   print('READONLY_BYPASSED')\n\
+             except Exception as e:\n\
+             \x20   print(f'write blocked: {{e}}')\n\
+             \x20   print('READONLY_ENFORCED')\n"
+        );
+
+        let config = serde_json::json!({
+            "process": { "commandLine": script, "timeout": 30000 },
+            "containment": "hyperlight",
+            "filesystem": {
+                "readonlyPaths": [ro_dir.to_string_lossy()],
+                "readwritePaths": [rw_dir.to_string_lossy()],
+            }
+        });
+
+        let result = run_wxc_state_aware(
+            "hyperlight-fs-readonly",
+            &config,
+            &["--debug", "--experimental"],
+        );
+        let combined = result.combined_output();
+
+        if result.code != Some(0) {
+            failures.push(format!(
+                "hyperlight-fs-readonly: expected exit 0, got {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                result.code, result.stdout, result.stderr
+            ));
+        } else if !combined.contains("readonly content") {
+            failures.push(format!(
+                "hyperlight-fs-readonly: could not read from readonly mount\n--- combined ---\n{combined}"
+            ));
+        } else if !rw_dir.join("output.txt").exists() {
+            failures.push(
+                "hyperlight-fs-readonly: readwrite mount did not produce output.txt".to_string(),
+            );
+        } else if ro_dir.join("forbidden.txt").exists() {
+            failures.push(
+                "hyperlight-fs-readonly: readonly mount was writable — forbidden.txt was created"
+                    .to_string(),
+            );
+        } else if !combined.contains("READONLY_ENFORCED") {
+            failures.push(format!(
+                "hyperlight-fs-readonly: guest did not confirm enforcement\n--- combined ---\n{combined}"
+            ));
+        } else {
+            println!("  PASS ({} ms)", result.wall_time_ms);
+        }
+
+        let _ = std::fs::remove_dir_all(&ro_dir);
+        let _ = std::fs::remove_dir_all(&rw_dir);
+    }
+
     if !failures.is_empty() {
         panic!("Hyperlight E2E failures:\n{}", failures.join("\n"));
     }

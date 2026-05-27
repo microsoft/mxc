@@ -84,6 +84,7 @@ jobs:
         installOptions:
           configFile: $(configTomlPath)
         cacheOptions:
+          enabled: true
           enableTargetCache: true
 
     steps:
@@ -113,18 +114,13 @@ jobs:
           testCondition: "eq(variables['isX64'], 'true')" # 1ES nested template takes this as a string
           enableTest: $(isX64)
           publishTestResults: false
+          # Clippy + fmt run in the parallel Lint stage (Lint.Job.yml).
           enableClippy: false
+          enableCodeStyleCheck: false
+          checkAllCodeStyle: false
           useNextest: false
           testAllTargets: false
           buildAllTargets: false
-
-      # Run clippy via plain cargo so the 1ES Setup task doesn't have to
-      # source-install clippy-sarif (~8 min). The toolchain ships clippy
-      # itself; `-D warnings` keeps the build gated.
-      - script: cargo clippy --locked --all-targets --all-features --target $(triplet) --release -- -D warnings
-        displayName: Clippy
-        condition: and(succeeded(), eq(variables['isX64'], 'true'))
-        workingDirectory: $(workingDirectory)
 
       - task: EsrpCodeSigning@5
         displayName: Code Sign

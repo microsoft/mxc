@@ -2,6 +2,8 @@
 
 ## Prerequisites
 
+The Rust toolchain version is pinned in [`src/rust-toolchain.toml`](../src/rust-toolchain.toml) to match what CI uses (currently 1.93). The pin is honored automatically by `rustup` — running any `cargo` command from `src/` (or below) downloads and selects that channel on first use. To opt out for one-off testing on a different toolchain, use `cargo +<channel> ...` or set `RUSTUP_TOOLCHAIN`. When bumping the pinned version, bump the matching `version: 'ms-prod-1.<N>'` lines in the two `.azure-pipelines/templates/*.Build.Job.yml` files in the same commit.
+
 LSP servers are configured in `.github/lsp.json` for Rust and TypeScript. Install them before use:
 
 ```
@@ -142,6 +144,7 @@ Core references:
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
 - `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
 - `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
+- `docs/host-prep.md` — `wxc-exec --prepare-system-drive` / `--unprepare-system-drive` host setup (metadata-only ACEs on the system-drive root for the AppContainer well-known SIDs, so `cmd.exe` / `pwsh.exe` / `node.exe` can stat `C:\` inside an AppContainer). Hand-test helpers live in `scripts/host-prep/`.
 - `docs/sandbox-policy/v1/policy.md` — sandbox policy v1 specification
 
 Per-backend guides:
