@@ -481,7 +481,7 @@ fn format_learning_mode_violation(props: &[(String, String)], mode: DisplayMode)
 
     // In minified mode, show a reduced set of properties.
     let display_props = if mode == DisplayMode::Minified {
-        const MINIFIED_FIELDS: &[&str] = &["ProcessName", "Category", "Denied"];
+        const MINIFIED_FIELDS: &[&str] = &["ProcessName", "Category", "Denied", "Detail"];
         let mut filtered: Vec<(String, String)> = formatted_props
             .into_iter()
             .filter(|(k, _)| MINIFIED_FIELDS.contains(&k.as_str()))
