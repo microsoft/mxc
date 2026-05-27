@@ -83,6 +83,8 @@ struct RawNetwork {
     default_policy: Option<String>,
     #[serde(rename = "enforcementMode")]
     enforcement_mode: Option<String>,
+    #[serde(rename = "allowLocalNetwork")]
+    allow_local_network: Option<bool>,
     #[serde(rename = "allowedHosts")]
     allowed_hosts: Option<Vec<String>>,
     #[serde(rename = "blockedHosts")]
@@ -825,6 +827,10 @@ fn convert_raw_config_inner(
             };
         }
 
+        if let Some(v) = net.allow_local_network {
+            policy.allow_local_network = v;
+        }
+
         if let Some(v) = net.allowed_hosts {
             policy.allowed_hosts = v;
         }
@@ -1524,6 +1530,32 @@ mod tests {
         assert_eq!(req.policy.blocked_hosts.len(), 2);
         assert_eq!(req.policy.blocked_hosts[0], "malicious.com");
         assert_eq!(req.policy.blocked_hosts[1], "tracker.net");
+    }
+
+    #[test]
+    fn network_allow_local_network() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {"allowLocalNetwork": true}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.allow_local_network);
+    }
+
+    #[test]
+    fn network_allow_local_network_defaults_false() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.allow_local_network);
     }
 
     #[test]

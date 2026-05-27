@@ -333,6 +333,7 @@ export function createConfigFromPolicy(
 
         config.network = {
             defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
+            allowLocalNetwork: policy.network.allowLocalNetwork,
             allowedHosts: policy.network.allowedHosts,
             blockedHosts: policy.network.blockedHosts,
             proxy: policy.network.proxy,

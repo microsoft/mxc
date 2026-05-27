@@ -188,46 +188,51 @@ fn write_filesystem_deny(out: &mut String, request: &CodexRequest) -> Result<(),
 fn write_network_rules(out: &mut String, request: &CodexRequest) {
     let policy = &request.policy;
     let allow_outbound = matches!(policy.default_network_policy, NetworkPolicy::Allow);
+    let has_allowed_hosts = !policy.allowed_hosts.is_empty();
 
-    if !allow_outbound {
-        if policy.allowed_hosts.is_empty() {
+    // blocked_hosts is rejected at the runner level before reaching the
+    // profile builder, so it isn't handled here.
+    match (allow_outbound, has_allowed_hosts) {
+        (false, false) => {
             // Pure deny — implicit from `(deny default)`.
             out.push_str(";; --- network: default-deny (no allow-network rules emitted) ---\n");
-            return;
         }
-        // defaultPolicy=block + allowedHosts = allowlist mode.
-        // Seatbelt limitation: only `*` or `localhost` are valid hosts in
-        // `(remote ...)` filters — per-hostname filtering is not supported.
-        // Fall back to allowing all outbound when allowedHosts is specified.
-        out.push_str(
-            ";; --- network: allowedHosts requested but Seatbelt cannot filter by host;\n",
-        );
-        out.push_str(";;     allowing all outbound as best-effort ---\n");
-        out.push_str("(allow network-outbound)\n");
-        out.push_str("(allow network-bind (local ip))\n");
-        out.push_str("(allow system-socket)\n");
+        (true, false) => {
+            out.push_str(";; --- network: outbound allowed (any host) ---\n");
+            write_outbound_allow_rules(out);
+        }
+        (_, true) => {
+            // Seatbelt only accepts `*` or `localhost` in `(remote ...)` filters —
+            // per-hostname filtering isn't possible, so allowedHosts degrades to
+            // allow-all outbound as a best-effort.
+            out.push_str(
+                ";; --- network: allowedHosts requested but Seatbelt cannot filter by host;\n",
+            );
+            out.push_str(";;     allowing all outbound as best-effort ---\n");
+            write_outbound_allow_rules(out);
+        }
+    }
+
+    write_local_network_rules(out, policy.allow_local_network);
+}
+
+fn write_outbound_allow_rules(out: &mut String) {
+    out.push_str("(allow network-outbound)\n");
+    out.push_str("(allow network-bind (local ip))\n");
+    out.push_str("(allow system-socket)\n");
+}
+
+/// Emit the `network-inbound` rule that lets the sandboxed process accept
+/// incoming connections on its own listeners. Required for `server.listen()`
+/// on macOS — the `network-bind` rule alone is not enough; the kernel rejects
+/// `listen()` with EPERM without `network-inbound`. Scoped to `(local ip)` so
+/// it only covers IP sockets, never UNIX-domain or Mach sockets.
+fn write_local_network_rules(out: &mut String, allow_local_network: bool) {
+    if !allow_local_network {
         return;
     }
-
-    if policy.allowed_hosts.is_empty() {
-        out.push_str(";; --- network: outbound allowed (any host) ---\n");
-        out.push_str("(allow network-outbound)\n");
-        out.push_str("(allow network-bind (local ip))\n");
-        out.push_str("(allow system-socket)\n");
-    } else {
-        // Seatbelt limitation: per-host filtering not supported.
-        // Allow all outbound as best-effort when allowedHosts is specified.
-        out.push_str(
-            ";; --- network: allowedHosts requested but Seatbelt cannot filter by host;\n",
-        );
-        out.push_str(";;     allowing all outbound as best-effort ---\n");
-        out.push_str("(allow network-outbound)\n");
-        out.push_str("(allow network-bind (local ip))\n");
-        out.push_str("(allow system-socket)\n");
-    }
-
-    // Note: blocked_hosts is rejected at the runner level before reaching
-    // the profile builder, so we don't need to handle it here.
+    out.push_str(";; --- network: allowLocalNetwork — accept inbound on local IPs ---\n");
+    out.push_str("(allow network-inbound (local ip))\n");
 }
 
 fn write_ui_rules(out: &mut String, request: &CodexRequest) {
@@ -556,6 +561,39 @@ mod tests {
         r.policy.blocked_hosts = vec!["evil.example.com".into()];
         let p = build_profile(&r).unwrap();
         assert!(!p.contains("(deny network-outbound"));
+    }
+
+    #[test]
+    fn allow_local_network_emits_inbound_rule() {
+        // server.listen() on macOS needs `network-inbound` in addition to
+        // `network-bind` — the kernel rejects listen() with EPERM otherwise.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.allow_local_network = true;
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-inbound (local ip))"));
+        assert!(p.contains("allowLocalNetwork"));
+    }
+
+    #[test]
+    fn allow_local_network_default_omits_inbound_rule() {
+        // Default (allow_local_network=false) must not emit any inbound rule.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("network-inbound"));
+    }
+
+    #[test]
+    fn allow_local_network_works_with_default_deny_outbound() {
+        // allow_local_network is independent of outbound: a process can be
+        // a pure server (no client traffic) and still accept local inbound.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.allow_local_network = true;
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-inbound (local ip))"));
+        assert!(!p.contains("(allow network-outbound)"));
     }
 
     #[test]
