@@ -185,6 +185,8 @@ struct RawSeatbelt {
     nested_pty: Option<bool>,
     #[serde(rename = "keychainAccess")]
     keychain_access: Option<bool>,
+    #[serde(rename = "extraMachLookups")]
+    extra_mach_lookups: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -921,6 +923,7 @@ fn convert_raw_config_inner(
             launch_method: raw_sb.launch_method.unwrap_or_default(),
             nested_pty: raw_sb.nested_pty.unwrap_or(true),
             keychain_access: raw_sb.keychain_access.unwrap_or(false),
+            extra_mach_lookups: raw_sb.extra_mach_lookups.unwrap_or_default(),
         });
         ExperimentalConfig {
             test,
