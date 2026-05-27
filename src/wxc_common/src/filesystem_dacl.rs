@@ -89,7 +89,9 @@ use windows::Win32::Security::{
     CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, INHERITED_ACE, OBJECT_INHERIT_ACE,
     PSECURITY_DESCRIPTOR, PSID,
 };
-use windows::Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE};
+use windows::Win32::Storage::FileSystem::{
+    DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+};
 use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
     ReleaseMutex, WaitForSingleObject, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -111,11 +113,44 @@ use windows::Win32::System::Threading::{
 // are `pub(crate)` so dispatcher and fallback_detector can import
 // them rather than re-derive the bit pattern.
 
-/// Access mask granted on `readwritePaths` entries: read + write + delete.
-pub(crate) const RW_MASK: u32 = FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0;
+/// Access mask granted on `readwritePaths` entries: read + write +
+/// execute + delete. `FILE_GENERIC_EXECUTE` is required so the
+/// AppContainer child can `SetCurrentDirectoryW` into the granted
+/// directory (the API opens the target with `FILE_TRAVERSE`, which
+/// is the same bit — `0x20` — as `FILE_EXECUTE` for files).
+///
+/// File-inheritance side-effect (deliberate): because the ACE is
+/// applied with `OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE`, the
+/// same bit propagates as `FILE_EXECUTE` to every file descendant.
+/// We accept this: (a) workloads commonly need to execute helper
+/// binaries they place under the scratch tree (compile-and-run
+/// cycles, test harnesses, build outputs), (b) NTFS has no clean
+/// primitive for "directory-only traverse, all-depth, with no
+/// file-execute" — `FILE_TRAVERSE` and `FILE_EXECUTE` are the same
+/// access right, distinguished only by the kernel's interpretation
+/// per object type, so any per-type split requires walking the
+/// tree at apply time, and (c) the AppContainer is already a
+/// code-execution sandbox: the policy's `commandLine` runs an
+/// attacker-chosen binary by design, and a compromised child can
+/// already load arbitrary in-memory code without needing
+/// `FILE_EXECUTE` on a host file.
+pub(crate) const RW_MASK: u32 =
+    FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | FILE_GENERIC_EXECUTE.0 | DELETE.0;
 
-/// Access mask granted on `readonlyPaths` entries: read only.
-pub(crate) const RO_MASK: u32 = FILE_GENERIC_READ.0;
+/// Access mask granted on `readonlyPaths` entries: read + execute.
+/// `FILE_GENERIC_EXECUTE` is included for the same reason as the
+/// rw mask — without it `chdir` into a granted read-only directory
+/// fails with `ERROR_ACCESS_DENIED`.
+///
+/// Granting `FILE_EXECUTE` on file descendants of a read-only path
+/// is also a feature, not just a side-effect: read-only grants are
+/// the canonical way to expose tool install directories (e.g. a
+/// per-user `python` or `node` install that doesn't inherit
+/// `ALL APPLICATION PACKAGES` from `Program Files`) to the
+/// AppContainer, and those tools must be loadable as executables.
+/// Stripping `FILE_EXECUTE` from file ACEs here would break that
+/// path.
+pub(crate) const RO_MASK: u32 = FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE.0;
 
 // Compile-time guarantee that the masks above keep their well-known
 // shape. Any change to [`RW_MASK`] or [`RO_MASK`] that breaks one of
@@ -124,8 +159,10 @@ pub(crate) const RO_MASK: u32 = FILE_GENERIC_READ.0;
 // `ensure_path_grantable_for_ac` (both of which read the constants
 // directly from this module).
 const _: () = {
-    assert!(RW_MASK == FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0);
-    assert!(RO_MASK == FILE_GENERIC_READ.0);
+    assert!(
+        RW_MASK == FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | FILE_GENERIC_EXECUTE.0 | DELETE.0
+    );
+    assert!(RO_MASK == FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE.0);
     assert!((RW_MASK & RO_MASK) == RO_MASK);
 };
 
@@ -1939,11 +1976,15 @@ mod tests {
 
     #[test]
     fn access_mask_layouts() {
-        let rw = FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0;
-        let ro = FILE_GENERIC_READ.0;
+        let rw = FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | FILE_GENERIC_EXECUTE.0 | DELETE.0;
+        let ro = FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE.0;
         assert_ne!(rw, 0);
         assert_ne!(ro, 0);
         assert!(rw & ro == ro, "rw should be a superset of ro");
+        // FILE_TRAVERSE = FILE_EXECUTE = 0x20 is part of FILE_GENERIC_EXECUTE.
+        // Both masks must carry it so chdir into granted dirs works.
+        assert!(rw & 0x20 == 0x20, "rw must grant FILE_TRAVERSE");
+        assert!(ro & 0x20 == 0x20, "ro must grant FILE_TRAVERSE");
         // Deny mask = FILE_ALL_ACCESS (0x1F01FF).
         assert_eq!(0x001F_01FF & 0xFF_FFFF, 0x001F_01FF);
     }
