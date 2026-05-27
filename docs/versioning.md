@@ -209,6 +209,44 @@ fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse
    move the matching `if/then` clause in the JSON schema's top-level `allOf`
    so it keys on the new top-level section instead of `experimental.<name>`.
 
+   Concretely, if `wslc` graduates the clause changes from
+
+   ```json
+   {
+     "if": {
+       "required": ["experimental"],
+       "properties": { "experimental": { "required": ["wslc"] } }
+     },
+     "then": {
+       "anyOf": [
+         { "not": { "required": ["containment"] } },
+         { "properties": { "containment": { "enum": ["wslc"] } } }
+       ]
+     }
+   }
+   ```
+
+   to
+
+   ```json
+   {
+     "if": { "required": ["wslc"] },
+     "then": {
+       "anyOf": [
+         { "not": { "required": ["containment"] } },
+         { "properties": { "containment": { "enum": ["wslc"] } } }
+       ]
+     }
+   }
+   ```
+
+   The `then` branch is unchanged. Its `anyOf` reads as "containment must
+   either be absent (let the parser pick the per-OS default) or be explicitly
+   set to the matching concrete value" — i.e. it permits the section under
+   either a matching `containment` or a defaulted one, and rejects only the
+   case where `containment` is set to a *different* concrete backend. The
+   Rust parser then re-validates against the resolved default at run time.
+
 ## Data Flow
 
 ```
