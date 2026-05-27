@@ -217,8 +217,8 @@ pub struct LxcConfig {
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkPolicy {
-    #[default]
     Allow,
+    #[default]
     Block,
 }
 

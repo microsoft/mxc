@@ -853,8 +853,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_empty_policy() {
-        // Default network policy is Allow + Capabilities, so internetClient
-        // should be auto-added even with an otherwise empty policy.
+        // Default network policy is Block — no internetClient auto-add.
         let request = CodexRequest::default();
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
 
@@ -866,7 +865,7 @@ mod tests {
         assert_eq!(spec.version(), "0.1.0");
         assert!(spec.app_container());
         assert!(!spec.least_privilege());
-        assert_eq!(spec.capabilities(), Some("internetClient"));
+        assert!(spec.capabilities().is_none());
         assert!(spec.fs_read_write().is_none());
         assert!(spec.fs_read_only().is_none());
         assert!(spec.disallow_win32k_system_calls());

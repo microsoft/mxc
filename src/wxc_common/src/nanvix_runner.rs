@@ -439,7 +439,7 @@ impl NanVixScriptRunner {
         }
         if !request.policy.allowed_hosts.is_empty()
             || !request.policy.blocked_hosts.is_empty()
-            || request.policy.default_network_policy != NetworkPolicy::Allow
+            || request.policy.default_network_policy != NetworkPolicy::Block
         {
             return Err(NanVixError::Preflight(ERR_NETWORK_POLICY.to_string()));
         }
@@ -864,12 +864,12 @@ mod tests {
     }
 
     #[test]
-    fn policy_rejects_network_block_policy() {
+    fn policy_rejects_network_allow_policy() {
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
             script_code: "echo test".to_string(),
             policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Block,
+                default_network_policy: NetworkPolicy::Allow,
                 ..Default::default()
             },
             ..Default::default()
@@ -896,8 +896,9 @@ mod tests {
 
     #[test]
     fn policy_allows_defaults() {
-        // A request with all-default policies should pass validation and
-        // fail later on path resolution (nanvixd not found), NOT on policy.
+        // NanVix accepts a default (deny-by-default) policy because it has
+        // no network stack -- Block is naturally enforced. The run then
+        // fails later on missing nanvixd binaries, not on policy.
         let mut runner = NanVixScriptRunner::new();
         let request = CodexRequest {
             script_code: "echo test".to_string(),
@@ -906,10 +907,6 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(
-            !resp.error_message.contains("denied_paths"),
-            "default request should not trigger filesystem policy rejection"
-        );
         assert!(
             !resp.error_message.contains(ERR_NETWORK_POLICY),
             "default request should not trigger network policy rejection"

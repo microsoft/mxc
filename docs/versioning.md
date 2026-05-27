@@ -57,6 +57,22 @@ mxc/schemas/
 The dev schema file (`mxc-config.schema.X.Y.Z-dev.json`) must define the `experimental`
 section structure so that editors can validate experimental configs.
 
+### Trust boundary vs schema defaults
+
+Schemas in `stable/` are immutable: they document the input shape that was
+promised at release. They are **not** authoritative for runtime security
+defaults. `wxc-exec` is the trust boundary and may apply stricter defaults
+than a stable schema declares when a security issue requires it.
+
+For example, schemas `0.4.0-alpha` and `0.5.0-alpha` declare
+`network.defaultPolicy` defaulting to `"allow"`. As of SDK 0.3.0 the runtime
+treats an absent `network.defaultPolicy` as `block` regardless of the
+declared schema version, because the old `allow` default was a security bug
+([#256](https://github.com/microsoft/mxc/issues/256)). Schema `0.6.0-dev`
+documents the new default; the stable schemas are left unchanged so the
+release contract stays auditable. Consumers that need the legacy behavior
+must set `defaultPolicy: "allow"` explicitly.
+
 ### Shipped vs Experimental
 
 The current stable schema versions are `0.4.0-alpha` and `0.5.0-alpha`. The parser

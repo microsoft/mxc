@@ -122,8 +122,8 @@
         "defaultPolicy": {
           "type": "string",
           "enum": ["allow", "block"],
-          "default": "allow",
-          "description": "Default network posture."
+          "default": "block",
+          "description": "Default network posture. Deny-by-default."
         },
         "enforcementMode": {
           "type": "string",

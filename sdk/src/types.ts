@@ -188,7 +188,7 @@ export interface NetworkConfig {
    * (default: "both")
    */
   enforcementMode?: 'capabilities' | 'firewall' | 'both';
-  /** Default network policy: "allow" or "block" (default: "allow") */
+  /** Default network policy: "allow" or "block" (default: "block") */
   defaultPolicy?: 'allow' | 'block';
   /**
    * Whether to allow inbound connections to local IP listeners (i.e. the

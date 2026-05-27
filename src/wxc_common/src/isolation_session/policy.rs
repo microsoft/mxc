@@ -70,7 +70,7 @@ pub(super) fn validate_isolation_session_user(user: &IsolationSessionUser) -> Re
 fn validate_network_and_proxy_policy(request: &CodexRequest) -> Result<(), IsolationSessionError> {
     if !request.policy.allowed_hosts.is_empty()
         || !request.policy.blocked_hosts.is_empty()
-        || request.policy.default_network_policy != NetworkPolicy::Allow
+        || request.policy.default_network_policy != NetworkPolicy::Block
     {
         return Err(IsolationSessionError::Policy(
             ERR_NETWORK_POLICY.to_string(),
@@ -267,10 +267,10 @@ mod tests {
     }
 
     #[test]
-    fn post_provision_policy_rejects_network_block_policy() {
+    fn post_provision_policy_rejects_network_allow_policy() {
         let request = CodexRequest {
             policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Block,
+                default_network_policy: NetworkPolicy::Allow,
                 ..Default::default()
             },
             ..Default::default()
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn post_provision_policy_allows_defaults() {
+    fn post_provision_policy_accepts_default_request() {
         let request = CodexRequest::default();
         assert!(validate_post_provision_policy(&request).is_ok());
     }
