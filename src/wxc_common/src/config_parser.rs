@@ -602,8 +602,20 @@ fn validate_single_backend_section(
         ContainmentBackend::Vm => "vm",
     };
     let msg = match owned {
-        Some(owned_name) => format!("Multiple containment backends configured: 'containment' is '{containment_wire}' (allows the '{owned_name}' section), but the config also includes unrelated backend section(s): {}. Only one backend section is allowed; remove the unused section(s).", extras.join(", ")),
-        None => format!("Multiple containment backends configured: 'containment' is '{containment_wire}' (no per-backend section is defined for this backend), but the config includes backend section(s): {}. Only one backend section is allowed; remove the unused section(s).", extras.join(", ")),
+        Some(owned_name) => format!(
+            "Multiple containment backends configured: 'containment' is '{containment_wire}' \
+             (allows the '{owned_name}' section), but the config also includes unrelated \
+             backend section(s): {}. Only one backend section is allowed; remove the unused \
+             section(s).",
+            extras.join(", "),
+        ),
+        None => format!(
+            "Multiple containment backends configured: 'containment' is '{containment_wire}' \
+             (no per-backend section is defined for this backend), but the config includes \
+             backend section(s): {}. Only one backend section is allowed; remove the unused \
+             section(s).",
+            extras.join(", "),
+        ),
     };
     logger.log_line(&msg);
     Err(WxcError::ConfigParse(msg))
