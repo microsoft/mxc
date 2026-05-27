@@ -72,6 +72,7 @@ pub fn build_profile(request: &CodexRequest) -> Result<String, String> {
     write_network_rules(&mut out, request);
     write_nested_pty_rules(&mut out, request);
     write_keychain_rules(&mut out, request)?;
+    write_extra_seatbelt_rules(&mut out, request);
     write_ui_rules(&mut out, request);
 
     // Policy-derived deny rules go LAST so they win on conflict.
@@ -408,6 +409,24 @@ fn write_keychain_rules(out: &mut String, request: &CodexRequest) -> Result<(), 
     let _ = writeln!(out, "    (subpath {})", quote_scheme(&user_keychains));
     out.push_str("    (subpath \"/private/var/folders\"))\n");
     Ok(())
+}
+
+/// Emit caller-provided `extraMachLookups` rules: additional Mach service
+/// global-names the inner process may resolve. No-op when the list is empty.
+fn write_extra_seatbelt_rules(out: &mut String, request: &CodexRequest) {
+    let Some(sb) = request.experimental.seatbelt.as_ref() else {
+        return;
+    };
+    if sb.extra_mach_lookups.is_empty() {
+        return;
+    }
+
+    out.push_str(";; --- extraMachLookups: caller-provided Mach services ---\n");
+    out.push_str("(allow mach-lookup\n");
+    for name in &sb.extra_mach_lookups {
+        let _ = writeln!(out, "    (global-name {})", quote_scheme(name));
+    }
+    out.push_str(")\n");
 }
 
 /// Expand a leading `~` or `~/` to the current user's home directory.
@@ -883,5 +902,39 @@ mod tests {
             "missing user keychain subpath"
         );
         assert!(p.contains("(subpath \"/private/var/folders\")"));
+    }
+
+    #[test]
+    fn extra_mach_lookups_emits_grouped_allow_form() {
+        let mut r = req();
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            extra_mach_lookups: vec![
+                "com.apple.example.one".to_string(),
+                "com.apple.example.two".to_string(),
+            ],
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains(";; --- extraMachLookups"));
+        assert!(p.contains("(allow mach-lookup\n    (global-name \"com.apple.example.one\")\n    (global-name \"com.apple.example.two\")\n)"));
+    }
+
+    #[test]
+    fn extra_mach_lookups_omitted_when_empty() {
+        let mut r = req();
+        r.experimental.seatbelt = Some(SeatbeltConfig::default());
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("extraMachLookups"));
+    }
+
+    #[test]
+    fn extra_mach_lookups_escape_embedded_quotes() {
+        let mut r = req();
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            extra_mach_lookups: vec!["weird\"name".to_string()],
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(global-name \"weird\\\"name\")"));
     }
 }

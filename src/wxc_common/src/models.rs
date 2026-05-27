@@ -94,6 +94,18 @@ pub struct SeatbeltConfig {
     /// access.
     #[serde(rename = "keychainAccess", default)]
     pub keychain_access: bool,
+
+    /// Additional Mach service global-names to allow `mach-lookup` for.
+    /// Escape hatch for callers that need to talk to a system service
+    /// the baseline doesn't cover (e.g. opt-in agent integrations).
+    /// Each entry is rendered verbatim as a `(global-name "...")`
+    /// inside a single `(allow mach-lookup ...)` form.
+    #[serde(
+        rename = "extraMachLookups",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub extra_mach_lookups: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -108,6 +120,7 @@ impl Default for SeatbeltConfig {
             launch_method: LaunchMethod::default(),
             nested_pty: true,
             keychain_access: false,
+            extra_mach_lookups: Vec::new(),
         }
     }
 }

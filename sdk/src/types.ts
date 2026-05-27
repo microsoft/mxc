@@ -364,6 +364,14 @@ export interface SeatbeltConfig {
    * needs Keychain access.
    */
   keychainAccess?: boolean;
+  /**
+   * Additional Mach service global-names to allow `mach-lookup` for.
+   * Escape hatch for callers that need a specific system service the
+   * baseline doesn't cover (e.g. opt-in agent integrations). Each entry
+   * is rendered as `(global-name "...")` inside a single
+   * `(allow mach-lookup ...)` form.
+   */
+  extraMachLookups?: string[];
 }
 
 /**
