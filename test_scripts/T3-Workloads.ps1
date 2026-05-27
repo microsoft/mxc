@@ -16,10 +16,13 @@
 
 [CmdletBinding()]
 param(
-    [string]$Wxc          = (Join-Path $PSScriptRoot 'src\target\debug\wxc-exec.exe'),
+    # Default assumes the script lives at <repo>\test_scripts\ and the
+    # built binary is at <repo>\src\target\debug\wxc-exec.exe. Override
+    # -Wxc explicitly if the layout differs.
+    [string]$Wxc          = (Join-Path (Split-Path -Parent $PSScriptRoot) 'src\target\debug\wxc-exec.exe'),
     [string]$ScratchRoot  = (Join-Path $env:TEMP 'mxc-t3-workloads'),
-    # Subset of workloads to run. Default: all ten.
-    [int[]] $Run          = @(1,2,3,4,5,6,7,8,9,10),
+    # Subset of workloads to run. Default: all nineteen.
+    [int[]] $Run          = @(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19),
     # Add a few extra "kitchen sink" RO grants (TEMP, LOCALAPPDATA, ...)
     # to each workload's policy. Useful for ruling out missing-grant
     # failures while iterating on a workload.
@@ -209,15 +212,65 @@ function Invoke-Workload {
 # -----------------------------------------------------------------------
 # Well-known host paths (probed at script start)
 # -----------------------------------------------------------------------
+function Test-NeedsAppContainerGrant {
+    # System-installed dirs under Program Files / Program Files (x86)
+    # inherit `ALL APPLICATION PACKAGES` Read & Execute from their
+    # parent — the AppContainer child can load executables and DLLs
+    # from there without any per-run grant. Per-user installs (e.g.
+    # `%LOCALAPPDATA%\Programs\Python\Python3xx\`, nvm-windows under
+    # `%APPDATA%\nvm\`) do not grant AAP and need an explicit
+    # ReadOnly grant from this harness for the child to function.
+    param([string]$Path)
+    $pf  = [Environment]::GetFolderPath('ProgramFiles')
+    $pfx = [Environment]::GetFolderPath('ProgramFilesX86')
+    $resolved = [System.IO.Path]::GetFullPath($Path)
+    return -not ($resolved.StartsWith($pf,  [System.StringComparison]::OrdinalIgnoreCase) -or
+                 $resolved.StartsWith($pfx, [System.StringComparison]::OrdinalIgnoreCase))
+}
+
 function Resolve-HostPaths {
-    $script:PwshDir   = $null
-    $script:GitDir    = $null
+    $script:PwshDir        = $null
+    $script:GitDir         = $null
+    $script:NodeDir        = $null
+    $script:NodeRoNeeded   = $null
+    $script:PythonExe      = $null
+    $script:PythonRoNeeded = $null
+
     $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
     if ($pwsh) { $script:PwshDir = Split-Path $pwsh.Source }
     $git  = Get-Command git  -ErrorAction SilentlyContinue
     if ($git)  { $script:GitDir  = Split-Path (Split-Path $git.Source) }
-    Write-Host ("pwsh dir: {0}" -f ($script:PwshDir ?? '<not found>'))
-    Write-Host ("git  dir: {0}" -f ($script:GitDir  ?? '<not found>'))
+
+    $node = Get-Command node -ErrorAction SilentlyContinue
+    if ($node) {
+        $script:NodeDir = Split-Path $node.Source
+        if (Test-NeedsAppContainerGrant $script:NodeDir) {
+            $script:NodeRoNeeded = $script:NodeDir
+        }
+    }
+
+    # Try `python` then `python3`. Skip the Microsoft Store
+    # AppExecutionAlias stub under WindowsApps — it is a 0-byte
+    # redirect that just opens the Store on launch and would fail
+    # to execute under AppContainer regardless.
+    foreach ($name in @('python', 'python3')) {
+        $py = Get-Command $name -ErrorAction SilentlyContinue
+        if (-not $py) { continue }
+        if ($py.Source -like '*\WindowsApps\*') { continue }
+        $script:PythonExe = $py.Source
+        $pyDir = Split-Path $py.Source -Parent
+        if (Test-NeedsAppContainerGrant $pyDir) {
+            $script:PythonRoNeeded = $pyDir
+        }
+        break
+    }
+
+    Write-Host ("pwsh dir:   {0}" -f ($script:PwshDir   ?? '<not found>'))
+    Write-Host ("git  dir:   {0}" -f ($script:GitDir    ?? '<not found>'))
+    Write-Host ("node dir:   {0}" -f ($script:NodeDir   ?? '<not found>'))
+    Write-Host ("python exe: {0}" -f ($script:PythonExe ?? '<not found>'))
+    if ($script:NodeRoNeeded)   { Write-Host ("  -> auto-grant ReadOnly: {0}" -f $script:NodeRoNeeded) }
+    if ($script:PythonRoNeeded) { Write-Host ("  -> auto-grant ReadOnly: {0}" -f $script:PythonRoNeeded) }
 }
 
 # -----------------------------------------------------------------------
@@ -442,6 +495,229 @@ function W10-PwshDotNetIo {
 }
 
 # -----------------------------------------------------------------------
+# Node workloads (W11-W13) — mirror W2/W7/W9 for node.exe.
+#
+# JS source uses forward-slash paths to avoid JS escape-sequence
+# ambiguity (`\U`, `\T`, etc. inside single-quoted JS strings).
+# Node's fs.* accepts both separators on Windows.
+# -----------------------------------------------------------------------
+function W11-NodeReadFile {
+    Section 'W11: node -e fs.readFileSync(marker)'
+    if (-not $script:NodeDir) {
+        Record-Workload -Id 'W11' -Name 'node read file' -Pass $false -Detail 'node not found on PATH'
+        return
+    }
+    $markerFwd = ("$ScratchRoot\rw\marker.txt") -replace '\\','/'
+    $js  = "process.stdout.write(require('fs').readFileSync('$markerFwd','utf8'))"
+    $cmd = "node.exe -e `"$js`""
+    $ro  = @()
+    if ($script:NodeRoNeeded) { $ro += $script:NodeRoNeeded }
+    $cfg = New-Config -Name 'w11-node-read' -CommandLine $cmd `
+        -ReadWrite @("$ScratchRoot\rw") -ReadOnly $ro -Cwd "$ScratchRoot\rw"
+    $log = "$ScratchRoot\log\w11.log"
+    $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 60
+    $pass = ($r.ExitCode -eq 0) -and ($r.Stdout -match 'mxc-t3-marker')
+    Record-Workload -Id 'W11' -Name 'node fs.readFileSync marker' -Pass $pass `
+        -ExitCode $r.ExitCode -Detail "stdout=$($r.Stdout.Trim())" -Stderr $r.Stderr
+}
+
+function W12-NodeEval {
+    Section 'W12: node in-proc eval (math, loop)'
+    if (-not $script:NodeDir) {
+        Record-Workload -Id 'W12' -Name 'node eval' -Pass $false -Detail 'node not found on PATH'
+        return
+    }
+    $js  = "let x=6*7;console.log('answer='+x);for(let i=1;i<=3;i++)console.log('iter='+i);"
+    $cmd = "node.exe -e `"$js`""
+    $ro  = @()
+    if ($script:NodeRoNeeded) { $ro += $script:NodeRoNeeded }
+    $cfg = New-Config -Name 'w12-node-eval' -CommandLine $cmd `
+        -ReadWrite @("$ScratchRoot\rw") -ReadOnly $ro -Cwd "$ScratchRoot\rw"
+    $log = "$ScratchRoot\log\w12.log"
+    $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 60
+    $pass = ($r.ExitCode -eq 0) -and ($r.Stdout -match 'answer=42') -and ($r.Stdout -match 'iter=3')
+    Record-Workload -Id 'W12' -Name 'node in-proc eval' -Pass $pass `
+        -ExitCode $r.ExitCode -Detail "stdout=$($r.Stdout.Trim())" -Stderr $r.Stderr
+}
+
+function W13-NodeRoundTrip {
+    Section 'W13: node fs.writeFileSync + readFileSync round-trip'
+    if (-not $script:NodeDir) {
+        Record-Workload -Id 'W13' -Name 'node write+read' -Pass $false -Detail 'node not found on PATH'
+        return
+    }
+    $targetFwd = ("$ScratchRoot\rw\w13-out.txt") -replace '\\','/'
+    $js  = "const fs=require('fs');fs.writeFileSync('$targetFwd','mxc-w13-payload');process.stdout.write(fs.readFileSync('$targetFwd','utf8'));"
+    $cmd = "node.exe -e `"$js`""
+    $ro  = @()
+    if ($script:NodeRoNeeded) { $ro += $script:NodeRoNeeded }
+    $cfg = New-Config -Name 'w13-node-rt' -CommandLine $cmd `
+        -ReadWrite @("$ScratchRoot\rw") -ReadOnly $ro -Cwd "$ScratchRoot\rw"
+    $log = "$ScratchRoot\log\w13.log"
+    $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 60
+    $pass = ($r.ExitCode -eq 0) -and ($r.Stdout -match 'mxc-w13-payload')
+    Record-Workload -Id 'W13' -Name 'node writeFileSync / readFileSync' -Pass $pass `
+        -ExitCode $r.ExitCode -Detail "stdout=$($r.Stdout.Trim())" -Stderr $r.Stderr
+}
+
+# -----------------------------------------------------------------------
+# Python workloads (W14-W16) — mirror W2/W7/W9 for python.
+#
+# Use raw-string `r'…'` literals for paths so backslashes pass through
+# unescaped. The python.exe is invoked by full path (stored at discovery
+# time) so we don't depend on PATH resolution inside the AppContainer.
+# -----------------------------------------------------------------------
+function W14-PyReadFile {
+    Section 'W14: python -c open(marker).read()'
+    if (-not $script:PythonExe) {
+        Record-Workload -Id 'W14' -Name 'python read file' -Pass $false -Detail 'python not found on PATH'
+        return
+    }
+    $py  = "import sys; sys.stdout.write(open(r'$ScratchRoot\rw\marker.txt').read())"
+    $cmd = "`"$script:PythonExe`" -c `"$py`""
+    $ro  = @()
+    if ($script:PythonRoNeeded) { $ro += $script:PythonRoNeeded }
+    $cfg = New-Config -Name 'w14-py-read' -CommandLine $cmd `
+        -ReadWrite @("$ScratchRoot\rw") -ReadOnly $ro -Cwd "$ScratchRoot\rw"
+    $log = "$ScratchRoot\log\w14.log"
+    $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 60
+    $pass = ($r.ExitCode -eq 0) -and ($r.Stdout -match 'mxc-t3-marker')
+    Record-Workload -Id 'W14' -Name 'python open().read() marker' -Pass $pass `
+        -ExitCode $r.ExitCode -Detail "stdout=$($r.Stdout.Trim())" -Stderr $r.Stderr
+}
+
+function W15-PyEval {
+    Section 'W15: python in-proc eval (math, loop)'
+    if (-not $script:PythonExe) {
+        Record-Workload -Id 'W15' -Name 'python eval' -Pass $false -Detail 'python not found on PATH'
+        return
+    }
+    # `python -c` accepts ';' between simple statements but requires
+    # newlines around compound statements (e.g. `for`). To keep this
+    # a single line, use a list-comprehension to drive the loop.
+    $py  = "x=6*7; print('answer='+str(x)); [print('iter='+str(i)) for i in range(1,4)]"
+    $cmd = "`"$script:PythonExe`" -c `"$py`""
+    $ro  = @()
+    if ($script:PythonRoNeeded) { $ro += $script:PythonRoNeeded }
+    $cfg = New-Config -Name 'w15-py-eval' -CommandLine $cmd `
+        -ReadWrite @("$ScratchRoot\rw") -ReadOnly $ro -Cwd "$ScratchRoot\rw"
+    $log = "$ScratchRoot\log\w15.log"
+    $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 60
+    $pass = ($r.ExitCode -eq 0) -and ($r.Stdout -match 'answer=42') -and ($r.Stdout -match 'iter=3')
+    Record-Workload -Id 'W15' -Name 'python in-proc eval' -Pass $pass `
+        -ExitCode $r.ExitCode -Detail "stdout=$($r.Stdout.Trim())" -Stderr $r.Stderr
+}
+
+# -----------------------------------------------------------------------
+# chdir diagnostic helper — shared by W17/W18/W19.
+#
+# Creates a fresh subdir under $rw with a marker file. The chdir tests
+# below have the sandboxed child runtime chdir() into this subdir and
+# list its contents. We use a freshly-created subdir (NOT the git $repo)
+# so we eliminate any side-effects from `git init` as a possible cause.
+# -----------------------------------------------------------------------
+function Initialize-ChdirTarget {
+    $target = "$ScratchRoot\rw\chdir-target"
+    if (-not (Test-Path $target)) {
+        New-Item -ItemType Directory -Path $target | Out-Null
+        'chdir-marker' | Out-File -LiteralPath (Join-Path $target 'chdir-marker.txt') -Encoding ascii -Force
+    }
+    return $target
+}
+
+function W16-PyRoundTrip {
+    Section 'W16: python open(w,write) + open(r,read) round-trip'
+    if (-not $script:PythonExe) {
+        Record-Workload -Id 'W16' -Name 'python write+read' -Pass $false -Detail 'python not found on PATH'
+        return
+    }
+    $target = "$ScratchRoot\rw\w16-out.txt"
+    $py  = "open(r'$target','w').write('mxc-w16-payload'); import sys; sys.stdout.write(open(r'$target').read())"
+    $cmd = "`"$script:PythonExe`" -c `"$py`""
+    $ro  = @()
+    if ($script:PythonRoNeeded) { $ro += $script:PythonRoNeeded }
+    $cfg = New-Config -Name 'w16-py-rt' -CommandLine $cmd `
+        -ReadWrite @("$ScratchRoot\rw") -ReadOnly $ro -Cwd "$ScratchRoot\rw"
+    $log = "$ScratchRoot\log\w16.log"
+    $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 60
+    $pass = ($r.ExitCode -eq 0) -and ($r.Stdout -match 'mxc-w16-payload')
+    Record-Workload -Id 'W16' -Name 'python write+read round-trip' -Pass $pass `
+        -ExitCode $r.ExitCode -Detail "stdout=$($r.Stdout.Trim())" -Stderr $r.Stderr
+}
+
+# -----------------------------------------------------------------------
+# Runtime chdir diagnostics (W17-W19) — does runtime SetCurrentDirectory
+# / chdir into a granted subdir work inside the AppContainer?
+#
+# W4/W5 use `git -C <subdir>` which invokes git's own chdir before doing
+# anything else. After the \Device\Null fix, those still fail with
+# `cannot change to '<subdir>': Permission denied` even when <subdir>
+# is granted explicitly. These three tests reproduce the same operation
+# from three different runtimes to see whether it is git-specific or
+# something broader.
+#
+# Pass criterion: stdout includes 'chdir-marker.txt' (proves the chdir
+# succeeded AND the post-chdir directory listing succeeded).
+# -----------------------------------------------------------------------
+function W17-PwshSetLocation {
+    Section 'W17: pwsh Set-Location into rw subdir'
+    if (-not $script:PwshDir) {
+        Record-Workload -Id 'W17' -Name 'pwsh Set-Location' -Pass $false -Detail 'pwsh not found'
+        return
+    }
+    $target = Initialize-ChdirTarget
+    $cmd = "pwsh.exe -NoProfile -NoLogo -Command `"Set-Location -LiteralPath '$target'; Get-ChildItem -Name; exit 0`""
+    $cfg = New-Config -Name 'w17-pwsh-cd' -CommandLine $cmd `
+        -ReadWrite @("$ScratchRoot\rw") -Cwd "$ScratchRoot\rw"
+    $log = "$ScratchRoot\log\w17.log"
+    $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 60
+    $pass = ($r.ExitCode -eq 0) -and ($r.Stdout -match 'chdir-marker\.txt')
+    Record-Workload -Id 'W17' -Name 'pwsh Set-Location' -Pass $pass `
+        -ExitCode $r.ExitCode -Detail "stdout=$($r.Stdout.Trim())" -Stderr $r.Stderr
+}
+
+function W18-NodeChdir {
+    Section 'W18: node process.chdir into rw subdir'
+    if (-not $script:NodeDir) {
+        Record-Workload -Id 'W18' -Name 'node chdir' -Pass $false -Detail 'node not found'
+        return
+    }
+    $target = Initialize-ChdirTarget
+    $targetFwd = $target -replace '\\','/'
+    $js  = "process.chdir('$targetFwd'); console.log(require('fs').readdirSync('.').join(','));"
+    $cmd = "node.exe -e `"$js`""
+    $ro  = @()
+    if ($script:NodeRoNeeded) { $ro += $script:NodeRoNeeded }
+    $cfg = New-Config -Name 'w18-node-cd' -CommandLine $cmd `
+        -ReadWrite @("$ScratchRoot\rw") -ReadOnly $ro -Cwd "$ScratchRoot\rw"
+    $log = "$ScratchRoot\log\w18.log"
+    $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 60
+    $pass = ($r.ExitCode -eq 0) -and ($r.Stdout -match 'chdir-marker\.txt')
+    Record-Workload -Id 'W18' -Name 'node process.chdir' -Pass $pass `
+        -ExitCode $r.ExitCode -Detail "stdout=$($r.Stdout.Trim())" -Stderr $r.Stderr
+}
+
+function W19-PyChdir {
+    Section 'W19: python os.chdir into rw subdir'
+    if (-not $script:PythonExe) {
+        Record-Workload -Id 'W19' -Name 'python chdir' -Pass $false -Detail 'python not found'
+        return
+    }
+    $target = Initialize-ChdirTarget
+    $py  = "import os; os.chdir(r'$target'); print(','.join(os.listdir('.')))"
+    $cmd = "`"$script:PythonExe`" -c `"$py`""
+    $ro  = @()
+    if ($script:PythonRoNeeded) { $ro += $script:PythonRoNeeded }
+    $cfg = New-Config -Name 'w19-py-cd' -CommandLine $cmd `
+        -ReadWrite @("$ScratchRoot\rw") -ReadOnly $ro -Cwd "$ScratchRoot\rw"
+    $log = "$ScratchRoot\log\w19.log"
+    $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 60
+    $pass = ($r.ExitCode -eq 0) -and ($r.Stdout -match 'chdir-marker\.txt')
+    Record-Workload -Id 'W19' -Name 'python os.chdir' -Pass $pass `
+        -ExitCode $r.ExitCode -Detail "stdout=$($r.Stdout.Trim())" -Stderr $r.Stderr
+}
+
+# -----------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------
 try {
@@ -459,6 +735,15 @@ try {
     if (8  -in $Run) { W8-PwshSpawnCmd }
     if (9  -in $Run) { W9-PwshWriteReadRoundTrip }
     if (10 -in $Run) { W10-PwshDotNetIo }
+    if (11 -in $Run) { W11-NodeReadFile }
+    if (12 -in $Run) { W12-NodeEval }
+    if (13 -in $Run) { W13-NodeRoundTrip }
+    if (14 -in $Run) { W14-PyReadFile }
+    if (15 -in $Run) { W15-PyEval }
+    if (16 -in $Run) { W16-PyRoundTrip }
+    if (17 -in $Run) { W17-PwshSetLocation }
+    if (18 -in $Run) { W18-NodeChdir }
+    if (19 -in $Run) { W19-PyChdir }
 }
 catch {
     Write-Host ''
