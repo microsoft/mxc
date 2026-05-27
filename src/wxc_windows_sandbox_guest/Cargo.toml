@@ -1,7 +1,7 @@
 [package]
 name = "wxc_windows_sandbox_guest"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [[bin]]
 name = "wxc-windows-sandbox-guest"
@@ -12,3 +12,6 @@ wxc_common = { path = "../wxc_common" }
 tokio.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+
+[build-dependencies]
+mxc_build_common.workspace = true

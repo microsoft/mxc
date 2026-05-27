@@ -1,7 +1,7 @@
 [package]
 name = "mxc_pty"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 # Unix-only at runtime: mxc_pty wraps `openpty` + `pre_exec` (TIOCSCTTY,
 # setsid) + sigwait-style helpers, none of which have a sensible Windows

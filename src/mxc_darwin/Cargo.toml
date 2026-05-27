@@ -1,11 +1,14 @@
 [package]
 name = "mxc_darwin"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [[bin]]
 name = "mxc-exec-mac"
 path = "src/main.rs"
+
+[build-dependencies]
+mxc_build_common.workspace = true
 
 [dependencies]
 wxc_common = { workspace = true }

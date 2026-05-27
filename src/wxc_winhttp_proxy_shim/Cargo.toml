@@ -1,6 +1,6 @@
 [package]
 name = "wxc_winhttp_proxy_shim"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 
 [[bin]]
@@ -12,3 +12,6 @@ wxc_common.workspace = true
 clap.workspace = true
 windows.workspace = true
 windows-core.workspace = true
+
+[build-dependencies]
+mxc_build_common.workspace = true

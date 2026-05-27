@@ -1,6 +1,6 @@
 [package]
 name = "wxc_e2e_tests"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 publish = false
 description = "End-to-end integration tests for MXC"

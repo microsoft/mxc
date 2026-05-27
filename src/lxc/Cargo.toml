@@ -1,7 +1,7 @@
 [package]
 name = "lxc"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [[bin]]
 name = "lxc-exec"
@@ -9,6 +9,9 @@ path = "src/main.rs"
 
 [features]
 hyperlight = ["wxc_common/hyperlight"]
+
+[build-dependencies]
+mxc_build_common.workspace = true
 
 [dependencies]
 wxc_common = { workspace = true }

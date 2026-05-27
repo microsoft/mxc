@@ -1,17 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script for wxc — copies NanVix binaries next to the output executable.
+//! Build script for wxc — embeds Windows VersionInfo and copies NanVix binaries.
 
 fn main() {
+    mxc_build_common::embed_version_info("MXC sandbox executor", "wxc-exec.exe");
+
     #[cfg(windows)]
     check_test_prerequisites();
 
     #[cfg(all(windows, feature = "microvm"))]
     copy_nanvix_binaries();
 
-    // Always emit rerun-if-changed so Cargo doesn't re-run unnecessarily.
-    println!("cargo:rerun-if-changed=build.rs");
     // Re-run prerequisite checks when PATH changes (e.g., after installing Python).
     #[cfg(windows)]
     println!("cargo:rerun-if-env-changed=PATH");
