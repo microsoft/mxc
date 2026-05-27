@@ -32,6 +32,16 @@ jobs:
   steps:
     - checkout: self
 
+    # Install nightly Rust via rustup-init. The toolchain itself runs on the
+    # hosted agent only -- crates come from Mxc-Azure-Feed (see below).
+    - powershell: |
+        $rustupInit = "$env:TEMP\rustup-init.exe"
+        Invoke-WebRequest -UseBasicParsing -Uri 'https://win.rustup.rs/x86_64' -OutFile $rustupInit
+        & $rustupInit -y --profile minimal --default-toolchain $(rustNightly) --default-host x86_64-pc-windows-msvc
+        if ($LASTEXITCODE -ne 0) { throw "rustup-init failed" }
+        Write-Host "##vso[task.prependpath]$env:USERPROFILE\.cargo\bin"
+      displayName: Install Rust nightly
+
     # Keep all crate fetches going through the internal feed.
     # Write to both project-level (for `cargo fuzz build`) and user-level
     # (for `cargo install` which only reads $CARGO_HOME/config.toml).
@@ -43,15 +53,9 @@ jobs:
         Add-Content -Path "$cargoHome\config.toml" -Value ("`n" + $feedConfig)
       displayName: Setup Cargo Config
 
-    # Install nightly Rust via rustup-init. The toolchain itself runs on the
-    # hosted agent only -- crates come from Mxc-Azure-Feed (see above).
-    - powershell: |
-        $rustupInit = "$env:TEMP\rustup-init.exe"
-        Invoke-WebRequest -UseBasicParsing -Uri 'https://win.rustup.rs/x86_64' -OutFile $rustupInit
-        & $rustupInit -y --profile minimal --default-toolchain $(rustNightly) --default-host x86_64-pc-windows-msvc
-        if ($LASTEXITCODE -ne 0) { throw "rustup-init failed" }
-        Write-Host "##vso[task.prependpath]$env:USERPROFILE\.cargo\bin"
-      displayName: Install Rust nightly
+    - task: CargoAuthenticate@0
+      inputs:
+        configFile: '$(Build.SourcesDirectory)/.cargo/config.toml'
 
     - powershell: |
         rustc --version
