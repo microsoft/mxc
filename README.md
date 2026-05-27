@@ -168,16 +168,10 @@ When `--audit` is passed:
 Example:
 
 ```powershell
-wxc --audit --config-path C:\path\to\my-config.json
+wxc --audit --config C:\path\to\my-config.json
 ```
 
 After the run, `Adjusted_my-config.json` will sit next to `my-config.json`, ready to be used as a tightened (or expanded) policy that reflects what the workload actually touched.
-
-> NOTE: `wxc` currently shells out to a hard-coded helper path (`C:\Users\AdminUser\Desktop\MXC\start_plm_logging.ps1` / `stop_plm_logging.ps1`). The helpers themselves live in [`src/learning_mode/`](src/learning_mode/readme.md) — see that readme for the full parameter list (`-LogDir`, `-FilePath`, and the stubbed `-OutputConfigPath` / `-InPlaceEdit` / `-AcpPath` parameters).
-
-ACP needs to be swapped out for XPERF
-Code in main.rs should be moved to another files (LearningMode.rs?)
-Finalize paths for output, and output structure
 
 ## Linux Support (LXC)
 

@@ -27,6 +27,8 @@ use wxc_common::state_aware_dispatch::{run_state_aware, DispatchOutcome};
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
 use wxc_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 
+mod learning_mode;
+
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
 struct Cli {
@@ -641,6 +643,8 @@ fn main() {
     request.experimental_enabled = cli.experimental;
     request.dry_run = cli.dry_run;
 
+    // Inject permissiveLearningMode capability when audit flag is set.
+    // Acceptable in non-debug builds as it can't be manifested.
     if cli.audit {
         request
             .policy
@@ -902,20 +906,7 @@ fn main() {
     };
 
     if cli.audit {
-        match std::process::Command::new("pwsh.exe")
-            .args([
-                "-command",
-                "C:\\Users\\AdminUser\\Desktop\\MXC\\start_plm_logging.ps1",
-            ])
-            .status()
-        {
-            Ok(status) => {
-                let _ = writeln!(logger, "start_plm_logging.ps1 start exited with {}", status);
-            }
-            Err(e) => {
-                let _ = writeln!(logger, "Failed to start start_plm_logging.ps1: {}", e);
-            }
-        }
+        learning_mode::start_audit_logging(&mut logger);
     }
 
     let run_start = Instant::now();
@@ -972,22 +963,7 @@ fn main() {
     }
 
     if cli.audit {
-        match std::process::Command::new("pwsh.exe")
-            .args([
-                "-command",
-                "C:\\Users\\AdminUser\\Desktop\\MXC\\stop_plm_logging.ps1",
-                "-FilePath",
-                &cli.config_path.unwrap_or_default(),
-            ])
-            .status()
-        {
-            Ok(status) => {
-                let _ = writeln!(logger, "stop_plm_logging.ps1 stop exited with {}", status);
-            }
-            Err(e) => {
-                let _ = writeln!(logger, "Failed to stop stop_plm_logging.ps1: {}", e);
-            }
-        }
+        learning_mode::stop_audit_logging(&mut logger, cli.config_path.as_deref());
     }
 
     process::exit(response.exit_code);

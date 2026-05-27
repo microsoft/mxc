@@ -13,7 +13,7 @@ fn main() {
     #[cfg(all(windows, feature = "microvm"))]
     copy_nanvix_binaries();
 
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(windows)]
     copy_learning_mode_scripts();
 
     // Always emit rerun-if-changed so Cargo doesn't re-run unnecessarily.
@@ -95,7 +95,13 @@ fn copy_learning_mode_scripts() {
         }
     };
 
-    for name in &["start_plm_logging.ps1", "stop_plm_logging.ps1"] {
+    for name in &[
+        "start_plm_logging.ps1",
+        "stop_plm_logging.ps1",
+        "event_dacl_parser.ps1",
+        "extract_caps.ps1",
+        "plm.wprp",
+    ] {
         let src = src_dir.join(name);
         let dst = target_dir.join(name);
 
