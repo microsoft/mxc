@@ -1522,8 +1522,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn learning_mode_adds_capability_in_debug() {
-        let json =
-            r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"learningMode": true}}"#;
+        let json = r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"learningMode": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
