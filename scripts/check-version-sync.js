@@ -7,11 +7,10 @@
 //
 //   node scripts/check-version-sync.js
 
-import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+const { readFileSync } = require("fs");
+const { join } = require("path");
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = join(__dirname, "..");
 
 const cargoToml = readFileSync(join(repoRoot, "src", "Cargo.toml"), "utf8");
 const cargoMatch = cargoToml.match(

@@ -80,15 +80,23 @@ fn track_git_head() {
         None => return,
     };
 
-    let head = Path::new(&git_dir).join("HEAD");
+    let git_dir_path = Path::new(&git_dir);
+    let head = git_dir_path.join("HEAD");
     if head.exists() {
         println!("cargo:rerun-if-changed={}", head.display());
 
         if let Ok(content) = std::fs::read_to_string(&head) {
             if let Some(ref_path) = content.strip_prefix("ref: ") {
-                let ref_file = Path::new(&git_dir).join(ref_path.trim());
+                let ref_file = git_dir_path.join(ref_path.trim());
                 if ref_file.exists() {
                     println!("cargo:rerun-if-changed={}", ref_file.display());
+                } else {
+                    // When refs are packed, the loose ref file doesn't exist
+                    // and changes are tracked in packed-refs instead.
+                    let packed_refs = git_dir_path.join("packed-refs");
+                    if packed_refs.exists() {
+                        println!("cargo:rerun-if-changed={}", packed_refs.display());
+                    }
                 }
             }
         }
