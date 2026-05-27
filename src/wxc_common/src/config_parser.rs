@@ -2814,7 +2814,9 @@ mod tests {
     }
 
     #[test]
-    fn processcontainer_containment_with_experimental_seatbelt_rejected() {
+    fn experimental_backend_section_for_other_containment_rejected() {
+        // Per-backend blocks nested under `experimental` (here: seatbelt)
+        // are subject to the same single-backend check as top-level blocks.
         let json = r#"{
             "containment": "processcontainer",
             "process": {"commandLine": "echo hi"},
