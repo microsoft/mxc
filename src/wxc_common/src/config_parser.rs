@@ -2769,7 +2769,7 @@ mod tests {
         );
     }
 
-    // ====== Single-backend-section enforcement (issue #104) ======
+    // ====== Single-backend-section enforcement ======
 
     fn assert_multi_backend_rejected(json: &str, expected_extra: &str) {
         let encoded = base64_encode(json.as_bytes());
