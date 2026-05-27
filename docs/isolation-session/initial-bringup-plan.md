@@ -102,8 +102,8 @@ interface.
 
 | File | Purpose |
 |---|---|
-| `external/windows-sdk/isolation-environment-session/README.md` | WinMD provenance, regeneration instructions |
-| `external/windows-sdk/isolation-environment-session/GENERATION_INFO.toml` | Machine-readable provenance (OS branch, OS commit, WinMD SHA256, `windows-bindgen` version, target `windows` crate version) |
+| `external/windows-sdk/isolation-session/README.md` | WinMD provenance, version-coupling notes |
+| `external/windows-sdk/isolation-session/GENERATION_INFO.toml` | Machine-readable provenance (`windows-bindgen` version, target `windows` crate version, generated date) |
 | `src/isolation_session_bindings/Cargo.toml` | Bindings crate manifest |
 | `src/isolation_session_bindings/build.rs` | Verifies `windows` crate version matches the recorded provenance |
 | `src/isolation_session_bindings/src/lib.rs` | Re-exports the generated module |
