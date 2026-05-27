@@ -56,16 +56,24 @@
         "to": "bin/x64/nanvixd.exe"
       },
       {
-        "from": "../src/target/x86_64-pc-windows-msvc/release/kernel.elf",
-        "to": "bin/x64/kernel.elf"
+        "from": "../src/target/x86_64-pc-windows-msvc/release/bin/kernel.elf",
+        "to": "bin/x64/bin/kernel.elf"
       },
       {
-        "from": "../src/target/x86_64-pc-windows-msvc/release/python.elf",
-        "to": "bin/x64/python.elf"
+        "from": "../src/target/x86_64-pc-windows-msvc/release/python3.initrd",
+        "to": "bin/x64/python3.initrd"
       },
       {
-        "from": "../src/target/x86_64-pc-windows-msvc/release/cpython-ramfs.img",
-        "to": "bin/x64/cpython-ramfs.img"
+        "from": "../src/target/x86_64-pc-windows-msvc/release/nanvix_rootfs.img",
+        "to": "bin/x64/nanvix_rootfs.img"
+      },
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/snapshots/kernel.vmem",
+        "to": "bin/x64/snapshots/kernel.vmem"
+      },
+      {
+        "from": "../src/target/x86_64-pc-windows-msvc/release/snapshots/kernel.whp.cbor",
+        "to": "bin/x64/snapshots/kernel.whp.cbor"
       },
       {
         "from": "../sdk/bin/x64/vcruntime140.dll",
