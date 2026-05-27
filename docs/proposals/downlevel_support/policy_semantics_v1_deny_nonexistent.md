@@ -25,15 +25,23 @@ rules needed to support non-existent `D` entries. It does not change:
 - F1's no-marker, subtree-implicit model;
 - F4's Position 3 delegation model;
 - F6's uniform most-specific-wins rule;
-- F7's same-path multi-list conflict rule;
+- F7's same-object multi-list conflict rule;
 - F8's canonicalization rule;
 - F10's access-denied semantics for `D`;
-- F11's path-based, not object-based, model;
+- F11's object-based model;
 - F12's provenance-irrelevant rule;
 - default-deny.
 
 If a point below seems to require changing one of those rules, treat it
 as an open question rather than a normative change.
+
+**Interaction with F11 (object-based).** A non-existent `D` path
+has no host object to canonicalize against at load time, so F8's
+object-resolution stage defers for that entry until the path
+materializes. Before materialization the entry matches by
+lexically-canonical path string. Once a host object exists at the
+path, F11's object-identity match applies and the deny covers all
+aliases that reach the object.
 
 ## Motivation
 
@@ -382,10 +390,10 @@ repo, but reserve a subpath the agent must not create or use.
   [`policy_semantics_v1.md`](./policy_semantics_v1.md)
   - F2: original existence requirement and OQ-S3 deferral
   - F4: Position 3 delegation and static validation
-  - F6/F7: most-specific-wins and same-path conflicts
-  - F8: canonical paths; no symlink/junction resolution
+  - F6/F7: most-specific-wins and same-object conflicts
+  - F8: lexical canonicalization plus object resolution
   - F10: `D` produces `ACCESS_DENIED`, not hidden
-  - F11/F12: path-based policy; provenance is irrelevant
+  - F11/F12: object-based policy; provenance is irrelevant
   - F14: validator role
 - Review summary:
   [`policy_semantics_v1_summary.md`](./policy_semantics_v1_summary.md)
