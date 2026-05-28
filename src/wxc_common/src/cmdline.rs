@@ -65,26 +65,11 @@ pub fn cmdline_from_argv_for_context(
             CommandLineContext::WindowsCreateProcess => {
                 append_windows_create_process(&mut out, arg)
             }
-            CommandLineContext::WindowsCommandProcessor => append_windows_cmd(&mut out, arg)?,
+            CommandLineContext::WindowsCommandProcessor => append_windows_cmd(&mut out, arg),
             CommandLineContext::PosixShell => append_posix_shell(&mut out, arg),
         }
     }
     Ok(out)
-}
-
-/// Join an argv slice into a single command-line string using the
-/// `CommandLineToArgvW` quoting rules. Tokens with no whitespace or
-/// quote characters are emitted verbatim; everything else is wrapped
-/// in double quotes with backslash/quote escaping.
-pub fn cmdline_from_argv(argv: &[String]) -> String {
-    let mut out = String::new();
-    for (i, arg) in argv.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        append_windows_create_process(&mut out, arg);
-    }
-    out
 }
 
 fn validate_argv(argv: &[String]) -> Result<(), CommandLineError> {
@@ -100,14 +85,8 @@ fn append_windows_create_process(out: &mut String, arg: &str) {
     append_windows_quoted(out, arg, needs_windows_create_process_quotes);
 }
 
-fn append_windows_cmd(out: &mut String, arg: &str) -> Result<(), CommandLineError> {
-    if arg.contains('%') || arg.contains('!') || arg.contains('"') {
-        return Err(CommandLineError::new(
-            "CLI command arguments for cmd.exe-backed sandboxes must not contain '%', '!', or '\"'",
-        ));
-    }
+fn append_windows_cmd(out: &mut String, arg: &str) {
     append_windows_quoted(out, arg, needs_windows_cmd_quotes);
-    Ok(())
 }
 
 fn append_windows_quoted(out: &mut String, arg: &str, needs_quoting: fn(&str) -> bool) {
@@ -211,20 +190,24 @@ mod tests {
         v.iter().map(|t| (*t).to_string()).collect()
     }
 
+    fn create_process_cmdline(v: &[&str]) -> String {
+        cmdline_from_argv_for_context(&s(v), CommandLineContext::WindowsCreateProcess).unwrap()
+    }
+
     #[test]
     fn empty_argv_produces_empty_string() {
-        assert_eq!(cmdline_from_argv(&[]), "");
+        assert_eq!(create_process_cmdline(&[]), "");
     }
 
     #[test]
     fn plain_tokens_join_with_single_space() {
-        assert_eq!(cmdline_from_argv(&s(&["py", "foo.py"])), "py foo.py");
+        assert_eq!(create_process_cmdline(&["py", "foo.py"]), "py foo.py");
     }
 
     #[test]
     fn token_with_space_is_quoted() {
         assert_eq!(
-            cmdline_from_argv(&s(&["py", "hello world.py"])),
+            create_process_cmdline(&["py", "hello world.py"]),
             "py \"hello world.py\""
         );
     }
@@ -232,14 +215,14 @@ mod tests {
     #[test]
     fn token_with_quote_escapes_the_quote() {
         assert_eq!(
-            cmdline_from_argv(&s(&["py", "-c", "print(\"hi\")"])),
+            create_process_cmdline(&["py", "-c", "print(\"hi\")"]),
             "py -c \"print(\\\"hi\\\")\""
         );
     }
 
     #[test]
     fn empty_token_is_emitted_as_empty_quoted_pair() {
-        assert_eq!(cmdline_from_argv(&s(&["py", ""])), "py \"\"");
+        assert_eq!(create_process_cmdline(&["py", ""]), "py \"\"");
     }
 
     #[test]
@@ -247,7 +230,7 @@ mod tests {
         // Path "C:\foo bar\" must serialise so the runtime parser sees
         // a single trailing backslash, not an escaped closing quote.
         assert_eq!(
-            cmdline_from_argv(&s(&["echo", "C:\\foo bar\\"])),
+            create_process_cmdline(&["echo", "C:\\foo bar\\"]),
             "echo \"C:\\foo bar\\\\\""
         );
     }
@@ -255,18 +238,16 @@ mod tests {
     #[test]
     fn backslashes_not_before_quote_are_not_doubled() {
         assert_eq!(
-            cmdline_from_argv(&s(&["echo", "a\\b c"])),
+            create_process_cmdline(&["echo", "a\\b c"]),
             "echo \"a\\b c\""
         );
     }
 
     #[test]
-    fn windows_create_process_context_matches_legacy_helper() {
-        let argv = s(&["py", "hello world.py", "safe&whoami"]);
-
+    fn windows_create_process_context_allows_shell_metacharacters_as_data() {
         assert_eq!(
-            cmdline_from_argv_for_context(&argv, CommandLineContext::WindowsCreateProcess).unwrap(),
-            cmdline_from_argv(&argv)
+            create_process_cmdline(&["py", "hello world.py", "safe&whoami"]),
+            "py \"hello world.py\" safe&whoami"
         );
     }
 
@@ -283,31 +264,74 @@ mod tests {
     }
 
     #[test]
-    fn windows_cmd_context_rejects_percent_and_bang_expansion() {
-        let percent_err = cmdline_from_argv_for_context(
-            &s(&["echo", "%PATH%"]),
-            CommandLineContext::WindowsCommandProcessor,
-        )
-        .unwrap_err();
-        let bang_err = cmdline_from_argv_for_context(
-            &s(&["echo", "!PATH!"]),
-            CommandLineContext::WindowsCommandProcessor,
-        )
-        .unwrap_err();
-
-        assert!(percent_err.to_string().contains("must not contain"));
-        assert!(bang_err.to_string().contains("must not contain"));
+    fn windows_cmd_context_preserves_less_than_as_argument_data() {
+        assert_eq!(
+            cmdline_from_argv_for_context(
+                &s(&["python", "-c", "if 5 < 10: print('hello')"]),
+                CommandLineContext::WindowsCommandProcessor,
+            )
+            .unwrap(),
+            "python -c \"if 5 < 10: print('hello')\""
+        );
     }
 
     #[test]
-    fn windows_cmd_context_rejects_embedded_quotes() {
+    fn windows_cmd_context_passes_expansion_chars_to_caller() {
+        assert_eq!(
+            cmdline_from_argv_for_context(
+                &s(&["python", "-c", "if !5: print('%hello%')"]),
+                CommandLineContext::WindowsCommandProcessor,
+            )
+            .unwrap(),
+            "python -c \"if !5: print('%hello%')\""
+        );
+    }
+
+    #[test]
+    fn windows_cmd_context_passes_embedded_quotes_to_caller() {
+        assert_eq!(
+            cmdline_from_argv_for_context(
+                &s(&["python", "-c", "print(\"hi\")"]),
+                CommandLineContext::WindowsCommandProcessor,
+            )
+            .unwrap(),
+            "python -c \"print(\\\"hi\\\")\""
+        );
+    }
+
+    #[test]
+    fn windows_cmd_context_passes_newlines_to_caller() {
+        assert_eq!(
+            cmdline_from_argv_for_context(
+                &s(&["python", "-c", "print('hello')\nprint('world')"]),
+                CommandLineContext::WindowsCommandProcessor,
+            )
+            .unwrap(),
+            "python -c \"print('hello')\nprint('world')\""
+        );
+    }
+
+    #[test]
+    fn windows_cmd_context_rejects_null_bytes() {
         let err = cmdline_from_argv_for_context(
-            &s(&["echo", "\"&whoami"]),
+            &["echo\0hidden".to_string()],
             CommandLineContext::WindowsCommandProcessor,
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("must not contain"));
+        assert!(err.to_string().contains("null bytes"));
+    }
+
+    #[test]
+    fn windows_cmd_context_quotes_whitespace_like_policy_command_line() {
+        assert_eq!(
+            cmdline_from_argv_for_context(
+                &s(&["python", "hello world.py"]),
+                CommandLineContext::WindowsCommandProcessor
+            )
+            .unwrap(),
+            "python \"hello world.py\""
+        );
     }
 
     #[test]

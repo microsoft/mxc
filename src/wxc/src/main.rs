@@ -1366,13 +1366,20 @@ mod tests {
 
     #[test]
     fn isolation_session_cli_command_quotes_shell_metacharacters() {
-        let cli = parse_cli(&["wxc-exec", "policy.json", "--", "echo", "safe&whoami"]);
+        let cli = parse_cli(&[
+            "wxc-exec",
+            "policy.json",
+            "--",
+            "python",
+            "-c",
+            "if 5 < 10: print('hello')",
+        ]);
         let command_override =
             command_override_from_cli(&cli, CommandLineContext::WindowsCommandProcessor)
                 .unwrap()
                 .unwrap();
 
-        assert_eq!(command_override, "echo \"safe&whoami\"");
+        assert_eq!(command_override, "python -c \"if 5 < 10: print('hello')\"");
     }
 
     #[test]
