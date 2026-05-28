@@ -11,14 +11,22 @@
 
 use std::ffi::c_void;
 use std::fmt::Write;
+use std::io::IsTerminal;
 use std::ptr;
 
-use windows::Win32::Foundation::{CloseHandle, GetLastError, WAIT_FAILED, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_FAILED,
+    WAIT_TIMEOUT,
+};
+use windows::Win32::System::Console::{
+    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
 use windows::Win32::System::Threading::{
-    GetExitCodeProcess, TerminateProcess, WaitForSingleObject, PROCESS_INFORMATION, STARTUPINFOW,
+    GetExitCodeProcess, TerminateProcess, WaitForSingleObject, PROCESS_INFORMATION,
+    STARTF_USESTDHANDLES, STARTUPINFOW,
 };
 use windows_core::PCWSTR;
 
@@ -559,9 +567,62 @@ impl ScriptRunner for BaseContainerRunner {
             );
         }
 
-        // STARTUPINFOW -- minimal, no handle inheritance (not yet supported by the API).
+        // --- Determine STDIO mode ---
+        // If wxc-exec's stdout or stderr is not a terminal (i.e., piped by the SDK),
+        // we forward our own std handles to the child via STARTF_USESTDHANDLES so the
+        // child's output streams directly to the SDK in real time.
+        let pipe_mode = !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
+
+        if pipe_mode {
+            let _ = writeln!(
+                logger,
+                "STDIO mode: passthrough (forwarding parent handles to child)"
+            );
+        }
+
+        // --- Retrieve parent std handles for passthrough (pipe mode only) ---
+        let h_stdin;
+        let h_stdout;
+        let h_stderr;
+
+        if pipe_mode {
+            h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
+                Ok(h) => h,
+                Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDIN): {e}")),
+            };
+            h_stdout = match unsafe { GetStdHandle(STD_OUTPUT_HANDLE) } {
+                Ok(h) => h,
+                Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDOUT): {e}")),
+            };
+            h_stderr = match unsafe { GetStdHandle(STD_ERROR_HANDLE) } {
+                Ok(h) => h,
+                Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")),
+            };
+
+            // Ensure the handles are inheritable.
+            unsafe {
+                let _ = SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT);
+                let _ = SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT);
+                let _ = SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT);
+            }
+        } else {
+            h_stdin = HANDLE::default();
+            h_stdout = HANDLE::default();
+            h_stderr = HANDLE::default();
+        }
+
+        // STARTUPINFOW -- in pipe mode, pass parent handles via STARTF_USESTDHANDLES
+        // so child output streams directly to the SDK caller.
         let si = STARTUPINFOW {
             cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+            dwFlags: if pipe_mode {
+                STARTF_USESTDHANDLES
+            } else {
+                Default::default()
+            },
+            hStdInput: h_stdin,
+            hStdOutput: h_stdout,
+            hStdError: h_stderr,
             ..unsafe { std::mem::zeroed() }
         };
         #[allow(unused_assignments)]
@@ -634,7 +695,7 @@ impl ScriptRunner for BaseContainerRunner {
                     cmd_wide.as_mut_ptr(),   // commandLine
                     ptr::null(),             // processAttributes (must be NULL)
                     ptr::null(),             // threadAttributes  (must be NULL)
-                    0,                       // inheritHandles    (must be FALSE)
+                    i32::from(false),        // inheritHandles (must be FALSE)
                     current_creation_flags,  // creationFlags
                     current_env_ptr,         // environment
                     cwd_ptr,                 // currentDirectory
@@ -809,10 +870,19 @@ impl ScriptRunner for BaseContainerRunner {
             (String::new(), FailurePhase::None)
         };
 
+        // Merge diagnostic error into stderr field if present.
+        // In passthrough mode, stdout/stderr already went directly to the SDK caller,
+        // so standard_out/standard_err in ScriptResponse will be empty.
+        let final_stderr = if error_message.is_empty() {
+            String::new()
+        } else {
+            error_message.clone()
+        };
+
         ScriptResponse {
             exit_code: exit_code as i32,
             standard_out: String::new(),
-            standard_err: error_message.clone(),
+            standard_err: final_stderr,
             error_message,
             failure_phase,
             ..Default::default()
