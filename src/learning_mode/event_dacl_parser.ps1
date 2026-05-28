@@ -129,6 +129,18 @@ function Invoke-EventDaclParser {
             }
         }
 
+        # Skip events with very short paths that are unlikely to be real file accesses or full drive access
+        if ($filePath.Length -lt 4) {
+            Write-VHost "Skipping too-short path event: $filePath" -ForegroundColor Yellow
+            continue
+        }
+
+        # We can only handle drive-letter paths, so skip anything that doesn't start with a drive letter. 
+        if ($filePath[1] -ne ':') {
+            Write-VHost "Skipping non-drive-letter path event: $filePath" -ForegroundColor Yellow
+            continue
+        }
+
         # Skip events where the app is just accessing its own binary -- the
         # app path is stored without a drive letter (HardDiskVolume form),
         # so we compare against the file path minus its drive letter.

@@ -93,7 +93,7 @@ try {
 } finally {
     foreach ($dir in $TempDirs) {
         if (Test-Path $dir) {
-            #Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
         }
     }
 }

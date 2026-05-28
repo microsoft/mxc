@@ -1,0 +1,15 @@
+{
+  "version": "0.4.0-alpha",
+  "containerId": "CLI-UI-Screenshot-Test",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "pwsh -NoProfile -Command \"try { $null = [Windows.Graphics.Capture.GraphicsCaptureItem,Windows.Graphics.Capture,ContentType=WindowsRuntime]; $null = [Windows.Graphics.DisplayId,Windows.Graphics,ContentType=WindowsRuntime]; Write-Host 'Testing GraphicsCaptureItem::TryCreateFromDisplayId with hardcoded DisplayId=0...'; $displayId = New-Object Windows.Graphics.DisplayId; $displayId.Value = 0; $item = [Windows.Graphics.Capture.GraphicsCaptureItem]::TryCreateFromDisplayId($displayId); if ($item) { Write-Host ('SUCCESS: created capture item: ' + $item.DisplayName + ' size=' + $item.Size.Width + 'x' + $item.Size.Height) } else { Write-Host 'FAIL: TryCreateFromDisplayId returned null'; exit 1 } } catch { Write-Host ('FAIL: ' + $_.Exception.GetType().FullName + ': ' + $_.Exception.Message); exit 1 }\"",
+    "timeout": 30000
+  },
+  "filesystem": {},
+  "ui": {
+    "disable": true
+  }
+}
+
+
