@@ -1,13 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# BFS filesystem test runner.
+# PLM filesystem test runner.
 # Creates temporary directories required by the test config, runs the test,
 # and cleans up regardless of outcome.
 #
 # Usage:
-#   .\run_filesystem_bfs_test.ps1              # debug build
-#   .\run_filesystem_bfs_test.ps1 -Release     # release build
+#   .\run_filesystem_PLM_test.ps1              # debug build
+#   .\run_filesystem_PLM_test.ps1 -Release     # release build
 
 param(
     [switch]$Release,
