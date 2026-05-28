@@ -73,7 +73,7 @@ fn check_test_prerequisites() {
     }
 }
 
-#[cfg(all(windows, debug_assertions))]
+#[cfg(all(windows))]
 fn copy_learning_mode_scripts() {
     use std::fs;
     use std::path::Path;
