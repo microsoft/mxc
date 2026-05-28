@@ -166,7 +166,7 @@ if ($ConfigPath -and (($ValidAccessEvents.Count -gt 0) -or ($AllRequestedCapabil
         # Check if the file is in a deny path
         foreach ($path in $denyFileSet) 
         {
-            if ($ev.FilePath.StartsWith($path)) 
+            if ($ev.FilePath.StartsWith($path, [StringComparison]::OrdinalIgnoreCase)) 
             {
                 # This file is already denied, so we skip it.
                 $ignoreCurrentFile = $true
@@ -177,7 +177,7 @@ if ($ConfigPath -and (($ValidAccessEvents.Count -gt 0) -or ($AllRequestedCapabil
         # Another file has already been marked as readwrite in the same directory.
         foreach ($path in $config.filesystem.readwritePaths) 
         {
-            if ($ev.FilePath.StartsWith($path)) 
+            if ($ev.FilePath.StartsWith($path, [StringComparison]::OrdinalIgnoreCase)) 
             {
                 # a parent directory is already marked as readwrite, so we skip this file.
                 $ignoreCurrentFile = $true
@@ -218,7 +218,7 @@ if ($ConfigPath -and (($ValidAccessEvents.Count -gt 0) -or ($AllRequestedCapabil
 
             foreach ($path in $config.filesystem.readonlyPaths) 
             {
-                if ($ev.FilePath.StartsWith($path)) 
+                if ($ev.FilePath.StartsWith($path, [StringComparison]::OrdinalIgnoreCase)) 
                 {
                     # a parent directory is already marked as readonly, so we skip this file.
                     # write-host "File $($ev.FilePath) is already marked as readonly by parent path $path, skipping event." -ForegroundColor Yellow

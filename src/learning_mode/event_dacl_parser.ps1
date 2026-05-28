@@ -114,7 +114,7 @@ function Invoke-EventDaclParser {
         $filePath = $filePath.Trim()
         # Strip leading "\??\" so the path is in the familiar drive-letter
         # form used elsewhere in the script.
-        if ($filePath.StartsWith('\??\', [StringComparison]::Ordinal)) {
+        if ($filePath.StartsWith('\??\', [StringComparison]::OrdinalIgnoreCase)) {
             $filePath = $filePath.Substring(4)
         }
 
