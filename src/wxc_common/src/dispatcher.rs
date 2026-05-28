@@ -4,7 +4,7 @@
 //! BaseContainer-fallback tier dispatcher.
 //!
 //! Wires Phases 0–3 (telemetry, fallback detector, AppContainer modes,
-//! DACL manager) into a single entrypoint. Given a [`CodexRequest`], the
+//! DACL manager) into a single entrypoint. Given an [`ExecutionRequest`], the
 //! dispatcher consults [`crate::fallback_detector::detect`] to choose
 //! between Tier 1 (BaseContainer), Tier 2 (AppContainer + BFS), or Tier 3
 //! (AppContainer + DACL), constructs the appropriate runner, and applies
@@ -74,7 +74,7 @@ use crate::base_container_runner::BaseContainerRunner;
 use crate::error::WxcError;
 use crate::fallback_detector::{self, FallbackError, IsolationTier};
 use crate::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
-use crate::models::CodexRequest;
+use crate::models::ExecutionRequest;
 use crate::script_runner::ScriptRunner;
 
 /// Result of a successful dispatch decision: a phased handle holding a
@@ -186,7 +186,7 @@ impl From<FallbackError> for DispatchError {
 /// The container-id → AppContainer-name mapping used by the runners. Empty
 /// container_id maps to `"CLI"` (matches both AppContainerScriptRunner and
 /// BaseContainerRunner internals).
-fn container_name(request: &CodexRequest) -> String {
+fn container_name(request: &ExecutionRequest) -> String {
     if request.container_id.is_empty() {
         "CLI".to_string()
     } else {
@@ -275,7 +275,7 @@ fn build_t3_dacl(
 /// execute and (when applicable) a [`DaclManager`] that has already
 /// applied its ACEs. Use [`Dispatched::into_runner_and_guard`] to
 /// extract both; the manager MUST stay alive through the run.
-pub fn dispatch_with_fallback(request: &CodexRequest) -> Result<Dispatched, DispatchError> {
+pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, DispatchError> {
     let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
 
     let (runner, dacl_manager): (Box<dyn ScriptRunner>, Option<DaclManager>) = match decision.tier {
@@ -363,7 +363,7 @@ pub fn dispatch_with_fallback(request: &CodexRequest) -> Result<Dispatched, Disp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{CodexRequest, ContainerPolicy};
+    use crate::models::{ContainerPolicy, ExecutionRequest};
     // `ForceTierGuard` lives in `crate::test_env` so the lock is
     // shared with the `fallback_detector::tests` module — otherwise
     // a dispatcher test and a fallback-detector test running on
@@ -371,11 +371,11 @@ mod tests {
     // independent locks and race.
     use crate::test_env::{ForceTierGuard, ENV_LOCK};
 
-    fn test_request(policy: ContainerPolicy) -> CodexRequest {
-        CodexRequest {
+    fn test_request(policy: ContainerPolicy) -> ExecutionRequest {
+        ExecutionRequest {
             container_id: "MxcDispatcherTest".to_string(),
             policy,
-            ..CodexRequest::default()
+            ..ExecutionRequest::default()
         }
     }
 

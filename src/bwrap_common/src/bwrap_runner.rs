@@ -5,7 +5,7 @@
 //! namespace sandbox via the `bwrap` CLI.
 //!
 //! Bubblewrap uses Linux user namespaces to create an unprivileged sandbox.
-//! The runner translates `CodexRequest` policy fields into `bwrap` CLI
+//! The runner translates `ExecutionRequest` policy fields into `bwrap` CLI
 //! arguments via [`crate::bwrap_command::build_args`], then spawns `bwrap`
 //! with stdout/stderr capture and optional timeout enforcement.
 //!
@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use lxc_common::network_iptables::NetworkIptablesManager;
 use wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator;
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, NetworkEnforcementMode, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 
 use crate::bwrap_command;
@@ -63,7 +63,7 @@ impl BubblewrapScriptRunner {
 }
 
 impl ScriptRunner for BubblewrapScriptRunner {
-    fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // User-input validation runs before the environmental `bwrap`
         // probe so config errors are reported deterministically even on
         // hosts without bwrap installed.
@@ -103,7 +103,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
         Ok(())
     }
 
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         // 1. Start the network proxy if configured. Must happen before
         //    arg-building so the proxy's loopback address can be injected as
         //    HTTP_PROXY / HTTPS_PROXY into the sandbox environment.
@@ -254,7 +254,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
 
 /// Returns `true` when the request has per-host network rules that require
 /// iptables. Pure `"block"` with no host lists uses `--unshare-net` instead.
-fn needs_iptables_rules(request: &CodexRequest) -> bool {
+fn needs_iptables_rules(request: &ExecutionRequest) -> bool {
     let uses_firewall = matches!(
         request.policy.network_enforcement_mode,
         NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
@@ -323,8 +323,8 @@ mod tests {
     use super::*;
     use wxc_common::models::ProxyConfig;
 
-    fn base_request() -> CodexRequest {
-        CodexRequest {
+    fn base_request() -> ExecutionRequest {
+        ExecutionRequest {
             script_code: "echo hi".into(),
             ..Default::default()
         }

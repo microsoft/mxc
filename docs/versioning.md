@@ -182,7 +182,7 @@ pub struct ExperimentalConfig {
     pub gpu_isolation: Option<GpuIsolationConfig>,
 }
 
-pub struct CodexRequest {
+pub struct ExecutionRequest {
     // ... stable fields ...
     pub experimental_enabled: bool,  // set by --experimental flag
     pub experimental: ExperimentalConfig,
@@ -191,7 +191,7 @@ pub struct CodexRequest {
 
 **In the runner (e.g., `appcontainer.rs`):**
 ```rust
-fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
     // ... normal execution ...
 
     // Experimental features only applied when flag is set
@@ -209,7 +209,7 @@ fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse
 **Promotion process:** When an experimental feature is ready to ship:
 1. Move the property from `experimental` to a top-level property in the schema
    (e.g., `experimental.gpuIsolation` → `gpuIsolation`)
-2. Move the struct from `ExperimentalConfig` to `CodexRequest`
+2. Move the struct from `ExperimentalConfig` to `ExecutionRequest`
 3. Move the field from `RawExperimental` to `RawConfig`
 4. Remove the `if request.experimental_enabled` guard
 5. Bump the minor version

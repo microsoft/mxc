@@ -193,7 +193,7 @@ All variants are surfaced via stderr output. Preflight and Platform errors preve
 
 ### Config Field Mapping
 
-| JSON Field | Rust Field (`CodexRequest`) | NanVix Behavior |
+| JSON Field | Rust Field (`ExecutionRequest`) | NanVix Behavior |
 |------------|---------------------------|----------------|
 | `process.commandLine` | `script_code: String` | ✅ **Used** — raw Python source code (not a shell command) |
 | `process.timeout` | `script_timeout: u32` | ✅ **Used** — script execution timeout in ms |
@@ -238,7 +238,7 @@ Setup scripts (PowerShell & Bash) will download matching pre-release binaries an
 **Goal:** Add NanVix as a functional containment backend in `wxc-exec.exe`.
 
 **What changed:**
-- `models.rs` — Added `MicroVm` variant to `ContainmentBackend`, added `NanVixConfig` struct, added `nanvix_config` field to `CodexRequest`
+- `models.rs` — Added `MicroVm` variant to `ContainmentBackend`, added `NanVixConfig` struct, added `nanvix_config` field to `ExecutionRequest`
 - `config_parser.rs` — Added `RawNanVix` serde struct, `"microvm"` containment parsing, NanVix config section parsing
 - `error.rs` — Added `WxcError::NanVix(String)` variant
 - `nanvix_runner.rs` — **NEW** — `NanVixScriptRunner` implementing `ScriptRunner` trait

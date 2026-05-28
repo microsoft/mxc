@@ -19,7 +19,7 @@ use wxc_common::hyperlight_runner::HyperlightScriptRunner;
 #[cfg(feature = "isolation_session")]
 use wxc_common::isolation_session::IsolationSessionRunner;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
+use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 #[cfg(feature = "microvm")]
 use wxc_common::nanvix_runner::NanVixScriptRunner;
@@ -183,7 +183,7 @@ impl Cli {
     }
 }
 
-fn log_request(request: &CodexRequest, logger: &mut Logger) {
+fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
     if !request.container_id.is_empty() {
         let _ = writeln!(logger, "Container ID: {}", request.container_id);
     }
@@ -257,7 +257,7 @@ fn command_override_context_for_state_aware(
 }
 
 fn apply_command_override(
-    request: &mut CodexRequest,
+    request: &mut ExecutionRequest,
     command_override: Option<&str>,
     logger: &mut Logger,
 ) {
@@ -842,7 +842,7 @@ fn main() {
     // Emit the full (redacted) request policy for diagnostics.
     let _ = writeln!(
         logger,
-        "SECTION: Full `CodexRequest` configuration (redacted)"
+        "SECTION: Full `ExecutionRequest` configuration (redacted)"
     );
     let _ = writeln!(
         logger,
@@ -1395,7 +1395,7 @@ mod tests {
     #[test]
     fn state_aware_command_override_only_applies_to_exec_phase() {
         let parsed = ParsedStateAwareRequest {
-            request: CodexRequest::default(),
+            request: ExecutionRequest::default(),
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("iso:wxc-1234".into()),

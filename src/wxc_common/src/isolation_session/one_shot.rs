@@ -10,7 +10,7 @@ use std::io::IsTerminal;
 
 use crate::id::mint_random_token;
 use crate::logger::Logger;
-use crate::models::{CodexRequest, IsolationSessionConfigurationId, ScriptResponse};
+use crate::models::{ExecutionRequest, IsolationSessionConfigurationId, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 
 use super::manager::IsolationSessionManager;
@@ -19,7 +19,7 @@ use super::process_options::build_process_options;
 use super::IsolationSessionRunner;
 
 impl ScriptRunner for IsolationSessionRunner {
-    fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // One-shot runs the full provision → start → exec → stop →
         // deprovision lifecycle in a single process, so provision-phase
         // semantics apply to the whole call.
@@ -33,7 +33,7 @@ impl ScriptRunner for IsolationSessionRunner {
         validate_provision_policy(request).map_err(ScriptResponse::from)
     }
 
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         // Detect at runtime whether wxc-exec's stdout is a TTY. This flips
         // the backend into ConPTY mode (`InteractiveConsole = true`) and
         // adjusts the redirect flags (no separate stderr in ConPTY mode —
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn validate_runner_one_shot_rejects_user() {
         let runner = IsolationSessionRunner::new();
-        let req = CodexRequest {
+        let req = ExecutionRequest {
             experimental: ExperimentalConfig {
                 isolation_session: Some(IsolationSessionConfig {
                     user: Some(well_formed_user()),
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn validate_runner_one_shot_accepts_no_user() {
         let runner = IsolationSessionRunner::new();
-        let req = CodexRequest {
+        let req = ExecutionRequest {
             experimental: ExperimentalConfig {
                 isolation_session: Some(IsolationSessionConfig::default()),
                 ..Default::default()

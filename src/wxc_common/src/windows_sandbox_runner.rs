@@ -9,7 +9,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::logger::Logger;
-use crate::models::{CodexRequest, ScriptResponse, WindowsSandboxConfig};
+use crate::models::{ExecutionRequest, ScriptResponse, WindowsSandboxConfig};
 use crate::process_util::resolve_sibling_binary;
 use crate::sandbox_protocol::DaemonResult;
 use crate::script_runner::ScriptRunner;
@@ -115,7 +115,11 @@ impl WindowsSandboxScriptRunner {
     }
 
     /// Send an execution request to the daemon and read the result.
-    fn execute_via_daemon(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute_via_daemon(
+        &self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> ScriptResponse {
         // Pre-flight: verify Windows Sandbox is available.
         if let Err(err) = Self::check_sandbox_available() {
             return ScriptResponse::error(&err);
@@ -187,7 +191,7 @@ impl WindowsSandboxScriptRunner {
 }
 
 impl ScriptRunner for WindowsSandboxScriptRunner {
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         self.execute_via_daemon(request, logger)
     }
 }
