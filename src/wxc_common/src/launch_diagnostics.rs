@@ -61,6 +61,24 @@ pub fn diagnose_create_process_failure(
     }
 }
 
+/// Returns `true` when the Win32 error is `ERROR_NOT_SUPPORTED` (0x32) and
+/// the caller passed a non-null environment block. Downlevel OS builds that
+/// predate environment-parameter support in `Experimental_CreateProcessInSandbox`
+/// surface this error; the caller should retry without the environment block.
+pub fn is_environment_not_supported(win32_error: u32, has_environment: bool) -> bool {
+    win32_error == ERROR_NOT_SUPPORTED.0 && has_environment
+}
+
+/// Produce a [`LaunchDiagnostic`] for the environment-not-supported case.
+pub fn diagnose_environment_not_supported() -> LaunchDiagnostic {
+    LaunchDiagnostic {
+        kind: "environment_not_supported_downlevel",
+        message: "WARNING: The `environment` parameter is not supported on this OS build. \
+                  Retrying without explicit environment variables."
+            .to_string(),
+    }
+}
+
 /// Diagnose a process that launched successfully but exited with a non-zero
 /// code. Returns `None` when no recognized condition matches.
 pub fn diagnose_process_exit(
@@ -89,7 +107,9 @@ const REQUIRED_VELOCITY_KEYS: &[(u32, &str)] = &[
 // are re-exported from the `windows` crate. Comparisons against them
 // flow through `u32`, which matches the existing public surface of
 // this module (`diagnose_create_process_failure` takes `u32`).
-use windows::Win32::Foundation::{ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, STATUS_DLL_INIT_FAILED};
+use windows::Win32::Foundation::{
+    ERROR_CALL_NOT_IMPLEMENTED, ERROR_NOT_SUPPORTED, E_NOTIMPL, STATUS_DLL_INIT_FAILED,
+};
 
 // -- Internal heuristics -----------------------------------------------------
 

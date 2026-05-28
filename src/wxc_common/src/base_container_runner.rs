@@ -22,7 +22,10 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
-use crate::launch_diagnostics::{diagnose_create_process_failure, diagnose_process_exit};
+use crate::launch_diagnostics::{
+    diagnose_create_process_failure, diagnose_environment_not_supported, diagnose_process_exit,
+    is_environment_not_supported,
+};
 use crate::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
@@ -560,6 +563,7 @@ impl ScriptRunner for BaseContainerRunner {
             cb: std::mem::size_of::<STARTUPINFOW>() as u32,
             ..unsafe { std::mem::zeroed() }
         };
+        #[allow(unused_assignments)]
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
         // Environment block for the sandboxed child.
@@ -612,22 +616,72 @@ impl ScriptRunner for BaseContainerRunner {
         }
 
         // 4. Call Experimental_CreateProcessInSandbox.
-        let success = unsafe {
-            create_process_in_sandbox(
-                ptr::null(),             // applicationName (resolved from commandLine)
-                cmd_wide.as_mut_ptr(),   // commandLine
-                ptr::null(),             // processAttributes (must be NULL)
-                ptr::null(),             // threadAttributes  (must be NULL)
-                0,                       // inheritHandles    (must be FALSE)
-                creation_flags,          // creationFlags
-                env_ptr,                 // environment
-                cwd_ptr,                 // currentDirectory
-                &si,                     // startupInfo
-                identity_wide.as_ptr(),  // identity
-                spec_bytes.as_ptr(),     // sandboxSpecification
-                spec_bytes.len() as u32, // sandboxSpecificationSize
-                &mut pi,                 // processInformation
-            )
+        //    If the OS returns ERROR_NOT_SUPPORTED (0x32) and we passed a non-null
+        //    environment block, this is a downlevel build that doesn't support the
+        //    `environment` parameter. Retry once without it.
+        let mut current_env_ptr = env_ptr;
+        let mut current_creation_flags = creation_flags;
+        let mut retries_remaining: u32 = 1;
+
+        // The loop yields (api_return_code, last_win32_error_on_failure).
+        let (success, last_error) = loop {
+            pi = unsafe { std::mem::zeroed() };
+
+            let result = unsafe {
+                create_process_in_sandbox(
+                    ptr::null(),             // applicationName (resolved from commandLine)
+                    cmd_wide.as_mut_ptr(),   // commandLine
+                    ptr::null(),             // processAttributes (must be NULL)
+                    ptr::null(),             // threadAttributes  (must be NULL)
+                    0,                       // inheritHandles    (must be FALSE)
+                    current_creation_flags,  // creationFlags
+                    current_env_ptr,         // environment
+                    cwd_ptr,                 // currentDirectory
+                    &si,                     // startupInfo
+                    identity_wide.as_ptr(),  // identity
+                    spec_bytes.as_ptr(),     // sandboxSpecification
+                    spec_bytes.len() as u32, // sandboxSpecificationSize
+                    &mut pi,                 // processInformation
+                )
+            };
+
+            if result != 0 {
+                break (result, None);
+            }
+
+            // Call failed -- capture the error before any handle cleanup.
+            let err = unsafe { GetLastError() };
+
+            if retries_remaining > 0
+                && is_environment_not_supported(err.0, !current_env_ptr.is_null())
+            {
+                retries_remaining -= 1;
+
+                // Clean up handles from the failed attempt.
+                unsafe {
+                    if !pi.hProcess.is_invalid() {
+                        let _ = CloseHandle(pi.hProcess);
+                    }
+                    if !pi.hThread.is_invalid() {
+                        let _ = CloseHandle(pi.hThread);
+                    }
+                }
+
+                let diag = diagnose_environment_not_supported();
+                let _ = writeln!(
+                    logger,
+                    "{EMOJI_WARNING} Launch diagnostic [{}]: {}",
+                    diag.kind, diag.message
+                );
+
+                // Retry without the environment block.
+                current_env_ptr = ptr::null();
+                current_creation_flags = 0;
+                continue;
+            }
+
+            // Non-retryable failure.
+            break (result, Some(err));
         };
 
         if success == 0 {
@@ -654,7 +708,7 @@ impl ScriptRunner for BaseContainerRunner {
             //
             // Diagnose the launch failure (FailurePhase::LaunchFailed).
             //
-            let err = unsafe { GetLastError() };
+            let err = last_error.unwrap_or_else(|| unsafe { GetLastError() });
             let diag = diagnose_create_process_failure(
                 err.0,
                 &request.script_code,
