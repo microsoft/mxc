@@ -122,6 +122,20 @@ jobs:
           useNextest: false
           testAllTargets: false
           buildAllTargets: false
+          # IMPORTANT: do not let the 1ES task default to `--all-features`. The
+          # `tier2_bfs` Cargo feature gates Tier 2 (BFS) and must NOT be
+          # compiled into production binaries on Win 11 25H2 (the embedded
+          # `bfscfg.exe` invocation risks an OS hang). See
+          # `.github/workflows/build.yml`, `test_scripts/T3-Workloads.ps1`,
+          # and `test_scripts/Win25H2Safe-Tests.ps1` for the safety model.
+          # Enumerate the production feature set explicitly so the shipped
+          # binary still carries every runtime backend except `tier2_bfs`.
+          # Schema reference: https://eng.ms/docs/coreai/devdiv/one-engineering-system-1es/1es-docs/1es-pipeline-templates/features/buildworkflows/rust-virtual-task
+          allFeatures: false
+          ${{ if eq(item.os, 'windows') }}:
+            activatedFeatures: 'hyperlight isolation_session microvm wslc'
+          ${{ if eq(item.os, 'linux') }}:
+            activatedFeatures: 'hyperlight'
 
       # linux_test_proxy is a separate workspace member (not a dep of lxc), so
       # the workspace-member-scoped build above doesn't pick it up. Build it
