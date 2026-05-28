@@ -21,6 +21,7 @@ members = [
     "generated/base_container_specification",
     "mxc_diagnostic_console",
     "mxc_build_common",
+    "wxc_host_prep",
 ]
 exclude = ["fuzz"]
 resolver = "3"

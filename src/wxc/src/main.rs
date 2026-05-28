@@ -101,63 +101,6 @@ struct Cli {
     #[arg(long = "storage-path", requires = "setup_wslc")]
     storage_path: Option<String>,
 
-    /// Grant the AppContainer "ALL APPLICATION PACKAGES" and
-    /// "ALL RESTRICTED APPLICATION PACKAGES" groups the minimum rights
-    /// needed to stat the system-drive root (e.g. `C:\`). Persistent —
-    /// survives across runs. Requests elevation via UAC if not already
-    /// elevated. See `wxc_common::system_drive_prep`.
-    #[cfg(target_os = "windows")]
-    #[arg(
-        long = "prepare-system-drive",
-        conflicts_with_all = [
-            "unprepare_system_drive",
-            "setup_hyperlight",
-            "setup_wslc",
-            "delete",
-            "dry_run",
-        ]
-    )]
-    prepare_system_drive: bool,
-
-    /// Remove the ACEs added by `--prepare-system-drive`. Uses precise
-    /// tuple matching: only ACEs the matching `--prepare-system-drive`
-    /// invocation would have written are removed. Other explicit ACEs
-    /// for the same SIDs are preserved.
-    #[cfg(target_os = "windows")]
-    #[arg(
-        long = "unprepare-system-drive",
-        conflicts_with_all = [
-            "setup_hyperlight",
-            "setup_wslc",
-            "delete",
-            "dry_run",
-        ]
-    )]
-    unprepare_system_drive: bool,
-
-    /// Internal — set by `--prepare-system-drive` / `--unprepare-system-drive`
-    /// when re-launching with elevation. Not for user use.
-    #[cfg(target_os = "windows")]
-    #[arg(long = "internal-elevated-helper", hide = true)]
-    internal_elevated_helper: bool,
-
-    /// Internal — the target path resolved by the unelevated parent,
-    /// passed to the elevated child so the child does not re-read
-    /// `%SystemDrive%` from a potentially attacker-controlled
-    /// environment. Validated as a drive root by the child.
-    #[cfg(target_os = "windows")]
-    #[arg(long = "internal-target-path", hide = true)]
-    internal_target_path: Option<String>,
-
-    /// Internal — the helper-log path chosen by the unelevated parent.
-    /// Passed to the elevated child so both processes write to / read
-    /// from the same file, even when UAC consents under a different
-    /// user than the parent ("over-the-shoulder" UAC). Not for user
-    /// use.
-    #[cfg(target_os = "windows")]
-    #[arg(long = "internal-log-path", hide = true)]
-    internal_log_path: Option<String>,
-
     /// Run the fallback detector and emit JSON, without spawning a sandbox.
     #[arg(long)]
     probe: bool,
@@ -550,30 +493,6 @@ fn main() {
     // `restore()` during unwind. Without it the manager is parked in
     // a static and unwinding skips destructors of static-owned values.
     let _dacl_guard = ParkedDaclGuard;
-
-    // --prepare-system-drive / --unprepare-system-drive: host DACL prep.
-    // Modifies the DACL of the system drive root to grant the well-known
-    // AppContainer SIDs metadata-read access. Self-elevates via UAC.
-    // Runs before config parsing so the user doesn't need a JSON file.
-    // Mutual exclusion with other top-level "do and exit" flags is
-    // enforced by clap (conflicts_with_all).
-    #[cfg(target_os = "windows")]
-    {
-        if cli.prepare_system_drive {
-            process::exit(wxc_common::system_drive_prep::run_prepare(
-                cli.internal_elevated_helper,
-                cli.internal_target_path.as_deref(),
-                cli.internal_log_path.as_deref(),
-            ));
-        }
-        if cli.unprepare_system_drive {
-            process::exit(wxc_common::system_drive_prep::run_unprepare(
-                cli.internal_elevated_helper,
-                cli.internal_target_path.as_deref(),
-                cli.internal_log_path.as_deref(),
-            ));
-        }
-    }
 
     // --setup-hyperlight: warm up the snapshot and exit. Runs before
     // config parsing so the user doesn't need a JSON file on disk

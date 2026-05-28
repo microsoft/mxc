@@ -144,7 +144,7 @@ Core references:
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
 - `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
 - `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
-- `docs/host-prep.md` — `wxc-exec --prepare-system-drive` / `--unprepare-system-drive` host setup (metadata-only ACEs on the system-drive root for the AppContainer well-known SIDs, so `cmd.exe` / `pwsh.exe` / `node.exe` can stat `C:\` inside an AppContainer).
+- `docs/host-prep.md` — `wxc-host-prep.exe` host setup binary (`prepare-system-drive` / `unprepare-system-drive` for the AppContainer ACEs on the system-drive root, plus `prepare-null-device` / `verify-null-device` / `dump-null-device` for the `\Device\Null` security descriptor that AppContainer-based backends require). Owns elevation via embedded `requireAdministrator` manifest — `wxc-exec.exe` no longer self-elevates.
 - `docs/sandbox-policy/v1/policy.md` — sandbox policy v1 specification
 
 Per-backend guides:
@@ -198,7 +198,7 @@ The parser uses two layers of structs: `Raw*` structs (matching JSON with `#[ser
 
 ### Binary naming
 
-- Windows: `wxc-exec.exe` (AppContainer / Windows Sandbox / MicroVM)
+- Windows: `wxc-exec.exe` (AppContainer / Windows Sandbox / MicroVM); `wxc-host-prep.exe` (host setup — see `docs/host-prep.md`)
 - Linux: `lxc-exec` (LXC containers)
 - macOS: `mxc-exec-mac` (Seatbelt)
 - Target triples: `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`

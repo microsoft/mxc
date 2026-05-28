@@ -1,0 +1,30 @@
+[package]
+name = "wxc_host_prep"
+version.workspace = true
+edition.workspace = true
+
+# Binary name uses hyphens (`wxc-host-prep`) to match the rest of the MXC
+# CLI surface (`wxc-exec`, `lxc-exec`, `mxc-exec-mac`).
+[[bin]]
+name = "wxc-host-prep"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+windows-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+wxc_common = { workspace = true }
+
+[build-dependencies]
+mxc_build_common = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+embed-manifest = "1.4"
+
+[dev-dependencies]
+tempfile = "3"
