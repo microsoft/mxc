@@ -429,6 +429,39 @@ impl ScriptRunner for BaseContainerRunner {
             "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
         );
 
+        // --- Validate permissiveLearningMode ---
+        // Mirrors the appcontainer_runner gate: debug builds always allow the
+        // capability with a warning; release builds reject it unless the
+        // operator opted in via `--audit` (which sets `request.audit_mode`).
+        for cap in &request.policy.capabilities {
+            if cap == "permissiveLearningMode" {
+                #[cfg(debug_assertions)]
+                {
+                    let _ = writeln!(logger, "*** SECURITY WARNING ***");
+                    let _ = writeln!(
+                        logger,
+                        "permissiveLearningMode is ENABLED. \
+                         Container will learn and record access patterns."
+                    );
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    if request.audit_mode {
+                        let _ = writeln!(logger, "*** SECURITY WARNING ***");
+                        let _ = writeln!(
+                            logger,
+                            "permissiveLearningMode is ENABLED via --audit. \
+                             Container restrictions will NOT be enforced."
+                        );
+                    } else {
+                        return ScriptResponse::error(
+                            "SECURITY: permissiveLearningMode not allowed in release builds (pass --audit to opt in)",
+                        );
+                    }
+                }
+            }
+        }
+
         let run_start = std::time::Instant::now();
 
         // Launch builtin test proxy if requested (before building spec so we have the port).
