@@ -518,7 +518,7 @@ pub struct ExperimentalConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct CodexRequest {
+pub struct ExecutionRequest {
     /// Schema version for the config format.
     pub schema_version: String,
     /// Externally assigned container identifier.
@@ -547,7 +547,7 @@ pub struct CodexRequest {
     pub dry_run: bool,
 }
 
-impl Default for CodexRequest {
+impl Default for ExecutionRequest {
     fn default() -> Self {
         Self {
             schema_version: String::new(),

@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 //! Helpers for turning a CLI argv vector back into the single `commandLine`
-//! string stored on `CodexRequest`.
+//! string stored on `ExecutionRequest`.
 //!
-//! `script_code` on `CodexRequest` is a single `String`, so when the
+//! `script_code` on `ExecutionRequest` is a single `String`, so when the
 //! driver collects trailing CLI args we must serialise them as if the
 //! user had written the same value in `process.commandLine`. The direct
 //! Windows path uses `CommandLineToArgvW`-compatible quoting; shell-backed

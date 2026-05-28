@@ -118,8 +118,8 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 
 ### Config flow
 
-1. User provides JSON config (file or base64) → `config_parser.rs` deserializes into intermediate `Raw*` structs → validates and maps to `CodexRequest` (the internal execution model in `models.rs`)
-2. `CodexRequest` includes the containment backend selection, process config, filesystem/network policies, and optional experimental features
+1. User provides JSON config (file or base64) → `config_parser.rs` deserializes into intermediate `Raw*` structs → validates and maps to `ExecutionRequest` (the internal execution model in `models.rs`)
+2. `ExecutionRequest` includes the containment backend selection, process config, filesystem/network policies, and optional experimental features
 3. The appropriate `ScriptRunner` implementation executes the process and returns `ScriptResponse`
 
 ### TypeScript layers

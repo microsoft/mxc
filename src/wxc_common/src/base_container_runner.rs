@@ -31,7 +31,8 @@ use crate::log_symbols::{
 };
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ScriptResponse,
+    ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress,
+    ScriptResponse,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
@@ -137,7 +138,7 @@ impl BaseContainerRunner {
     /// - `disallow_win32k_system_calls` from `ui.disable`
     /// - `ui_restrictions` bitmask from `ui.to_ui_restrictions_bitmask()`
     /// - `network_policy.proxy.url` from proxy config
-    fn build_sandbox_spec(request: &CodexRequest) -> Vec<u8> {
+    fn build_sandbox_spec(request: &ExecutionRequest) -> Vec<u8> {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
 
         let version = builder.create_string(SANDBOX_SPEC_VERSION);
@@ -400,7 +401,7 @@ impl BaseContainerRunner {
 }
 
 impl ScriptRunner for BaseContainerRunner {
-    fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         Self::is_base_container_api_present().map_err(|e| {
             let hint = if !request.experimental_enabled {
                 format!(
@@ -422,7 +423,7 @@ impl ScriptRunner for BaseContainerRunner {
         })
     }
 
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         let _ = writeln!(
             logger,
             "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
@@ -856,7 +857,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_produces_valid_flatbuffer() {
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.least_privilege_mode = true;
         request.policy.capabilities = vec!["internetClient".into(), "registryRead".into()];
         request.policy.readwrite_paths = vec!["C:\\temp".into()];
@@ -908,7 +909,7 @@ mod tests {
     #[test]
     fn build_sandbox_spec_empty_policy() {
         // Default network policy is Block — no internetClient auto-add.
-        let request = CodexRequest::default();
+        let request = ExecutionRequest::default();
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
 
         assert!(base_container_layout::sandbox_spec_buffer_has_identifier(
@@ -928,7 +929,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_network_block_no_internet_client() {
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.default_network_policy = NetworkPolicy::Block;
 
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
@@ -938,7 +939,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_ui_disabled() {
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.ui = UiPolicy {
             disable: true,
             ..Default::default()
@@ -968,7 +969,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_ui_clipboard_read_only() {
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.ui = UiPolicy {
             disable: false,
             clipboard: ClipboardPolicy::Read,
@@ -999,7 +1000,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_ui_clipboard_readwrite_no_injection() {
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.ui = UiPolicy {
             disable: false,
             clipboard: ClipboardPolicy::All,
@@ -1031,7 +1032,7 @@ mod tests {
     fn build_sandbox_spec_proxy_url() {
         use crate::models::ProxyAddress;
 
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.default_network_policy = NetworkPolicy::Block;
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
@@ -1048,7 +1049,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_no_proxy() {
-        let request = CodexRequest::default();
+        let request = ExecutionRequest::default();
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
         assert!(spec.network_policy().is_none());

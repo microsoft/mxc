@@ -15,7 +15,7 @@ use std::process;
 use clap::Parser;
 use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{CodexRequest, ContainmentBackend};
+use wxc_common::models::{ContainmentBackend, ExecutionRequest};
 
 #[cfg(target_os = "macos")]
 use std::time::Instant;
@@ -57,7 +57,7 @@ struct Cli {
     log_file: Option<String>,
 }
 
-fn log_request(request: &CodexRequest, logger: &mut Logger) {
+fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
     let _ = writeln!(logger, "Script code length: {}", request.script_code.len());
     let _ = writeln!(logger, "Working directory: {}", request.working_directory);
     let _ = writeln!(logger, "Script timeout: {}", request.script_timeout);
@@ -132,7 +132,7 @@ fn main() {
 }
 
 #[cfg(target_os = "macos")]
-fn run_seatbelt(request: &CodexRequest, logger: &mut Logger) -> ! {
+fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     use seatbelt_common::seatbelt_runner::SeatbeltScriptRunner;
 
     let mut runner = SeatbeltScriptRunner::new();
@@ -153,7 +153,7 @@ fn run_seatbelt(request: &CodexRequest, logger: &mut Logger) -> ! {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run_seatbelt(_request: &CodexRequest, logger: &mut Logger) -> ! {
+fn run_seatbelt(_request: &ExecutionRequest, logger: &mut Logger) -> ! {
     eprintln!(
         "mxc-exec-mac: the macOS sandbox backend is only available on macOS. \
          This binary was built for a non-Darwin target and cannot execute scripts."

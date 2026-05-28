@@ -10,7 +10,7 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
+    ClipboardPolicy, ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
     IsolationSessionConfig, IsolationSessionUser, LifecycleConfig, LxcConfig,
     NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
     TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
@@ -27,7 +27,7 @@ pub enum ParseError {
     /// I/O, base64-decode, or top-level JSON parse failure — the input could
     /// not be discriminated as state-aware vs one-shot.
     Decode(WxcError),
-    /// Discriminated as one-shot; conversion to `CodexRequest` failed.
+    /// Discriminated as one-shot; conversion to `ExecutionRequest` failed.
     OneShot(WxcError),
     /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
     /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
@@ -234,7 +234,7 @@ struct RawConfig {
 // the struct, no field-level default) and acts as the discriminator against
 // `RawConfig`; the other fields mirror `RawConfig`'s wire shape so
 // cross-cutting fields (filesystem/network/ui/process) populate the inner
-// `CodexRequest` via the same conversion path. The `experimental` block stays
+// `ExecutionRequest` via the same conversion path. The `experimental` block stays
 // raw — typed deserialisation happens at dispatch time keyed by backend.
 #[derive(Deserialize)]
 struct RawStateAwareRequest {
@@ -382,7 +382,7 @@ pub fn load_request(
     input: &str,
     logger: &mut Logger,
     is_base64: bool,
-) -> Result<CodexRequest, WxcError> {
+) -> Result<ExecutionRequest, WxcError> {
     load_request_with_options(
         input,
         logger,
@@ -399,7 +399,7 @@ pub fn load_request_with_options(
     input: &str,
     logger: &mut Logger,
     opts: LoadOptions,
-) -> Result<CodexRequest, WxcError> {
+) -> Result<ExecutionRequest, WxcError> {
     let json_str = decode_request_input(input, logger, opts.is_base64)?;
 
     let raw: RawConfig = serde_json::from_str(&json_str).map_err(|e| {
@@ -604,7 +604,7 @@ fn convert_raw_config_inner(
     logger: &mut Logger,
     require_process: bool,
     allow_missing_command: bool,
-) -> Result<CodexRequest, WxcError> {
+) -> Result<ExecutionRequest, WxcError> {
     // New top-level fields
     let schema_version = raw.version.unwrap_or_default();
     let container_id = raw.container_id.unwrap_or_default();
@@ -1085,7 +1085,7 @@ fn convert_raw_config_inner(
         };
     }
 
-    Ok(CodexRequest {
+    Ok(ExecutionRequest {
         schema_version,
         container_id,
         platform,
@@ -1119,7 +1119,7 @@ fn convert_raw_state_aware(
         Some(s) => Some(parse_containment_str(s, logger)?),
     };
 
-    // Build a RawConfig surrogate so the inner CodexRequest is populated by the
+    // Build a RawConfig surrogate so the inner ExecutionRequest is populated by the
     // same conversion path one-shot uses for cross-cutting wire fields.
     let surrogate = RawConfig {
         version: raw.version,

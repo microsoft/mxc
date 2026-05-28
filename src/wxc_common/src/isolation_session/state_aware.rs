@@ -11,7 +11,7 @@ use std::io::IsTerminal;
 use serde::Serialize;
 
 use crate::id::mint_random_token;
-use crate::models::{CodexRequest, IsolationSessionConfig, IsolationSessionProvisionConfig};
+use crate::models::{ExecutionRequest, IsolationSessionConfig, IsolationSessionProvisionConfig};
 use crate::mxc_error::MxcError;
 use crate::state_aware_backend::{
     DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
@@ -72,7 +72,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 
     fn provision(
         &mut self,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         config: Option<IsolationSessionProvisionConfig>,
     ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
         let user = config.and_then(|c| c.user);
@@ -125,7 +125,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     fn start(
         &mut self,
         sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         config: Option<IsolationSessionConfig>,
     ) -> Result<StartResult<()>, MxcError> {
         let provision_id = extract_provision_id(sandbox_id)?;
@@ -146,7 +146,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     fn stop(
         &mut self,
         sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<()>,
     ) -> Result<StopResult<()>, MxcError> {
         let provision_id = extract_provision_id(sandbox_id)?;
@@ -161,7 +161,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     fn deprovision(
         &mut self,
         sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<()>,
     ) -> Result<DeprovisionResult<()>, MxcError> {
         let provision_id = extract_provision_id(sandbox_id)?;
@@ -182,7 +182,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 
     fn validate_provision(
         &self,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         config: Option<&IsolationSessionProvisionConfig>,
     ) -> Result<(), MxcError> {
         if let Some(user) = config.and_then(|c| c.user.as_ref()) {
@@ -194,7 +194,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     fn validate_start(
         &self,
         sandbox_id: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         config: Option<&IsolationSessionConfig>,
     ) -> Result<(), MxcError> {
         let provision_id = extract_provision_id(sandbox_id)?;
@@ -227,7 +227,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     fn validate_exec(
         &self,
         _sandbox_id: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
@@ -236,7 +236,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     fn validate_stop(
         &self,
         _sandbox_id: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
@@ -245,7 +245,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     fn validate_deprovision(
         &self,
         _sandbox_id: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
@@ -261,7 +261,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     fn exec(
         &mut self,
         sandbox_id: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         _config: Option<()>,
     ) -> Result<ExecHandle, MxcError> {
         let provision_id = extract_provision_id(sandbox_id)?;
@@ -328,8 +328,8 @@ mod tests {
         );
     }
 
-    fn request_with_filesystem_policy() -> CodexRequest {
-        CodexRequest {
+    fn request_with_filesystem_policy() -> ExecutionRequest {
+        ExecutionRequest {
             policy: ContainerPolicy {
                 readwrite_paths: vec!["C:\\workspace".into()],
                 ..Default::default()
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn validate_provision_hook_rejects_denied_paths() {
         let runner = IsolationSessionRunner::new();
-        let req = CodexRequest {
+        let req = ExecutionRequest {
             policy: ContainerPolicy {
                 denied_paths: vec!["C:\\secret".into()],
                 ..Default::default()
@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn validate_phase_hooks_accept_clean_request() {
         let runner = IsolationSessionRunner::new();
-        let req = CodexRequest::default();
+        let req = ExecutionRequest::default();
 
         runner.validate_provision(&req, None).unwrap();
         runner.validate_start("iso:abc", &req, None).unwrap();
@@ -430,7 +430,7 @@ mod tests {
             user: Some(well_formed_user()),
         };
         runner
-            .validate_provision(&CodexRequest::default(), Some(&cfg))
+            .validate_provision(&ExecutionRequest::default(), Some(&cfg))
             .unwrap();
     }
 
@@ -444,7 +444,7 @@ mod tests {
             }),
         };
         let err = runner
-            .validate_provision(&CodexRequest::default(), Some(&cfg))
+            .validate_provision(&ExecutionRequest::default(), Some(&cfg))
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::PolicyValidation);
     }
@@ -459,7 +459,7 @@ mod tests {
         runner
             .validate_start(
                 "iso:alice@contoso.com",
-                &CodexRequest::default(),
+                &ExecutionRequest::default(),
                 Some(&cfg),
             )
             .unwrap();
@@ -469,7 +469,7 @@ mod tests {
     fn validate_start_entra_sandbox_without_user_is_malformed() {
         let runner = IsolationSessionRunner::new();
         let err = runner
-            .validate_start("iso:alice@contoso.com", &CodexRequest::default(), None)
+            .validate_start("iso:alice@contoso.com", &ExecutionRequest::default(), None)
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
         assert!(
@@ -487,7 +487,7 @@ mod tests {
             ..Default::default()
         };
         let err = runner
-            .validate_start("iso:wxc-abcd1234", &CodexRequest::default(), Some(&cfg))
+            .validate_start("iso:wxc-abcd1234", &ExecutionRequest::default(), Some(&cfg))
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
         assert!(
@@ -501,7 +501,7 @@ mod tests {
     fn validate_start_local_sandbox_without_user_accepts() {
         let runner = IsolationSessionRunner::new();
         runner
-            .validate_start("iso:wxc-abcd1234", &CodexRequest::default(), None)
+            .validate_start("iso:wxc-abcd1234", &ExecutionRequest::default(), None)
             .unwrap();
     }
 
@@ -518,7 +518,7 @@ mod tests {
         let err = runner
             .validate_start(
                 "iso:alice@contoso.com",
-                &CodexRequest::default(),
+                &ExecutionRequest::default(),
                 Some(&cfg),
             )
             .unwrap_err();
@@ -543,7 +543,7 @@ mod tests {
         runner
             .validate_start(
                 "iso:alice@contoso.com",
-                &CodexRequest::default(),
+                &ExecutionRequest::default(),
                 Some(&cfg),
             )
             .unwrap();

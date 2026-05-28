@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-# Provides CodexRequest, ContainerPolicy, SeatbeltConfig, Logger, and
+# Provides ExecutionRequest, ContainerPolicy, SeatbeltConfig, Logger, and
 # the ScriptRunner trait that seatbelt_runner implements. Same dep that
 # lxc_common uses.
 wxc_common = { workspace = true }

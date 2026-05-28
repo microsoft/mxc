@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use crate::logger::Logger;
-use crate::models::{CodexRequest, ScriptResponse};
+use crate::models::{ExecutionRequest, ScriptResponse};
 use crate::validator::validate_common;
 
 /// Trait for executing scripts within a containment backend.
@@ -17,18 +17,18 @@ use crate::validator::validate_common;
 pub trait ScriptRunner {
     /// Validate the request before execution. Override to add
     /// runner-specific checks. Default accepts all requests.
-    fn validate_runner(&self, _request: &CodexRequest) -> Result<(), ScriptResponse> {
+    fn validate_runner(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         Ok(())
     }
 
     /// Execute the script inside this backend's containment and return the response.
     /// Implement this instead of `run` — validation and dry-run are handled by the trait.
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse;
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse;
 
     /// Entry point called by the binary. Runs shared validation, runner-specific
     /// validation, checks for dry-run mode, then delegates to
     /// [`execute`](ScriptRunner::execute).
-    fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         if let Err(response) = validate_common(request) {
             return response;
         }
