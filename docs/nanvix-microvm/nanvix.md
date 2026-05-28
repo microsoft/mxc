@@ -2,19 +2,32 @@
 
 Nanvix MicroVM is an experimental containment backend for MxC. It is powered by the
 [Nanvix OS/VM](https://aka.ms/nanvix) and runs untrusted code with hardware-enforced isolation
-via the Windows Hypervisor Platform (WHP).
+via the Windows Hypervisor Platform (WHP) on Windows or KVM on Linux.
 
 ## Key Features
 
-- **Fast cold-start** — ~100 ms from process spawn to guest code execution
+- **Fast cold-start** — ~100 ms from process spawn to guest code execution (Windows warm-start via WHP snapshot; Linux uses cold boot via KVM every run)
 - **Low Memory Footprint** — Resident memory size of ~100 MB
 - **Hardware-Enforced Isolation** — Runs guest code inside a lightweight virtual machine (VM)
 
 ## Requirements
 
+### Windows
+
 - Windows with WHP enabled (`bcdedit /set hypervisorlaunchtype auto`)
-- Nanvix runtime binaries (`nanvixd.exe`, `kernel.elf`, `python3.12`, `nanvix_rootfs.img`) placed next to `wxc-exec.exe`
+- Nanvix runtime binaries (`nanvixd.exe`, `kernel.elf`, `python3.initrd`, `nanvix_rootfs.img`) placed next to `wxc-exec.exe`
+- Build with `--with-microvm` (`build.bat --with-microvm` or `cargo build -p wxc --features microvm`)
 - `--experimental` flag (Nanvix MicroVM is an experimental feature)
+
+### Linux
+
+- Linux with KVM available at `/dev/kvm` (and the invoking user has read/write access to it)
+- Nanvix runtime binaries (`nanvixd.elf`, `kernel.elf`, `python3.initrd`, `nanvix_rootfs.img`) placed next to `lxc-exec` (the build script downloads and stages them automatically)
+- Build with `--with-microvm` (`./build.sh --with-microvm` or `cargo build -p lxc --features microvm`)
+- `--experimental` flag (Nanvix MicroVM is an experimental feature)
+
+> **Note:** On Linux, WHP snapshots are not used. Each invocation cold-boots
+> the VM via KVM. Snapshot-based warm-start is Windows-only.
 
 ## Quick Start
 
