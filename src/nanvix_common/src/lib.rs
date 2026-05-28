@@ -12,8 +12,33 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-/// All required NanVix binary filenames (flat, next to wxc-exec).
+/// All required NanVix binary filenames (flat, next to wxc-exec) — Windows.
+#[cfg(target_os = "windows")]
 pub const REQUIRED_BINARIES: &[&str] = &["nanvixd.exe", "nanvix_rootfs.img", "python3.initrd"];
+
+/// All required NanVix binary filenames (flat, next to lxc-exec) — Linux.
+#[cfg(target_os = "linux")]
+pub const REQUIRED_BINARIES: &[&str] = &["nanvixd.elf", "nanvix_rootfs.img", "python3.initrd"];
+
+/// NanVix daemon binary name (platform-conditional).
+#[cfg(target_os = "windows")]
+pub const NANVIXD_BINARY: &str = "nanvixd.exe";
+
+/// NanVix daemon binary name (platform-conditional).
+#[cfg(target_os = "linux")]
+pub const NANVIXD_BINARY: &str = "nanvixd.elf";
+
+/// Multi-binary initrd (daemons + CPython) loaded by NanVix at warm start.
+pub const INITRD_BINARY: &str = "python3.initrd";
+
+/// Combined rootfs image (NanVix kernel userspace + CPython stdlib).
+pub const RAMFS_IMAGE: &str = "nanvix_rootfs.img";
+
+/// Pre-built VM state snapshot (CBOR) for warm start (Windows/WHP only).
+pub const SNAPSHOT_CBOR: &str = "kernel.whp.cbor";
+
+/// Pre-built VM memory snapshot for warm start (Windows/WHP only).
+pub const SNAPSHOT_VMEM: &str = "kernel.vmem";
 
 /// Subdirectory holding kernel binary (nanvixd expects `./bin/kernel.elf`).
 pub const BIN_SUBDIR: &str = "bin";
@@ -25,7 +50,7 @@ pub const SNAPSHOTS_SUBDIR: &str = "snapshots";
 pub const BIN_SUBDIR_FILES: &[&str] = &["kernel.elf"];
 
 /// Snapshot files that live in a `snapshots/` subdirectory next to the exe.
-pub const SNAPSHOT_FILES: &[&str] = &["kernel.vmem", "kernel.whp.cbor"];
+pub const SNAPSHOT_FILES: &[&str] = &[SNAPSHOT_VMEM, SNAPSHOT_CBOR];
 
 /// Binaries sourced from the `nanvix/nanvix-python` GitHub release.
 pub const NANVIX_PYTHON_REPO_BINARIES: &[&str] = REQUIRED_BINARIES;
@@ -102,10 +127,16 @@ pub struct ReleaseConfig {
 pub struct RepoConfig {
     /// Git tag of the pinned release (e.g., "v0.12.291").
     pub tag: String,
-    /// Exact filename of the zip asset in the GitHub release.
+    /// Exact filename of the zip asset in the GitHub release (Windows).
     pub asset: String,
-    /// List of binary filenames to extract from the zip.
+    /// Exact filename of the tar.gz asset in the GitHub release (Linux).
+    #[serde(default)]
+    pub asset_linux: Option<String>,
+    /// List of binary filenames to extract from the zip (Windows).
     pub binaries: Vec<String>,
+    /// List of binary filenames to extract from the tar.gz (Linux).
+    #[serde(default)]
+    pub binaries_linux: Option<Vec<String>>,
 }
 
 /// Load and deserialize a JSON file.
@@ -117,8 +148,18 @@ pub fn load_json<T: serde::de::DeserializeOwned>(path: &str) -> T {
 }
 
 /// Load checksums from `checksums.json`.
-pub fn load_checksums(path: &str) -> HashMap<String, String> {
-    load_json(path)
+///
+/// The file is a platform-keyed map of the form
+/// `{ "windows": { "name": "hash", ... }, "linux": { ... } }`; `platform`
+/// selects which sub-map to return.
+pub fn load_checksums(path: &str, platform: &str) -> HashMap<String, String> {
+    let mut value: HashMap<String, HashMap<String, String>> = load_json(path);
+    value.remove(platform).unwrap_or_else(|| {
+        panic!(
+            "nanvix_common: {} does not contain a '{}' section",
+            path, platform
+        )
+    })
 }
 
 /// Construct a deterministic GitHub release download URL.

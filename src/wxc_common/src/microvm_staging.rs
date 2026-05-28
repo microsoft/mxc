@@ -255,8 +255,12 @@ fn host_path_to_guest_relative(host_path: &Path) -> String {
         // UNC or relative path — just normalize slashes.
         s.replace('\\', "/")
     };
-    // Trim trailing slash.
-    stripped.trim_end_matches('/').to_string()
+    // Trim leading and trailing slashes to ensure the result is always relative.
+    // On Linux, absolute paths like `/tmp/xyz` become `tmp/xyz`.
+    stripped
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// Replaces host paths in the script source with their guest mount equivalents.
@@ -633,10 +637,27 @@ mod tests {
             "expected guest path in rewritten script, got: {}",
             rewritten
         );
+        // On Windows, verify the forward-slash variant was replaced too.
+        // On Linux, host_path == forward_path and the guest path contains
+        // the original as a substring (/mnt/rw/tmp/xyz contains /tmp/xyz),
+        // so we verify replacement by counting occurrences of the guest path.
+        #[cfg(target_os = "windows")]
         assert!(
             !rewritten.contains(&forward_path),
             "forward-slash host path should have been replaced"
         );
+        #[cfg(target_os = "linux")]
+        {
+            // Both occurrences in the script (a='...' and b='...') should
+            // have been replaced with the guest path.
+            let count = rewritten.matches(&expected_guest).count();
+            assert!(
+                count >= 2,
+                "expected at least 2 occurrences of guest path, got {}: {}",
+                count,
+                rewritten
+            );
+        }
     }
 
     #[test]
@@ -966,6 +987,26 @@ mod tests {
         let result = host_path_to_guest_relative(&p);
         assert!(result.starts_with('e'), "drive letter should be lowercase");
         assert_eq!(result, "e/Projects/src");
+    }
+
+    #[test]
+    fn host_path_to_guest_relative_strips_leading_slash() {
+        // On Linux, absolute paths like /tmp/xyz should become relative (tmp/xyz).
+        let p = PathBuf::from("/tmp/my-dir/payload");
+        let result = host_path_to_guest_relative(&p);
+        assert_eq!(result, "tmp/my-dir/payload");
+        assert!(
+            !result.starts_with('/'),
+            "result must be relative: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn host_path_to_guest_relative_linux_root_path() {
+        // A path like /home/user/project → home/user/project.
+        let p = PathBuf::from("/home/user/project");
+        assert_eq!(host_path_to_guest_relative(&p), "home/user/project");
     }
 
     #[test]

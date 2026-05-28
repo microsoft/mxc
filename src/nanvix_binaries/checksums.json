@@ -1,6 +1,14 @@
 {
-  "nanvixd.exe": "9172542c250c7cc3eb1bba00fb027543f2a309e5b0152f5f9dee9e6484ed21ec",
-  "nanvix_rootfs.img": "0d45a1f0a29e0d6fc9f297016c02a798738d5288acacb46e770eb9103e1ca0b9",
-  "python3.initrd": "9e20583c70b2b6feb43ccbd477657d78f5cd1a061e962bacb7b13079fbdede92",
-  "kernel.elf": "4e75f32192b63c034846f7f802e3e3cfe7d6df57b3a0c8d6bd5927fc4ead0b2d"
+  "windows": {
+    "nanvixd.exe": "9172542c250c7cc3eb1bba00fb027543f2a309e5b0152f5f9dee9e6484ed21ec",
+    "nanvix_rootfs.img": "0d45a1f0a29e0d6fc9f297016c02a798738d5288acacb46e770eb9103e1ca0b9",
+    "python3.initrd": "9e20583c70b2b6feb43ccbd477657d78f5cd1a061e962bacb7b13079fbdede92",
+    "kernel.elf": "4e75f32192b63c034846f7f802e3e3cfe7d6df57b3a0c8d6bd5927fc4ead0b2d"
+  },
+  "linux": {
+    "nanvixd.elf": "4c4368c523784808bcb21471e2377341b7920f4f3c9e255a6287e5dac5a54b3c",
+    "nanvix_rootfs.img": "0d45a1f0a29e0d6fc9f297016c02a798738d5288acacb46e770eb9103e1ca0b9",
+    "python3.initrd": "9e20583c70b2b6feb43ccbd477657d78f5cd1a061e962bacb7b13079fbdede92",
+    "kernel.elf": "207b50dc44db4c2f513da5ce2d8223a21ec01a135343ff56b773ebf391b5dec4"
+  }
 }

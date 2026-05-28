@@ -35,10 +35,9 @@ use nanvix_common::{github_download_url, load_checksums, load_json, ReleaseConfi
 
 fn main() {
     // Check the TARGET platform (not host). NanVix binaries are only needed when
-    // the output binary will run on Windows. This build script runs on the host,
-    // but CARGO_CFG_TARGET_OS reflects the cross-compilation target.
+    // the output binary will run on Windows or Linux with KVM.
     let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target != "windows" {
+    if target != "windows" && target != "linux" {
         let out_dir = std::env::var("OUT_DIR").unwrap();
         println!("cargo:rustc-env=NANVIX_BIN_DIR={}", out_dir);
         println!("cargo:rerun-if-changed=build.rs");
@@ -50,59 +49,89 @@ fn main() {
     fs::create_dir_all(&bin_dir).expect("failed to create nanvix-binaries dir");
 
     let versions: ReleaseConfig = load_json("versions.json");
-    let checksums: HashMap<String, String> = load_checksums("checksums.json");
+    let checksums: HashMap<String, String> = load_checksums("checksums.json", &target);
 
-    let all_binaries: Vec<&str> = versions
-        .nanvix_python
-        .binaries
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
+    if target == "linux" {
+        // Linux: download tar.gz and extract Linux binaries.
+        let asset = versions
+            .nanvix_python
+            .asset_linux
+            .as_deref()
+            .unwrap_or("microvm-standalone-256mb.tar.gz");
+        let binaries: Vec<&str> = versions
+            .nanvix_python
+            .binaries_linux
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_else(|| nanvix_common::REQUIRED_BINARIES.to_vec());
 
-    let needs_nanvix_python = needs_download(&versions.nanvix_python, &bin_dir, &checksums);
-
-    if needs_nanvix_python {
-        eprintln!(
-            "nanvix_binaries: downloading nanvix/nanvix-python {}...",
-            versions.nanvix_python.tag
-        );
-        download_and_extract(&versions.nanvix_python, "nanvix/nanvix-python", &bin_dir);
-    } else {
-        eprintln!("nanvix_binaries: all binaries cached and verified");
-    }
-
-    verify_checksums(&all_binaries, &bin_dir, &checksums);
-    verify_bin_subdir_checksums(&bin_dir, &checksums);
-
-    // Generate host-local WHP snapshots at build time so even the first
-    // runtime execution uses warm start. The runtime fallback in
-    // nanvix_runner.rs handles the case where snapshots are missing.
-    //
-    // Skip on non-x86_64 hosts: `nanvixd.exe` is an x86_64 Windows binary
-    // and launching it on (e.g.) ARM64 Windows fails with
-    // STATUS_INVALID_IMAGE_FORMAT (0xc000007b). Snapshot pre-generation is
-    // a warm-start cache only — the runtime fallback covers cold boot on
-    // hosts where this build step is skipped.
-    let host = std::env::var("HOST").unwrap_or_default();
-    let host_is_x86_64 = host.starts_with("x86_64-");
-    if !host_is_x86_64 {
-        eprintln!(
-            "nanvix_binaries: skipping host-local snapshot generation \
-             (host '{}' is not x86_64; nanvixd.exe cannot run here). \
-             Runtime will cold-boot on first use.",
-            host
-        );
-    } else {
-        let snapshots_dir = bin_dir.join(nanvix_common::SNAPSHOTS_SUBDIR);
-        let snapshots_present = nanvix_common::SNAPSHOT_FILES
-            .iter()
-            .all(|name| snapshots_dir.join(name).exists());
-        if !snapshots_present {
-            fs::create_dir_all(&snapshots_dir).expect("failed to create snapshots dir");
-            eprintln!("nanvix_binaries: generating host-local snapshots (cold boot)...");
-            generate_snapshots_locally(&bin_dir);
+        let needs_download = needs_download_linux(&binaries, &bin_dir, &checksums);
+        if needs_download {
+            eprintln!(
+                "nanvix_binaries: downloading nanvix/nanvix-python {} (Linux)...",
+                versions.nanvix_python.tag
+            );
+            download_and_extract_linux(&versions.nanvix_python.tag, asset, &binaries, &bin_dir);
         } else {
-            eprintln!("nanvix_binaries: host-local snapshots already present");
+            eprintln!("nanvix_binaries: all Linux binaries cached and verified");
+        }
+
+        verify_checksums_linux(&binaries, &bin_dir, &checksums);
+        verify_bin_subdir_checksums_linux(&bin_dir, &checksums);
+    } else {
+        // Windows: original logic
+        let all_binaries: Vec<&str> = versions
+            .nanvix_python
+            .binaries
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+
+        let needs_nanvix_python = needs_download(&versions.nanvix_python, &bin_dir, &checksums);
+
+        if needs_nanvix_python {
+            eprintln!(
+                "nanvix_binaries: downloading nanvix/nanvix-python {}...",
+                versions.nanvix_python.tag
+            );
+            download_and_extract(&versions.nanvix_python, "nanvix/nanvix-python", &bin_dir);
+        } else {
+            eprintln!("nanvix_binaries: all binaries cached and verified");
+        }
+
+        verify_checksums(&all_binaries, &bin_dir, &checksums);
+        verify_bin_subdir_checksums(&bin_dir, &checksums);
+
+        // Generate host-local WHP snapshots at build time so even the first
+        // runtime execution uses warm start. The runtime fallback in
+        // nanvix_runner.rs handles the case where snapshots are missing.
+        //
+        // Skip on non-x86_64 hosts: `nanvixd.exe` is an x86_64 Windows binary
+        // and launching it on (e.g.) ARM64 Windows fails with
+        // STATUS_INVALID_IMAGE_FORMAT (0xc000007b). Snapshot pre-generation is
+        // a warm-start cache only — the runtime fallback covers cold boot on
+        // hosts where this build step is skipped.
+        let host = std::env::var("HOST").unwrap_or_default();
+        let host_is_x86_64 = host.starts_with("x86_64-");
+        if !host_is_x86_64 {
+            eprintln!(
+                "nanvix_binaries: skipping host-local snapshot generation \
+                 (host '{}' is not x86_64; nanvixd.exe cannot run here). \
+                 Runtime will cold-boot on first use.",
+                host
+            );
+        } else {
+            let snapshots_dir = bin_dir.join(nanvix_common::SNAPSHOTS_SUBDIR);
+            let snapshots_present = nanvix_common::SNAPSHOT_FILES
+                .iter()
+                .all(|name| snapshots_dir.join(name).exists());
+            if !snapshots_present {
+                fs::create_dir_all(&snapshots_dir).expect("failed to create snapshots dir");
+                eprintln!("nanvix_binaries: generating host-local snapshots (cold boot)...");
+                generate_snapshots_locally(&bin_dir);
+            } else {
+                eprintln!("nanvix_binaries: host-local snapshots already present");
+            }
         }
     }
 
@@ -252,8 +281,8 @@ fn try_curl_download(url: &str, dest: &Path) -> Result<(), String> {
 
     let output = cmd.output().map_err(|e| {
         format!(
-            "curl.exe not found: {}\n\
-             curl.exe ships with Windows 10 1803+. Ensure it's in PATH.",
+            "curl not found: {}\n\
+             Ensure curl is in PATH.",
             e
         )
     })?;
@@ -460,6 +489,254 @@ fn verify_bin_subdir_checksums(bin_dir: &Path, checksums: &HashMap<String, Strin
 
         if let Some(expected) = checksums.get(*name) {
             let actual = certutil_sha256(&path);
+            if actual != *expected {
+                panic!(
+                    "nanvix_binaries: SHA256 mismatch for 'bin/{}'!\n\
+                     \x20 expected: {}\n\
+                     \x20 actual:   {}\n\
+                     Update checksums.json with the new hashes.",
+                    name, expected, actual
+                );
+            }
+            eprintln!("  bin/{} -- checksum OK", name);
+        } else {
+            panic!(
+                "nanvix_binaries: 'bin/{}' has no entry in checksums.json — \
+                 every binary must be hash-verified",
+                name
+            );
+        }
+    }
+}
+
+// -- Linux-specific functions ------------------------------------------------
+
+fn needs_download_linux(
+    binaries: &[&str],
+    bin_dir: &Path,
+    checksums: &HashMap<String, String>,
+) -> bool {
+    // Check flat binaries.
+    for name in binaries {
+        let path = bin_dir.join(name);
+        if !path.exists() {
+            return true;
+        }
+        if let Some(expected) = checksums.get(*name) {
+            if sha256sum(&path) != *expected {
+                return true;
+            }
+        }
+    }
+
+    // Check bin/ subdir files.
+    let bin_subdir = bin_dir.join(nanvix_common::BIN_SUBDIR);
+    for name in nanvix_common::BIN_SUBDIR_FILES {
+        let path = bin_subdir.join(name);
+        if !path.exists() {
+            return true;
+        }
+        if let Some(expected) = checksums.get(*name) {
+            if sha256sum(&path) != *expected {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn download_and_extract_linux(tag: &str, asset: &str, binaries: &[&str], bin_dir: &Path) {
+    let url = github_download_url("nanvix/nanvix-python", tag, asset);
+    let tar_path = bin_dir.join(asset);
+
+    let cleanup = |p: &Path| {
+        let _ = fs::remove_file(p);
+    };
+
+    eprintln!("  downloading {}...", asset);
+    if let Err(msg) = try_curl_download(&url, &tar_path) {
+        cleanup(&tar_path);
+        panic!("nanvix_binaries: {}", msg);
+    }
+
+    let size = tar_path.metadata().map(|m| m.len()).unwrap_or(0);
+    eprintln!("  downloaded {} bytes, extracting...", size);
+
+    // Extract flat binaries from <prefix>/ using tar on Linux.
+    if let Err(msg) = try_tar_extract_linux(&tar_path, bin_dir, binaries) {
+        cleanup(&tar_path);
+        panic!("nanvix_binaries: {}", msg);
+    }
+
+    // Extract bin/ subdir files (kernel.elf, nanvixd.elf).
+    let bin_subdir = bin_dir.join(nanvix_common::BIN_SUBDIR);
+    fs::create_dir_all(&bin_subdir).expect("failed to create bin subdir");
+    if let Err(msg) = try_tar_extract_bin_subdir_linux(&tar_path, &bin_subdir) {
+        cleanup(&tar_path);
+        panic!("nanvix_binaries: {}", msg);
+    }
+
+    let _ = fs::remove_file(&tar_path);
+}
+
+fn try_tar_extract_linux(tar_path: &Path, dest_dir: &Path, files: &[&str]) -> Result<(), String> {
+    const ARCHIVE_PREFIX: &str = "microvm-standalone-256mb";
+
+    // nanvixd.elf lives under <prefix>/bin/, other flat binaries under <prefix>/.
+    let bin_dir_files: &[&str] = &["nanvixd.elf"];
+    let (bin_files, root_files): (Vec<&&str>, Vec<&&str>) =
+        files.iter().partition(|f| bin_dir_files.contains(f));
+
+    // Pass 1: files under <prefix>/bin/ — strip 2 path components.
+    if !bin_files.is_empty() {
+        let mut cmd = Command::new("tar");
+        cmd.arg("-xzf").arg(tar_path).arg("-C").arg(dest_dir);
+        cmd.args(["--strip-components", "2"]);
+        for f in &bin_files {
+            cmd.arg(format!("{}/bin/{}", ARCHIVE_PREFIX, f));
+        }
+        let output = cmd.output().map_err(|e| format!("tar not found: {}", e))?;
+        if !output.status.success() {
+            return Err(format!(
+                "tar extraction failed (bin files)\n  exit code: {}\n  stderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+
+    // Pass 2: files at <prefix>/ root — strip 1 path component.
+    if !root_files.is_empty() {
+        let mut cmd = Command::new("tar");
+        cmd.arg("-xzf").arg(tar_path).arg("-C").arg(dest_dir);
+        cmd.args(["--strip-components", "1"]);
+        for f in &root_files {
+            cmd.arg(format!("{}/{}", ARCHIVE_PREFIX, f));
+        }
+        let output = cmd.output().map_err(|e| format!("tar not found: {}", e))?;
+        if !output.status.success() {
+            return Err(format!(
+                "tar extraction failed (root files)\n  exit code: {}\n  stderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+
+    for f in files {
+        let path = dest_dir.join(f);
+        if path.exists() {
+            let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+            eprintln!("  {} -- extracted ({} bytes)", f, size);
+        } else {
+            return Err(format!("'{}' not found in archive after extraction", f));
+        }
+    }
+
+    Ok(())
+}
+
+fn try_tar_extract_bin_subdir_linux(tar_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    const ARCHIVE_PREFIX: &str = "microvm-standalone-256mb";
+
+    for name in nanvix_common::BIN_SUBDIR_FILES {
+        let mut cmd = Command::new("tar");
+        cmd.arg("-xzf").arg(tar_path).arg("-C").arg(dest_dir);
+        cmd.args(["--strip-components", "2"]);
+        cmd.arg(format!("{}/bin/{}", ARCHIVE_PREFIX, name));
+        let output = cmd.output().map_err(|e| format!("tar not found: {}", e))?;
+        if !output.status.success() {
+            return Err(format!(
+                "tar extraction failed (bin/{})\n  exit code: {}\n  stderr: {}",
+                name,
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let path = dest_dir.join(name);
+        if path.exists() {
+            let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+            eprintln!("  bin/{} -- extracted ({} bytes)", name, size);
+        } else {
+            return Err(format!(
+                "'bin/{}' not found in archive after extraction",
+                name
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Compute SHA256 hash using the `sha256sum` command (Linux).
+fn sha256sum(path: &Path) -> String {
+    let output = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!("nanvix_binaries: failed to run sha256sum: {}", e);
+        });
+
+    if !output.status.success() {
+        panic!(
+            "nanvix_binaries: sha256sum failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout).expect("sha256sum output not UTF-8");
+    stdout
+        .split_whitespace()
+        .next()
+        .unwrap_or_else(|| panic!("nanvix_binaries: unexpected sha256sum output: {}", stdout))
+        .to_lowercase()
+}
+
+fn verify_checksums_linux(binaries: &[&str], bin_dir: &Path, checksums: &HashMap<String, String>) {
+    for name in binaries {
+        let path = bin_dir.join(name);
+        if !path.exists() {
+            panic!("nanvix_binaries: {} not found after download/extract", name);
+        }
+
+        if let Some(expected) = checksums.get(*name) {
+            let actual = sha256sum(&path);
+            if actual != *expected {
+                panic!(
+                    "nanvix_binaries: SHA256 mismatch for '{}'!\n\
+                     \x20 expected: {}\n\
+                     \x20 actual:   {}\n\
+                     This may indicate a corrupted download or a NanVix version update.\n\
+                     Update checksums.json with the new hashes.",
+                    name, expected, actual
+                );
+            }
+            eprintln!("  {} -- checksum OK", name);
+        } else {
+            panic!(
+                "nanvix_binaries: '{}' has no entry in checksums.json — \
+                 every binary must be hash-verified",
+                name
+            );
+        }
+    }
+}
+
+fn verify_bin_subdir_checksums_linux(bin_dir: &Path, checksums: &HashMap<String, String>) {
+    let bin_subdir = bin_dir.join(nanvix_common::BIN_SUBDIR);
+    for name in nanvix_common::BIN_SUBDIR_FILES {
+        let path = bin_subdir.join(name);
+        if !path.exists() {
+            panic!(
+                "nanvix_binaries: bin/{} not found after download/extract",
+                name
+            );
+        }
+
+        if let Some(expected) = checksums.get(*name) {
+            let actual = sha256sum(&path);
             if actual != *expected {
                 panic!(
                     "nanvix_binaries: SHA256 mismatch for 'bin/{}'!\n\
