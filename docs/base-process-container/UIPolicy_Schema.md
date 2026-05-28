@@ -13,7 +13,7 @@ The `"ui"` section of the MXC container configuration controls how a contained p
 - **Job Object UI Restrictions**
 - **Process Mitigation: Win32k System Call Disable** (`PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY`)
 
-Developers declare *what the process is allowed to do* — Tessera translates that into the correct kernel flags and mitigations.
+Developers declare *what the process is allowed to do* — the OS-side sandbox layer translates that into the correct kernel flags and mitigations.
 
 ### Design Principles
 

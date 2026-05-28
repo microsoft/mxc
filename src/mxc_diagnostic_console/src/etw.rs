@@ -4,7 +4,7 @@
 //! Real-time ETW consumer for MXC diagnostic providers.
 //!
 //! Listens for events from:
-//! - **Tessera** TraceLogging provider (all events)
+//! - **MXC OS-side** TraceLogging provider (all events)
 //! - **Microsoft-Windows-Kernel-General** (all events -- AccessCheckLog, AppContainerTokenCheckLog,
 //!   TokenSidManagementLog, learning-mode violations, etc.)
 //!
@@ -31,8 +31,8 @@ use super::{collect_mode, display_mode, DisplayEvent, DisplayMode};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Tessera TraceLogging provider GUID: {f6ec123e-314e-400b-9e0a-151365e23083}
-const TESSERA_PROVIDER: GUID = GUID {
+/// MXC OS-side TraceLogging provider GUID: {f6ec123e-314e-400b-9e0a-151365e23083}
+const MXC_OS_PROVIDER: GUID = GUID {
     data1: 0xf6ec123e,
     data2: 0x314e,
     data3: 0x400b,
@@ -85,7 +85,7 @@ unsafe impl Send for SendPtr {}
 
 /// Start the ETW listener for diagnostic providers.
 ///
-/// Enables the Tessera TraceLogging provider and the Kernel-General provider
+/// Enables the MXC OS-side TraceLogging provider and the Kernel-General provider
 /// (all events for learning-mode diagnostics).
 /// Spawns a background thread that calls `ProcessTrace` (blocking). Returns
 /// immediately on success. Events are delivered via `tx`.
@@ -175,11 +175,11 @@ fn enable_provider(session_handle: u64) -> Result<(), String> {
         Value: session_handle,
     };
 
-    // Enable the Tessera TraceLogging provider (all keywords, Verbose).
+    // Enable the MXC OS-side TraceLogging provider (all keywords, Verbose).
     let status = unsafe {
         EnableTraceEx2(
             h,
-            &TESSERA_PROVIDER,
+            &MXC_OS_PROVIDER,
             1, // EVENT_CONTROL_CODE_ENABLE_PROVIDER
             TRACE_LEVEL_VERBOSE as u8,
             0xFFFF_FFFF_FFFF_FFFF, // all keywords
@@ -191,7 +191,7 @@ fn enable_provider(session_handle: u64) -> Result<(), String> {
 
     if status != WIN32_ERROR(0) {
         return Err(format!(
-            "EnableTraceEx2 (Tessera) failed: error {}",
+            "EnableTraceEx2 (MXC OS provider) failed: error {}",
             status.0
         ));
     }
@@ -211,7 +211,7 @@ fn enable_provider(session_handle: u64) -> Result<(), String> {
     };
 
     if status != WIN32_ERROR(0) {
-        // Non-fatal: warn but continue (Tessera provider is already enabled).
+        // Non-fatal: warn but continue (MXC OS-side provider is already enabled).
         eprintln!(
             "[ETW] Warning: EnableTraceEx2 (Kernel-General) failed: error {}",
             status.0
@@ -296,8 +296,8 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
     let event = unsafe { &*event_record };
     let provider = event.EventHeader.ProviderId;
 
-    if provider == TESSERA_PROVIDER {
-        // Tessera: accept all events.
+    if provider == MXC_OS_PROVIDER {
+        // MXC OS-side: accept all events.
     } else if provider == KERNEL_GENERAL_PROVIDER {
         // Kernel-General: accept all events (AccessCheckLog, AppContainerTokenCheckLog,
         // TokenSidManagementLog, learning-mode violations, etc.).

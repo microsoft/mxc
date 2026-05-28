@@ -40,7 +40,7 @@ const TRACKING_BASE: &str = "Software\\Classes\\Local Settings\\Software\\Micros
 /// Generate a unique sandbox identity string: `sandbox-{16 lowercase hex chars}`.
 ///
 /// Uses 8 bytes of CSPRNG randomness (64 bits), matching the format specified
-/// in the Tessera sandbox lifecycle design.
+/// in the MXC sandbox lifecycle design.
 pub fn generate_sandbox_identity() -> String {
     let mut buf = [0u8; 8];
     getrandom::getrandom(&mut buf).expect("OS getrandom call failed");
