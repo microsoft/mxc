@@ -359,9 +359,20 @@ impl AppContainerScriptRunner {
                 }
                 #[cfg(not(debug_assertions))]
                 {
-                    return Ok(ScriptResponse::error(
-                        "SECURITY: permissiveLearningMode not allowed in release builds",
-                    ));
+                    // `--audit` is the supported path for surfacing access
+                    // events in release builds, so we allow the capability
+                    // through (with a warning) when audit mode is on.
+                    if request.audit_mode {
+                        logger.log_line("*** SECURITY WARNING ***");
+                        logger.log_line(
+                            "permissiveLearningMode is ENABLED via --audit. \
+                             Container restrictions will NOT be enforced.",
+                        );
+                    } else {
+                        return Ok(ScriptResponse::error(
+                            "SECURITY: permissiveLearningMode not allowed in release builds (pass --audit to opt in)",
+                        ));
+                    }
                 }
             }
         }

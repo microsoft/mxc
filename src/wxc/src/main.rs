@@ -778,6 +778,8 @@ fn main() {
             .policy
             .capabilities
             .push("permissiveLearningMode".to_string());
+        request.audit_mode = true;
+    }
 
     // Apply the CLI command-line override to one-shot requests. State-aware
     // exec is handled above before dispatch.

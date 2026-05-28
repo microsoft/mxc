@@ -545,6 +545,11 @@ pub struct ExecutionRequest {
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
+    /// Audit mode: the operator passed `--audit` on the CLI. Lets backends
+    /// relax safety checks that would otherwise reject capabilities like
+    /// `permissiveLearningMode` in release builds, since audit mode is the
+    /// supported avenue for surfacing access events into the adjusted config.
+    pub audit_mode: bool,
 }
 
 impl Default for ExecutionRequest {
@@ -564,6 +569,7 @@ impl Default for ExecutionRequest {
             experimental_enabled: false,
             experimental: ExperimentalConfig::default(),
             dry_run: false,
+            audit_mode: false,
         }
     }
 }
