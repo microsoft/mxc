@@ -1,0 +1,195 @@
+{
+  "properties": {
+    "helpUri": "https://eng.ms/docs/microsoft-security/security/azure-security/cloudai-security-fundamentals-engineering/security-integration/guardian-wiki/microsoft-guardian/general/baselines"
+  },
+  "version": "1.0.0",
+  "baselines": {
+    "default": {
+      "name": "default",
+      "createdDate": "2026-05-28 18:54:11Z",
+      "lastUpdatedDate": "2026-05-28 18:54:11Z"
+    }
+  },
+  "results": {
+    "48efc6d6fe318d60dcb4d5cd4c2a8c03d094fad47a9f6f5dfebc12468c54f6bc": {
+      "signature": "48efc6d6fe318d60dcb4d5cd4c2a8c03d094fad47a9f6f5dfebc12468c54f6bc",
+      "alternativeSignatures": [
+        "12d7d92e40099f7d21c4e300dee924498b76b30edd65c04d4ebd1b7a78bbb73c",
+        "b26ae59455e0b4e3798f5329ac612a403b5d253d362270f638d1ac22f4efe686",
+        "af7ce370c5b16022080059c1558ea1c9a7957bd5f88d5f8dd8b12175eb7a7923"
+      ],
+      "target": "onefuzz-drop/base64_decode.exe",
+      "uriBaseId": "file:///D:/a/_work/1/a/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2007",
+      "createdDate": "2026-05-28 18:54:11Z",
+      "expirationDate": "2026-11-14 18:58:06Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-05-28 18:58:06Z"
+    },
+    "650595306d7de9025bd6a7dffb42cd4286336f906970ad35a8dd7c8efb02fdad": {
+      "signature": "650595306d7de9025bd6a7dffb42cd4286336f906970ad35a8dd7c8efb02fdad",
+      "alternativeSignatures": [
+        "9d93672e0188d4e4cf85a755d939c1ce4cd4a104d16ec718e3a23cb16eddad23",
+        "fb0beaff3a98dc7f9b2d984c7e4509829e8e01f5130d51c9aa52bacbb1920cd1",
+        "67017c59d535dd2f9a143cab0fa27e8e9a655ae7f060856f39f49a58fe79c7dd"
+      ],
+      "target": "onefuzz-drop/base64_decode.exe",
+      "uriBaseId": "file:///D:/a/_work/1/a/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2026-05-28 18:54:11Z",
+      "expirationDate": "2026-11-14 18:58:06Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-05-28 18:58:06Z"
+    },
+    "f995130b78dda47ba5234cdb99574c85c0acf55a26e9d040e577e330e408ce1b": {
+      "signature": "f995130b78dda47ba5234cdb99574c85c0acf55a26e9d040e577e330e408ce1b",
+      "alternativeSignatures": [
+        "1bd62e927c2386741c6f711917ab9cab2402a886c3cf956c31837c42815ca97d",
+        "6ff880d7562405a5c1e0aac603271412c7ea82a6a158403293e757e32a5280ed",
+        "d7b9176e837cf648f2f7733addf11adb7058014d4fad964e555d1071671d2744"
+      ],
+      "target": "onefuzz-drop/base64_decode.exe",
+      "uriBaseId": "file:///D:/a/_work/1/a/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2014",
+      "createdDate": "2026-05-28 18:54:11Z",
+      "expirationDate": "2026-11-14 18:58:06Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-05-28 18:58:06Z"
+    },
+    "3718764c8f691c1555880f934dbdc5282b2f2985c3aaef57661bcc4dd5abc615": {
+      "signature": "3718764c8f691c1555880f934dbdc5282b2f2985c3aaef57661bcc4dd5abc615",
+      "alternativeSignatures": [
+        "12a51a3ab82ad356e8f3c68a90c0d9826ff9567f55f8836c1df3e22d18a73b81",
+        "5b8b3f4642c249f8cc6b6f9f67ff46240a62af47a1b5830f4c943c192954856e",
+        "308dc99112a985b582507efc7ee782070fd2664bf2f92950802140e776b8d38c"
+      ],
+      "target": "onefuzz-drop/clang_rt.asan_dynamic-x86_64.dll",
+      "uriBaseId": "file:///D:/a/_work/1/a/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2026-05-28 18:54:11Z",
+      "expirationDate": "2026-11-14 18:58:06Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-05-28 18:58:06Z"
+    },
+    "c409543832ac1e9b040c351cb365f538e368bb2b0adb668be3c6a16b473c24a7": {
+      "signature": "c409543832ac1e9b040c351cb365f538e368bb2b0adb668be3c6a16b473c24a7",
+      "alternativeSignatures": [
+        "bfb1f728b4fed081a2f9ea3b066d299619d6749b16718f013d21b3c50c9cde81",
+        "6d917b130feef547a3a1fb85a794c820801b17be55743a8321bdc6caa8b55a14",
+        "d8c3f7f89bfca297a4b7ad5d5982258e95d95d401cd10810906345df02932e36"
+      ],
+      "target": "onefuzz-drop/config_parser.exe",
+      "uriBaseId": "file:///D:/a/_work/1/a/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2007",
+      "createdDate": "2026-05-28 18:54:11Z",
+      "expirationDate": "2026-11-14 18:58:06Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-05-28 18:58:06Z"
+    },
+    "e63660256ae22bda601e9cb67f445a44437b07a51b50bef34bafe9379c79565f": {
+      "signature": "e63660256ae22bda601e9cb67f445a44437b07a51b50bef34bafe9379c79565f",
+      "alternativeSignatures": [
+        "52397be626481b3aa44c7234e6fafdc36140ec30c7eafaa28bf4fdc255e3c590",
+        "15cd13335bea900985a544b53b3fa846da174afb0d2be3e26259d20eb06f1958",
+        "81bd3a96f992f0556e9fd997bd69a5ab5c80447fc19168aea91c64f608785489"
+      ],
+      "target": "onefuzz-drop/config_parser.exe",
+      "uriBaseId": "file:///D:/a/_work/1/a/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2026-05-28 18:54:11Z",
+      "expirationDate": "2026-11-14 18:58:06Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-05-28 18:58:06Z"
+    },
+    "1f1d127bf318962919d23fd65bbe6ac48901222b970398912b280e87f50e6a0b": {
+      "signature": "1f1d127bf318962919d23fd65bbe6ac48901222b970398912b280e87f50e6a0b",
+      "alternativeSignatures": [
+        "83755603c61a4951cc6523b3064bc139b2a143c66c16751476566947d45d0060",
+        "ec58885dacf4e2c178f2c090aeb6105d4c93cc4771a6bb39ce394d74338b62d2",
+        "4ec6209e5f81173a22c86b3c6b0e9e13d5963cc88184bffe1ee1fd2467a97551"
+      ],
+      "target": "onefuzz-drop/config_parser.exe",
+      "uriBaseId": "file:///D:/a/_work/1/a/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2014",
+      "createdDate": "2026-05-28 18:54:11Z",
+      "expirationDate": "2026-11-14 18:58:06Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-05-28 18:58:06Z"
+    },
+    "21099aa36ed8208054456006f30ed8c3de2c7cff9b580adbe1fba3dee3ade760": {
+      "signature": "21099aa36ed8208054456006f30ed8c3de2c7cff9b580adbe1fba3dee3ade760",
+      "alternativeSignatures": [
+        "43842c0c67115f7f416f0670ad6d982100c733b0a69b37eeb99ef6bd0fffe257",
+        "0aea5b781faded3744f6ef31e619c3953154e7e0a8363acc4732230aa903ea5c",
+        "a1ff01205b6eac678f97d7de6de5cd217836bef022d66efc2b976c37492c3e31"
+      ],
+      "target": "onefuzz-drop/validator.exe",
+      "uriBaseId": "file:///D:/a/_work/1/a/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2007",
+      "createdDate": "2026-05-28 18:54:11Z",
+      "expirationDate": "2026-11-14 18:58:06Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-05-28 18:58:06Z"
+    },
+    "909e7c7ab3887ba3aea9e0f3a2c1b08e39b1e4824c307da43d29d089d663f5ea": {
+      "signature": "909e7c7ab3887ba3aea9e0f3a2c1b08e39b1e4824c307da43d29d089d663f5ea",
+      "alternativeSignatures": [
+        "305ba59761b24fb0a3a77396451eadd051cf1203e8c603fc7b6113b37f09c024",
+        "9a6136d6fcf49b9ea07ecd3586b19bafa2c2184a0e8ba020a7353149e25987ca",
+        "9179c13a6d1e097432c54b15b2bde435a839775fec0ba7adc78733163fdbf268"
+      ],
+      "target": "onefuzz-drop/validator.exe",
+      "uriBaseId": "file:///D:/a/_work/1/a/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2026-05-28 18:54:11Z",
+      "expirationDate": "2026-11-14 18:58:06Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-05-28 18:58:06Z"
+    },
+    "b0436d6dd3e338cd74c349f944b9d784671a4cecf89b39a8e9890a38312ab2e5": {
+      "signature": "b0436d6dd3e338cd74c349f944b9d784671a4cecf89b39a8e9890a38312ab2e5",
+      "alternativeSignatures": [
+        "e775ab312a2dcc6bc617788e63c1cfd5a936343b1abf0d8ba6e68f05b762de7f",
+        "dc7bdd7197e062e2bb5d3f33ec42ab6f6d750eaa9481a5181ec72ff9aaa12b10",
+        "fe2d8fbcb4d0a940d4a6a7b363b17fe475e9d83d071c16766370191dea51644d"
+      ],
+      "target": "onefuzz-drop/validator.exe",
+      "uriBaseId": "file:///D:/a/_work/1/a/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2014",
+      "createdDate": "2026-05-28 18:54:11Z",
+      "expirationDate": "2026-11-14 18:58:06Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-05-28 18:58:06Z"
+    }
+  }
+}
