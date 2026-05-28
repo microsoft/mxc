@@ -166,6 +166,19 @@ struct Cli {
     /// Enable Audit mode for AppContainers
     #[arg(long = "audit")]
     audit: bool,
+
+    /// Directory used by audit mode for the ETW trace, the captured config
+    /// copy, and the adjusted config output. Forwarded to
+    /// `stop_plm_logging.ps1 -LogDir`. Only meaningful with `--audit`.
+    #[arg(long = "log-dir", requires = "audit")]
+    log_dir: Option<String>,
+
+    /// Override the path where audit mode writes the adjusted config.
+    /// Forwarded to `stop_plm_logging.ps1 -AdjustedConfigPath`. When
+    /// omitted, the script derives a path inside `--log-dir`. Only
+    /// meaningful with `--audit`.
+    #[arg(long = "adjusted-config-path", requires = "audit")]
+    adjusted_config_path: Option<String>,
 }
 
 fn log_request(request: &CodexRequest, logger: &mut Logger) {
@@ -963,7 +976,12 @@ fn main() {
     }
 
     if cli.audit {
-        learning_mode::stop_audit_logging(&mut logger, cli.config_path.as_deref());
+        learning_mode::stop_audit_logging(
+            &mut logger,
+            cli.config_path.as_deref(),
+            cli.log_dir.as_deref(),
+            cli.adjusted_config_path.as_deref(),
+        );
     }
 
     process::exit(response.exit_code);

@@ -1,0 +1,23 @@
+{
+  "version": "0.4.0-alpha",
+  "containerId": "CLI-BFS-Test",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"import os\nwrite_readwrite_file = 'C:\\\\temp\\\\wxc_test_readwrite\\\\test_write.txt'\nwrite_and_read_readwrite_file = 'C:\\\\temp\\\\wxc_test_readwrite\\\\test_readandwrite.txt'\nread_readwrite_file = 'C:\\\\temp\\\\wxc_test_readwrite\\\\test_read_readwrite.txt'\nread_readonly_readwrite_file = 'C:\\\\temp\\\\wxc_test_readwrite\\\\test_readonly_readwrite.txt'\nread_readonly_file = 'C:\\\\temp\\\\wxc_test_read\\\\test_readonly.txt'\nread_denied_file = 'C:\\\\temp\\\\wxc_test_denied\\\\test_deny_read.txt'\nwrite_denied_file = 'C:\\\\temp\\\\wxc_test_denied\\\\test_deny_write.txt'\nprint('Testing filesystem PLM detection...')\n\n#Write to file with Write permissions\ntry:\n    f = open(write_readwrite_file, 'w')\n    f.write('SUCCESS: Write to allowed path worked!')\n    f.close()\n    print(f'Successfully wrote to: {write_readwrite_file}')\nexcept PermissionError:\n    print('Could not write to writeFile path')\n\n#Write to file with readWrite permissions and then read\ntry:\n    f = open(write_and_read_readwrite_file, 'w+')\n    f.write('SUCCESS: Writing to readWriteFile path worked!')\n    content = f.read()\n    f.close()\n    print(f'Successfully read from: {write_and_read_readwrite_file}')\nexcept PermissionError:\n    print('Could not read from write_and_read_readwrite_file path')\n\n# Read from file with readWrite permissions\ntry:\n    f = open(read_readwrite_file, 'w+')\n    content = f.read()\n    f.close()\n    print(f'Successfully read from: {read_readwrite_file}')\nexcept PermissionError:\n    print('Could not read from read_readwrite_file path')\n\n# Read from file with read permissions in readWrite directory\ntry:\n    f = open(read_readonly_readwrite_file, 'r')\n    content = f.read()\n    f.close()\n    print(f'Successfully read from: {read_readonly_readwrite_file}')\nexcept PermissionError:\n    print('Could not read from read_readonly_readwrite_file path')\n\n#Read from file in read only path \ntry:\n    f2 = open(read_readonly_file, 'r')\n    content = f2.read()\n    f2.close()\n    print('successfully read')\nexcept PermissionError:\n    print('Could not read from read_readonly_file path')\n\n#Read from a file in a denied directory\ntry:\n    f = open(read_denied_file, 'r')\n    content = f.read()\n    f.close()\n    print(f'Successfully read from: {read_denied_file}')\nexcept PermissionError:\n    print('Could not read from read_denied_file path')\n\n#write to a file in a denied directory\ntry:\n    f = open(write_denied_file, 'w')\n    f.write('SUCCESS: Writing to denied path worked!')\n    f.close()\n    print(f'Successfully wrote to: {write_denied_file}')\nexcept PermissionError:\n    print('Could not write to write_denied_file path')\n\n\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "deniedPaths": [
+      "C:\\temp\\wxc_test_denied"
+    ],
+    "readwritePaths": [
+      "C:\\temp\\wxc_test_readwrite"
+    ],
+    "readonlyPaths": [
+      "C:\\temp\\wxc_test_read\\test_readonly.txt"
+    ]
+  },
+  "ui": {
+    "disable": false
+  }
+}

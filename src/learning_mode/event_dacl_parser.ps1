@@ -30,6 +30,11 @@ $ComplexDataDaclAceIndex   = 4
 # File path we treat as "no useful info" and skip.
 $MountPointManager         = "\Device\MountPointManager"
 
+# Current working directory at parse time. Events under this path are
+# treated as test/script scaffolding noise and skipped. Captured here (at
+# dot-source time) so the value is stable for the whole parser run.
+$CurrentDirectory          = (Get-Location).Path.TrimEnd('\')
+
 # Path to extract_caps.ps1. Resolved once at dot-source time relative to this
 # script so the function doesn't depend on the caller's current directory.
 $ExtractCapsScript         = Join-Path $PSScriptRoot 'extract_caps.ps1'
@@ -110,6 +115,19 @@ function Invoke-EventDaclParser {
         # Strip leading "\??\" so the path is in the familiar drive-letter
         # form used elsewhere in the script.
         $filePath = $filePath.Substring(4)
+
+        # Skip events targeting the parser's current working directory or
+        # anything underneath it -- these are typically the test harness's
+        # own scaffolding files, not anything the sandboxed app needs
+        # captured into the adjusted config.
+        if ($CurrentDirectory) {
+            $normalized = $filePath.TrimEnd('\')
+            if ($normalized.Equals($CurrentDirectory, [StringComparison]::OrdinalIgnoreCase) -or
+                $normalized.StartsWith($CurrentDirectory + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                Write-VHost "Skipping current-directory event: $filePath" -ForegroundColor Yellow
+                continue
+            }
+        }
 
         # Skip events where the app is just accessing its own binary -- the
         # app path is stored without a drive letter (HardDiskVolume form),

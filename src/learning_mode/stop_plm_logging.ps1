@@ -5,6 +5,11 @@ param(
     [string]$BinPath = ([System.IO.Path]::GetFullPath($PSScriptRoot)),
     [string]$ConfigPath,
 
+    # Optional override for where the adjusted config is written. When
+    # omitted, the script writes "Adjusted_<original>.json" next to the
+    # captured config copy inside $LogDir.
+    [string]$AdjustedConfigPath,
+
     # When set, per-event and per-ACE diagnostic lines are emitted to the
     # host. Off by default so the script's host output is limited to the
     # summary sections (requested capabilities, included/skipped caps).
@@ -310,8 +315,17 @@ if ($ConfigPath -and (($ValidAccessEvents.Count -gt 0) -or ($AllRequestedCapabil
         Write-Host ("Enabling access to GUI subsystem ") -ForegroundColor Cyan
     }
 
-    # Write out new config next to original with adjusted_ prefix.
-    $adjustedPath = Join-Path (Split-Path $destConfig -Parent) ("Adjusted_" + (Split-Path $destConfig -Leaf))
+    # Write out new config. By default, place it next to the captured copy
+    # with an "Adjusted_" prefix; honor -AdjustedConfigPath when supplied.
+    if ([string]::IsNullOrWhiteSpace($AdjustedConfigPath)) {
+        $adjustedPath = Join-Path (Split-Path $destConfig -Parent) ("Adjusted_" + (Split-Path $destConfig -Leaf))
+    } else {
+        $adjustedPath = $AdjustedConfigPath
+        $adjustedParent = Split-Path $adjustedPath -Parent
+        if ($adjustedParent -and -not (Test-Path -PathType Container $adjustedParent)) {
+            New-Item -ItemType Directory -Path $adjustedParent -Force | Out-Null
+        }
+    }
     Set-Content -Path $adjustedPath -Value ($config | ConvertTo-Json -Depth 10)
 
     # Unconditional summary of filesystem entries added during this run.
