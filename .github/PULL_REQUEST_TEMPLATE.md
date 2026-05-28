@@ -20,3 +20,8 @@
 - [ ] Bug fix
 - [ ] Feature
 - [ ] Task
+
+---
+
+Microsoft reviewers: PR builds don't auto-run (ADO policy). Comment `/azp run`
+to start `MXC-PR-Build`. See [docs/pull-requests.md](../docs/pull-requests.md).
