@@ -356,6 +356,24 @@ fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError
     ))
 }
 
+/// Options for [`load_mxc_request_with_options`].
+///
+/// Kept as a struct (rather than additional positional arguments) so future
+/// loader-tuning knobs can be threaded through without re-spinning every
+/// caller.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LoadOptions {
+    /// Treat `input` as a base64-encoded JSON blob rather than a file path.
+    pub is_base64: bool,
+    /// Allow `process.commandLine` to be absent or empty in the policy.
+    ///
+    /// The driver sets this when it has a CLI-provided command-line
+    /// override to splice into `script_code` after parsing. Without it,
+    /// missing/empty `commandLine` is a hard parse error in one-shot
+    /// and state-aware exec requests (matching the legacy contract).
+    pub allow_missing_command: bool,
+}
+
 /// Loads and parses a JSON-based code execution request.
 ///
 /// If `is_base64` is true, `input` is treated as a base64-encoded JSON string.
@@ -365,14 +383,31 @@ pub fn load_request(
     logger: &mut Logger,
     is_base64: bool,
 ) -> Result<CodexRequest, WxcError> {
-    let json_str = decode_request_input(input, logger, is_base64)?;
+    load_request_with_options(
+        input,
+        logger,
+        LoadOptions {
+            is_base64,
+            allow_missing_command: false,
+        },
+    )
+}
+
+/// Options-aware variant of [`load_request`] used by drivers that may
+/// override `process.commandLine` from the CLI. See [`LoadOptions`].
+pub fn load_request_with_options(
+    input: &str,
+    logger: &mut Logger,
+    opts: LoadOptions,
+) -> Result<CodexRequest, WxcError> {
+    let json_str = decode_request_input(input, logger, opts.is_base64)?;
 
     let raw: RawConfig = serde_json::from_str(&json_str).map_err(|e| {
         logger.log_line("Error parsing JSON");
         WxcError::ConfigParse(format!("JSON parse error: {}", e))
     })?;
 
-    convert_raw_config(raw, logger)
+    convert_raw_config_inner(raw, logger, true, opts.allow_missing_command)
 }
 
 /// Loads a request and routes to the one-shot or state-aware path based on
@@ -385,7 +420,27 @@ pub fn load_mxc_request(
     logger: &mut Logger,
     is_base64: bool,
 ) -> Result<MxcRequest, ParseError> {
-    let json_str = decode_request_input(input, logger, is_base64).map_err(ParseError::Decode)?;
+    load_mxc_request_with_options(
+        input,
+        logger,
+        LoadOptions {
+            is_base64,
+            allow_missing_command: false,
+        },
+    )
+}
+
+/// Options-aware variant of [`load_mxc_request`]. When
+/// `LoadOptions::allow_missing_command` is set, a missing or empty
+/// `process.commandLine` in the policy is tolerated and `script_code`
+/// is left empty for the driver to fill in from a CLI override.
+pub fn load_mxc_request_with_options(
+    input: &str,
+    logger: &mut Logger,
+    opts: LoadOptions,
+) -> Result<MxcRequest, ParseError> {
+    let json_str =
+        decode_request_input(input, logger, opts.is_base64).map_err(ParseError::Decode)?;
 
     let raw: RawMxcRequest = serde_json::from_str(&json_str).map_err(|e| {
         logger.log_line("Error parsing JSON");
@@ -393,12 +448,16 @@ pub fn load_mxc_request(
     })?;
 
     match raw {
-        RawMxcRequest::StateAware(state_aware) => convert_raw_state_aware(*state_aware, logger)
-            .map(MxcRequest::StateAware)
-            .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string()))),
-        RawMxcRequest::OneShot(one_shot) => convert_raw_config(*one_shot, logger)
-            .map(MxcRequest::OneShot)
-            .map_err(ParseError::OneShot),
+        RawMxcRequest::StateAware(state_aware) => {
+            convert_raw_state_aware(*state_aware, logger, opts.allow_missing_command)
+                .map(MxcRequest::StateAware)
+                .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
+        }
+        RawMxcRequest::OneShot(one_shot) => {
+            convert_raw_config_inner(*one_shot, logger, true, opts.allow_missing_command)
+                .map(MxcRequest::OneShot)
+                .map_err(ParseError::OneShot)
+        }
     }
 }
 
@@ -532,17 +591,19 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
 
 // ---------- Conversion from raw JSON to domain model ----------
 
-fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
-    convert_raw_config_inner(raw, logger, true)
-}
-
 // `require_process = false` allows state-aware non-exec phases to omit the
 // `process` block entirely; those phases leave `script_code` / `working_directory`
 // / `script_timeout` / `env` at their defaults and never read them.
+//
+// `allow_missing_command` further relaxes the `require_process == true` arms
+// so that a CLI command-line override (provided by the driver after parsing)
+// can stand in for `process.commandLine`. When set, a missing or empty
+// `commandLine` is silently accepted and `script_code` is left empty.
 fn convert_raw_config_inner(
     raw: RawConfig,
     logger: &mut Logger,
     require_process: bool,
+    allow_missing_command: bool,
 ) -> Result<CodexRequest, WxcError> {
     // New top-level fields
     let schema_version = raw.version.unwrap_or_default();
@@ -550,18 +611,21 @@ fn convert_raw_config_inner(
     let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
 
     // Process section: required for one-shot and for state-aware exec; absent
-    // is allowed for state-aware non-exec phases (require_process == false).
+    // is allowed for state-aware non-exec phases (require_process == false)
+    // or when the driver has signalled a CLI command-line override is
+    // present via `allow_missing_command`.
+    let command_required = require_process && !allow_missing_command;
     let (script_code, working_directory, script_timeout, env) = match raw.process {
         Some(process) => {
             let script_code = match process.command_line {
                 Some(s) if !s.is_empty() => s,
-                Some(_) if require_process => {
+                Some(_) if command_required => {
                     logger.log_line("process.commandLine cannot be empty");
                     return Err(WxcError::ConfigParse(
                         "process.commandLine cannot be empty".to_string(),
                     ));
                 }
-                None if require_process => {
+                None if command_required => {
                     logger.log_line("Missing required field: process.commandLine");
                     return Err(WxcError::ConfigParse(
                         "Missing required field: process.commandLine".to_string(),
@@ -585,7 +649,7 @@ fn convert_raw_config_inner(
                 process.env.unwrap_or_default(),
             )
         }
-        None if require_process => {
+        None if command_required => {
             return Err(WxcError::ConfigParse(
                 "'process' section is required".into(),
             ));
@@ -1042,6 +1106,7 @@ fn convert_raw_config_inner(
 fn convert_raw_state_aware(
     raw: RawStateAwareRequest,
     logger: &mut Logger,
+    allow_missing_command: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
     let phase = Phase::from_wire(&raw.phase).map_err(|e| {
         let msg = e.message.clone();
@@ -1076,7 +1141,8 @@ fn convert_raw_state_aware(
     };
 
     let require_process = phase == Phase::Exec;
-    let request = convert_raw_config_inner(surrogate, logger, require_process)?;
+    let request =
+        convert_raw_config_inner(surrogate, logger, require_process, allow_missing_command)?;
 
     Ok(ParsedStateAwareRequest {
         request,
@@ -1172,6 +1238,83 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         load_mxc_request(&encoded, &mut logger, true)
+    }
+
+    fn load_mxc_with_opts(json: &str, opts: LoadOptions) -> Result<MxcRequest, ParseError> {
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        load_mxc_request_with_options(
+            &encoded,
+            &mut logger,
+            LoadOptions {
+                is_base64: true,
+                ..opts
+            },
+        )
+    }
+
+    #[test]
+    fn allow_missing_command_lets_one_shot_skip_command_line() {
+        // No process.commandLine in the policy — without the flag this would
+        // be a parse error; with allow_missing_command set the parser yields
+        // an empty script_code for the driver to fill in.
+        let json = r#"{"process": {"cwd": "C:\\tmp"}}"#;
+        let opts = LoadOptions {
+            is_base64: true,
+            allow_missing_command: true,
+        };
+        match load_mxc_with_opts(json, opts).unwrap() {
+            MxcRequest::OneShot(req) => {
+                assert!(req.script_code.is_empty());
+                assert_eq!(req.working_directory, "C:\\tmp");
+            }
+            MxcRequest::StateAware(_) => panic!("expected one-shot"),
+        }
+    }
+
+    #[test]
+    fn allow_missing_command_lets_one_shot_skip_process_block_entirely() {
+        let json = r#"{"containment": "processcontainer"}"#;
+        let opts = LoadOptions {
+            is_base64: true,
+            allow_missing_command: true,
+        };
+        match load_mxc_with_opts(json, opts).unwrap() {
+            MxcRequest::OneShot(req) => assert!(req.script_code.is_empty()),
+            MxcRequest::StateAware(_) => panic!("expected one-shot"),
+        }
+    }
+
+    #[test]
+    fn allow_missing_command_lets_state_aware_exec_skip_command_line() {
+        let json = r#"{
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234",
+            "process": {"cwd": "C:\\tmp"}
+        }"#;
+        let opts = LoadOptions {
+            is_base64: true,
+            allow_missing_command: true,
+        };
+        match load_mxc_with_opts(json, opts).unwrap() {
+            MxcRequest::StateAware(p) => {
+                assert_eq!(p.phase, Phase::Exec);
+                assert!(p.request.script_code.is_empty());
+            }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn default_options_still_reject_missing_command_line() {
+        // Sanity: without the flag, the legacy contract holds — missing
+        // commandLine is a hard parse error.
+        let json = r#"{"process": {"cwd": "C:\\tmp"}}"#;
+        let opts = LoadOptions {
+            is_base64: true,
+            allow_missing_command: false,
+        };
+        assert!(load_mxc_with_opts(json, opts).is_err());
     }
 
     #[test]
