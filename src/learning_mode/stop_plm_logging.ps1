@@ -198,9 +198,13 @@ if ($ConfigPath -and (($ValidAccessEvents.Count -gt 0) -or ($AllRequestedCapabil
             {
                 $parent = Split-Path $ev.FilePath -Parent
             }
-            if (test-path -PathType container $ev.FilePath) 
+            elseif (test-path -PathType container $ev.FilePath) 
             {
                 $parent = $ev.FilePath
+            }
+            else {
+                Write-VHost "Only files and directories are currently supported" -ForegroundColor Yellow
+                continue
             }
             
             # Writing to files requires readwrite for the parent directory. 
