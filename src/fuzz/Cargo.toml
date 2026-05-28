@@ -17,6 +17,7 @@ cargo-fuzz = true
 # These pull in heavier deps so they're opt-in for local dev.
 hyperlight = ["wxc_common/hyperlight"]
 isolation_session = ["wxc_common/isolation_session"]
+microvm = ["wxc_common/microvm"]
 
 [dependencies]
 libfuzzer-sys = "0.4"

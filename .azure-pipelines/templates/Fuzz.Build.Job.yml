@@ -39,6 +39,8 @@ jobs:
         Invoke-WebRequest -UseBasicParsing -Uri 'https://win.rustup.rs/x86_64' -OutFile $rustupInit
         & $rustupInit -y --profile minimal --default-toolchain $(rustNightly) --default-host x86_64-pc-windows-msvc
         if ($LASTEXITCODE -ne 0) { throw "rustup-init failed" }
+        # Ensure nightly is the default even if agent has a pre-existing stable toolchain.
+        rustup default $(rustNightly)
         Write-Host "##vso[task.prependpath]$env:USERPROFILE\.cargo\bin"
       displayName: Install Rust nightly
 
@@ -70,17 +72,23 @@ jobs:
         cd $(fuzzDir)
         foreach ($t in 'config_parser','base64_decode') {
           Write-Host "===== building $t ====="
-          cargo fuzz build $t --release
+          cargo +$(rustNightly) fuzz build $t --release
           if ($LASTEXITCODE -ne 0) { throw "fuzz build failed for $t" }
         }
         Write-Host "===== building validator ====="
-        cargo fuzz build validator --release --features hyperlight,isolation_session
+        cargo +$(rustNightly) fuzz build validator --release --features hyperlight,isolation_session,microvm
         if ($LASTEXITCODE -ne 0) { throw "fuzz build failed for validator" }
       displayName: Build fuzz targets (ASAN)
 
-    # Stage the OneFuzz drop directory: one subdir per fuzzer with the .exe,
-    # the OneFuzzConfig.json subset for that fuzzer, the ASAN runtime DLL,
-    # and the seed corpus.
+    # Stage the OneFuzz drop directory. OneFuzzConfig v3 requires a flat
+    # layout: OneFuzzConfig.json at the root, with each fuzzer's .exe / .pdb
+    # and the shared ASAN runtime DLL alongside it (referenced by simple
+    # name in `Fuzzer.FuzzingHarnessExecutableName` and `JobDependencies`).
+    # Seeds are not shipped in the drop in v3 — they must live in a OneFuzz
+    # storage container referenced via `OneFuzzJobs[].SeedCorpusContainer`.
+    # TODO: provision containers (`onefuzz containers create mxc-seeds-<target>`),
+    # upload `test_configs/*.json` (and `src/fuzz/corpus/base64_decode/*`),
+    # then add `SeedCorpusContainer` to each entry in OneFuzzConfig.json.
     - powershell: |
         $asanDir = (Get-ChildItem 'C:\Program Files\Microsoft Visual Studio' -Recurse -Filter 'clang_rt.asan_dynamic-x86_64.dll' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'HostX64\\x64\\clang_rt' } | Select-Object -First 1).Directory.FullName
         if (-not $asanDir) { throw "Could not locate clang_rt.asan_dynamic-x86_64.dll" }
@@ -88,16 +96,15 @@ jobs:
 
         New-Item -ItemType Directory -Force -Path '$(dropDir)' | Out-Null
         Copy-Item '$(fuzzDir)/OneFuzzConfig.json' '$(dropDir)/OneFuzzConfig.json'
+        Copy-Item "$asanDir/clang_rt.asan_dynamic-x86_64.dll" '$(dropDir)/'
 
         foreach ($t in 'config_parser','base64_decode','validator') {
-          $sub = "$(dropDir)/$t"
-          New-Item -ItemType Directory -Force -Path $sub, "$sub/corpus" | Out-Null
-          Copy-Item "$(fuzzTargetDir)/$t.exe" $sub
-          Copy-Item "$asanDir/clang_rt.asan_dynamic-x86_64.dll" $sub
-          if ($t -eq 'base64_decode') {
-            Copy-Item "$(fuzzDir)/corpus/$t/*" "$sub/corpus/" -Recurse
+          Copy-Item "$(fuzzTargetDir)/$t.exe" '$(dropDir)/'
+          $pdb = "$(fuzzTargetDir)/$t.pdb"
+          if (Test-Path $pdb) {
+            Copy-Item $pdb '$(dropDir)/'
           } else {
-            Copy-Item "$(Build.SourcesDirectory)/test_configs/*.json" "$sub/corpus/"
+            Write-Warning "PDB not found for $t at $pdb"
           }
         }
         Get-ChildItem -Recurse '$(dropDir)' | Select-Object FullName, Length
