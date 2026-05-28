@@ -24,6 +24,8 @@ All scripts accept a `-Release` switch to use the release build (default: debug)
 | `run_filesystem_bfs_test.ps1` | BFS filesystem test | `wxc-exec.exe` |
 | `run_filesystem_bfsreadonly_test.ps1` | BFS read-only filesystem test | `wxc-exec.exe` |
 | `run_filesystem_bfs_spaces_test.ps1` | BFS path-with-spaces test | `wxc-exec.exe` |
+| `run_filesystem_PLM_test.ps1` | Permissive Learning Mode filesystem test.| `wxc-exec.exe`, `pwsh.exe`, `wpr.exe` |
+| `run_PLM_capability_tests.ps1` | Permissive Learning Mode capability test.| `wxc-exec.exe`, `pwsh.exe`, `wpr.exe` |
 | `run_test_configs.ps1` | All test configs via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_examples.ps1` | All examples via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_microvm_basic_test.ps1` | MicroVM smoke test | `wxc-exec.exe`, NanVix binaries |
