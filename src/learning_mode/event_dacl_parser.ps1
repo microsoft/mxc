@@ -146,7 +146,7 @@ function Invoke-EventDaclParser {
         # Skip events where the app is just accessing its own binary -- the
         # app path is stored without a drive letter (HardDiskVolume form),
         # so we compare against the file path minus its drive letter.
-        if ($ev.Properties[$AppPathIndex].Value.EndsWith($filePath.Substring(3))) {
+        if ($ev.Properties[$AppPathIndex] -and $ev.Properties[$AppPathIndex].Value.EndsWith($filePath.Substring(3))) {
             continue
         }
 
