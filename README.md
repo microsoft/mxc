@@ -153,25 +153,37 @@ xperf -merge user.etl kernel.etl merged.etl
 
 ### `--audit` Flag
 
-The `wxc` CLI supports an `--audit` flag that automates the start/stop tracing flow above using the `Application Capability Profiler (ACP)` module, via the PowerShell helpers in [`src/learning_mode/`](src/learning_mode/readme.md).
+The `wxc` CLI supports an `--audit` flag that automates the start/stop tracing flow above using PowerShell helpers in [`src/learning_mode/`](src/learning_mode/readme.md).
 
 When `--audit` is passed:
 
-1. `permissiveLearningMode` is appended to the container's capability list, so the AppContainer runs in audit (non-blocking) mode and the profiler can observe all file accesses.
+1. `permissiveLearningMode` is appended to the container's capability list and `request.audit_mode` is set, so the AppContainer runs in audit (non-blocking) mode and the profiler can observe all file accesses. The `appcontainer_runner` normally rejects `permissiveLearningMode` in release builds; `--audit` is the supported opt-in (release builds without `--audit` still fail with `SECURITY: permissiveLearningMode not allowed in release builds (pass --audit to opt in)`).
 2. **Before** the runner starts, `wxc` invokes `start_plm_logging.ps1` to begin an ACP profiling session.
 3. The script/container runs as usual.
-4. **After** the runner completes, `wxc` invokes `stop_plm_logging.ps1 -FilePath <config-path>`, where `<config-path>` is the JSON config that was passed to `wxc`. The stop script:
-   - Writes the ETL trace, `results.csv`, `summary.txt`, and `manifest.xml` to a timestamped folder under `logs\`.
-   - Parses `summary.txt` for observed file accesses.
-   - Emits an `Adjusted_<config-name>.json` next to the original config, with the observed paths merged into `filesystem.readwritePaths`.
+4. **After** the runner completes, `wxc` invokes `stop_plm_logging.ps1` to merge observed accesses into an adjusted config. The stop script:
+   - Writes the ETL trace and the captured copy of the original config to a timestamped folder under `logs\` (or under `--log-dir` if supplied).
+   - Parses the trace for file-access (EventID 14) and UI (EventID 27) events via `event_dacl_parser.ps1`, including ACE-derived capability names from `extract_caps.ps1`.
+   - Emits an `Adjusted_<config-name>.json` with observed paths merged into `filesystem.readwritePaths` / `readonlyPaths`, discovered capabilities merged into the containment-specific `capabilities` block, and `ui.disable` flipped to `false` when a UI event was detected.
+
+The scripts are resolved next to `wxc-exec.exe` via `std::env::current_exe()`, so `--audit` works regardless of the caller's current working directory.
+
+#### Related flags
+
+| Flag | Forwarded as | Purpose |
+|---|---|---|
+| `--audit` | — | Enable audit mode (required to use the flags below). |
+| `--log-dir <dir>` | `stop_plm_logging.ps1 -LogDir` | Directory for the ETW trace, captured config copy, and (by default) the adjusted config. |
+| `--adjusted-config-path <file>` | `stop_plm_logging.ps1 -AdjustedConfigPath` | Override the exact path the adjusted config is written to. When omitted the script writes `Adjusted_<original>.json` inside `--log-dir`. |
 
 Example:
 
 ```powershell
-wxc --audit --config C:\path\to\my-config.json
+wxc-exec --audit --log-dir C:\temp\wxc_logs `
+    --adjusted-config-path C:\temp\wxc_logs\adjusted_my-config.json `
+    C:\path\to\my-config.json
 ```
 
-After the run, `Adjusted_my-config.json` will sit next to `my-config.json`, ready to be used as a tightened (or expanded) policy that reflects what the workload actually touched.
+After the run, the file at `--adjusted-config-path` (or `Adjusted_my-config.json` under `--log-dir`) reflects what the workload actually touched, ready to be used as a tightened (or expanded) policy.
 
 ## Linux Support (LXC)
 
