@@ -200,7 +200,7 @@ export interface NetworkConfig {
   allowedHosts?: string[];
   /** Hostnames or IP addresses to block (firewall mode only) */
   blockedHosts?: string[];
-  /** Proxy configuration (Windows only) */
+  /** Proxy configuration (supported on Windows ProcessContainer and Linux Bubblewrap) */
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;

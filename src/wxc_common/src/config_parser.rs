@@ -789,9 +789,12 @@ fn convert_raw_config_inner(
     if let Some(net) = raw.network {
         if let Some(proxy_value) = net.proxy {
             let proxy_config = parse_proxy_config(&proxy_value)?;
-            if proxy_config.is_enabled() && containment != ContainmentBackend::ProcessContainer {
-                let msg =
-                    "Network proxy is only supported with the 'processcontainer' containment backend";
+            if proxy_config.is_enabled()
+                && containment != ContainmentBackend::ProcessContainer
+                && containment != ContainmentBackend::Bubblewrap
+            {
+                let msg = "Network proxy is only supported with the 'processcontainer' \
+                           or 'bubblewrap' containment backends";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -838,6 +841,73 @@ fn convert_raw_config_inner(
         }
         if let Some(v) = net.blocked_hosts {
             policy.blocked_hosts = v;
+        }
+
+        // Bubblewrap is unprivileged by design; iptables-based enforcement
+        // (firewall / both) requires CAP_NET_ADMIN, which defeats the
+        // backend's privilege story. Reject the combination explicitly so
+        // users get a clear error instead of an opaque runtime failure.
+        if containment == ContainmentBackend::Bubblewrap
+            && policy.network_proxy.is_enabled()
+            && matches!(
+                policy.network_enforcement_mode,
+                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+            )
+        {
+            let msg = "Bubblewrap: network.proxy cannot be combined with \
+                       network.enforcementMode='firewall' or 'both'. The cooperative \
+                       env-var proxy enforces hosts at the proxy layer; iptables-based \
+                       enforcement requires privilege and is mutually exclusive.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // External proxy (`network.proxy.url` / `network.proxy.localhost`)
+        // enforces its own policy — the runner does NOT forward
+        // `allowedHosts` / `blockedHosts` / `defaultPolicy` to it. Reject
+        // configs that combine an external proxy with host lists or a
+        // restrictive default, otherwise users get a silently weaker
+        // enforcement than a no-proxy `defaultPolicy: "block"` config
+        // would have produced.
+        if containment == ContainmentBackend::Bubblewrap
+            && policy.network_proxy.is_enabled()
+            && !policy.network_proxy.builtin_test_server
+            && (!policy.allowed_hosts.is_empty()
+                || !policy.blocked_hosts.is_empty()
+                || policy.default_network_policy == NetworkPolicy::Block)
+        {
+            let msg = "Bubblewrap: an external network.proxy (url/localhost) cannot be \
+                       combined with allowedHosts, blockedHosts, or defaultPolicy='block'. \
+                       The external proxy is expected to enforce its own host policy; \
+                       MXC does not forward host lists to it. Use \
+                       'network.proxy.builtinTestServer: true' (testing only) for \
+                       MXC-enforced host filtering, or remove the host policy.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // Cooperative-model warning: when the builtin test proxy is paired
+        // with `defaultPolicy: "block"` and no allowlist, well-behaved
+        // HTTP clients are denied at the proxy, but raw-socket clients
+        // (anything that ignores HTTP_PROXY/HTTPS_PROXY) still reach the
+        // host network because the sandbox shares the host netns in proxy
+        // mode. Surface this at config-validation time so users porting a
+        // working hard-block config don't silently lose enforcement when
+        // they add a proxy block.
+        if containment == ContainmentBackend::Bubblewrap
+            && policy.network_proxy.is_enabled()
+            && policy.default_network_policy == NetworkPolicy::Block
+            && policy.allowed_hosts.is_empty()
+            && policy.blocked_hosts.is_empty()
+        {
+            logger.log_line(
+                "WARNING: Bubblewrap network.proxy with defaultPolicy='block' is \
+                 cooperative. HTTP_PROXY-aware clients (curl, requests, etc.) are \
+                 denied at the proxy, but raw-socket clients that ignore HTTP_PROXY \
+                 bypass the proxy and reach the host network. For strict isolation \
+                 of all clients, remove network.proxy so --unshare-net applies; for \
+                 host-list enforcement, add allowedHosts (cooperative tools only).",
+            );
         }
     }
 
@@ -2036,12 +2106,237 @@ mod tests {
 
     #[test]
     fn proxy_builtin_test_server_rejected_with_non_processcontainer() {
+        // lxc is not allowed -- proxy is gated to processcontainer + bubblewrap.
         let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_accepted_with_bubblewrap() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"builtinTestServer": true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn proxy_with_bubblewrap_and_firewall_enforcement_is_rejected() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "firewall",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("network.proxy cannot be combined with"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn proxy_with_bubblewrap_and_both_enforcement_is_rejected() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "both",
+                "blockedHosts": ["evil.example"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        assert!(load_request(&encoded, &mut logger, true).is_err());
+    }
+
+    #[test]
+    fn proxy_with_bubblewrap_and_capabilities_enforcement_is_accepted() {
+        // Capabilities mode never invokes iptables, so combining it with a
+        // proxy is fine and must NOT trigger the conflict guard.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "capabilities",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert_eq!(req.policy.allowed_hosts, vec!["example.com".to_string()]);
+    }
+
+    #[test]
+    fn external_proxy_url_with_bubblewrap_and_allowed_hosts_is_rejected() {
+        // The external proxy enforces its own policy; the runner does not
+        // forward host lists to it. Combining the two is a silent
+        // policy-weakening trap and must be rejected at parse time.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"url": "http://127.0.0.1:8080"},
+                "allowedHosts": ["api.github.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("external network.proxy") && msg.contains("allowedHosts"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn external_proxy_localhost_with_bubblewrap_and_blocked_hosts_is_rejected() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"localhost": 8080},
+                "blockedHosts": ["evil.example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(format!("{}", err).contains("external network.proxy"));
+    }
+
+    #[test]
+    fn external_proxy_with_bubblewrap_and_default_block_is_rejected() {
+        // defaultPolicy=block is a hard-block intent; pairing it with an
+        // external proxy whose policy we don't control silently weakens
+        // enforcement.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"url": "http://127.0.0.1:8080"},
+                "defaultPolicy": "block"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(format!("{}", err).contains("defaultPolicy"));
+    }
+
+    #[test]
+    fn external_proxy_with_bubblewrap_and_no_host_policy_is_accepted() {
+        // Pure delegate-to-external-proxy with no MXC-side host policy is
+        // the supported external-proxy use case. Under deny-by-default,
+        // callers must explicitly set `defaultPolicy: "allow"` to opt
+        // into trusting the external proxy with full policy delegation.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"url": "http://127.0.0.1:8080"},
+                "defaultPolicy": "allow"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(!req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn builtin_proxy_with_bubblewrap_and_host_policy_is_accepted() {
+        // The builtin proxy DOES enforce host lists at the proxy layer, so
+        // combining it with allowedHosts is fine.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "allowedHosts": ["api.github.com"],
+                "defaultPolicy": "block"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.builtin_test_server);
+        assert_eq!(req.policy.allowed_hosts, vec!["api.github.com".to_string()]);
+    }
+
+    #[test]
+    fn bubblewrap_proxy_with_default_block_and_empty_allowlist_warns() {
+        // Cooperative mode with no allowlist denies HTTP_PROXY-aware clients
+        // but raw-socket clients still reach the host network. Parser must
+        // surface a warning (does not reject).
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "defaultPolicy": "block"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+        // Warning is best-effort surfaced via the logger; the request still
+        // succeeds.
     }
 
     #[test]

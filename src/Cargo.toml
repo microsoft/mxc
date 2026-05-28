@@ -13,6 +13,7 @@ members = [
     "lxc_common",
     "wslc_common",
     "bwrap_common",
+    "linux_test_proxy",
     "isolation_session_bindings",
     "seatbelt_common",
     "mxc_darwin",

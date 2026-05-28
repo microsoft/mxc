@@ -230,7 +230,37 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should reject proxy configuration on Linux', () => {
+    it('should accept proxy configuration on Linux for the default process containment (resolves to bubblewrap)', () => {
+      mockLinux();
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.4.0-alpha',
+          network: { proxy: { builtinTestServer: true } },
+        };
+        const config = buildSandboxPayload('echo hi', policy);
+        assert.strictEqual(config.containment, 'process');
+        assert.deepStrictEqual(config.network!.proxy, { builtinTestServer: true });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should accept proxy configuration on Linux for explicit bubblewrap containment', () => {
+      mockLinux();
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.4.0-alpha',
+          network: { proxy: { builtinTestServer: true } },
+        };
+        const config = buildSandboxPayload('echo hi', policy, undefined, undefined, 'bubblewrap');
+        assert.strictEqual(config.containment, 'bubblewrap');
+        assert.deepStrictEqual(config.network!.proxy, { builtinTestServer: true });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject proxy configuration on Linux for non-bubblewrap containments (e.g. lxc)', () => {
       mockLinux();
       try {
         const policy: SandboxPolicy = {
@@ -238,8 +268,8 @@ describe('buildSandboxPayload', () => {
           network: { proxy: { builtinTestServer: true } },
         };
         assert.throws(
-          () => buildSandboxPayload('echo hi', policy),
-          { message: /not supported on Linux/ },
+          () => buildSandboxPayload('echo hi', policy, undefined, undefined, 'lxc'),
+          { message: /not supported on Linux containment='lxc'/ },
         );
       } finally {
         restore();
@@ -577,15 +607,76 @@ describe('createConfigFromPolicy', () => {
       }
     });
 
-    it('should reject proxy on Linux', () => {
+    it('should accept proxy on Linux for the default process containment (resolves to bubblewrap)', () => {
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.4.0-alpha',
+          network: { proxy: { builtinTestServer: true } },
+        });
+        assert.strictEqual(config.containment, 'process');
+        assert.deepStrictEqual(config.network!.proxy, { builtinTestServer: true });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should accept proxy on Linux for explicit bubblewrap containment', () => {
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy(
+          {
+            version: '0.4.0-alpha',
+            network: { proxy: { builtinTestServer: true } },
+          },
+          'bubblewrap',
+        );
+        assert.strictEqual(config.containment, 'bubblewrap');
+        assert.deepStrictEqual(config.network!.proxy, { builtinTestServer: true });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should NOT force enforcementMode=firewall when proxy + host filtering are combined on bubblewrap', () => {
+      // The Rust config_parser explicitly rejects bubblewrap+proxy+firewall
+      // since the iptables path requires privilege the bwrap backend
+      // deliberately avoids. Host enforcement happens at the proxy layer
+      // instead, so the SDK must leave enforcementMode at its default.
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy(
+          {
+            version: '0.4.0-alpha',
+            network: {
+              allowOutbound: true,
+              allowedHosts: ['example.com'],
+              proxy: { builtinTestServer: true },
+            },
+          },
+          'bubblewrap',
+        );
+        assert.strictEqual(config.containment, 'bubblewrap');
+        assert.strictEqual(config.network!.enforcementMode, undefined);
+        assert.deepStrictEqual(config.network!.proxy, { builtinTestServer: true });
+        assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject proxy on Linux for explicit lxc containment', () => {
       mockLinux();
       try {
         assert.throws(
-          () => createConfigFromPolicy({
-            version: '0.4.0-alpha',
-            network: { proxy: { builtinTestServer: true } },
-          }),
-          { message: /not supported on Linux/ },
+          () => createConfigFromPolicy(
+            {
+              version: '0.4.0-alpha',
+              network: { proxy: { builtinTestServer: true } },
+            },
+            'lxc',
+          ),
+          { message: /not supported on Linux containment='lxc'/ },
         );
       } finally {
         restore();
@@ -849,7 +940,7 @@ describe('createConfigFromPolicy', () => {
       assert.deepStrictEqual(config.filesystem!.readwritePaths, ['/workspace']);
       assert.deepStrictEqual(config.filesystem!.readonlyPaths, ['/data']);
       assert.deepStrictEqual(config.filesystem!.deniedPaths, ['/secrets']);
-      // Per applyIptablesNetworkEnforcement, host filtering forces firewall mode.
+      // Per applyLinuxNetworkPolicy, host filtering forces firewall mode.
       assert.strictEqual(config.network!.enforcementMode, 'firewall');
     });
   });
