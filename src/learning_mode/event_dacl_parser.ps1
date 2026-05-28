@@ -114,7 +114,9 @@ function Invoke-EventDaclParser {
         $filePath = $filePath.Trim()
         # Strip leading "\??\" so the path is in the familiar drive-letter
         # form used elsewhere in the script.
-        $filePath = $filePath.Substring(4)
+        if ($filePath.StartsWith('\??\', [StringComparison]::Ordinal)) {
+            $filePath = $filePath.Substring(4)
+        }
 
         # Skip events targeting the parser's current working directory or
         # anything underneath it -- these are typically the test harness's
