@@ -4,18 +4,20 @@
 use std::ptr;
 
 use windows::Win32::Foundation::{
-    GetLastError, LocalFree, ERROR_ALREADY_EXISTS, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, HANDLE, HLOCAL, WAIT_FAILED,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
-use windows::Win32::Security::{FreeSid, PSID};
+use windows::Win32::Security::{FreeSid, PSID, TOKEN_QUERY};
+use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::SystemServices::SE_GROUP_ENABLED;
 use windows::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS,
     PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
     PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
@@ -57,6 +59,63 @@ fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
     }
     block.push(0);
     block
+}
+
+/// Create a default environment block for the current user without inheriting
+/// the parent process's environment variables.
+///
+/// Calls `CreateEnvironmentBlock` with `bInherit = FALSE` so that only the
+/// system/user profile variables are included (no process-level vars leak in).
+/// Returns the entries as `(key, value)` pairs.
+fn create_default_env_entries() -> Result<Vec<(String, String)>, WxcError> {
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+            .map_err(|e| WxcError::Process(format!("OpenProcessToken failed: {e}")))?;
+
+        let mut block_ptr: *mut core::ffi::c_void = ptr::null_mut();
+        // bInherit = FALSE: do not inherit the calling process's environment.
+        let result = CreateEnvironmentBlock(&mut block_ptr, Some(token), false);
+        // Close the token handle regardless of success.
+        let _ = CloseHandle(token);
+        result.map_err(|e| WxcError::Process(format!("CreateEnvironmentBlock failed: {e}")))?;
+
+        let entries = parse_environment_block(block_ptr as *const u16);
+        let _ = DestroyEnvironmentBlock(block_ptr);
+        Ok(entries)
+    }
+}
+
+/// Parse a double-null-terminated UTF-16 environment block into `(key, value)` pairs.
+fn parse_environment_block(block: *const u16) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        // SAFETY: the block is a valid double-null-terminated UTF-16 string from the OS.
+        let ch = unsafe { *block.add(offset) };
+        if ch == 0 {
+            break; // double-null terminator
+        }
+        // Find end of this entry (single null terminator).
+        let start = offset;
+        while unsafe { *block.add(offset) } != 0 {
+            offset += 1;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(block.add(start), offset - start) };
+        let entry = String::from_utf16_lossy(slice);
+        offset += 1; // skip the null terminator
+
+        // Split on the first '=' (env vars can have '=' in the value).
+        // Skip entries that start with '=' (hidden drive-letter vars like "=C:=C:\").
+        if let Some(eq_pos) = entry.find('=') {
+            if eq_pos > 0 {
+                let key = entry[..eq_pos].to_string();
+                let value = entry[eq_pos + 1..].to_string();
+                entries.push((key, value));
+            }
+        }
+    }
+    entries
 }
 
 /// Parse explicit `KEY=VALUE` strings into entry pairs, optionally injecting
@@ -546,35 +605,37 @@ impl AppContainerScriptRunner {
         };
 
         // Environment block for the sandboxed child.
-        // If explicit env vars were provided, use only those (+ proxy injection).
-        // If only proxy is active (no explicit env), build a block with just proxy vars.
-        // Otherwise, pass NULL to inherit the default environment.
-        let env_block: Option<Vec<u16>> = if !request.env.is_empty() {
+        // SECURITY: Never pass NULL (which would inherit the parent process's
+        // full environment). Always build an explicit block:
+        //   1. If explicit env vars were provided, use only those (+ proxy injection).
+        //   2. Otherwise, call CreateEnvironmentBlock(bInherit=FALSE) for a clean
+        //      default user environment and merge proxy vars if needed.
+        let env_block: Vec<u16> = if !request.env.is_empty() {
             let entries = build_explicit_entries(&request.env, self.proxy_address.as_ref());
-            Some(encode_env_block(&entries))
-        } else if let Some(addr) = self.proxy_address.as_ref() {
-            // No explicit env but proxy is active -- inject only proxy vars.
-            let proxy_url = addr.to_url();
-            let entries = vec![
-                ("HTTP_PROXY".to_string(), proxy_url.clone()),
-                ("HTTPS_PROXY".to_string(), proxy_url),
-            ];
-            Some(encode_env_block(&entries))
+            encode_env_block(&entries)
         } else {
-            None
-        };
-
-        let env_ptr = env_block
-            .as_ref()
-            .map(|b| b.as_ptr() as *const core::ffi::c_void);
-
-        let creation_flags = {
-            let mut flags = EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0;
-            if env_block.is_some() {
-                flags |= CREATE_UNICODE_ENVIRONMENT.0;
+            // Get clean default user env without inheriting process env vars.
+            let mut entries = create_default_env_entries()?;
+            if let Some(addr) = self.proxy_address.as_ref() {
+                // Strip any pre-existing proxy vars from the default block
+                // and inject our configured proxy.
+                entries.retain(|(key, _)| {
+                    !PROXY_VAR_NAMES
+                        .iter()
+                        .any(|name| key.eq_ignore_ascii_case(name))
+                });
+                let proxy_url = addr.to_url();
+                entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
+                entries.push(("HTTPS_PROXY".to_string(), proxy_url));
             }
-            PROCESS_CREATION_FLAGS(flags)
+            encode_env_block(&entries)
         };
+
+        let env_ptr = env_block.as_ptr() as *const core::ffi::c_void;
+
+        let creation_flags = PROCESS_CREATION_FLAGS(
+            EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0 | CREATE_UNICODE_ENVIRONMENT.0,
+        );
 
         // --- Create process (console inheritance) ---
         //
@@ -634,7 +695,7 @@ impl AppContainerScriptRunner {
                 None,
                 false, // bInheritHandles = false — no explicit handles to inherit
                 creation_flags,
-                env_ptr,
+                Some(env_ptr),
                 working_dir_pcwstr,
                 &si_ex.StartupInfo as *const STARTUPINFOW,
                 &mut pi,
