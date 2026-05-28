@@ -8,7 +8,7 @@
 //! exposes the five lifecycle phases — provision, start, exec, stop,
 //! deprovision — plus per-phase validation hooks.
 //!
-//! Methods take `&CodexRequest` (the same one-shot domain model used by every
+//! Methods take `&ExecutionRequest` (the same one-shot domain model used by every
 //! existing backend) plus the typed `sandbox_id` for non-provision phases and
 //! an optional backend-specific config object. Cross-cutting policy fields
 //! flow through `request.policy`; per-exec process info flows through
@@ -22,7 +22,7 @@
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::id::mint_random_token;
-use crate::models::CodexRequest;
+use crate::models::ExecutionRequest;
 use crate::mxc_error::MxcError;
 
 /// Platform pipe-handle wrapper used by `ExecHandle`. On Windows this is a
@@ -116,7 +116,7 @@ pub trait StatefulSandboxBackend {
     /// metadata. Override when the backend has native provision work.
     fn provision(
         &mut self,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<Self::ProvisionConfig>,
     ) -> Result<ProvisionResult<Self::ProvisionMetadata>, MxcError> {
         Ok(ProvisionResult {
@@ -129,7 +129,7 @@ pub trait StatefulSandboxBackend {
     fn start(
         &mut self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<Self::StartConfig>,
     ) -> Result<StartResult<Self::StartMetadata>, MxcError> {
         Ok(StartResult { metadata: None })
@@ -139,7 +139,7 @@ pub trait StatefulSandboxBackend {
     fn exec(
         &mut self,
         sandbox_id: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         config: Option<Self::ExecConfig>,
     ) -> Result<ExecHandle, MxcError>;
 
@@ -147,7 +147,7 @@ pub trait StatefulSandboxBackend {
     fn stop(
         &mut self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<Self::StopConfig>,
     ) -> Result<StopResult<Self::StopMetadata>, MxcError> {
         Ok(StopResult { metadata: None })
@@ -157,7 +157,7 @@ pub trait StatefulSandboxBackend {
     fn deprovision(
         &mut self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<Self::DeprovisionConfig>,
     ) -> Result<DeprovisionResult<Self::DeprovisionMetadata>, MxcError> {
         Ok(DeprovisionResult { metadata: None })
@@ -169,7 +169,7 @@ pub trait StatefulSandboxBackend {
     /// enforcement, id format checks beyond the prefix).
     fn validate_provision(
         &self,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<&Self::ProvisionConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
@@ -178,7 +178,7 @@ pub trait StatefulSandboxBackend {
     fn validate_start(
         &self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<&Self::StartConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
@@ -187,7 +187,7 @@ pub trait StatefulSandboxBackend {
     fn validate_exec(
         &self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<&Self::ExecConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
@@ -196,7 +196,7 @@ pub trait StatefulSandboxBackend {
     fn validate_stop(
         &self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<&Self::StopConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
@@ -205,7 +205,7 @@ pub trait StatefulSandboxBackend {
     fn validate_deprovision(
         &self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<&Self::DeprovisionConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
@@ -239,7 +239,7 @@ mod tests {
         fn exec(
             &mut self,
             _sandbox_id: &str,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             _config: Option<()>,
         ) -> Result<ExecHandle, MxcError> {
             Err(MxcError::backend_error("StubBackend::exec not implemented"))
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn default_provision_mints_id_with_prefix_and_token() {
         let mut b = StubBackend;
-        let r = b.provision(&CodexRequest::default(), None).unwrap();
+        let r = b.provision(&ExecutionRequest::default(), None).unwrap();
         // Expected shape: "stub:" followed by 8 lowercase hex chars.
         assert!(r.sandbox_id.starts_with("stub:"), "got {:?}", r.sandbox_id);
         let token = &r.sandbox_id["stub:".len()..];
@@ -272,8 +272,8 @@ mod tests {
     #[test]
     fn default_provision_produces_distinct_ids() {
         let mut b = StubBackend;
-        let a = b.provision(&CodexRequest::default(), None).unwrap();
-        let c = b.provision(&CodexRequest::default(), None).unwrap();
+        let a = b.provision(&ExecutionRequest::default(), None).unwrap();
+        let c = b.provision(&ExecutionRequest::default(), None).unwrap();
         assert_ne!(a.sandbox_id, c.sandbox_id);
     }
 
@@ -281,7 +281,7 @@ mod tests {
     fn default_start_returns_no_metadata() {
         let mut b = StubBackend;
         let r = b
-            .start("stub:abcd1234", &CodexRequest::default(), None)
+            .start("stub:abcd1234", &ExecutionRequest::default(), None)
             .unwrap();
         assert!(r.metadata.is_none());
     }
@@ -290,7 +290,7 @@ mod tests {
     fn default_stop_returns_no_metadata() {
         let mut b = StubBackend;
         let r = b
-            .stop("stub:abcd1234", &CodexRequest::default(), None)
+            .stop("stub:abcd1234", &ExecutionRequest::default(), None)
             .unwrap();
         assert!(r.metadata.is_none());
     }
@@ -299,7 +299,7 @@ mod tests {
     fn default_deprovision_returns_no_metadata() {
         let mut b = StubBackend;
         let r = b
-            .deprovision("stub:abcd1234", &CodexRequest::default(), None)
+            .deprovision("stub:abcd1234", &ExecutionRequest::default(), None)
             .unwrap();
         assert!(r.metadata.is_none());
     }
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn default_validate_hooks_all_pass() {
         let b = StubBackend;
-        let req = CodexRequest::default();
+        let req = ExecutionRequest::default();
         b.validate_provision(&req, None).unwrap();
         b.validate_start("stub:abcd1234", &req, None).unwrap();
         b.validate_exec("stub:abcd1234", &req, None).unwrap();
@@ -322,7 +322,7 @@ mod tests {
         // surface this code rather than aborting the test binary.
         let mut b = StubBackend;
         let err = b
-            .exec("stub:abcd1234", &CodexRequest::default(), None)
+            .exec("stub:abcd1234", &ExecutionRequest::default(), None)
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::BackendError);
     }

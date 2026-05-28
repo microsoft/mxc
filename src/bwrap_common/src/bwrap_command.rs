@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Builds the `bwrap` CLI argument vector from a [`CodexRequest`].
+//! Builds the `bwrap` CLI argument vector from an [`ExecutionRequest`].
 //!
 //! This module is platform-agnostic: it only produces a `Vec<String>` of
 //! arguments without spawning any processes, so it compiles and can be
 //! unit-tested on every host (Windows, macOS, Linux).
 
-use wxc_common::models::{CodexRequest, NetworkPolicy, ProxyAddress};
+use wxc_common::models::{ExecutionRequest, NetworkPolicy, ProxyAddress};
 
 /// Env var keys that the proxy block manages. Listed here so we can strip
 /// any conflicting entries the caller supplied via `request.env` (callers
@@ -35,7 +35,7 @@ const PROXY_ENV_KEYS: &[&str] = &[
 /// - strips any caller-supplied `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`
 ///   entries from `request.env`,
 /// - emits `--setenv` for those keys pointing at the proxy URL.
-pub fn build_args(request: &CodexRequest, proxy_address: Option<&ProxyAddress>) -> Vec<String> {
+pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddress>) -> Vec<String> {
     // -- Namespace isolation (all unshared by default) ---------------------
     let mut args = vec![
         "--unshare-user",
@@ -146,10 +146,10 @@ pub fn build_args(request: &CodexRequest, proxy_address: Option<&ProxyAddress>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{CodexRequest, NetworkPolicy, ProxyAddress};
+    use wxc_common::models::{ExecutionRequest, NetworkPolicy, ProxyAddress};
 
-    fn base_request() -> CodexRequest {
-        CodexRequest {
+    fn base_request() -> ExecutionRequest {
+        ExecutionRequest {
             script_code: "echo hello".into(),
             working_directory: "/home/user".into(),
             ..Default::default()

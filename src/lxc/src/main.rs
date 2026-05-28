@@ -8,7 +8,7 @@ use std::time::Instant;
 use clap::Parser;
 use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{CodexRequest, ContainmentBackend, ScriptResponse};
+use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
 #[cfg(target_os = "linux")]
@@ -73,7 +73,7 @@ struct Cli {
     force: bool,
 }
 
-fn log_request(request: &CodexRequest, logger: &mut Logger) {
+fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
     let _ = writeln!(logger, "Script code length: {}", request.script_code.len());
     let _ = writeln!(logger, "Working directory: {}", request.working_directory);
     let _ = writeln!(logger, "Script timeout: {}", request.script_timeout);

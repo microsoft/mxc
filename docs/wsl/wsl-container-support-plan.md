@@ -128,7 +128,7 @@ Shipped in earlier PRs. The SDK supports `SandboxingMethod` types and
 Shipped in PR #44. The config parser reads `"containment": "wslc"` and the
 `"wslc"` section with image, cpuCount, memoryMb, gpu, storagePath, and
 portMappings. `ContainerConfig` struct and `container_config` field on
-`CodexRequest` are in place.
+`ExecutionRequest` are in place.
 
 **Example config (current format):**
 ```json

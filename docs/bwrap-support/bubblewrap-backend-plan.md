@@ -21,7 +21,7 @@ Key advantages over LXC for MXC:
 
 MXC's `ScriptRunner` trait requires only:
 ```rust
-fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse;
+fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse;
 ```
 Plus optional `validate_runner()`. This is a perfect fit for bwrap, which is fundamentally
 "run a command in a namespace sandbox" — a single `std::process::Command` invocation.
@@ -70,7 +70,7 @@ Bubblewrap,
 ```
 
 No `BubblewrapConfig` struct needed for now — the runner uses only the shared
-`ContainerPolicy` fields on `CodexRequest` (filesystem paths, network policy, env, etc.).
+`ContainerPolicy` fields on `ExecutionRequest` (filesystem paths, network policy, env, etc.).
 A backend-specific config can be added later under `ExperimentalConfig` if needed.
 
 ### 3. Config Parser Changes
@@ -117,20 +117,20 @@ Add `bwrap_common` to workspace `members` in `src/Cargo.toml`.
 
 ### 5. BubblewrapScriptRunner Implementation
 
-Core design — translate `CodexRequest` into a `bwrap` command line:
+Core design — translate `ExecutionRequest` into a `bwrap` command line:
 
 ```rust
 pub struct BubblewrapScriptRunner;
 
 impl ScriptRunner for BubblewrapScriptRunner {
-    fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // Check bwrap is on PATH
         // Check user namespaces are enabled (cat /proc/sys/kernel/unprivileged_userns_clone)
         // Validate filesystem paths exist
         // Reject allowedHosts/blockedHosts (not supported by bwrap)
     }
 
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         let mut cmd = std::process::Command::new("bwrap");
 
         // Namespace isolation (all unshared by default)
@@ -336,7 +336,7 @@ policy gap is a design decision, not an implementation challenge.
 - `src/Cargo.toml` — add `bwrap_common` to workspace members + dependencies
 - `src/lxc/Cargo.toml` — add `bwrap_common` dependency
 - `src/lxc/src/main.rs` — add dispatch arm for `ContainmentBackend::Bubblewrap`
-- `src/wxc_common/src/models.rs` — add `Bubblewrap` variant, `BubblewrapConfig` struct, wire into `ExperimentalConfig` and `CodexRequest`
+- `src/wxc_common/src/models.rs` — add `Bubblewrap` variant, `BubblewrapConfig` struct, wire into `ExperimentalConfig` and `ExecutionRequest`
 - `src/wxc_common/src/config_parser.rs` — add `RawBubblewrap`, parsing, containment match arm
 
 ### Schema (modify)

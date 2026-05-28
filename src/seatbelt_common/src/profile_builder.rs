@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Pure builder that converts a [`CodexRequest`] into a TinyScheme sandbox
+//! Pure builder that converts an [`ExecutionRequest`] into a TinyScheme sandbox
 //! profile string suitable for `/usr/bin/sandbox-exec -p <profile>`.
 //!
 //! This module is platform-agnostic — it is just string generation — so it
@@ -27,7 +27,7 @@
 
 use std::fmt::Write as _;
 
-use wxc_common::models::{ClipboardPolicy, CodexRequest, NetworkPolicy};
+use wxc_common::models::{ClipboardPolicy, ExecutionRequest, NetworkPolicy};
 
 /// Build a complete sandbox profile string from the given request.
 ///
@@ -35,7 +35,7 @@ use wxc_common::models::{ClipboardPolicy, CodexRequest, NetworkPolicy};
 /// string is returned verbatim and policy fields are ignored. This is the
 /// escape hatch for advanced/testing scenarios that need to hand-author a
 /// profile.
-pub fn build_profile(request: &CodexRequest) -> Result<String, String> {
+pub fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
     if let Some(override_profile) = request
         .experimental
         .seatbelt
@@ -144,7 +144,7 @@ const TTY_ALLOW: &str = "\
 (allow file-read* (subpath \"/dev/fd\"))
 ";
 
-fn write_filesystem_allow(out: &mut String, request: &CodexRequest) -> Result<(), String> {
+fn write_filesystem_allow(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
     let policy = &request.policy;
 
     if !policy.readonly_paths.is_empty() {
@@ -170,7 +170,7 @@ fn write_filesystem_allow(out: &mut String, request: &CodexRequest) -> Result<()
     Ok(())
 }
 
-fn write_filesystem_deny(out: &mut String, request: &CodexRequest) -> Result<(), String> {
+fn write_filesystem_deny(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
     let policy = &request.policy;
 
     if !policy.denied_paths.is_empty() {
@@ -186,7 +186,7 @@ fn write_filesystem_deny(out: &mut String, request: &CodexRequest) -> Result<(),
     Ok(())
 }
 
-fn write_network_rules(out: &mut String, request: &CodexRequest) {
+fn write_network_rules(out: &mut String, request: &ExecutionRequest) {
     let policy = &request.policy;
     let allow_outbound = matches!(policy.default_network_policy, NetworkPolicy::Allow);
     let has_allowed_hosts = !policy.allowed_hosts.is_empty();
@@ -236,7 +236,7 @@ fn write_local_network_rules(out: &mut String, allow_local_network: bool) {
     out.push_str("(allow network-inbound (local ip))\n");
 }
 
-fn write_ui_rules(out: &mut String, request: &CodexRequest) {
+fn write_ui_rules(out: &mut String, request: &ExecutionRequest) {
     let ui = &request.policy.ui;
     let gui_access = request
         .experimental
@@ -320,7 +320,7 @@ fn write_ui_rules(out: &mut String, request: &CodexRequest) {
 /// Emit rules so the inner process can call `posix_openpt()` and allocate
 /// its own pty. Skipped when `gui_access` (with UI enabled) already emits
 /// a strict superset.
-fn write_nested_pty_rules(out: &mut String, request: &CodexRequest) {
+fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
     let sb = request.experimental.seatbelt.as_ref();
     let enabled = sb.is_none_or(|c| c.nested_pty);
     let gui_block_emitted = sb.is_some_and(|c| c.gui_access) && !request.policy.ui.disable;
@@ -359,7 +359,7 @@ fn write_nested_pty_rules(out: &mut String, request: &CodexRequest) {
 /// stores under `/Library/Keychains` and `/System/Library/Keychains`
 /// are already covered by the baseline `/Library` and `/System`
 /// read-only allows, so we don't re-add them here.
-fn write_keychain_rules(out: &mut String, request: &CodexRequest) -> Result<(), String> {
+fn write_keychain_rules(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
     let enabled = request
         .experimental
         .seatbelt
@@ -413,7 +413,7 @@ fn write_keychain_rules(out: &mut String, request: &CodexRequest) -> Result<(), 
 
 /// Emit caller-provided `extraMachLookups` rules: additional Mach service
 /// global-names the inner process may resolve. No-op when the list is empty.
-fn write_extra_seatbelt_rules(out: &mut String, request: &CodexRequest) {
+fn write_extra_seatbelt_rules(out: &mut String, request: &ExecutionRequest) {
     let Some(sb) = request.experimental.seatbelt.as_ref() else {
         return;
     };
@@ -473,8 +473,8 @@ mod tests {
     use super::*;
     use wxc_common::models::{SeatbeltConfig, UiPolicy};
 
-    fn req() -> CodexRequest {
-        CodexRequest {
+    fn req() -> ExecutionRequest {
+        ExecutionRequest {
             script_code: "echo hi".to_string(),
             ..Default::default()
         }

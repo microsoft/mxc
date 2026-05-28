@@ -15,7 +15,7 @@ use std::ptr;
 use std::sync::{Arc, Mutex};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, NetworkPolicy, ScriptResponse, WslcConfig};
+use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse, WslcConfig};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
@@ -318,7 +318,7 @@ fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
 }
 
 impl ScriptRunner for WSLContainerRunner {
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         unsafe { self.run_internal(request, logger) }
     }
 }
@@ -377,7 +377,7 @@ impl WSLContainerRunner {
     unsafe fn create_session(
         &self,
         sdk: &WslcSdk,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         logger: &mut Logger,
     ) -> Result<WslcSessionGuard, ScriptResponse> {
         let session_name: Vec<u16> = to_wide(&request.container_id);
@@ -731,7 +731,7 @@ impl WSLContainerRunner {
         process_guard: &WslcProcessGuard,
         container_guard: &WslcContainerGuard,
         io_ctx: &IoContext,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         logger: &mut Logger,
     ) -> Result<(i32, bool), ScriptResponse> {
         let mut exit_event: HANDLE = ptr::null_mut();
@@ -850,7 +850,11 @@ impl WSLContainerRunner {
     /// (`WslcSessionGuard`, `WslcContainerGuard`, `WslcProcessGuard`,
     /// `IoCtxRawGuard`) ensure handles and reference counts are released
     /// on every exit path.
-    unsafe fn run_internal(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    unsafe fn run_internal(
+        &self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> ScriptResponse {
         let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
 
         // -- Init: COM + SDK + preflight --

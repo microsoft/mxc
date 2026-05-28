@@ -72,7 +72,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::logger::Logger;
-use crate::models::{CodexRequest, NetworkPolicy, ScriptResponse};
+use crate::models::{ExecutionRequest, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 
 use hyperlight_unikraft::pyhl;
@@ -276,7 +276,7 @@ impl HyperlightScriptRunner {
 
     /// Reject only policies that the hyperlight backend genuinely cannot honor.
     /// Filesystem mounts and network policies ARE supported.
-    fn validate_policies(request: &CodexRequest) -> Result<(), PyhlError> {
+    fn validate_policies(request: &ExecutionRequest) -> Result<(), PyhlError> {
         if request.policy.network_proxy.is_enabled() {
             return Err(PyhlError::Preflight(ERR_PROXY_POLICY.to_string()));
         }
@@ -320,7 +320,7 @@ impl HyperlightScriptRunner {
     /// - `default_network_policy == Block`, no host lists → `None` (networking disabled)
     /// - `default_network_policy == Allow`, no host lists → `AllowAll`
     fn network_policy_from_request(
-        request: &CodexRequest,
+        request: &ExecutionRequest,
     ) -> Result<Option<hyperlight_unikraft::NetworkPolicy>, PyhlError> {
         if !request.policy.allowed_hosts.is_empty() {
             let allow_list = AllowList::from_hosts(&request.policy.allowed_hosts)
@@ -349,7 +349,7 @@ impl HyperlightScriptRunner {
     ///
     /// `readonlyPaths` are mounted with `Preopen::read_only()`, blocking
     /// all write operations at the host-function level.
-    fn preopens_from_policy(request: &CodexRequest) -> Result<Vec<Preopen>, PyhlError> {
+    fn preopens_from_policy(request: &ExecutionRequest) -> Result<Vec<Preopen>, PyhlError> {
         let mut preopens = Vec::new();
         let mut seen_guest_paths = std::collections::HashSet::new();
 
@@ -490,11 +490,11 @@ impl HyperlightScriptRunner {
 }
 
 impl ScriptRunner for HyperlightScriptRunner {
-    fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         Self::validate_policies(request).map_err(|e| e.to_response())
     }
 
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         let home = match Self::resolve_home() {
             Ok(h) => h,
             Err(e) => {
@@ -721,7 +721,7 @@ mod tests {
         // the policy→Preopen mapping.
         let tmp = std::env::temp_dir().join(format!("hl-mount-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readwrite_paths: vec![tmp.to_string_lossy().to_string()],
                 ..Default::default()
@@ -743,7 +743,7 @@ mod tests {
         let b = std::env::temp_dir().join(format!("hl-col-b-{}/same", std::process::id()));
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readwrite_paths: vec![
                     a.to_string_lossy().to_string(),
@@ -765,7 +765,7 @@ mod tests {
     #[test]
     fn policy_rejects_denied_overlapping_allow() {
         let mut r = runner();
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             script_code: "print('x')".to_string(),
             policy: ContainerPolicy {
                 readwrite_paths: vec!["/tmp/x".to_string()],
@@ -782,7 +782,7 @@ mod tests {
 
     #[test]
     fn network_policy_allow_all_when_default_allow() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 default_network_policy: NetworkPolicy::Allow,
                 ..Default::default()
@@ -798,7 +798,7 @@ mod tests {
 
     #[test]
     fn network_policy_allowlist_from_allowed_hosts() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 allowed_hosts: vec!["127.0.0.1".to_string()],
                 ..Default::default()
@@ -814,7 +814,7 @@ mod tests {
 
     #[test]
     fn network_policy_none_when_blocked() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 default_network_policy: NetworkPolicy::Block,
                 ..Default::default()
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn network_policy_blocklist_from_blocked_hosts() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 blocked_hosts: vec!["127.0.0.1".to_string()],
                 ..Default::default()
@@ -844,7 +844,7 @@ mod tests {
     #[test]
     fn policy_rejects_allowed_and_blocked_hosts() {
         let mut r = runner();
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             script_code: "print('x')".to_string(),
             policy: ContainerPolicy {
                 allowed_hosts: vec!["a.com".to_string()],
@@ -862,7 +862,7 @@ mod tests {
     #[test]
     fn policy_rejects_working_directory() {
         let mut r = runner();
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             script_code: "print('x')".to_string(),
             working_directory: "C:/tmp".to_string(),
             ..Default::default()

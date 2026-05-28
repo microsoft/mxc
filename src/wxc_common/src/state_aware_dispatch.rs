@@ -245,7 +245,7 @@ impl<M: Serialize> HasMetadata for DeprovisionResult<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::CodexRequest;
+    use crate::models::ExecutionRequest;
     use crate::mxc_error::MxcErrorCode;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
@@ -305,7 +305,7 @@ mod tests {
 
         fn provision(
             &mut self,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             _config: Option<()>,
         ) -> Result<ProvisionResult<()>, MxcError> {
             self.provision_calls.set(self.provision_calls.get() + 1);
@@ -320,7 +320,7 @@ mod tests {
         fn start(
             &mut self,
             _sandbox_id: &str,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             _config: Option<()>,
         ) -> Result<StartResult<()>, MxcError> {
             self.start_calls.set(self.start_calls.get() + 1);
@@ -329,7 +329,7 @@ mod tests {
         fn exec(
             &mut self,
             _sandbox_id: &str,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             _config: Option<()>,
         ) -> Result<ExecHandle, MxcError> {
             self.exec_calls.set(self.exec_calls.get() + 1);
@@ -338,7 +338,7 @@ mod tests {
         fn stop(
             &mut self,
             _sandbox_id: &str,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             _config: Option<()>,
         ) -> Result<StopResult<()>, MxcError> {
             self.stop_calls.set(self.stop_calls.get() + 1);
@@ -347,7 +347,7 @@ mod tests {
         fn deprovision(
             &mut self,
             _sandbox_id: &str,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             _config: Option<()>,
         ) -> Result<DeprovisionResult<()>, MxcError> {
             self.deprovision_calls.set(self.deprovision_calls.get() + 1);
@@ -356,7 +356,7 @@ mod tests {
 
         fn validate_provision(
             &self,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             _config: Option<&()>,
         ) -> Result<(), MxcError> {
             self.validate_provision_calls
@@ -369,7 +369,7 @@ mod tests {
         fn validate_start(
             &self,
             _sandbox_id: &str,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             _config: Option<&()>,
         ) -> Result<(), MxcError> {
             self.validate_start_calls
@@ -379,7 +379,7 @@ mod tests {
         fn validate_exec(
             &self,
             _sandbox_id: &str,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             _config: Option<&()>,
         ) -> Result<(), MxcError> {
             self.validate_exec_calls
@@ -389,7 +389,7 @@ mod tests {
         fn validate_stop(
             &self,
             _sandbox_id: &str,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             _config: Option<&()>,
         ) -> Result<(), MxcError> {
             self.validate_stop_calls
@@ -399,7 +399,7 @@ mod tests {
         fn validate_deprovision(
             &self,
             _sandbox_id: &str,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             _config: Option<&()>,
         ) -> Result<(), MxcError> {
             self.validate_deprovision_calls
@@ -445,7 +445,7 @@ mod tests {
         fn exec(
             &mut self,
             _sandbox_id: &str,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             _config: Option<()>,
         ) -> Result<ExecHandle, MxcError> {
             Err(MxcError::backend_error("typed stub exec not wired"))
@@ -454,7 +454,7 @@ mod tests {
         fn start(
             &mut self,
             _sandbox_id: &str,
-            _request: &CodexRequest,
+            _request: &ExecutionRequest,
             config: Option<TypedStartConfig>,
         ) -> Result<StartResult<()>, MxcError> {
             self.captured_start_config.set(config);
@@ -468,7 +468,7 @@ mod tests {
         exp: Option<Value>,
     ) -> ParsedStateAwareRequest {
         ParsedStateAwareRequest {
-            request: CodexRequest::default(),
+            request: ExecutionRequest::default(),
             phase,
             containment: Some(ContainmentBackend::IsolationSession),
             sandbox_id: sandbox_id.map(String::from),
@@ -643,7 +643,7 @@ mod tests {
         // No state-aware impls registered yet — every recognized backend is
         // unsupported. Smoke-test scenario #2 from decision 6.
         let p = ParsedStateAwareRequest {
-            request: CodexRequest::default(),
+            request: ExecutionRequest::default(),
             phase: Phase::Provision,
             containment: Some(ContainmentBackend::Wslc),
             sandbox_id: None,
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn run_state_aware_provision_without_containment_is_malformed() {
         let p = ParsedStateAwareRequest {
-            request: CodexRequest::default(),
+            request: ExecutionRequest::default(),
             phase: Phase::Provision,
             containment: None,
             sandbox_id: None,
@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn resolve_backend_for_iso_prefix_returns_isolation_session() {
         let p = ParsedStateAwareRequest {
-            request: CodexRequest::default(),
+            request: ExecutionRequest::default(),
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("iso:wxc-abcd1234".into()),
@@ -684,7 +684,7 @@ mod tests {
     #[test]
     fn resolve_backend_for_unknown_prefix_returns_unsupported_containment() {
         let p = ParsedStateAwareRequest {
-            request: CodexRequest::default(),
+            request: ExecutionRequest::default(),
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("unknownxyz:abc".into()),
@@ -697,7 +697,7 @@ mod tests {
     #[test]
     fn resolve_backend_for_malformed_id_surfaces_malformed_id() {
         let p = ParsedStateAwareRequest {
-            request: CodexRequest::default(),
+            request: ExecutionRequest::default(),
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("no-colon".into()),
