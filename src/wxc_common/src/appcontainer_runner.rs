@@ -5,22 +5,23 @@ use std::io::IsTerminal;
 use std::ptr;
 
 use windows::Win32::Foundation::{
-    GetLastError, LocalFree, SetHandleInformation, ERROR_ALREADY_EXISTS, HANDLE,
+    CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_ALREADY_EXISTS, HANDLE,
     HANDLE_FLAG_INHERIT, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
-use windows::Win32::Security::{FreeSid, PSID};
+use windows::Win32::Security::{FreeSid, PSID, TOKEN_QUERY};
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
+use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::SystemServices::SE_GROUP_ENABLED;
 use windows::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS,
     PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
@@ -63,6 +64,70 @@ fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
     }
     block.push(0);
     block
+}
+
+/// Create a default environment block for the current user without inheriting
+/// the parent process's environment variables.
+///
+/// Calls `CreateEnvironmentBlock` with `bInherit = FALSE` so that only the
+/// system/user profile variables are included (no process-level vars leak in).
+/// Returns the entries as `(key, value)` pairs.
+fn create_default_env_entries() -> Result<Vec<(String, String)>, WxcError> {
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+            .map_err(|e| WxcError::Process(format!("OpenProcessToken failed: {e}")))?;
+
+        let mut block_ptr: *mut core::ffi::c_void = ptr::null_mut();
+        // bInherit = FALSE: do not inherit the calling process's environment.
+        let result = CreateEnvironmentBlock(&mut block_ptr, Some(token), false);
+        // Close the token handle regardless of success.
+        let _ = CloseHandle(token);
+        result.map_err(|e| WxcError::Process(format!("CreateEnvironmentBlock failed: {e}")))?;
+
+        let entries = parse_environment_block(block_ptr as *const u16);
+        let _ = DestroyEnvironmentBlock(block_ptr);
+        Ok(entries)
+    }
+}
+
+/// Parse a double-null-terminated UTF-16 environment block into `(key, value)` pairs.
+fn parse_environment_block(block: *const u16) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        // SAFETY: the block is a valid double-null-terminated UTF-16 string from the OS.
+        let ch = unsafe { *block.add(offset) };
+        if ch == 0 {
+            break; // double-null terminator
+        }
+        // Find end of this entry (single null terminator).
+        let start = offset;
+        while unsafe { *block.add(offset) } != 0 {
+            offset += 1;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(block.add(start), offset - start) };
+        let entry = String::from_utf16_lossy(slice);
+        offset += 1; // skip the null terminator
+
+        // Split on the first '=' (env vars can have '=' in the value).
+        // Entries that start with '=' are hidden per-drive current-directory vars
+        // (e.g. "=C:=C:\Users\foo"). For those, the key includes the leading '='
+        // and we split on the second '='.
+        if let Some(stripped) = entry.strip_prefix('=') {
+            // Key is everything up to and including the drive colon, e.g. "=C:"
+            if let Some(eq_pos) = stripped.find('=') {
+                let key = format!("={}", &stripped[..eq_pos]);
+                let value = stripped[eq_pos + 1..].to_string();
+                entries.push((key, value));
+            }
+        } else if let Some(eq_pos) = entry.find('=') {
+            let key = entry[..eq_pos].to_string();
+            let value = entry[eq_pos + 1..].to_string();
+            entries.push((key, value));
+        }
+    }
+    entries
 }
 
 /// Parse explicit `KEY=VALUE` strings into entry pairs, optionally injecting
@@ -643,35 +708,37 @@ impl AppContainerScriptRunner {
         };
 
         // Environment block for the sandboxed child.
-        // If explicit env vars were provided, use only those (+ proxy injection).
-        // If only proxy is active (no explicit env), build a block with just proxy vars.
-        // Otherwise, pass NULL to inherit the default environment.
-        let env_block: Option<Vec<u16>> = if !request.env.is_empty() {
+        // SECURITY: Never pass NULL (which would inherit the parent process's
+        // full environment). Always build an explicit block:
+        //   1. If explicit env vars were provided, use only those (+ proxy injection).
+        //   2. Otherwise, call CreateEnvironmentBlock(bInherit=FALSE) for a clean
+        //      default user environment and merge proxy vars if needed.
+        let env_block: Vec<u16> = if !request.env.is_empty() {
             let entries = build_explicit_entries(&request.env, self.proxy_address.as_ref());
-            Some(encode_env_block(&entries))
-        } else if let Some(addr) = self.proxy_address.as_ref() {
-            // No explicit env but proxy is active -- inject only proxy vars.
-            let proxy_url = addr.to_url();
-            let entries = vec![
-                ("HTTP_PROXY".to_string(), proxy_url.clone()),
-                ("HTTPS_PROXY".to_string(), proxy_url),
-            ];
-            Some(encode_env_block(&entries))
+            encode_env_block(&entries)
         } else {
-            None
-        };
-
-        let env_ptr = env_block
-            .as_ref()
-            .map(|b| b.as_ptr() as *const core::ffi::c_void);
-
-        let creation_flags = {
-            let mut flags = EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0;
-            if env_block.is_some() {
-                flags |= CREATE_UNICODE_ENVIRONMENT.0;
+            // Get clean default user env without inheriting process env vars.
+            let mut entries = create_default_env_entries()?;
+            if let Some(addr) = self.proxy_address.as_ref() {
+                // Strip any pre-existing proxy vars from the default block
+                // and inject our configured proxy.
+                entries.retain(|(key, _)| {
+                    !PROXY_VAR_NAMES
+                        .iter()
+                        .any(|name| key.eq_ignore_ascii_case(name))
+                });
+                let proxy_url = addr.to_url();
+                entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
+                entries.push(("HTTPS_PROXY".to_string(), proxy_url));
             }
-            PROCESS_CREATION_FLAGS(flags)
+            encode_env_block(&entries)
         };
+
+        let env_ptr = env_block.as_ptr() as *const core::ffi::c_void;
+
+        let creation_flags = PROCESS_CREATION_FLAGS(
+            EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0 | CREATE_UNICODE_ENVIRONMENT.0,
+        );
 
         // --- Create process ---
         //
@@ -708,7 +775,7 @@ impl AppContainerScriptRunner {
                 None,
                 pipe_mode, // bInheritHandles: true only in pipe mode (restricted by HANDLE_LIST)
                 creation_flags,
-                env_ptr,
+                Some(env_ptr),
                 working_dir_pcwstr,
                 &si_ex.StartupInfo as *const STARTUPINFOW,
                 &mut pi,
@@ -1042,5 +1109,125 @@ mod tests {
         let a = super::derive_sid_string("MxcDeriveSidTestStable").expect("first derivation");
         let b = super::derive_sid_string("MxcDeriveSidTestStable").expect("second derivation");
         assert_eq!(a, b);
+    }
+
+    /// Helper: build a double-null-terminated UTF-16 env block from strings.
+    fn make_utf16_block(entries: &[&str]) -> Vec<u16> {
+        let mut block = Vec::new();
+        for entry in entries {
+            for ch in entry.encode_utf16() {
+                block.push(ch);
+            }
+            block.push(0);
+        }
+        block.push(0);
+        block
+    }
+
+    #[test]
+    fn parse_environment_block_basic_entries() {
+        let block = make_utf16_block(&["FOO=bar", "PATH=C:\\Windows"]);
+        let entries = super::parse_environment_block(block.as_ptr());
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], ("FOO".to_string(), "bar".to_string()));
+        assert_eq!(entries[1], ("PATH".to_string(), "C:\\Windows".to_string()));
+    }
+
+    #[test]
+    fn parse_environment_block_preserves_drive_letter_vars() {
+        let block = make_utf16_block(&[
+            "=C:=C:\\Users\\test",
+            "=D:=D:\\Data",
+            "HOME=C:\\Users\\test",
+        ]);
+        let entries = super::parse_environment_block(block.as_ptr());
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries[0],
+            ("=C:".to_string(), "C:\\Users\\test".to_string())
+        );
+        assert_eq!(entries[1], ("=D:".to_string(), "D:\\Data".to_string()));
+        assert_eq!(
+            entries[2],
+            ("HOME".to_string(), "C:\\Users\\test".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_environment_block_value_with_equals() {
+        let block = make_utf16_block(&["CONN=host=db;port=5432"]);
+        let entries = super::parse_environment_block(block.as_ptr());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0],
+            ("CONN".to_string(), "host=db;port=5432".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_environment_block_empty_block() {
+        let block: Vec<u16> = vec![0]; // just the double-null (no entries)
+        let entries = super::parse_environment_block(block.as_ptr());
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn encode_env_block_sorts_case_insensitively() {
+        let entries = vec![
+            ("Zebra".to_string(), "1".to_string()),
+            ("alpha".to_string(), "2".to_string()),
+        ];
+        let block = super::encode_env_block(&entries);
+        // Decode: "alpha=2\0Zebra=1\0\0"
+        let parsed = super::parse_environment_block(block.as_ptr());
+        assert_eq!(parsed[0].0, "alpha");
+        assert_eq!(parsed[1].0, "Zebra");
+    }
+
+    #[test]
+    fn encode_decode_round_trip_with_drive_vars() {
+        let entries = vec![
+            ("=C:".to_string(), "C:\\Users\\test".to_string()),
+            ("PATH".to_string(), "C:\\Windows".to_string()),
+        ];
+        let block = super::encode_env_block(&entries);
+        let parsed = super::parse_environment_block(block.as_ptr());
+        assert_eq!(parsed, entries);
+    }
+
+    #[test]
+    fn build_explicit_entries_no_proxy() {
+        let env = vec!["FOO=bar".to_string(), "BAZ=qux".to_string()];
+        let entries = super::build_explicit_entries(&env, None);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], ("FOO".to_string(), "bar".to_string()));
+        assert_eq!(entries[1], ("BAZ".to_string(), "qux".to_string()));
+    }
+
+    #[test]
+    fn build_explicit_entries_strips_and_injects_proxy() {
+        let env = vec![
+            "FOO=bar".to_string(),
+            "HTTP_PROXY=old".to_string(),
+            "https_proxy=old2".to_string(),
+            "NO_PROXY=localhost".to_string(),
+        ];
+        let proxy = crate::models::ProxyAddress::new("127.0.0.1".to_string(), 8080);
+        let entries = super::build_explicit_entries(&env, Some(&proxy));
+
+        // Original proxy vars should be stripped.
+        assert!(!entries
+            .iter()
+            .any(|(k, _)| k == "http_proxy" || k == "https_proxy" || k == "NO_PROXY"));
+        // FOO should remain.
+        assert!(entries.iter().any(|(k, v)| k == "FOO" && v == "bar"));
+        // Injected proxy vars should be present.
+        let proxy_url = proxy.to_url();
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "HTTP_PROXY" && v == &proxy_url));
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "HTTPS_PROXY" && v == &proxy_url));
     }
 }
