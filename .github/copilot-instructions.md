@@ -39,7 +39,7 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 ./build-mac.sh --rust-only # Only Rust binaries, skip SDK
 ```
 
-Requires Xcode Command Line Tools and Rust. Produces an unsigned `mxc-exec-mac` binary (codesigning + notarization happen at release time). Schema `0.6.0-dev` or later required for macOS/Seatbelt backend.
+Requires Xcode Command Line Tools and Rust. Produces an unsigned `mxc-exec-mac` binary (codesigning + notarization happen at release time). Schema `0.7.0-dev` or later required for macOS/Seatbelt backend.
 
 ### Individual components
 
@@ -113,7 +113,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 | Hyperlight | `wxc-exec.exe` | Windows | `hyperlight_runner.rs` — Hyperlight + Unikraft micro-VM backend |
 | IsolationSession | `wxc-exec.exe` | Windows | `isolation_session_runner.rs` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Supports both one-shot (single-invocation lifecycle, via `ScriptRunner`) and state-aware (multi-invocation provision/start/exec/stop/deprovision, via `StatefulSandboxBackend`) modes. Honors `readwritePaths` and `readonlyPaths` at provision via `ShareFolderBatchAsync` (rejects `deniedPaths` since the API has no Deny ACE primitive); filesystem policy is immutable post-provision and rejected at later phases. State-aware additionally accepts an optional `user` bundle (`upn`, `wamToken`) at provision and start to provision Entra cloud-agent sandboxes; one-shot rejects the bundle, and hosts that don't support Entra agents surface `backend_unavailable`. Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
 | LXC | `lxc-exec` | Linux | `lxc/src/main.rs` + `lxc_common/` |
-| Seatbelt | `mxc-exec-mac` | macOS | `mxc_darwin/src/main.rs` + `seatbelt_common/` — uses macOS App Sandbox (Seatbelt) profiles for process containment. Requires schema `0.6.0-dev`+. See `docs/macos-support/seatbelt-backend.md`. |
+| Seatbelt | `mxc-exec-mac` | macOS | `mxc_darwin/src/main.rs` + `seatbelt_common/` — uses macOS App Sandbox (Seatbelt) profiles for process containment. Requires schema `0.7.0-dev`+. See `docs/macos-support/seatbelt-backend.md`. |
 | Bubblewrap | `lxc-exec` | Linux | `bwrap_common/src/bwrap_runner.rs` — unprivileged sandboxing via Linux user namespaces and `bwrap`. Experimental — requires `--experimental`. Uses shared filesystem/network policy fields; per-host network filtering via `NetworkIptablesManager` from `lxc_common`. See `docs/bwrap-support/bubblewrap-backend.md`. |
 
 ### Config flow
@@ -131,7 +131,7 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 ### Schema system
 
 - **Stable schemas**: `schemas/stable/mxc-config.schema.0.4.0-alpha.json` and `schemas/stable/mxc-config.schema.0.5.0-alpha.json` — immutable after release
-- **Dev schema**: `schemas/dev/mxc-config.schema.0.6.0-dev.json`
+- **Dev schema**: `schemas/dev/mxc-config.schema.0.7.0-dev.json`
 - Current schema version: `0.5.0-alpha`
 - Config files can reference schemas via `"$schema"` for editor validation
 
