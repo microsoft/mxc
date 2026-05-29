@@ -103,13 +103,13 @@ struct RawSandbox {
     daemon_pipe_name: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
+#[derive(Deserialize)]
 struct RawPortMapping {
     #[serde(rename = "windowsPort")]
-    windows_port: Option<u16>,
+    windows_port: u16,
     #[serde(rename = "containerPort")]
-    container_port: Option<u16>,
+    container_port: u16,
+    #[serde(default)]
     protocol: Option<String>,
 }
 
@@ -1128,7 +1128,7 @@ fn convert_raw_config_inner(
             }
             config
         });
-        let wslc = raw_exp.wslc.map(|cc| {
+        let wslc = if let Some(cc) = raw_exp.wslc {
             let mut config = WslcConfig::default();
             if let Some(os) = cc.target_os {
                 config.target_os = os;
@@ -1144,17 +1144,33 @@ fn convert_raw_config_inner(
             }
             config.storage_path = cc.storage_path;
             if let Some(mappings) = cc.port_mappings {
-                config.port_mappings = mappings
-                    .into_iter()
-                    .map(|m| PortMapping {
-                        windows_port: m.windows_port.unwrap_or(0),
-                        container_port: m.container_port.unwrap_or(0),
-                        protocol: m.protocol.unwrap_or_else(|| "tcp".to_string()),
-                    })
-                    .collect();
+                let mut converted = Vec::with_capacity(mappings.len());
+                for m in mappings {
+                    if m.windows_port == 0 || m.container_port == 0 {
+                        return Err(WxcError::ConfigParse(format!(
+                            "experimental.wslc.portMappings: port 0 is not a valid forward (windowsPort={}, containerPort={})",
+                            m.windows_port, m.container_port
+                        )));
+                    }
+                    let protocol = m.protocol.unwrap_or_else(|| "tcp".to_string());
+                    if protocol != "tcp" && protocol != "udp" {
+                        return Err(WxcError::ConfigParse(format!(
+                            "experimental.wslc.portMappings: protocol must be 'tcp' or 'udp', got '{}'",
+                            protocol
+                        )));
+                    }
+                    converted.push(PortMapping {
+                        windows_port: m.windows_port,
+                        container_port: m.container_port,
+                        protocol,
+                    });
+                }
+                config.port_mappings = converted;
             }
-            config
-        });
+            Some(config)
+        } else {
+            None
+        };
         let isolation_session = raw_exp.isolation_session.map(|as_cfg| {
             let mut config = IsolationSessionConfig::default();
             if let Some(id) = as_cfg.configuration_id {
@@ -2911,6 +2927,59 @@ mod tests {
             wslc.image_tar_path.as_deref(),
             Some("C:\\images\\alpine.tar")
         );
+    }
+
+    #[test]
+    fn wslc_port_mappings_parsed() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"}, {"windowsPort": 5353, "containerPort": 53, "protocol": "udp"}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let wslc = req.experimental.wslc.unwrap();
+        assert_eq!(wslc.port_mappings.len(), 2);
+        assert_eq!(wslc.port_mappings[0].windows_port, 8080);
+        assert_eq!(wslc.port_mappings[0].container_port, 80);
+        assert_eq!(wslc.port_mappings[0].protocol, "tcp");
+        assert_eq!(wslc.port_mappings[1].protocol, "udp");
+    }
+
+    #[test]
+    fn wslc_port_mappings_default_protocol_is_tcp() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let wslc = req.experimental.wslc.unwrap();
+        assert_eq!(wslc.port_mappings[0].protocol, "tcp");
+    }
+
+    #[test]
+    fn wslc_port_mappings_missing_windows_port_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"containerPort": 80}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        assert!(load_request(&encoded, &mut logger, true).is_err());
+    }
+
+    #[test]
+    fn wslc_port_mappings_zero_port_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 0, "containerPort": 80}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        assert!(load_request(&encoded, &mut logger, true).is_err());
+    }
+
+    #[test]
+    fn wslc_port_mappings_invalid_protocol_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "sctp"}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        assert!(load_request(&encoded, &mut logger, true).is_err());
     }
 
     // ---------- Experimental feature tests ----------

@@ -2,8 +2,14 @@
     "nanvix_python": {
         "tag": "3.12.3-nanvix-0.15.4-ac76d40",
         "asset": "microvm-standalone-256mb.zip",
+        "asset_linux": "microvm-standalone-256mb.tar.gz",
         "binaries": [
             "nanvixd.exe",
+            "nanvix_rootfs.img",
+            "python3.initrd"
+        ],
+        "binaries_linux": [
+            "nanvixd.elf",
             "nanvix_rootfs.img",
             "python3.initrd"
         ]

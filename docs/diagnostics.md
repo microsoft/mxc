@@ -6,7 +6,7 @@ A unified diagnostic view across every layer of the MXC stack:
 |-------|--------|--------------|
 | **SDK** | `mxc-sdk` (TypeScript) | SDK version, policy construction |
 | **Runtime** | `wxc-exec.exe` (Rust) | Input config, parsed request, sandbox spec, process lifecycle, timing |
-| **OS** | Tessera ETW provider | Kernel-side sandbox creation and validation events |
+| **OS** | MXC OS-side ETW provider | Kernel-side sandbox creation and validation events |
 | **Internals** | Kernel-General ETW (learning mode) | Access checks that would have been denied, logged instead of blocked |
 
 All layers stream into a single `mxc-diagnostic-console.exe` window in real time.
@@ -81,7 +81,7 @@ mxc-diagnostic-console.exe | Tee-Object -Encoding ascii -FilePath out.log
 
 ### ETW Tracing
 
-The console captures ETW events from the Tessera provider and Kernel-General
+The console captures ETW events from the MXC OS-side provider and Kernel-General
 learning-mode access check events. **Admin privileges required** for ETW; pipe
 messages work without elevation.
 

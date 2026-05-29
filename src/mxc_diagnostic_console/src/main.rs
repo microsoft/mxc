@@ -92,7 +92,7 @@ enum DisplayEvent {
     Message { pid: u32, text: String },
     /// A client disconnected.
     Disconnected { pid: u32 },
-    /// An ETW event from the Tessera provider.
+    /// An ETW event from the MXC OS-side provider.
     EtwEvent {
         pid: u32,
         text: String,
@@ -254,7 +254,7 @@ fn main() {
             w = W - 39
         );
         println!("{blank}");
-        line("  ETW event capture (Tessera + learning mode events) requires administrator privileges.");
+        line("  ETW event capture (MXC OS provider + learning mode events) requires administrator privileges.");
         line("  Pipe-based log messages from wxc-exec will still work without elevation.");
         println!("{blank}");
         println!("{y}╚{bar}╝{r}");

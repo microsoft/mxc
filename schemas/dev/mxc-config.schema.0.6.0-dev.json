@@ -17,9 +17,21 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["process", "vm", "processcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "seatbelt", "isolation_session", "bubblewrap", "hyperlight"],
+      "enum": [
+        "process",
+        "processcontainer",
+        "vm",
+        "windows_sandbox",
+        "lxc",
+        "microvm",
+        "hyperlight",
+        "wslc",
+        "seatbelt",
+        "isolation_session",
+        "bubblewrap"
+      ],
       "default": "processcontainer",
-      "description": "Containment value to use for execution. Accepts abstract intents ('process', 'vm') and concrete backends ('processcontainer', 'windows_sandbox', 'lxc', 'microvm', 'wslc', 'seatbelt', 'isolation_session', 'bubblewrap', 'hyperlight'). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities. Note: 'windows_sandbox', 'wslc', 'seatbelt', 'isolation_session', 'bubblewrap', and 'hyperlight' are experimental and require the --experimental CLI flag."
+      "description": "Containment value to use for execution. Accepts both abstract intents (''process'', ''vm'') and concrete backends (''processcontainer'', ''windows_sandbox'', ''lxc'', ''microvm'', ''hyperlight'', ''wslc'', ''seatbelt'', ''isolation_session'', ''bubblewrap''). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities (e.g., ''process'' resolves to ProcessContainer on Windows, LXC on Linux, Seatbelt on macOS; ''vm'' resolves to Windows Sandbox on Windows). Note: ''windows_sandbox'', ''wslc'', ''seatbelt'', ''isolation_session'', ''hyperlight'', and ''bubblewrap'' are experimental and require the --experimental CLI flag. ''hyperlight'' and ''bubblewrap'' have no per-backend configuration block; they share the common filesystem/network policy fields. The legacy aliases ''appcontainer'' and ''macos_sandbox'' are still accepted by the parser (with a deprecation log line) but are intentionally omitted from this enum so editors steer authors toward the canonical names."
     },
 
     "phase": {
@@ -141,6 +153,11 @@
           "items": { "type": "string" },
           "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc' and 'processcontainer' containment backends."
         },
+        "allowLocalNetwork": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, the sandboxed process may bind() and listen() on local IPs and accept incoming connections. Independent of 'defaultPolicy' (which governs outbound traffic). Honored by the 'seatbelt' backend; other backends ignore this field today."
+        },
         "proxy": {
           "type": "object",
           "description": "Proxy configuration. Supported with the 'processcontainer' (Windows) and 'bubblewrap' (Linux) backends.",
@@ -166,6 +183,16 @@
                 }
               },
               "required": ["builtinTestServer"],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "description": "Full proxy URL including port (e.g., http://proxy.example.com:8080). Host and port are extracted from the URL."
+                }
+              },
+              "required": ["url"],
               "additionalProperties": false
             }
           ]
@@ -279,7 +306,7 @@
               "type": "integer",
               "minimum": 0,
               "default": 300000,
-              "description": "Idle timeout in milliseconds before the daemon tears down the sandbox VM. 0 = no timeout."
+              "description": "Idle timeout in milliseconds before the daemon tears down the sandbox VM. 0 = no timeout. The parser also accepts the legacy 'idleTimeout' alias (same units) for back-compat, but the schema intentionally omits it so editors steer authors here."
             },
             "daemonPipeName": {
               "type": "string",
@@ -326,6 +353,35 @@
             "storagePath": {
               "type": "string",
               "description": "Storage path for the WSLC session image store. Omit to use a temporary directory."
+            },
+            "portMappings": {
+              "type": "array",
+              "description": "Host-to-container port forwards. Each entry maps a Windows host port to a container port for a given protocol.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "windowsPort": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535,
+                    "description": "Port on the Windows host to bind."
+                  },
+                  "containerPort": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535,
+                    "description": "Port inside the container to forward to."
+                  },
+                  "protocol": {
+                    "type": "string",
+                    "enum": ["tcp", "udp"],
+                    "default": "tcp",
+                    "description": "Transport protocol for the mapping."
+                  }
+                },
+                "required": ["windowsPort", "containerPort"],
+                "additionalProperties": false
+              }
             }
           }
         },
@@ -357,6 +413,12 @@
               "type": "boolean",
               "default": false,
               "description": "Allow the inner process to use the macOS Keychain (e.g. via keytar or Security.framework) end-to-end. Adds Mach lookup for com.apple.SecurityServer, com.apple.securityd, com.apple.trustd, com.apple.ocspd, com.apple.cfprefsd.daemon, com.apple.xpcd and the com.apple.lsd.* family; read access to /private/var/db/mds and /private/var/protected/trustd; and read+write access to ~/Library/Keychains and /private/var/folders (XPC cache). System keychain stores under /Library and /System/Library are already covered by the baseline read-only allows. Defaults to false; opt in only when the inner workload genuinely needs Keychain access."
+            },
+            "extraMachLookups": {
+              "type": "array",
+              "items": { "type": "string" },
+              "default": [],
+              "description": "Caller-provided Mach service global-names the inner process may resolve. Each entry is emitted into the generated TinyScheme profile as `(allow mach-lookup (global-name \"...\"))`. Use this as a targeted escape hatch when a workload needs a Mach service the baseline profile does not already grant, without resorting to 'profileOverride' to replace the whole profile."
             }
           }
         },

@@ -9,9 +9,11 @@ path = "src/main.rs"
 
 [features]
 hyperlight = ["wxc_common/hyperlight"]
+microvm = ["wxc_common/microvm", "dep:nanvix_binaries"]
 
 [build-dependencies]
 mxc_build_common.workspace = true
+nanvix_common = { path = "../nanvix_common" }
 
 [dependencies]
 wxc_common = { workspace = true }
@@ -19,3 +21,4 @@ lxc_common = { workspace = true }
 bwrap_common = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+nanvix_binaries = { path = "../nanvix_binaries", optional = true }

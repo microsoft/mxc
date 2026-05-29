@@ -52,27 +52,31 @@ use crate::models::{ExecutionRequest, NetworkPolicy, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 
 /// Multi-binary initrd (daemons + CPython) loaded by NanVix at warm start.
-const INITRD_BINARY: &str = "python3.initrd";
-/// NanVix daemon binary launched by the host runner.
-const NANVIXD_BINARY: &str = "nanvixd.exe";
+const INITRD_BINARY: &str = nanvix_common::INITRD_BINARY;
+/// NanVix daemon binary launched by the host runner (platform-conditional).
+const NANVIXD_BINARY: &str = nanvix_common::NANVIXD_BINARY;
 /// Combined rootfs image (NanVix kernel userspace + CPython stdlib).
-const RAMFS_IMAGE: &str = "nanvix_rootfs.img";
-/// Pre-built VM state snapshot (CBOR) for warm start.
-const SNAPSHOT_CBOR: &str = "kernel.whp.cbor";
-/// Subdirectory holding snapshot files next to the exe.
+const RAMFS_IMAGE: &str = nanvix_common::RAMFS_IMAGE;
+/// Pre-built VM state snapshot (CBOR) for warm start (Windows/WHP only).
+#[cfg(target_os = "windows")]
+const SNAPSHOT_CBOR: &str = nanvix_common::SNAPSHOT_CBOR;
+/// Subdirectory holding snapshot files next to the exe (Windows/WHP only).
+#[cfg(target_os = "windows")]
 const SNAPSHOTS_DIR: &str = nanvix_common::SNAPSHOTS_SUBDIR;
 /// Subdirectory holding kernel binary.
 const BIN_DIR: &str = nanvix_common::BIN_SUBDIR;
 /// Env var override for the NanVix snapshot home directory. Set this to
 /// force a specific location; otherwise the runner uses a standard
 /// OS-local data path or falls back to `<exe>/snapshots/`.
+#[cfg(target_os = "windows")]
 const NANVIX_HOME_ENV: &str = "NANVIX_HOME";
 /// Env var that opts in to nanvixd's verbose tracing (and captured stderr).
 /// When unset (the default), the runner forces `RUST_LOG=off` for nanvixd
 /// and inherits stderr, which saves ~25–30 ms per warm execution by
 /// avoiding nanvixd's per-run log file and the host-side stderr drain.
 const NANVIX_TRACE_ENV: &str = "MXC_NANVIX_TRACE";
-/// Final component of the default OS-local data path.
+/// Final component of the default OS-local data path (Windows only).
+#[cfg(target_os = "windows")]
 const DEFAULT_HOME_LEAF: &str = "nanvix";
 /// Boot grace period that is always enforced.
 const BOOT_TIMEOUT_MS: u64 = 60_000;
@@ -90,6 +94,27 @@ const ERR_NETWORK_POLICY: &str =
 const ERR_PROXY_POLICY: &str =
     "network proxy is not supported by the NanVix backend -- NanVix has no network stack";
 const ERR_WORKDIR: &str = "workingDirectory is not supported by the NanVix backend -- guest has its own filesystem namespace";
+
+/// Maps a finished child's [`ExitStatus`] to a host-visible exit code.
+///
+/// On Unix, processes terminated by a signal have no exit code (`status.code()`
+/// returns `None`); we surface them as the negated signal number (e.g. SIGKILL
+/// → `-9`) so callers can distinguish them from normal exits and from the
+/// generic [`ERROR_EXIT_CODE`] sentinel. On Windows, `status.code()` always
+/// returns `Some(_)`.
+fn exit_code_from_status(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return -signal;
+        }
+    }
+    ERROR_EXIT_CODE
+}
 
 // -- NanVix error classification ---------------------------------------------
 
@@ -139,8 +164,17 @@ impl NanVixError {
 }
 
 /// Returns the directory containing the current executable.
+///
+/// Inlined (rather than reusing `crate::process_util::exe_dir`) because
+/// `process_util` is gated to `target_os = "windows"`.
 fn exe_dir() -> Result<PathBuf, NanVixError> {
-    crate::process_util::exe_dir().map_err(|e| NanVixError::Preflight(e.to_string()))
+    std::env::current_exe()
+        .map_err(|e| NanVixError::Preflight(format!("cannot determine exe path: {}", e)))
+        .and_then(|exe| {
+            exe.parent()
+                .map(|p| p.to_path_buf())
+                .ok_or_else(|| NanVixError::Preflight("exe has no parent directory".to_string()))
+        })
 }
 
 /// Returns `true` when [`NANVIX_TRACE_ENV`] is set to a truthy value
@@ -154,8 +188,11 @@ fn nanvix_trace_enabled() -> bool {
 }
 
 /// Watchdog thread: waits for timeout or cancellation, then terminates the process.
+///
+/// On Windows, `process_id_or_handle` is a duplicated process HANDLE (as usize).
+/// On Linux, `process_id_or_handle` is the child PID (as usize).
 fn watchdog_thread_fn(
-    process_handle_raw: usize,
+    process_id_or_handle: usize,
     duration: Duration,
     cancel_pair: Arc<(Mutex<bool>, Condvar)>,
     timed_out: Arc<AtomicBool>,
@@ -179,34 +216,50 @@ fn watchdog_thread_fn(
         remaining = duration.saturating_sub(elapsed);
     }
 
-    // Always close the duplicated handle to avoid leaks.
-    let close_handle = |handle_raw: usize| {
-        use windows::Win32::Foundation::{CloseHandle, HANDLE};
-        let handle = HANDLE(handle_raw as *mut std::ffi::c_void);
-        // SAFETY: `handle` was returned by `DuplicateHandle` in this
-        // process and is closed exactly once by this watchdog thread.
-        let _ = unsafe { CloseHandle(handle) };
-    };
+    #[cfg(target_os = "windows")]
+    {
+        // Always close the duplicated handle to avoid leaks.
+        let close_handle = |handle_raw: usize| {
+            use windows::Win32::Foundation::{CloseHandle, HANDLE};
+            let handle = HANDLE(handle_raw as *mut std::ffi::c_void);
+            // SAFETY: `handle` was returned by `DuplicateHandle` in this
+            // process and is closed exactly once by this watchdog thread.
+            let _ = unsafe { CloseHandle(handle) };
+        };
 
-    if *cancelled {
-        // Process already exited — close the handle and return.
-        close_handle(process_handle_raw);
-        return;
+        if *cancelled {
+            close_handle(process_id_or_handle);
+            return;
+        }
+
+        timed_out.store(true, Ordering::SeqCst);
+
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Threading::TerminateProcess;
+
+        let handle = HANDLE(process_id_or_handle as *mut std::ffi::c_void);
+        // SAFETY: `handle` is a valid duplicated process handle owned by
+        // this thread, and passing exit code 1 is valid for termination.
+        let _ = unsafe { TerminateProcess(handle, 1) };
+        close_handle(process_id_or_handle);
     }
 
-    // Timeout elapsed and process is still running — kill it.
-    // Set the timed_out flag BEFORE terminating so the main thread
-    // always sees it as true after child.wait() returns from a kill.
-    timed_out.store(true, Ordering::SeqCst);
+    #[cfg(target_os = "linux")]
+    {
+        if *cancelled {
+            return;
+        }
 
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::System::Threading::TerminateProcess;
+        timed_out.store(true, Ordering::SeqCst);
 
-    let handle = HANDLE(process_handle_raw as *mut std::ffi::c_void);
-    // SAFETY: `handle` is a valid duplicated process handle owned by
-    // this thread, and passing exit code 1 is valid for termination.
-    let _ = unsafe { TerminateProcess(handle, 1) };
-    close_handle(process_handle_raw);
+        // Kill the child process by PID using SIGKILL.
+        let pid = process_id_or_handle as i32;
+        // SAFETY: sending SIGKILL to a known child PID is always valid.
+        // If the process already exited, `kill()` returns ESRCH which we ignore.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
 }
 
 /// Components returned by [`NanVixScriptRunner::setup_watchdog`]: the watchdog
@@ -254,7 +307,6 @@ impl NanVixScriptRunner {
     /// Resolve and validate all required paths next to the running executable.
     fn resolve_paths(&self) -> Result<ResolvedPaths, NanVixError> {
         let dir = exe_dir()?;
-        // NanVix runtime artifacts are placed next to wxc-exec.exe by the build system.
 
         let nanvixd = dir.join(NANVIXD_BINARY);
         if !nanvixd.exists() {
@@ -294,18 +346,27 @@ impl NanVixScriptRunner {
             }
         }
 
-        let snapshot_home = Self::resolve_snapshot_home(&dir)?;
-        // Warm start requires *all* snapshot files (kernel.vmem + kernel.whp.cbor);
-        // a partial/corrupt set must trigger regeneration instead of a late failure
-        // inside nanvixd.
-        let snapshots_present = nanvix_common::SNAPSHOT_FILES
-            .iter()
-            .all(|name| snapshot_home.join(SNAPSHOTS_DIR).join(name).exists());
-        if !snapshots_present {
-            // No (complete) snapshot yet — generate one via cold boot
-            // (one-time cost, ~400–500 ms). Subsequent runs restore directly.
-            Self::generate_snapshot(&dir, &snapshot_home, &nanvixd, &ramfs, &initrd)?;
-        }
+        // Snapshot resolution — Windows only (WHP snapshots for warm start).
+        // Linux uses cold boot via KVM every time.
+        #[cfg(target_os = "windows")]
+        let snapshot_home = {
+            let home = Self::resolve_snapshot_home(&dir)?;
+            // Warm start requires *all* snapshot files (kernel.vmem + kernel.whp.cbor);
+            // a partial/corrupt set must trigger regeneration instead of a late failure
+            // inside nanvixd.
+            let snapshots_present = nanvix_common::SNAPSHOT_FILES
+                .iter()
+                .all(|name| home.join(SNAPSHOTS_DIR).join(name).exists());
+            if !snapshots_present {
+                // No (complete) snapshot yet — generate one via cold boot
+                // (one-time cost, ~400–500 ms). Subsequent runs restore directly.
+                Self::generate_snapshot(&dir, &home, &nanvixd, &ramfs, &initrd)?;
+            }
+            home
+        };
+
+        #[cfg(target_os = "linux")]
+        let snapshot_home = dir.clone();
 
         Ok(ResolvedPaths {
             nanvixd,
@@ -316,17 +377,17 @@ impl NanVixScriptRunner {
         })
     }
 
-    /// Resolve the snapshot home directory.
+    /// Resolve the snapshot home directory (Windows only — WHP snapshots).
     ///
     /// Discovery chain (first match wins):
     /// 1. `$NANVIX_HOME` env var (if set and non-empty)
     /// 2. `<exe>` directory itself, when a complete set of pre-generated
     ///    snapshots already lives in `<exe>/snapshots/` (build-time output
     ///    or shipped artifacts) — using it avoids a redundant cold boot.
-    /// 3. OS-local data path (`%LOCALAPPDATA%\nanvix` on Windows,
-    ///    `~/.local/share/nanvix` on Linux)
+    /// 3. OS-local data path (`%LOCALAPPDATA%\nanvix` on Windows)
     /// 4. `<exe>` directory itself as a last-resort fallback (dev builds —
     ///    nanvixd will write snapshots into `<exe>/snapshots/`).
+    #[cfg(target_os = "windows")]
     fn resolve_snapshot_home(exe_dir: &Path) -> Result<PathBuf, NanVixError> {
         // 1. Env var override.
         if let Some(val) = std::env::var_os(NANVIX_HOME_ENV) {
@@ -366,28 +427,18 @@ impl NanVixScriptRunner {
     }
 
     /// Default OS-local snapshot home path.
+    #[cfg(target_os = "windows")]
     fn default_home() -> Option<PathBuf> {
-        #[cfg(target_os = "windows")]
-        {
-            std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join(DEFAULT_HOME_LEAF))
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            std::env::var_os("HOME").map(|d| {
-                PathBuf::from(d)
-                    .join(".local")
-                    .join("share")
-                    .join(DEFAULT_HOME_LEAF)
-            })
-        }
+        std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join(DEFAULT_HOME_LEAF))
     }
 
-    /// Generate a WHP snapshot via cold boot (one-time cost).
+    /// Generate a WHP snapshot via cold boot (one-time cost, Windows only).
     ///
     /// Delegates to `nanvix_common::generate_snapshot` which runs nanvixd with
     /// `-kernel-args snapshot` and cwd set to `snapshot_home`. nanvixd writes
     /// snapshot files to `<snapshot_home>/snapshots/` directly. Subsequent runs
     /// restore from the snapshot (~20 ms vs ~430 ms cold boot).
+    #[cfg(target_os = "windows")]
     fn generate_snapshot(
         exe_dir: &Path,
         snapshot_home: &Path,
@@ -457,11 +508,6 @@ impl NanVixScriptRunner {
         paths: &ResolvedPaths,
         staging_dir: &Path,
     ) -> Result<std::process::Child, NanVixError> {
-        // nanvixd loads kernel.vmem from <cwd>/snapshots/ so cwd must be
-        // the snapshot home. All other paths are passed as absolute.
-        //   nanvixd.exe -snapshot snapshots/kernel.whp.cbor
-        //              -bin-dir <exe>/bin -ramfs <img> -mount <staging> -- python3.initrd
-        let snapshot_rel = Path::new(SNAPSHOTS_DIR).join(SNAPSHOT_CBOR);
         let trace = nanvix_trace_enabled();
         // Default: silence nanvixd and inherit stderr so kernel traces (if
         // any) stream straight to the parent terminal without a per-run
@@ -472,19 +518,43 @@ impl NanVixScriptRunner {
         } else {
             Stdio::inherit()
         };
+
         let mut cmd = Command::new(&paths.nanvixd);
-        cmd.current_dir(&paths.snapshot_home)
-            .arg("-snapshot")
-            .arg(&snapshot_rel)
-            .arg("-bin-dir")
-            .arg(paths.exe_dir.join(BIN_DIR))
-            .arg("-ramfs")
-            .arg(&paths.ramfs)
-            .arg("-mount")
-            .arg(staging_dir)
-            .arg("--")
-            .arg(&paths.initrd)
-            .stdin(Stdio::null())
+
+        #[cfg(target_os = "windows")]
+        {
+            // nanvixd loads kernel.vmem from <cwd>/snapshots/ so cwd must be
+            // the snapshot home. All other paths are passed as absolute.
+            //   nanvixd.exe -snapshot snapshots/kernel.whp.cbor
+            //              -bin-dir <exe>/bin -ramfs <img> -mount <staging> -- python3.initrd
+            let snapshot_rel = Path::new(SNAPSHOTS_DIR).join(SNAPSHOT_CBOR);
+            cmd.current_dir(&paths.snapshot_home)
+                .arg("-snapshot")
+                .arg(&snapshot_rel)
+                .arg("-bin-dir")
+                .arg(paths.exe_dir.join(BIN_DIR))
+                .arg("-ramfs")
+                .arg(&paths.ramfs)
+                .arg("-mount")
+                .arg(staging_dir)
+                .arg("--")
+                .arg(&paths.initrd);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Linux invocation (cold boot via KVM):
+            //   nanvixd.elf -ramfs <rootfs.img> -mount <staging_dir> -- python3.initrd
+            cmd.current_dir(&paths.exe_dir)
+                .arg("-ramfs")
+                .arg(&paths.ramfs)
+                .arg("-mount")
+                .arg(staging_dir)
+                .arg("--")
+                .arg(&paths.initrd);
+        }
+
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(stderr);
         if !trace {
@@ -508,35 +578,48 @@ impl NanVixScriptRunner {
 
         let duration = Duration::from_millis(timeout_ms);
 
-        // Duplicate the process handle at spawn time (safe against PID reuse).
-        use std::os::windows::io::AsRawHandle;
-        use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
-        use windows::Win32::System::Threading::GetCurrentProcess;
+        #[cfg(target_os = "windows")]
+        {
+            // Duplicate the process handle at spawn time (safe against PID reuse).
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
+            use windows::Win32::System::Threading::GetCurrentProcess;
 
-        let raw = child.as_raw_handle();
-        let mut dup_handle = HANDLE::default();
-        let dup_ok = unsafe {
-            // SAFETY: `raw` is the live process HANDLE from `std::process::Child`.
-            // We duplicate it into the current process with same access rights so
-            // the watchdog thread can safely terminate/close it independently.
-            DuplicateHandle(
-                GetCurrentProcess(),
-                HANDLE(raw),
-                GetCurrentProcess(),
-                &mut dup_handle,
-                0,
-                false,
-                DUPLICATE_SAME_ACCESS,
-            )
-        };
-        if dup_ok.is_err() {
-            return None;
+            let raw = child.as_raw_handle();
+            let mut dup_handle = HANDLE::default();
+            let dup_ok = unsafe {
+                // SAFETY: `raw` is the live process HANDLE from `std::process::Child`.
+                // We duplicate it into the current process with same access rights so
+                // the watchdog thread can safely terminate/close it independently.
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    HANDLE(raw),
+                    GetCurrentProcess(),
+                    &mut dup_handle,
+                    0,
+                    false,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            };
+            if dup_ok.is_err() {
+                return None;
+            }
+            let process_id_or_handle = dup_handle.0 as usize;
+
+            Some(thread::spawn(move || {
+                watchdog_thread_fn(process_id_or_handle, duration, cancel_pair, timed_out);
+            }))
         }
-        let process_handle_raw = dup_handle.0 as usize;
 
-        Some(thread::spawn(move || {
-            watchdog_thread_fn(process_handle_raw, duration, cancel_pair, timed_out);
-        }))
+        #[cfg(target_os = "linux")]
+        {
+            // On Linux, use the child PID directly for kill-based termination.
+            let pid = child.id() as usize;
+
+            Some(thread::spawn(move || {
+                watchdog_thread_fn(pid, duration, cancel_pair, timed_out);
+            }))
+        }
     }
 
     fn setup_watchdog(
@@ -643,7 +726,7 @@ impl NanVixScriptRunner {
 
         match exit_status {
             Ok(status) => {
-                let exit_code = status.code().unwrap_or(ERROR_EXIT_CODE);
+                let exit_code = exit_code_from_status(&status);
                 let _ = writeln!(logger, "NanVix: process exited with code {}", exit_code);
                 if exit_code != 0 && !stderr_output.is_empty() {
                     let _ = writeln!(logger, "NanVix stderr:\n{}", stderr_output);
@@ -992,5 +1075,100 @@ mod tests {
             !NanVixScriptRunner::should_copy_back(&response),
             "copyback must be skipped for NTSTATUS crash exit codes"
         );
+    }
+
+    #[test]
+    fn copyback_skipped_for_signal_killed() {
+        // On Linux, SIGKILL results in exit code -9 (negative signal number).
+        let response = ScriptResponse {
+            exit_code: -9,
+            error_message: String::new(),
+            ..Default::default()
+        };
+        assert!(
+            !NanVixScriptRunner::should_copy_back(&response),
+            "copyback must be skipped for signal-killed processes"
+        );
+    }
+
+    // -- Platform-specific constant tests ---------------------------------------
+
+    #[test]
+    fn nanvixd_binary_matches_platform() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(NANVIXD_BINARY, "nanvixd.elf");
+        #[cfg(target_os = "windows")]
+        assert_eq!(NANVIXD_BINARY, "nanvixd.exe");
+    }
+
+    #[test]
+    fn total_timeout_infinite_when_zero() {
+        assert_eq!(NanVixScriptRunner::total_timeout_ms(0, 0), u64::MAX);
+        assert_eq!(NanVixScriptRunner::total_timeout_ms(0, 500), u64::MAX);
+    }
+
+    #[test]
+    fn total_timeout_saturates_on_overflow() {
+        // With values that would cause u64 overflow, should saturate at u64::MAX.
+        let result = NanVixScriptRunner::total_timeout_ms(u32::MAX, u64::MAX - 1);
+        assert_eq!(result, u64::MAX);
+    }
+
+    // -- Watchdog timeout state tests ------------------------------------------
+
+    #[test]
+    fn watchdog_state_no_thread_when_infinite_timeout() {
+        // When timeout is u64::MAX, start_watchdog should return None.
+        // We can't test this directly without a real child process, but we can
+        // verify the total_timeout_ms sentinel logic.
+        let timeout = NanVixScriptRunner::total_timeout_ms(0, 0);
+        assert_eq!(
+            timeout,
+            u64::MAX,
+            "zero script_timeout should yield infinite"
+        );
+    }
+
+    // -- NanVixError display tests ---------------------------------------------
+
+    #[test]
+    fn error_display_preflight() {
+        let err = NanVixError::Preflight("missing binary".to_string());
+        assert!(err.to_string().contains("preflight"));
+        assert!(err.to_string().contains("missing binary"));
+    }
+
+    #[test]
+    fn error_display_platform() {
+        let err = NanVixError::Platform("spawn failed".to_string());
+        assert!(err.to_string().contains("platform"));
+        assert!(err.to_string().contains("spawn failed"));
+    }
+
+    #[test]
+    fn error_display_runtime() {
+        let err = NanVixError::Runtime("VM crashed".to_string());
+        assert!(err.to_string().contains("runtime"));
+        assert!(err.to_string().contains("VM crashed"));
+    }
+
+    #[test]
+    fn error_display_timeout() {
+        let err = NanVixError::Timeout {
+            script_timeout_ms: 5000,
+            total_ms: 65000,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("timed out"));
+        assert!(msg.contains("65000"));
+        assert!(msg.contains("5000"));
+    }
+
+    #[test]
+    fn error_to_response_has_error_exit_code() {
+        let err = NanVixError::Preflight("test".to_string());
+        let resp = err.to_response();
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert!(!resp.error_message.is_empty());
     }
 }

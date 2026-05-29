@@ -1210,6 +1210,8 @@ dependencies = [
  "clap",
  "lxc_common",
  "mxc_build_common",
+ "nanvix_binaries",
+ "nanvix_common",
  "wxc_common",
 ]
 
