@@ -657,18 +657,7 @@ fn validate_single_backend_section(
         return Ok(());
     }
 
-    let containment_wire = match containment {
-        ContainmentBackend::ProcessContainer => "processcontainer",
-        ContainmentBackend::Lxc => "lxc",
-        ContainmentBackend::WindowsSandbox => "windows_sandbox",
-        ContainmentBackend::Wslc => "wslc",
-        ContainmentBackend::Seatbelt => "seatbelt",
-        ContainmentBackend::IsolationSession => "isolation_session",
-        ContainmentBackend::Bubblewrap => "bubblewrap",
-        ContainmentBackend::Hyperlight => "hyperlight",
-        ContainmentBackend::MicroVm => "microvm",
-        ContainmentBackend::Vm => "vm",
-    };
+    let containment_wire = containment.wire_name();
     let msg = match owned {
         Some(owned_name) => format!(
             "Multiple containment backends configured: 'containment' is '{containment_wire}' \

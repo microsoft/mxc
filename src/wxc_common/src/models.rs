@@ -45,6 +45,26 @@ pub enum ContainmentBackend {
     Bubblewrap,
 }
 
+impl ContainmentBackend {
+    /// Canonical wire string for this backend, matching the JSON schema
+    /// `containment` enum. Single source of truth so the parser,
+    /// validators, and diagnostics don't drift from each other.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            ContainmentBackend::ProcessContainer => "processcontainer",
+            ContainmentBackend::Wslc => "wslc",
+            ContainmentBackend::Lxc => "lxc",
+            ContainmentBackend::Vm => "vm",
+            ContainmentBackend::MicroVm => "microvm",
+            ContainmentBackend::Hyperlight => "hyperlight",
+            ContainmentBackend::WindowsSandbox => "windows_sandbox",
+            ContainmentBackend::IsolationSession => "isolation_session",
+            ContainmentBackend::Seatbelt => "seatbelt",
+            ContainmentBackend::Bubblewrap => "bubblewrap",
+        }
+    }
+}
+
 /// Configuration specific to the Seatbelt backend (experimental).
 /// Used under `experimental.seatbelt` when `containment == Seatbelt`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

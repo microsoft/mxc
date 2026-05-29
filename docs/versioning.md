@@ -218,12 +218,16 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
    This error should persist for at least one release cycle so users have
    time to migrate, then it can be relaxed to the standard "unknown field"
    behavior.
-7. If the feature is a containment backend with a per-backend config section,
-   update the single-backend-section enforcement in
-   `wxc_common::config_parser`: rename the entry in `present_backend_sections`
-   and `owned_backend_section` from `experimental.<name>` to `<name>`, and
-   move the matching `if/then` clause in the JSON schema's top-level `allOf`
-   so it keys on the new top-level section instead of `experimental.<name>`.
+7. If the feature is a containment backend with a per-backend config
+   section, update the single-backend-section enforcement when it graduates
+   from experimental to top-level:
+
+   - In `wxc_common::config_parser`, rename the matching entry in
+     `present_backend_sections` and `owned_backend_section` from
+     `experimental.<name>` to `<name>`.
+   - In the JSON schema's top-level `allOf`, rekey the matching `if/then`
+     clause so it checks the new top-level section instead of
+     `experimental.<name>`.
 
    Concretely, if `wslc` graduates the clause changes from
 
