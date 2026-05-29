@@ -33,6 +33,27 @@ All subcommands require elevation. The binary aborts with exit code
 `65` and a clear message if launched without an elevated token (e.g.
 running a debug build directly without `Run as Administrator`).
 
+### When does MXC need these?
+
+The system-drive and null-device preparations matter for the
+**AppContainer + DACL** isolation tier (Tier 3), which MXC selects on
+hosts without the in-process BaseContainer API (and, for builds that
+ship without the `tier2_bfs` Cargo feature, without AppContainer + BFS
+either). To make the requirement discoverable, `wxc-exec --probe` (the
+detection-only path the SDK's `getPlatformSupport()` uses) emits an
+operator-visible warning recommending the relevant `wxc-host-prep`
+subcommand **whenever Tier 3 is selected and the corresponding prep is
+not already in effect**:
+
+- If the system-drive root is missing the metadata ACEs, the probe
+  recommends `wxc-host-prep prepare-system-drive`.
+- If `\Device\Null` does not grant the AppContainer package SIDs (it
+  resets to an AppContainer-hostile default at every boot), the probe
+  recommends `wxc-host-prep prepare-null-device`.
+
+The probe performs these checks read-only (no elevation, no writes); it
+suppresses a recommendation once the matching prep is detected.
+
 ### `prepare-system-drive`
 
 Adds two persistent, non-inheriting allow ACEs to the system-drive

@@ -105,9 +105,17 @@ pub enum FallbackError {
 /// 1. If `MXC_FORCE_TIER` is set in a test build, honor it (test seam).
 /// 2. Try Tier 1 (BaseContainer) when `prefer_base_container` is true and the
 ///    API surface is detected.
-/// 3. Otherwise try Tier 2 (AppContainer + BFS) when there's no filesystem
-///    policy at all, or `bfscfg.exe` is on disk.
-/// 4. Otherwise fall back to Tier 3 (AppContainer + DACL).
+/// 3. Otherwise try Tier 2 (AppContainer + BFS), but **only when this binary
+///    was compiled with the `tier2_bfs` Cargo feature**. With the feature on,
+///    Tier 2 is selected when there's no filesystem policy at all, or
+///    `bfscfg.exe` is on disk. With the feature off, `bfscfg.exe` can never be
+///    resolved, so Tier 2 is skipped entirely (rather than mis-reporting
+///    `appcontainer-bfs` for the no-policy case) and we fall through to Tier 3.
+/// 4. Otherwise fall back to Tier 3 (AppContainer + DACL). When Tier 3 is
+///    selected we append `wxc-host-prep` recommendations to the decision's
+///    warnings for any host-side preparation (system-drive metadata ACEs;
+///    `\Device\Null` descriptor) that is read-only-detected as not already in
+///    effect on this machine.
 ///
 /// Any tier that needs to modify host DACLs (T3 always; T1/T2 when
 /// `denied_paths` is non-empty) requires `fallback.allow_dacl_mutation = true`
@@ -164,35 +172,51 @@ pub fn detect(
             warnings,
         });
     }
-    warnings.push(
-        "BaseContainer API not present or not preferred; falling back to AppContainer + BFS"
-            .to_string(),
-    );
-
     // Tier 2 — AppContainer + BFS
     //
-    // When the policy has no filesystem rules at all there is nothing for
-    // BFS to enforce, so we can stay on T2 without resolving bfscfg.exe.
-    // Otherwise we need a real path: probe-time resolution doubles as the
-    // execution path (see `TierDecision::bfscfg_path`).
-    let bfscfg_path = if has_fs_policy {
-        find_bfscfg_exe()?
-    } else {
-        None
-    };
-    if !has_fs_policy || bfscfg_path.is_some() {
-        if denied {
-            ensure_dacl_augmentation_allowed(policy)?;
-            verify_write_dac_all(&policy.denied_paths)?;
+    // Reachable only when this binary was compiled with the `tier2_bfs`
+    // feature. Without it, `find_bfscfg_exe` returns `Ok(None)`
+    // unconditionally, so BFS could never enforce a filesystem policy.
+    // Critically, the no-filesystem-policy short-circuit below would
+    // otherwise return `appcontainer-bfs` on a binary that physically
+    // cannot run BFS — so when the feature is absent we skip Tier 2
+    // entirely and fall through to Tier 3 (AppContainer + DACL).
+    if cfg!(feature = "tier2_bfs") {
+        warnings.push(
+            "BaseContainer API not present or not preferred; falling back to AppContainer + BFS"
+                .to_string(),
+        );
+
+        // When the policy has no filesystem rules at all there is
+        // nothing for BFS to enforce, so we can stay on T2 without
+        // resolving bfscfg.exe. Otherwise we need a real path: probe-
+        // time resolution doubles as the execution path (see
+        // `TierDecision::bfscfg_path`).
+        let bfscfg_path = if has_fs_policy {
+            find_bfscfg_exe()?
+        } else {
+            None
+        };
+        if !has_fs_policy || bfscfg_path.is_some() {
+            if denied {
+                ensure_dacl_augmentation_allowed(policy)?;
+                verify_write_dac_all(&policy.denied_paths)?;
+            }
+            return Ok(TierDecision {
+                tier: IsolationTier::AppContainerBfs,
+                needs_dacl_augmentation: denied,
+                bfscfg_path,
+                warnings,
+            });
         }
-        return Ok(TierDecision {
-            tier: IsolationTier::AppContainerBfs,
-            needs_dacl_augmentation: denied,
-            bfscfg_path,
-            warnings,
-        });
+        warnings.push("bfscfg.exe not present; falling back to AppContainer + DACL".to_string());
+    } else {
+        warnings.push(
+            "BaseContainer API not present or not preferred, and AppContainer + BFS is not \
+             compiled into this binary; falling back to AppContainer + DACL"
+                .to_string(),
+        );
     }
-    warnings.push("bfscfg.exe not present; falling back to AppContainer + DACL".to_string());
 
     // Tier 3 — AppContainer + DACL
     ensure_dacl_augmentation_allowed(policy)?;
@@ -211,12 +235,106 @@ pub fn detect(
         ensure_path_grantable_for_ac(Path::new(p), crate::filesystem_dacl::RO_MASK)?;
     }
     verify_write_dac_all(&policy.denied_paths)?;
+
+    // Tier 3 leans on host-side preparation the kernel does not provide
+    // by default (the system-drive metadata ACEs) or resets at every
+    // boot (the `\Device\Null` descriptor). Surface actionable
+    // `wxc-host-prep` recommendations, but only for the preparations
+    // that are not already in effect on this machine.
+    push_host_prep_warnings(&mut warnings);
+
     Ok(TierDecision {
         tier: IsolationTier::AppContainerDacl,
         needs_dacl_augmentation: true,
         bfscfg_path: None,
         warnings,
     })
+}
+
+/// Append `wxc-host-prep` recommendations to `warnings` for any
+/// host-side preparation the AppContainer + DACL tier relies on that is
+/// not currently in effect on this machine.
+///
+/// Each check is read-only and best-effort: if the machine state cannot
+/// be determined we err on the side of surfacing the recommendation
+/// rather than silently swallowing it.
+fn push_host_prep_warnings(warnings: &mut Vec<String>) {
+    if !system_drive_prepared() {
+        warnings.push(
+            "AppContainer + DACL tier selected: AppContainer processes may be unable to read \
+             metadata of the system-drive root (e.g. `cmd.exe`, `pwsh.exe`, `node.exe` startup \
+             stats of `C:\\`). Run `wxc-host-prep prepare-system-drive` (elevated) to grant the \
+             minimal metadata ACEs."
+                .to_string(),
+        );
+    }
+    if !null_device_prepared() {
+        warnings.push(
+            "AppContainer + DACL tier selected: AppContainer processes may be unable to open the \
+             NUL device (`\\Device\\Null`), which the kernel resets to an AppContainer-hostile \
+             default at every boot. Run `wxc-host-prep prepare-null-device` (elevated) to reapply \
+             the documented security descriptor."
+                .to_string(),
+        );
+    }
+}
+
+/// Well-known AppContainer package SIDs that `wxc-host-prep` grants
+/// access to. `Everyone` (`S-1-1-0`) is deliberately excluded — these
+/// checks care specifically about the AppContainer package identities.
+const HOST_PREP_AC_SIDS: &[&str] = &["S-1-15-2-1", "S-1-15-2-2"];
+
+/// Metadata-read mask `wxc-host-prep prepare-system-drive` stamps on the
+/// system-drive root (`FILE_READ_ATTRIBUTES | FILE_READ_EA |
+/// READ_CONTROL | SYNCHRONIZE`). Must stay in sync with the
+/// `STAT_ACCESS_MASK` constant in `wxc_host_prep`'s `system_drive`
+/// module.
+const SYSTEM_DRIVE_STAT_MASK: u32 = 0x0012_0088;
+
+/// Resolve the system-drive root (e.g. `C:\`) for the read-only
+/// host-prep state probe.
+///
+/// Unlike the elevated `prepare-system-drive` write path — which must
+/// not trust `%SystemDrive%` from a potentially attacker-controlled
+/// environment — this is a read-only DACL *read*, so deriving the root
+/// from `%SystemDrive%` is acceptable. Falls back to `C:\`.
+fn system_drive_root() -> std::path::PathBuf {
+    let mut root = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+    if !root.ends_with('\\') {
+        root.push('\\');
+    }
+    std::path::PathBuf::from(root)
+}
+
+/// Returns `true` when the `prepare-system-drive` ACEs are already
+/// present for BOTH well-known AppContainer package SIDs on the
+/// system-drive root.
+///
+/// Read-only and best-effort: a failed DACL read for any SID yields
+/// `false`, so the caller surfaces the recommendation rather than
+/// suppressing it on incomplete information.
+fn system_drive_prepared() -> bool {
+    let root = system_drive_root();
+    HOST_PREP_AC_SIDS.iter().all(|sid| {
+        match crate::filesystem_dacl::scan_explicit_aces_for_sid(&root, sid) {
+            Ok(priors) => priors.iter().any(|p| {
+                p.ace_type == crate::filesystem_dacl::AceType::Allow
+                    && p.access_mask == SYSTEM_DRIVE_STAT_MASK
+                    && p.inherit_flags == 0
+            }),
+            Err(_) => false,
+        }
+    })
+}
+
+/// Returns `true` when `\Device\Null` already grants both well-known
+/// AppContainer package SIDs access — i.e. `prepare-null-device` has
+/// been applied since the last boot.
+///
+/// Read-only and best-effort: an unreadable DACL yields `false`, so the
+/// caller surfaces the recommendation.
+fn null_device_prepared() -> bool {
+    crate::filesystem_dacl::null_device_appcontainer_grants().unwrap_or(false)
 }
 
 /// Returns `Ok(true)` if a per-run ACE on `path` is unnecessary because
@@ -762,5 +880,103 @@ mod tests {
             "after explicit grant on ALL APPLICATION PACKAGES, AC should be covered"
         );
         // mgr.Drop restores, returning the path to its original state.
+    }
+
+    #[test]
+    fn system_drive_root_ends_with_backslash() {
+        let root = system_drive_root();
+        let s = root.to_string_lossy();
+        assert!(
+            s.ends_with('\\'),
+            "system-drive root should end with a backslash, got {s}"
+        );
+    }
+
+    /// The host-prep state is machine-dependent, so we assert only the
+    /// contract: at most the two known recommendations, and each names
+    /// the corresponding `wxc-host-prep` verb.
+    #[test]
+    fn push_host_prep_warnings_are_actionable_and_bounded() {
+        let mut warnings = Vec::new();
+        push_host_prep_warnings(&mut warnings);
+        assert!(
+            warnings.len() <= 2,
+            "expected at most two host-prep warnings, got {warnings:?}"
+        );
+        for w in &warnings {
+            assert!(
+                w.contains("wxc-host-prep prepare-system-drive")
+                    || w.contains("wxc-host-prep prepare-null-device"),
+                "host-prep warning should name a wxc-host-prep verb, got: {w}"
+            );
+        }
+    }
+
+    /// Read-only `\Device\Null` probe must not panic; the result is
+    /// host-dependent so we only assert it returns.
+    #[test]
+    fn null_device_grants_probe_smoke() {
+        let _ = crate::filesystem_dacl::null_device_appcontainer_grants();
+    }
+
+    /// With `tier2_bfs` compiled out, an empty policy on a host where
+    /// Tier 1 is skipped must resolve to Tier 3 (AppContainer + DACL) —
+    /// never `appcontainer-bfs` — and carry the BFS-not-compiled
+    /// fall-through warning.
+    #[cfg(not(feature = "tier2_bfs"))]
+    #[test]
+    fn no_bfs_feature_falls_through_to_dacl_for_empty_policy() {
+        // Clear MXC_FORCE_TIER under ENV_LOCK so the test-only force
+        // seam in `detect` doesn't observe a sibling test's value.
+        let _lock = {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            // SAFETY: env-var mutation in tests; serialized by ENV_LOCK.
+            unsafe {
+                std::env::remove_var("MXC_FORCE_TIER");
+            }
+            lock
+        };
+        let mut policy = empty_policy();
+        policy.fallback.allow_dacl_mutation = true;
+        // `prefer_base_container = false` skips Tier 1 deterministically;
+        // with `tier2_bfs` off, Tier 2 is skipped too.
+        let d = detect(&policy, false).expect("empty policy must resolve");
+        assert!(
+            matches!(d.tier, IsolationTier::AppContainerDacl),
+            "tier2_bfs off must select AppContainerDacl, got {:?}",
+            d.tier
+        );
+        assert!(d.needs_dacl_augmentation);
+        assert!(
+            d.warnings
+                .iter()
+                .any(|w| w.contains("not compiled into this binary")),
+            "expected BFS-not-compiled fall-through warning, got: {:?}",
+            d.warnings
+        );
+    }
+
+    /// With `tier2_bfs` compiled in, an empty policy on a host where
+    /// Tier 1 is skipped stays on Tier 2 (AppContainer + BFS) via the
+    /// no-filesystem-policy short-circuit.
+    #[cfg(feature = "tier2_bfs")]
+    #[test]
+    fn bfs_feature_selects_bfs_for_empty_policy_when_bc_skipped() {
+        let _lock = {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            // SAFETY: env-var mutation in tests; serialized by ENV_LOCK.
+            unsafe {
+                std::env::remove_var("MXC_FORCE_TIER");
+            }
+            lock
+        };
+        let policy = empty_policy();
+        let d = detect(&policy, false).expect("empty policy must resolve");
+        assert!(
+            matches!(d.tier, IsolationTier::AppContainerBfs),
+            "tier2_bfs on with empty policy must select AppContainerBfs, got {:?}",
+            d.tier
+        );
+        assert!(!d.needs_dacl_augmentation);
     }
 }
