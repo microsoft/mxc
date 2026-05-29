@@ -218,6 +218,48 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
    This error should persist for at least one release cycle so users have
    time to migrate, then it can be relaxed to the standard "unknown field"
    behavior.
+7. If the feature is a containment backend with a per-backend config
+   section, update the single-backend-section enforcement when it graduates
+   from experimental to top-level:
+
+   - In `wxc_common::config_parser`, rename the matching entry in
+     `present_backend_sections` and `owned_backend_section` from
+     `experimental.<name>` to `<name>`.
+   - In the JSON schema's top-level `allOf`, rekey the matching `if/then`
+     clause so it checks the new top-level section instead of
+     `experimental.<name>`.
+
+   Concretely, if `wslc` graduates the clause changes from
+
+   ```json
+   {
+     "if": {
+       "required": ["experimental"],
+       "properties": { "experimental": { "required": ["wslc"] } }
+     },
+     "then": {
+       "required": ["containment"],
+       "properties": { "containment": { "enum": ["wslc"] } }
+     }
+   }
+   ```
+
+   to
+
+   ```json
+   {
+     "if": { "required": ["wslc"] },
+     "then": {
+       "required": ["containment"],
+       "properties": { "containment": { "enum": ["wslc"] } }
+     }
+   }
+   ```
+
+   The `then` branch is unchanged: a backend section requires `containment`
+   to be set, and the value must be either the concrete backend name or any
+   abstract intent that resolves to it on at least one platform (for
+   example, `processContainer` accepts both `processcontainer` and `process`).
 
 ## Data Flow
 

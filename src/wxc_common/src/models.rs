@@ -45,6 +45,42 @@ pub enum ContainmentBackend {
     Bubblewrap,
 }
 
+impl ContainmentBackend {
+    /// Canonical wire string matching the JSON schema `containment` enum.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            ContainmentBackend::ProcessContainer => "processcontainer",
+            ContainmentBackend::Wslc => "wslc",
+            ContainmentBackend::Lxc => "lxc",
+            ContainmentBackend::Vm => "vm",
+            ContainmentBackend::MicroVm => "microvm",
+            ContainmentBackend::Hyperlight => "hyperlight",
+            ContainmentBackend::WindowsSandbox => "windows_sandbox",
+            ContainmentBackend::IsolationSession => "isolation_session",
+            ContainmentBackend::Seatbelt => "seatbelt",
+            ContainmentBackend::Bubblewrap => "bubblewrap",
+        }
+    }
+
+    /// JSON path of this backend's per-backend config section, if any.
+    /// Backends without a section return `None` and reject any backend
+    /// section paired with them.
+    pub fn section_path(&self) -> Option<&'static str> {
+        match self {
+            ContainmentBackend::ProcessContainer => Some("processContainer"),
+            ContainmentBackend::Lxc => Some("lxc"),
+            ContainmentBackend::WindowsSandbox => Some("experimental.windows_sandbox"),
+            ContainmentBackend::Wslc => Some("experimental.wslc"),
+            ContainmentBackend::Seatbelt => Some("experimental.seatbelt"),
+            ContainmentBackend::IsolationSession => Some("experimental.isolation_session"),
+            ContainmentBackend::Bubblewrap
+            | ContainmentBackend::Hyperlight
+            | ContainmentBackend::MicroVm
+            | ContainmentBackend::Vm => None,
+        }
+    }
+}
+
 /// Configuration specific to the Seatbelt backend (experimental).
 /// Used under `experimental.seatbelt` when `containment == Seatbelt`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

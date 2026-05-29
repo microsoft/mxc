@@ -31,7 +31,7 @@
         "bubblewrap"
       ],
       "default": "processcontainer",
-      "description": "Containment value to use for execution. Accepts both abstract intents ('process', 'vm') and concrete backends ('processcontainer', 'windows_sandbox', 'lxc', 'microvm', 'hyperlight', 'wslc', 'seatbelt', 'isolation_session', 'bubblewrap'). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities (e.g., 'process' resolves to ProcessContainer on Windows, LXC on Linux, Seatbelt on macOS; 'vm' resolves to Windows Sandbox on Windows). Note: 'windows_sandbox', 'wslc', 'seatbelt', 'isolation_session', 'hyperlight', and 'bubblewrap' are experimental and require the --experimental CLI flag. 'hyperlight' and 'bubblewrap' have no per-backend configuration block; they share the common filesystem/network policy fields. The legacy aliases 'appcontainer' and 'macos_sandbox' are still accepted by the parser (with a deprecation log line) but are intentionally omitted from this enum so editors steer authors toward the canonical names."
+      "description": "Containment value to use for execution. Accepts both abstract intents (''process'', ''vm'') and concrete backends (''processcontainer'', ''windows_sandbox'', ''lxc'', ''microvm'', ''hyperlight'', ''wslc'', ''seatbelt'', ''isolation_session'', ''bubblewrap''). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities (e.g., ''process'' resolves to ProcessContainer on Windows, LXC on Linux, Seatbelt on macOS; ''vm'' resolves to Windows Sandbox on Windows). Note: ''windows_sandbox'', ''wslc'', ''seatbelt'', ''isolation_session'', ''hyperlight'', and ''bubblewrap'' are experimental and require the --experimental CLI flag. ''hyperlight'' and ''bubblewrap'' have no per-backend configuration block; they share the common filesystem/network policy fields. The legacy aliases ''appcontainer'' and ''macos_sandbox'' are still accepted by the parser (with a deprecation log line) but are intentionally omitted from this enum so editors steer authors toward the canonical names."
     },
 
     "phase": {
@@ -492,5 +492,71 @@
         }
       }
     }
-  }
+  },
+
+  "allOf": [
+    {
+      "$comment": "Enforce single backend section: each per-backend section requires the matching `containment` value (concrete backend or matching abstract intent). Requiring `containment` to be present when a backend section is provided also rules out the ambiguous case where two backend sections appear with no `containment` set.",
+      "if": { "required": ["processContainer"] },
+      "then": {
+        "required": ["containment"],
+        "properties": { "containment": { "enum": ["processcontainer", "process"] } }
+      }
+    },
+    {
+      "$comment": "`appContainer` is the deprecated alias for `processContainer`; same containment values are valid.",
+      "if": { "required": ["appContainer"] },
+      "then": {
+        "required": ["containment"],
+        "properties": { "containment": { "enum": ["processcontainer", "process"] } }
+      }
+    },
+    {
+      "if": { "required": ["lxc"] },
+      "then": {
+        "required": ["containment"],
+        "properties": { "containment": { "enum": ["lxc"] } }
+      }
+    },
+    {
+      "if": {
+        "required": ["experimental"],
+        "properties": { "experimental": { "required": ["windows_sandbox"] } }
+      },
+      "then": {
+        "required": ["containment"],
+        "properties": { "containment": { "enum": ["windows_sandbox", "vm"] } }
+      }
+    },
+    {
+      "if": {
+        "required": ["experimental"],
+        "properties": { "experimental": { "required": ["wslc"] } }
+      },
+      "then": {
+        "required": ["containment"],
+        "properties": { "containment": { "enum": ["wslc"] } }
+      }
+    },
+    {
+      "if": {
+        "required": ["experimental"],
+        "properties": { "experimental": { "required": ["seatbelt"] } }
+      },
+      "then": {
+        "required": ["containment"],
+        "properties": { "containment": { "enum": ["seatbelt", "process"] } }
+      }
+    },
+    {
+      "if": {
+        "required": ["experimental"],
+        "properties": { "experimental": { "required": ["isolation_session"] } }
+      },
+      "then": {
+        "required": ["containment"],
+        "properties": { "containment": { "enum": ["isolation_session"] } }
+      }
+    }
+  ]
 }

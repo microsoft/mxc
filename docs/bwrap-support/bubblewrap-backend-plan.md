@@ -54,9 +54,9 @@ Add `"bubblewrap"` to the `containment` enum:
 ```
 
 No backend-specific config block for now. Bubblewrap will use only the shared
-cross-backend fields (`filesystem`, `network`, `process`, `lifecycle`, `ui`). Backend-specific
-knobs (e.g., namespace sharing, device bindings) can be added later under `experimental.bubblewrap`
-if needed.
+cross-backend fields (`filesystem`, `network`, `process`, `lifecycle`, `ui`).
+Adding backend-specific knobs later would mean introducing a dedicated section
+plus updating the parser's single-backend-section enforcement so it's allowed.
 
 ### 2. Rust Model Changes
 
