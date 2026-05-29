@@ -508,6 +508,13 @@ const CURRENT_SCHEMA_VERSION: &str = "0.6.0-alpha";
 /// The minimum schema version that implies BaseContainer backend usage.
 const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
 
+/// Known `experimental.<backend>` keys. Used by validation code to flag
+/// experimental backend sections that don't match the selected
+/// `containment`. Add a new entry when promoting a backend to a top-level
+/// section or graduating one from experimental.
+const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] =
+    &["windows_sandbox", "wslc", "seatbelt", "isolation_session"];
+
 /// Returns `true` if `version` is a BaseContainer-era schema version (>= 0.5.0).
 ///
 /// Pre-release labels are stripped before comparison, so `"0.5.0-alpha"` is
@@ -591,77 +598,56 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
 
 // ---------- Conversion from raw JSON to domain model ----------
 
-/// Returns the list of per-backend section names present in the raw config.
-/// Used by `validate_single_backend_section` to detect configs that include
-/// backend sections for more than one backend.
 fn present_backend_sections(raw: &RawConfig) -> Vec<&'static str> {
     let mut sections: Vec<&'static str> = Vec::new();
+    let mut push = |backend: ContainmentBackend| {
+        if let Some(path) = backend.section_path() {
+            sections.push(path);
+        }
+    };
     if raw.process_container.is_some() {
-        sections.push("processContainer");
+        push(ContainmentBackend::ProcessContainer);
     }
     if raw.lxc.is_some() {
-        sections.push("lxc");
+        push(ContainmentBackend::Lxc);
     }
     if let Some(experimental) = raw.experimental.as_ref() {
         if experimental.windows_sandbox.is_some() {
-            sections.push("experimental.windows_sandbox");
+            push(ContainmentBackend::WindowsSandbox);
         }
         if experimental.wslc.is_some() {
-            sections.push("experimental.wslc");
+            push(ContainmentBackend::Wslc);
         }
         if experimental.seatbelt.is_some() {
-            sections.push("experimental.seatbelt");
+            push(ContainmentBackend::Seatbelt);
         }
         if experimental.isolation_session.is_some() {
-            sections.push("experimental.isolation_session");
+            push(ContainmentBackend::IsolationSession);
         }
     }
     sections
 }
 
-/// Returns the per-backend section "owned" by the given concrete containment,
-/// if any. Abstract intents and backends without a per-backend section return
-/// `None`, in which case no backend section is permitted.
-fn owned_backend_section(containment: &ContainmentBackend) -> Option<&'static str> {
-    match containment {
-        ContainmentBackend::ProcessContainer => Some("processContainer"),
-        ContainmentBackend::Lxc => Some("lxc"),
-        ContainmentBackend::WindowsSandbox => Some("experimental.windows_sandbox"),
-        ContainmentBackend::Wslc => Some("experimental.wslc"),
-        ContainmentBackend::Seatbelt => Some("experimental.seatbelt"),
-        ContainmentBackend::IsolationSession => Some("experimental.isolation_session"),
-        // Backends with no per-backend section: any backend section is foreign.
-        ContainmentBackend::Bubblewrap
-        | ContainmentBackend::Hyperlight
-        | ContainmentBackend::MicroVm
-        | ContainmentBackend::Vm => None,
-    }
-}
-
-/// Enforces that a config selecting one backend does not also carry per-backend
-/// sections for other backends. The runner only consults the section for the
-/// selected backend, so a stray `appContainer` block under `containment:
-/// "lxc"` would otherwise be silently ignored.
 fn validate_single_backend_section(
     containment: ContainmentBackend,
     present_sections: &[&'static str],
     logger: &mut Logger,
 ) -> Result<(), WxcError> {
-    let owned = owned_backend_section(&containment);
+    let allowed_section = containment.section_path();
     let extras: Vec<&'static str> = present_sections
         .iter()
         .copied()
-        .filter(|section| Some(*section) != owned)
+        .filter(|section| Some(*section) != allowed_section)
         .collect();
     if extras.is_empty() {
         return Ok(());
     }
 
     let containment_wire = containment.wire_name();
-    let msg = match owned {
-        Some(owned_name) => format!(
+    let msg = match allowed_section {
+        Some(name) => format!(
             "Multiple containment backends configured: 'containment' is '{containment_wire}' \
-             (allows the '{owned_name}' section), but the config also includes unrelated \
+             (allows the '{name}' section), but the config also includes unrelated \
              backend section(s): {}. Only one backend section is allowed; remove the unused \
              section(s).",
             extras.join(", "),
@@ -678,24 +664,12 @@ fn validate_single_backend_section(
     Err(WxcError::ConfigParse(msg))
 }
 
-/// Returns the experimental-block key that owns the given concrete
-/// containment in the *state-aware* shape (per-backend config nested under
-/// `experimental.<backend>`). Returns `None` for backends with no nested
-/// experimental section.
-fn state_aware_experimental_owner(containment: &ContainmentBackend) -> Option<&'static str> {
-    match containment {
-        ContainmentBackend::WindowsSandbox => Some("windows_sandbox"),
-        ContainmentBackend::Wslc => Some("wslc"),
-        ContainmentBackend::Seatbelt => Some("seatbelt"),
-        ContainmentBackend::IsolationSession => Some("isolation_session"),
-        _ => None,
-    }
-}
-
-/// State-aware mirror of `validate_single_backend_section`: inspects the raw
-/// `experimental` JSON for foreign backend keys.
-fn validate_state_aware_experimental(
-    containment: &ContainmentBackend,
+/// Rejects `experimental.<backend>` keys that don't match the resolved
+/// `containment`. When `containment` is `None` (state-aware non-provision
+/// phases can resolve the backend from `sandboxId`), a single key is
+/// allowed; two or more is unambiguously wrong.
+fn validate_experimental_backend_keys(
+    containment: Option<&ContainmentBackend>,
     experimental_raw: Option<&serde_json::Value>,
     logger: &mut Logger,
 ) -> Result<(), WxcError> {
@@ -703,27 +677,35 @@ fn validate_state_aware_experimental(
         return Ok(());
     };
 
-    const BACKEND_KEYS: &[&str] = &["windows_sandbox", "wslc", "seatbelt", "isolation_session"];
-    let owned = state_aware_experimental_owner(containment);
-    let foreign: Vec<&'static str> = BACKEND_KEYS
+    let matching_key = containment
+        .and_then(|c| c.section_path())
+        .and_then(|path| path.strip_prefix("experimental."));
+
+    let present: Vec<&'static str> = KNOWN_EXPERIMENTAL_BACKENDS
         .iter()
         .copied()
-        .filter(|key| map.contains_key(*key) && Some(*key) != owned)
+        .filter(|key| map.contains_key(*key))
         .collect();
 
-    if foreign.is_empty() {
+    let rejected: Vec<&'static str> = match matching_key {
+        Some(allowed) => present.into_iter().filter(|k| *k != allowed).collect(),
+        None if present.len() > 1 => present,
+        None => return Ok(()),
+    };
+
+    if rejected.is_empty() {
         return Ok(());
     }
 
-    let foreign_qualified: Vec<String> = foreign
+    let qualified: Vec<String> = rejected
         .iter()
-        .map(|key| format!("experimental.{key}"))
+        .map(|k| format!("experimental.{k}"))
         .collect();
     let msg = format!(
-        "Multiple containment backends configured: state-aware request includes \
-         experimental backend section(s) that do not match 'containment': {}. \
-         Only one backend section is allowed; remove the unused section(s).",
-        foreign_qualified.join(", "),
+        "Multiple containment backends configured: request includes \
+         experimental backend section(s) {}. Only one backend section is allowed; \
+         remove the unused section(s).",
+        qualified.join(", "),
     );
     logger.log_line(&msg);
     Err(WxcError::ConfigParse(msg))
@@ -743,9 +725,7 @@ fn convert_raw_config_inner(
     require_process: bool,
     allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
-    // Capture which per-backend sections are present before any of the raw
-    // fields get consumed below; the multi-backend check needs to inspect
-    // them after `containment` has been resolved.
+    // Captured before `raw` fields are moved out below.
     let present_backend_sections = present_backend_sections(&raw);
 
     // New top-level fields
@@ -1264,9 +1244,7 @@ fn convert_raw_state_aware(
         Some(wire) => Some(parse_containment_str(wire, logger)?),
     };
 
-    if let Some(backend) = containment.as_ref() {
-        validate_state_aware_experimental(backend, raw.experimental.as_ref(), logger)?;
-    }
+    validate_experimental_backend_keys(containment.as_ref(), raw.experimental.as_ref(), logger)?;
 
     // Build a RawConfig surrogate so the inner ExecutionRequest is populated by the
     // same conversion path one-shot uses for cross-cutting wire fields.
@@ -3326,10 +3304,8 @@ mod tests {
         );
     }
 
-    // ====== Single-backend-section enforcement ======
+    // ---- Single-backend-section enforcement ----
 
-    /// Splices a backend fragment into a minimal one-shot config and returns
-    /// the base64-encoded payload `load_request` expects.
     fn make_multi_backend_config(containment: &str, extra_json: &str) -> String {
         let json = format!(
             r#"{{ "containment": "{containment}", "process": {{"commandLine": "echo hi"}}, {extra_json} }}"#
@@ -3337,9 +3313,6 @@ mod tests {
         base64_encode(json.as_bytes())
     }
 
-    /// Runs the parser against a config that should be rejected by the
-    /// single-backend-section check and asserts the error mentions both the
-    /// generic rejection phrase and the foreign section name.
     fn assert_multi_backend_rejected(containment: &str, extra_json: &str, expected_extra: &str) {
         let encoded = make_multi_backend_config(containment, extra_json);
         let mut logger = test_logger();
@@ -3356,8 +3329,6 @@ mod tests {
         );
     }
 
-    /// Runs the parser against a config that should be accepted by the
-    /// single-backend-section check and panics with the parser error if not.
     fn assert_config_accepted(containment: &str, extra_json: &str) {
         let encoded = make_multi_backend_config(containment, extra_json);
         let mut logger = test_logger();
@@ -3374,8 +3345,7 @@ mod tests {
         );
     }
 
-    // `appContainer` is a deprecated alias for `processContainer`; the check
-    // applies to the canonical key after aliasing.
+    // appContainer is a deprecated alias for processContainer.
     #[test]
     fn lxc_containment_with_legacy_app_container_alias_rejected() {
         assert_multi_backend_rejected(
@@ -3413,6 +3383,15 @@ mod tests {
             "bubblewrap",
             r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
             "lxc",
+        );
+    }
+
+    #[test]
+    fn bubblewrap_containment_with_process_container_section_rejected() {
+        assert_multi_backend_rejected(
+            "bubblewrap",
+            r#""processContainer": {"leastPrivilege": true}"#,
+            "processContainer",
         );
     }
 
@@ -3460,5 +3439,77 @@ mod tests {
             msg.contains("experimental.wslc"),
             "error did not name the foreign section: {msg}"
         );
+    }
+
+    // ---- Abstract-intent coverage ----
+    // Backend sections paired with `containment: "process"` / "vm" must be
+    // accepted iff the intent resolves to the owning backend on this OS.
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn abstract_process_with_process_container_accepted_on_windows() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "containment": "process",
+            "processContainer": {}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        load_request(&encoded, &mut logger, true)
+            .expect("process resolves to ProcessContainer on Windows");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn abstract_process_with_seatbelt_accepted_on_macos() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "containment": "process",
+            "experimental": {"seatbelt": {}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        load_request(&encoded, &mut logger, true).expect("process resolves to Seatbelt on macOS");
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[test]
+    fn abstract_process_with_process_container_rejected_off_windows() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "containment": "process",
+            "processContainer": {}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        load_request(&encoded, &mut logger, true)
+            .expect_err("processContainer is foreign when process resolves off Windows");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn abstract_vm_with_windows_sandbox_accepted_on_windows() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "containment": "vm",
+            "experimental": {"windows_sandbox": {}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        load_request(&encoded, &mut logger, true)
+            .expect("vm resolves to WindowsSandbox on Windows");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn abstract_vm_with_windows_sandbox_rejected_off_windows() {
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "containment": "vm",
+            "experimental": {"windows_sandbox": {}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        load_request(&encoded, &mut logger, true).expect_err("vm has no resolver off Windows");
     }
 }

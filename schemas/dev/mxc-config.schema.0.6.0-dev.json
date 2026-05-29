@@ -17,9 +17,9 @@
     },
     "containment": {
       "type": "string",
-      "enum": ["process", "processcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "seatbelt", "isolation_session", "bubblewrap"],
+      "enum": ["process", "vm", "processcontainer", "windows_sandbox", "lxc", "microvm", "wslc", "seatbelt", "isolation_session", "bubblewrap", "hyperlight"],
       "default": "processcontainer",
-      "description": "Containment value to use for execution. Accepts both abstract intents ('process', 'microvm') and concrete backends ('processcontainer', 'windows_sandbox', 'lxc', 'microvm', 'wslc', 'seatbelt', 'isolation_session', 'bubblewrap'). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities. Note: 'windows_sandbox', 'wslc', 'seatbelt', 'isolation_session', and 'bubblewrap' are experimental and require the --experimental CLI flag."
+      "description": "Containment value to use for execution. Accepts abstract intents ('process', 'vm') and concrete backends ('processcontainer', 'windows_sandbox', 'lxc', 'microvm', 'wslc', 'seatbelt', 'isolation_session', 'bubblewrap', 'hyperlight'). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities. Note: 'windows_sandbox', 'wslc', 'seatbelt', 'isolation_session', 'bubblewrap', and 'hyperlight' are experimental and require the --experimental CLI flag."
     },
 
     "phase": {
@@ -463,7 +463,7 @@
       },
       "then": {
         "required": ["containment"],
-        "properties": { "containment": { "enum": ["windows_sandbox"] } }
+        "properties": { "containment": { "enum": ["windows_sandbox", "vm"] } }
       }
     },
     {
