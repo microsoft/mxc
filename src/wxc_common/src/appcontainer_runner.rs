@@ -143,7 +143,7 @@ fn compute_attr_count(least_privilege_mode: bool, ui_disable: bool, pipe_mode: b
         n += 1;
     }
     if pipe_mode {
-        n += 1; // HANDLE_LIST for inheritable pipe handles
+        n += 1; // one attribute slot for HANDLE_LIST (the list itself can hold 1..N handles)
     }
     n
 }
@@ -561,11 +561,30 @@ impl AppContainerScriptRunner {
             h_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
                 .map_err(|e| WxcError::Process(format!("GetStdHandle(STDERR): {e}")))?;
 
+            if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
+                return Err(WxcError::Process(
+                    "GetStdHandle(STDIN) returned null/invalid handle".to_string(),
+                ));
+            }
+            if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
+                return Err(WxcError::Process(
+                    "GetStdHandle(STDOUT) returned null/invalid handle".to_string(),
+                ));
+            }
+            if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
+                return Err(WxcError::Process(
+                    "GetStdHandle(STDERR) returned null/invalid handle".to_string(),
+                ));
+            }
+
             // Ensure the handles are inheritable.
             unsafe {
-                let _ = SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT);
-                let _ = SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT);
-                let _ = SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT);
+                SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                    .map_err(|e| WxcError::Process(format!("SetHandleInformation(STDIN): {e}")))?;
+                SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                    .map_err(|e| WxcError::Process(format!("SetHandleInformation(STDOUT): {e}")))?;
+                SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                    .map_err(|e| WxcError::Process(format!("SetHandleInformation(STDERR): {e}")))?;
             }
 
             handle_list.push(h_stdin);

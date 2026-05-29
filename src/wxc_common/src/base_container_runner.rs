@@ -581,9 +581,9 @@ impl ScriptRunner for BaseContainerRunner {
         }
 
         // --- Retrieve parent std handles for passthrough (pipe mode only) ---
-        let h_stdin;
-        let h_stdout;
-        let h_stderr;
+        let mut h_stdin = HANDLE::default();
+        let mut h_stdout = HANDLE::default();
+        let mut h_stderr = HANDLE::default();
 
         if pipe_mode {
             h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
@@ -599,16 +599,34 @@ impl ScriptRunner for BaseContainerRunner {
                 Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")),
             };
 
+            if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
+                return ScriptResponse::error("GetStdHandle(STDIN) returned null/invalid handle");
+            }
+            if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
+                return ScriptResponse::error("GetStdHandle(STDOUT) returned null/invalid handle");
+            }
+            if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
+                return ScriptResponse::error("GetStdHandle(STDERR) returned null/invalid handle");
+            }
+
             // Ensure the handles are inheritable.
             unsafe {
-                let _ = SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT);
-                let _ = SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT);
-                let _ = SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT);
+                if let Err(e) =
+                    SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                {
+                    return ScriptResponse::error(&format!("SetHandleInformation(STDIN): {e}"));
+                }
+                if let Err(e) =
+                    SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                {
+                    return ScriptResponse::error(&format!("SetHandleInformation(STDOUT): {e}"));
+                }
+                if let Err(e) =
+                    SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                {
+                    return ScriptResponse::error(&format!("SetHandleInformation(STDERR): {e}"));
+                }
             }
-        } else {
-            h_stdin = HANDLE::default();
-            h_stdout = HANDLE::default();
-            h_stderr = HANDLE::default();
         }
 
         // STARTUPINFOW -- in pipe mode, pass parent handles via STARTF_USESTDHANDLES
@@ -691,11 +709,16 @@ impl ScriptRunner for BaseContainerRunner {
 
             let result = unsafe {
                 create_process_in_sandbox(
-                    ptr::null(),             // applicationName (resolved from commandLine)
-                    cmd_wide.as_mut_ptr(),   // commandLine
-                    ptr::null(),             // processAttributes (must be NULL)
-                    ptr::null(),             // threadAttributes  (must be NULL)
-                    i32::from(false),        // inheritHandles (must be FALSE)
+                    ptr::null(),           // applicationName (resolved from commandLine)
+                    cmd_wide.as_mut_ptr(), // commandLine
+                    ptr::null(),           // processAttributes (must be NULL)
+                    ptr::null(),           // threadAttributes  (must be NULL)
+                    // inheritHandles: must be FALSE per the OS sandbox API contract.
+                    // Unlike regular CreateProcess, CreateProcessInSandbox treats the
+                    // explicit STDIO handles in STARTUPINFO (hStdInput/hStdOutput/hStdError)
+                    // as inheritable when STARTF_USESTDHANDLES is set, but does not support
+                    // general handle inheritance.
+                    i32::from(false),        // inheritHandles
                     current_creation_flags,  // creationFlags
                     current_env_ptr,         // environment
                     cwd_ptr,                 // currentDirectory
