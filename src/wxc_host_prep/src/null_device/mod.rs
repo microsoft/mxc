@@ -3,7 +3,7 @@
 
 //! Reapply the documented security descriptor on `\Device\Null`.
 //!
-//! See `set-null-acl-plan.md` (Tessera) for full background. Briefly:
+//! See `set-null-acl-plan.md` (internal design doc) for full background. Briefly:
 //! on downlevel Windows builds that pre-date the
 //! `Feature_AgenticAppContainerBfsSupport` ship, AppContainer / LPAC
 //! processes cannot open `\Device\Null` — every tool that writes to

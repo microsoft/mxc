@@ -17,6 +17,8 @@ use lxc_common::lxc_runner::LxcScriptRunner;
 use lxc_common::signal_cleanup;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use wxc_common::hyperlight_runner::HyperlightScriptRunner;
+#[cfg(feature = "microvm")]
+use wxc_common::nanvix_runner::NanVixScriptRunner;
 
 #[derive(Parser)]
 #[command(name = "lxc-exec", about = "Linux Container Executor")]
@@ -231,6 +233,21 @@ fn main() {
                 eprintln!(
                     "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
                 );
+                process::exit(1);
+            }
+        }
+        ContainmentBackend::MicroVm => {
+            if !request.experimental_enabled {
+                eprintln!("Error: MicroVM is an experimental feature. Use --experimental flag.");
+                process::exit(1);
+            }
+            #[cfg(feature = "microvm")]
+            {
+                Box::new(NanVixScriptRunner::new())
+            }
+            #[cfg(not(feature = "microvm"))]
+            {
+                eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
                 process::exit(1);
             }
         }

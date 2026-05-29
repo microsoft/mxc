@@ -1,17 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::io::IsTerminal;
 use std::ptr;
 
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, HANDLE, HLOCAL, WAIT_FAILED,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_ALREADY_EXISTS, HANDLE,
+    HANDLE_FLAG_INHERIT, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::{FreeSid, PSID, TOKEN_QUERY};
+use windows::Win32::System::Console::{
+    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::SystemServices::SE_GROUP_ENABLED;
 use windows::Win32::System::Threading::{
@@ -20,8 +24,9 @@ use windows::Win32::System::Threading::{
     UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS,
     PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
-    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-    STARTUPINFOEXW, STARTUPINFOW,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    STARTUPINFOW,
 };
 use windows_core::{PCWSTR, PWSTR};
 
@@ -194,13 +199,16 @@ struct SecurityCapabilities {
 /// Always at least 1 (`SECURITY_CAPABILITIES`). LPAC adds one
 /// (`ALL_APPLICATION_PACKAGES_POLICY`); UI-disable adds one
 /// (`MITIGATION_POLICY` for Win32k disable).
-fn compute_attr_count(least_privilege_mode: bool, ui_disable: bool) -> u32 {
-    let mut n = 1;
+fn compute_attr_count(least_privilege_mode: bool, ui_disable: bool, pipe_mode: bool) -> u32 {
+    let mut n = 1; // SECURITY_CAPABILITIES always present
     if least_privilege_mode {
         n += 1;
     }
     if ui_disable {
         n += 1;
+    }
+    if pipe_mode {
+        n += 1; // one attribute slot for HANDLE_LIST (the list itself can hold 1..N handles)
     }
     n
 }
@@ -481,10 +489,22 @@ impl AppContainerScriptRunner {
             reserved: 0,
         };
 
+        // --- Determine STDIO mode ---
+        // If wxc-exec's stdout or stderr is not a terminal (i.e., piped by the SDK),
+        // we forward our own std handles to the child via STARTF_USESTDHANDLES so the
+        // child's output streams directly to the SDK in real time. Otherwise we use
+        // console sharing (the ConPTY path).
+        let pipe_mode = !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
+
+        if pipe_mode {
+            logger.log_line("STDIO mode: passthrough (forwarding parent handles to child)");
+        }
+
         // --- Allocate and initialize attribute list ---
         let attr_count = compute_attr_count(
             request.policy.least_privilege_mode,
             request.policy.ui.disable,
+            pipe_mode,
         );
 
         // Lifetime spans the attribute list and CreateProcessW:
@@ -565,7 +585,7 @@ impl AppContainerScriptRunner {
             }
         }
 
-        // 3. MITIGATION_POLICY (Win32k syscall disable) — applied by the kernel
+        // 3. MITIGATION_POLICY (Win32k syscall disable) -- applied by the kernel
         // before the child runs any user-mode code, so there is no race window.
         if request.policy.ui.disable {
             unsafe {
@@ -588,14 +608,90 @@ impl AppContainerScriptRunner {
             logger.log_line("Win32k mitigation applied to child process");
         }
 
+        // --- Setup handle passthrough (pipe mode only) ---
+        // Forward wxc-exec's own stdin/stdout/stderr handles to the child so the
+        // child's output streams directly to the SDK caller in real time.
+        // Handle list for PROC_THREAD_ATTRIBUTE_HANDLE_LIST. Must outlive CreateProcessW.
+        let mut handle_list: Vec<HANDLE> = Vec::new();
+
+        let h_stdin;
+        let h_stdout;
+        let h_stderr;
+
+        if pipe_mode {
+            h_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
+                .map_err(|e| WxcError::Process(format!("GetStdHandle(STDIN): {e}")))?;
+            h_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
+                .map_err(|e| WxcError::Process(format!("GetStdHandle(STDOUT): {e}")))?;
+            h_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
+                .map_err(|e| WxcError::Process(format!("GetStdHandle(STDERR): {e}")))?;
+
+            if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
+                return Err(WxcError::Process(
+                    "GetStdHandle(STDIN) returned null/invalid handle".to_string(),
+                ));
+            }
+            if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
+                return Err(WxcError::Process(
+                    "GetStdHandle(STDOUT) returned null/invalid handle".to_string(),
+                ));
+            }
+            if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
+                return Err(WxcError::Process(
+                    "GetStdHandle(STDERR) returned null/invalid handle".to_string(),
+                ));
+            }
+
+            // Ensure the handles are inheritable.
+            unsafe {
+                SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                    .map_err(|e| WxcError::Process(format!("SetHandleInformation(STDIN): {e}")))?;
+                SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                    .map_err(|e| WxcError::Process(format!("SetHandleInformation(STDOUT): {e}")))?;
+                SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                    .map_err(|e| WxcError::Process(format!("SetHandleInformation(STDERR): {e}")))?;
+            }
+
+            handle_list.push(h_stdin);
+            handle_list.push(h_stdout);
+            handle_list.push(h_stderr);
+
+            // 4. HANDLE_LIST -- restrict which handles the child inherits.
+            unsafe {
+                UpdateProcThreadAttribute(
+                    attr_list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                    Some(handle_list.as_ptr() as *const core::ffi::c_void),
+                    handle_list.len() * std::mem::size_of::<HANDLE>(),
+                    None,
+                    None,
+                )
+                .map_err(|e| {
+                    WxcError::Process(format!("UpdateProcThreadAttribute(HANDLE_LIST): {}", e))
+                })?;
+            }
+        } else {
+            h_stdin = HANDLE::default();
+            h_stdout = HANDLE::default();
+            h_stderr = HANDLE::default();
+        }
+
         // --- Setup STARTUPINFOEXW ---
         let mut desktop_wide = string_util::to_wide("winsta0\\default");
 
-        // No STARTF_USESTDHANDLES — child inherits parent's console.
         let si_ex = STARTUPINFOEXW {
             StartupInfo: STARTUPINFOW {
                 cb: std::mem::size_of::<STARTUPINFOEXW>() as u32,
                 lpDesktop: PWSTR(desktop_wide.as_mut_ptr()),
+                dwFlags: if pipe_mode {
+                    STARTF_USESTDHANDLES
+                } else {
+                    Default::default()
+                },
+                hStdInput: h_stdin,
+                hStdOutput: h_stdout,
+                hStdError: h_stderr,
                 ..Default::default()
             },
             lpAttributeList: attr_list,
@@ -644,41 +740,18 @@ impl AppContainerScriptRunner {
             EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0 | CREATE_UNICODE_ENVIRONMENT.0,
         );
 
-        // --- Create process (console inheritance) ---
+        // --- Create process ---
         //
-        // Console I/O path — no pipes, no relay threads:
+        // In console-sharing mode (pipe_mode == false):
+        //   stdin:  node-pty -> ConPTY -> wxc-exec -> child (AppContainer)
+        //   stdout: node-pty <- ConPTY <----------- child (shares parent's console)
+        //   bInheritHandles = false, no STARTF_USESTDHANDLES.
         //
-        //   stdin:  node-pty → ConPTY → wxc-exec → PowerShell (AppContainer)
-        //   stdout: node-pty ← ConPTY ←─────────── PowerShell (shares parent's console)
-        //                    ↑
-        //                 onData()
-        //
-        // The child attaches to wxc-exec's console (the ConPTY created by node-pty)
-        // so PowerShell sees a real terminal — PSReadLine, ANSI, UTF-8 all work.
-        //
-        // Why this works for AppContainer:
-        //
-        //   1. Kernel (PspSetupUserProcessAddressSpace):
-        //      ObDuplicateObject copies the parent's ConsoleHandle
-        //      (\Device\ConDrv\Reference) into the child using the parent's
-        //      security context — before the AppContainer token takes effect.
-        //
-        //   2. condrv:
-        //      FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL is set, so the I/O
-        //      Manager permits the AppContainer to open \Device\ConDrv\Connect.
-        //
-        //   3. condrv (CdCreateConnection):
-        //      Inheritance path skips CdAccessCheck. Having the Reference
-        //      handle is proof of authorization.
-        //
-        //   4. conhost (ConsoleHandleConnectionRequest):
-        //      No token check — allocates I/O handles unconditionally.
-        //
-        // bInheritHandles = false: we have no explicit handles to inherit.
-        // Console attachment is a separate mechanism — the child automatically
-        // attaches to the parent's console session via \Device\ConDrv during
-        // process initialization, regardless of bInheritHandles. Since we don't
-        // pass CREATE_NEW_CONSOLE or DETACH_PROCESS, the child shares our console.
+        // In pipe-passthrough mode (pipe_mode == true):
+        //   The child receives wxc-exec's own stdin/stdout/stderr handles directly.
+        //   Child output streams to the SDK in real time (no intermediate buffering).
+        //   bInheritHandles = true, with PROC_THREAD_ATTRIBUTE_HANDLE_LIST restricting
+        //   which handles the child can access.
         let mut pi = PROCESS_INFORMATION::default();
 
         // Pre-launch check: abort if policy paths are on ReFS (Dev Drive) volumes
@@ -700,7 +773,7 @@ impl AppContainerScriptRunner {
                 Some(PWSTR(cmd_line_wide.as_mut_ptr())),
                 None,
                 None,
-                false, // bInheritHandles = false — no explicit handles to inherit
+                pipe_mode, // bInheritHandles: true only in pipe mode (restricted by HANDLE_LIST)
                 creation_flags,
                 Some(env_ptr),
                 working_dir_pcwstr,
@@ -755,7 +828,6 @@ impl AppContainerScriptRunner {
         }
 
         // --- Wait for child process to exit ---
-        // No relay threads needed — child shares our console directly.
         let timeout_ms = get_timeout_milliseconds(request.script_timeout);
 
         let wait_result = unsafe { WaitForSingleObject(process_handle.get(), timeout_ms) };
@@ -989,22 +1061,28 @@ impl Drop for AppContainerScriptRunner {
 mod tests {
     #[test]
     fn attr_count_neither() {
-        assert_eq!(super::compute_attr_count(false, false), 1);
+        assert_eq!(super::compute_attr_count(false, false, false), 1);
     }
 
     #[test]
     fn attr_count_lpac_only() {
-        assert_eq!(super::compute_attr_count(true, false), 2);
+        assert_eq!(super::compute_attr_count(true, false, false), 2);
     }
 
     #[test]
     fn attr_count_ui_disable_only() {
-        assert_eq!(super::compute_attr_count(false, true), 2);
+        assert_eq!(super::compute_attr_count(false, true, false), 2);
     }
 
     #[test]
     fn attr_count_both() {
-        assert_eq!(super::compute_attr_count(true, true), 3);
+        assert_eq!(super::compute_attr_count(true, true, false), 3);
+    }
+
+    #[test]
+    fn attr_count_pipe_mode() {
+        assert_eq!(super::compute_attr_count(false, false, true), 2);
+        assert_eq!(super::compute_attr_count(true, true, true), 4);
     }
 
     #[test]

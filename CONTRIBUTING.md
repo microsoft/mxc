@@ -197,6 +197,8 @@ PowerShell and shell helper scripts that drive the executor end-to-end live unde
 
 When the change is ready, mark the Draft PR as **Ready for Review**. The PR template asks you to confirm CLA acceptance and to update [`.github/copilot-instructions.md`](./.github/copilot-instructions.md) if your change affects build commands, project architecture, or key conventions.
 
+PR builds don't run automatically — Microsoft ADO policy requires a Microsoft employee to comment `/azp run` to start the `MXC-PR-Build` pipeline. See [`docs/pull-requests.md`](./docs/pull-requests.md) for details.
+
 Reviewers will look for:
 
 * Correctness and security — MXC is a sandboxing system, so containment policy changes get extra scrutiny.
