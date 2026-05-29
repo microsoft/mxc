@@ -106,13 +106,20 @@ fn parse_environment_block(block: *const u16) -> Vec<(String, String)> {
         offset += 1; // skip the null terminator
 
         // Split on the first '=' (env vars can have '=' in the value).
-        // Skip entries that start with '=' (hidden drive-letter vars like "=C:=C:\").
-        if let Some(eq_pos) = entry.find('=') {
-            if eq_pos > 0 {
-                let key = entry[..eq_pos].to_string();
-                let value = entry[eq_pos + 1..].to_string();
+        // Entries that start with '=' are hidden per-drive current-directory vars
+        // (e.g. "=C:=C:\Users\foo"). For those, the key includes the leading '='
+        // and we split on the second '='.
+        if let Some(stripped) = entry.strip_prefix('=') {
+            // Key is everything up to and including the drive colon, e.g. "=C:"
+            if let Some(eq_pos) = stripped.find('=') {
+                let key = format!("={}", &stripped[..eq_pos]);
+                let value = stripped[eq_pos + 1..].to_string();
                 entries.push((key, value));
             }
+        } else if let Some(eq_pos) = entry.find('=') {
+            let key = entry[..eq_pos].to_string();
+            let value = entry[eq_pos + 1..].to_string();
+            entries.push((key, value));
         }
     }
     entries
