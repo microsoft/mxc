@@ -35,9 +35,7 @@ A copy of Python 3.x is needed for executing test scripts.
 src/            Rust workspace (wxc-exec native binary + wxc_common library)
 sdk/            TypeScript SDK (@microsoft/mxc-sdk npm package)
 docs/           Schema and configuration documentation
-examples/       Example configurations
-test_configs/   Test JSON configurations
-test_scripts/   Test scripts for exercising MXC
+tests/          Test collateral (configs, scripts, examples)
 ```
 
 ### Building WXC
@@ -181,7 +179,7 @@ This will:
 
 ### LXC Example Configurations
 
-See `examples/11_lxc_hello_world.json`, `examples/12_lxc_filesystem_access.json`, and `examples/13_lxc_network_restricted.json` for LXC-specific examples.
+See `tests/examples/11_lxc_hello_world.json`, `tests/examples/12_lxc_filesystem_access.json`, and `tests/examples/13_lxc_network_restricted.json` for LXC-specific examples.
 
 ### Running on Linux
 
@@ -220,7 +218,7 @@ This will:
 
 ### macOS Example Configurations
 
-See `examples/15_mac_hello_world.json` and `examples/21_mac_python_info.json` for macOS-specific examples.
+See `tests/examples/15_mac_hello_world.json` and `tests/examples/21_mac_python_info.json` for macOS-specific examples.
 
 ### Running on macOS
 

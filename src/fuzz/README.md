@@ -24,9 +24,9 @@ cargo +nightly install cargo-fuzz
 $asanDir = 'C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\<ver>\bin\HostX64\x64'
 $env:PATH = "$asanDir;$env:PATH"
 
-# Run a target for 30 seconds (uses test_configs/ as the seed corpus)
+# Run a target for 30 seconds (uses tests/configs/ as the seed corpus)
 cd src\fuzz
-cargo +nightly fuzz run config_parser ..\..\test_configs -- -max_total_time=30
+cargo +nightly fuzz run config_parser ..\..\tests\configs -- -max_total_time=30
 ```
 
 Findings are written to `artifacts/<target>/`. Reproduce a finding with:

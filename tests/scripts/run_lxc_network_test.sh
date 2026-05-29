@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
 
 if [ ! -f "$LXC_EXEC" ]; then
@@ -16,5 +16,5 @@ if [ ! -f "$LXC_EXEC" ]; then
 fi
 
 echo "Running LXC network test..."
-"$LXC_EXEC" "$REPO_DIR/test_configs/lxc_network_test.json"
+"$LXC_EXEC" "$REPO_DIR/tests/configs/lxc_network_test.json"
 echo "LXC network test complete."

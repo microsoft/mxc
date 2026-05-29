@@ -27,7 +27,7 @@ trigger:
   paths:
     exclude:
     - 'docs/**'
-    - 'examples/**'
+    - 'tests/examples/**'
     - '.github/ISSUE_TEMPLATE/**'
     - '.github/PULL_REQUEST_TEMPLATE.md'
     - '.github/copilot-instructions.md'
@@ -50,7 +50,7 @@ pr:
   paths:
     exclude:
     - 'docs/**'
-    - 'examples/**'
+    - 'tests/examples/**'
     - '.github/ISSUE_TEMPLATE/**'
     - '.github/PULL_REQUEST_TEMPLATE.md'
     - '.github/copilot-instructions.md'

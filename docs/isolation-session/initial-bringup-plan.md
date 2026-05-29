@@ -262,7 +262,7 @@ CI, since CI machines do not have a Windows build with the IsolationSession feat
 
 **Integration tests (require a Windows host with the IsolationSession feature enabled):**
 
-Two end-to-end configs live under `test_configs/`:
+Two end-to-end configs live under `tests/configs/`:
 
 - `isolation_session_hello.json` — happy path. Prints `USERNAME`,
   `MYVAR`, `CWD`, and `whoami` from inside the session. Validates the
@@ -272,7 +272,7 @@ Two end-to-end configs live under `test_configs/`:
 - `isolation_session_exit42.json` — runs `exit 42` and validates that
   exit code 42 propagates to `ScriptResponse.exit_code`.
 
-A test runner at `test_scripts/run_isolation_session_tests.ps1` invokes
+A test runner at `tests/scripts/run_isolation_session_tests.ps1` invokes
 both configs via `wxc-exec.exe --experimental`, validates exit codes and
 expected output substrings, and reports a pass/fail summary. Pattern
 follows the existing per-backend integration scripts (e.g.

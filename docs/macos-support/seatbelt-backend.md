@@ -122,7 +122,7 @@ After setup, verify the build works end-to-end:
 ./build-mac.sh --rust-only
 
 # Run a quick smoke test
-./src/target/aarch64-apple-darwin/release/mxc-exec-mac --debug examples/15_mac_hello_world.json
+./src/target/aarch64-apple-darwin/release/mxc-exec-mac --debug tests/examples/15_mac_hello_world.json
 ```
 
 You should see sandbox profile generation output followed by

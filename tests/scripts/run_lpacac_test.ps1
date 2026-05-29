@@ -13,7 +13,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
 if (-not $BinDir) {
     if ($Release) {
@@ -24,7 +24,7 @@ if (-not $BinDir) {
 }
 
 $WxcExec = Join-Path $BinDir "wxc-exec.exe"
-$TestConfig = Join-Path $RepoRoot "test_configs\basic_lpac.json"
+$TestConfig = Join-Path $RepoRoot "tests\configs\basic_lpac.json"
 
 if (-not (Test-Path $WxcExec)) {
     Write-Host "ERROR: wxc-exec.exe not found at $WxcExec" -ForegroundColor Red

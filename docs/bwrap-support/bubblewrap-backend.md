@@ -273,13 +273,13 @@ resolution.
 
 ```bash
 # Single basic test
-test_scripts/run_bwrap_basic_test.sh
+tests/scripts/run_bwrap_basic_test.sh
 
 # All Bubblewrap tests
-test_scripts/run_bwrap_all_tests.sh
+tests/scripts/run_bwrap_all_tests.sh
 ```
 
-Test configs are in `test_configs/bubblewrap_*.json`.
+Test configs are in `tests/configs/bubblewrap_*.json`.
 
 ## Limitations
 

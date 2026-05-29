@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
 
 if [ ! -f "$LXC_EXEC" ]; then
@@ -16,7 +16,7 @@ if [ ! -f "$LXC_EXEC" ]; then
 fi
 
 echo "Running Bubblewrap network block test..."
-OUTPUT=$("$LXC_EXEC" --experimental "$REPO_DIR/test_configs/bubblewrap_network_block.json" 2>&1 || true)
+OUTPUT=$("$LXC_EXEC" --experimental "$REPO_DIR/tests/configs/bubblewrap_network_block.json" 2>&1 || true)
 echo "$OUTPUT"
 
 if echo "$OUTPUT" | grep -qi "blocked\|network.*correctly\|connection refused\|network is unreachable"; then

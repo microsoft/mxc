@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
 
 if [ ! -f "$LXC_EXEC" ]; then
@@ -26,7 +26,7 @@ echo "test content" | sudo tee "$RO_DIR/test.txt" > /dev/null
 echo "should not see this" | sudo tee "$DENIED_DIR/secret.txt" > /dev/null
 
 echo "Running Bubblewrap filesystem test..."
-"$LXC_EXEC" --experimental "$REPO_DIR/test_configs/bubblewrap_filesystem.json"
+"$LXC_EXEC" --experimental "$REPO_DIR/tests/configs/bubblewrap_filesystem.json"
 echo "Bubblewrap filesystem test complete."
 
 # Verify the write succeeded

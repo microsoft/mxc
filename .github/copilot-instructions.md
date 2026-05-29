@@ -84,12 +84,12 @@ npm run test:integration
 node --test dist/cli.test.js
 
 # Local PowerShell helpers — run from repo root, require built binaries
-test_scripts\run_test_configs.ps1            # All test configs via wxc_test_driver
-test_scripts\run_basicac_test.ps1            # Single AppContainer test
-test_scripts\run_isolation_session_tests.ps1                # IsolationSession one-shot E2E (requires host with the OS-side IsoSessionOps service)
-test_scripts\run_isolation_session_state_aware_tests.ps1    # IsolationSession state-aware lifecycle E2E (multi-invocation provision/start/exec/stop/deprovision, same host requirements)
-test_scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
-test_scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap)
+tests\scripts\run_test_configs.ps1            # All test configs via wxc_test_driver
+tests\scripts\run_basicac_test.ps1            # Single AppContainer test
+tests\scripts\run_isolation_session_tests.ps1                # IsolationSession one-shot E2E (requires host with the OS-side IsoSessionOps service)
+tests\scripts\run_isolation_session_state_aware_tests.ps1    # IsolationSession state-aware lifecycle E2E (multi-invocation provision/start/exec/stop/deprovision, same host requirements)
+tests\scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
+tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap)
 
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
@@ -142,7 +142,7 @@ Core references:
 - `docs/schema.md` — full JSON configuration schema reference
 - `docs/versioning.md` — schema versioning design, experimental feature lifecycle, and promotion process
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
-- `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
+- `docs/examples.md` — annotated configuration examples (see also `tests/examples/` and `tests/configs/`)
 - `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
 - `docs/host-prep.md` — `wxc-host-prep.exe` host setup binary (`prepare-system-drive` / `unprepare-system-drive` for the AppContainer ACEs on the system-drive root, plus `prepare-null-device` / `verify-null-device` / `dump-null-device` for the `\Device\Null` security descriptor that AppContainer-based backends require). Owns elevation via embedded `requireAdministrator` manifest — `wxc-exec.exe` no longer self-elevates.
 - `docs/sandbox-policy/v1/policy.md` — sandbox policy v1 specification

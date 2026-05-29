@@ -107,7 +107,7 @@ Adding a feature may touch these files:
 | `src/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |
 | `src/wxc_common/src/config_parser.rs` | Add `gpuIsolation` field to `RawExperimental` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
-| `test_configs/` | Test config exercising your feature |
+| `tests/configs/` | Test config exercising your feature |
 
 ## Step 1: Update the schema
 
@@ -333,10 +333,10 @@ Run it with and without the flag to verify:
 
 ```bash
 # With flag — experimental feature is active
-wxc-exec.exe test_configs/experimental_gpu_isolation.json --experimental --debug
+wxc-exec.exe tests/configs/experimental_gpu_isolation.json --experimental --debug
 
 # Without flag — experimental section silently ignored, normal execution
-wxc-exec.exe test_configs/experimental_gpu_isolation.json --debug
+wxc-exec.exe tests/configs/experimental_gpu_isolation.json --debug
 ```
 
 Verify three things:

@@ -13,7 +13,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
 
 if [ ! -f "$LXC_EXEC" ]; then
@@ -32,7 +32,7 @@ trap 'rm -f "$STDERR_FILE"' EXIT
 
 START=$(date +%s)
 set +e
-"$LXC_EXEC" "$REPO_DIR/test_configs/lxc_timeout.json" 2>"$STDERR_FILE"
+"$LXC_EXEC" "$REPO_DIR/tests/configs/lxc_timeout.json" 2>"$STDERR_FILE"
 EXIT_CODE=$?
 set -e
 ELAPSED=$(($(date +%s) - START))

@@ -295,9 +295,9 @@ the LXC runner: apply rules before execution, remove rules after.
 ### 9. Test Additions
 
 - Unit tests in `bwrap_common/src/bwrap_runner.rs` (command-line generation, policy mapping)
-- Test config files in `test_configs/` (e.g., `bubblewrap_basic.json`)
+- Test config files in `tests/configs/` (e.g., `bubblewrap_basic.json`)
 - E2E test in `wxc_e2e_tests` if applicable
-- Script in `test_scripts/run_bwrap_tests.sh`
+- Script in `tests/scripts/run_bwrap_tests.sh`
 
 ### 10. Documentation
 
@@ -354,5 +354,5 @@ policy gap is a design decision, not an implementation challenge.
 - `.github/copilot-instructions.md` (modify — add to backend table)
 
 ### Tests (new)
-- `test_configs/bubblewrap_basic.json`
-- `test_scripts/run_bwrap_tests.sh`
+- `tests/configs/bubblewrap_basic.json`
+- `tests/scripts/run_bwrap_tests.sh`

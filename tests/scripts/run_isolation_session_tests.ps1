@@ -45,7 +45,7 @@
     release dirs relative to the repo root.
 
 .PARAMETER ConfigDir
-    Path to the test_configs directory. Defaults to ..\test_configs.
+    Path to the tests/configs directory. Defaults to ..\configs.
 
 .EXAMPLE
     .\run_isolation_session_tests.ps1
@@ -58,10 +58,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
 if (-not $ConfigDir) {
-    $ConfigDir = Join-Path $RepoRoot "test_configs"
+    $ConfigDir = Join-Path $RepoRoot "tests\configs"
 }
 
 # Locate wxc-exec.exe --explicit path > host-arch target dir > other-arch

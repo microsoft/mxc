@@ -7,7 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
 if (-not $BinDir) {
     if ($Release) {
@@ -18,7 +18,7 @@ if (-not $BinDir) {
 }
 
 $wxcExe = Join-Path $BinDir "wxc-exec.exe"
-$testConfig = Join-Path $RepoRoot "test_configs\filesystem_bfs_spaces_test.json"
+$testConfig = Join-Path $RepoRoot "tests\configs\filesystem_bfs_spaces_test.json"
 $testDir = "C:\Users\Public\wxc bfs test"
 
 if (-not (Test-Path $wxcExe)) {
