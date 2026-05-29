@@ -1,19 +1,58 @@
-# Host preparation: `--prepare-system-drive`
+# Host preparation: `wxc-host-prep.exe`
 
-The `wxc-exec --prepare-system-drive` flag adds two persistent allow ACEs to
-the system-drive root (typically `C:\`) so that AppContainer-isolated
-processes can read directory metadata of the drive. Many common tools —
-`cmd.exe`, `powershell.exe`, `pwsh.exe`, `node.exe` — call APIs like
-`GetFileAttributesW("C:\\")`, `_stat("C:\\")`, or
+`wxc-host-prep.exe` is a Windows-only, privileged-by-manifest binary
+that owns the one-time host setup steps MXC requires before
+AppContainer- and other sandboxed workloads can run reliably. It is
+shipped alongside `wxc-exec.exe` inside the SDK bin payload.
+
+The binary has `requireAdministrator` baked into its embedded
+application manifest in release builds. The Windows loader prompts
+for UAC at process start (or, when launched under SYSTEM — e.g. from
+a scheduled task — satisfies the requirement trivially). The
+sandbox launcher `wxc-exec.exe` never elevates itself; all
+privilege-requiring setup work lives in `wxc-host-prep.exe` instead.
+
+> **Migrated from `wxc-exec --prepare-system-drive`.** Earlier
+> revisions of MXC let `wxc-exec` self-elevate via a hand-rolled
+> `ShellExecuteExW(runas)` dance. That capability has been removed
+> — `wxc-exec --prepare-system-drive` and
+> `wxc-exec --unprepare-system-drive` no longer exist. Use the
+> `wxc-host-prep` subcommands documented below.
+
+## Subcommands
+
+| Subcommand | Purpose |
+| --- | --- |
+| `prepare-system-drive` | Add minimum-rights ACEs for AppContainer SIDs to the system-drive root. |
+| `unprepare-system-drive` | Remove ACEs added by `prepare-system-drive` using precise tuple matching. |
+| `prepare-null-device` | Apply MXC's managed security descriptor to `\Device\Null`. |
+| `verify-null-device` | Check `\Device\Null` SD against the target without modifying it. |
+| `dump-null-device` | Print the current `\Device\Null` SD as SDDL. |
+
+All subcommands require elevation. The binary aborts with exit code
+`65` and a clear message if launched without an elevated token (e.g.
+running a debug build directly without `Run as Administrator`).
+
+### `prepare-system-drive`
+
+Adds two persistent, non-inheriting allow ACEs to the system-drive
+root (typically `C:\`) for the well-known AppContainer SIDs. Many
+common tools — `cmd.exe`, `powershell.exe`, `pwsh.exe`, `node.exe` —
+call APIs like `GetFileAttributesW("C:\\")`, `_stat("C:\\")`, or
 `[IO.DirectoryInfo]::GetAccessControl` during startup and fail with
 `ERROR_ACCESS_DENIED` inside an AppContainer because the well-known
-AppContainer SIDs are not granted any rights on the system-drive root
-by default.
+AppContainer SIDs are not granted any rights on the system-drive
+root by default.
 
-This is a one-time, host-wide setup step — it does not need to be re-run
-per container or per session.
+This is a one-time, host-wide setup step.
 
-## What it grants
+```
+wxc-host-prep prepare-system-drive [--target <path>]
+```
+
+`--target` overrides the system-drive lookup; the supplied path must
+be a literal drive root (`X:\`). Without it the binary uses
+`%SystemDrive%`.
 
 | Trustee | SID | Access mask | Inheritance |
 | --- | --- | --- | --- |
@@ -22,108 +61,194 @@ per container or per session.
 
 What this **does not** grant:
 
-- `FILE_LIST_DIRECTORY` — the container still cannot enumerate `C:\`.
+- `FILE_LIST_DIRECTORY` — containers still cannot enumerate `C:\`.
 - `FILE_READ_DATA` — irrelevant on a directory, but explicit.
 - any write rights.
 
-Because the ACEs are non-inheriting, descendant files and subdirectories
-of `C:\` are not affected — the change is scoped to the directory object
-itself.
+Because the ACEs are non-inheriting, descendant files and
+subdirectories of `C:\` are unaffected.
 
-## Usage
+Re-running `prepare-system-drive` is idempotent: when our exact ACE
+is already present, the scan-before-apply path detects the match and
+performs a no-op. If the system-drive root already has an explicit
+Allow ACE for one of the well-known AppContainer SIDs with a
+*different* mask or inheritance, the subcommand **refuses** rather
+than silently coalesce. The error message names the conflicting
+trustee and suggests an `icacls` command to clean it up first.
+Without this guard, `SetEntriesInAclW(GRANT_ACCESS)` would merge the
+masks and the tuple-precise revoke would not be able to undo the
+merge.
+
+### `unprepare-system-drive`
 
 ```
-wxc-exec --prepare-system-drive
+wxc-host-prep unprepare-system-drive [--target <path>]
 ```
 
-The flag self-elevates via UAC. If the current process is not already
-elevated, Windows shows a UAC prompt; the elevated child does the DACL
-write and exits, and the unelevated parent reports success.
+Removes ACEs added by `prepare-system-drive`. Uses **precise tuple
+matching**: only ACEs whose `(access mask, ACE type, inheritance
+flags)` exactly match what `prepare-system-drive` would have
+authored are removed. Other explicit ACEs for the same SIDs — e.g.
+an existing `icacls C:\ /grant "ALL APPLICATION PACKAGES":(R)`
+written by a third-party tool — are preserved.
 
-```
-wxc-exec --unprepare-system-drive
-```
-
-Removes ACEs the prepare step added. Uses **precise tuple matching**:
-only ACEs whose `(access mask, ACE type, inheritance flags)` exactly
-match what `--prepare-system-drive` would have authored are removed.
-Other explicit ACEs for the same SIDs — e.g. an existing
-`icacls C:\ /grant "ALL APPLICATION PACKAGES":(R)` written by a
-third-party tool — are preserved. This is symmetric with the PowerShell
-`Unprepare-SystemDriveForAppContainer.ps1` script's
-`RemoveAccessRuleSpecific` semantics.
-
-Re-running `--prepare-system-drive` is safe when our exact ACE is
-already present — the scan-before-apply detects the existing match and
-performs an idempotent no-op. The precise-revoke path is similarly
-idempotent. However: if the system-drive root already has an explicit
-Allow ACE for one of the well-known AppContainer SIDs with a *different*
-mask or inheritance, `--prepare-system-drive` will **refuse** rather
-than silently coalesce. The error message names the conflicting trustee
-and suggests an `icacls` command to clean it up first. Without this
-guard, `SetEntriesInAclW(GRANT_ACCESS)` would merge the masks and the
-tuple-precise revoke would not be able to undo the merge.
-
-## Verifying the result
-
-After running `--prepare-system-drive`, the two ACEs should be visible
-in the system-drive root's DACL:
+After running, the two ACEs should no longer appear in the DACL:
 
 ```powershell
 (Get-Acl C:\).Access |
     Where-Object { [uint32]$_.FileSystemRights -eq 0x00120088 -and -not $_.IsInherited }
 ```
 
-You should see two entries — one each for the two AppContainer groups —
-both with `FileSystemRights` listing
-`ReadAttributes, ReadExtendedAttributes, ReadPermissions, Synchronize`,
-`AccessControlType` of `Allow`, and `InheritanceFlags` of `None`.
+should return nothing.
+
+### `prepare-null-device`
+
+```
+wxc-host-prep prepare-null-device [--no-sacl] [--quiet] [--json] [--log <path>]
+```
+
+Applies MXC's managed security descriptor to `\Device\Null`. The
+Windows kernel resets the SD to a default value at every boot; for
+the AppContainer-based backends the default does not include the
+well-known AppContainer SIDs, and processes that open `NUL` for
+stdin/stdout/stderr redirection fail with `ERROR_ACCESS_DENIED`
+partway through startup. Run `prepare-null-device` once per boot
+from an elevated context (e.g. a scheduled task, an MDM-managed
+startup script, or interactively from an elevated prompt).
+
+The target SDDL is:
+
+```
+O:BAG:SYD:(A;;GRGWGX;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;RC)(A;;GRGWGX;;;AC)(A;;GRGWGX;;;S-1-15-2-2)S:(ML;;NW;;;LW)
+```
+
+That decomposes to:
+
+| Component | Trustee | SID | Rights |
+| --- | --- | --- | --- |
+| Owner | `BUILTIN\Administrators` | `BA` | n/a |
+| Group | `NT AUTHORITY\SYSTEM` | `SY` | n/a |
+| DACL allow | `Everyone` | `WD` | `GENERIC_READ \| GENERIC_WRITE \| GENERIC_EXECUTE` |
+| DACL allow | `NT AUTHORITY\SYSTEM` | `SY` | `FILE_ALL_ACCESS` |
+| DACL allow | `BUILTIN\Administrators` | `BA` | `FILE_ALL_ACCESS` |
+| DACL allow | `RESTRICTED` | `RC` | `GENERIC_READ \| GENERIC_EXECUTE` |
+| DACL allow | `ALL APPLICATION PACKAGES` | `AC` | `GENERIC_READ \| GENERIC_WRITE \| GENERIC_EXECUTE` |
+| DACL allow | `ALL RESTRICTED APPLICATION PACKAGES` | `S-1-15-2-2` | `GENERIC_READ \| GENERIC_WRITE \| GENERIC_EXECUTE` |
+| SACL mandatory label | `Low Integrity` | `LW` | `NO_WRITE_UP` |
+
+`--no-sacl` skips the SACL component (the mandatory integrity
+label is still applied via the separate `LABEL_SECURITY_INFORMATION`
+write path, which does not require `SeSecurityPrivilege`). Use this
+when `SeSecurityPrivilege` is unavailable in the calling token. The
+DACL — the part that actually unblocks AppContainer access — is
+still written.
+
+`--quiet` suppresses the human-readable status line. `--json`
+emits a single-line JSON record describing the result. `--log`
+overrides the default log path
+(`%ProgramData%\mxc\null-device-acl.log`).
+
+The apply path reads the current SD, compares it structurally
+against the target (order-insensitive set comparison of
+`(SID, ACE type, ACE flags, access mask)` tuples), and only
+writes when a difference is found. When the current SD already
+matches the result is reported as `"no-change"`; a successful write
+is reported as `"applied"`. Both are exit code 0; consumers
+distinguish them by the JSON / log record.
+
+### `verify-null-device`
+
+```
+wxc-host-prep verify-null-device [--json]
+```
+
+Reads the current `\Device\Null` SD and compares it against the
+target without modifying anything. Exit code `0` means match; exit
+code `1` means drift. With `--json` a single-line JSON record
+documents which component differs (`owner-differs`,
+`group-differs`, `dacl-differs`, `sacl-differs`).
+
+Intended for monitoring: scheduled-task or telemetry agents can
+invoke `verify-null-device --json` periodically and alert on a
+non-zero exit code.
+
+### `dump-null-device`
+
+```
+wxc-host-prep dump-null-device [--json]
+```
+
+Prints the current `\Device\Null` SD as SDDL. With `--json` the
+SDDL string is wrapped in a JSON object of the form
+`{"op":"dump-null-device","sddl":"…"}`. Read-only — the SD is not
+modified.
+
+Use for triage after `verify-null-device` reports drift.
+`verify-null-device --json` is the right place to look for the
+drift label; `dump-null-device` deliberately only reports the
+current SD.
+
+## Logs
+
+`prepare-null-device` writes a JSON-Lines log record to
+`%ProgramData%\mxc\null-device-acl.log`, rotated at ~1 MB. Each
+record contains:
+
+```json
+{"ts":"2025-01-01T12:00:00Z","op":"prepare-null-device","want_sacl":true,"result":"applied","drift":"dacl-differs"}
+```
+
+Drift label is `"n/a"` when the result is `"no-change"`. Pass
+`--log <path>` to redirect.
+
+`prepare-system-drive` and `unprepare-system-drive` do not write
+file logs today — they print one line per operation to stdout
+(success path) or stderr (failure path). They're intended to be
+run interactively by an admin or once at install time by a wrapper
+that captures stdout/stderr itself.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Operation completed successfully (no-change or applied). |
+| `1` | Drift detected (`verify-null-device` only) or generic non-fatal error. |
+| `2` | Could not open `\Device\Null` (typically a missing privilege or device-namespace ACL). |
+| `3` | `SeSecurityPrivilege` could not be enabled for the calling token. |
+| `4` | `SetKernelObjectSecurity` failed during write. |
+| `5` | The hard-coded target SDDL failed to parse. Indicates an MXC bug — report it. |
+| `6` | System-drive DACL operation failed. |
+| `64` | clap parse error (unknown flag / bad argument). |
+| `65` | The current token is not elevated. |
 
 ## Implementation notes
 
-- Windows does not allow a running process to elevate its own token, so
-  the unelevated parent re-launches itself with `ShellExecuteExW` and the
-  `runas` verb. A hidden `--internal-elevated-helper` flag is set on the
-  child; if that flag is observed in a process whose token is not
-  elevated (which should be unreachable in practice because
-  `ShellExecuteExW(runas)` either elevates or returns `Err`), the helper
-  refuses to recurse — defense in depth against unforeseen spawn loops.
-- The unelevated parent resolves the target path once (from
-  `%SystemDrive%`) and passes it to the elevated child via
-  `--internal-target-path`. The child does **not** re-read
-  `%SystemDrive%` from environment — which would otherwise let an
-  unelevated user steer the elevated DACL write at an arbitrary drive
-  via inherited env. The child validates the passed path is a literal
-  drive root (`X:\`) before touching its DACL.
-- The elevated child writes its console output to a per-invocation log
-  file under the **unelevated parent's** `%TEMP%`. The parent picks the
-  path (`%TEMP%\wxc-exec-prepare-system-drive-<pid>-<nonce>.log`) and
-  passes it to the child via `--internal-log-path`. This works under
-  both same-user UAC (where parent and child agree on `%TEMP%`
-  naturally) and over-the-shoulder UAC (where the elevated child runs
-  as a different user and would otherwise resolve `%TEMP%` against
-  another profile, making the log invisible to the parent). The
-  unelevated parent reads this file on non-zero child exit and prints
-  the contents to stderr, so the user sees a real diagnostic instead
-  of just `ChildFailed(<code>)`. The elevated child runs hidden
-  (`SW_HIDE`) — the UAC dialog itself is system-rendered and
-  unaffected.
-- The parent quotes `--internal-target-path` and `--internal-log-path`
-  per the documented `CommandLineToArgvW` rules — critically, doubling
-  any backslashes that immediately precede the closing quote. Without
-  this, a drive root like `C:\` would be passed as `"C:\"` and the
-  parser would interpret `\"` as an escaped literal quote, mangling
-  the argument.
-- The DACL operations use the same `GetNamedSecurityInfoW` →
-  `SetEntriesInAclW` → `SetNamedSecurityInfoW` sequence as
+- The binary's elevation requirement is enforced by both the
+  embedded application manifest (Windows-loader-level guard) and a
+  runtime `GetTokenInformation(TokenElevation)` check in
+  `elevation_check::require_elevated`. Defence in depth — the
+  runtime check still trips if a debug build (no manifest) is
+  launched without `Run as Administrator`.
+- The DACL operations for `prepare-system-drive` /
+  `unprepare-system-drive` use the same
+  `GetNamedSecurityInfoW` → `SetEntriesInAclW` →
+  `SetNamedSecurityInfoW` sequence as
   `wxc_common::filesystem_dacl`. Apply ACEs are *not* tracked by
-  `DaclManager` because the change is intentionally persistent across
-  process exit. The precise-revoke path scans the existing DACL via
-  `GetAce` to find ACEs matching our exact tuple, then issues a single
-  `REVOKE_ACCESS` for the SID followed by replay of any non-matching
-  explicit ACEs — symmetric with `restore_one`'s pattern.
-- Unit tests redirect the target path to a tempdir via the debug-only
-  `MXC_PREPARE_PATH_OVERRIDE` env var. The elevation flow itself is
-  verified manually with the PowerShell scripts in
-  [`scripts/host-prep/`](../scripts/host-prep/), which mirror the Rust
-  implementation for hand-testing without rebuilding `wxc-exec`.
+  `DaclManager` — the change is intentionally persistent across
+  process exit. The precise-revoke path scans the existing DACL
+  via `GetAce` to find ACEs matching our exact tuple, then issues
+  a single `REVOKE_ACCESS` for the SID followed by replay of any
+  non-matching explicit ACEs — symmetric with the runtime
+  `restore_one` pattern.
+- `prepare-null-device` writes the entire target SD in one
+  `SetKernelObjectSecurity` call rather than mutating components
+  piecemeal. Writing components in sequence creates
+  failure-recovery edge cases (partial application leaves the
+  device in an unintended state); writing the whole SD trades a
+  slightly larger blob for atomic semantics.
+- The mandatory integrity label is part of the SACL on disk, but
+  its in-API info bit is the separate `LABEL_SECURITY_INFORMATION`
+  flag, which does not require `SeSecurityPrivilege`. Reads and
+  writes always include this bit even when the caller declined to
+  touch the full SACL (`--no-sacl`), so the integrity label
+  round-trips faithfully.

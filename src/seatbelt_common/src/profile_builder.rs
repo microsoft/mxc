@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Pure builder that converts a [`CodexRequest`] into a TinyScheme sandbox
+//! Pure builder that converts an [`ExecutionRequest`] into a TinyScheme sandbox
 //! profile string suitable for `/usr/bin/sandbox-exec -p <profile>`.
 //!
 //! This module is platform-agnostic — it is just string generation — so it
@@ -27,7 +27,7 @@
 
 use std::fmt::Write as _;
 
-use wxc_common::models::{ClipboardPolicy, CodexRequest, NetworkPolicy};
+use wxc_common::models::{ClipboardPolicy, ExecutionRequest, NetworkPolicy};
 
 /// Build a complete sandbox profile string from the given request.
 ///
@@ -35,7 +35,7 @@ use wxc_common::models::{ClipboardPolicy, CodexRequest, NetworkPolicy};
 /// string is returned verbatim and policy fields are ignored. This is the
 /// escape hatch for advanced/testing scenarios that need to hand-author a
 /// profile.
-pub fn build_profile(request: &CodexRequest) -> Result<String, String> {
+pub fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
     if let Some(override_profile) = request
         .experimental
         .seatbelt
@@ -72,6 +72,7 @@ pub fn build_profile(request: &CodexRequest) -> Result<String, String> {
     write_network_rules(&mut out, request);
     write_nested_pty_rules(&mut out, request);
     write_keychain_rules(&mut out, request)?;
+    write_extra_seatbelt_rules(&mut out, request);
     write_ui_rules(&mut out, request);
 
     // Policy-derived deny rules go LAST so they win on conflict.
@@ -143,7 +144,7 @@ const TTY_ALLOW: &str = "\
 (allow file-read* (subpath \"/dev/fd\"))
 ";
 
-fn write_filesystem_allow(out: &mut String, request: &CodexRequest) -> Result<(), String> {
+fn write_filesystem_allow(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
     let policy = &request.policy;
 
     if !policy.readonly_paths.is_empty() {
@@ -169,7 +170,7 @@ fn write_filesystem_allow(out: &mut String, request: &CodexRequest) -> Result<()
     Ok(())
 }
 
-fn write_filesystem_deny(out: &mut String, request: &CodexRequest) -> Result<(), String> {
+fn write_filesystem_deny(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
     let policy = &request.policy;
 
     if !policy.denied_paths.is_empty() {
@@ -185,52 +186,57 @@ fn write_filesystem_deny(out: &mut String, request: &CodexRequest) -> Result<(),
     Ok(())
 }
 
-fn write_network_rules(out: &mut String, request: &CodexRequest) {
+fn write_network_rules(out: &mut String, request: &ExecutionRequest) {
     let policy = &request.policy;
     let allow_outbound = matches!(policy.default_network_policy, NetworkPolicy::Allow);
+    let has_allowed_hosts = !policy.allowed_hosts.is_empty();
 
-    if !allow_outbound {
-        if policy.allowed_hosts.is_empty() {
+    // blocked_hosts is rejected at the runner level before reaching the
+    // profile builder, so it isn't handled here.
+    match (allow_outbound, has_allowed_hosts) {
+        (false, false) => {
             // Pure deny — implicit from `(deny default)`.
             out.push_str(";; --- network: default-deny (no allow-network rules emitted) ---\n");
-            return;
         }
-        // defaultPolicy=block + allowedHosts = allowlist mode.
-        // Seatbelt limitation: only `*` or `localhost` are valid hosts in
-        // `(remote ...)` filters — per-hostname filtering is not supported.
-        // Fall back to allowing all outbound when allowedHosts is specified.
-        out.push_str(
-            ";; --- network: allowedHosts requested but Seatbelt cannot filter by host;\n",
-        );
-        out.push_str(";;     allowing all outbound as best-effort ---\n");
-        out.push_str("(allow network-outbound)\n");
-        out.push_str("(allow network-bind (local ip))\n");
-        out.push_str("(allow system-socket)\n");
-        return;
+        (true, false) => {
+            out.push_str(";; --- network: outbound allowed (any host) ---\n");
+            write_outbound_allow_rules(out);
+        }
+        (_, true) => {
+            // Seatbelt only accepts `*` or `localhost` in `(remote ...)` filters —
+            // per-hostname filtering isn't possible, so allowedHosts degrades to
+            // allow-all outbound as a best-effort.
+            out.push_str(
+                ";; --- network: allowedHosts requested but Seatbelt cannot filter by host;\n",
+            );
+            out.push_str(";;     allowing all outbound as best-effort ---\n");
+            write_outbound_allow_rules(out);
+        }
     }
 
-    if policy.allowed_hosts.is_empty() {
-        out.push_str(";; --- network: outbound allowed (any host) ---\n");
-        out.push_str("(allow network-outbound)\n");
-        out.push_str("(allow network-bind (local ip))\n");
-        out.push_str("(allow system-socket)\n");
-    } else {
-        // Seatbelt limitation: per-host filtering not supported.
-        // Allow all outbound as best-effort when allowedHosts is specified.
-        out.push_str(
-            ";; --- network: allowedHosts requested but Seatbelt cannot filter by host;\n",
-        );
-        out.push_str(";;     allowing all outbound as best-effort ---\n");
-        out.push_str("(allow network-outbound)\n");
-        out.push_str("(allow network-bind (local ip))\n");
-        out.push_str("(allow system-socket)\n");
-    }
-
-    // Note: blocked_hosts is rejected at the runner level before reaching
-    // the profile builder, so we don't need to handle it here.
+    write_local_network_rules(out, policy.allow_local_network);
 }
 
-fn write_ui_rules(out: &mut String, request: &CodexRequest) {
+fn write_outbound_allow_rules(out: &mut String) {
+    out.push_str("(allow network-outbound)\n");
+    out.push_str("(allow network-bind (local ip))\n");
+    out.push_str("(allow system-socket)\n");
+}
+
+/// Emit the `network-inbound` rule that lets the sandboxed process accept
+/// incoming connections on its own listeners. Required for `server.listen()`
+/// on macOS — the `network-bind` rule alone is not enough; the kernel rejects
+/// `listen()` with EPERM without `network-inbound`. Scoped to `(local ip)` so
+/// it only covers IP sockets, never UNIX-domain or Mach sockets.
+fn write_local_network_rules(out: &mut String, allow_local_network: bool) {
+    if !allow_local_network {
+        return;
+    }
+    out.push_str(";; --- network: allowLocalNetwork — accept inbound on local IPs ---\n");
+    out.push_str("(allow network-inbound (local ip))\n");
+}
+
+fn write_ui_rules(out: &mut String, request: &ExecutionRequest) {
     let ui = &request.policy.ui;
     let gui_access = request
         .experimental
@@ -314,7 +320,7 @@ fn write_ui_rules(out: &mut String, request: &CodexRequest) {
 /// Emit rules so the inner process can call `posix_openpt()` and allocate
 /// its own pty. Skipped when `gui_access` (with UI enabled) already emits
 /// a strict superset.
-fn write_nested_pty_rules(out: &mut String, request: &CodexRequest) {
+fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
     let sb = request.experimental.seatbelt.as_ref();
     let enabled = sb.is_none_or(|c| c.nested_pty);
     let gui_block_emitted = sb.is_some_and(|c| c.gui_access) && !request.policy.ui.disable;
@@ -353,7 +359,7 @@ fn write_nested_pty_rules(out: &mut String, request: &CodexRequest) {
 /// stores under `/Library/Keychains` and `/System/Library/Keychains`
 /// are already covered by the baseline `/Library` and `/System`
 /// read-only allows, so we don't re-add them here.
-fn write_keychain_rules(out: &mut String, request: &CodexRequest) -> Result<(), String> {
+fn write_keychain_rules(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
     let enabled = request
         .experimental
         .seatbelt
@@ -405,6 +411,24 @@ fn write_keychain_rules(out: &mut String, request: &CodexRequest) -> Result<(), 
     Ok(())
 }
 
+/// Emit caller-provided `extraMachLookups` rules: additional Mach service
+/// global-names the inner process may resolve. No-op when the list is empty.
+fn write_extra_seatbelt_rules(out: &mut String, request: &ExecutionRequest) {
+    let Some(sb) = request.experimental.seatbelt.as_ref() else {
+        return;
+    };
+    if sb.extra_mach_lookups.is_empty() {
+        return;
+    }
+
+    out.push_str(";; --- extraMachLookups: caller-provided Mach services ---\n");
+    out.push_str("(allow mach-lookup\n");
+    for name in &sb.extra_mach_lookups {
+        let _ = writeln!(out, "    (global-name {})", quote_scheme(name));
+    }
+    out.push_str(")\n");
+}
+
 /// Expand a leading `~` or `~/` to the current user's home directory.
 /// Returns an error if `HOME` is not set and the path requires expansion.
 fn expand_tilde(path: &str) -> Result<String, String> {
@@ -449,8 +473,8 @@ mod tests {
     use super::*;
     use wxc_common::models::{SeatbeltConfig, UiPolicy};
 
-    fn req() -> CodexRequest {
-        CodexRequest {
+    fn req() -> ExecutionRequest {
+        ExecutionRequest {
             script_code: "echo hi".to_string(),
             ..Default::default()
         }
@@ -556,6 +580,39 @@ mod tests {
         r.policy.blocked_hosts = vec!["evil.example.com".into()];
         let p = build_profile(&r).unwrap();
         assert!(!p.contains("(deny network-outbound"));
+    }
+
+    #[test]
+    fn allow_local_network_emits_inbound_rule() {
+        // server.listen() on macOS needs `network-inbound` in addition to
+        // `network-bind` — the kernel rejects listen() with EPERM otherwise.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.allow_local_network = true;
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-inbound (local ip))"));
+        assert!(p.contains("allowLocalNetwork"));
+    }
+
+    #[test]
+    fn allow_local_network_default_omits_inbound_rule() {
+        // Default (allow_local_network=false) must not emit any inbound rule.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("network-inbound"));
+    }
+
+    #[test]
+    fn allow_local_network_works_with_default_deny_outbound() {
+        // allow_local_network is independent of outbound: a process can be
+        // a pure server (no client traffic) and still accept local inbound.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.allow_local_network = true;
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-inbound (local ip))"));
+        assert!(!p.contains("(allow network-outbound)"));
     }
 
     #[test]
@@ -845,5 +902,39 @@ mod tests {
             "missing user keychain subpath"
         );
         assert!(p.contains("(subpath \"/private/var/folders\")"));
+    }
+
+    #[test]
+    fn extra_mach_lookups_emits_grouped_allow_form() {
+        let mut r = req();
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            extra_mach_lookups: vec![
+                "com.apple.example.one".to_string(),
+                "com.apple.example.two".to_string(),
+            ],
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains(";; --- extraMachLookups"));
+        assert!(p.contains("(allow mach-lookup\n    (global-name \"com.apple.example.one\")\n    (global-name \"com.apple.example.two\")\n)"));
+    }
+
+    #[test]
+    fn extra_mach_lookups_omitted_when_empty() {
+        let mut r = req();
+        r.experimental.seatbelt = Some(SeatbeltConfig::default());
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("extraMachLookups"));
+    }
+
+    #[test]
+    fn extra_mach_lookups_escape_embedded_quotes() {
+        let mut r = req();
+        r.experimental.seatbelt = Some(SeatbeltConfig {
+            extra_mach_lookups: vec!["weird\"name".to_string()],
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(global-name \"weird\\\"name\")"));
     }
 }

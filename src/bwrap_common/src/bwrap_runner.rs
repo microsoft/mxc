@@ -5,23 +5,34 @@
 //! namespace sandbox via the `bwrap` CLI.
 //!
 //! Bubblewrap uses Linux user namespaces to create an unprivileged sandbox.
-//! The runner translates `CodexRequest` policy fields into `bwrap` CLI
+//! The runner translates `ExecutionRequest` policy fields into `bwrap` CLI
 //! arguments via [`crate::bwrap_command::build_args`], then spawns `bwrap`
 //! with stdout/stderr capture and optional timeout enforcement.
 //!
 //! For per-host network filtering (`allowedHosts`/`blockedHosts`) the runner
-//! reuses [`lxc_common::network_iptables::NetworkIptablesManager`] from the
-//! LXC backend — this requires root but is consistent with the LXC approach.
-//! When only `defaultPolicy: "block"` is set (no host lists), the runner uses
-//! `--unshare-net` for zero-overhead full isolation without root.
+//! supports two paths:
+//! - **Cooperative env-var proxy** (default, no privilege required): when
+//!   `network.proxy` is configured the runner launches an unprivileged HTTP
+//!   proxy via [`wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator`]
+//!   and the command builder injects `HTTP_PROXY` / `HTTPS_PROXY` /
+//!   `NO_PROXY` env vars into the sandbox.
+//! - **iptables firewall** (requires `CAP_NET_ADMIN` / root): when
+//!   `network.enforcementMode` is `firewall` or `both`, the runner reuses
+//!   [`lxc_common::network_iptables::NetworkIptablesManager`] from the LXC
+//!   backend.
+//!
+//! When only `defaultPolicy: "block"` is set (no host lists and no proxy),
+//! the runner uses `--unshare-net` for zero-overhead full isolation
+//! without root.
 
 use std::fmt::Write as FmtWrite;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use lxc_common::network_iptables::NetworkIptablesManager;
+use wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator;
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, NetworkEnforcementMode, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 
 use crate::bwrap_command;
@@ -52,17 +63,25 @@ impl BubblewrapScriptRunner {
 }
 
 impl ScriptRunner for BubblewrapScriptRunner {
-    fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
-        if !Self::is_bwrap_available() {
-            return Err(ScriptResponse::error(
-                "Bubblewrap (bwrap) is not installed or not on PATH. \
-                 Install it via your package manager (e.g., apt install bubblewrap).",
-            ));
-        }
-
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        // User-input validation runs before the environmental `bwrap`
+        // probe so config errors are reported deterministically even on
+        // hosts without bwrap installed.
         if request.script_code.is_empty() {
             return Err(ScriptResponse::error(
                 "script_code is empty — nothing to execute.",
+            ));
+        }
+
+        // The bundled `linux-test-proxy` is a testing-only HTTP proxy with
+        // a deliberately permissive feature set (no auth, no body limits,
+        // no hop-by-hop header handling). Gate it behind --experimental so
+        // it cannot be enabled from a stock production config.
+        if request.policy.network_proxy.builtin_test_server && !request.experimental_enabled {
+            return Err(ScriptResponse::error(
+                "network.proxy.builtinTestServer is a testing-only feature and requires \
+                 --experimental. For production, point network.proxy at a real HTTP \
+                 proxy via 'localhost' or 'url'.",
             ));
         }
 
@@ -74,20 +93,55 @@ impl ScriptRunner for BubblewrapScriptRunner {
             )));
         }
 
+        if !Self::is_bwrap_available() {
+            return Err(ScriptResponse::error(
+                "Bubblewrap (bwrap) is not installed or not on PATH. \
+                 Install it via your package manager (e.g., apt install bubblewrap).",
+            ));
+        }
+
         Ok(())
     }
 
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
-        // 1. Build the bwrap argument vector.
-        let args = bwrap_command::build_args(request);
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        // 1. Start the network proxy if configured. Must happen before
+        //    arg-building so the proxy's loopback address can be injected as
+        //    HTTP_PROXY / HTTPS_PROXY into the sandbox environment.
+        //
+        //    Pass the request's `default_network_policy` through so that a
+        //    config of `{ defaultPolicy: "block", proxy: {...}, allowedHosts:
+        //    [] }` actually denies-by-default at the proxy layer (otherwise
+        //    the empty allow list + no iptables + no --unshare-net would let
+        //    everything through).
+        let mut proxy = LinuxProxyCoordinator::new();
+        if request.policy.network_proxy.is_enabled() {
+            if let Err(err) = proxy.start(
+                &request.policy.network_proxy,
+                "127.0.0.1",
+                &request.policy.allowed_hosts,
+                &request.policy.blocked_hosts,
+                request.policy.default_network_policy.clone(),
+                logger,
+            ) {
+                return ScriptResponse::error(&format!(
+                    "Bubblewrap: failed to start network proxy: {}",
+                    err
+                ));
+            }
+        }
+
+        // 2. Build the bwrap argument vector.
+        let args = bwrap_command::build_args(request, proxy.address());
         let _ = writeln!(
             logger,
             "Bubblewrap: spawning bwrap with {} args",
             args.len()
         );
 
-        // 2. Determine whether iptables network rules are needed.
-        let needs_iptables = needs_iptables_rules(request);
+        // 3. Determine whether iptables network rules are needed. When the
+        //    cooperative proxy is active we skip iptables entirely (host
+        //    enforcement happens at the proxy layer).
+        let needs_iptables = needs_iptables_rules(request) && !proxy.is_active();
         let container_name = if request.container_id.is_empty() {
             format!("bwrap-{:08x}", std::process::id())
         } else {
@@ -103,11 +157,13 @@ impl ScriptRunner for BubblewrapScriptRunner {
             match mgr.apply_firewall_rules(&request.policy, logger) {
                 Ok(true) => {}
                 Ok(false) => {
+                    proxy.stop(logger);
                     return ScriptResponse::error(
                         "Bubblewrap: failed to apply iptables firewall rules.",
                     );
                 }
                 Err(e) => {
+                    proxy.stop(logger);
                     return ScriptResponse::error(&format!(
                         "Bubblewrap: network policy error: {}",
                         e
@@ -119,7 +175,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
             None
         };
 
-        // 3. Spawn `bwrap`.
+        // 4. Spawn `bwrap`.
         let mut command = Command::new("bwrap");
         command.args(&args);
         command
@@ -131,6 +187,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
             Ok(process) => process,
             Err(error) => {
                 cleanup_iptables(&mut fw_manager, logger);
+                proxy.stop(logger);
                 return ScriptResponse::error(&format!(
                     "Bubblewrap: failed to spawn bwrap: {}",
                     error
@@ -138,7 +195,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
             }
         };
 
-        // 4. Drain stdout/stderr in background threads to avoid pipe-buffer
+        // 5. Drain stdout/stderr in background threads to avoid pipe-buffer
         //    deadlock.
         let stdout_handle = child
             .stdout
@@ -149,7 +206,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
             .take()
             .map(|r| std::thread::spawn(move || read_to_string(r)));
 
-        // 5. Wait with optional timeout.
+        // 6. Wait with optional timeout.
         let timeout = if request.script_timeout == 0 {
             None
         } else {
@@ -162,6 +219,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
                 let _ = child.kill();
                 let _ = child.wait();
                 cleanup_iptables(&mut fw_manager, logger);
+                proxy.stop(logger);
                 return ScriptResponse {
                     exit_code: -1,
                     standard_out: join_reader(stdout_handle),
@@ -175,12 +233,14 @@ impl ScriptRunner for BubblewrapScriptRunner {
             }
             Err(WaitError::Io(error)) => {
                 cleanup_iptables(&mut fw_manager, logger);
+                proxy.stop(logger);
                 return ScriptResponse::error(&format!("Bubblewrap: wait failed: {}", error));
             }
         };
 
-        // 6. Collect output and clean up.
+        // 7. Collect output and clean up.
         cleanup_iptables(&mut fw_manager, logger);
+        proxy.stop(logger);
 
         ScriptResponse {
             exit_code: exit_status.code().unwrap_or(-1),
@@ -194,7 +254,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
 
 /// Returns `true` when the request has per-host network rules that require
 /// iptables. Pure `"block"` with no host lists uses `--unshare-net` instead.
-fn needs_iptables_rules(request: &CodexRequest) -> bool {
+fn needs_iptables_rules(request: &ExecutionRequest) -> bool {
     let uses_firewall = matches!(
         request.policy.network_enforcement_mode,
         NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
@@ -255,5 +315,49 @@ fn wait_with_timeout(
             }
             Err(e) => return Err(WaitError::Io(e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wxc_common::models::ProxyConfig;
+
+    fn base_request() -> ExecutionRequest {
+        ExecutionRequest {
+            script_code: "echo hi".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_rejects_builtin_test_server_without_experimental() {
+        let mut req = base_request();
+        req.policy.network_proxy = ProxyConfig {
+            address: None,
+            builtin_test_server: true,
+        };
+        req.experimental_enabled = false;
+
+        let runner = BubblewrapScriptRunner::new();
+        let err = runner.validate_runner(&req).unwrap_err();
+        assert!(
+            err.error_message.contains("builtinTestServer")
+                && err.error_message.contains("--experimental"),
+            "expected experimental-gate error, got: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_script_before_environment_probe() {
+        // Empty script_code is a user-input error and must be surfaced
+        // even on hosts without bwrap installed (independent of CI image).
+        let mut req = base_request();
+        req.script_code = String::new();
+
+        let runner = BubblewrapScriptRunner::new();
+        let err = runner.validate_runner(&req).unwrap_err();
+        assert!(err.error_message.contains("script_code is empty"));
     }
 }

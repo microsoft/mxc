@@ -64,13 +64,25 @@ export type ContainmentType = "process" | "vm" | "microvm";
 export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm', 'microvm'];
 
 /**
- * Deprecated wire values accepted by the native binary via serde aliases.
- * Maps each legacy name to the canonical {@link ContainmentBackend} value
- * so the SDK validator can resolve them before the platform check. Configs
- * using these values still reach wxc-exec unchanged — the Rust parser
- * handles the final mapping at run time.
+ * Deprecated containment wire values, mapped to their canonical
+ * {@link ContainmentBackend} replacement. The native binary (wxc-exec) accepts
+ * the deprecated form via serde aliases; this map mirrors that behavior in
+ * the SDK validator so legacy configs are not rejected before reaching the
+ * binary.
+ *
+ * The map is intentionally partial: only deprecated keys appear. Use a
+ * presence check (e.g. `LegacyContainmentAliases[value] ?? value`) rather
+ * than indexing blindly.
+ *
+ * The wire payload is forwarded to wxc-exec unchanged — the Rust parser
+ * performs the final mapping at runtime. Resolution here is purely so the
+ * SDK's experimental-mode, platform-support, and availability checks see
+ * the canonical backend.
+ *
+ * Internal to the SDK; not part of the public API. Subject to removal in a
+ * future minor release once the deprecation window closes.
  */
-export const LegacyContainmentAliases: Readonly<Record<string, ContainmentBackend>> = {
+export const LegacyContainmentAliases: Readonly<Partial<Record<string, ContainmentBackend>>> = {
   appcontainer: 'processcontainer',
   macos_sandbox: 'seatbelt',
 };
@@ -176,13 +188,19 @@ export interface NetworkConfig {
    * (default: "both")
    */
   enforcementMode?: 'capabilities' | 'firewall' | 'both';
-  /** Default network policy: "allow" or "block" (default: "allow") */
+  /** Default network policy: "allow" or "block" (default: "block") */
   defaultPolicy?: 'allow' | 'block';
+  /**
+   * Whether to allow inbound connections to local IP listeners (i.e. the
+   * sandboxed process may call `bind()` + `listen()` and accept incoming
+   * TCP/UDP). Independent of `defaultPolicy`. (default: false)
+   */
+  allowLocalNetwork?: boolean;
   /** Hostnames or IP addresses/CIDR blocks to allow (firewall mode only) */
   allowedHosts?: string[];
   /** Hostnames or IP addresses to block (firewall mode only) */
   blockedHosts?: string[];
-  /** Proxy configuration (Windows only) */
+  /** Proxy configuration (supported on Windows ProcessContainer and Linux Bubblewrap) */
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
@@ -358,6 +376,14 @@ export interface SeatbeltConfig {
    * needs Keychain access.
    */
   keychainAccess?: boolean;
+  /**
+   * Additional Mach service global-names to allow `mach-lookup` for.
+   * Escape hatch for callers that need a specific system service the
+   * baseline doesn't cover (e.g. opt-in agent integrations). Each entry
+   * is rendered as `(global-name "...")` inside a single
+   * `(allow mach-lookup ...)` form.
+   */
+  extraMachLookups?: string[];
 }
 
 /**

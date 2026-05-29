@@ -30,7 +30,7 @@ wxc-exec.exe --experimental my-config.json
 
 ## What Gets Logged
 
-- Input JSON config and parsed `CodexRequest` (env values redacted, script truncated)
+- Input JSON config and parsed `ExecutionRequest` (env values redacted, script truncated)
 - Sandbox spec details (size, UI flags, capabilities, filesystem/network policy)
 - Process lifecycle (command line, identity, child PID, exit code, elapsed time)
 - Section markers for key execution stages

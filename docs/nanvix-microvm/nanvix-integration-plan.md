@@ -8,7 +8,7 @@ There is a need for a **micro-VM backend** that can execute various forms of cod
 
 ## Proposed Solution
 
-Add a **NanVix micro-VM backend** directly into the existing `wxc-exec.exe` binary. When the JSON config specifies `"containment": "nanvix"`, the binary routes to a new `NanVixScriptRunner`. The runner spawns `nanvixd.exe` (the NanVix daemon), pipes the script via stdin, and relays stdout/stderr directly to the parent process.
+Add a **NanVix micro-VM backend** directly into the existing `wxc-exec.exe` binary. When the JSON config specifies `"containment": "microvm"`, the binary routes to a new `NanVixScriptRunner` (NanVix is the implementation behind the `microvm` containment). The runner stages the user script into a temporary host directory, spawns `nanvixd.exe` with that directory bind-mounted into the guest, and relays stdout/stderr directly to the parent process. The guest's stdin is closed (`Stdio::null()`) — the script is loaded from the mounted staging directory, not piped over stdin.
 
 **NanVix** is a lightweight microkernel OS that runs inside a WHP (Windows Hypervisor Platform) virtual machine. It provides POSIX-compatible process execution with hardware-enforced isolation. NanVix supports multiple runtimes — the initial integration uses CPython 3.12 with a trimmed FAT32 stdlib filesystem, but the architecture supports JavaScript (QuickJS), C, C++, and Rust binaries as configurable runtimes.
 
@@ -20,34 +20,46 @@ Path A — CLI (direct):
     └── Parses args → loads JSON → dispatches to NanVixScriptRunner
 
 Path B — SDK (programmatic):
-  App calls: spawnSandbox("print('hello')", policy, { containment: "nanvix" })
-    ├── Builds JSON config with containment = "nanvix"
+  App calls: spawnSandbox("print('hello')", policy, { containment: "microvm" })
+    ├── Builds JSON config with containment = "microvm"
     └── Spawns wxc-exec.exe with the config
 
 Both paths converge here:
   wxc-exec.exe
-    ├── Parses JSON config → sees containment = "nanvix"
+    ├── Parses JSON config → sees containment = "microvm"
     ├── Creates NanVixScriptRunner (via existing Box<dyn ScriptRunner> dispatch)
-    ├── Validates paths: nanvixd.exe, bin_dir, ramfs, python.elf
-    ├── Spawns nanvixd.exe as child process:
-    │     nanvixd.exe -bin-dir <dir> -ramfs <ramfs.img>
-    │       -- python.elf "-S -B -c exec(__import__('sys').stdin.read());PYTHONHOME=/sysroot"
-    ├── Spawns stdin/stdout/stderr pipe relay threads
-    ├── Relays parent stdin to nanvixd (script content + EOF)
+    ├── Validates paths next to wxc-exec.exe:
+    │     nanvixd.exe, bin/kernel.elf, nanvix_rootfs.img, python3.initrd
+    ├── Builds a temp staging directory containing bootstrap.py
+    │     (user script wrapped in a small loader preamble) plus any
+    │     readwrite/readonly host paths resolved by the policy.
+    ├── Ensures a WHP warm-start snapshot exists under <home>/snapshots/
+    │     (cold-boots once to generate kernel.vmem + kernel.whp.cbor on
+    │      first run; subsequent runs restore from the snapshot)
+    ├── Spawns nanvixd.exe as a child process (cwd = snapshot home):
+    │     nanvixd.exe -snapshot snapshots/kernel.whp.cbor
+    │                 -bin-dir <exe>/bin
+    │                 -ramfs   <exe>/nanvix_rootfs.img
+    │                 -mount   <staging-dir>
+    │                 -- python3.initrd
+    ├── stdin is set to Stdio::null() (guest never reads host stdin);
+    │   stdout/stderr are streamed live to the parent via relay threads.
     ├── Starts watchdog thread
     ├── Waits for process exit or timeout
     ├── Signals watchdog to cancel, joins all threads
     └── Returns exit code (stdout/stderr relayed directly to parent)
 
 Inside the NanVix VM:
-  nanvixd.exe boots a WHP virtual machine:
-    ├── Loads kernel.elf (NanVix microkernel)
-    ├── Loads python.elf as initrd payload
-    ├── Maps cpython-ramfs.img (FAT32 stdlib) into guest memory
+  nanvixd.exe restores (or cold-boots) a WHP virtual machine:
+    ├── Loads kernel.elf (NanVix microkernel) from -bin-dir
+    ├── Loads python3.initrd as initrd payload
+    ├── Maps nanvix_rootfs.img (FAT32 stdlib) into guest memory
+    ├── Bind-mounts the host staging directory into the guest
+    │     (exposes bootstrap.py and any policy-mapped host paths)
     ├── Kernel splits cmdline on ';':
-    │     argv = ["python.elf", "-S", "-B", "-c", "exec(__import__('sys').stdin.read())"]
+    │     argv = ["python3.initrd", "/mnt/bootstrap.py"]
     │     env  = ["PYTHONHOME=/sysroot"]
-    ├── Python reads ALL stdin → exec() runs the script
+    ├── Python executes bootstrap.py from the mounted staging dir
     ├── Script output → stdout (via IKC) → host stdout
     ├── Kernel traces → host stderr
     └── sys.exit(N) → nanvixd exits N (exit code propagated)
@@ -67,24 +79,24 @@ Inside the NanVix VM:
   Runner (existing)   ScriptRunner  ScriptRunner (new)
            │          (existing)         │
      AppContainer         │         Spawn nanvixd.exe
-     NTFS ACLs       Windows        ├── Pipe stdin
+     NTFS ACLs       Windows        ├── Mount staging dir
      WFP firewall    Sandbox VM     └── Relay stdout/stderr
 ```
 
 ## Key Design Decisions
 
-1. **Stdin piping for script delivery** — NanVix's cmdline has a 255-byte limit and splits on spaces. Hence we pipe scripts via stdin using `exec(__import__('sys').stdin.read())`. Zero changes to CPython or NanVix.
+1. **Staging-directory mount for script delivery** — NanVix's cmdline has a 255-byte limit and splits on spaces, so the script cannot be passed as an argument. Instead, the runner writes a `bootstrap.py` (user script + small loader preamble) into a per-invocation temp directory and bind-mounts that directory into the guest via `nanvixd -mount <dir>`. Python then executes `bootstrap.py` from the mount. Host stdin is closed (`Stdio::null()`) — no stdin relay is involved. Zero changes to CPython or NanVix.
 
-2. **Raw Python source in `script` field** — For AppContainer/Sandbox, `script` is a shell command. For NanVix, it's raw Python code. The runner handles interpreter invocation internally. This avoids users needing to understand NanVix's cmdline constraints.
+2. **Raw Python source in `process.commandLine` field** — For AppContainer/Sandbox, `process.commandLine` is a shell command. For the microvm backend, it's raw Python source code. The runner handles interpreter invocation internally. This avoids users needing to understand NanVix's cmdline constraints.
 
-3. **Pre-built artifacts, not built from source** — NanVix binaries (`nanvixd.exe`, `kernel.elf`, `python.elf`, `cpython-ramfs.img`) are downloaded from GitHub pre-releases. MXC does not compile or build NanVix components.
+3. **Pre-built artifacts, not built from source** — NanVix binaries (`nanvixd.exe`, `kernel.elf`, `python3.initrd`, `nanvix_rootfs.img`) are downloaded from GitHub pre-releases. MXC does not compile or build NanVix components.
 
 
-4. **Unsupported policies are rejected** — If a config specifies `filesystem`, `network`, or `processContainer` policies with `containment: "nanvix"`, the runner returns a clear error.
+4. **Unsupported policies are rejected** — If a config specifies `network` or `processContainer` policies with `containment: "microvm"`, the runner returns a clear error. (Filesystem readwrite/readonly paths are honored via the staging-dir mount.)
 
 5. **Host-side I/O risk mitigated by IKC framing** — `nanvixd.exe` parses guest I/O via IKC (Inter-Kernel Communication) messages using fixed-size frames with bounds checking. A crafted guest could attempt malformed messages. Mitigation: formal fuzzing (future work).
 
-6. **Artifact integrity via hash verification** — Guest artifacts (`python.elf`, `kernel.elf`, `cpython-ramfs.img`) are loaded from disk. If an attacker can modify these files, they control the guest. Mitigation: hash verification at install time via setup scripts (future work).
+6. **Artifact integrity via hash verification** — Guest artifacts (`python3.initrd`, `kernel.elf`, `nanvix_rootfs.img`) are loaded from disk. If an attacker can modify these files, they control the guest. Mitigation: hash verification at install time via setup scripts (future work).
 
 7. **Timeout = boot + script** — Total timeout is `boot_timeout_ms` (default 60000ms, grace for VM boot + Python init) + `script_timeout` (from JSON `timeout` field). A background watchdog thread terminates the process if the total expires.
 
@@ -102,8 +114,8 @@ mxc/src/
 │   ├── Cargo.toml                    # UNCHANGED
 │   └── src/
 │       ├── lib.rs                    # Add: pub mod nanvix_runner (1 line)
-│       ├── models.rs                 # Add: NanVixConfig struct, ContainmentBackend::NanVix
-│       ├── config_parser.rs          # Add: RawNanVix struct, "nanvix" parsing
+│       ├── models.rs                 # Add: NanVixConfig struct, ContainmentBackend::MicroVm
+│       ├── config_parser.rs          # Add: RawNanVix struct, "microvm" parsing
 │       ├── error.rs                  # Add: WxcError::NanVix variant
 │       ├── nanvix_runner.rs          # NEW — NanVixScriptRunner implementation
 │       ├── appcontainer.rs           # UNCHANGED
@@ -118,22 +130,22 @@ mxc/docs/nanvix-microvm/
 └── nanvix-integration-plan.md        # NEW — this document
 
 mxc/test_configs/
-└── nanvix_hello.json                 # NEW — example NanVix config
+└── microvm_hello.json                # NEW — example microvm config
 ```
 
 ## Error Handling & Output Semantics
 
 ### I/O Model
 
-The NanVix runner follows the same pattern as the other backends: **stdin/stdout/stderr are all relayed directly** between the parent process and nanvixd via pipe relay threads. The runner does not capture or buffer any stream.
+**stdout/stderr** are relayed live between nanvixd and the parent via pipe relay threads — the runner does not capture or buffer either stream. **stdin is not relayed**: the runner spawns nanvixd with `stdin = Stdio::null()`, so the guest sees no host input.
 
 ```
-wxc-exec stdin  ──▶  nanvixd stdin  ──▶  guest python stdin
+wxc-exec stdin  ──╳  (closed; not relayed into the guest)
 wxc-exec stdout ◀──  nanvixd stdout ◀──  guest python stdout
 wxc-exec stderr ◀──  nanvixd stderr ◀──  kernel traces
 ```
 
-**Script delivery via stdin**: The calling layer (the SDK) writes the script content to wxc-exec's stdin, which relays through to nanvixd and into the guest Python's `sys.stdin.read()`. The SDK closes stdin after writing, which propagates EOF through to the guest.
+**Script delivery via mount, not stdin**: The runner writes `bootstrap.py` (the user script wrapped in a loader preamble) into a per-invocation temp staging directory and passes that directory to `nanvixd -mount <staging>`. Inside the guest, Python executes `bootstrap.py` from the mounted directory. The SDK does not write the script to wxc-exec's stdin.
 
 ### Exit Code Propagation
 
@@ -171,26 +183,28 @@ All variants are surfaced via stderr output. Preflight and Platform errors preve
 
 ```json
 {
-  "script": "print('Hello from NanVix!')",
-  "containment": "nanvix",
-  "timeout": 30000
+  "process": {
+    "commandLine": "print('Hello from NanVix!')",
+    "timeout": 30000
+  },
+  "containment": "microvm"
 }
 ```
 
 ### Config Field Mapping
 
-| JSON Field | Rust Field (`CodexRequest`) | NanVix Behavior |
+| JSON Field | Rust Field (`ExecutionRequest`) | NanVix Behavior |
 |------------|---------------------------|----------------|
-| `script` | `script_code: String` | ✅ **Used** — raw Python source code (not a shell command) |
-| `timeout` | `script_timeout: u32` | ✅ **Used** — script execution timeout in ms |
-| `containment` | `containment: ContainmentBackend` | ✅ **Used** — must be `"nanvix"` |
+| `process.commandLine` | `script_code: String` | ✅ **Used** — raw Python source code (not a shell command) |
+| `process.timeout` | `script_timeout: u32` | ✅ **Used** — script execution timeout in ms |
+| `containment` | `containment: ContainmentBackend` | ✅ **Used** — must be `"microvm"` |
 | `workingDirectory` | `working_directory: String` | ❌ **Rejected** — guest has its own filesystem namespace |
 | `processContainer.*` | `policy: ContainerPolicy` | ❌ **Rejected** — not applicable to NanVix |
-| `filesystem.*` | (part of `policy`) | ❌ **Rejected** — guest FS is a read-only ramfs |
+| `filesystem.readwritePaths` / `readonlyPaths` | (part of `policy`) | ✅ **Used** — host paths bind-mounted into the guest via the staging dir |
 | `network.*` | (part of `policy`) | ❌ **Rejected** — no network stack in guest |
-| `sandbox.*` | `sandbox_config: WindowsSandboxConfig` | ❌ **Rejected** — NanVix is not Windows Sandbox |
+| `sandbox.*` | `sandbox_config: WindowsSandboxConfig` | ❌ **Rejected** — microvm is not Windows Sandbox |
 
-**Policy validation**: If a config specifies `containment: "nanvix"` alongside `filesystem`, `network`, `processContainer`, or `workingDirectory` fields, the runner returns a error.
+**Policy validation**: If a config specifies `containment: "microvm"` alongside `network`, `processContainer`, or `workingDirectory` fields, the runner returns an error.
 
 ## Binary Distribution & Versioning
 
@@ -200,8 +214,8 @@ NanVix artifacts are **NOT bundled** in the MXC npm package. They are distribute
 |----------|------|--------|
 | `nanvixd.exe` | 7.5 MB | [nanvix/nanvix](https://github.com/nanvix/nanvix) releases |
 | `kernel.elf` | 10.5 MB | [nanvix/nanvix](https://github.com/nanvix/nanvix) releases |
-| `python.elf` | 9.1 MB | [nanvix/cpython](https://github.com/nanvix/cpython) releases |
-| `cpython-ramfs.img` | 35.6 MB | [nanvix/cpython](https://github.com/nanvix/cpython) releases |
+| `python3.initrd` | 9.1 MB | [nanvix/cpython](https://github.com/nanvix/cpython) releases |
+| `nanvix_rootfs.img` | 35.6 MB | [nanvix/cpython](https://github.com/nanvix/cpython) releases |
 
 Setup scripts (PowerShell & Bash) will download matching pre-release binaries and verify checksums.
 
@@ -224,12 +238,12 @@ Setup scripts (PowerShell & Bash) will download matching pre-release binaries an
 **Goal:** Add NanVix as a functional containment backend in `wxc-exec.exe`.
 
 **What changed:**
-- `models.rs` — Added `NanVix` variant to `ContainmentBackend`, added `NanVixConfig` struct, added `nanvix_config` field to `CodexRequest`
-- `config_parser.rs` — Added `RawNanVix` serde struct, `"nanvix"` containment parsing, NanVix config section parsing
+- `models.rs` — Added `MicroVm` variant to `ContainmentBackend`, added `NanVixConfig` struct, added `nanvix_config` field to `ExecutionRequest`
+- `config_parser.rs` — Added `RawNanVix` serde struct, `"microvm"` containment parsing, NanVix config section parsing
 - `error.rs` — Added `WxcError::NanVix(String)` variant
 - `nanvix_runner.rs` — **NEW** — `NanVixScriptRunner` implementing `ScriptRunner` trait
 - `lib.rs` — Added `pub mod nanvix_runner`
-- `main.rs` — Added `ContainmentBackend::NanVix` dispatch arm
+- `main.rs` — Added `ContainmentBackend::MicroVm` dispatch arm
 
 **Verified:** Build succeeds, all existing tests pass, E2E test produces correct output.
 
@@ -238,9 +252,9 @@ Setup scripts (PowerShell & Bash) will download matching pre-release binaries an
 **Goal:** Make the TypeScript SDK aware of NanVix as a backend option.
 
 **What changes:**
-- `sdk/src/types.ts` — Add `'nanvix'` to `SandboxingMethod` type, add `NanVixConfig` interface
+- `sdk/src/types.ts` — Add `'microvm'` to `SandboxingMethod` type, add `NanVixConfig` interface
 - `sdk/src/platform.ts` — Detect NanVix availability via `wxc-exec.exe --check-platform`
-- `sdk/src/sandbox.ts` — Accept `containment: 'nanvix'` in `SandboxSpawnOptions`
+- `sdk/src/sandbox.ts` — Accept `containment: 'microvm'` in `SandboxSpawnOptions`
 - `wxc/src/main.rs` — Add `--check-platform` subcommand returning JSON capabilities
 
 ### Phase 3 — CLI Flags & Setup Scripts
@@ -248,7 +262,7 @@ Setup scripts (PowerShell & Bash) will download matching pre-release binaries an
 **Goal:** Let users invoke NanVix from the CLI and set up the runtime.
 
 **What changes:**
-- `wxc/src/main.rs` — Add `--nanvix` flag (sets `containment: "nanvix"` automatically)
+- `wxc/src/main.rs` — Add `--microvm` flag (sets `containment: "microvm"` automatically)
 - `scripts/setup-nanvix.ps1` — PowerShell script to download NanVix pre-release binaries
 - `scripts/setup-nanvix.sh` — Bash equivalent for WSL/Linux/CI
 
@@ -287,7 +301,7 @@ Setup scripts (PowerShell & Bash) will download matching pre-release binaries an
 | SSL/TLS (`import ssl`) | `_ssl` module not built | `ModuleNotFoundError: No module named '_ssl'` |
 | ctypes (`import ctypes`) | `_ctypes` module not built | `ModuleNotFoundError: No module named '_ctypes'` |
 | GUI (`tkinter`, `turtle`) | No display server | Module removed from ramfs |
-| Interactive input (`input()`) | stdin consumed for script delivery | `EOFError: EOF when reading a line` |
+| Interactive input (`input()`) | guest stdin is closed (`Stdio::null()`); no host stdin relay | `EOFError: EOF when reading a line` |
 | Large memory (>128MB) | Default VM memory limit | Process killed by kernel OOM |
 
 ## End-User Experience
@@ -295,35 +309,37 @@ Setup scripts (PowerShell & Bash) will download matching pre-release binaries an
 ### CLI Usage
 
 ```bash
-# Run a Python script in a NanVix VM
-wxc-exec.exe nanvix_config.json
+# Run a Python script in a NanVix micro-VM
+wxc-exec.exe microvm_config.json
 
 # With debug output
-wxc-exec.exe --debug nanvix_config.json
+wxc-exec.exe --debug microvm_config.json
 ```
 
-### Example Config (`nanvix_config.json`)
+### Example Config (`microvm_config.json`)
 
 ```json
 {
-  "script": "import sys\nprint(f'Python {sys.version} on {sys.platform}')",
-  "containment": "nanvix",
-  "timeout": 30000
+  "process": {
+    "commandLine": "import sys\nprint(f'Python {sys.version} on {sys.platform}')",
+    "timeout": 30000
+  },
+  "containment": "microvm"
 }
 ```
 
 ### Expected Output
 
 ```
-$ wxc-exec.exe --debug nanvix_config.json
+$ wxc-exec.exe --debug microvm_config.json
 Script code length: 58
 Working directory:
 Script timeout: 30000
 Container name: CLI
 NanVix: nanvixd="C:\\nanvix\\bin\\nanvixd.exe"
 NanVix: bin_dir="C:\\nanvix\\bin"
-NanVix: ramfs="C:\\nanvix\\bin\\cpython-ramfs.img"
-NanVix: python="C:\\nanvix\\bin\\python.elf"
+NanVix: ramfs="C:\\nanvix\\bin\\nanvix_rootfs.img"
+NanVix: python="C:\\nanvix\\bin\\python3.initrd"
 NanVix: process exited with code 0
 Exit code: 0
 Python 3.12.3 (tags/0715636-nanvix-03bba66:0715636) on nanvix
@@ -337,7 +353,7 @@ import { spawnSandboxAsync } from '@microsoft/mxc-sdk';
 const result = await spawnSandboxAsync(
   "print('Hello from NanVix!')",
   {},  // no policy needed — NanVix is isolated by design
-  { containment: 'nanvix' }
+  { containment: 'microvm' }
 );
 
 console.log(result.stdout);  // "Hello from NanVix!"
@@ -351,21 +367,21 @@ console.log(result.exitCode); // 0
 
 | Test | What It Validates |
 |------|------------------|
-| `default_config_values` | NanVixConfig defaults (python.elf, /sysroot, 60s) |
+| `default_config_values` | NanVixConfig defaults (python3.initrd, /sysroot, 60s) |
 | `total_timeout_adds_boot_and_script` | Timeout arithmetic |
 | `resolve_nanvixd_missing_returns_error` | Path resolution error handling |
-| Config parser: `"nanvix"` containment | JSON parsing of nanvix section |
+| Config parser: `"microvm"` containment | JSON parsing of microvm section |
 
 ### Integration Tests (requires WHP + NanVix binaries)
 
 | Test | What It Validates |
 |------|------------------|
-| Hello world | Basic stdin → stdout pipeline |
-| Script with spaces | Stdin piping bypasses space-splitting |
+| Hello world | Basic script → stdout pipeline (script delivered via mounted staging dir) |
+| Script with spaces | Mount-based delivery bypasses the cmdline space-splitting limit |
 | Exit code propagation | `sys.exit(42)` → exit code 42 |
 | Missing nanvixd | Preflight error message |
 | Timeout | Watchdog kills after deadline |
-| Large script | >255 bytes (exceeds cmdline limit) |
+| Large script | >255 bytes (would exceed cmdline limit if it weren't mounted) |
 
 ## Open Design Questions
 
@@ -375,4 +391,3 @@ console.log(result.exitCode); // 0
 | 2 | Should there be a size limit to the VM |  |
 | 3 | Should there be a writable FS area in the guest? | Parked for Phase 2 |
 | 4 | Should we support TypeScript or other payloads? | Architecture supports it |
-

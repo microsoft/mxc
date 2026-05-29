@@ -1,13 +1,62 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-trigger: none
+# Push trigger on `main` exists primarily to populate the Azure Pipelines
+# target-dir and CARGO_HOME cache scopes for the default branch. PR-triggered
+# runs are branch-scoped on writes and cannot populate `main`'s scope; they
+# can only *read* from it as a fallback. Without a `main` trigger, the
+# 1ES `cacheOptions.enableTargetCache: true` configuration in
+# `Rust.Build.Job.yml` runs every PR with a cold target dir — the
+# auto-generated wildcard restore key (visible in the `🎯 Cache target
+# directory` task log as `…|Rust=<ver>|**`) finds no prior entry in
+# main's scope, so each PR build does a fully cold cargo compile
+# (~14 min on x64 WXC).
+#
+# After this trigger is enabled, the first push to `main` populates the
+# cache; every subsequent PR's restore step finds it via that wildcard
+# fallback and the cargo build step drops to a few minutes.
+#
+# Docs-only commits to `main` don't need to rebuild the whole workspace,
+# so the path exclusion list here matches the one added to the `pr:`
+# trigger in PR #396 (kept in sync intentionally — if that PR lands and
+# the lists drift, reconcile them).
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    exclude:
+    - 'docs/**'
+    - 'examples/**'
+    - '.github/ISSUE_TEMPLATE/**'
+    - '.github/PULL_REQUEST_TEMPLATE.md'
+    - '.github/copilot-instructions.md'
+    - '.github/instructions/**'
+    - '**/*.md'
+    - '.editorconfig'
+
 name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
 
 pr:
-- main
-- feature/*
-- user/*
+  branches:
+    include:
+    - main
+    - feature/*
+    - user/*
+  # Skip the full build pipeline when a PR only touches documentation /
+  # non-shipping content. Any change outside this exclusion list still
+  # triggers the pipeline as before. Keep this list conservative — exclude
+  # only paths that cannot possibly affect built artifacts or test behavior.
+  paths:
+    exclude:
+    - 'docs/**'
+    - 'examples/**'
+    - '.github/ISSUE_TEMPLATE/**'
+    - '.github/PULL_REQUEST_TEMPLATE.md'
+    - '.github/copilot-instructions.md'
+    - '.github/instructions/**'
+    - '**/*.md'
+    - '.editorconfig'
 
 resources:
   repositories:
@@ -120,6 +169,12 @@ extends:
           ESRPInfo: ${{ parameters.ESRPInfo }}
 
       - template: .azure-pipelines/templates/Mxc.Binary.Packaging.Job.yml@self
+
+    - stage: Lint
+      displayName: 'Lint'
+      dependsOn: []
+      jobs:
+      - template: .azure-pipelines/templates/Lint.Job.yml@self
 
     - stage: SDK_Unit_Tests
       displayName: 'SDK Unit Tests'

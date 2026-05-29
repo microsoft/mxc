@@ -4,11 +4,11 @@
 //! State-aware request types — public domain output of the parser.
 //!
 //! `MxcRequest` is the bridge between parser and dispatcher: a one-shot call
-//! produces `MxcRequest::OneShot(CodexRequest)`, a state-aware call produces
+//! produces `MxcRequest::OneShot(ExecutionRequest)`, a state-aware call produces
 //! `MxcRequest::StateAware(ParsedStateAwareRequest)`. The parser narrows the
 //! discriminator by presence of the wire-format `phase` field.
 //!
-//! `ParsedStateAwareRequest` bundles the inner `CodexRequest` (populated by
+//! `ParsedStateAwareRequest` bundles the inner `ExecutionRequest` (populated by
 //! the same parser path one-shot uses for cross-cutting fields) with the
 //! state-aware-only fields: `phase`, optional `containment`, optional
 //! `sandbox_id`, and the raw JSON `experimental` block. The dispatcher
@@ -19,7 +19,7 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::models::{CodexRequest, ContainmentBackend};
+use crate::models::{ContainmentBackend, ExecutionRequest};
 use crate::mxc_error::MxcError;
 
 /// Lifecycle phase in a state-aware request.
@@ -67,7 +67,7 @@ impl std::fmt::Display for Phase {
     }
 }
 
-/// Parsed state-aware request. Pairs the inner `CodexRequest` with the
+/// Parsed state-aware request. Pairs the inner `ExecutionRequest` with the
 /// state-aware-only wire fields the dispatcher consumes.
 #[derive(Debug, Clone)]
 pub struct ParsedStateAwareRequest {
@@ -76,7 +76,7 @@ pub struct ParsedStateAwareRequest {
     /// For non-exec phases the process-related fields (`script_code`,
     /// `working_directory`, `script_timeout`, `env`) are left at their default
     /// values; only exec carries process info on the wire.
-    pub request: CodexRequest,
+    pub request: ExecutionRequest,
     pub phase: Phase,
     /// Present iff the request carried a `containment` field. Required for
     /// `provision`; for non-provision phases the dispatcher resolves the
@@ -136,7 +136,7 @@ impl ParsedStateAwareRequest {
 /// Public bridge between parser and dispatcher.
 #[derive(Debug, Clone)]
 pub enum MxcRequest {
-    OneShot(CodexRequest),
+    OneShot(ExecutionRequest),
     StateAware(ParsedStateAwareRequest),
 }
 
@@ -154,7 +154,7 @@ mod tests {
 
     fn parsed_with_experimental(exp: Option<Value>, phase: Phase) -> ParsedStateAwareRequest {
         ParsedStateAwareRequest {
-            request: CodexRequest::default(),
+            request: ExecutionRequest::default(),
             phase,
             containment: None,
             sandbox_id: None,

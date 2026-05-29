@@ -481,7 +481,7 @@ fn format_learning_mode_violation(props: &[(String, String)], mode: DisplayMode)
 
     // In minified mode, show a reduced set of properties.
     let display_props = if mode == DisplayMode::Minified {
-        const MINIFIED_FIELDS: &[&str] = &["ProcessName", "Category", "Denied"];
+        const MINIFIED_FIELDS: &[&str] = &["ProcessName", "Category", "Denied", "Detail"];
         let mut filtered: Vec<(String, String)> = formatted_props
             .into_iter()
             .filter(|(k, _)| MINIFIED_FIELDS.contains(&k.as_str()))
@@ -549,8 +549,33 @@ fn decode_properties(
         let prop_name =
             wide_str_at(info_buf, prop_info.NameOffset).unwrap_or_else(|| format!("prop{i}"));
 
-        // PropertyStruct = PROPERTY_FLAGS(1)
+        // PropertyStruct = PROPERTY_FLAGS(1) -- the struct header itself holds no
+        // data, but its N child members do occupy space in the user data buffer.
+        // We must decode (and skip) each child member to keep `offset` in sync.
         if prop_info.Flags.0 & 1 != 0 {
+            let num_members =
+                unsafe { prop_info.Anonymous1.structType.NumOfStructMembers } as usize;
+            let start_index = unsafe { prop_info.Anonymous1.structType.StructStartIndex } as usize;
+
+            for j in 0..num_members {
+                let child_prop = unsafe {
+                    let base = std::ptr::addr_of!(info.EventPropertyInfoArray)
+                        as *const EVENT_PROPERTY_INFO;
+                    &*base.add(start_index + j)
+                };
+                let child_in_type = unsafe { child_prop.Anonymous1.nonStructType.InType };
+                let child_length = unsafe { child_prop.Anonymous3.length } as usize;
+                let remaining = user_data_len.saturating_sub(offset);
+                let data_ptr = if remaining > 0 {
+                    unsafe { user_data.add(offset) }
+                } else {
+                    std::ptr::null()
+                };
+                let (_, consumed) =
+                    format_property_value(child_in_type, child_length, data_ptr, remaining);
+                offset += consumed;
+            }
+
             results.push((prop_name, "<struct>".to_string()));
             continue;
         }

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome};
 use wxc_common::logger::Logger;
-use wxc_common::models::{CodexRequest, LaunchMethod, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, LaunchMethod, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 
 use crate::profile_builder::build_profile;
@@ -68,7 +68,7 @@ impl SeatbeltScriptRunner {
 const POLL_INTERVAL_MS: u64 = 500;
 
 impl ScriptRunner for SeatbeltScriptRunner {
-    fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // Seatbelt cannot filter network by hostname — reject blockedHosts
         // rather than silently allowing traffic the user expects to be denied.
         if !request.policy.blocked_hosts.is_empty() {
@@ -92,7 +92,7 @@ impl ScriptRunner for SeatbeltScriptRunner {
         Ok(())
     }
 
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         // 1. Build the Seatbelt profile from the policy.
         let profile = match build_profile(request) {
             Ok(p) => p,
@@ -135,7 +135,7 @@ impl SeatbeltScriptRunner {
     fn execute_exec(
         &self,
         profile: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         gui_access: bool,
         logger: &mut Logger,
     ) -> ScriptResponse {
@@ -244,7 +244,7 @@ impl SeatbeltScriptRunner {
     fn execute_open(
         &self,
         profile: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         logger: &mut Logger,
     ) -> ScriptResponse {
         let _ = writeln!(
@@ -516,11 +516,11 @@ fn cleanup_files(paths: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{CodexRequest, SeatbeltConfig};
+    use wxc_common::models::{ExecutionRequest, SeatbeltConfig};
 
     #[allow(clippy::field_reassign_with_default)]
-    fn base_request() -> CodexRequest {
-        let mut request = CodexRequest::default();
+    fn base_request() -> ExecutionRequest {
+        let mut request = ExecutionRequest::default();
         request.experimental_enabled = true;
         request.experimental.seatbelt = Some(SeatbeltConfig::default());
         request

@@ -22,13 +22,17 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
-use crate::launch_diagnostics::{diagnose_create_process_failure, diagnose_process_exit};
+use crate::launch_diagnostics::{
+    diagnose_create_process_failure, diagnose_environment_not_supported, diagnose_process_exit,
+    is_environment_not_supported,
+};
 use crate::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
 use crate::logger::Logger;
 use crate::models::{
-    CodexRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ScriptResponse,
+    ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress,
+    ScriptResponse,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
@@ -134,7 +138,7 @@ impl BaseContainerRunner {
     /// - `disallow_win32k_system_calls` from `ui.disable`
     /// - `ui_restrictions` bitmask from `ui.to_ui_restrictions_bitmask()`
     /// - `network_policy.proxy.url` from proxy config
-    fn build_sandbox_spec(request: &CodexRequest) -> Vec<u8> {
+    fn build_sandbox_spec(request: &ExecutionRequest) -> Vec<u8> {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
 
         let version = builder.create_string(SANDBOX_SPEC_VERSION);
@@ -397,7 +401,7 @@ impl BaseContainerRunner {
 }
 
 impl ScriptRunner for BaseContainerRunner {
-    fn validate_runner(&self, request: &CodexRequest) -> Result<(), ScriptResponse> {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         Self::is_base_container_api_present().map_err(|e| {
             let hint = if !request.experimental_enabled {
                 format!(
@@ -419,7 +423,7 @@ impl ScriptRunner for BaseContainerRunner {
         })
     }
 
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         let _ = writeln!(
             logger,
             "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
@@ -560,6 +564,7 @@ impl ScriptRunner for BaseContainerRunner {
             cb: std::mem::size_of::<STARTUPINFOW>() as u32,
             ..unsafe { std::mem::zeroed() }
         };
+        #[allow(unused_assignments)]
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
         // Environment block for the sandboxed child.
@@ -612,22 +617,72 @@ impl ScriptRunner for BaseContainerRunner {
         }
 
         // 4. Call Experimental_CreateProcessInSandbox.
-        let success = unsafe {
-            create_process_in_sandbox(
-                ptr::null(),             // applicationName (resolved from commandLine)
-                cmd_wide.as_mut_ptr(),   // commandLine
-                ptr::null(),             // processAttributes (must be NULL)
-                ptr::null(),             // threadAttributes  (must be NULL)
-                0,                       // inheritHandles    (must be FALSE)
-                creation_flags,          // creationFlags
-                env_ptr,                 // environment
-                cwd_ptr,                 // currentDirectory
-                &si,                     // startupInfo
-                identity_wide.as_ptr(),  // identity
-                spec_bytes.as_ptr(),     // sandboxSpecification
-                spec_bytes.len() as u32, // sandboxSpecificationSize
-                &mut pi,                 // processInformation
-            )
+        //    If the OS returns ERROR_NOT_SUPPORTED (0x32) and we passed a non-null
+        //    environment block, this is a downlevel build that doesn't support the
+        //    `environment` parameter. Retry once without it.
+        let mut current_env_ptr = env_ptr;
+        let mut current_creation_flags = creation_flags;
+        let mut retries_remaining: u32 = 1;
+
+        // The loop yields (api_return_code, last_win32_error_on_failure).
+        let (success, last_error) = loop {
+            pi = unsafe { std::mem::zeroed() };
+
+            let result = unsafe {
+                create_process_in_sandbox(
+                    ptr::null(),             // applicationName (resolved from commandLine)
+                    cmd_wide.as_mut_ptr(),   // commandLine
+                    ptr::null(),             // processAttributes (must be NULL)
+                    ptr::null(),             // threadAttributes  (must be NULL)
+                    0,                       // inheritHandles    (must be FALSE)
+                    current_creation_flags,  // creationFlags
+                    current_env_ptr,         // environment
+                    cwd_ptr,                 // currentDirectory
+                    &si,                     // startupInfo
+                    identity_wide.as_ptr(),  // identity
+                    spec_bytes.as_ptr(),     // sandboxSpecification
+                    spec_bytes.len() as u32, // sandboxSpecificationSize
+                    &mut pi,                 // processInformation
+                )
+            };
+
+            if result != 0 {
+                break (result, None);
+            }
+
+            // Call failed -- capture the error before any handle cleanup.
+            let err = unsafe { GetLastError() };
+
+            if retries_remaining > 0
+                && is_environment_not_supported(err.0, !current_env_ptr.is_null())
+            {
+                retries_remaining -= 1;
+
+                // Clean up handles from the failed attempt.
+                unsafe {
+                    if !pi.hProcess.is_invalid() {
+                        let _ = CloseHandle(pi.hProcess);
+                    }
+                    if !pi.hThread.is_invalid() {
+                        let _ = CloseHandle(pi.hThread);
+                    }
+                }
+
+                let diag = diagnose_environment_not_supported();
+                let _ = writeln!(
+                    logger,
+                    "{EMOJI_WARNING} Launch diagnostic [{}]: {}",
+                    diag.kind, diag.message
+                );
+
+                // Retry without the environment block.
+                current_env_ptr = ptr::null();
+                current_creation_flags = 0;
+                continue;
+            }
+
+            // Non-retryable failure.
+            break (result, Some(err));
         };
 
         if success == 0 {
@@ -654,7 +709,7 @@ impl ScriptRunner for BaseContainerRunner {
             //
             // Diagnose the launch failure (FailurePhase::LaunchFailed).
             //
-            let err = unsafe { GetLastError() };
+            let err = last_error.unwrap_or_else(|| unsafe { GetLastError() });
             let diag = diagnose_create_process_failure(
                 err.0,
                 &request.script_code,
@@ -802,7 +857,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_produces_valid_flatbuffer() {
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.least_privilege_mode = true;
         request.policy.capabilities = vec!["internetClient".into(), "registryRead".into()];
         request.policy.readwrite_paths = vec!["C:\\temp".into()];
@@ -853,9 +908,8 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_empty_policy() {
-        // Default network policy is Allow + Capabilities, so internetClient
-        // should be auto-added even with an otherwise empty policy.
-        let request = CodexRequest::default();
+        // Default network policy is Block — no internetClient auto-add.
+        let request = ExecutionRequest::default();
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
 
         assert!(base_container_layout::sandbox_spec_buffer_has_identifier(
@@ -866,7 +920,7 @@ mod tests {
         assert_eq!(spec.version(), "0.1.0");
         assert!(spec.app_container());
         assert!(!spec.least_privilege());
-        assert_eq!(spec.capabilities(), Some("internetClient"));
+        assert!(spec.capabilities().is_none());
         assert!(spec.fs_read_write().is_none());
         assert!(spec.fs_read_only().is_none());
         assert!(spec.disallow_win32k_system_calls());
@@ -875,7 +929,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_network_block_no_internet_client() {
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.default_network_policy = NetworkPolicy::Block;
 
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
@@ -885,7 +939,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_ui_disabled() {
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.ui = UiPolicy {
             disable: true,
             ..Default::default()
@@ -915,7 +969,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_ui_clipboard_read_only() {
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.ui = UiPolicy {
             disable: false,
             clipboard: ClipboardPolicy::Read,
@@ -946,7 +1000,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_ui_clipboard_readwrite_no_injection() {
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.ui = UiPolicy {
             disable: false,
             clipboard: ClipboardPolicy::All,
@@ -978,7 +1032,7 @@ mod tests {
     fn build_sandbox_spec_proxy_url() {
         use crate::models::ProxyAddress;
 
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.default_network_policy = NetworkPolicy::Block;
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
@@ -995,7 +1049,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_no_proxy() {
-        let request = CodexRequest::default();
+        let request = ExecutionRequest::default();
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
         assert!(spec.network_policy().is_none());

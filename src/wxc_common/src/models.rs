@@ -94,6 +94,18 @@ pub struct SeatbeltConfig {
     /// access.
     #[serde(rename = "keychainAccess", default)]
     pub keychain_access: bool,
+
+    /// Additional Mach service global-names to allow `mach-lookup` for.
+    /// Escape hatch for callers that need to talk to a system service
+    /// the baseline doesn't cover (e.g. opt-in agent integrations).
+    /// Each entry is rendered verbatim as a `(global-name "...")`
+    /// inside a single `(allow mach-lookup ...)` form.
+    #[serde(
+        rename = "extraMachLookups",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub extra_mach_lookups: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -108,6 +120,7 @@ impl Default for SeatbeltConfig {
             launch_method: LaunchMethod::default(),
             nested_pty: true,
             keychain_access: false,
+            extra_mach_lookups: Vec::new(),
         }
     }
 }
@@ -217,8 +230,8 @@ pub struct LxcConfig {
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkPolicy {
-    #[default]
     Allow,
+    #[default]
     Block,
 }
 
@@ -386,6 +399,10 @@ pub struct ContainerPolicy {
     pub fallback: FallbackPolicy,
     pub default_network_policy: NetworkPolicy,
     pub network_enforcement_mode: NetworkEnforcementMode,
+    /// When true, the sandboxed process may bind() + listen() on local IPs
+    /// and accept incoming connections. Independent of `default_network_policy`
+    /// (which governs outbound traffic).
+    pub allow_local_network: bool,
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
     #[serde(skip)]
@@ -501,7 +518,7 @@ pub struct ExperimentalConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct CodexRequest {
+pub struct ExecutionRequest {
     /// Schema version for the config format.
     pub schema_version: String,
     /// Externally assigned container identifier.
@@ -530,7 +547,7 @@ pub struct CodexRequest {
     pub dry_run: bool,
 }
 
-impl Default for CodexRequest {
+impl Default for ExecutionRequest {
     fn default() -> Self {
         Self {
             schema_version: String::new(),

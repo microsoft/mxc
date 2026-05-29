@@ -10,7 +10,7 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    ClipboardPolicy, CodexRequest, ContainerPolicy, ContainmentBackend, ExperimentalConfig,
+    ClipboardPolicy, ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
     IsolationSessionConfig, IsolationSessionUser, LifecycleConfig, LxcConfig,
     NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
     TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
@@ -27,7 +27,7 @@ pub enum ParseError {
     /// I/O, base64-decode, or top-level JSON parse failure — the input could
     /// not be discriminated as state-aware vs one-shot.
     Decode(WxcError),
-    /// Discriminated as one-shot; conversion to `CodexRequest` failed.
+    /// Discriminated as one-shot; conversion to `ExecutionRequest` failed.
     OneShot(WxcError),
     /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
     /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
@@ -83,6 +83,8 @@ struct RawNetwork {
     default_policy: Option<String>,
     #[serde(rename = "enforcementMode")]
     enforcement_mode: Option<String>,
+    #[serde(rename = "allowLocalNetwork")]
+    allow_local_network: Option<bool>,
     #[serde(rename = "allowedHosts")]
     allowed_hosts: Option<Vec<String>>,
     #[serde(rename = "blockedHosts")]
@@ -183,6 +185,8 @@ struct RawSeatbelt {
     nested_pty: Option<bool>,
     #[serde(rename = "keychainAccess")]
     keychain_access: Option<bool>,
+    #[serde(rename = "extraMachLookups")]
+    extra_mach_lookups: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -230,7 +234,7 @@ struct RawConfig {
 // the struct, no field-level default) and acts as the discriminator against
 // `RawConfig`; the other fields mirror `RawConfig`'s wire shape so
 // cross-cutting fields (filesystem/network/ui/process) populate the inner
-// `CodexRequest` via the same conversion path. The `experimental` block stays
+// `ExecutionRequest` via the same conversion path. The `experimental` block stays
 // raw — typed deserialisation happens at dispatch time keyed by backend.
 #[derive(Deserialize)]
 struct RawStateAwareRequest {
@@ -352,6 +356,24 @@ fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError
     ))
 }
 
+/// Options for [`load_mxc_request_with_options`].
+///
+/// Kept as a struct (rather than additional positional arguments) so future
+/// loader-tuning knobs can be threaded through without re-spinning every
+/// caller.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LoadOptions {
+    /// Treat `input` as a base64-encoded JSON blob rather than a file path.
+    pub is_base64: bool,
+    /// Allow `process.commandLine` to be absent or empty in the policy.
+    ///
+    /// The driver sets this when it has a CLI-provided command-line
+    /// override to splice into `script_code` after parsing. Without it,
+    /// missing/empty `commandLine` is a hard parse error in one-shot
+    /// and state-aware exec requests (matching the legacy contract).
+    pub allow_missing_command: bool,
+}
+
 /// Loads and parses a JSON-based code execution request.
 ///
 /// If `is_base64` is true, `input` is treated as a base64-encoded JSON string.
@@ -360,15 +382,32 @@ pub fn load_request(
     input: &str,
     logger: &mut Logger,
     is_base64: bool,
-) -> Result<CodexRequest, WxcError> {
-    let json_str = decode_request_input(input, logger, is_base64)?;
+) -> Result<ExecutionRequest, WxcError> {
+    load_request_with_options(
+        input,
+        logger,
+        LoadOptions {
+            is_base64,
+            allow_missing_command: false,
+        },
+    )
+}
+
+/// Options-aware variant of [`load_request`] used by drivers that may
+/// override `process.commandLine` from the CLI. See [`LoadOptions`].
+pub fn load_request_with_options(
+    input: &str,
+    logger: &mut Logger,
+    opts: LoadOptions,
+) -> Result<ExecutionRequest, WxcError> {
+    let json_str = decode_request_input(input, logger, opts.is_base64)?;
 
     let raw: RawConfig = serde_json::from_str(&json_str).map_err(|e| {
         logger.log_line("Error parsing JSON");
         WxcError::ConfigParse(format!("JSON parse error: {}", e))
     })?;
 
-    convert_raw_config(raw, logger)
+    convert_raw_config_inner(raw, logger, true, opts.allow_missing_command)
 }
 
 /// Loads a request and routes to the one-shot or state-aware path based on
@@ -381,7 +420,27 @@ pub fn load_mxc_request(
     logger: &mut Logger,
     is_base64: bool,
 ) -> Result<MxcRequest, ParseError> {
-    let json_str = decode_request_input(input, logger, is_base64).map_err(ParseError::Decode)?;
+    load_mxc_request_with_options(
+        input,
+        logger,
+        LoadOptions {
+            is_base64,
+            allow_missing_command: false,
+        },
+    )
+}
+
+/// Options-aware variant of [`load_mxc_request`]. When
+/// `LoadOptions::allow_missing_command` is set, a missing or empty
+/// `process.commandLine` in the policy is tolerated and `script_code`
+/// is left empty for the driver to fill in from a CLI override.
+pub fn load_mxc_request_with_options(
+    input: &str,
+    logger: &mut Logger,
+    opts: LoadOptions,
+) -> Result<MxcRequest, ParseError> {
+    let json_str =
+        decode_request_input(input, logger, opts.is_base64).map_err(ParseError::Decode)?;
 
     let raw: RawMxcRequest = serde_json::from_str(&json_str).map_err(|e| {
         logger.log_line("Error parsing JSON");
@@ -389,12 +448,16 @@ pub fn load_mxc_request(
     })?;
 
     match raw {
-        RawMxcRequest::StateAware(state_aware) => convert_raw_state_aware(*state_aware, logger)
-            .map(MxcRequest::StateAware)
-            .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string()))),
-        RawMxcRequest::OneShot(one_shot) => convert_raw_config(*one_shot, logger)
-            .map(MxcRequest::OneShot)
-            .map_err(ParseError::OneShot),
+        RawMxcRequest::StateAware(state_aware) => {
+            convert_raw_state_aware(*state_aware, logger, opts.allow_missing_command)
+                .map(MxcRequest::StateAware)
+                .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
+        }
+        RawMxcRequest::OneShot(one_shot) => {
+            convert_raw_config_inner(*one_shot, logger, true, opts.allow_missing_command)
+                .map(MxcRequest::OneShot)
+                .map_err(ParseError::OneShot)
+        }
     }
 }
 
@@ -436,6 +499,11 @@ pub fn decode_request_input(
 
 /// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
 const SUPPORTED_VERSION: &str = ">=0.4, <=0.6";
+
+/// Canonical "latest" schema version string used in samples and tests. Bump
+/// alongside `SUPPORTED_VERSION`'s upper bound when a new dev schema lands.
+#[cfg(test)]
+const CURRENT_SCHEMA_VERSION: &str = "0.6.0-alpha";
 
 /// The minimum schema version that implies BaseContainer backend usage.
 const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
@@ -679,11 +747,17 @@ fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexReques
 // `require_process = false` allows state-aware non-exec phases to omit the
 // `process` block entirely; those phases leave `script_code` / `working_directory`
 // / `script_timeout` / `env` at their defaults and never read them.
+//
+// `allow_missing_command` further relaxes the `require_process == true` arms
+// so that a CLI command-line override (provided by the driver after parsing)
+// can stand in for `process.commandLine`. When set, a missing or empty
+// `commandLine` is silently accepted and `script_code` is left empty.
 fn convert_raw_config_inner(
     raw: RawConfig,
     logger: &mut Logger,
     require_process: bool,
-) -> Result<CodexRequest, WxcError> {
+    allow_missing_command: bool,
+) -> Result<ExecutionRequest, WxcError> {
     // Capture which per-backend sections are present before any of the raw
     // fields get consumed below; the multi-backend check needs to inspect
     // them after `containment` has been resolved.
@@ -695,18 +769,21 @@ fn convert_raw_config_inner(
     let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
 
     // Process section: required for one-shot and for state-aware exec; absent
-    // is allowed for state-aware non-exec phases (require_process == false).
+    // is allowed for state-aware non-exec phases (require_process == false)
+    // or when the driver has signalled a CLI command-line override is
+    // present via `allow_missing_command`.
+    let command_required = require_process && !allow_missing_command;
     let (script_code, working_directory, script_timeout, env) = match raw.process {
         Some(process) => {
             let script_code = match process.command_line {
                 Some(s) if !s.is_empty() => s,
-                Some(_) if require_process => {
+                Some(_) if command_required => {
                     logger.log_line("process.commandLine cannot be empty");
                     return Err(WxcError::ConfigParse(
                         "process.commandLine cannot be empty".to_string(),
                     ));
                 }
-                None if require_process => {
+                None if command_required => {
                     logger.log_line("Missing required field: process.commandLine");
                     return Err(WxcError::ConfigParse(
                         "Missing required field: process.commandLine".to_string(),
@@ -730,7 +807,7 @@ fn convert_raw_config_inner(
                 process.env.unwrap_or_default(),
             )
         }
-        None if require_process => {
+        None if command_required => {
             return Err(WxcError::ConfigParse(
                 "'process' section is required".into(),
             ));
@@ -941,9 +1018,12 @@ fn convert_raw_config_inner(
     if let Some(net) = raw.network {
         if let Some(proxy_value) = net.proxy {
             let proxy_config = parse_proxy_config(&proxy_value)?;
-            if proxy_config.is_enabled() && containment != ContainmentBackend::ProcessContainer {
-                let msg =
-                    "Network proxy is only supported with the 'processcontainer' containment backend";
+            if proxy_config.is_enabled()
+                && containment != ContainmentBackend::ProcessContainer
+                && containment != ContainmentBackend::Bubblewrap
+            {
+                let msg = "Network proxy is only supported with the 'processcontainer' \
+                           or 'bubblewrap' containment backends";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -981,11 +1061,82 @@ fn convert_raw_config_inner(
             };
         }
 
+        if let Some(v) = net.allow_local_network {
+            policy.allow_local_network = v;
+        }
+
         if let Some(v) = net.allowed_hosts {
             policy.allowed_hosts = v;
         }
         if let Some(v) = net.blocked_hosts {
             policy.blocked_hosts = v;
+        }
+
+        // Bubblewrap is unprivileged by design; iptables-based enforcement
+        // (firewall / both) requires CAP_NET_ADMIN, which defeats the
+        // backend's privilege story. Reject the combination explicitly so
+        // users get a clear error instead of an opaque runtime failure.
+        if containment == ContainmentBackend::Bubblewrap
+            && policy.network_proxy.is_enabled()
+            && matches!(
+                policy.network_enforcement_mode,
+                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+            )
+        {
+            let msg = "Bubblewrap: network.proxy cannot be combined with \
+                       network.enforcementMode='firewall' or 'both'. The cooperative \
+                       env-var proxy enforces hosts at the proxy layer; iptables-based \
+                       enforcement requires privilege and is mutually exclusive.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // External proxy (`network.proxy.url` / `network.proxy.localhost`)
+        // enforces its own policy — the runner does NOT forward
+        // `allowedHosts` / `blockedHosts` / `defaultPolicy` to it. Reject
+        // configs that combine an external proxy with host lists or a
+        // restrictive default, otherwise users get a silently weaker
+        // enforcement than a no-proxy `defaultPolicy: "block"` config
+        // would have produced.
+        if containment == ContainmentBackend::Bubblewrap
+            && policy.network_proxy.is_enabled()
+            && !policy.network_proxy.builtin_test_server
+            && (!policy.allowed_hosts.is_empty()
+                || !policy.blocked_hosts.is_empty()
+                || policy.default_network_policy == NetworkPolicy::Block)
+        {
+            let msg = "Bubblewrap: an external network.proxy (url/localhost) cannot be \
+                       combined with allowedHosts, blockedHosts, or defaultPolicy='block'. \
+                       The external proxy is expected to enforce its own host policy; \
+                       MXC does not forward host lists to it. Use \
+                       'network.proxy.builtinTestServer: true' (testing only) for \
+                       MXC-enforced host filtering, or remove the host policy.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // Cooperative-model warning: when the builtin test proxy is paired
+        // with `defaultPolicy: "block"` and no allowlist, well-behaved
+        // HTTP clients are denied at the proxy, but raw-socket clients
+        // (anything that ignores HTTP_PROXY/HTTPS_PROXY) still reach the
+        // host network because the sandbox shares the host netns in proxy
+        // mode. Surface this at config-validation time so users porting a
+        // working hard-block config don't silently lose enforcement when
+        // they add a proxy block.
+        if containment == ContainmentBackend::Bubblewrap
+            && policy.network_proxy.is_enabled()
+            && policy.default_network_policy == NetworkPolicy::Block
+            && policy.allowed_hosts.is_empty()
+            && policy.blocked_hosts.is_empty()
+        {
+            logger.log_line(
+                "WARNING: Bubblewrap network.proxy with defaultPolicy='block' is \
+                 cooperative. HTTP_PROXY-aware clients (curl, requests, etc.) are \
+                 denied at the proxy, but raw-socket clients that ignore HTTP_PROXY \
+                 bypass the proxy and reach the host network. For strict isolation \
+                 of all clients, remove network.proxy so --unshare-net applies; for \
+                 host-list enforcement, add allowedHosts (cooperative tools only).",
+            );
         }
     }
 
@@ -1071,6 +1222,7 @@ fn convert_raw_config_inner(
             launch_method: raw_sb.launch_method.unwrap_or_default(),
             nested_pty: raw_sb.nested_pty.unwrap_or(true),
             keychain_access: raw_sb.keychain_access.unwrap_or(false),
+            extra_mach_lookups: raw_sb.extra_mach_lookups.unwrap_or_default(),
         });
         ExperimentalConfig {
             test,
@@ -1098,7 +1250,7 @@ fn convert_raw_config_inner(
         };
     }
 
-    Ok(CodexRequest {
+    Ok(ExecutionRequest {
         schema_version,
         container_id,
         platform,
@@ -1119,6 +1271,7 @@ fn convert_raw_config_inner(
 fn convert_raw_state_aware(
     raw: RawStateAwareRequest,
     logger: &mut Logger,
+    allow_missing_command: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
     let phase = Phase::from_wire(&raw.phase).map_err(|e| {
         let msg = e.message.clone();
@@ -1140,7 +1293,7 @@ fn convert_raw_state_aware(
         validate_state_aware_experimental(backend, raw.experimental.as_ref(), logger)?;
     }
 
-    // Build a RawConfig surrogate so the inner CodexRequest is populated by the
+    // Build a RawConfig surrogate so the inner ExecutionRequest is populated by the
     // same conversion path one-shot uses for cross-cutting wire fields.
     let surrogate = RawConfig {
         version: raw.version,
@@ -1162,7 +1315,8 @@ fn convert_raw_state_aware(
     };
 
     let require_process = phase == Phase::Exec;
-    let request = convert_raw_config_inner(surrogate, logger, require_process)?;
+    let request =
+        convert_raw_config_inner(surrogate, logger, require_process, allow_missing_command)?;
 
     Ok(ParsedStateAwareRequest {
         request,
@@ -1258,6 +1412,83 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         load_mxc_request(&encoded, &mut logger, true)
+    }
+
+    fn load_mxc_with_opts(json: &str, opts: LoadOptions) -> Result<MxcRequest, ParseError> {
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        load_mxc_request_with_options(
+            &encoded,
+            &mut logger,
+            LoadOptions {
+                is_base64: true,
+                ..opts
+            },
+        )
+    }
+
+    #[test]
+    fn allow_missing_command_lets_one_shot_skip_command_line() {
+        // No process.commandLine in the policy — without the flag this would
+        // be a parse error; with allow_missing_command set the parser yields
+        // an empty script_code for the driver to fill in.
+        let json = r#"{"process": {"cwd": "C:\\tmp"}}"#;
+        let opts = LoadOptions {
+            is_base64: true,
+            allow_missing_command: true,
+        };
+        match load_mxc_with_opts(json, opts).unwrap() {
+            MxcRequest::OneShot(req) => {
+                assert!(req.script_code.is_empty());
+                assert_eq!(req.working_directory, "C:\\tmp");
+            }
+            MxcRequest::StateAware(_) => panic!("expected one-shot"),
+        }
+    }
+
+    #[test]
+    fn allow_missing_command_lets_one_shot_skip_process_block_entirely() {
+        let json = r#"{"containment": "processcontainer"}"#;
+        let opts = LoadOptions {
+            is_base64: true,
+            allow_missing_command: true,
+        };
+        match load_mxc_with_opts(json, opts).unwrap() {
+            MxcRequest::OneShot(req) => assert!(req.script_code.is_empty()),
+            MxcRequest::StateAware(_) => panic!("expected one-shot"),
+        }
+    }
+
+    #[test]
+    fn allow_missing_command_lets_state_aware_exec_skip_command_line() {
+        let json = r#"{
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234",
+            "process": {"cwd": "C:\\tmp"}
+        }"#;
+        let opts = LoadOptions {
+            is_base64: true,
+            allow_missing_command: true,
+        };
+        match load_mxc_with_opts(json, opts).unwrap() {
+            MxcRequest::StateAware(p) => {
+                assert_eq!(p.phase, Phase::Exec);
+                assert!(p.request.script_code.is_empty());
+            }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn default_options_still_reject_missing_command_line() {
+        // Sanity: without the flag, the legacy contract holds — missing
+        // commandLine is a hard parse error.
+        let json = r#"{"process": {"cwd": "C:\\tmp"}}"#;
+        let opts = LoadOptions {
+            is_base64: true,
+            allow_missing_command: false,
+        };
+        assert!(load_mxc_with_opts(json, opts).is_err());
     }
 
     #[test]
@@ -1612,6 +1843,27 @@ mod tests {
     }
 
     #[test]
+    fn network_default_policy_absent_defaults_to_block_on_any_version() {
+        // wxc-exec is the trust boundary -- absent `defaultPolicy`
+        // resolves to `Block` regardless of declared schema version.
+        for version in ["0.4.0-alpha", "0.5.0-alpha", "0.6.0-alpha"] {
+            let json = format!(
+                r#"{{"version": "{}", "process": {{"commandLine": "echo x"}}}}"#,
+                version
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+            let req = load_request(&encoded, &mut logger, true).unwrap();
+            assert_eq!(
+                req.policy.default_network_policy,
+                NetworkPolicy::Block,
+                "version {} should default to Block",
+                version
+            );
+        }
+    }
+
+    #[test]
     fn network_enforcement_mode_capabilities() {
         let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "capabilities"}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -1669,6 +1921,32 @@ mod tests {
         assert_eq!(req.policy.blocked_hosts.len(), 2);
         assert_eq!(req.policy.blocked_hosts[0], "malicious.com");
         assert_eq!(req.policy.blocked_hosts[1], "tracker.net");
+    }
+
+    #[test]
+    fn network_allow_local_network() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {"allowLocalNetwork": true}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.allow_local_network);
+    }
+
+    #[test]
+    fn network_allow_local_network_defaults_false() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.allow_local_network);
     }
 
     #[test]
@@ -2148,12 +2426,237 @@ mod tests {
 
     #[test]
     fn proxy_builtin_test_server_rejected_with_non_processcontainer() {
+        // lxc is not allowed -- proxy is gated to processcontainer + bubblewrap.
         let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn proxy_accepted_with_bubblewrap() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"builtinTestServer": true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn proxy_with_bubblewrap_and_firewall_enforcement_is_rejected() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "firewall",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("network.proxy cannot be combined with"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn proxy_with_bubblewrap_and_both_enforcement_is_rejected() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "both",
+                "blockedHosts": ["evil.example"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        assert!(load_request(&encoded, &mut logger, true).is_err());
+    }
+
+    #[test]
+    fn proxy_with_bubblewrap_and_capabilities_enforcement_is_accepted() {
+        // Capabilities mode never invokes iptables, so combining it with a
+        // proxy is fine and must NOT trigger the conflict guard.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "capabilities",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert_eq!(req.policy.allowed_hosts, vec!["example.com".to_string()]);
+    }
+
+    #[test]
+    fn external_proxy_url_with_bubblewrap_and_allowed_hosts_is_rejected() {
+        // The external proxy enforces its own policy; the runner does not
+        // forward host lists to it. Combining the two is a silent
+        // policy-weakening trap and must be rejected at parse time.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"url": "http://127.0.0.1:8080"},
+                "allowedHosts": ["api.github.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("external network.proxy") && msg.contains("allowedHosts"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn external_proxy_localhost_with_bubblewrap_and_blocked_hosts_is_rejected() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"localhost": 8080},
+                "blockedHosts": ["evil.example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(format!("{}", err).contains("external network.proxy"));
+    }
+
+    #[test]
+    fn external_proxy_with_bubblewrap_and_default_block_is_rejected() {
+        // defaultPolicy=block is a hard-block intent; pairing it with an
+        // external proxy whose policy we don't control silently weakens
+        // enforcement.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"url": "http://127.0.0.1:8080"},
+                "defaultPolicy": "block"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(format!("{}", err).contains("defaultPolicy"));
+    }
+
+    #[test]
+    fn external_proxy_with_bubblewrap_and_no_host_policy_is_accepted() {
+        // Pure delegate-to-external-proxy with no MXC-side host policy is
+        // the supported external-proxy use case. Under deny-by-default,
+        // callers must explicitly set `defaultPolicy: "allow"` to opt
+        // into trusting the external proxy with full policy delegation.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"url": "http://127.0.0.1:8080"},
+                "defaultPolicy": "allow"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(!req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn builtin_proxy_with_bubblewrap_and_host_policy_is_accepted() {
+        // The builtin proxy DOES enforce host lists at the proxy layer, so
+        // combining it with allowedHosts is fine.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "allowedHosts": ["api.github.com"],
+                "defaultPolicy": "block"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.builtin_test_server);
+        assert_eq!(req.policy.allowed_hosts, vec!["api.github.com".to_string()]);
+    }
+
+    #[test]
+    fn bubblewrap_proxy_with_default_block_and_empty_allowlist_warns() {
+        // Cooperative mode with no allowlist denies HTTP_PROXY-aware clients
+        // but raw-socket clients still reach the host network. Parser must
+        // surface a warning (does not reject).
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "platform": "linux",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "defaultPolicy": "block"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+        // Warning is best-effort surfaced via the logger; the request still
+        // succeeds.
     }
 
     #[test]
@@ -2247,6 +2750,19 @@ mod tests {
 
     #[test]
     fn schema_version_current_accepted() {
+        let json = format!(
+            r#"{{"process": {{"commandLine": "echo hi"}}, "version": "{}"}}"#,
+            CURRENT_SCHEMA_VERSION
+        );
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn schema_version_0_5_still_accepted() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.5.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();

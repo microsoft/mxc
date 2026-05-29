@@ -57,6 +57,22 @@ mxc/schemas/
 The dev schema file (`mxc-config.schema.X.Y.Z-dev.json`) must define the `experimental`
 section structure so that editors can validate experimental configs.
 
+### Trust boundary vs schema defaults
+
+Schemas in `stable/` are immutable: they document the input shape that was
+promised at release. They are **not** authoritative for runtime security
+defaults. `wxc-exec` is the trust boundary and may apply stricter defaults
+than a stable schema declares when a security issue requires it.
+
+For example, schemas `0.4.0-alpha` and `0.5.0-alpha` declare
+`network.defaultPolicy` defaulting to `"allow"`. As of SDK 0.3.0 the runtime
+treats an absent `network.defaultPolicy` as `block` regardless of the
+declared schema version, because the old `allow` default was a security bug
+([#256](https://github.com/microsoft/mxc/issues/256)). Schema `0.6.0-dev`
+documents the new default; the stable schemas are left unchanged so the
+release contract stays auditable. Consumers that need the legacy behavior
+must set `defaultPolicy: "allow"` explicitly.
+
 ### Shipped vs Experimental
 
 The current stable schema versions are `0.4.0-alpha` and `0.5.0-alpha`. The parser
@@ -166,7 +182,7 @@ pub struct ExperimentalConfig {
     pub gpu_isolation: Option<GpuIsolationConfig>,
 }
 
-pub struct CodexRequest {
+pub struct ExecutionRequest {
     // ... stable fields ...
     pub experimental_enabled: bool,  // set by --experimental flag
     pub experimental: ExperimentalConfig,
@@ -175,7 +191,7 @@ pub struct CodexRequest {
 
 **In the runner (e.g., `appcontainer.rs`):**
 ```rust
-fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
     // ... normal execution ...
 
     // Experimental features only applied when flag is set
@@ -193,7 +209,7 @@ fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse
 **Promotion process:** When an experimental feature is ready to ship:
 1. Move the property from `experimental` to a top-level property in the schema
    (e.g., `experimental.gpuIsolation` → `gpuIsolation`)
-2. Move the struct from `ExperimentalConfig` to `CodexRequest`
+2. Move the struct from `ExperimentalConfig` to `ExecutionRequest`
 3. Move the field from `RawExperimental` to `RawConfig`
 4. Remove the `if request.experimental_enabled` guard
 5. Bump the minor version
@@ -335,6 +351,41 @@ enable/disable mechanism — simplicity over granularity.
 stable section, configs that still reference it under `experimental` will receive
 an error: "feature X has moved to the stable section." The parser will not
 silently fall back — explicit migration is required.
+
+## Deprecation Aliases
+
+When a wire value is renamed (e.g. `appcontainer` → `processcontainer` in
+[#268](https://github.com/microsoft/mxc/pull/268)), the legacy spelling enters a
+deprecation window where both forms are accepted on the wire.
+
+**Policy:** deprecation aliases are **version-agnostic**. The native parser
+accepts the legacy form regardless of `config.version`, and the SDK validator
+mirrors that behavior. We do *not* gate alias acceptance on schema version (i.e.
+"`appcontainer` only allowed for `0.4.0-alpha`/`0.5.0-alpha`") because:
+
+1. **Two layers must agree.** Schema-version gating would mean a config accepted
+   by the binary could be rejected by the SDK validator (or vice versa) based
+   on a string in `config.version`. That class of "works through one entry point
+   but not another" bug is exactly what [#390](https://github.com/microsoft/mxc/issues/390)
+   surfaced.
+2. **Authors don't always control `config.version`.** Configs flowing from
+   external sources (governance services, third-party tooling) may legitimately
+   declare `0.6.0-alpha` while still using legacy vocabulary their generator
+   has not yet been updated for.
+3. **The deprecation window is short.** The stated intent at rename time is
+   removal in a future minor release; gating buys little and costs review
+   complexity in every layer that re-checks containment.
+
+**Observability.** Each legacy-value encounter emits a one-line deprecation hint
+via the existing diagnostic channel (Rust: `Logger`; TypeScript SDK: `diagLog`,
+dedup'd per legacy value per process). The hint names the canonical replacement.
+No throw, no stderr write — the deprecation is observable only to callers who
+opt into the diagnostic stream.
+
+**Removal.** When an alias is removed in a future release, the change goes
+through the same promotion-style migration: a single release that turns the
+silent accept-and-warn into an explicit `unsupported_containment` error.
+Document the removal in the schema bump that drops it.
 
 ## Open Questions
 

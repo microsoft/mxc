@@ -7,7 +7,7 @@ import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
 import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } from './types.js';
-import { prepareSpawn, diagLogVersion } from './helper.js';
+import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromCode } from './errors.js';
 
@@ -87,27 +87,6 @@ function buildWslcContainerConfig(
 }
 
 /**
- * Applies iptables-based network enforcement to `config.network`:
- * when host filtering is requested, force `enforcementMode = 'firewall'`
- * so the Linux runner actually applies iptables rules. Without this,
- * `network_enforcement_mode` falls back to the parser default of
- * `Capabilities` and the runner silently skips iptables, dropping
- * `allowedHosts` / `blockedHosts` on the floor.
- *
- * Shared between the explicit `'bubblewrap'` / `'lxc'` builders and the
- * abstract `'process'` branch on Linux (which resolves to Bubblewrap
- * server-side) so the wire-format `network` block is identical regardless
- * of which intent the caller used.
- */
-function applyIptablesNetworkEnforcement(config: ContainerConfig): void {
-    if (config.network) {
-        if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
-            config.network.enforcementMode = 'firewall';
-        }
-    }
-}
-
-/**
  * Builds the Bubblewrap (bwrap) portion of a ContainerConfig.
  * Bubblewrap is Linux-only and uses shared cross-backend fields only —
  * no backend-specific config block. Network enforcement via iptables
@@ -117,7 +96,7 @@ function buildBubblewrapConfig(
     config: ContainerConfig,
 ): ContainerConfig {
     config.containment = 'bubblewrap';
-    applyIptablesNetworkEnforcement(config);
+    applyLinuxNetworkPolicy(config);
     return config;
 }
 
@@ -134,7 +113,7 @@ function buildLinuxProcessConfig(
         release: '3.23',
         destroyOnExit: true,
     };
-    applyIptablesNetworkEnforcement(config);
+    applyLinuxNetworkPolicy(config);
     return config;
 }
 
@@ -303,8 +282,19 @@ export function createConfigFromPolicy(
 
     // Network mapping (cross-platform) — default-deny: block if not explicitly allowed
     if (policy.network) {
+        // Linux: only Bubblewrap supports network.proxy (cooperative env-var
+        // proxy, no privilege required). LXC and explicit non-bubblewrap
+        // containments do not. Abstract `'process'` on Linux resolves to
+        // Bubblewrap server-side so the proxy field is permitted there too.
         if (policy.network.proxy && platform === 'linux') {
-            throw new Error('Proxy configuration is not supported on Linux');
+            const linuxProxySupported =
+                containment === 'bubblewrap' || containment === 'process';
+            if (!linuxProxySupported) {
+                throw new Error(
+                    `Proxy configuration is not supported on Linux containment='${containment}'. ` +
+                    `Use containment 'bubblewrap' (or the abstract 'process') for proxy-based host filtering.`,
+                );
+            }
         }
         if (policy.network.proxy && platform === 'darwin') {
             throw new Error('Proxy configuration is not supported on macOS');
@@ -333,6 +323,7 @@ export function createConfigFromPolicy(
 
         config.network = {
             defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
+            allowLocalNetwork: policy.network.allowLocalNetwork,
             allowedHosts: policy.network.allowedHosts,
             blockedHosts: policy.network.blockedHosts,
             proxy: policy.network.proxy,
@@ -370,7 +361,7 @@ export function createConfigFromPolicy(
             //
             // Network enforcement still needs the same iptables firewall mode
             // as explicit `'bubblewrap'` when host filtering is in play.
-            applyIptablesNetworkEnforcement(config);
+            applyLinuxNetworkPolicy(config);
             diagLog(`createConfigFromPolicy: containment=process (linux, resolves to bubblewrap), id=${containerId}`);
             return config;
         }

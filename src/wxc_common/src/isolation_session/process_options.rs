@@ -2,10 +2,10 @@
 // Licensed under the MIT License.
 
 //! Process-creation options for the IsolationSession backend: MXC-internal
-//! `ProcessOptions` built from a `CodexRequest`, then translated to the
+//! `ProcessOptions` built from an `ExecutionRequest`, then translated to the
 //! WinRT `IsoSessionProcessOptions` consumed by `RunProcessWithOptionsAsync`.
 
-use crate::models::CodexRequest;
+use crate::models::ExecutionRequest;
 
 use isolation_session_bindings::bindings::IsoSessionProcessOptions;
 use windows_core::HSTRING;
@@ -30,7 +30,7 @@ fn compute_redirect_flags(interactive: bool) -> u32 {
     flags
 }
 
-/// Process creation options decoupled from `CodexRequest` and from the
+/// Process creation options decoupled from `ExecutionRequest` and from the
 /// WinRT types — small struct so the builder is unit-testable without a
 /// live `IsoSessionOps` activation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,14 +48,17 @@ pub(super) struct ProcessOptions {
     pub interactive: bool,
 }
 
-/// Builds `ProcessOptions` from a `CodexRequest`. `interactive` flips the
+/// Builds `ProcessOptions` from an `ExecutionRequest`. `interactive` flips the
 /// backend into ConPTY mode (`InteractiveConsole = true`) and adjusts
 /// `redirect_flags` accordingly (no separate stderr stream in ConPTY mode).
 ///
 /// The command line is wrapped with `cmd.exe /c` so shell features (pipes,
 /// redirections, chained commands) work — same pattern as the LXC backend's
 /// `/bin/sh -c`.
-pub(super) fn build_process_options(request: &CodexRequest, interactive: bool) -> ProcessOptions {
+pub(super) fn build_process_options(
+    request: &ExecutionRequest,
+    interactive: bool,
+) -> ProcessOptions {
     let env_vars: Vec<(String, String)> = request
         .env
         .iter()
@@ -138,7 +141,7 @@ mod tests {
 
     #[test]
     fn options_wraps_command_with_cmd_exe() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             script_code: "echo hello".to_string(),
             ..Default::default()
         };
@@ -155,7 +158,7 @@ mod tests {
 
     #[test]
     fn options_maps_timeout() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             script_code: "echo hi".to_string(),
             script_timeout: 30000,
             ..Default::default()
@@ -166,7 +169,7 @@ mod tests {
 
     #[test]
     fn options_maps_working_directory() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             script_code: "echo hi".to_string(),
             working_directory: r"C:\Windows".to_string(),
             ..Default::default()
@@ -177,7 +180,7 @@ mod tests {
 
     #[test]
     fn options_parses_env_vars() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             script_code: "echo hi".to_string(),
             env: vec!["FOO=bar".to_string(), "PATH=C:\\bin;C:\\tools".to_string()],
             ..Default::default()
@@ -193,7 +196,7 @@ mod tests {
 
     #[test]
     fn options_skips_malformed_env_vars() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             script_code: "echo hi".to_string(),
             env: vec![
                 "GOOD=value".to_string(),
@@ -210,7 +213,7 @@ mod tests {
 
     #[test]
     fn options_non_interactive_redirects_all_three_streams() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             script_code: "echo hi".to_string(),
             ..Default::default()
         };
@@ -224,7 +227,7 @@ mod tests {
 
     #[test]
     fn options_interactive_redirects_stdin_stdout_only() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             script_code: "echo hi".to_string(),
             ..Default::default()
         };

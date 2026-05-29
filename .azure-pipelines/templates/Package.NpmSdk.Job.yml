@@ -28,6 +28,9 @@ jobs:
     outputDirectory: $(Build.SourcesDirectory)/out
     sdkDirectory: $(Build.SourcesDirectory)/sdk
     artifactBaseName: mxc-npm-sdk-package
+    # Cache npm package downloads across runs to avoid re-fetching every dependency
+    # tarball from the Azure Artifacts feed on each pipeline invocation.
+    npm_config_cache: $(Pipeline.Workspace)/.npm
 
   steps:
     - checkout: self
@@ -36,6 +39,14 @@ jobs:
       displayName: Use Node.js 20
       inputs:
         version: '20.x'
+
+    - task: Cache@2
+      displayName: Cache npm
+      inputs:
+        key: 'npm | "$(Agent.OS)" | sdk/package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
+        path: $(npm_config_cache)
 
     # Download all artifacts dynamically
     - ${{ each target in parameters.targets }}:
@@ -49,6 +60,11 @@ jobs:
     # Restore +x on Linux and macOS binaries so the tarball preserves them.
     - script: chmod +x $(sdkDirectory)/bin/*/lxc-exec
       displayName: Restore execute permission on lxc-exec
+
+    - script: |
+        set -euo pipefail
+        find $(sdkDirectory)/bin -name linux-test-proxy -exec chmod +x {} +
+      displayName: Restore execute permission on linux-test-proxy
 
     # Drop symbol files from the npm package — symbols ship separately.
     - script: rm -rf $(sdkDirectory)/bin/*/symbols

@@ -99,7 +99,7 @@ In `src/wxc_common/src/base_container_runner.rs`, update
 `build_sandbox_spec` to include your new data:
 
 ```rust
-fn build_sandbox_spec(request: &CodexRequest) -> Vec<u8> {
+fn build_sandbox_spec(request: &ExecutionRequest) -> Vec<u8> {
     // ... existing code ...
 
     let spec = SandboxSpec::create(

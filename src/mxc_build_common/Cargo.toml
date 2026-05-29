@@ -1,0 +1,8 @@
+[package]
+name = "mxc_build_common"
+version.workspace = true
+edition.workspace = true
+description = "Shared build-time helpers for embedding Windows VersionInfo in MXC binaries"
+
+[target.'cfg(windows)'.dependencies]
+winresource = { version = "0.1.31", default-features = false }

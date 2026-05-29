@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    CodexRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, ScriptResponse,
+    ExecutionRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, ScriptResponse,
 };
 use wxc_common::script_runner::ScriptRunner;
 
@@ -88,7 +88,7 @@ impl LxcScriptRunner {
     }
 
     /// Core execution logic.
-    fn run_internal(&self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn run_internal(&self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         // Validate required LXC fields
         if self.config.distribution.is_empty() || self.config.release.is_empty() {
             return ScriptResponse::error(
@@ -246,7 +246,7 @@ impl LxcScriptRunner {
 }
 
 impl ScriptRunner for LxcScriptRunner {
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         // Run with panic catching for safety
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.run_internal(request, logger)

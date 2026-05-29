@@ -5,6 +5,20 @@ All notable changes to `@microsoft/mxc-sdk` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0]
+
+### ⚠️ Breaking changes
+
+- **Network policy is now deny-by-default.** `wxc-exec` is the trust boundary
+  and falls back to `block` whenever `network.defaultPolicy` is omitted,
+  regardless of the declared schema version. Callers that previously relied on
+  the implicit `allow` default must now set `defaultPolicy: 'allow'`
+  explicitly (or accept the deny default and grant specific hosts via
+  `allowedHosts`).
+- The new `0.6.0-alpha` schema documents the new default; `0.5.0-alpha` and
+  the stable `0.4.0-alpha` schemas are unchanged, but the Rust parser still
+  applies deny-by-default to them at the trust boundary.
+
 ## [0.2.0]
 
 ### ⚠️ Breaking changes

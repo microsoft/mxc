@@ -122,8 +122,8 @@
         "defaultPolicy": {
           "type": "string",
           "enum": ["allow", "block"],
-          "default": "allow",
-          "description": "Default network posture."
+          "default": "block",
+          "description": "Default network posture. Deny-by-default."
         },
         "enforcementMode": {
           "type": "string",
@@ -143,7 +143,7 @@
         },
         "proxy": {
           "type": "object",
-          "description": "Proxy configuration. Only supported with processcontainer backend.",
+          "description": "Proxy configuration. Supported with the 'processcontainer' (Windows) and 'bubblewrap' (Linux) backends.",
           "oneOf": [
             {
               "properties": {

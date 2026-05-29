@@ -55,6 +55,7 @@ export const EXPECTED_WINDOWS_BINARIES = [
 
 export const EXPECTED_LINUX_BINARIES = [
   'lxc-exec',
+  'linux-test-proxy',
 ];
 
 export const EXPECTED_MACOS_BINARIES = [
@@ -146,6 +147,25 @@ export const sandboxSkipReason = skipOsDependentTests
   : undefined;
 
 export const isLinuxRoot = os.platform() === 'linux' && process.getuid?.() === 0;
+
+/**
+ * Linux + bubblewrap available on PATH. The cooperative-proxy backend does
+ * not require root, so proxy-focused tests use this gate instead of the
+ * stricter `isLinuxRoot` used by other Bubblewrap fingerprint tests.
+ */
+export const isLinuxBubblewrap = (() => {
+  if (os.platform() !== 'linux') return false;
+  const pathDirs = (process.env.PATH ?? '').split(path.delimiter);
+  for (const dir of pathDirs) {
+    if (!dir) continue;
+    try {
+      if (fs.existsSync(path.join(dir, 'bwrap'))) return true;
+    } catch {
+      // ignore inaccessible PATH entries
+    }
+  }
+  return false;
+})();
 
 // When MXC_DEBUG=true, integration tests pass { debug: true } to spawn options
 // so wxc-exec / lxc-exec emit verbose output. Enable via pipeline parameter or locally.
@@ -389,3 +409,58 @@ export function startTestProxy(dir: string): { port: number; proxyProcess: Child
   return { port, proxyProcess };
 }
 
+// Linux-only: linux-test-proxy helpers
+
+/** Locate linux-test-proxy in the SDK package bin directory. */
+function findLinuxTestProxyBinary(): string {
+  const binDir = getSdkBinDir();
+  const proxyPath = path.join(binDir, 'linux-test-proxy');
+  if (fs.existsSync(proxyPath)) {
+    return proxyPath;
+  }
+  throw new Error(`linux-test-proxy not found at expected SDK package location: ${proxyPath}`);
+}
+
+/**
+ * Start linux-test-proxy in a child process.
+ *
+ * Binds to an OS-assigned port on `127.0.0.1` and writes it atomically to a
+ * ready file. The proxy uses `PR_SET_PDEATHSIG` so it dies when the test
+ * process exits — no cleanup-event mechanism is needed on Linux.
+ */
+export function startLinuxTestProxy(
+  dir: string,
+  opts: { allowHosts?: string[]; blockHosts?: string[] } = {},
+): { port: number; proxyProcess: ChildProcess } {
+  const proxyPath = findLinuxTestProxyBinary();
+  const readyFile = path.join(dir, 'linux-proxy-ready.txt');
+
+  const args: string[] = ['--ready-file', readyFile, '--bind-address', '127.0.0.1'];
+  for (const host of opts.allowHosts ?? []) {
+    args.push('--allow-host', host);
+  }
+  for (const host of opts.blockHosts ?? []) {
+    args.push('--block-host', host);
+  }
+
+  const proxyProcess = spawn(proxyPath, args, { stdio: 'ignore' });
+
+  const deadline = Date.now() + 15000;
+  while (!fs.existsSync(readyFile) && Date.now() < deadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  }
+
+  if (!fs.existsSync(readyFile)) {
+    proxyProcess.kill('SIGTERM');
+    throw new Error('linux-test-proxy did not write ready file within 15 seconds');
+  }
+
+  const portStr = fs.readFileSync(readyFile, 'utf-8').trim();
+  const port = parseInt(portStr, 10);
+  if (isNaN(port) || port <= 0) {
+    proxyProcess.kill('SIGTERM');
+    throw new Error(`Invalid port in ready file: ${portStr}`);
+  }
+
+  return { port, proxyProcess };
+}

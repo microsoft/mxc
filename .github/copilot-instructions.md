@@ -118,8 +118,8 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 
 ### Config flow
 
-1. User provides JSON config (file or base64) → `config_parser.rs` deserializes into intermediate `Raw*` structs → validates and maps to `CodexRequest` (the internal execution model in `models.rs`)
-2. `CodexRequest` includes the containment backend selection, process config, filesystem/network policies, and optional experimental features
+1. User provides JSON config (file or base64) → `config_parser.rs` deserializes into intermediate `Raw*` structs → validates and maps to `ExecutionRequest` (the internal execution model in `models.rs`)
+2. `ExecutionRequest` includes the containment backend selection, process config, filesystem/network policies, and optional experimental features
 3. The appropriate `ScriptRunner` implementation executes the process and returns `ScriptResponse`
 
 ### TypeScript layers
@@ -144,7 +144,7 @@ Core references:
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
 - `docs/examples.md` — annotated configuration examples (see also `examples/` and `test_configs/`)
 - `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
-- `docs/host-prep.md` — `wxc-exec --prepare-system-drive` / `--unprepare-system-drive` host setup (metadata-only ACEs on the system-drive root for the AppContainer well-known SIDs, so `cmd.exe` / `pwsh.exe` / `node.exe` can stat `C:\` inside an AppContainer). Hand-test helpers live in `scripts/host-prep/`.
+- `docs/host-prep.md` — `wxc-host-prep.exe` host setup binary (`prepare-system-drive` / `unprepare-system-drive` for the AppContainer ACEs on the system-drive root, plus `prepare-null-device` / `verify-null-device` / `dump-null-device` for the `\Device\Null` security descriptor that AppContainer-based backends require). Owns elevation via embedded `requireAdministrator` manifest — `wxc-exec.exe` no longer self-elevates.
 - `docs/sandbox-policy/v1/policy.md` — sandbox policy v1 specification
 
 Per-backend guides:
@@ -181,6 +181,7 @@ New features go under the `experimental` JSON section and are only active when `
 - `wxc_common` is the shared library — all config parsing, models, error types, and runner implementations live here
 - `wxc` and `lxc` are thin binary crates that wire up CLI args (`clap`) and dispatch to `wxc_common`
 - `mxc_pty` is the shared pty bridge used by the unix-side backends (`lxc_common::lxc_bindings::attach_run` on Linux and `seatbelt_common::seatbelt_runner` on macOS) so the inner shell sees a real TTY and host stdio is streamed live
+- `mxc_build_common` is a build-time helper crate — all Windows binary crates use it in their `build.rs` to embed VersionInfo (ProductName, FileDescription, copyright, version+commit). When adding a new Windows binary crate, add `mxc_build_common` as a build-dependency and call `mxc_build_common::embed_version_info()` from `build.rs`
 - Platform-specific modules in `wxc_common` use `#[cfg(target_os = "windows")]` / `#[cfg(target_os = "linux")]`
 - Workspace edition is 2021; shared dependencies are declared in the root `Cargo.toml` `[workspace.dependencies]`
 
@@ -197,9 +198,14 @@ The parser uses two layers of structs: `Raw*` structs (matching JSON with `#[ser
 
 ### Binary naming
 
-- Windows: `wxc-exec.exe` (AppContainer / Windows Sandbox / MicroVM)
+- Windows: `wxc-exec.exe` (AppContainer / Windows Sandbox / MicroVM); `wxc-host-prep.exe` (host setup — see `docs/host-prep.md`)
 - Linux: `lxc-exec` (LXC containers)
-- Target triples: `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
+- macOS: `mxc-exec-mac` (Seatbelt)
+- Target triples: `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`
+
+### Package versioning
+
+All Rust crates use `version.workspace = true` to inherit the version from `src/Cargo.toml` `[workspace.package]`. The npm SDK version in `sdk/package.json` must match. Run `node scripts/check-version-sync.js` to validate they are in sync. When bumping the version, update both `src/Cargo.toml` (workspace version) and `sdk/package.json` in the same commit.
 
 ### Keeping docs up to date
 

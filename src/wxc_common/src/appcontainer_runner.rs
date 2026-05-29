@@ -26,7 +26,7 @@ use windows_core::{PCWSTR, PWSTR};
 use crate::error::WxcError;
 use crate::job_object::UiJobObject;
 use crate::logger::Logger;
-use crate::models::{CodexRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
+use crate::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
 use crate::process_util::{get_capability_sid_from_name, OwnedHandle, SidAndAttributes};
 use crate::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use crate::{process_mitigation, string_util, ui_policy};
@@ -343,7 +343,7 @@ impl AppContainerScriptRunner {
     /// Core implementation of `run_internal`, returning `Result` for ergonomic error handling.
     fn run_internal_impl(
         &self,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         logger: &mut Logger,
     ) -> Result<ScriptResponse, WxcError> {
         // --- Validate permissiveLearningMode ---
@@ -730,7 +730,7 @@ impl AppContainerScriptRunner {
     }
 
     /// Create the AppContainer SID for the given request.
-    fn initialize(&mut self, request: &CodexRequest) -> Result<(), WxcError> {
+    fn initialize(&mut self, request: &ExecutionRequest) -> Result<(), WxcError> {
         let container_name = if request.container_id.is_empty() {
             "CLI".to_string()
         } else {
@@ -756,7 +756,7 @@ impl AppContainerScriptRunner {
     }
 
     /// Execute the script inside the AppContainer, converting errors to ScriptResponse.
-    fn run_internal(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn run_internal(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         match self.run_internal_impl(request, logger) {
             Ok(response) => response,
             Err(e) => ScriptResponse::error(&e.to_string()),
@@ -771,7 +771,7 @@ impl Default for AppContainerScriptRunner {
 }
 
 impl ScriptRunner for AppContainerScriptRunner {
-    fn execute(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         use crate::filesystem_bfs::FileSystemBfsManager;
         use crate::launch_diagnostics::diagnose_process_exit;
         use crate::models::FailurePhase;

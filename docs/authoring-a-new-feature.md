@@ -249,10 +249,10 @@ Add tests to verify:
 - Missing optional fields use defaults
 - Unknown fields under `experimental` are ignored (forward compatibility)
 
-Also ensure that `convert_raw_config()` populates `CodexRequest.experimental`:
+Also ensure that `convert_raw_config()` populates `ExecutionRequest.experimental`:
 
 ```rust
-Ok(CodexRequest {
+Ok(ExecutionRequest {
     // ... existing fields ...
     experimental,   // ← include the parsed experimental config
 })
@@ -261,7 +261,7 @@ Ok(CodexRequest {
 ## Step 4: Implement the feature in the runner
 
 > The `--experimental` CLI flag and `experimental_enabled` field on
-> `CodexRequest` already exist from when `compartments` was added. No changes
+> `ExecutionRequest` already exist from when `compartments` was added. No changes
 > needed in `main.rs`.
 
 The full flow is:
@@ -278,7 +278,7 @@ In the appropriate runner (`appcontainer.rs`, `lxc_runner.rs`, etc.), guard
 your feature behind `experimental_enabled`:
 
 ```rust
-fn run(&mut self, request: &CodexRequest, logger: &mut Logger) -> ScriptResponse {
+fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
     // ... normal execution (filesystem, network, etc.) ...
 
     if request.experimental_enabled {
@@ -367,7 +367,7 @@ When your experimental feature is ready to ship:
 
 1. Move the property from `experimental` to a top-level property in the schema
    (e.g., `experimental.gpuIsolation` → `gpuIsolation`)
-2. Move the struct from `ExperimentalConfig` to `CodexRequest`
+2. Move the struct from `ExperimentalConfig` to `ExecutionRequest`
 3. Move the field from `RawExperimental` to `RawConfig`
 4. Remove the `if request.experimental_enabled` guard
 5. Bump the minor version

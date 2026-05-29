@@ -143,6 +143,111 @@ Standard `process` fields work as expected:
 }
 ```
 
+## Network proxy (cooperative, unprivileged)
+
+Bubblewrap supports an **unprivileged, cooperative network proxy** that
+enforces `allowedHosts` / `blockedHosts` at the proxy layer instead of via
+iptables. This is the **recommended** way to do per-host filtering on
+Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
+
+### How it works
+
+1. When `network.proxy` is set, the runner launches an unprivileged HTTP
+   proxy on loopback (`127.0.0.1:N`). For tests, the bundled
+   `linux-test-proxy` binary is used (`builtinTestServer: true`,
+   testing-only and gated behind `--experimental`); in production callers
+   supply their own proxy via `localhost: <port>` or `url: <url>`.
+2. The sandbox is then started **without** `--unshare-net` so the sandbox
+   shares the host network namespace and can reach the loopback proxy.
+3. The command builder sets `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and
+   `https_proxy` inside the sandbox via `bwrap --setenv` (any
+   caller-supplied values for these keys, including `NO_PROXY` /
+   `no_proxy`, are stripped before injection). The runner deliberately
+   does **not** set `NO_PROXY`: since the sandbox shares the host netns,
+   a `NO_PROXY=localhost,127.0.0.1` entry would let cooperating clients
+   bypass the proxy for host-loopback destinations, defeating
+   `allowedHosts` / `blockedHosts` enforcement for those targets.
+4. Cooperative tools (curl, wget, Python `requests`, Node `https`, etc.)
+   honor the env vars and traffic flows through the proxy, which applies
+   the `allowedHosts` / `blockedHosts` lists.
+
+### Example: builtin test proxy with allowlist
+
+```json
+{
+  "version": "0.6.0-alpha",
+  "platform": "linux",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "curl -fsSL https://api.github.com/zen && echo OK"
+  },
+  "network": {
+    "defaultPolicy": "allow",
+    "proxy": { "builtinTestServer": true },
+    "allowedHosts": ["api.github.com"]
+  }
+}
+```
+
+### Example: external proxy on loopback
+
+```json
+{
+  "version": "0.6.0-alpha",
+  "containment": "bubblewrap",
+  "process": { "commandLine": "curl -fsSL https://example.com" },
+  "network": {
+    "proxy": { "localhost": 8080 }
+  }
+}
+```
+
+### Caveats
+
+- **Cooperative model**: the runner enforces by injecting
+  `HTTP_PROXY` / `HTTPS_PROXY` into the sandbox environment, so only
+  well-behaved clients that honor those vars are routed through the
+  proxy. Tools that bypass them (raw sockets, custom HTTP clients,
+  statically-linked binaries that ignore the env) are **not enforced**.
+  This applies to **both** the builtin test proxy and external (BYO)
+  proxy modes — the limitation is in the env-var injection mechanism,
+  not in the proxy itself; a BYO proxy can do whatever it likes for
+  cooperating clients. For strict whole-network isolation, omit
+  `network.proxy` so the runner can apply `--unshare-net` instead.
+- **Mutually exclusive with iptables enforcement**: setting
+  `network.proxy` together with `network.enforcementMode` of `"firewall"`
+  or `"both"` is rejected at config-parse time because iptables-based
+  enforcement requires root and would defeat the proxy's privilege story.
+- **External proxy delegates policy**: when `network.proxy` uses
+  `localhost: <port>` or `url: <url>` (not `builtinTestServer`), the
+  external proxy is responsible for any host filtering. The runner does
+  **not** forward `allowedHosts` / `blockedHosts` / `defaultPolicy: "block"`
+  to it, and config combinations that would silently weaken enforcement
+  are rejected at parse time.
+- **`builtinTestServer` is testing-only**: gated behind `--experimental`
+  and never to be used as a real production proxy. It has no auth, no
+  body-size limits, and minimal hop-by-hop header handling. Use a real
+  HTTP proxy for production deployments.
+- **HTTPS via CONNECT**: the proxy uses HTTP `CONNECT` tunnels for TLS, so
+  certificate validation continues to work end-to-end (the proxy does not
+  see plaintext).
+
+### Common pitfalls when configuring `allowedHosts`
+
+The proxy applies `allowedHosts` and `blockedHosts` by **case-insensitive
+exact host match** — there is no subdomain wildcard and no IP-vs-hostname
+resolution.
+
+- `allowedHosts: ["github.com"]` does **not** match `api.github.com`. List
+  each subdomain explicitly (e.g. `["api.github.com", "objects.githubusercontent.com"]`).
+- `allowedHosts: ["api.github.com"]` does **not** match a CONNECT to a raw
+  IP literal such as `140.82.114.6:443`. If your workload bypasses DNS,
+  include the IPs.
+- `allowedHosts: ["localhost"]` does **not** match `127.0.0.1`; if you
+  need both, list both.
+- IPv6 literals are normalised: an allowlist entry of `"::1"` matches a
+  CONNECT to `[::1]:443`, but not the unrelated `[fe80::1]:443`.
+
 ## Comparison with LXC
 
 | Aspect | LXC | Bubblewrap |
@@ -182,8 +287,10 @@ Test configs are in `test_configs/bubblewrap_*.json`.
 - **Linux only** — Bubblewrap requires Linux kernel namespaces
 - **Host filesystem** — the sandbox sees the host's files (read-only by
   default); there is no separate rootfs
-- **Network filtering** — per-host `allowedHosts`/`blockedHosts` requires
-  root for iptables; without host lists, only all-or-nothing isolation is
-  available
+- **Network filtering** — per-host `allowedHosts`/`blockedHosts` is best
+  done via the cooperative env-var **network proxy** (no privilege
+  required, see above). The legacy iptables path
+  (`network.enforcementMode: "firewall"` / `"both"`) still works but
+  requires root and is mutually exclusive with the proxy.
 - **No state-aware lifecycle** — Bubblewrap implements `ScriptRunner` only
   (one-shot), not `StatefulSandboxBackend`

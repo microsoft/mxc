@@ -75,7 +75,7 @@ if "%BUILD_ALL%"=="1" (
 echo   Check formatting
 cargo fmt --all -- --check || goto :error
 echo   Check linting
-cargo clippy --workspace --all-targets -- -D warnings || goto :error  
+cargo clippy --workspace --all-targets -- -D warnings || goto :error
 popd
 
 :: Copy binaries into SDK package
@@ -104,11 +104,27 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             copy /Y "!BIN_DIR!\wxc-test-proxy.exe" "sdk\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-test-proxy.exe
         )
+        if exist "!BIN_DIR!\wxc-host-prep.exe" (
+            copy /Y "!BIN_DIR!\wxc-host-prep.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            echo   Copied !SDK_ARCH!\wxc-host-prep.exe
+        )
         if "%WITH_NANVIX%"=="1" (
-            for %%B in (nanvixd.exe kernel.elf python.elf cpython-ramfs.img) do (
+            for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd) do (
                 if exist "!BIN_DIR!\%%B" (
                     copy /Y "!BIN_DIR!\%%B" "sdk\bin\!SDK_ARCH!\" >nul
                     echo   Copied !SDK_ARCH!\%%B
+                )
+            )
+            if exist "!BIN_DIR!\bin\kernel.elf" (
+                if not exist "sdk\bin\!SDK_ARCH!\bin" mkdir "sdk\bin\!SDK_ARCH!\bin"
+                copy /Y "!BIN_DIR!\bin\kernel.elf" "sdk\bin\!SDK_ARCH!\bin\" >nul
+                echo   Copied !SDK_ARCH!\bin\kernel.elf
+            )
+            for %%S in (kernel.vmem kernel.whp.cbor) do (
+                if exist "!BIN_DIR!\snapshots\%%S" (
+                    if not exist "sdk\bin\!SDK_ARCH!\snapshots" mkdir "sdk\bin\!SDK_ARCH!\snapshots"
+                    copy /Y "!BIN_DIR!\snapshots\%%S" "sdk\bin\!SDK_ARCH!\snapshots\" >nul
+                    echo   Copied !SDK_ARCH!\snapshots\%%S
                 )
             )
         )

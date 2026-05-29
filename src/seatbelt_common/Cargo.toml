@@ -1,10 +1,10 @@
 [package]
 name = "seatbelt_common"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-# Provides CodexRequest, ContainerPolicy, SeatbeltConfig, Logger, and
+# Provides ExecutionRequest, ContainerPolicy, SeatbeltConfig, Logger, and
 # the ScriptRunner trait that seatbelt_runner implements. Same dep that
 # lxc_common uses.
 wxc_common = { workspace = true }

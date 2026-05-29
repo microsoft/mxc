@@ -752,7 +752,7 @@ const { sandboxId } = await provisionSandbox(
 ```
 
 ```rust
-// Parser deserializes the JSON above into a CodexRequest with
+// Parser deserializes the JSON above into an ExecutionRequest with
 //   request.policy.readwrite_paths = ["C:\\workspace"]
 //   request.policy.default_network_policy = NetworkPolicy::Allow
 //   request.policy.allowed_hosts = ["api.anthropic.com"]
@@ -985,7 +985,7 @@ implements one trait, the other, or both, depending on its declared participatio
 MXC's existing parser at `src/wxc_common/src/config_parser.rs` uses private `Raw*`
 intermediate structs that mirror the wire-format JSON shape (with serde renames to handle
 camelCase keys), then converts them into typed domain models via `convert_*` helpers
-(e.g., `RawConfig` → `CodexRequest`) before dispatch. The state-aware path extends this
+(e.g., `RawConfig` → `ExecutionRequest`) before dispatch. The state-aware path extends this
 same pattern.
 
 ```rust
@@ -1032,16 +1032,16 @@ falls through to the one-shot branch. Per-phase requirements (`containment` for
 than at the deserialiser; the `Raw*` struct accepts both fields as optional.
 
 Conversion from `Raw*` into the typed domain model is the existing
-`convert_raw_config` → `CodexRequest` path, used for both one-shot and state-aware
+`convert_raw_config` → `ExecutionRequest` path, used for both one-shot and state-aware
 requests. The cross-cutting wire fields (`filesystem`, `network`, `ui`) populate
-`CodexRequest.policy` (a `ContainerPolicy`) exactly as the one-shot path does today,
-and `process` populates `CodexRequest`'s flat `script_code` / `working_directory` /
+`ExecutionRequest.policy` (a `ContainerPolicy`) exactly as the one-shot path does today,
+and `process` populates `ExecutionRequest`'s flat `script_code` / `working_directory` /
 `script_timeout` / `env` fields via the existing `RawProcess` intermediate. The
 state-aware-only fields (`phase`, `sandboxId`, `experimental.<backend>.<phase>`) are
-extracted alongside the `CodexRequest` and bundled into a `ParsedStateAwareRequest`
-domain model — `{ request: CodexRequest, phase: Phase, containment:
+extracted alongside the `ExecutionRequest` and bundled into a `ParsedStateAwareRequest`
+domain model — `{ request: ExecutionRequest, phase: Phase, containment:
 Option<ContainmentBackend>, sandbox_id: Option<String>, experimental_raw: ... }` —
-that the dispatcher consumes (§9.3). The bundling does not modify `CodexRequest`'s
+that the dispatcher consumes (§9.3). The bundling does not modify `ExecutionRequest`'s
 shape. There is no unified Rust "policy" type — Rust reads cross-cutting fields
 directly from `request.policy` (a `ContainerPolicy`), exactly as the one-shot path does
 today. Domain models are exposed to the dispatch layer; the `Raw*` types stay private
@@ -1085,7 +1085,7 @@ pub trait StatefulSandboxBackend {
     /// (e.g., allocating a session, registering with the underlying service).
     fn provision(
         &mut self,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<Self::ProvisionConfig>,
     ) -> Result<ProvisionResult<Self::ProvisionMetadata>, MxcError> {
         Ok(ProvisionResult {
@@ -1099,7 +1099,7 @@ pub trait StatefulSandboxBackend {
     fn start(
         &mut self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<Self::StartConfig>,
     ) -> Result<StartResult<Self::StartMetadata>, MxcError> {
         Ok(StartResult { metadata: None })
@@ -1109,7 +1109,7 @@ pub trait StatefulSandboxBackend {
     fn exec(
         &mut self,
         sandbox_id: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         config: Option<Self::ExecConfig>,
     ) -> Result<ExecHandle, MxcError>;
 
@@ -1117,7 +1117,7 @@ pub trait StatefulSandboxBackend {
     fn stop(
         &mut self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<Self::StopConfig>,
     ) -> Result<StopResult<Self::StopMetadata>, MxcError> {
         Ok(StopResult { metadata: None })
@@ -1127,7 +1127,7 @@ pub trait StatefulSandboxBackend {
     fn deprovision(
         &mut self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<Self::DeprovisionConfig>,
     ) -> Result<DeprovisionResult<Self::DeprovisionMetadata>, MxcError> {
         Ok(DeprovisionResult { metadata: None })
@@ -1140,7 +1140,7 @@ pub trait StatefulSandboxBackend {
     /// the chosen `MxcError` code.
     fn validate_provision(
         &self,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<&Self::ProvisionConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
@@ -1149,7 +1149,7 @@ pub trait StatefulSandboxBackend {
     fn validate_start(
         &self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<&Self::StartConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
@@ -1158,7 +1158,7 @@ pub trait StatefulSandboxBackend {
     fn validate_exec(
         &self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<&Self::ExecConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
@@ -1167,7 +1167,7 @@ pub trait StatefulSandboxBackend {
     fn validate_stop(
         &self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<&Self::StopConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
@@ -1176,7 +1176,7 @@ pub trait StatefulSandboxBackend {
     fn validate_deprovision(
         &self,
         _sandbox_id: &str,
-        _request: &CodexRequest,
+        _request: &ExecutionRequest,
         _config: Option<&Self::DeprovisionConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
@@ -1214,7 +1214,7 @@ pub struct ExecHandle {
 }
 ```
 
-Trait methods take `&CodexRequest` (the existing one-shot domain model from
+Trait methods take `&ExecutionRequest` (the existing one-shot domain model from
 `wxc_common::models`, populated by the same `convert_raw_config` parser path that
 serves one-shot calls), plus `sandbox_id` for non-provision phases and an optional
 backend-specific typed config (`Self::<Phase>Config`). Cross-cutting policy fields
@@ -1240,32 +1240,32 @@ do not need to accumulate state between calls within a backend instance — with
 single call a backend may use mutability to hold open service connections, but no state
 needs to survive across phase calls.
 
-#### Why the trait reuses `CodexRequest`
+#### Why the trait reuses `ExecutionRequest`
 
 The trait could plausibly require its own per-phase request types (e.g., an
 `ExecRequest<C>` containing typed `ProcessConfig`, `FilesystemConfig`, `NetworkConfig`,
-and `UiConfig` fields) instead of taking `&CodexRequest` directly. The design rejects
-that shape and reuses `CodexRequest` for five concrete reasons:
+and `UiConfig` fields) instead of taking `&ExecutionRequest` directly. The design rejects
+that shape and reuses `ExecutionRequest` for five concrete reasons:
 
 1. **The field-ignore precedent is established across every existing backend.** Every
    `ScriptRunner` impl in the workspace today (`AppContainer`, `BaseContainer`,
    `NanVix`, `WindowsSandbox`, `IsolationSession`, `Lxc`, `Wslc`) takes
-   `&CodexRequest` and reads only the fields it needs. `NanVix` and
+   `&ExecutionRequest` and reads only the fields it needs. `NanVix` and
    `IsolationSession` go further and actively reject fields they cannot honor (e.g.,
    `NanVixScriptRunner::validate_runner` rejects filesystem paths, network rules,
    network proxy, and a non-empty working directory). State-aware follows the same
    pattern, so the trait ergonomic stays consistent across one-shot and state-aware
    surfaces.
 
-2. **Process info is already typed on `CodexRequest`.** The wire-format `process`
-   block (`commandLine`, `cwd`, `env`, `timeout`) deserialises into `CodexRequest`'s
+2. **Process info is already typed on `ExecutionRequest`.** The wire-format `process`
+   block (`commandLine`, `cwd`, `env`, `timeout`) deserialises into `ExecutionRequest`'s
    flat fields (`script_code`, `working_directory`, `script_timeout`, `env`) via the
    existing `RawProcess` intermediate in `config_parser.rs`. Wrapping these four
    typed fields into a Rust `ProcessConfig` struct adds no type safety the compiler
    does not already provide on the flat fields. The TypeScript-side `ProcessConfig`
    in `sdk/src/types.ts` is unchanged regardless.
 
-3. **Cross-cutting policy is already typed on `CodexRequest`.** Existing backends read
+3. **Cross-cutting policy is already typed on `ExecutionRequest`.** Existing backends read
    `request.policy.readwrite_paths`, `request.policy.allowed_hosts`,
    `request.policy.network_proxy`, `request.policy.ui`, etc. directly today.
    State-aware `provision` and `validate_<phase>` hooks read the same fields.
@@ -1274,11 +1274,11 @@ that shape and reuses `CodexRequest` for five concrete reasons:
    without changing what any of them does.
 
 4. **The existing extraction helpers already work for state-aware exec.** The
-   `IsolationSessionRunner::build_process_options(&CodexRequest)` function in
+   `IsolationSessionRunner::build_process_options(&ExecutionRequest)` function in
    `wxc_common::isolation_session_runner` extracts process info into the runner's
    internal `ProcessOptions` struct used to populate `IsoSessionProcessOptions` for
    `RunProcessWithOptionsAsync`. State-aware `exec` calls the same function with the
-   same `&CodexRequest` argument; no new public Rust type closes a semantic gap that
+   same `&ExecutionRequest` argument; no new public Rust type closes a semantic gap that
    does not exist.
 
 5. **No SDK or wire-format change is required.** The TypeScript `ProcessConfig`,
@@ -1288,11 +1288,11 @@ that shape and reuses `CodexRequest` for five concrete reasons:
    `request.policy.allowed_hosts`, etc. is an internal implementation choice
    invisible above the Rust layer.
 
-What would justify deviating from `CodexRequest` reuse — none of which apply to the v1
+What would justify deviating from `ExecutionRequest` reuse — none of which apply to the v1
 surface in this proposal:
 
 - A fundamentally new state-aware-only field that does not fit any existing
-  `CodexRequest` shape (e.g., a snapshot id for a hypothetical `restore` phase).
+  `ExecutionRequest` shape (e.g., a snapshot id for a hypothetical `restore` phase).
 - A type-system invariant only expressible via a wrapper struct (e.g., enforcing at
   compile time that exec requests always carry a non-empty command line —
   `validate_exec_common` checks this at runtime instead per §10.1).
@@ -1300,7 +1300,7 @@ surface in this proposal:
   across the SDK-Rust boundary.
 
 If any of these emerges, the trait gains the necessary type at that point. The v1
-surface introduces none, so the trait stays minimal and reuses `CodexRequest`.
+surface introduces none, so the trait stays minimal and reuses `ExecutionRequest`.
 
 ### 9.3 Dispatch
 
@@ -1333,7 +1333,7 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
     parsed: ParsedStateAwareRequest,
     dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
-    // `parsed` carries the typed `CodexRequest`, the parsed `Phase`, the optional
+    // `parsed` carries the typed `ExecutionRequest`, the parsed `Phase`, the optional
     // `sandbox_id`, and the raw JSON value for `experimental.<backend>.<phase>` (if
     // present). The dispatcher deserialises that raw JSON into the backend's
     // `Self::<Phase>Config` associated type before calling the trait method.

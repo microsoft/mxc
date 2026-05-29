@@ -96,9 +96,7 @@ fn main() {
             panic!(
                 "\n\n\
                  isolation_session_bindings: generated code targets windows crate {expected},\n\
-                 but workspace has {actual}. Regenerate bindings:\n\
-                 \n\
-                 cargo run --manifest-path tools/generate-isolation-session-bindings/Cargo.toml -- <winmd-path>\n\
+                 but workspace has {actual}. Bindings must be regenerated.\n\
                  \n",
                 expected = expected_version,
                 actual = actual,

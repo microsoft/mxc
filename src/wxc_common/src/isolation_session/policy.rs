@@ -6,7 +6,7 @@
 //! other filesystem field is rejected, and network / proxy policy is
 //! rejected at every phase — the backend has no equivalent primitive.
 
-use crate::models::{CodexRequest, IsolationSessionUser, NetworkPolicy};
+use crate::models::{ExecutionRequest, IsolationSessionUser, NetworkPolicy};
 use crate::mxc_error::MxcError;
 
 use super::error::IsolationSessionError;
@@ -20,7 +20,7 @@ const ERR_PROXY_POLICY: &str = "network proxy is not supported by the isolation 
 /// honored (applied later via `share_folders`); `denied_paths` is rejected
 /// because the underlying API has no equivalent primitive.
 pub(super) fn validate_provision_policy(
-    request: &CodexRequest,
+    request: &ExecutionRequest,
 ) -> Result<(), IsolationSessionError> {
     if !request.policy.denied_paths.is_empty() {
         return Err(IsolationSessionError::Policy(
@@ -34,7 +34,7 @@ pub(super) fn validate_provision_policy(
 /// are rejected because filesystem policy is bound to provision and
 /// immutable thereafter.
 pub(super) fn validate_post_provision_policy(
-    request: &CodexRequest,
+    request: &ExecutionRequest,
 ) -> Result<(), IsolationSessionError> {
     if !request.policy.readwrite_paths.is_empty()
         || !request.policy.readonly_paths.is_empty()
@@ -67,10 +67,12 @@ pub(super) fn validate_isolation_session_user(user: &IsolationSessionUser) -> Re
     Ok(())
 }
 
-fn validate_network_and_proxy_policy(request: &CodexRequest) -> Result<(), IsolationSessionError> {
+fn validate_network_and_proxy_policy(
+    request: &ExecutionRequest,
+) -> Result<(), IsolationSessionError> {
     if !request.policy.allowed_hosts.is_empty()
         || !request.policy.blocked_hosts.is_empty()
-        || request.policy.default_network_policy != NetworkPolicy::Allow
+        || request.policy.default_network_policy != NetworkPolicy::Block
     {
         return Err(IsolationSessionError::Policy(
             ERR_NETWORK_POLICY.to_string(),
@@ -107,7 +109,7 @@ mod tests {
 
     #[test]
     fn provision_policy_accepts_readwrite_paths() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readwrite_paths: vec!["C:\\src".to_string()],
                 ..Default::default()
@@ -119,7 +121,7 @@ mod tests {
 
     #[test]
     fn provision_policy_accepts_readonly_paths() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readonly_paths: vec!["C:\\data".to_string()],
                 ..Default::default()
@@ -131,7 +133,7 @@ mod tests {
 
     #[test]
     fn provision_policy_accepts_readwrite_and_readonly_together() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readwrite_paths: vec!["C:\\src".to_string()],
                 readonly_paths: vec!["C:\\data".to_string()],
@@ -144,7 +146,7 @@ mod tests {
 
     #[test]
     fn provision_policy_rejects_denied_paths() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 denied_paths: vec!["C:\\secret".to_string()],
                 ..Default::default()
@@ -159,7 +161,7 @@ mod tests {
 
     #[test]
     fn provision_policy_rejects_denied_even_with_rw() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readwrite_paths: vec!["C:\\src".to_string()],
                 denied_paths: vec!["C:\\secret".to_string()],
@@ -175,7 +177,7 @@ mod tests {
 
     #[test]
     fn provision_policy_rejects_network_policy() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 allowed_hosts: vec!["example.com".to_string()],
                 ..Default::default()
@@ -190,7 +192,7 @@ mod tests {
 
     #[test]
     fn provision_policy_rejects_proxy() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 network_proxy: ProxyConfig {
                     address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
@@ -208,7 +210,7 @@ mod tests {
 
     #[test]
     fn post_provision_policy_rejects_readwrite_paths() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readwrite_paths: vec!["C:\\src".to_string()],
                 ..Default::default()
@@ -223,7 +225,7 @@ mod tests {
 
     #[test]
     fn post_provision_policy_rejects_readonly_paths() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readonly_paths: vec!["C:\\data".to_string()],
                 ..Default::default()
@@ -238,7 +240,7 @@ mod tests {
 
     #[test]
     fn post_provision_policy_rejects_denied_paths() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 denied_paths: vec!["C:\\secret".to_string()],
                 ..Default::default()
@@ -253,7 +255,7 @@ mod tests {
 
     #[test]
     fn post_provision_policy_rejects_blocked_hosts() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
                 blocked_hosts: vec!["evil.com".to_string()],
                 ..Default::default()
@@ -267,10 +269,10 @@ mod tests {
     }
 
     #[test]
-    fn post_provision_policy_rejects_network_block_policy() {
-        let request = CodexRequest {
+    fn post_provision_policy_rejects_network_allow_policy() {
+        let request = ExecutionRequest {
             policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Block,
+                default_network_policy: NetworkPolicy::Allow,
                 ..Default::default()
             },
             ..Default::default()
@@ -282,8 +284,8 @@ mod tests {
     }
 
     #[test]
-    fn post_provision_policy_allows_defaults() {
-        let request = CodexRequest::default();
+    fn post_provision_policy_accepts_default_request() {
+        let request = ExecutionRequest::default();
         assert!(validate_post_provision_policy(&request).is_ok());
     }
 

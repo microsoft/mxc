@@ -52,7 +52,7 @@ production configs and the dev schema when working on experimental features:
     "network": {
         "defaultPolicy": "block",          // "allow" or "block"
         "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
-        "proxy": { "localhost": 8080 }     // Localhost proxy port (processcontainer only)
+        "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap)
     },
 
     "processContainer": {                  // Process-based container-specific

@@ -8,7 +8,7 @@
 
 use std::env;
 
-use crate::models::CodexRequest;
+use crate::models::ExecutionRequest;
 
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
@@ -107,12 +107,12 @@ impl DiagnosticConfig {
     }
 }
 
-/// Produce a redacted JSON representation of a `CodexRequest` suitable for diagnostic logging.
+/// Produce a redacted JSON representation of an `ExecutionRequest` suitable for diagnostic logging.
 ///
 /// - Environment variable values are replaced with `<redacted>`.
 /// - `script_code` is truncated to [`SCRIPT_CODE_TRUNCATE_LEN`] characters.
 /// - `network_proxy` (which is `#[serde(skip)]`) is logged separately.
-pub fn redacted_request_json(request: &CodexRequest) -> String {
+pub fn redacted_request_json(request: &ExecutionRequest) -> String {
     // Build a redacted copy for serialization.
     let mut redacted = request.clone();
 
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn redacted_request_hides_env_values() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             env: vec![
                 "PATH=C:\\Windows".to_string(),
                 "SECRET_TOKEN=abc123".to_string(),
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn redacted_request_truncates_script_code() {
-        let request = CodexRequest {
+        let request = ExecutionRequest {
             script_code: "x".repeat(500),
             ..Default::default()
         };
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn redacted_request_shows_proxy_info() {
-        let mut request = CodexRequest::default();
+        let mut request = ExecutionRequest::default();
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn redacted_request_shows_proxy_disabled() {
-        let request = CodexRequest::default();
+        let request = ExecutionRequest::default();
         let json = redacted_request_json(&request);
         assert!(json.contains("network_proxy: disabled"));
     }

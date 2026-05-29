@@ -222,7 +222,7 @@ pub trait StatefulSandboxBackend {
     // Default body mints `<ID_PREFIX>:<random-token>`; override for native provision.
     fn provision(
         &mut self,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         config: Option<Self::ProvisionConfig>,
     ) -> Result<ProvisionResult<Self::ProvisionMetadata>, MxcError> { /* ... */ }
 
@@ -230,7 +230,7 @@ pub trait StatefulSandboxBackend {
     fn start(
         &mut self,
         sandbox_id: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         config: Option<Self::StartConfig>,
     ) -> Result<StartResult<Self::StartMetadata>, MxcError> { /* ... */ }
 
@@ -238,21 +238,21 @@ pub trait StatefulSandboxBackend {
     fn exec(
         &mut self,
         sandbox_id: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         config: Option<Self::ExecConfig>,
     ) -> Result<ExecHandle, MxcError>;
 
     fn stop(
         &mut self,
         sandbox_id: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         config: Option<Self::StopConfig>,
     ) -> Result<StopResult<Self::StopMetadata>, MxcError> { /* ... */ }
 
     fn deprovision(
         &mut self,
         sandbox_id: &str,
-        request: &CodexRequest,
+        request: &ExecutionRequest,
         config: Option<Self::DeprovisionConfig>,
     ) -> Result<DeprovisionResult<Self::DeprovisionMetadata>, MxcError> { /* ... */ }
 
@@ -264,14 +264,14 @@ Backends declare two consts (`ID_PREFIX` for sandbox-id routing, `BACKEND_KEY` f
 wire-format `containment` value and `experimental.<BACKEND_KEY>.<phase>` deserialisation
 — see reference §5), per-phase config and metadata as associated types (use `()` for
 phases that don't need either), and override only the methods they care about — `exec`
-is the only required method. Trait methods take `&CodexRequest` (the existing one-shot
+is the only required method. Trait methods take `&ExecutionRequest` (the existing one-shot
 domain model from `wxc_common::models`) plus `sandbox_id` for non-provision phases and
 an optional backend-specific typed config; cross-cutting policy fields flow through
 `request.policy` (a `ContainerPolicy`) and per-exec process info flows through
 `request.script_code` / `request.working_directory` / `request.script_timeout` /
 `request.env`. There is no Rust `ProcessConfig` / `FilesystemConfig` / `NetworkConfig`
 / `UiConfig` wrapper struct — those names exist as TypeScript SDK interfaces only. See
-"Why the trait reuses `CodexRequest`" in main doc §9.2 for the rationale.
+"Why the trait reuses `ExecutionRequest`" in main doc §9.2 for the rationale.
 
 A backend's participation mode (ephemeral-only, state-aware-only, both) is declared by
 which traits it implements. State-aware backends additionally register their
@@ -312,7 +312,7 @@ const { sandboxId } = await provisionSandbox(
 ```
 
 ```rust
-// Parser deserializes the JSON above into a CodexRequest with
+// Parser deserializes the JSON above into an ExecutionRequest with
 //   request.policy.readwrite_paths = ["C:\\workspace"]
 //   request.policy.default_network_policy = NetworkPolicy::Allow
 //   request.policy.allowed_hosts = ["api.anthropic.com"]

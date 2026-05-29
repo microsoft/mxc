@@ -13,12 +13,15 @@ members = [
     "lxc_common",
     "wslc_common",
     "bwrap_common",
+    "linux_test_proxy",
     "isolation_session_bindings",
     "seatbelt_common",
     "mxc_darwin",
     "mxc_pty",
     "generated/base_container_specification",
     "mxc_diagnostic_console",
+    "mxc_build_common",
+    "wxc_host_prep",
 ]
 exclude = ["fuzz"]
 resolver = "3"
@@ -34,6 +37,7 @@ split-debuginfo = "packed"
 strip = "debuginfo"
 
 [workspace.package]
+version = "0.3.0"
 edition = "2021"
 
 [workspace.dependencies]
@@ -91,3 +95,4 @@ sandbox_spec = { path = "generated/base_container_specification" }
 widestring = "1"
 url = "2"
 winreg = "0.55"
+mxc_build_common = { path = "mxc_build_common" }

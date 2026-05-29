@@ -1,7 +1,7 @@
 [package]
 name = "nanvix_binaries"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Build-time download of NanVix binaries from GitHub releases"
 links = "nanvix_binaries"
 
