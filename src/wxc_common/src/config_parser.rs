@@ -740,10 +740,6 @@ fn validate_state_aware_experimental(
     Err(WxcError::ConfigParse(msg))
 }
 
-fn convert_raw_config(raw: RawConfig, logger: &mut Logger) -> Result<CodexRequest, WxcError> {
-    convert_raw_config_inner(raw, logger, true)
-}
-
 // `require_process = false` allows state-aware non-exec phases to omit the
 // `process` block entirely; those phases leave `script_code` / `working_directory`
 // / `script_timeout` / `env` at their defaults and never read them.
@@ -920,11 +916,6 @@ fn convert_raw_config_inner(
         }
     };
 
-    // Mutual-exclusivity: each concrete backend owns at most one per-backend
-    // section (top-level `processContainer`/`lxc` or nested
-    // `experimental.<backend>`). Reject configs that include sections for
-    // other backends, so a stray `appContainer` block under `containment:
-    // "lxc"` fails loudly instead of being silently ignored.
     validate_single_backend_section(containment.clone(), &present_backend_sections, logger)?;
 
     // LXC configuration
@@ -1284,11 +1275,6 @@ fn convert_raw_state_aware(
         Some(wire) => Some(parse_containment_str(wire, logger)?),
     };
 
-    // Mutual-exclusivity in the state-aware shape: per-backend config is
-    // nested under `experimental.<backend>` (e.g. `experimental.isolation_session`
-    // with optional per-phase sub-objects). Reject configs whose `experimental`
-    // block carries a backend key that doesn't match the resolved
-    // `containment`, mirroring the one-shot check.
     if let Some(backend) = containment.as_ref() {
         validate_state_aware_experimental(backend, raw.experimental.as_ref(), logger)?;
     }
