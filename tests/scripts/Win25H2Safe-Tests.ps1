@@ -31,10 +31,10 @@
 
 [CmdletBinding()]
 param(
-    # Defaults assume the script lives at <repo>\test_scripts\; the
+    # Defaults assume the script lives at <repo>\tests\scripts\; the
     # cargo workspace and built binaries are under <repo>\src\. Override
     # any of these explicitly if the layout differs.
-    [string]$RepoRoot       = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepoRoot       = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
     [string]$CargoRoot      = (Join-Path $RepoRoot 'src'),
     [string]$WxcDebug       = (Join-Path $RepoRoot 'src\target\debug\wxc-exec.exe'),
     [string]$WxcRelease     = (Join-Path $RepoRoot 'src\target\release\wxc-exec.exe'),

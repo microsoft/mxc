@@ -107,9 +107,7 @@ Once you've discussed your proposed change with a team member and agreed on an a
 src/                Rust workspace (wxc-exec, lxc-exec, mxc-exec-mac, wxc_common, etc.)
 sdk/                TypeScript SDK (@microsoft/mxc-sdk)
 docs/               Schema and configuration documentation
-examples/           Example JSON configurations
-test_configs/       Test JSON configurations
-test_scripts/       Test scripts that exercise the built binaries
+tests/              Test collateral (examples, configs, scripts)
 schemas/            JSON schemas (stable + dev)
 .azure-pipelines/   1ES Pipeline Templates configuration
 ```
@@ -191,7 +189,7 @@ cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
 cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests
 ```
 
-PowerShell and shell helper scripts that drive the executor end-to-end live under `test_scripts/` and require a local build. See the [README](./README.md) and the [SDK README](./sdk/README.md) for more.
+PowerShell and shell helper scripts that drive the executor end-to-end live under `tests/scripts/` and require a local build. See the [README](./README.md) and the [SDK README](./sdk/README.md) for more.
 
 ### Code review
 

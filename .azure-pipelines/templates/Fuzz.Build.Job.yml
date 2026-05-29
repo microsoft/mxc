@@ -87,7 +87,7 @@ jobs:
     # Seeds are not shipped in the drop in v3 — they must live in a OneFuzz
     # storage container referenced via `OneFuzzJobs[].SeedCorpusContainer`.
     # TODO: provision containers (`onefuzz containers create mxc-seeds-<target>`),
-    # upload `test_configs/*.json` (and `src/fuzz/corpus/base64_decode/*`),
+    # upload `tests/configs/*.json` (and `src/fuzz/corpus/base64_decode/*`),
     # then add `SeedCorpusContainer` to each entry in OneFuzzConfig.json.
     - powershell: |
         $asanDir = (Get-ChildItem 'C:\Program Files\Microsoft Visual Studio' -Recurse -Filter 'clang_rt.asan_dynamic-x86_64.dll' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'HostX64\\x64\\clang_rt' } | Select-Object -First 1).Directory.FullName

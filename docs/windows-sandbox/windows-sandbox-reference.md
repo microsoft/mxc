@@ -161,7 +161,7 @@ Get-Process | Where-Object { $_.ProcessName -match "vmmem|vmwp|sandbox" }
 # Run daemon manually (visible logs)
 src\target\release\wxc-windows-sandbox-daemon.exe wxc-windows-sandbox 300000
 # In another terminal:
-src\target\release\wxc-exec.exe --debug test_configs\basic_windows_sandbox.json
+src\target\release\wxc-exec.exe --debug tests\configs\basic_windows_sandbox.json
 
 # Clean slate
 Get-Process -Name "wxc-windows-sandbox-daemon","WindowsSandbox*" -ErrorAction SilentlyContinue |
@@ -193,7 +193,7 @@ Manual-only — requires Hyper-V + Windows Sandbox feature (cannot run in GitHub
 ### Running
 
 ```powershell
-cd test_scripts
+cd tests\scripts
 .\run_windows_sandbox_tests.ps1 -Release
 ```
 

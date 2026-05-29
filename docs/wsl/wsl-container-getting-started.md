@@ -246,10 +246,10 @@ the container.
 
 ## Example Configs
 
-- [`examples/wslc_hello_world.json`](../../examples/wslc_hello_world.json) — Hello world with Alpine
-- [`test_configs/wslc_network_isolated.json`](../../test_configs/wslc_network_isolated.json) — Network isolation
-- [`test_configs/wslc_custom_registry_ghcr.json`](../../test_configs/wslc_custom_registry_ghcr.json) — Pull from GitHub Container Registry
-- [`test_configs/wslc_custom_registry_quay.json`](../../test_configs/wslc_custom_registry_quay.json) — Pull from Quay.io
-- [`test_configs/wslc_tar_import_rootfs.json`](../../test_configs/wslc_tar_import_rootfs.json) — Import rootfs tar
-- [`test_configs/wslc_tar_import_docker_save.json`](../../test_configs/wslc_tar_import_docker_save.json) — Import Docker save archive
-- [`test_configs/wslc_timeout.json`](../../test_configs/wslc_timeout.json) — Execution timeout enforcement
+- [`tests/examples/wslc_hello_world.json`](../../tests/examples/wslc_hello_world.json) — Hello world with Alpine
+- [`tests/configs/wslc_network_isolated.json`](../../tests/configs/wslc_network_isolated.json) — Network isolation
+- [`tests/configs/wslc_custom_registry_ghcr.json`](../../tests/configs/wslc_custom_registry_ghcr.json) — Pull from GitHub Container Registry
+- [`tests/configs/wslc_custom_registry_quay.json`](../../tests/configs/wslc_custom_registry_quay.json) — Pull from Quay.io
+- [`tests/configs/wslc_tar_import_rootfs.json`](../../tests/configs/wslc_tar_import_rootfs.json) — Import rootfs tar
+- [`tests/configs/wslc_tar_import_docker_save.json`](../../tests/configs/wslc_tar_import_docker_save.json) — Import Docker save archive
+- [`tests/configs/wslc_timeout.json`](../../tests/configs/wslc_timeout.json) — Execution timeout enforcement

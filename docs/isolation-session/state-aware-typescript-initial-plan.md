@@ -182,7 +182,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
 ```
 
 The Entra path can't be exercised in CI without WAM credentials; the Rust-side
-[state-aware test runner](../../test_scripts/run_isolation_session_state_aware_tests.ps1)
+[state-aware test runner](../../tests/scripts/run_isolation_session_state_aware_tests.ps1)
 covers the validation rejections.
 
 ## References

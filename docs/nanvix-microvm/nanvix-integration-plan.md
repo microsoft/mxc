@@ -129,7 +129,7 @@ mxc/src/
 mxc/docs/nanvix-microvm/
 └── nanvix-integration-plan.md        # NEW — this document
 
-mxc/test_configs/
+mxc/tests/configs/
 └── microvm_hello.json                # NEW — example microvm config
 ```
 

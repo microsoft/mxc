@@ -19,7 +19,7 @@
     Explicit binary directory. Overrides -Release logic when provided.
 
 .PARAMETER ConfigDir
-    Path to test configs directory. Defaults to <repo-root>\test_configs
+    Path to test configs directory. Defaults to <repo-root>\tests\configs
 
 .EXAMPLE
     .\run_microvm_tests.ps1
@@ -34,7 +34,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
 if (-not $BinDir) {
     if ($Release) {
@@ -45,7 +45,7 @@ if (-not $BinDir) {
 }
 
 if (-not $ConfigDir) {
-    $ConfigDir = Join-Path $RepoRoot "test_configs"
+    $ConfigDir = Join-Path $RepoRoot "tests\configs"
 }
 
 $WxcExePath = Join-Path $BinDir "wxc-exec.exe"

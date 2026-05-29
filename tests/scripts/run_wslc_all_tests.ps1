@@ -38,8 +38,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent $PSScriptRoot
-$TestConfigs = Join-Path $RepoRoot "test_configs"
+$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+$TestConfigs = Join-Path $RepoRoot "tests\configs"
 
 # Find binary -- prefer explicit path, then probe target-specific and default dirs.
 $Target = "x86_64-pc-windows-msvc"

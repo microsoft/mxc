@@ -22,7 +22,7 @@
     One or more image references to pre-pull. Defaults to a small
     starter set (alpine:latest, python:3.12-alpine) suitable for a quick
     smoke test. To populate the cache for the full WSLC test suite, run
-    test_scripts\run_wslc_all_tests.ps1, which invokes this script with
+    tests\scripts\run_wslc_all_tests.ps1, which invokes this script with
     the complete image list.
 
 .PARAMETER WxcExecPath

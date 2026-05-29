@@ -50,7 +50,7 @@ and the operator observes the output to confirm healthy behavior.
 Invoke from `cmd.exe`:
 
 ```cmd
-powershell -ExecutionPolicy Bypass -File test_scripts\run_isolation_session_resize_smoke.ps1
+powershell -ExecutionPolicy Bypass -File tests\scripts\run_isolation_session_resize_smoke.ps1
 ```
 
 ### Deployment helpers
@@ -63,7 +63,7 @@ itself and takes a `-ComputerName` / `-VMName` plus `-Credential`.
 | Script | Copies | Transport |
 |--------|--------|-----------|
 | `push_exes_to_vm.ps1` | Native Rust binaries (Debug + Release) | TShell (active `Open-Device` session) |
-| `push_batch_and_config_files_to_vm.ps1` | `test_configs\`, `examples\`, runner batch files, helper scripts | TShell (active `Open-Device` session) |
+| `push_batch_and_config_files_to_vm.ps1` | `tests\configs\`, `examples\`, runner batch files, helper scripts | TShell (active `Open-Device` session) |
 | `push_sdk_integration_tests_to_vm.ps1` | SDK integration test artifacts (`sdk\bin\x64`, compiled tests, `node_modules`, `package.json`, `run-tests.js`) | PowerShell Remoting (`-ComputerName`/`-VMName` + `-Credential`) |
 
 CI currently runs the MicroVM Rust E2E suite when WHP is available. Other
@@ -113,7 +113,7 @@ Run them explicitly on capable machines with
 | `test_filesystem_bfs_readonly` | Requires velocity key 61714527 (BFS deadlock fix) |
 | `test_filesystem_bfs_spaces` | Requires velocity key 61714527 (BFS deadlock fix) |
 | `test_pwsh_setlocation` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_test_configs` | Requires velocity key 61714527 (BFS deadlock fix) |
+| `test_tests\configs` | Requires velocity key 61714527 (BFS deadlock fix) |
 | `test_examples` | Requires velocity key 61714527 (BFS deadlock fix) |
 | `test_appcontainer_proxy` | Requires velocity key 61714527 (BFS deadlock fix) and elevation |
 | `test_on_repeat` | Stress test (loops BFS tests) |

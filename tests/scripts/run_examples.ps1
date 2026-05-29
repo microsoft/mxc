@@ -1,13 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Runs wxc-test-driver against all test configs.
-# Creates temporary directories required by various test configs, runs the
-# test driver, and cleans up regardless of outcome.
+# Runs wxc-test-driver against example configs.
+# Creates temporary directories required by examples, runs the test driver,
+# and cleans up regardless of outcome.
 #
 # Usage:
-#   .\run_test_configs.ps1              # debug build
-#   .\run_test_configs.ps1 -Release     # release build
+#   .\run_examples.ps1              # debug build
+#   .\run_examples.ps1 -Release     # release build
 
 param(
     [switch]$Release,
@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
 if (-not $BinDir) {
     if ($Release) {
@@ -26,7 +26,7 @@ if (-not $BinDir) {
 }
 
 $TestDriver = Join-Path $BinDir "wxc-test-driver.exe"
-$TestConfigsDir = Join-Path $RepoRoot "test_configs"
+$ExamplesDir = Join-Path $RepoRoot "tests\examples"
 
 if (-not (Test-Path $TestDriver)) {
     Write-Host "ERROR: wxc-test-driver.exe not found at $TestDriver" -ForegroundColor Red
@@ -35,19 +35,17 @@ if (-not (Test-Path $TestDriver)) {
 }
 
 $TempDirs = @(
-    "C:\temp\wxc_test_allowed",
-    "C:\temp\wxc_test_allowedreadonly",
-    "C:\temp\wxc_test_denied"
+    "C:\temp\wxc_sandbox",
+    "C:\temp\wxc_combined_test"
 )
 
 try {
     foreach ($dir in $TempDirs) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    Set-Content -Path "C:\temp\wxc_test_allowedreadonly\test_input.txt" -Value "Test Input"
 
-    Write-Host "Running wxc-test-driver against test_configs..." -ForegroundColor Cyan
-    & $TestDriver $TestConfigsDir
+    Write-Host "Running wxc-test-driver against examples..." -ForegroundColor Cyan
+    & $TestDriver $ExamplesDir
     $exitCode = $LASTEXITCODE
 
     if ($exitCode -ne 0) {
@@ -55,7 +53,7 @@ try {
         exit $exitCode
     }
 
-    Write-Host "PASSED: all test configs" -ForegroundColor Green
+    Write-Host "PASSED: all examples" -ForegroundColor Green
 } finally {
     foreach ($dir in $TempDirs) {
         if (Test-Path $dir) {

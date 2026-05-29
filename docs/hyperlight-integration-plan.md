@@ -117,7 +117,7 @@ mxc/src/wxc_common/
 mxc/src/wxc/
 └── src/main.rs                # + ContainmentBackend::Hyperlight dispatch arm
 
-mxc/test_configs/
+mxc/tests/configs/
 ├── hyperlight_hello.json      # NEW — hello from Python
 └── hyperlight_pandas.json     # NEW — exercises pre-imported numpy/pandas
 

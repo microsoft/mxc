@@ -1,13 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Runs wxc-test-driver against example configs.
-# Creates temporary directories required by examples, runs the test driver,
+# BFS filesystem test runner.
+# Creates temporary directories required by the test config, runs the test,
 # and cleans up regardless of outcome.
 #
 # Usage:
-#   .\run_examples.ps1              # debug build
-#   .\run_examples.ps1 -Release     # release build
+#   .\run_filesystem_bfs_test.ps1              # debug build
+#   .\run_filesystem_bfs_test.ps1 -Release     # release build
 
 param(
     [switch]$Release,
@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
 if (-not $BinDir) {
     if ($Release) {
@@ -25,18 +25,18 @@ if (-not $BinDir) {
     }
 }
 
-$TestDriver = Join-Path $BinDir "wxc-test-driver.exe"
-$ExamplesDir = Join-Path $RepoRoot "examples"
+$WxcExec = Join-Path $BinDir "wxc-exec.exe"
+$TestConfig = Join-Path $RepoRoot "tests\configs\filesystem_bfs_test.json"
 
-if (-not (Test-Path $TestDriver)) {
-    Write-Host "ERROR: wxc-test-driver.exe not found at $TestDriver" -ForegroundColor Red
+if (-not (Test-Path $WxcExec)) {
+    Write-Host "ERROR: wxc-exec.exe not found at $WxcExec" -ForegroundColor Red
     Write-Host "Run 'cargo build$(if ($Release) { ' --release' })' first." -ForegroundColor Yellow
     exit 1
 }
 
 $TempDirs = @(
-    "C:\temp\wxc_sandbox",
-    "C:\temp\wxc_combined_test"
+    "C:\temp\wxc_test_allowed",
+    "C:\temp\wxc_test_denied"
 )
 
 try {
@@ -44,16 +44,16 @@ try {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
 
-    Write-Host "Running wxc-test-driver against examples..." -ForegroundColor Cyan
-    & $TestDriver $ExamplesDir
+    Write-Host "Running BFS filesystem test..." -ForegroundColor Cyan
+    & $WxcExec --debug $TestConfig
     $exitCode = $LASTEXITCODE
 
     if ($exitCode -ne 0) {
-        Write-Host "FAILED: wxc-test-driver exited with code $exitCode" -ForegroundColor Red
+        Write-Host "FAILED: wxc-exec exited with code $exitCode" -ForegroundColor Red
         exit $exitCode
     }
 
-    Write-Host "PASSED: all examples" -ForegroundColor Green
+    Write-Host "PASSED: BFS filesystem test" -ForegroundColor Green
 } finally {
     foreach ($dir in $TempDirs) {
         if (Test-Path $dir) {

@@ -184,4 +184,4 @@ changes require a major bump.
 | 0.3.0-alpha | Initial versioned schema. Added `process`, `lifecycle`, `containerId`, `wslc` alias. Dual-read fallbacks for legacy fields. |
 | 0.4.0-alpha | Removed legacy fields (`script`, `workingDirectory`, `processContainer.name`, etc.). `process` section now required. |
 
-See the `examples/` directory for complete configuration examples.
+See the `tests/examples/` directory for complete configuration examples.

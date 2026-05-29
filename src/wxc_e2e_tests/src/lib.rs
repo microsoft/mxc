@@ -28,14 +28,14 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Return the repository `test_configs/` directory.
+/// Return the repository `tests/configs/` directory.
 pub fn test_configs_dir() -> PathBuf {
-    repo_root().join("test_configs")
+    repo_root().join("tests").join("configs")
 }
 
-/// Return the repository `examples/` directory.
+/// Return the repository `tests/examples/` directory.
 pub fn examples_dir() -> PathBuf {
-    repo_root().join("examples")
+    repo_root().join("tests").join("examples")
 }
 
 fn src_dir() -> PathBuf {

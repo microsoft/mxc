@@ -48,7 +48,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
 # ---------------- Locate wxc-exec.exe ----------------
 
@@ -143,7 +143,7 @@ $encodedLoop = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loop
 
 # ---------------- Build the wxc-exec config envelope ----------------
 #
-# Shape matches test_configs/isolation_session_powershell_interactive.json:
+# Shape matches tests/configs/isolation_session_powershell_interactive.json:
 # top-level version + containerId + containment + process. timeout=0 lets
 # the loop run until Ctrl-C.
 

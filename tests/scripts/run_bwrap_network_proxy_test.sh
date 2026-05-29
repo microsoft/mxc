@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
 
 if [ ! -f "$LXC_EXEC" ]; then
@@ -24,7 +24,7 @@ run_one() {
     local sentinel="$3"
     echo "Running Bubblewrap network proxy test: $label..."
     local out
-    if ! out=$("$LXC_EXEC" --experimental "$REPO_DIR/test_configs/$config" 2>&1); then
+    if ! out=$("$LXC_EXEC" --experimental "$REPO_DIR/tests/configs/$config" 2>&1); then
         echo "$out"
         echo "FAIL: $label (lxc-exec returned non-zero)"
         return 1

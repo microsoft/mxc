@@ -33,12 +33,12 @@
 
 .PARAMETER ConfigDir
     Directory holding the state-aware request fixture JSON files. Defaults
-    to <repo>/test_configs. Override on the VM where the deployed layout
+    to <repo>/tests/configs. Override on the VM where the deployed layout
     differs from the repo layout.
 
 .EXAMPLE
     .\run_isolation_session_state_aware_tests.ps1
-    .\run_isolation_session_state_aware_tests.ps1 -WxcExePath C:\test\wxc-exec.exe -ConfigDir C:\test\test_configs
+    .\run_isolation_session_state_aware_tests.ps1 -WxcExePath C:\test\wxc-exec.exe -ConfigDir C:\test\tests\configs
 #>
 
 param(
@@ -47,7 +47,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
 # ---------------- Locate wxc-exec.exe ----------------
 
@@ -103,15 +103,15 @@ if (-not (Test-Path $IsoSessionOpsKey)) {
 # ---------------- Helpers ----------------
 
 # Resolve the directory holding state-aware request fixtures. The -ConfigDir
-# CLI parameter wins when supplied; otherwise default to <repo>/test_configs
+# CLI parameter wins when supplied; otherwise default to <repo>/tests/configs
 # computed from $RepoRoot.
 if (-not $ConfigDir) {
-    $ConfigDir = Join-Path $RepoRoot "test_configs"
+    $ConfigDir = Join-Path $RepoRoot "tests\configs"
 }
 
 # Encode a state-aware request envelope and run wxc-exec against it. The
 # request comes either from an in-line hashtable or from a static JSON
-# fixture file under test_configs/ (for the project-wide "test scenarios are
+# fixture file under tests/configs/ (for the project-wide "test scenarios are
 # version-controlled JSON" pattern). When the fixture contains the
 # placeholder `{{SANDBOX_ID}}`, the caller must supply -SandboxId so it can
 # be substituted before the request is base64-encoded. Returns a hashtable

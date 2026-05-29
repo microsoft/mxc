@@ -1,11 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# AppContainer basic test runner.
+# MicroVM basic smoke test runner.
 #
 # Usage:
-#   .\run_basicac_test.ps1              # debug build
-#   .\run_basicac_test.ps1 -Release     # release build
+#   .\run_microvm_basic_test.ps1              # debug build
+#   .\run_microvm_basic_test.ps1 -Release     # release build
 
 param(
     [switch]$Release,
@@ -13,7 +13,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
 if (-not $BinDir) {
     if ($Release) {
@@ -24,7 +24,7 @@ if (-not $BinDir) {
 }
 
 $WxcExec = Join-Path $BinDir "wxc-exec.exe"
-$TestConfig = Join-Path $RepoRoot "test_configs\basic_processcontainer.json"
+$TestConfig = Join-Path $RepoRoot "tests\configs\microvm_hello.json"
 
 if (-not (Test-Path $WxcExec)) {
     Write-Host "ERROR: wxc-exec.exe not found at $WxcExec" -ForegroundColor Red
@@ -32,8 +32,8 @@ if (-not (Test-Path $WxcExec)) {
     exit 1
 }
 
-Write-Host "Running basic AppContainer test..." -ForegroundColor Cyan
-& $WxcExec --debug $TestConfig
+Write-Host "Running MicroVM basic smoke test..." -ForegroundColor Cyan
+& $WxcExec --debug --experimental $TestConfig
 $exitCode = $LASTEXITCODE
 
 if ($exitCode -ne 0) {
@@ -41,4 +41,4 @@ if ($exitCode -ne 0) {
     exit $exitCode
 }
 
-Write-Host "PASSED: basic AppContainer test" -ForegroundColor Green
+Write-Host "PASSED: MicroVM basic smoke test" -ForegroundColor Green

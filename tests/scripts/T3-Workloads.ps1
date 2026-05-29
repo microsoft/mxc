@@ -16,10 +16,10 @@
 
 [CmdletBinding()]
 param(
-    # Default assumes the script lives at <repo>\test_scripts\ and the
+    # Default assumes the script lives at <repo>\tests\scripts\ and the
     # built binary is at <repo>\src\target\debug\wxc-exec.exe. Override
     # -Wxc explicitly if the layout differs.
-    [string]$Wxc          = (Join-Path (Split-Path -Parent $PSScriptRoot) 'src\target\debug\wxc-exec.exe'),
+    [string]$Wxc          = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'src\target\debug\wxc-exec.exe'),
     [string]$ScratchRoot  = (Join-Path $env:TEMP 'mxc-t3-workloads'),
     # Subset of workloads to run. Default: all nineteen.
     [int[]] $Run          = @(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19),
