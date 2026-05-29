@@ -1032,4 +1032,124 @@ mod tests {
         let b = super::derive_sid_string("MxcDeriveSidTestStable").expect("second derivation");
         assert_eq!(a, b);
     }
+
+    /// Helper: build a double-null-terminated UTF-16 env block from strings.
+    fn make_utf16_block(entries: &[&str]) -> Vec<u16> {
+        let mut block = Vec::new();
+        for entry in entries {
+            for ch in entry.encode_utf16() {
+                block.push(ch);
+            }
+            block.push(0);
+        }
+        block.push(0);
+        block
+    }
+
+    #[test]
+    fn parse_environment_block_basic_entries() {
+        let block = make_utf16_block(&["FOO=bar", "PATH=C:\\Windows"]);
+        let entries = super::parse_environment_block(block.as_ptr());
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], ("FOO".to_string(), "bar".to_string()));
+        assert_eq!(entries[1], ("PATH".to_string(), "C:\\Windows".to_string()));
+    }
+
+    #[test]
+    fn parse_environment_block_preserves_drive_letter_vars() {
+        let block = make_utf16_block(&[
+            "=C:=C:\\Users\\test",
+            "=D:=D:\\Data",
+            "HOME=C:\\Users\\test",
+        ]);
+        let entries = super::parse_environment_block(block.as_ptr());
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries[0],
+            ("=C:".to_string(), "C:\\Users\\test".to_string())
+        );
+        assert_eq!(entries[1], ("=D:".to_string(), "D:\\Data".to_string()));
+        assert_eq!(
+            entries[2],
+            ("HOME".to_string(), "C:\\Users\\test".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_environment_block_value_with_equals() {
+        let block = make_utf16_block(&["CONN=host=db;port=5432"]);
+        let entries = super::parse_environment_block(block.as_ptr());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0],
+            ("CONN".to_string(), "host=db;port=5432".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_environment_block_empty_block() {
+        let block: Vec<u16> = vec![0]; // just the double-null (no entries)
+        let entries = super::parse_environment_block(block.as_ptr());
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn encode_env_block_sorts_case_insensitively() {
+        let entries = vec![
+            ("Zebra".to_string(), "1".to_string()),
+            ("alpha".to_string(), "2".to_string()),
+        ];
+        let block = super::encode_env_block(&entries);
+        // Decode: "alpha=2\0Zebra=1\0\0"
+        let parsed = super::parse_environment_block(block.as_ptr());
+        assert_eq!(parsed[0].0, "alpha");
+        assert_eq!(parsed[1].0, "Zebra");
+    }
+
+    #[test]
+    fn encode_decode_round_trip_with_drive_vars() {
+        let entries = vec![
+            ("=C:".to_string(), "C:\\Users\\test".to_string()),
+            ("PATH".to_string(), "C:\\Windows".to_string()),
+        ];
+        let block = super::encode_env_block(&entries);
+        let parsed = super::parse_environment_block(block.as_ptr());
+        assert_eq!(parsed, entries);
+    }
+
+    #[test]
+    fn build_explicit_entries_no_proxy() {
+        let env = vec!["FOO=bar".to_string(), "BAZ=qux".to_string()];
+        let entries = super::build_explicit_entries(&env, None);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], ("FOO".to_string(), "bar".to_string()));
+        assert_eq!(entries[1], ("BAZ".to_string(), "qux".to_string()));
+    }
+
+    #[test]
+    fn build_explicit_entries_strips_and_injects_proxy() {
+        let env = vec![
+            "FOO=bar".to_string(),
+            "HTTP_PROXY=old".to_string(),
+            "https_proxy=old2".to_string(),
+            "NO_PROXY=localhost".to_string(),
+        ];
+        let proxy = crate::models::ProxyAddress::new("127.0.0.1".to_string(), 8080);
+        let entries = super::build_explicit_entries(&env, Some(&proxy));
+
+        // Original proxy vars should be stripped.
+        assert!(!entries
+            .iter()
+            .any(|(k, _)| k == "http_proxy" || k == "https_proxy" || k == "NO_PROXY"));
+        // FOO should remain.
+        assert!(entries.iter().any(|(k, v)| k == "FOO" && v == "bar"));
+        // Injected proxy vars should be present.
+        let proxy_url = proxy.to_url();
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "HTTP_PROXY" && v == &proxy_url));
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "HTTPS_PROXY" && v == &proxy_url));
+    }
 }
