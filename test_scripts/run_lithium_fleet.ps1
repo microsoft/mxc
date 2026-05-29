@@ -39,7 +39,7 @@ $endpoints = @{
     int  = @{
         ApiEndpoint = 'https://sandboxmanagement.us.int.w365lith.azure.com'
         MgmtScope   = 'api://7702b3c7-c33c-4ca7-8cf4-1a49063b77e2/.default'
-        ProxyScope  = 'api://7702b3c7-c33c-4ca7-8cf4-1a49063b77e2/.default'
+        ProxyScope  = 'api://afc70dbb-531d-4d7f-8f76-def8215631c7/.default'
     }
 }
 
