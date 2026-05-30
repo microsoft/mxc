@@ -1,9 +1,18 @@
 # Adding a New Feature
 
-> **Do not modify stable schemas.** Files in `schemas/stable/` are
-> immutable release artifacts. All experimental work happens in
-> `schemas/dev/` only. Stable schemas are updated solely during the
-> promotion process when an experimental feature ships.
+> **Stable schemas are immutable once shipped.** Files in
+> `schemas/stable/` that are already published in a release must not be
+> edited. Add experimental work to `schemas/dev/` only, then carry it
+> into a *new* stable schema file at promotion time (per
+> [Promoting to Stable](#promoting-to-stable) below).
+>
+> **Stable schemas document only the non-experimental surface.**
+> Experimental backends, the `experimental.*` block, and any in-progress
+> shapes live solely in `schemas/dev/` — they must not be mirrored into
+> a stable file. Configs that need editor validation for experimental
+> fields should point `$schema` at the dev file. The `--experimental`
+> runtime gate is unchanged: it still controls execution regardless of
+> which schema validated the config.
 
 ## Prerequisites
 
@@ -103,7 +112,7 @@ Adding a feature may touch these files:
 
 | File | What to change |
 |------|----------------|
-| `schemas/dev/mxc-config.schema.0.6.0-dev.json` | Add `gpuIsolation` as a feature under `experimental` |
+| `schemas/dev/mxc-config.schema.0.7.0-dev.json` | Add `gpuIsolation` as a feature under `experimental` |
 | `src/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |
 | `src/wxc_common/src/config_parser.rs` | Add `gpuIsolation` field to `RawExperimental` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
@@ -111,7 +120,7 @@ Adding a feature may touch these files:
 
 ## Step 1: Update the schema
 
-In `schemas/dev/mxc-config.schema.0.6.0-dev.json`, the `experimental` section already
+In `schemas/dev/mxc-config.schema.0.7.0-dev.json`, the `experimental` section already
 exists with `compartments` as a feature. Add `gpuIsolation` as a new
 feature with its own typed schema:
 

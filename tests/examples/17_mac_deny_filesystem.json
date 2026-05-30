@@ -1,6 +1,6 @@
 {
-    "$schema": "../schemas/dev/mxc-config.schema.0.6.0-dev.json",
-    "version": "0.6.0-alpha",
+    "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
+    "version": "0.7.0-alpha",
     "containment": "seatbelt",
     "process": {
         "commandLine": "ls /Users && echo FS_ALLOWED || echo FS_BLOCKED",
