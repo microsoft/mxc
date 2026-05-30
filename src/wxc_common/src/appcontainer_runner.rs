@@ -974,7 +974,7 @@ impl ScriptRunner for AppContainerScriptRunner {
             logger.log_line(
                 "warning: proxy support on Windows is best-effort -- only scripts that use \
                  the WinHTTP stack will be proxied; other HTTP stacks may bypass it. The \
-                 AppContainer backend may also surface a UAC prompt on downlevel hosts.",
+                 AppContainer backend may also surface a UAC prompt.",
             );
         }
 
