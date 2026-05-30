@@ -19,7 +19,7 @@ MXC is a sandboxed code execution environment.  It currently implements WXC for 
 
 ## Building
 
-MXC ships a native container wrapper plus a TypeScript SDK ([`@microsoft/mxc-sdk`](./sdk/README.md)) for Node/Electron projects. The SDK is the supported integration surface — see the [SDK README](./sdk/README.md) for the API, choosing a backend, and the state-aware lifecycle.
+MXC ships a native container wrapper plus a TypeScript SDK ([`@microsoft/mxc-sdk`](https://www.npmjs.com/package/@microsoft/mxc-sdk)) for Node/Electron projects. The SDK is the supported integration surface — see the [SDK README](./sdk/README.md) for the API, choosing a backend, and the state-aware lifecycle.
 
 ### Platforms
 
