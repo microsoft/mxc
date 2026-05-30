@@ -98,7 +98,10 @@ function isIsoSessionSupported(): boolean {
   if (!build) {
     return false;
   }
-  return build.major > 26300 || (build.major === 26300 && build.minor >= 8553);
+
+  // We can't confirm the minor versions outside of the Windows Insider Preview
+  // so we only check the major version.
+  return build.major > 26300;
 }
 
 let windowsSandboxAvailableCache: boolean | undefined;
