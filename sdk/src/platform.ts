@@ -54,6 +54,39 @@ function queryWindowsRegistry(key: string, valueName: string): string | null {
 }
 
 /**
+ * Result of querying the host's Windows build number, or `null` when the
+ * registry values are missing or unparseable.
+ */
+type WindowsBuild = { major: number; minor: number } | null;
+
+/**
+ * Default implementation that reads `CurrentBuild` / `UBR` from the
+ * registry. Replaceable via {@link _setWindowsBuildQuery} in tests so we
+ * can exercise the IsolationSession version gate deterministically.
+ */
+function defaultWindowsBuildQuery(): WindowsBuild {
+  const registryPath = 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion';
+  const currentBuild = queryWindowsRegistry(registryPath, 'CurrentBuild');
+  const ubrValue = queryWindowsRegistry(registryPath, 'UBR');
+  if (!currentBuild || !ubrValue) {
+    return null;
+  }
+  const major = parseInt(currentBuild, 10);
+  const minor = Number(ubrValue);
+  if (isNaN(major) || isNaN(minor)) {
+    return null;
+  }
+  return { major, minor };
+}
+
+let windowsBuildQuery: () => WindowsBuild = defaultWindowsBuildQuery;
+
+/** @internal Test-only: override the Windows build lookup. */
+export function _setWindowsBuildQuery(fn: (() => WindowsBuild) | null): void {
+  windowsBuildQuery = fn ?? defaultWindowsBuildQuery;
+}
+
+/**
  * Check whether the host supports the IsolationSession backend.
  * Requires Windows Insider Preview build 26300.8553 or later.
  *
@@ -61,20 +94,11 @@ function queryWindowsRegistry(key: string, valueName: string): string | null {
  * registry reads are cheap relative to the rest of the probe.
  */
 function isIsoSessionSupported(): boolean {
-  const registryPath = 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion';
-  const currentBuild = queryWindowsRegistry(registryPath, 'CurrentBuild');
-  const ubrValue = queryWindowsRegistry(registryPath, 'UBR');
-  if (!currentBuild || !ubrValue) {
+  const build = windowsBuildQuery();
+  if (!build) {
     return false;
   }
-
-  const major = parseInt(currentBuild, 10);
-  const minor = Number(ubrValue);
-  if (isNaN(major) || isNaN(minor)) {
-    return false;
-  }
-
-  return major > 26300 || (major === 26300 && minor >= 8553);
+  return build.major > 26300 || (build.major === 26300 && build.minor >= 8553);
 }
 
 let windowsSandboxAvailableCache: boolean | undefined;

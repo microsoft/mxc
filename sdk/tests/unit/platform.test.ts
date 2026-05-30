@@ -9,6 +9,7 @@ import {
   getPlatformSupport,
   _resetPlatformSupportCache,
   _setProbeRunner,
+  _setWindowsBuildQuery,
   findWxcExecutable,
 } from '../../src/platform.js';
 
@@ -207,5 +208,56 @@ describe('findWxcExecutable failure modes', () => {
     process.env.MXC_BIN_DIR = '';
     const result = findWxcExecutable();
     assert.ok(result === null || typeof result === 'string');
+  });
+});
+
+// IsolationSession availability is gated on Windows Insider Preview build
+// 26300.8553+. These tests stub the build-query seam so the gate can be
+// exercised deterministically without depending on the host's actual build.
+describe('isolation_session availability gate', () => {
+  beforeEach(() => {
+    _resetPlatformSupportCache();
+  });
+
+  afterEach(() => {
+    _setWindowsBuildQuery(null);
+    _resetPlatformSupportCache();
+  });
+
+  it('omits isolation_session when build is below 26300.8553', { skip: !isWindows }, () => {
+    _setWindowsBuildQuery(() => ({ major: 26300, minor: 8552 }));
+    const support = getPlatformSupport();
+    assert.ok(support.isSupported, 'Windows is supported regardless of iso gate');
+    assert.ok(
+      !support.availableMethods.includes('isolation_session'),
+      `expected isolation_session absent, got: ${support.availableMethods.join(',')}`,
+    );
+  });
+
+  it('includes isolation_session when build is exactly 26300.8553', { skip: !isWindows }, () => {
+    _setWindowsBuildQuery(() => ({ major: 26300, minor: 8553 }));
+    const support = getPlatformSupport();
+    assert.ok(support.availableMethods.includes('isolation_session'));
+  });
+
+  it('includes isolation_session when build is newer (e.g. 26400.x)', { skip: !isWindows }, () => {
+    _setWindowsBuildQuery(() => ({ major: 26400, minor: 0 }));
+    const support = getPlatformSupport();
+    assert.ok(support.availableMethods.includes('isolation_session'));
+  });
+
+  it('omits isolation_session when the registry query returns null', { skip: !isWindows }, () => {
+    _setWindowsBuildQuery(() => null);
+    const support = getPlatformSupport();
+    assert.ok(!support.availableMethods.includes('isolation_session'));
+  });
+
+  it('always reports processcontainer as the default on Windows (no build gate)', { skip: !isWindows }, () => {
+    // Even on a hypothetical sub-24H2 build the SDK now reports support;
+    // the runtime gate has moved into the native binary.
+    _setWindowsBuildQuery(() => ({ major: 22000, minor: 0 }));
+    const support = getPlatformSupport();
+    assert.ok(support.isSupported);
+    assert.strictEqual(support.availableMethods[0], 'processcontainer');
   });
 });
