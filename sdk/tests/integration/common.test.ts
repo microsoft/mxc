@@ -7,7 +7,6 @@ import os from 'os';
 import {
   sdk,
   supportedVersions,
-  expectDryRunValidationPass,
   assertDryRunResult,
   debugSpawnOptions,
 } from './test-helpers.js';
@@ -23,7 +22,6 @@ describe('Platform support', () => {
 const platformSupport = sdk.getPlatformSupport();
 
 for (const schemaVersion of supportedVersions) {
-  const dryRunExpectation = expectDryRunValidationPass(schemaVersion);
   const skipReason = !platformSupport.isSupported
     ? `Platform not supported: ${platformSupport.reason}`
     : undefined;
@@ -59,14 +57,14 @@ for (const schemaVersion of supportedVersions) {
         child.on('close', (code: number) => resolve({ code, stdout, stderr }));
         child.on('error', reject);
       });
-      assertDryRunResult(result.stdout, result.code, dryRunExpectation, schemaVersion.raw);
+      assertDryRunResult(result.stdout, result.code, schemaVersion.raw);
     });
 
     it('should dry-run via spawnSandboxAsync', async () => {
       const result = await sdk.spawnSandboxAsync(
         'cmd.exe /c echo test', policy, { dryRun: true, ...debugSpawnOptions }, undefined, `dryrun-async-${schemaVersion}`,
       );
-      assertDryRunResult(result.stdout, result.exitCode, dryRunExpectation, schemaVersion.raw);
+      assertDryRunResult(result.stdout, result.exitCode, schemaVersion.raw);
     });
 
     it('should dry-run via spawnSandboxFromConfig', async () => {
@@ -83,7 +81,7 @@ for (const schemaVersion of supportedVersions) {
           resolve({ exitCode: event.exitCode, stdout });
         });
       });
-      assertDryRunResult(result.stdout, result.exitCode, dryRunExpectation, schemaVersion.raw);
+      assertDryRunResult(result.stdout, result.exitCode, schemaVersion.raw);
     });
 
     it('should dry-run via spawnSandbox (PTY)', async () => {
@@ -97,7 +95,7 @@ for (const schemaVersion of supportedVersions) {
           resolve({ exitCode: event.exitCode, stdout });
         });
       });
-      assertDryRunResult(result.stdout, result.exitCode, dryRunExpectation, schemaVersion.raw);
+      assertDryRunResult(result.stdout, result.exitCode, schemaVersion.raw);
     });
   });
 }
