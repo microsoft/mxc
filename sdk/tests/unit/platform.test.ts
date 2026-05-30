@@ -224,8 +224,10 @@ describe('isolation_session availability gate', () => {
     _resetPlatformSupportCache();
   });
 
-  it('omits isolation_session when build is below 26300.8553', { skip: !isWindows }, () => {
-    _setWindowsBuildQuery(() => ({ major: 26300, minor: 8552 }));
+  it('omits isolation_session when major build is at or below 26300', { skip: !isWindows }, () => {
+    // The gate is `major > 26300`; UBR (minor) is not used because it
+    // isn't verifiable outside the Windows Insider Preview.
+    _setWindowsBuildQuery(() => ({ major: 26300, minor: 8553 }));
     const support = getPlatformSupport();
     assert.ok(support.isSupported, 'Windows is supported regardless of iso gate');
     assert.ok(
@@ -234,13 +236,13 @@ describe('isolation_session availability gate', () => {
     );
   });
 
-  it('includes isolation_session when build is exactly 26300.8553', { skip: !isWindows }, () => {
-    _setWindowsBuildQuery(() => ({ major: 26300, minor: 8553 }));
+  it('omits isolation_session when major build is far below the threshold', { skip: !isWindows }, () => {
+    _setWindowsBuildQuery(() => ({ major: 22000, minor: 0 }));
     const support = getPlatformSupport();
-    assert.ok(support.availableMethods.includes('isolation_session'));
+    assert.ok(!support.availableMethods.includes('isolation_session'));
   });
 
-  it('includes isolation_session when build is newer (e.g. 26400.x)', { skip: !isWindows }, () => {
+  it('includes isolation_session when major build is newer than 26300', { skip: !isWindows }, () => {
     _setWindowsBuildQuery(() => ({ major: 26400, minor: 0 }));
     const support = getPlatformSupport();
     assert.ok(support.availableMethods.includes('isolation_session'));
