@@ -45,14 +45,6 @@ impl From<std::io::Error> for WxcError {
     }
 }
 
-// ---- Shared error messages surfaced by the Windows AppContainer and ----
-// ---- BaseContainer runners when a policy field is accepted by the   ----
-// ---- schema but not yet honored on the BaseContainer (schema        ----
-// ---- 0.5.0-alpha+) path. The legacy 0.4.0-alpha AppContainer path   ----
-// ---- still honors blockedHosts (via Windows Firewall) and           ----
-// ---- deniedPaths (via DACL ACEs), so the runners only surface these ----
-// ---- errors when the request's schema implies BaseContainer.        ----
-
 #[cfg(target_os = "windows")]
 pub(crate) const DENIED_PATHS_NOT_SUPPORTED_MSG: &str =
     "filesystem.deniedPaths is not yet supported on Windows. Paths are denied by \
