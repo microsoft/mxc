@@ -25,7 +25,7 @@ MXC ships a native container wrapper plus a TypeScript SDK ([`@microsoft/mxc-sdk
 
 | Platform | Default backend | Other backends | Minimum build |
 | --- | --- | --- | --- |
-| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: build 26100 (24H2); `isolation_session`: build 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
+| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
 | Linux x64 / ARM64 | `lxc` | `bubblewrap` | — |
 | macOS ARM64 (schema `0.6.0-dev`+) | `seatbelt` | — | — |
 
@@ -137,11 +137,16 @@ xperf -start user -on a68ca8b7-004f-d7b6-a698-07e2de0f1f5d:::'stack'
 
 ### Run wxc-exec
 
-Execute your script with AppContainer in permissive learning mode:
+Execute your script with AppContainer in permissive learning mode (debug builds only — release builds strip this capability):
 
 ```json
 {
-  "script": "your_code_here",
+  "version": "0.5.0-alpha",
+  "containerId": "ETW-Tracing",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python your_script.py"
+  },
   "processContainer": {
     "capabilities": ["permissiveLearningMode"]
   }

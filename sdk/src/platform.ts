@@ -53,34 +53,28 @@ function queryWindowsRegistry(key: string, valueName: string): string | null {
   }
 }
 
-let isoSessionSupportedCache: boolean | undefined;
-
 /**
  * Check whether the host supports the IsolationSession backend.
  * Requires Windows Insider Preview build 26300.8553 or later.
+ *
+ * No internal cache — `getPlatformSupport` memoizes the full result, and
+ * registry reads are cheap relative to the rest of the probe.
  */
 function isIsoSessionSupported(): boolean {
-  if (isoSessionSupportedCache !== undefined) {
-    return isoSessionSupportedCache;
-  }
-
   const registryPath = 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion';
   const currentBuild = queryWindowsRegistry(registryPath, 'CurrentBuild');
   const ubrValue = queryWindowsRegistry(registryPath, 'UBR');
   if (!currentBuild || !ubrValue) {
-    isoSessionSupportedCache = false;
-    return isoSessionSupportedCache;
+    return false;
   }
 
   const major = parseInt(currentBuild, 10);
   const minor = Number(ubrValue);
   if (isNaN(major) || isNaN(minor)) {
-    isoSessionSupportedCache = false;
-    return isoSessionSupportedCache;
+    return false;
   }
 
-  isoSessionSupportedCache = major > 26300 || (major === 26300 && minor >= 8553);
-  return isoSessionSupportedCache;
+  return major > 26300 || (major === 26300 && minor >= 8553);
 }
 
 let windowsSandboxAvailableCache: boolean | undefined;
