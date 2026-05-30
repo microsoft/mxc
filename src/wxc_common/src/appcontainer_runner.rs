@@ -914,12 +914,12 @@ impl ScriptRunner for AppContainerScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
             return Err(ScriptResponse::error(
-                crate::script_runner::DENIED_PATHS_NOT_SUPPORTED_MSG,
+                crate::windows_policy_errors::DENIED_PATHS_NOT_SUPPORTED_MSG,
             ));
         }
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
             return Err(ScriptResponse::error(
-                crate::script_runner::HOST_LISTS_NOT_SUPPORTED_MSG,
+                crate::windows_policy_errors::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }
         Ok(())

@@ -53,6 +53,8 @@ pub mod sandbox_protocol;
 pub mod string_util;
 #[cfg(target_os = "windows")]
 pub mod windows_sandbox_runner;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows_policy_errors;
 
 // Diagnostic logging (registry/env-controlled real-time output)
 #[cfg(target_os = "windows")]

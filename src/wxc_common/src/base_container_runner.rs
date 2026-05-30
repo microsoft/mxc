@@ -412,12 +412,12 @@ impl ScriptRunner for BaseContainerRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         if !request.policy.denied_paths.is_empty() {
             return Err(ScriptResponse::error(
-                crate::script_runner::DENIED_PATHS_NOT_SUPPORTED_MSG,
+                crate::windows_policy_errors::DENIED_PATHS_NOT_SUPPORTED_MSG,
             ));
         }
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
             return Err(ScriptResponse::error(
-                crate::script_runner::HOST_LISTS_NOT_SUPPORTED_MSG,
+                crate::windows_policy_errors::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }
         Self::is_base_container_api_present().map_err(|e| {
