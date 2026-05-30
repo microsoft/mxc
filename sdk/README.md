@@ -65,15 +65,15 @@ Pick `0.6.0-alpha` for new code on any supported platform.
 
 > **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `seatbelt`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.7.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
 
-> **Heads-up for `0.4.0-alpha` on Windows:** firewall network enforcement (`network.blockedHosts` — the only one currently wired through on `0.4.0-alpha`; `allowedHosts` is not effective) and `network.proxy` both require the host process to be elevated (Administrator) — they hit Windows APIs that need it and may surface a UAC prompt. Hosts must be specified as IP addresses (DNS-based filtering isn't supported on `0.4.0-alpha`). `0.5.0-alpha`+ moved proxy handling in-OS, so the elevation requirement is gone there (firewall enforcement on `0.5.0-alpha`+ is not yet implemented). All other policy fields work unelevated on every schema version.
+> **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 
 **Platforms:**
 
-| Platform | Default backend | Other backends |
-| --- | --- | --- |
-| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` |
-| Linux x64 / ARM64 | `bubblewrap` | `lxc` |
-| macOS ARM64 (schema `0.6.0-alpha`+) | `seatbelt` | — |
+| Platform | Default backend | Other backends | Minimum build |
+| --- | --- | --- | --- |
+| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
+| Linux x64 / ARM64 | `bubblewrap` | `lxc` | — |
+| macOS ARM64 (schema `0.6.0-alpha`+) | `seatbelt` | — | — |
 
 The default `processcontainer`, `bubblewrap`, and `lxc` backends work out of the box. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `seatbelt`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
 
@@ -321,7 +321,7 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 
 | Error | Cause | Fix |
 | --- | --- | --- |
-| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Windows: build < 26100 or UBR < 7965. On Linux: `lxc-ls` not on PATH. macOS: schema version < `0.6.0-alpha`. | Update the OS, install LXC, or switch to schema `0.6.0-alpha` (or `0.7.0-alpha` if you need state-aware lifecycle). |
+| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux: neither LXC nor Bubblewrap on PATH. On macOS: schema version < `0.6.0-alpha`. | Install LXC/Bubblewrap, or switch to schema `0.6.0-alpha` (or `0.7.0-alpha` if you need state-aware lifecycle). |
 | `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
 | `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
 | `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `microvm` / `seatbelt` / `isolation_session` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |

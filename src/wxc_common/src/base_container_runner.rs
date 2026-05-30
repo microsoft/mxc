@@ -410,6 +410,16 @@ impl BaseContainerRunner {
 
 impl ScriptRunner for BaseContainerRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if !request.policy.denied_paths.is_empty() {
+            return Err(ScriptResponse::error(
+                crate::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
+            return Err(ScriptResponse::error(
+                crate::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+            ));
+        }
         Self::is_base_container_api_present().map_err(|e| {
             let hint = if !request.experimental_enabled {
                 format!(
@@ -468,6 +478,11 @@ impl ScriptRunner for BaseContainerRunner {
                 logger,
                 "effective proxy: {} (builtin_test_server={})",
                 addr, request.policy.network_proxy.builtin_test_server
+            );
+            let _ = writeln!(
+                logger,
+                "warning: proxy support on Windows is best-effort -- only scripts that use \
+                 the WinHTTP stack will be proxied; other HTTP stacks may bypass it.",
             );
         }
 
@@ -1146,5 +1161,62 @@ mod tests {
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
         assert!(spec.network_policy().is_none());
+    }
+
+    // ---- validate_runner: unsupported policy fields surface as errors. ----
+
+    use crate::script_runner::ScriptRunner;
+
+    #[test]
+    fn validate_runner_rejects_denied_paths() {
+        let runner = BaseContainerRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.denied_paths = vec!["C:\\secret".into()];
+
+        let err = runner
+            .validate_runner(&request)
+            .expect_err("BaseContainer does not yet support deniedPaths");
+        assert!(
+            err.error_message.contains("deniedPaths"),
+            "expected message to mention deniedPaths, got: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn validate_runner_rejects_allowed_hosts() {
+        let runner = BaseContainerRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.allowed_hosts = vec!["example.com".into()];
+
+        let err = runner
+            .validate_runner(&request)
+            .expect_err("allowedHosts is not yet supported");
+        assert!(err.error_message.contains("allowedHosts"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_blocked_hosts() {
+        let runner = BaseContainerRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.blocked_hosts = vec!["bad.example.com".into()];
+
+        let err = runner
+            .validate_runner(&request)
+            .expect_err("blockedHosts is not yet supported");
+        assert!(err.error_message.contains("blockedHosts"));
+    }
+
+    #[test]
+    fn validate_runner_accepts_empty_policy() {
+        let runner = BaseContainerRunner::new();
+        let request = ExecutionRequest::default();
+        // validate_runner may still surface the host-API-unavailable error on
+        // dev machines where BaseContainer isn't present; we only assert that
+        // the policy-field checks above don't fire. Skip when the host doesn't
+        // expose the API.
+        if BaseContainerRunner::is_base_container_api_present().is_ok() {
+            assert!(runner.validate_runner(&request).is_ok());
+        }
     }
 }

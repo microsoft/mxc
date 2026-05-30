@@ -54,44 +54,54 @@ function queryWindowsRegistry(key: string, valueName: string): string | null {
 }
 
 /**
- * Check Windows build version requirements for WXC
- * 
- * Requirements:
- * - CurrentBuild (major version) must be >= 26100
- * - UBR (minor version) must be >= 7965 (Windows Insider 3A or later)
- * - UBR should not be checked for build versions >= 26500 as they may have different versioning
- * 
- * @returns true if Windows build meets requirements, false otherwise
+ * Result of querying the host's Windows build number, or `null` when the
+ * registry values are missing or unparseable.
  */
-function checkWindowsBuildVersion(): boolean {
+type WindowsBuild = { major: number; minor: number } | null;
+
+/**
+ * Default implementation that reads `CurrentBuild` / `UBR` from the
+ * registry. Replaceable via {@link _setWindowsBuildQuery} in tests so we
+ * can exercise the IsolationSession version gate deterministically.
+ */
+function defaultWindowsBuildQuery(): WindowsBuild {
   const registryPath = 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion';
-
   const currentBuild = queryWindowsRegistry(registryPath, 'CurrentBuild');
-  if (!currentBuild) {
-    return false;
-  }
-
-  const majorVersion = parseInt(currentBuild, 10);
-  if (isNaN(majorVersion) || majorVersion < 26100) {
-    return false;
-  }
-
   const ubrValue = queryWindowsRegistry(registryPath, 'UBR');
-  if (!ubrValue) {
+  if (!currentBuild || !ubrValue) {
+    return null;
+  }
+  const major = parseInt(currentBuild, 10);
+  const minor = Number(ubrValue);
+  if (isNaN(major) || isNaN(minor)) {
+    return null;
+  }
+  return { major, minor };
+}
+
+let windowsBuildQuery: () => WindowsBuild = defaultWindowsBuildQuery;
+
+/** @internal Test-only: override the Windows build lookup. */
+export function _setWindowsBuildQuery(fn: (() => WindowsBuild) | null): void {
+  windowsBuildQuery = fn ?? defaultWindowsBuildQuery;
+}
+
+/**
+ * Check whether the host supports the IsolationSession backend.
+ * Requires Windows Insider Preview build 26300.8553 or later.
+ *
+ * No internal cache — `getPlatformSupport` memoizes the full result, and
+ * registry reads are cheap relative to the rest of the probe.
+ */
+function isIsoSessionSupported(): boolean {
+  const build = windowsBuildQuery();
+  if (!build) {
     return false;
   }
 
-  // UBR is stored as REG_DWORD (hex format), use Number() to parse
-  const minorVersion = Number(ubrValue);
-  if (isNaN(minorVersion)) {
-    return false;
-  }
-
-  if (majorVersion >= 26100 && majorVersion <= 26500 && minorVersion < 7965) {
-    return false;
-  }
-
-  return true;
+  // Pin to the Windows Insider Preview build that introduced IsolationSession
+  // (26300.8553+). Other major builds are not yet supported.
+  return build.major === 26300 && build.minor >= 8553;
 }
 
 let windowsSandboxAvailableCache: boolean | undefined;
@@ -249,18 +259,15 @@ function computeSupport(): PlatformSupport {
     return support;
   }
 
-  const buildSupported = checkWindowsBuildVersion();
-  if (buildSupported) {
-    support.isSupported = true;
-    support.availableMethods = ['processcontainer'];
-    if (isWindowsSandboxAvailable()) {
-      support.availableMethods.push('windows_sandbox');
-    }
-    populateIsolationFromProbe(support);
-    return support;
+  support.isSupported = true;
+  support.availableMethods = ['processcontainer'];
+  if (isWindowsSandboxAvailable()) {
+    support.availableMethods.push('windows_sandbox');
   }
-
-  support.reason = 'Unsupported Windows branch or build version';
+  if (isIsoSessionSupported()) {
+    support.availableMethods.push('isolation_session');
+  }
+  populateIsolationFromProbe(support);
   return support;
 }
 

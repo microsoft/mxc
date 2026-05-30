@@ -1,6 +1,6 @@
 {
   "name": "@microsoft/mxc-sdk",
-  "version": "0.3.0",
+  "version": "0.6.0",
   "description": "TypeScript SDK for MXC (Microsoft eXecution Containers)",
   "type": "module",
   "types": "dist/index.d.ts",

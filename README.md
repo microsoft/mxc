@@ -19,7 +19,15 @@ MXC is a sandboxed code execution environment.  It currently implements WXC for 
 
 ## Building
 
-MXC is a container wrapper and a TypeScript based SDK for Node/Electron projects.  It is currently supported only on Windows 11 based machines (x64/ARM64).
+MXC ships a native container wrapper plus a TypeScript SDK ([`@microsoft/mxc-sdk`](https://www.npmjs.com/package/@microsoft/mxc-sdk)) for Node/Electron projects — see the [SDK README](./sdk/README.md) for details.
+
+### Platforms
+
+| Platform | Default backend | Other backends | Minimum build |
+| --- | --- | --- | --- |
+| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
+| Linux x64 / ARM64 | `bubblewrap` | `lxc` | — |
+| macOS ARM64 (schema `0.6.0-alpha`+) | `seatbelt` | — | — |
 
 ### Requirements
 
@@ -129,11 +137,17 @@ xperf -start user -on a68ca8b7-004f-d7b6-a698-07e2de0f1f5d:::'stack'
 
 ### Run wxc-exec
 
-Execute your script with AppContainer in permissive learning mode:
+Execute your script with AppContainer in permissive learning mode (debug builds only — release builds strip this capability):
 
 ```json
 {
-  "script": "your_code_here",
+  "version": "0.5.0-alpha",
+  "containerId": "ETW-Tracing",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoLogo -NoProfile -Command \"Write-Host 'Hello from MXC'\""
+  },
+  "ui": { "disable": false },
   "processContainer": {
     "capabilities": ["permissiveLearningMode"]
   }

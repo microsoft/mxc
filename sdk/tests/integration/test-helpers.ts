@@ -46,6 +46,7 @@ export function getSdkBinDir(): string {
 
 export const EXPECTED_WINDOWS_BINARIES = [
   'wxc-exec.exe',
+  'wxc-host-prep.exe',
   'winhttp-proxy-shim.exe',
   'wxc-test-proxy.exe',
   'wxc-windows-sandbox-daemon.exe',
@@ -86,57 +87,20 @@ export function platformName(): string {
 }
 
 /**
- * Check whether the BaseContainer API(processmodel.dll) is likely available.
- * Mirrors the Rust-side probe in `BaseContainerRunner::load_api()`.
+ * Assert that a dry-run completed successfully (exit 0 + validation-passed banner).
+ *
+ * Dry-run failure paths aren't asserted here — the dispatcher's tier-fallback
+ * chain (BaseContainer → AppContainer+BFS → AppContainer+DACL) finds a viable
+ * runner on every supported host, so a failing dry-run from the test harness
+ * is a real regression, not an expected outcome.
  */
-function isBaseContainerApiPresent(): boolean {
-  const dllPath = path.join(
-    process.env.SystemRoot ?? 'C:\\Windows',
-    'System32',
-    'processmodel.dll',
-  );
-  return fs.existsSync(dllPath);
-}
-
-export enum DryRunExpectation {
-  ValidationPass = 'validation_pass',
-  ValidationFail = 'validation_fail',
-}
-
-const BASE_CONTAINER_MIN_VERSION = new semver.SemVer('0.5.0');
-
-/** Returns true if the given schema version selects the BaseContainer backend. */
-function isBaseContainerVersion(schemaVersion: semver.SemVer): boolean {
-  return schemaVersion.major > BASE_CONTAINER_MIN_VERSION.major ||
-    (schemaVersion.major === BASE_CONTAINER_MIN_VERSION.major &&
-     schemaVersion.minor >= BASE_CONTAINER_MIN_VERSION.minor);
-}
-
-/** Returns the expected dry-run outcome for the given schema version on this platform. */
-export function expectDryRunValidationPass(schemaVersion: semver.SemVer): DryRunExpectation {
-  if (os.platform() !== 'win32') {
-    return DryRunExpectation.ValidationPass;
-  }
-  if (isBaseContainerVersion(schemaVersion) && !isBaseContainerApiPresent()) {
-    return DryRunExpectation.ValidationFail;
-  }
-  return DryRunExpectation.ValidationPass;
-}
-
-/** Assert that a dry-run result matches the expected outcome. */
 export function assertDryRunResult(
   stdout: string,
   exitCode: number,
-  expectation: DryRunExpectation,
   version: string,
 ): void {
-  if (expectation === DryRunExpectation.ValidationPass) {
-    assert.strictEqual(exitCode, 0, `[${version}] Expected exit 0 but got ${exitCode}`);
-    assert.ok(stdout.includes('Dry run completed. Result: validation passed'), `[${version}] ${stdout}`);
-  } else {
-    assert.notStrictEqual(exitCode, 0, `[${version}] Expected non-zero exit for validation failure`);
-    assert.ok(stdout.includes('Dry run completed. Result: validation failed'), `[${version}] ${stdout}`);
-  }
+  assert.strictEqual(exitCode, 0, `[${version}] Expected exit 0 but got ${exitCode}`);
+  assert.ok(stdout.includes('Dry run completed. Result: validation passed'), `[${version}] ${stdout}`);
 }
 
 // Environment / skip helpers
