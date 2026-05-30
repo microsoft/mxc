@@ -65,7 +65,7 @@ Pick `0.6.0-alpha` for new code on any supported platform.
 
 > **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `seatbelt`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.7.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
 
-> **Heads-up for `0.4.0-alpha` on Windows:** firewall network enforcement (`network.blockedHosts` — the only one currently wired through on `0.4.0-alpha`; `allowedHosts` is not effective) and `network.proxy` both require the host process to be elevated (Administrator) — they hit Windows APIs that need it and may surface a UAC prompt. Hosts must be specified as IP addresses (DNS-based filtering isn't supported on `0.4.0-alpha`). `0.5.0-alpha`+ moved proxy handling in-OS, so the elevation requirement is gone there (firewall enforcement on `0.5.0-alpha`+ is not yet implemented). All other policy fields work unelevated on every schema version.
+> **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `defaultNetworkPolicy` (`allow` / `deny`) or `network.proxy` to constrain network access.
 
 **Platforms:**
 
