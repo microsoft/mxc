@@ -147,9 +147,7 @@ Execute your script with AppContainer in permissive learning mode (debug builds 
   "process": {
     "commandLine": "powershell.exe -NoLogo -NoProfile -Command \"Write-Host 'Hello from MXC'\""
   },
-  "policy": {
-    "ui": { "allowWindows": true }
-  },
+  "ui": { "disable": false },
   "processContainer": {
     "capabilities": ["permissiveLearningMode"]
   }

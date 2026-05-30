@@ -54,5 +54,5 @@ pub(crate) const DENIED_PATHS_NOT_SUPPORTED_MSG: &str =
 #[cfg(target_os = "windows")]
 pub(crate) const HOST_LISTS_NOT_SUPPORTED_MSG: &str =
     "network.allowedHosts / network.blockedHosts are not yet supported on Windows. \
-     Remove the host list(s) and rely on defaultNetworkPolicy (allow / deny) or a \
+     Remove the host list(s) and rely on network.defaultPolicy (allow / block) or a \
      proxy instead.";
