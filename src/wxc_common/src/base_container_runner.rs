@@ -410,6 +410,16 @@ impl BaseContainerRunner {
 
 impl ScriptRunner for BaseContainerRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if !request.policy.denied_paths.is_empty() {
+            return Err(ScriptResponse::error(
+                crate::script_runner::DENIED_PATHS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
+            return Err(ScriptResponse::error(
+                crate::script_runner::HOST_LISTS_NOT_SUPPORTED_MSG,
+            ));
+        }
         Self::is_base_container_api_present().map_err(|e| {
             let hint = if !request.experimental_enabled {
                 format!(
@@ -468,6 +478,11 @@ impl ScriptRunner for BaseContainerRunner {
                 logger,
                 "effective proxy: {} (builtin_test_server={})",
                 addr, request.policy.network_proxy.builtin_test_server
+            );
+            let _ = writeln!(
+                logger,
+                "warning: proxy support on Windows is best-effort -- only scripts that use \
+                 the WinHTTP stack will be proxied; other HTTP stacks may bypass it.",
             );
         }
 

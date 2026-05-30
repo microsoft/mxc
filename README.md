@@ -19,7 +19,15 @@ MXC is a sandboxed code execution environment.  It currently implements WXC for 
 
 ## Building
 
-MXC is a container wrapper and a TypeScript based SDK for Node/Electron projects.  It is currently supported only on Windows 11 based machines (x64/ARM64).
+MXC ships a native container wrapper plus a TypeScript SDK ([`@microsoft/mxc-sdk`](./sdk/README.md)) for Node/Electron projects. The SDK is the supported integration surface — see the [SDK README](./sdk/README.md) for the API, choosing a backend, and the state-aware lifecycle.
+
+### Platforms
+
+| Platform | Default backend | Other backends | Minimum build |
+| --- | --- | --- | --- |
+| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: build 26100 (24H2); `isolation_session`: build 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
+| Linux x64 / ARM64 | `lxc` | `bubblewrap` | — |
+| macOS ARM64 (schema `0.6.0-dev`+) | `seatbelt` | — | — |
 
 ### Requirements
 

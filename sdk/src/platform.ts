@@ -53,45 +53,34 @@ function queryWindowsRegistry(key: string, valueName: string): string | null {
   }
 }
 
+let isoSessionSupportedCache: boolean | undefined;
+
 /**
- * Check Windows build version requirements for WXC
- * 
- * Requirements:
- * - CurrentBuild (major version) must be >= 26100
- * - UBR (minor version) must be >= 7965 (Windows Insider 3A or later)
- * - UBR should not be checked for build versions >= 26500 as they may have different versioning
- * 
- * @returns true if Windows build meets requirements, false otherwise
+ * Check whether the host supports the IsolationSession backend.
+ * Requires Windows Insider Preview build 26300.8553 or later.
  */
-function checkWindowsBuildVersion(): boolean {
+function isIsoSessionSupported(): boolean {
+  if (isoSessionSupportedCache !== undefined) {
+    return isoSessionSupportedCache;
+  }
+
   const registryPath = 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion';
-
   const currentBuild = queryWindowsRegistry(registryPath, 'CurrentBuild');
-  if (!currentBuild) {
-    return false;
-  }
-
-  const majorVersion = parseInt(currentBuild, 10);
-  if (isNaN(majorVersion) || majorVersion < 26100) {
-    return false;
-  }
-
   const ubrValue = queryWindowsRegistry(registryPath, 'UBR');
-  if (!ubrValue) {
-    return false;
+  if (!currentBuild || !ubrValue) {
+    isoSessionSupportedCache = false;
+    return isoSessionSupportedCache;
   }
 
-  // UBR is stored as REG_DWORD (hex format), use Number() to parse
-  const minorVersion = Number(ubrValue);
-  if (isNaN(minorVersion)) {
-    return false;
+  const major = parseInt(currentBuild, 10);
+  const minor = Number(ubrValue);
+  if (isNaN(major) || isNaN(minor)) {
+    isoSessionSupportedCache = false;
+    return isoSessionSupportedCache;
   }
 
-  if (majorVersion >= 26100 && majorVersion <= 26500 && minorVersion < 7965) {
-    return false;
-  }
-
-  return true;
+  isoSessionSupportedCache = major > 26300 || (major === 26300 && minor >= 8553);
+  return isoSessionSupportedCache;
 }
 
 let windowsSandboxAvailableCache: boolean | undefined;
@@ -249,18 +238,15 @@ function computeSupport(): PlatformSupport {
     return support;
   }
 
-  const buildSupported = checkWindowsBuildVersion();
-  if (buildSupported) {
-    support.isSupported = true;
-    support.availableMethods = ['processcontainer'];
-    if (isWindowsSandboxAvailable()) {
-      support.availableMethods.push('windows_sandbox');
-    }
-    populateIsolationFromProbe(support);
-    return support;
+  support.isSupported = true;
+  support.availableMethods = ['processcontainer'];
+  if (isWindowsSandboxAvailable()) {
+    support.availableMethods.push('windows_sandbox');
   }
-
-  support.reason = 'Unsupported Windows branch or build version';
+  if (isIsoSessionSupported()) {
+    support.availableMethods.push('isolation_session');
+  }
+  populateIsolationFromProbe(support);
   return support;
 }
 

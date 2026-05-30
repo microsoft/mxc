@@ -65,11 +65,11 @@ Pick `0.5.0-alpha` for new code targeting Windows / Linux; pick `0.6.0-dev` if y
 
 **Platforms:**
 
-| Platform | Default backend | Other backends |
-| --- | --- | --- |
-| Windows 11 build 26100+ (UBR ≥ 7965) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` |
-| Linux x64 / ARM64 | `lxc` | — |
-| macOS x64 / ARM64 (schema `0.6.0-dev`+) | `seatbelt` | — |
+| Platform | Default backend | Other backends | Minimum build |
+| --- | --- | --- | --- |
+| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: build 26100 (24H2); `isolation_session`: build 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
+| Linux x64 / ARM64 | `lxc` | `bubblewrap` | — |
+| macOS ARM64 (schema `0.6.0-dev`+) | `seatbelt` | — | — |
 
 The default `processcontainer` and `lxc` backends work out of the box. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `seatbelt`, `isolation_session`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
 
@@ -314,7 +314,7 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 
 | Error | Cause | Fix |
 | --- | --- | --- |
-| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Windows: build < 26100 or UBR < 7965. On Linux: `lxc-ls` not on PATH. macOS: schema version < `0.6.0-dev`. | Update the OS, install LXC, or switch to schema `0.6.0-dev`. |
+| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Windows: pre-24H2 build. On Linux: neither LXC nor Bubblewrap on PATH. macOS: schema version < `0.6.0-dev`. | Update the OS, install LXC/Bubblewrap, or switch to schema `0.6.0-dev`. |
 | `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
 | `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
 | `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `microvm` / `seatbelt` / `isolation_session` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |

@@ -911,6 +911,20 @@ impl Default for AppContainerScriptRunner {
 }
 
 impl ScriptRunner for AppContainerScriptRunner {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
+            return Err(ScriptResponse::error(
+                crate::script_runner::DENIED_PATHS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
+            return Err(ScriptResponse::error(
+                crate::script_runner::HOST_LISTS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        Ok(())
+    }
+
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         use crate::filesystem_bfs::FileSystemBfsManager;
         use crate::launch_diagnostics::diagnose_process_exit;
@@ -954,6 +968,14 @@ impl ScriptRunner for AppContainerScriptRunner {
             if let Err(e) = bfs_manager.configure(&request.policy, logger) {
                 return ScriptResponse::error(&e.to_string());
             }
+        }
+
+        if request.policy.network_proxy.is_enabled() {
+            logger.log_line(
+                "warning: proxy support on Windows is best-effort -- only scripts that use \
+                 the WinHTTP stack will be proxied; other HTTP stacks may bypass it. The \
+                 AppContainer backend may also surface a UAC prompt on downlevel hosts.",
+            );
         }
 
         let mut network_manager = NetworkManager::new();

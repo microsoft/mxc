@@ -48,6 +48,29 @@ pub trait ScriptRunner {
     }
 }
 
+/// Shared error strings for policy fields that are not yet fully supported on
+/// Windows AppContainer / BaseContainer backends. Kept here so both runners
+/// surface identical wording.
+///
+/// Background: an AppContainer process runs with a lowbox token whose access
+/// checks succeed only when the target object's DACL grants access to the
+/// per-package AppContainer SID or to the well-known `ALL APPLICATION
+/// PACKAGES` group (S-1-15-2-1). Standard `Users` ACEs are not consulted,
+/// so anything not explicitly added to an allow list is already unreachable
+/// from the sandboxed process — which is why these errors don't suggest a
+/// "switch to a different tier" workaround.
+#[cfg(target_os = "windows")]
+pub(crate) const DENIED_PATHS_NOT_SUPPORTED_MSG: &str =
+    "filesystem.deniedPaths is not yet supported on Windows. Paths are denied by \
+     default unless granted via readwritePaths or readonlyPaths. Remove deniedPaths, \
+     or narrow readwritePaths/readonlyPaths to exclude the path you wanted to deny.";
+
+#[cfg(target_os = "windows")]
+pub(crate) const HOST_LISTS_NOT_SUPPORTED_MSG: &str =
+    "network.allowedHosts / network.blockedHosts are not yet supported on Windows. \
+     Remove the host list(s) and rely on defaultNetworkPolicy (allow / deny) or a \
+     proxy instead.";
+
 /// Convert a timeout value to milliseconds, treating 0 as infinite (INFINITE = `u32::MAX`).
 pub fn get_timeout_milliseconds(timeout: u32) -> u32 {
     if timeout == 0 {
