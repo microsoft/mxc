@@ -410,23 +410,15 @@ impl BaseContainerRunner {
 
 impl ScriptRunner for BaseContainerRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        // BaseContainer is only routed to on BaseContainer-era schemas
-        // (>= 0.5.0-alpha), but we still gate defensively so that any
-        // hypothetical 0.4-era request that reaches this runner bypasses
-        // the strict-reject path that the legacy AppContainer code honors.
-        if crate::config_parser::is_base_container_version(&request.schema_version) {
-            if !request.policy.denied_paths.is_empty() {
-                return Err(ScriptResponse::error(
-                    crate::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
-                ));
-            }
-            if !request.policy.allowed_hosts.is_empty()
-                || !request.policy.blocked_hosts.is_empty()
-            {
-                return Err(ScriptResponse::error(
-                    crate::error::HOST_LISTS_NOT_SUPPORTED_MSG,
-                ));
-            }
+        if !request.policy.denied_paths.is_empty() {
+            return Err(ScriptResponse::error(
+                crate::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
+            return Err(ScriptResponse::error(
+                crate::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+            ));
         }
         Self::is_base_container_api_present().map_err(|e| {
             let hint = if !request.experimental_enabled {
@@ -1175,17 +1167,10 @@ mod tests {
 
     use crate::script_runner::ScriptRunner;
 
-    fn base_container_request() -> ExecutionRequest {
-        ExecutionRequest {
-            schema_version: "0.5.0-alpha".to_string(),
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn validate_runner_rejects_denied_paths() {
         let runner = BaseContainerRunner::new();
-        let mut request = base_container_request();
+        let mut request = ExecutionRequest::default();
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         let err = runner
@@ -1201,7 +1186,7 @@ mod tests {
     #[test]
     fn validate_runner_rejects_allowed_hosts() {
         let runner = BaseContainerRunner::new();
-        let mut request = base_container_request();
+        let mut request = ExecutionRequest::default();
         request.policy.allowed_hosts = vec!["example.com".into()];
 
         let err = runner
@@ -1213,7 +1198,7 @@ mod tests {
     #[test]
     fn validate_runner_rejects_blocked_hosts() {
         let runner = BaseContainerRunner::new();
-        let mut request = base_container_request();
+        let mut request = ExecutionRequest::default();
         request.policy.blocked_hosts = vec!["bad.example.com".into()];
 
         let err = runner
@@ -1225,39 +1210,13 @@ mod tests {
     #[test]
     fn validate_runner_accepts_empty_policy() {
         let runner = BaseContainerRunner::new();
-        let request = base_container_request();
+        let request = ExecutionRequest::default();
         // validate_runner may still surface the host-API-unavailable error on
         // dev machines where BaseContainer isn't present; we only assert that
         // the policy-field checks above don't fire. Skip when the host doesn't
         // expose the API.
         if BaseContainerRunner::is_base_container_api_present().is_ok() {
             assert!(runner.validate_runner(&request).is_ok());
-        }
-    }
-
-    /// Defensive: even if a 0.4-era request somehow reaches this runner,
-    /// the strict-reject path must not fire — the legacy AppContainer
-    /// firewall/DACL behavior is what callers expect on that schema.
-    #[test]
-    fn validate_runner_skips_check_on_legacy_schema() {
-        let runner = BaseContainerRunner::new();
-        let mut request = ExecutionRequest {
-            schema_version: "0.4.0-alpha".to_string(),
-            ..Default::default()
-        };
-        request.policy.denied_paths = vec!["C:\\legacy-denied".into()];
-        request.policy.allowed_hosts = vec!["legacy.example.com".into()];
-
-        // We can't assert Ok unconditionally (the API-present check still
-        // fires), but we CAN assert the error — if any — does not mention
-        // our policy-field error strings.
-        if let Err(err) = runner.validate_runner(&request) {
-            assert!(
-                !err.error_message.contains("deniedPaths")
-                    && !err.error_message.contains("allowedHosts"),
-                "legacy schema must not trip the BaseContainer policy-field checks: {}",
-                err.error_message
-            );
         }
     }
 }
