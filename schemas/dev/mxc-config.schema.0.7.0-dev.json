@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.6.0-dev.json",
+  "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.7.0-dev.json",
   "title": "MXC Configuration",
   "description": "Configuration schema for MXC container execution engine. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. The parser also accepts legacy fields not listed here during the migration period.",
   "type": "object",
@@ -8,8 +8,8 @@
   "properties": {
     "version": {
       "type": "string",
-      "description": "MXC config schema version (semver). Current stable: '0.4.0-alpha'. Configs using promoted or experimental features should use '0.6.0-alpha'. State-aware lifecycle requests use '0.6.0-alpha'.",
-      "examples": ["0.4.0-alpha", "0.6.0-alpha"]
+      "description": "MXC config schema version (semver). Current stable: '0.6.0-alpha'. Configs targeting this in-progress 0.7.0-dev schema should declare 'version: 0.7.0-alpha'.",
+      "examples": ["0.6.0-alpha", "0.7.0-alpha"]
     },
     "containerId": {
       "type": "string",
@@ -30,8 +30,8 @@
         "isolation_session",
         "bubblewrap"
       ],
-      "default": "processcontainer",
-      "description": "Containment value to use for execution. Accepts both abstract intents (''process'', ''vm'') and concrete backends (''processcontainer'', ''windows_sandbox'', ''lxc'', ''microvm'', ''hyperlight'', ''wslc'', ''seatbelt'', ''isolation_session'', ''bubblewrap''). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities (e.g., ''process'' resolves to ProcessContainer on Windows, LXC on Linux, Seatbelt on macOS; ''vm'' resolves to Windows Sandbox on Windows). Note: ''windows_sandbox'', ''wslc'', ''seatbelt'', ''isolation_session'', ''hyperlight'', and ''bubblewrap'' are experimental and require the --experimental CLI flag. ''hyperlight'' and ''bubblewrap'' have no per-backend configuration block; they share the common filesystem/network policy fields. The legacy aliases ''appcontainer'' and ''macos_sandbox'' are still accepted by the parser (with a deprecation log line) but are intentionally omitted from this enum so editors steer authors toward the canonical names."
+      "default": "process",
+      "description": "Containment value to use for execution. Accepts both abstract intents ('process', 'vm') and concrete backends ('processcontainer', 'windows_sandbox', 'lxc', 'microvm', 'hyperlight', 'wslc', 'seatbelt', 'isolation_session', 'bubblewrap'). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities (e.g., 'process' resolves to ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS; 'vm' resolves to Windows Sandbox on Windows). 'lxc' is treated as a full Linux container and is only selected when explicitly requested. Note: 'microvm', 'windows_sandbox', 'wslc', 'seatbelt', 'isolation_session', and 'hyperlight' are experimental and require the --experimental CLI flag. 'hyperlight' and 'bubblewrap' have no per-backend configuration block; they share the common filesystem/network policy fields. The legacy aliases 'appcontainer' and 'macos_sandbox' are still accepted by the parser (with a deprecation log line) but are intentionally omitted from this enum so editors steer authors toward the canonical names."
     },
 
     "phase": {
@@ -146,12 +146,12 @@
         "allowedHosts": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Enforced by 'lxc' and 'processcontainer' containment backends."
+          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Enforced by 'lxc', 'processcontainer', 'bubblewrap', 'wslc', and 'hyperlight' containment backends."
         },
         "blockedHosts": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc' and 'processcontainer' containment backends."
+          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc', 'processcontainer', 'bubblewrap', 'wslc', and 'hyperlight' containment backends."
         },
         "allowLocalNetwork": {
           "type": "boolean",
@@ -430,7 +430,7 @@
               "type": "string",
               "enum": ["small", "medium", "large", "composable"],
               "default": "composable",
-              "description": "IsoSession configuration ID for one-shot requests. For state-aware requests, place this under 'start.configurationId' instead. Unknown values are accepted but warned and downgraded to 'composable'."
+              "description": "IsoSession configuration ID for one-shot requests. For state-aware requests, place this under 'start.configurationId' instead. The schema enforces this enum; the runtime additionally accepts unknown values and downgrades them to 'composable' with a warning, for back-compat."
             },
             "provision": {
               "type": "object",
@@ -461,7 +461,7 @@
                   "type": "string",
                   "enum": ["small", "medium", "large", "composable"],
                   "default": "composable",
-                  "description": "IsoSession configuration ID. Unknown values are accepted but warned and downgraded to 'composable'."
+                  "description": "IsoSession configuration ID. The schema enforces this enum; the runtime additionally accepts unknown values and downgrades them to 'composable' with a warning, for back-compat."
                 },
                 "user": {
                   "type": "object",

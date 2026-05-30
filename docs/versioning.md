@@ -49,9 +49,10 @@ Per [semver.org](https://semver.org/):
 mxc/schemas/
 ├── stable/
 │   ├── mxc-config.schema.0.4.0-alpha.json
-│   └── mxc-config.schema.0.5.0-alpha.json  (shipped — current stable)
+│   ├── mxc-config.schema.0.5.0-alpha.json
+│   └── mxc-config.schema.0.6.0-alpha.json  (shipped — current stable)
 └── dev/
-    └── mxc-config.schema.0.6.0-dev.json    (current — work in progress)
+    └── mxc-config.schema.0.7.0-dev.json    (current — work in progress)
 ```
 
 The dev schema file (`mxc-config.schema.X.Y.Z-dev.json`) must define the `experimental`
@@ -64,43 +65,15 @@ promised at release. They are **not** authoritative for runtime security
 defaults. `wxc-exec` is the trust boundary and may apply stricter defaults
 than a stable schema declares when a security issue requires it.
 
-For example, schemas `0.4.0-alpha` and `0.5.0-alpha` declare
-`network.defaultPolicy` defaulting to `"allow"`. As of SDK 0.3.0 the runtime
-treats an absent `network.defaultPolicy` as `block` regardless of the
-declared schema version, because the old `allow` default was a security bug
-([#256](https://github.com/microsoft/mxc/issues/256)). Schema `0.6.0-dev`
-documents the new default; the stable schemas are left unchanged so the
-release contract stays auditable. Consumers that need the legacy behavior
-must set `defaultPolicy: "allow"` explicitly.
+For example, an older stable schema may declare
+`network.defaultPolicy` defaulting to `"allow"`. The runtime may treat an
+absent `network.defaultPolicy` as `block` regardless of the declared schema
+version when the old default is a security bug. The older stable schema is
+left unchanged so the release contract stays auditable; newer schemas
+document the corrected default. Consumers that need the legacy behavior
+must set the field explicitly.
 
 ### Shipped vs Experimental
-
-The current stable schema versions are `0.4.0-alpha` and `0.5.0-alpha`. The parser
-also accepts `0.6.0-alpha`, which should be used for configs that include
-experimental features:
-
-```json
-{
-  "version": "0.6.0-alpha",
-  "process": { ... },
-  "filesystem": { ... },
-  "network": { ... },
-  "processContainer": { ... },
-  "lxc": { ... },
-
-  "experimental": {
-    "compartments": {
-      "namespace": "test-ns",
-      "isolationLevel": 2
-    },
-    "gpuIsolation": {
-      "deviceIndex": 0,
-      "memoryLimitMb": 1024,
-      "allowCuda": true
-    }
-  }
-}
-```
 
 Each experimental feature is a typed property under `experimental` — the same
 pattern as stable features (`filesystem`, `network`) under the top-level
@@ -342,17 +315,18 @@ MXC ↔ OS needs a defined error contract:
 
 ## Experimental Features — Clarifications
 
-**Shipping model:** The shipped schema contains **only** non-experimental features.
-Experimental features exist solely for internal development and testing — they are
-never shipped to end users. The `--experimental` flag is a development tool, not
-a production feature.
+**Shipping model:** The shipped schema contains **only** non-experimental 
+features. Experimental features exist solely for internal development and 
+testing — they are never shipped to end users. The `--experimental` flag is a 
+development tool, not a production feature.
 
 **Global flag:** The `--experimental` flag is a single global toggle. When enabled,
 all experimental features in the config are active. There is no per-feature
 enable/disable mechanism — simplicity over granularity.
 
 **Migration after promotion:** When an experimental feature is promoted to the
-stable section, configs that still reference it under `experimental` will receive
+stable section (moved from `experimental.X` to top-level `X` in a stable
+schema), configs that still reference it under `experimental` will receive
 an error: "feature X has moved to the stable section." The parser will not
 silently fall back — explicit migration is required.
 

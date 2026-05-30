@@ -56,10 +56,14 @@ child.on('close', (code) => console.log('exit:', code));
 | Version | Status | Schema file |
 | --- | --- | --- |
 | `0.4.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.4.0-alpha.json) |
-| `0.5.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.5.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.5.0-alpha.json) |
-| `0.6.0-dev` | Dev (latest features: macOS / Seatbelt, etc.) | [`schemas/dev/mxc-config.schema.0.6.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.6.0-dev.json) |
+| `0.5.0-alpha` | Stable (legacy — see strict sibling below) | [`schemas/stable/mxc-config.schema.0.5.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.5.0-alpha.json) |
+| `0.5.0-alpha` (strict) | Stable, non-experimental surface only | [`schemas/stable/mxc-config.schema.0.5.0-alpha-strict.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.5.0-alpha-strict.json) |
+| `0.6.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
+| `0.7.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.7.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.7.0-dev.json) |
 
-Pick `0.5.0-alpha` for new code targeting Windows / Linux; pick `0.6.0-dev` if you need macOS or the newest experimental features. Full model: [`docs/versioning.md`](https://github.com/microsoft/mxc/blob/main/docs/versioning.md).
+Pick `0.6.0-alpha` for new code on any supported platform.
+
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `seatbelt`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.7.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
 
 > **Heads-up for `0.4.0-alpha` on Windows:** firewall network enforcement (`network.blockedHosts` — the only one currently wired through on `0.4.0-alpha`; `allowedHosts` is not effective) and `network.proxy` both require the host process to be elevated (Administrator) — they hit Windows APIs that need it and may surface a UAC prompt. Hosts must be specified as IP addresses (DNS-based filtering isn't supported on `0.4.0-alpha`). `0.5.0-alpha`+ moved proxy handling in-OS, so the elevation requirement is gone there (firewall enforcement on `0.5.0-alpha`+ is not yet implemented). All other policy fields work unelevated on every schema version.
 
@@ -68,10 +72,12 @@ Pick `0.5.0-alpha` for new code targeting Windows / Linux; pick `0.6.0-dev` if y
 | Platform | Default backend | Other backends | Minimum build |
 | --- | --- | --- | --- |
 | Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
-| Linux x64 / ARM64 | `lxc` | `bubblewrap` | — |
-| macOS ARM64 (schema `0.6.0-dev`+) | `seatbelt` | — | — |
+| Linux x64 / ARM64 | `bubblewrap` | `lxc` | — |
+| macOS ARM64 (schema `0.6.0-alpha`+) | `seatbelt` | — | — |
 
-The default `processcontainer` and `lxc` backends work out of the box. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `seatbelt`, `isolation_session`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
+The default `processcontainer`, `bubblewrap`, and `lxc` backends work out of the box. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `seatbelt`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
+
+> **Hyperlight** is an opt-in build flavor (Linux x64 and Windows x64) gated by the `--with-hyperlight` cargo feature. Default shipped binaries do not include it; build from source with `build.bat --with-hyperlight` (Windows) or the equivalent cargo invocation on Linux.
 
 **Node.js:** ≥ 18.
 
@@ -186,8 +192,9 @@ console.log(result.stdout);
 | Backend | Intent | Platforms | Stable? | Guide |
 | --- | --- | --- | --- | --- |
 | `processcontainer` | `process` | Windows | ✅ | [`docs/base-process-container/guide.md`](https://github.com/microsoft/mxc/blob/main/docs/base-process-container/guide.md) |
-| `lxc` | `process` | Linux | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
-| `seatbelt` | `process` | macOS | Experimental (schema `0.6.0-dev`+) | [`docs/macos-support/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/macos-support/seatbelt-backend.md) |
+| `bubblewrap` | `process` | Linux | ✅ | [`docs/bwrap-support/bubblewrap-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/bwrap-support/bubblewrap-backend.md) |
+| `lxc` | (concrete only) | Linux | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
+| `seatbelt` | `process` | macOS | Experimental (schema `0.6.0-alpha`+) | [`docs/macos-support/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/macos-support/seatbelt-backend.md) |
 | `windows_sandbox` | `vm` | Windows | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
 | `microvm` | `microvm` | Windows | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
 | `wslc` | (concrete only) | Windows | Experimental | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
@@ -275,7 +282,7 @@ Each helper returns `{ readonlyPaths, readwritePaths }` — merge what you want 
 
 ### UI is blocked by default on 0.5.0+ — some shells need it
 
-The `policy.ui` block is enforced starting with schema `0.5.0-alpha` (it has no effect on `0.4.0-alpha`). When you use `0.5.0-alpha` or `0.6.0-dev`, `policy.ui.allowWindows` defaults to `false`. Most non-interactive command-line tools work fine, but on Windows some shells make win32k system calls during startup and fail without UI access. **All versions of PowerShell are affected** — both Windows PowerShell 5.1 (`powershell.exe`) and PowerShell 7 (`pwsh.exe`). Set `ui.allowWindows: true` when launching a shell:
+The `policy.ui` block is enforced starting with schema `0.5.0-alpha` (it has no effect on `0.4.0-alpha`). When you use `0.5.0-alpha`, `0.6.0-alpha`, or `0.7.0-alpha`, `policy.ui.allowWindows` defaults to `false`. Most non-interactive command-line tools work fine, but on Windows some shells make win32k system calls during startup and fail without UI access. **All versions of PowerShell are affected** — both Windows PowerShell 5.1 (`powershell.exe`) and PowerShell 7 (`pwsh.exe`). Set `ui.allowWindows: true` when launching a shell:
 
 ```typescript
 import { spawnSandboxFromConfig, createConfigFromPolicy } from '@microsoft/mxc-sdk';
@@ -314,14 +321,14 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 
 | Error | Cause | Fix |
 | --- | --- | --- |
-| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Windows: pre-24H2 build. On Linux: neither LXC nor Bubblewrap on PATH. macOS: schema version < `0.6.0-dev`. | Update the OS, install LXC/Bubblewrap, or switch to schema `0.6.0-dev`. |
+| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Windows: pre-24H2 build. On Linux: neither LXC nor Bubblewrap on PATH. macOS: schema version < `0.6.0-alpha`. | Update the OS, install LXC/Bubblewrap, or switch to schema `0.6.0-alpha` (or `0.7.0-alpha` if you need state-aware lifecycle). |
 | `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
 | `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
-| `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `microvm` / `seatbelt` / `isolation_session` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
+| `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `microvm` / `seatbelt` / `isolation_session` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `Experimental_CreateProcessInSandbox failed: WIN32_ERROR(...)` | Native sandbox API returned an OS-level error. Codes vary: `120` = call not implemented (BaseContainer disabled — use schema `0.4.0-alpha`), `448` = device feature not supported (Windows build / WIP feature not enabled). | Check the Windows build / WIP requirements, or fall back to schema `0.4.0-alpha`. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
-| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.4.0-alpha`, `0.5.0-alpha`, or `0.6.0-dev`. See [Compatibility](#compatibility). |
+| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.4.0-alpha`, `0.5.0-alpha`, `0.6.0-alpha`, or `0.7.0-alpha`. See [Compatibility](#compatibility). |
 
 For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
 

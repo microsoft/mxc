@@ -137,7 +137,7 @@ flag is required to enable the backend at runtime:
 
 ```json
 {
-    "$schema": "./schemas/dev/mxc-config.schema.0.6.0-dev.json",
+    "$schema": "./schemas/dev/mxc-config.schema.0.7.0-dev.json",
     "containment": "seatbelt",
     "process": {
         "commandLine": "echo hi from seatbelt",
