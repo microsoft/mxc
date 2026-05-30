@@ -1442,6 +1442,153 @@ pub(crate) fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, 
     Ok(allowed)
 }
 
+/// Read-only probe used by the fallback detector's Tier-3 host-prep
+/// advice: returns `Some(true)` when BOTH well-known AppContainer
+/// package SIDs (`S-1-15-2-1`, `S-1-15-2-2`) have a non-zero explicit
+/// Allow ACE on `\Device\Null`, `Some(false)` when at least one is
+/// missing, and `None` when the device's DACL could not be read (the
+/// open or the security query failed).
+///
+/// This mirrors the symptom that `wxc-host-prep prepare-null-device`
+/// fixes — AppContainer processes being unable to open `NUL` — without
+/// requiring `SeSecurityPrivilege` (the SACL is never read) and without
+/// taking a dependency on the `wxc_host_prep` crate. `Everyone`
+/// (`S-1-1-0`) is deliberately NOT accepted as satisfying the check:
+/// the kernel-default `\Device\Null` descriptor can grant `Everyone`
+/// while still failing AppContainer access, so only the package SIDs
+/// are probative. A NULL DACL (grants everyone everything) is treated
+/// as "accessible".
+pub(crate) fn null_device_appcontainer_grants() -> Option<bool> {
+    use windows::Win32::Foundation::GENERIC_READ;
+    use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+
+    // `READ_CONTROL` is the only security-class right needed to read a
+    // DACL; `GENERIC_READ` keeps the open symmetric with how the device
+    // is normally opened (some drivers reject a security-class-only
+    // open). We deliberately do NOT request WRITE_DAC / WRITE_OWNER /
+    // ACCESS_SYSTEM_SECURITY — a normal, unprivileged token can read
+    // the DACL, and asking for more could fail the open spuriously.
+    const READ_CONTROL: u32 = 0x0002_0000;
+
+    // `\\.\NUL` resolves through the I/O manager to `\Device\Null`.
+    let path: Vec<u16> = "\\\\.\\NUL\0".encode_utf16().collect();
+    let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
+    // SAFETY: standard CreateFileW invocation; every pointer references
+    // local data or is NULL.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(path.as_ptr()),
+            GENERIC_READ.0 | READ_CONTROL,
+            share,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    };
+    let handle = match handle {
+        Ok(h) if !h.is_invalid() => h,
+        _ => return None,
+    };
+
+    let mut dacl: *mut ACL = ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(ptr::null_mut());
+    // SAFETY: `handle` is a valid kernel-object handle opened with
+    // READ_CONTROL; the out-params are owned locals.
+    let rc = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut dacl),
+            None,
+            Some(&mut sd),
+        )
+    };
+    // We have everything we need from the handle; close it regardless.
+    // SAFETY: `handle` came from a successful CreateFileW above.
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    if rc != ERROR_SUCCESS {
+        return None;
+    }
+    if dacl.is_null() {
+        // A NULL DACL grants everyone full access — the device is
+        // reachable by AppContainer, so no prep is needed.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+        return Some(true);
+    }
+
+    let sids = match (OwnedSid::parse("S-1-15-2-1"), OwnedSid::parse("S-1-15-2-2")) {
+        (Ok(a), Ok(b)) => [a, b],
+        _ => {
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(sd.0)));
+            }
+            return None;
+        }
+    };
+
+    let mut info = ACL_SIZE_INFORMATION::default();
+    let info_sz = std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32;
+    if unsafe {
+        GetAclInformation(
+            dacl,
+            &mut info as *mut _ as *mut c_void,
+            info_sz,
+            AclSizeInformation,
+        )
+    }
+    .is_err()
+    {
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+        return None;
+    }
+
+    // Per package SID, whether it has a non-zero Allow grant.
+    let mut granted = [false; 2];
+    for i in 0..info.AceCount {
+        let mut ace_ptr: *mut c_void = ptr::null_mut();
+        if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() {
+            continue;
+        }
+        let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+        // ACCESS_ALLOWED_ACE_TYPE only; deny / audit / object ACEs are
+        // not "grants" and are ignored.
+        if header.AceType != 0x00 {
+            continue;
+        }
+        let allowed = ace_ptr as *const ACCESS_ALLOWED_ACE;
+        let mask = unsafe { (*allowed).Mask };
+        if mask == 0 {
+            continue;
+        }
+        let ace_sid = PSID(unsafe { &(*allowed).SidStart } as *const _ as *mut c_void);
+        for (idx, want) in sids.iter().enumerate() {
+            if unsafe { EqualSid(ace_sid, want.as_psid()).is_ok() } {
+                granted[idx] = true;
+            }
+        }
+    }
+
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+    }
+    Some(granted[0] && granted[1])
+}
+
 /// Rebuild `path`'s DACL by dropping every explicit ACE whose trustee
 /// is `sid_str`, then re-appending `replay` ACEs (also for `sid_str`)
 /// in canonical order. Inherited ACEs and explicit ACEs for other
