@@ -786,19 +786,6 @@ fn main() {
             let version_implies_base_container = is_base_container_version(&request.schema_version);
             let use_base_container = request.experimental_enabled || version_implies_base_container;
 
-            // Validation warning: deniedPaths is only honored on the
-            // BaseContainer-fallback path. Surface once at parse time
-            // through the buffered logger so it lands in `--dry-run`
-            // output and any tooling scraping the diagnostic pipe.
-            if !use_base_container && !request.policy.denied_paths.is_empty() {
-                let _ = writeln!(
-                    logger,
-                    "warning: filesystem.deniedPaths is set but containment is ProcessContainer \
-                     (no BaseContainer fallback in effect). deniedPaths will not be honored. \
-                     Use --experimental or schema 0.5+ to enable fallback with deny enforcement."
-                );
-            }
-
             if use_base_container {
                 let reason = if version_implies_base_container {
                     format!("schema version {}", request.schema_version)
