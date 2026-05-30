@@ -145,7 +145,10 @@ Execute your script with AppContainer in permissive learning mode (debug builds 
   "containerId": "ETW-Tracing",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "python your_script.py"
+    "commandLine": "powershell.exe -NoLogo -NoProfile -Command \"Write-Host 'Hello from MXC'\""
+  },
+  "policy": {
+    "ui": { "allowWindows": true }
   },
   "processContainer": {
     "capabilities": ["permissiveLearningMode"]

@@ -44,3 +44,20 @@ impl From<std::io::Error> for WxcError {
         WxcError::Io(err.to_string())
     }
 }
+
+// ---- Shared error messages surfaced by the Windows AppContainer and ----
+// ---- BaseContainer runners when a policy field is accepted by the   ----
+// ---- schema but not yet honored by the runtime. Centralising the    ----
+// ---- wording here keeps both runners in lockstep.                   ----
+
+#[cfg(target_os = "windows")]
+pub(crate) const DENIED_PATHS_NOT_SUPPORTED_MSG: &str =
+    "filesystem.deniedPaths is not yet supported on Windows. Paths are denied by \
+     default unless granted via readwritePaths or readonlyPaths. Remove deniedPaths, \
+     or narrow readwritePaths/readonlyPaths to exclude the path you wanted to deny.";
+
+#[cfg(target_os = "windows")]
+pub(crate) const HOST_LISTS_NOT_SUPPORTED_MSG: &str =
+    "network.allowedHosts / network.blockedHosts are not yet supported on Windows. \
+     Remove the host list(s) and rely on defaultNetworkPolicy (allow / deny) or a \
+     proxy instead.";
