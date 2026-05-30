@@ -99,9 +99,9 @@ function isIsoSessionSupported(): boolean {
     return false;
   }
 
-  // We can't confirm the minor versions outside of the Windows Insider Preview
-  // so we only check the major version.
-  return build.major > 26300;
+  // Pin to the Windows Insider Preview build that introduced IsolationSession
+  // (26300.8553+). Other major builds are not yet supported.
+  return build.major === 26300 && build.minor >= 8553;
 }
 
 let windowsSandboxAvailableCache: boolean | undefined;
