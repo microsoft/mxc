@@ -1255,9 +1255,9 @@ mod tests {
 
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
+    use super::{AppContainerScriptRunner, FilesystemMode};
     use crate::models::ExecutionRequest;
     use crate::script_runner::ScriptRunner;
-    use super::{AppContainerScriptRunner, FilesystemMode};
 
     #[test]
     fn validate_runner_rejects_denied_paths_in_bfs_mode() {
