@@ -912,15 +912,24 @@ impl Default for AppContainerScriptRunner {
 
 impl ScriptRunner for AppContainerScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
-            return Err(ScriptResponse::error(
-                crate::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
-            ));
-        }
-        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::error(
-                crate::error::HOST_LISTS_NOT_SUPPORTED_MSG,
-            ));
+        // The 0.4.0-alpha legacy AppContainer path wires `blockedHosts` via
+        // Windows Firewall and supports `deniedPaths` on DACL hosts; only
+        // reject these fields on BaseContainer-era schemas (0.5.0-alpha+).
+        if crate::config_parser::is_base_container_version(&request.schema_version) {
+            if !request.policy.denied_paths.is_empty()
+                && self.filesystem_mode != FilesystemMode::Dacl
+            {
+                return Err(ScriptResponse::error(
+                    crate::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
+                ));
+            }
+            if !request.policy.allowed_hosts.is_empty()
+                || !request.policy.blocked_hosts.is_empty()
+            {
+                return Err(ScriptResponse::error(
+                    crate::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+                ));
+            }
         }
         Ok(())
     }
@@ -1259,10 +1268,18 @@ mod tests {
     use crate::script_runner::ScriptRunner;
     use super::{AppContainerScriptRunner, FilesystemMode};
 
+    fn base_container_request() -> ExecutionRequest {
+        // BaseContainer-era schema so validate_runner's gate fires.
+        ExecutionRequest {
+            schema_version: "0.5.0-alpha".to_string(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn validate_runner_rejects_denied_paths_in_bfs_mode() {
         let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs);
-        let mut request = ExecutionRequest::default();
+        let mut request = base_container_request();
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         let err = runner
@@ -1278,7 +1295,7 @@ mod tests {
     #[test]
     fn validate_runner_accepts_denied_paths_in_dacl_mode() {
         let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Dacl);
-        let mut request = ExecutionRequest::default();
+        let mut request = base_container_request();
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         assert!(
@@ -1290,7 +1307,7 @@ mod tests {
     #[test]
     fn validate_runner_rejects_allowed_hosts() {
         let runner = AppContainerScriptRunner::new();
-        let mut request = ExecutionRequest::default();
+        let mut request = base_container_request();
         request.policy.allowed_hosts = vec!["example.com".into()];
 
         let err = runner
@@ -1302,7 +1319,7 @@ mod tests {
     #[test]
     fn validate_runner_rejects_blocked_hosts() {
         let runner = AppContainerScriptRunner::new();
-        let mut request = ExecutionRequest::default();
+        let mut request = base_container_request();
         request.policy.blocked_hosts = vec!["bad.example.com".into()];
 
         let err = runner
@@ -1314,7 +1331,27 @@ mod tests {
     #[test]
     fn validate_runner_accepts_empty_policy() {
         let runner = AppContainerScriptRunner::new();
-        let request = ExecutionRequest::default();
+        let request = base_container_request();
         assert!(runner.validate_runner(&request).is_ok());
+    }
+
+    /// On the legacy 0.4.0-alpha schema the AppContainer path natively
+    /// honors `blockedHosts` (firewall) and `deniedPaths` (DACL), so
+    /// validate_runner must NOT short-circuit those configs.
+    #[test]
+    fn validate_runner_skips_check_on_legacy_schema() {
+        let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs);
+        let mut request = ExecutionRequest {
+            schema_version: "0.4.0-alpha".to_string(),
+            ..Default::default()
+        };
+        request.policy.denied_paths = vec!["C:\\legacy-denied".into()];
+        request.policy.allowed_hosts = vec!["legacy.example.com".into()];
+        request.policy.blocked_hosts = vec!["bad.legacy.example.com".into()];
+
+        assert!(
+            runner.validate_runner(&request).is_ok(),
+            "legacy 0.4.0-alpha configs must continue through validate_runner"
+        );
     }
 }

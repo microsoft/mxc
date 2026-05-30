@@ -47,17 +47,21 @@ impl From<std::io::Error> for WxcError {
 
 // ---- Shared error messages surfaced by the Windows AppContainer and ----
 // ---- BaseContainer runners when a policy field is accepted by the   ----
-// ---- schema but not yet honored by the runtime. Centralising the    ----
-// ---- wording here keeps both runners in lockstep.                   ----
+// ---- schema but not yet honored on the BaseContainer (schema        ----
+// ---- 0.5.0-alpha+) path. The legacy 0.4.0-alpha AppContainer path   ----
+// ---- still honors blockedHosts (via Windows Firewall) and           ----
+// ---- deniedPaths (via DACL ACEs), so the runners only surface these ----
+// ---- errors when the request's schema implies BaseContainer.        ----
 
 #[cfg(target_os = "windows")]
 pub(crate) const DENIED_PATHS_NOT_SUPPORTED_MSG: &str =
-    "filesystem.deniedPaths is not yet supported on Windows. Paths are denied by \
-     default unless granted via readwritePaths or readonlyPaths. Remove deniedPaths, \
-     or narrow readwritePaths/readonlyPaths to exclude the path you wanted to deny.";
+    "filesystem.deniedPaths is not yet supported on this Windows backend. Paths are \
+     denied by default unless granted via readwritePaths or readonlyPaths. Remove \
+     deniedPaths, or narrow readwritePaths/readonlyPaths to exclude the path you \
+     wanted to deny.";
 
 #[cfg(target_os = "windows")]
 pub(crate) const HOST_LISTS_NOT_SUPPORTED_MSG: &str =
-    "network.allowedHosts / network.blockedHosts are not yet supported on Windows. \
-     Remove the host list(s) and rely on defaultNetworkPolicy (allow / deny) or a \
-     proxy instead.";
+    "network.allowedHosts / network.blockedHosts are not yet supported on this \
+     Windows backend. Remove the host list(s) and rely on defaultNetworkPolicy \
+     (allow / deny) or a proxy instead.";
