@@ -1162,4 +1162,61 @@ mod tests {
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
         assert!(spec.network_policy().is_none());
     }
+
+    // ---- validate_runner: unsupported policy fields surface as errors. ----
+
+    use crate::script_runner::ScriptRunner;
+
+    #[test]
+    fn validate_runner_rejects_denied_paths() {
+        let runner = BaseContainerRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.denied_paths = vec!["C:\\secret".into()];
+
+        let err = runner
+            .validate_runner(&request)
+            .expect_err("BaseContainer does not yet support deniedPaths");
+        assert!(
+            err.error_message.contains("deniedPaths"),
+            "expected message to mention deniedPaths, got: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn validate_runner_rejects_allowed_hosts() {
+        let runner = BaseContainerRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.allowed_hosts = vec!["example.com".into()];
+
+        let err = runner
+            .validate_runner(&request)
+            .expect_err("allowedHosts is not yet supported");
+        assert!(err.error_message.contains("allowedHosts"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_blocked_hosts() {
+        let runner = BaseContainerRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.blocked_hosts = vec!["bad.example.com".into()];
+
+        let err = runner
+            .validate_runner(&request)
+            .expect_err("blockedHosts is not yet supported");
+        assert!(err.error_message.contains("blockedHosts"));
+    }
+
+    #[test]
+    fn validate_runner_accepts_empty_policy() {
+        let runner = BaseContainerRunner::new();
+        let request = ExecutionRequest::default();
+        // validate_runner may still surface the host-API-unavailable error on
+        // dev machines where BaseContainer isn't present; we only assert that
+        // the policy-field checks above don't fire. Skip when the host doesn't
+        // expose the API.
+        if BaseContainerRunner::is_base_container_api_present().is_ok() {
+            assert!(runner.validate_runner(&request).is_ok());
+        }
+    }
 }

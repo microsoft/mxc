@@ -1252,4 +1252,69 @@ mod tests {
             .iter()
             .any(|(k, v)| k == "HTTPS_PROXY" && v == &proxy_url));
     }
+
+    // ---- validate_runner: unsupported policy fields surface as errors. ----
+
+    use crate::models::ExecutionRequest;
+    use crate::script_runner::ScriptRunner;
+    use super::{AppContainerScriptRunner, FilesystemMode};
+
+    #[test]
+    fn validate_runner_rejects_denied_paths_in_bfs_mode() {
+        let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs);
+        let mut request = ExecutionRequest::default();
+        request.policy.denied_paths = vec!["C:\\secret".into()];
+
+        let err = runner
+            .validate_runner(&request)
+            .expect_err("BFS mode must reject deniedPaths");
+        assert!(
+            err.error_message.contains("deniedPaths"),
+            "expected message to mention deniedPaths, got: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn validate_runner_accepts_denied_paths_in_dacl_mode() {
+        let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Dacl);
+        let mut request = ExecutionRequest::default();
+        request.policy.denied_paths = vec!["C:\\secret".into()];
+
+        assert!(
+            runner.validate_runner(&request).is_ok(),
+            "DACL mode supports deniedPaths and should not error"
+        );
+    }
+
+    #[test]
+    fn validate_runner_rejects_allowed_hosts() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.allowed_hosts = vec!["example.com".into()];
+
+        let err = runner
+            .validate_runner(&request)
+            .expect_err("allowedHosts is not yet supported");
+        assert!(err.error_message.contains("allowedHosts"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_blocked_hosts() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.blocked_hosts = vec!["bad.example.com".into()];
+
+        let err = runner
+            .validate_runner(&request)
+            .expect_err("blockedHosts is not yet supported");
+        assert!(err.error_message.contains("blockedHosts"));
+    }
+
+    #[test]
+    fn validate_runner_accepts_empty_policy() {
+        let runner = AppContainerScriptRunner::new();
+        let request = ExecutionRequest::default();
+        assert!(runner.validate_runner(&request).is_ok());
+    }
 }

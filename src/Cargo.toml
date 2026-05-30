@@ -37,7 +37,7 @@ split-debuginfo = "packed"
 strip = "debuginfo"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.6.0"
 edition = "2021"
 
 [workspace.dependencies]
