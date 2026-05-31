@@ -17,7 +17,7 @@ MXC is a **sandboxed code execution system** for running untrusted code (model o
     - **Filesystem Policy**: Read-only and read-write path lists (denied paths not yet supported on Windows)
     - **Network Policy**: Proxy support; allow/block outbound and host filtering (not yet supported on Windows)
     - **UI Policy**: Clipboard, display, and GUI access controls
-- **State-aware Lifecycle**: Multi-step sandbox lifecycle (provision → start → exec → stop → deprovision) for long-lived sandboxes
+- **State-aware Lifecycle**: Explicit `create` / `connect` / `delete` lifecycle for reusable `lxc` and `wslc` sandboxes
 - **TypeScript SDK**: [`@microsoft/mxc-sdk`](https://www.npmjs.com/package/@microsoft/mxc-sdk) npm package with one-shot and state-aware APIs
 - **Diagnostics**: Debug logging and Event Tracing for Windows (ETW) for troubleshooting
 
