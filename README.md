@@ -83,7 +83,7 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 
 All build scripts:
 1. Build the platform-appropriate Rust binary
-2. Copy the binary into `sdk/bin/<target-triple>/` for SDK bundling
+2. Copy the binary into `sdk/bin/<arch>/` (for example, `x64` or `arm64`) for SDK bundling
 3. Build the TypeScript SDK
 
 ### Building Components Individually
@@ -105,12 +105,16 @@ npm install && npm run build
 ### Lint and Format
 
 ```bash
-# Windows Rust (from src/)
+# Windows Rust (from src/)
+
 cargo clippy --workspace --all-targets -- -D warnings
 
-# Linux Rust (from src/; matches build.sh's platform-compatible crate set)
-cargo clippy -p lxc -p lxc_common -p wxc_common -p bwrap_common -p linux_test_proxy --all-targets -- -D warnings
-
+# Linux Rust (from src/; matches build.sh's platform-compatible crate set)
+
+cargo clippy -p lxc -p lxc_common -p wxc_common -p bwrap_common -p linux_test_proxy --all-targets -- -D warnings
+
+
+
 # CLI (from cli/)
 npx eslint src --ext .ts
 ```
