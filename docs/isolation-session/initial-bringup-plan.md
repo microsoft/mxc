@@ -2,10 +2,9 @@
 
 ## Problem
 
-MXC supports several sandboxing backends (AppContainer, Windows Sandbox,
-NanVix, LXC, WSLC), but none of them runs the workload as a freshly-provisioned,
-per-execution Windows user account inside a dedicated OS-managed session. Use
-cases that need this — per the broader claw-on-MXC scenario — call for:
+MXC supports several sandboxing backends, but none of them runs the workload as a 
+freshly-provisioned, per-execution Windows user account inside a dedicated OS-managed
+session. Use cases that need this — per the broader claw-on-MXC scenario — call for:
 
 - **per-execution OS-isolated identity** so the workload's actions cannot
   pollute the calling user's NTFS / registry / token state,

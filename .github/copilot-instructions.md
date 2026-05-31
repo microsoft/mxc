@@ -85,7 +85,7 @@ node --test dist/cli.test.js
 
 # Local PowerShell helpers — run from repo root, require built binaries
 tests\scripts\run_test_configs.ps1            # All test configs via wxc_test_driver
-tests\scripts\run_basicac_test.ps1            # Single AppContainer test
+tests\scripts\run_basicprocess_test.ps1            # Single process container test
 tests\scripts\run_isolation_session_tests.ps1                # IsolationSession one-shot E2E (requires host with the OS-side IsoSessionOps service)
 tests\scripts\run_isolation_session_state_aware_tests.ps1    # IsolationSession state-aware lifecycle E2E (multi-invocation provision/start/exec/stop/deprovision, same host requirements)
 tests\scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)

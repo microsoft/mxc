@@ -2,9 +2,9 @@
 
 ## Overview
 
-The Windows Sandbox backend provides VM-level isolation for script execution using [Windows Sandbox](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview). Unlike the AppContainer backend (which runs scripts in a sandboxed process on the host), the Sandbox backend boots an ephemeral Windows VM, executes scripts inside it, and tears it down when idle.
+The Windows Sandbox backend provides VM-level isolation for script execution using [Windows Sandbox](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview). Unlike the process container backend (which runs scripts in a sandboxed process on the host), the Sandbox backend boots an ephemeral Windows VM, executes scripts inside it, and tears it down when idle.
 
-This provides stronger isolation than AppContainer — the script runs in a completely separate OS instance with its own filesystem, registry, and network stack.
+This provides stronger isolation than process containers — the script runs in a completely separate OS instance with its own filesystem, registry, and network stack.
 
 ## Architecture
 

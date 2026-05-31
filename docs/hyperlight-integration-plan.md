@@ -149,7 +149,6 @@ mxc/docs/
 | `filesystem.*` | ✅ `readwritePaths`/`readonlyPaths` mapped to host mounts |
 | `network.*` | ❌ Rejected |
 | `workingDirectory` | ❌ Rejected (guest has its own FS namespace) |
-| `appContainer.*`, `sandbox.*` | ❌ N/A |
 
 ## Security Model
 

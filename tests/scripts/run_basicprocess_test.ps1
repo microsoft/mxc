@@ -1,11 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# AppContainer basic test runner.
+# Basic process container test runner.
 #
 # Usage:
-#   .\run_basicac_test.ps1              # debug build
-#   .\run_basicac_test.ps1 -Release     # release build
+#   .\run_basicprocess_test.ps1              # debug build
+#   .\run_basicprocess_test.ps1 -Release     # release build
 
 param(
     [switch]$Release,
@@ -32,7 +32,7 @@ if (-not (Test-Path $WxcExec)) {
     exit 1
 }
 
-Write-Host "Running basic AppContainer test..." -ForegroundColor Cyan
+Write-Host "Running basic process container test..." -ForegroundColor Cyan
 & $WxcExec --debug $TestConfig
 $exitCode = $LASTEXITCODE
 
@@ -41,4 +41,4 @@ if ($exitCode -ne 0) {
     exit $exitCode
 }
 
-Write-Host "PASSED: basic AppContainer test" -ForegroundColor Green
+Write-Host "PASSED: basic process container test" -ForegroundColor Green

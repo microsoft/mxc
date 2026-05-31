@@ -50,7 +50,7 @@ We provide four issue templates under [`.github/ISSUE_TEMPLATE/`](./.github/ISSU
 **Complete the information requested in the template**. The more information you provide, the more likely your issue will be understood and addressed. Helpful information includes:
 
 * The platform you're on (Windows / Linux / macOS) and architecture (x64 / ARM64).
-* Which containment backend is involved (AppContainer, BaseContainer, Windows Sandbox, MicroVM, IsolationSession, LXC, or macOS seatbelt).
+* Which containment backend is involved.
 * The MXC version or commit you're using.
 * **Detailed reproduction steps** — what exact JSON config, command, or SDK call triggers the issue.
 * Prefer pasted text (command output, error messages, JSON snippets) over screenshots.

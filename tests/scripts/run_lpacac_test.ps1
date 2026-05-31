@@ -32,7 +32,7 @@ if (-not (Test-Path $WxcExec)) {
     exit 1
 }
 
-Write-Host "Running LPAC AppContainer test..." -ForegroundColor Cyan
+Write-Host "Running LPAC container test..." -ForegroundColor Cyan
 & $WxcExec --debug $TestConfig
 $exitCode = $LASTEXITCODE
 
@@ -41,4 +41,4 @@ if ($exitCode -ne 0) {
     exit $exitCode
 }
 
-Write-Host "PASSED: LPAC AppContainer test" -ForegroundColor Green
+Write-Host "PASSED: LPAC container test" -ForegroundColor Green

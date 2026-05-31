@@ -3,7 +3,7 @@
   "containerId": "CLI-Filesystem-Test",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "cmd /c echo Test AppContainer for deletion"
+    "commandLine": "cmd /c echo Test process container for deletion"
   },
   "filesystem": {
     "readwritePaths": [

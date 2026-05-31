@@ -402,6 +402,5 @@ Document the removal in the schema bump that drops it.
    we are pre-1.0 with only one major version, so a single dev schema suffices.
 
 7. **Experimental features modifying stable behavior:** Experimental features
-   may need to modify stable behavior (e.g., "AppContainer as Medium IL"
-   changes how the stable appcontainer feature works). How do we reason about
+   may need to modify stable behavior. How do we reason about
    and test this?
