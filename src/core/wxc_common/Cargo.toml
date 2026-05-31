@@ -26,7 +26,7 @@ base64 = { workspace = true }
 url = { workspace = true }
 getrandom = { workspace = true }
 semver = "1"
-nanvix_common = { path = "../nanvix_common", optional = true }
+nanvix_common = { path = "../../backends/nanvix/common", optional = true }
 uuid = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

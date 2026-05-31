@@ -9,7 +9,7 @@ links = "nanvix_binaries"
 path = "src/lib.rs"
 
 [dependencies]
-nanvix_common = { path = "../nanvix_common" }
+nanvix_common = { path = "../common" }
 
 [build-dependencies]
-nanvix_common = { path = "../nanvix_common" }
+nanvix_common = { path = "../common" }

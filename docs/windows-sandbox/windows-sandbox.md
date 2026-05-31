@@ -11,7 +11,7 @@ This provides stronger isolation than AppContainer — the script runs in a comp
 ```
 wxc-exec.exe (CLI client)
   │
-  └── WindowsSandboxScriptRunner (src/wxc_common/src/windows_sandbox_runner.rs)
+  └── WindowsSandboxScriptRunner (src/core/wxc_common/src/windows_sandbox_runner.rs)
         │
         ├── Pre-flight: checks Windows Sandbox feature is enabled
         ├── Connects to wxc-windows-sandbox-daemon via TCP IPC on localhost

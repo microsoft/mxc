@@ -13,7 +13,7 @@ microvm = ["wxc_common/microvm", "dep:nanvix_binaries"]
 
 [build-dependencies]
 mxc_build_common.workspace = true
-nanvix_common = { path = "../nanvix_common" }
+nanvix_common = { path = "../../backends/nanvix/common" }
 
 [dependencies]
 wxc_common = { workspace = true }
@@ -21,4 +21,4 @@ lxc_common = { workspace = true }
 bwrap_common = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
-nanvix_binaries = { path = "../nanvix_binaries", optional = true }
+nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }

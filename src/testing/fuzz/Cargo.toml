@@ -21,7 +21,7 @@ microvm = ["wxc_common/microvm"]
 
 [dependencies]
 libfuzzer-sys = "0.4"
-wxc_common = { path = "../wxc_common" }
+wxc_common = { path = "../../core/wxc_common" }
 
 [[bin]]
 name = "config_parser"

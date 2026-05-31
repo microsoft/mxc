@@ -102,7 +102,7 @@ MXC is a **sandboxed code execution system** with a Rust core and TypeScript SDK
 
 ### Containment backends
 
-The Rust workspace (`src/`) implements multiple sandboxing backends behind the `ScriptRunner` trait (`wxc_common/src/script_runner.rs`):
+The Rust workspace (`src/`) implements multiple sandboxing backends behind the `ScriptRunner` trait (`core/wxc_common/src/script_runner.rs`):
 
 | Backend | Binary | Platform | Module |
 |---------|--------|----------|--------|
@@ -112,9 +112,9 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 | MicroVM (NanVix) | `wxc-exec.exe` | Windows | `nanvix_runner.rs` — feature-gated behind `microvm` |
 | Hyperlight | `wxc-exec.exe` | Windows | `hyperlight_runner.rs` — Hyperlight + Unikraft micro-VM backend |
 | IsolationSession | `wxc-exec.exe` | Windows | `isolation_session_runner.rs` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Supports both one-shot (single-invocation lifecycle, via `ScriptRunner`) and state-aware (multi-invocation provision/start/exec/stop/deprovision, via `StatefulSandboxBackend`) modes. Honors `readwritePaths` and `readonlyPaths` at provision via `ShareFolderBatchAsync` (rejects `deniedPaths` since the API has no Deny ACE primitive); filesystem policy is immutable post-provision and rejected at later phases. State-aware additionally accepts an optional `user` bundle (`upn`, `wamToken`) at provision and start to provision Entra cloud-agent sandboxes; one-shot rejects the bundle, and hosts that don't support Entra agents surface `backend_unavailable`. Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
-| LXC | `lxc-exec` | Linux | `lxc/src/main.rs` + `lxc_common/` |
-| Seatbelt | `mxc-exec-mac` | macOS | `mxc_darwin/src/main.rs` + `seatbelt_common/` — uses macOS App Sandbox (Seatbelt) profiles for process containment. Requires schema `0.7.0-dev`+. See `docs/macos-support/seatbelt-backend.md`. |
-| Bubblewrap | `lxc-exec` | Linux | `bwrap_common/src/bwrap_runner.rs` — unprivileged sandboxing via Linux user namespaces and `bwrap`. Experimental — requires `--experimental`. Uses shared filesystem/network policy fields; per-host network filtering via `NetworkIptablesManager` from `lxc_common`. See `docs/bwrap-support/bubblewrap-backend.md`. |
+| LXC | `lxc-exec` | Linux | `core/lxc/src/main.rs` + `backends/lxc/common/` |
+| Seatbelt | `mxc-exec-mac` | macOS | `core/mxc_darwin/src/main.rs` + `backends/seatbelt/common/` — uses macOS App Sandbox (Seatbelt) profiles for process containment. Requires schema `0.7.0-dev`+. See `docs/macos-support/seatbelt-backend.md`. |
+| Bubblewrap | `lxc-exec` | Linux | `backends/bubblewrap/common/src/bwrap_runner.rs` — unprivileged sandboxing via Linux user namespaces and `bwrap`. Experimental — requires `--experimental`. Uses shared filesystem/network policy fields; per-host network filtering via `NetworkIptablesManager` from `backends/lxc/common`. See `docs/bwrap-support/bubblewrap-backend.md`. |
 
 ### Config flow
 
@@ -177,6 +177,16 @@ New features go under the `experimental` JSON section and are only active when `
 4. Never modify files in `schemas/stable/` — those are immutable release artifacts
 
 ### Rust workspace structure
+
+The workspace is organized into five top-level directories under `src/`:
+
+| Directory | Purpose | Examples |
+|-----------|---------|----------|
+| `core/` | Cross-platform foundation + per-platform aggregator binaries | `wxc_common/`, `wxc/`, `lxc/`, `mxc_darwin/`, `mxc_pty/`, `mxc_build_common/`, `generated/` |
+| `backends/` | Backend-specific code (one subfolder per containment backend) | `windows_sandbox/{daemon,guest}`, `isolation_session/bindings`, `nanvix/{common,binaries}`, `lxc/common`, `bubblewrap/common`, `wslc/common`, `seatbelt/common` |
+| `host/` | Host-side utilities | `wxc_host_prep/`, `wxc_winhttp_proxy_shim/` |
+| `testing/` | Test infrastructure crates | `wxc_e2e_tests/`, `wxc_test_driver/`, `wxc_test_proxy/`, `linux_test_proxy/`, `wxc_ui_probe/`, `fuzz/` |
+| `tools/` | Developer/diagnostic tools | `mxc_diagnostic_console/` |
 
 - `wxc_common` is the shared library — all config parsing, models, error types, and runner implementations live here
 - `wxc` and `lxc` are thin binary crates that wire up CLI args (`clap`) and dispatch to `wxc_common`

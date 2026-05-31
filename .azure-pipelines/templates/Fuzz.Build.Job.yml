@@ -22,8 +22,8 @@ jobs:
 
   variables:
     triplet: x86_64-pc-windows-msvc
-    fuzzDir: $(Build.SourcesDirectory)/src/fuzz
-    fuzzTargetDir: $(Build.SourcesDirectory)/src/fuzz/target/$(triplet)/release
+    fuzzDir: $(Build.SourcesDirectory)/src/testing/fuzz
+    fuzzTargetDir: $(Build.SourcesDirectory)/src/testing/fuzz/target/$(triplet)/release
     dropDir: $(Build.ArtifactStagingDirectory)/onefuzz-drop
     # TODO: pin a specific nightly date (e.g. nightly-2026-05-01) for build
     # reproducibility once we've validated cargo-fuzz against it.
@@ -87,7 +87,7 @@ jobs:
     # Seeds are not shipped in the drop in v3 — they must live in a OneFuzz
     # storage container referenced via `OneFuzzJobs[].SeedCorpusContainer`.
     # TODO: provision containers (`onefuzz containers create mxc-seeds-<target>`),
-    # upload `tests/configs/*.json` (and `src/fuzz/corpus/base64_decode/*`),
+    # upload `tests/configs/*.json` (and `src/testing/fuzz/corpus/base64_decode/*`),
     # then add `SeedCorpusContainer` to each entry in OneFuzzConfig.json.
     - powershell: |
         $asanDir = (Get-ChildItem 'C:\Program Files\Microsoft Visual Studio' -Recurse -Filter 'clang_rt.asan_dynamic-x86_64.dll' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'HostX64\\x64\\clang_rt' } | Select-Object -First 1).Directory.FullName

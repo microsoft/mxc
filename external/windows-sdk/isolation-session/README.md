@@ -1,7 +1,7 @@
 # Windows.AI.IsolationSession — WinMD Provenance
 
 This directory tracks provenance for the generated Rust bindings in
-`src/isolation_session_bindings/`. The WinMD file itself is NOT checked in.
+`src/backends/isolation_session/bindings/`. The WinMD file itself is NOT checked in.
 
 ## Source
 

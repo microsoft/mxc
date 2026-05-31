@@ -50,9 +50,9 @@ jobs:
         workingDirectory: src
       ${{ if eq(item.os, 'linux') }}:
         CARGO_TARGET_DIR: /tmp/target
-        # LXC build job uses src/lxc as cwd; mirror it so the cargo
+        # LXC build job uses src/core/lxc as cwd; mirror it so the cargo
         # target-dir cache key matches and we benefit from any shared cache.
-        workingDirectory: $(Build.SourcesDirectory)/src/lxc
+        workingDirectory: $(Build.SourcesDirectory)/src/core/lxc
       targetTriple: ${{ item.triplet }}
 
     templateContext:
@@ -84,7 +84,7 @@ jobs:
         workingDirectory: $(workingDirectory)
 
       # Run clippy via plain cargo. Note the deliberate lack of `--workspace`:
-      # on Linux this job runs from `src/lxc` which scopes clippy to the lxc
+      # on Linux this job runs from `src/core/lxc` which scopes clippy to the lxc
       # package and its deps (matching the existing build's scope); the
       # Windows job runs from `src/` (the workspace root with no `[package]`),
       # so cargo's default expands to all workspace members. This avoids

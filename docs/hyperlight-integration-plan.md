@@ -106,7 +106,7 @@ C/C++, PowerShell, and Bash/Shell runtimes.
 ## Workspace Changes
 
 ```
-mxc/src/wxc_common/
+mxc/src/core/wxc_common/
 ├── Cargo.toml                 # + hyperlight-unikraft-host dependency
 └── src/
     ├── lib.rs                 # + pub mod hyperlight_runner;
@@ -114,7 +114,7 @@ mxc/src/wxc_common/
     ├── config_parser.rs       # + Some("hyperlight") => Hyperlight match arm
     └── hyperlight_runner.rs   # NEW
 
-mxc/src/wxc/
+mxc/src/core/wxc/
 └── src/main.rs                # + ContainmentBackend::Hyperlight dispatch arm
 
 mxc/tests/configs/

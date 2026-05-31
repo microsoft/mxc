@@ -60,7 +60,7 @@ plus updating the parser's single-backend-section enforcement so it's allowed.
 
 ### 2. Rust Model Changes
 
-**File:** `src/wxc_common/src/models.rs`
+**File:** `src/core/wxc_common/src/models.rs`
 
 ```rust
 // Add to ContainmentBackend enum:
@@ -75,7 +75,7 @@ A backend-specific config can be added later under `ExperimentalConfig` if neede
 
 ### 3. Config Parser Changes
 
-**File:** `src/wxc_common/src/config_parser.rs`
+**File:** `src/core/wxc_common/src/config_parser.rs`
 
 - Add `RawBubblewrap` struct (placeholder — empty for now, reserved for future backend-specific fields)
 - Add `bubblewrap` field to `RawExperimental` (optional, for future use)
@@ -85,10 +85,10 @@ A backend-specific config can be added later under `ExperimentalConfig` if neede
 
 ### 4. New Crate: `bwrap_common`
 
-**Pattern follows:** `lxc_common/` and `seatbelt_common/`
+**Pattern follows:** `backends/lxc/common/` and `backends/seatbelt/common/`
 
 ```
-src/bwrap_common/
+src/backends/bubblewrap/common/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs
@@ -326,18 +326,18 @@ policy gap is a design decision, not an implementation challenge.
 ## Files to Touch (Summary)
 
 ### Rust (new)
-- `src/bwrap_common/Cargo.toml`
-- `src/bwrap_common/src/lib.rs`
-- `src/bwrap_common/src/bwrap_runner.rs`
-- `src/bwrap_common/src/bwrap_command.rs`
-- `src/bwrap_common/src/filesystem_policy.rs`
+- `src/backends/bubblewrap/common/Cargo.toml`
+- `src/backends/bubblewrap/common/src/lib.rs`
+- `src/backends/bubblewrap/common/src/bwrap_runner.rs`
+- `src/backends/bubblewrap/common/src/bwrap_command.rs`
+- `src/backends/bubblewrap/common/src/filesystem_policy.rs`
 
 ### Rust (modify)
 - `src/Cargo.toml` — add `bwrap_common` to workspace members + dependencies
-- `src/lxc/Cargo.toml` — add `bwrap_common` dependency
-- `src/lxc/src/main.rs` — add dispatch arm for `ContainmentBackend::Bubblewrap`
-- `src/wxc_common/src/models.rs` — add `Bubblewrap` variant, `BubblewrapConfig` struct, wire into `ExperimentalConfig` and `ExecutionRequest`
-- `src/wxc_common/src/config_parser.rs` — add `RawBubblewrap`, parsing, containment match arm
+- `src/core/lxc/Cargo.toml` — add `bwrap_common` dependency
+- `src/core/lxc/src/main.rs` — add dispatch arm for `ContainmentBackend::Bubblewrap`
+- `src/core/wxc_common/src/models.rs` — add `Bubblewrap` variant, `BubblewrapConfig` struct, wire into `ExperimentalConfig` and `ExecutionRequest`
+- `src/core/wxc_common/src/config_parser.rs` — add `RawBubblewrap`, parsing, containment match arm
 
 ### Schema (modify)
 - `schemas/dev/mxc-config.schema.0.6.0-dev.json` — add `"bubblewrap"` to enum, add config block

@@ -982,7 +982,7 @@ implements one trait, the other, or both, depending on its declared participatio
 
 ### 9.1 Wire envelope (Rust mirror)
 
-MXC's existing parser at `src/wxc_common/src/config_parser.rs` uses private `Raw*`
+MXC's existing parser at `src/core/wxc_common/src/config_parser.rs` uses private `Raw*`
 intermediate structs that mirror the wire-format JSON shape (with serde renames to handle
 camelCase keys), then converts them into typed domain models via `convert_*` helpers
 (e.g., `RawConfig` → `ExecutionRequest`) before dispatch. The state-aware path extends this
@@ -1815,4 +1815,3 @@ path forward.
   file descriptor, sentinel-marked envelope appended after the script's stdout, or
   switching to fully buffered, which loses live-streaming). Defer until a backend has
   a concrete need.
-

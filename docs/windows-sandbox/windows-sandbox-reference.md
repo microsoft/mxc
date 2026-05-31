@@ -174,17 +174,17 @@ Remove-Item "$env:TEMP\wxc-sandbox-rendezvous\*" -ErrorAction SilentlyContinue
 
 | File | Purpose |
 |------|---------|
-| `src/wxc_common/src/windows_sandbox_runner.rs` | Client: connects to daemon, sends EXEC, reads RESULT |
-| `src/wxc_common/src/sandbox_protocol.rs` | Shared control protocol |
-| `src/wxc_windows_sandbox_daemon/src/main.rs` | Daemon entry point, idle watchdog |
-| `src/wxc_windows_sandbox_daemon/src/pipe_server.rs` | TCP IPC server, EXEC handling, retry logic |
-| `src/wxc_windows_sandbox_daemon/src/sandbox_vm.rs` | .wsb generation, Python discovery, VM launch/teardown |
-| `src/wxc_windows_sandbox_daemon/src/rendezvous.rs` | Polls rendezvous.txt |
-| `src/wxc_windows_sandbox_daemon/src/tcp_bridge.rs` | 4-channel TCP bridge, execute_on_guest, reconnect |
-| `src/wxc_windows_sandbox_guest/src/main.rs` | Guest entry point |
-| `src/wxc_windows_sandbox_guest/src/listener.rs` | TCP listener, rendezvous writer |
-| `src/wxc_windows_sandbox_guest/src/executor.rs` | Command loop, stdio bridging |
-| `src/wxc_windows_sandbox_guest/src/firewall.rs` | Guest firewall lockdown |
+| `src/core/wxc_common/src/windows_sandbox_runner.rs` | Client: connects to daemon, sends EXEC, reads RESULT |
+| `src/core/wxc_common/src/sandbox_protocol.rs` | Shared control protocol |
+| `src/backends/windows_sandbox/daemon/src/main.rs` | Daemon entry point, idle watchdog |
+| `src/backends/windows_sandbox/daemon/src/pipe_server.rs` | TCP IPC server, EXEC handling, retry logic |
+| `src/backends/windows_sandbox/daemon/src/sandbox_vm.rs` | .wsb generation, Python discovery, VM launch/teardown |
+| `src/backends/windows_sandbox/daemon/src/rendezvous.rs` | Polls rendezvous.txt |
+| `src/backends/windows_sandbox/daemon/src/tcp_bridge.rs` | 4-channel TCP bridge, execute_on_guest, reconnect |
+| `src/backends/windows_sandbox/guest/src/main.rs` | Guest entry point |
+| `src/backends/windows_sandbox/guest/src/listener.rs` | TCP listener, rendezvous writer |
+| `src/backends/windows_sandbox/guest/src/executor.rs` | Command loop, stdio bridging |
+| `src/backends/windows_sandbox/guest/src/firewall.rs` | Guest firewall lockdown |
 
 ## E2E Tests
 

@@ -15,7 +15,7 @@ serde_json.workspace = true
 windows.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-nanvix_binaries = { path = "../nanvix_binaries", optional = true }
+nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }
 wslc_common = { workspace = true, optional = true }
 isolation_session_bindings = { workspace = true, optional = true }
 
@@ -23,7 +23,7 @@ isolation_session_bindings = { workspace = true, optional = true }
 mxc_build_common.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
-nanvix_common = { path = "../nanvix_common" }
+nanvix_common = { path = "../../backends/nanvix/common" }
 
 [features]
 default = []
