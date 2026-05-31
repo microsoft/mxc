@@ -33,7 +33,7 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 | Linux x64 / ARM64 | `bubblewrap` | `lxc` | — |
 | macOS ARM64 (schema `0.6.0-alpha`+) | `seatbelt` | — | — |
 
-The default `processcontainer`, `bubblewrap`, and `lxc` backends work out of the box. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `seatbelt`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI flag.
+The stable one-shot backends (`processcontainer`, `bubblewrap`, and `lxc`) do not require experimental mode; Linux hosts still need the corresponding runtime installed. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `seatbelt`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI flag.
 
 ### Requirements
 
@@ -83,7 +83,8 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 
 All build scripts:
 1. Build the platform-appropriate Rust binary
-2. Copy the binary into `sdk/bin/<arch>/` (for example, `x64` or `arm64`) for SDK bundling
+2. Copy the binary into `sdk/bin/<arch>/` (for example, `x64` or `arm64`) for SDK bundling
+
 3. Build the TypeScript SDK
 
 ### Building Components Individually
