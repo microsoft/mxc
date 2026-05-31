@@ -12,7 +12,7 @@ MXC is a **sandboxed code execution system** for running untrusted code (model o
 
 - **Cross-platform**: Windows, Linux, and macOS support with platform-appropriate containment backends
 - **JSON-based Configuration**: Define execution parameters and security policies via a versioned JSON schema
-- **Multiple Containment Backends**: AppContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), MicroVM (NanVix), Hyperlight, IsolationSession, and WSLC
+- **Multiple Containment Backends**: ProcessContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), MicroVM (NanVix), Hyperlight, IsolationSession, and WSLC
 - **Policy-driven Sandboxing**:
     - **Filesystem Policy**: Read-only and read-write path lists (denied paths not yet supported on Windows)
     - **Network Policy**: Proxy support; allow/block outbound and host filtering (not yet supported on Windows)
