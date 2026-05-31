@@ -213,7 +213,7 @@ See the [SDK README](sdk/README.md) for full API documentation.
 |---------|--------|-------------|
 | `0.4.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](schemas/stable/mxc-config.schema.0.4.0-alpha.json) |
 | `0.5.0-alpha` | Stable (legacy) | [`schemas/stable/mxc-config.schema.0.5.0-alpha.json`](schemas/stable/mxc-config.schema.0.5.0-alpha.json) |
-| `0.5.0-alpha` (strict) | Stable, non-experimental surface only | [`schemas/stable/mxc-config.schema.0.5.0-alpha-strict.json`](schemas/stable/mxc-config.schema.0.5.0-alpha-strict.json) |
+| `0.5.0-alpha` (strict) | Stable; rejects deprecated v0.4 aliases (CI/local validation mode) | [`schemas/stable/mxc-config.schema.0.5.0-alpha-strict.json`](schemas/stable/mxc-config.schema.0.5.0-alpha-strict.json) |
 | `0.6.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
 | `0.7.0-dev` | Dev (experimental backends, state-aware lifecycle) | [`schemas/dev/mxc-config.schema.0.7.0-dev.json`](schemas/dev/mxc-config.schema.0.7.0-dev.json) |
 
