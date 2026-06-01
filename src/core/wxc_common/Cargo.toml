@@ -4,19 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-hyperlight = ["dep:hyperlight-unikraft-host"]
-isolation_session = [
-    "dep:isolation_session_bindings",
-    "dep:windows-future",
-    "dep:windows-collections",
-]
 microvm = ["dep:nanvix_common", "dep:uuid"]
-# Compile-time gate for Tier 2 (AppContainer + BFS via bfscfg.exe).
-# OFF by default: production wxc-exec cannot resolve or spawn bfscfg.exe,
-# and `fallback_detector::detect` naturally falls through T2 to T3 because
-# `find_bfscfg_exe` returns `Ok(None)`. Enable explicitly on hosts where
-# bfscfg.exe is known safe to invoke.
-tier2_bfs = []
 
 [dependencies]
 serde = { workspace = true }
@@ -29,19 +17,11 @@ semver = "1"
 nanvix_common = { path = "../../backends/nanvix/common", optional = true }
 uuid = { workspace = true, optional = true }
 
-[target.'cfg(target_arch = "x86_64")'.dependencies]
-hyperlight-unikraft-host = { git = "https://github.com/hyperlight-dev/hyperlight-unikraft", tag = "v0.9.0", optional = true }
-
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
 windows-core = { workspace = true }
-flatbuffers = { workspace = true }
-sandbox_spec = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }
-isolation_session_bindings = { workspace = true, optional = true }
-windows-future = { version = "0.3", optional = true }
-windows-collections = { version = "0.3", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }

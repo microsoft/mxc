@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::tcp_bridge;
 use crate::{rendezvous, sandbox_vm, DaemonState};
-use wxc_common::sandbox_protocol::DaemonResult;
+use windows_sandbox_common::sandbox_protocol::DaemonResult;
 
 /// Maximum number of sandbox launch attempts before giving up.
 const MAX_LAUNCH_ATTEMPTS: u32 = 3;

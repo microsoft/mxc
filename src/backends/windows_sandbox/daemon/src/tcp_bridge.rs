@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use wxc_common::sandbox_protocol::{
+use windows_sandbox_common::sandbox_protocol::{
     decode_message, encode_message, ControlMessage, DecodeResult, ExecRequest,
 };
 

@@ -1,0 +1,30 @@
+[package]
+name = "appcontainer_common"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Compile-time gate for Tier 2 (AppContainer + BFS via bfscfg.exe).
+# OFF by default: production wxc-exec cannot resolve or spawn bfscfg.exe,
+# and `fallback_detector::detect` naturally falls through T2 to T3 because
+# `find_bfscfg_exe` returns `Ok(None)`. Enable explicitly on hosts where
+# bfscfg.exe is known safe to invoke.
+tier2_bfs = []
+
+[dependencies]
+wxc_common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+getrandom = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+windows-core = { workspace = true }
+flatbuffers = { workspace = true }
+sandbox_spec = { workspace = true }
+widestring = { workspace = true }
+winreg = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

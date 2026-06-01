@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 
-use wxc_common::sandbox_protocol::{
+use windows_sandbox_common::sandbox_protocol::{
     decode_message, encode_message, ControlMessage, DecodeResult, ExecRequest, ExitNotification,
 };
 

@@ -14,7 +14,14 @@ clap.workspace = true
 serde_json.workspace = true
 windows.workspace = true
 
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+hyperlight_common = { workspace = true, optional = true }
+
 [target.'cfg(windows)'.dependencies]
+appcontainer_common = { workspace = true }
+windows_sandbox_common = { workspace = true }
+isolation_session_common = { workspace = true, optional = true }
+nanvix_runner = { workspace = true, optional = true }
 nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }
 wslc_common = { workspace = true, optional = true }
 isolation_session_bindings = { workspace = true, optional = true }
@@ -27,12 +34,12 @@ nanvix_common = { path = "../../backends/nanvix/common" }
 
 [features]
 default = []
-microvm = ["nanvix_binaries", "wxc_common/microvm"]
+microvm = ["nanvix_binaries", "dep:nanvix_runner"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
-hyperlight = ["wxc_common/hyperlight"]
+hyperlight = ["dep:hyperlight_common"]
 isolation_session = [
     "dep:isolation_session_bindings",
-    "wxc_common/isolation_session",
+    "dep:isolation_session_common",
 ]
-# Forwards wxc_common/tier2_bfs. OFF by default; see wxc_common/Cargo.toml.
-tier2_bfs = ["wxc_common/tier2_bfs"]
+# Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
+tier2_bfs = ["appcontainer_common/tier2_bfs"]

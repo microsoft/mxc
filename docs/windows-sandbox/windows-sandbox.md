@@ -11,7 +11,7 @@ This provides stronger isolation than process containers — the script runs in 
 ```
 wxc-exec.exe (CLI client)
   │
-  └── WindowsSandboxScriptRunner (src/core/wxc_common/src/windows_sandbox_runner.rs)
+  └── WindowsSandboxScriptRunner (src/backends/windows_sandbox/common/src/windows_sandbox_runner.rs)
         │
         ├── Pre-flight: checks Windows Sandbox feature is enabled
         ├── Connects to wxc-windows-sandbox-daemon via TCP IPC on localhost

@@ -7,26 +7,30 @@ use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use appcontainer_common::appcontainer_runner::{
+    delete_app_container_profile, AppContainerScriptRunner,
+};
 use clap::Parser;
-use wxc_common::appcontainer_runner::{delete_app_container_profile, AppContainerScriptRunner};
+#[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
+use hyperlight_common::HyperlightScriptRunner;
+#[cfg(feature = "isolation_session")]
+use isolation_session_common::IsolationSessionRunner;
+#[cfg(feature = "microvm")]
+use nanvix_runner::NanVixScriptRunner;
+use windows_sandbox_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{
     is_base_container_version, load_mxc_request_with_options, load_request, LoadOptions, ParseError,
 };
 use wxc_common::diagnostic::DiagnosticConfig;
-#[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
-use wxc_common::hyperlight_runner::HyperlightScriptRunner;
-#[cfg(feature = "isolation_session")]
-use wxc_common::isolation_session::IsolationSessionRunner;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
-#[cfg(feature = "microvm")]
-use wxc_common::nanvix_runner::NanVixScriptRunner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+use wxc_common::state_aware_dispatch::dispatch_state_aware;
 use wxc_common::state_aware_dispatch::{resolve_backend, run_state_aware, DispatchOutcome};
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
-use wxc_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
@@ -223,7 +227,7 @@ fn apply_command_override(
 /// regardless of mode (per design §7.3 stream protocol — stdout reserved
 /// for the response envelope).
 fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: &mut Logger) -> ! {
-    let outcome = run_state_aware(parsed, dry_run);
+    let outcome = dispatch_state_aware_request(parsed, dry_run);
     // Diagnostic buffer flushes to stderr regardless of success/failure so it
     // never interleaves with the stdout envelope.
     let buffered = logger.get_buffer().to_string();
@@ -240,6 +244,28 @@ fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: 
             print_error_envelope(&e);
             process::exit(1);
         }
+    }
+}
+
+/// Per-backend dispatch for state-aware requests. Resolves the requested
+/// backend and constructs its `StatefulSandboxBackend` impl from the
+/// owning backend crate (which depends on `wxc_common`, so the
+/// construction can't live inside `wxc_common` without a cycle). Falls
+/// back to `wxc_common::state_aware_dispatch::run_state_aware` for
+/// backends that have no state-aware impl, which surfaces the
+/// `unsupported_phase` envelope.
+fn dispatch_state_aware_request(
+    parsed: ParsedStateAwareRequest,
+    dry_run: bool,
+) -> Result<DispatchOutcome, MxcError> {
+    let backend = resolve_backend(&parsed)?;
+    match backend {
+        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
+        wxc_common::models::ContainmentBackend::IsolationSession => {
+            let mut runner = isolation_session_common::IsolationSessionRunner::new();
+            dispatch_state_aware(&mut runner, parsed, dry_run)
+        }
+        _ => run_state_aware(parsed, dry_run),
     }
 }
 
@@ -458,8 +484,8 @@ fn main() {
         } else {
             wxc_common::models::ContainerPolicy::default()
         };
-        let output = wxc_common::probe::run_probe(&policy);
-        match wxc_common::probe::to_json_pretty(&output) {
+        let output = appcontainer_common::probe::run_probe(&policy);
+        match appcontainer_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
                 eprintln!("Error: probe serialization failed: {e}");
@@ -505,7 +531,7 @@ fn main() {
             } else {
                 Mode::Buffer
             });
-            match wxc_common::hyperlight_runner::setup(cli.force, &mut logger) {
+            match hyperlight_common::setup(cli.force, &mut logger) {
                 Ok(snap) => {
                     eprintln!("hyperlight setup: snapshot ready at {:?}", snap);
                     process::exit(0);
@@ -794,7 +820,7 @@ fn main() {
                 };
                 let _ = writeln!(logger, "Using BaseContainer-fallback dispatcher ({reason})");
 
-                match wxc_common::dispatcher::dispatch_with_fallback(&request) {
+                match appcontainer_common::dispatcher::dispatch_with_fallback(&request) {
                     Ok(dispatched) => {
                         for w in &dispatched.warnings {
                             let _ = writeln!(logger, "warning: {w}");
@@ -813,7 +839,11 @@ fn main() {
                     }
                     Err(e) => {
                         eprintln!("error: {e}");
-                        if let wxc_common::dispatcher::DispatchError::Dacl { warnings, .. } = &e {
+                        if let appcontainer_common::dispatcher::DispatchError::Dacl {
+                            warnings,
+                            ..
+                        } = &e
+                        {
                             for w in warnings {
                                 eprintln!("  dacl warning: {w}");
                             }

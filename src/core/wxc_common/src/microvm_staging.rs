@@ -490,7 +490,7 @@ fn clear_readonly_recursive(path: &Path) -> Result<(), StagingError> {
 
 /// Removes orphaned `mxc-staging-*` directories under `root` that are older than `max_age`.
 /// Called at the start of each run to prevent temp dir accumulation on process crash.
-pub(crate) fn sweep_orphaned_staging_dirs(root: &Path, max_age: Duration) {
+pub fn sweep_orphaned_staging_dirs(root: &Path, max_age: Duration) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };

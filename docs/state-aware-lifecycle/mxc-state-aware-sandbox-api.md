@@ -1275,7 +1275,7 @@ that shape and reuses `ExecutionRequest` for five concrete reasons:
 
 4. **The existing extraction helpers already work for state-aware exec.** The
    `IsolationSessionRunner::build_process_options(&ExecutionRequest)` function in
-   `wxc_common::isolation_session_runner` extracts process info into the runner's
+   `isolation_session_common` extracts process info into the runner's
    internal `ProcessOptions` struct used to populate `IsoSessionProcessOptions` for
    `RunProcessWithOptionsAsync`. State-aware `exec` calls the same function with the
    same `&ExecutionRequest` argument; no new public Rust type closes a semantic gap that

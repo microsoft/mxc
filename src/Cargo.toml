@@ -7,11 +7,16 @@ members = [
     "core/mxc_pty",
     "core/mxc_build_common",
     "core/generated/base_container_specification",
+    "backends/appcontainer/common",
     "backends/windows_sandbox/daemon",
     "backends/windows_sandbox/guest",
+    "backends/windows_sandbox/common",
     "backends/isolation_session/bindings",
+    "backends/isolation_session/common",
+    "backends/hyperlight/common",
     "backends/nanvix/common",
     "backends/nanvix/binaries",
+    "backends/nanvix/runner",
     "backends/lxc/common",
     "backends/bubblewrap/common",
     "backends/wslc/common",
@@ -82,6 +87,11 @@ anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 wxc_common = { path = "core/wxc_common" }
+appcontainer_common = { path = "backends/appcontainer/common" }
+windows_sandbox_common = { path = "backends/windows_sandbox/common" }
+isolation_session_common = { path = "backends/isolation_session/common" }
+hyperlight_common = { path = "backends/hyperlight/common" }
+nanvix_runner = { path = "backends/nanvix/runner" }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 getrandom = "0.2"

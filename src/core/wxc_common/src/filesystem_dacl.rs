@@ -134,7 +134,7 @@ use windows::Win32::System::Threading::{
 /// attacker-chosen binary by design, and a compromised child can
 /// already load arbitrary in-memory code without needing
 /// `FILE_EXECUTE` on a host file.
-pub(crate) const RW_MASK: u32 =
+pub const RW_MASK: u32 =
     FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | FILE_GENERIC_EXECUTE.0 | DELETE.0;
 
 /// Access mask granted on `readonlyPaths` entries: read + execute.
@@ -150,7 +150,7 @@ pub(crate) const RW_MASK: u32 =
 /// AppContainer, and those tools must be loadable as executables.
 /// Stripping `FILE_EXECUTE` from file ACEs here would break that
 /// path.
-pub(crate) const RO_MASK: u32 = FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE.0;
+pub const RO_MASK: u32 = FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE.0;
 
 // Compile-time guarantee that the masks above keep their well-known
 // shape. Any change to [`RW_MASK`] or [`RO_MASK`] that breaks one of
@@ -1349,7 +1349,7 @@ const WELL_KNOWN_AC_SIDS: &[&str] = &["S-1-15-2-1", "S-1-15-2-2", "S-1-1-0"];
 /// ALLOW path.
 ///
 /// Returns 0 when the DACL is empty / NULL.
-pub(crate) fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, DaclError> {
+pub fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, DaclError> {
     let well_known = well_known_ac_sids();
 
     let path_w = wide(path);
@@ -1458,7 +1458,7 @@ pub(crate) fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, 
 /// while still failing AppContainer access, so only the package SIDs
 /// are probative. A NULL DACL (grants everyone everything) is treated
 /// as "accessible".
-pub(crate) fn null_device_appcontainer_grants() -> Option<bool> {
+pub fn null_device_appcontainer_grants() -> Option<bool> {
     use windows::Win32::Foundation::GENERIC_READ;
     use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
     use windows::Win32::Storage::FileSystem::{

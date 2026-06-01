@@ -13,12 +13,12 @@ use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
 #[cfg(target_os = "linux")]
 use bwrap_common::bwrap_runner::BubblewrapScriptRunner;
+#[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
+use hyperlight_common::HyperlightScriptRunner;
 use lxc_common::lxc_runner::LxcScriptRunner;
 use lxc_common::signal_cleanup;
-#[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
-use wxc_common::hyperlight_runner::HyperlightScriptRunner;
 #[cfg(feature = "microvm")]
-use wxc_common::nanvix_runner::NanVixScriptRunner;
+use nanvix_runner::NanVixScriptRunner;
 
 #[derive(Parser)]
 #[command(name = "lxc-exec", about = "Linux Container Executor")]
@@ -136,7 +136,7 @@ fn main() {
             } else {
                 Mode::Buffer
             });
-            match wxc_common::hyperlight_runner::setup(cli.force, &mut logger) {
+            match hyperlight_common::setup(cli.force, &mut logger) {
                 Ok(snap) => {
                     eprintln!("hyperlight setup: snapshot ready at {:?}", snap);
                     process::exit(0);

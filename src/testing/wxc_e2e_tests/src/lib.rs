@@ -18,11 +18,12 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 // ---------------------------------------------------------------------------
 
 /// Locate the repository root.
-/// `CARGO_MANIFEST_DIR` points to `src/wxc_e2e_tests/` during `cargo test`.
+/// `CARGO_MANIFEST_DIR` points to `src/testing/wxc_e2e_tests/` during `cargo test`.
 pub fn repo_root() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
-        .parent() // src/
+        .parent() // src/testing
+        .and_then(|p| p.parent()) // src
         .and_then(|p| p.parent()) // repo root
         .expect("could not determine repo root")
         .to_path_buf()
@@ -40,7 +41,8 @@ pub fn examples_dir() -> PathBuf {
 
 fn src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
+        .parent() // src/testing
+        .and_then(|p| p.parent()) // src
         .expect("could not find src/")
         .to_path_buf()
 }
