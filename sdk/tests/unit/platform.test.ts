@@ -15,6 +15,19 @@ import {
 
 const isWindows = os.platform() === 'win32';
 
+const allUiCapabilities = {
+  canBlockClipboardRead: true,
+  canBlockClipboardWrite: true,
+  canBlockInputInjection: true,
+  canBlockInputMethodChanges: true,
+  canBlockExternalUiObjects: true,
+  canBlockGlobalUiNamespace: true,
+  canBlockDesktopSwitching: true,
+  canBlockLogoffOrShutdown: true,
+  canBlockSystemParameterChanges: true,
+  canBlockDisplaySettingsChanges: true,
+};
+
 describe('getPlatformSupport probe integration', () => {
   beforeEach(() => {
     _resetPlatformSupportCache();
@@ -97,6 +110,7 @@ describe('getPlatformSupport probe integration', () => {
     const support = getPlatformSupport();
     assert.strictEqual(support.isolationTier, undefined);
     assert.strictEqual(support.isolationWarnings, undefined);
+    assert.strictEqual(support.uiCapabilities, undefined);
     assert.ok(Array.isArray(support.availableMethods));
   });
 
@@ -168,6 +182,105 @@ describe('getPlatformSupport probe integration', () => {
       assert.strictEqual(support.isolationTier, undefined, `payload=${payload}`);
       assert.strictEqual(support.isolationWarnings, undefined, `payload=${payload}`);
     }
+  });
+
+  it('surfaces portable UI capabilities from probes', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({
+        tier: 'appcontainer-dacl',
+        probes: {
+          baseContainerApiPresent: false,
+          bfscfgPresent: false,
+          uiCapabilities: allUiCapabilities,
+        },
+      }),
+    );
+    const support = getPlatformSupport();
+    if (!support.isSupported) return;
+    assert.deepStrictEqual(support.uiCapabilities, allUiCapabilities);
+  });
+
+  it('reports input-injection blocking unsupported from probe capabilities', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({
+        tier: 'appcontainer-dacl',
+        probes: {
+          baseContainerApiPresent: false,
+          bfscfgPresent: false,
+          uiCapabilities: {
+            ...allUiCapabilities,
+            canBlockInputInjection: false,
+          },
+        },
+      }),
+    );
+    const support = getPlatformSupport();
+    if (!support.isSupported) return;
+    assert.strictEqual(support.uiCapabilities?.canBlockInputInjection, false);
+    assert.strictEqual(support.uiCapabilities?.canBlockInputMethodChanges, true);
+  });
+
+  it('reports input-method and input-injection blocking unsupported from probe capabilities', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({
+        tier: 'appcontainer-dacl',
+        probes: {
+          baseContainerApiPresent: false,
+          bfscfgPresent: false,
+          uiCapabilities: {
+            ...allUiCapabilities,
+            canBlockInputInjection: false,
+            canBlockInputMethodChanges: false,
+          },
+        },
+      }),
+    );
+    const support = getPlatformSupport();
+    if (!support.isSupported) return;
+    assert.strictEqual(support.uiCapabilities?.canBlockInputInjection, false);
+    assert.strictEqual(support.uiCapabilities?.canBlockInputMethodChanges, false);
+    assert.strictEqual(support.uiCapabilities?.canBlockClipboardRead, true);
+    assert.strictEqual(support.uiCapabilities?.canBlockDisplaySettingsChanges, true);
+  });
+
+  it('omits UI capabilities when probes block is absent', { skip: !isWindows }, () => {
+    _setProbeRunner(() => JSON.stringify({ tier: 'appcontainer-dacl' }));
+    const support = getPlatformSupport();
+    if (!support.isSupported) return;
+    assert.strictEqual(support.uiCapabilities, undefined);
+  });
+
+  it('omits UI capabilities when probe omits them', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({
+        tier: 'appcontainer-dacl',
+        probes: {
+          baseContainerApiPresent: false,
+          bfscfgPresent: false,
+        },
+      }),
+    );
+    const support = getPlatformSupport();
+    if (!support.isSupported) return;
+    assert.strictEqual(support.uiCapabilities, undefined);
+  });
+
+  it('omits UI capabilities when probe returns a partial capability object', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({
+        tier: 'appcontainer-dacl',
+        probes: {
+          baseContainerApiPresent: false,
+          bfscfgPresent: false,
+          uiCapabilities: {
+            canBlockClipboardRead: true,
+          },
+        },
+      }),
+    );
+    const support = getPlatformSupport();
+    if (!support.isSupported) return;
+    assert.strictEqual(support.uiCapabilities, undefined);
   });
 });
 
