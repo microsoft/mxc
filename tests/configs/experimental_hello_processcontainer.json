@@ -7,7 +7,7 @@
   },
   "experimental": {
     "test": {
-      "message": "Test feature from AppContainer experimental!"
+      "message": "Test feature from process container experimental!"
     }
   },
   "ui": {

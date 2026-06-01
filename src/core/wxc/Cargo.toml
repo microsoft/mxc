@@ -1,0 +1,45 @@
+[package]
+name = "wxc"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "wxc-exec"
+path = "src/main.rs"
+
+[dependencies]
+wxc_common.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+windows.workspace = true
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+hyperlight_common = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+appcontainer_common = { workspace = true }
+windows_sandbox_common = { workspace = true }
+isolation_session_common = { workspace = true, optional = true }
+nanvix_runner = { workspace = true, optional = true }
+nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }
+wslc_common = { workspace = true, optional = true }
+isolation_session_bindings = { workspace = true, optional = true }
+
+[build-dependencies]
+mxc_build_common.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+nanvix_common = { path = "../../backends/nanvix/common" }
+
+[features]
+default = []
+microvm = ["nanvix_binaries", "dep:nanvix_runner"]
+wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
+hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
+isolation_session = [
+    "dep:isolation_session_bindings",
+    "dep:isolation_session_common",
+]
+# Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
+tier2_bfs = ["appcontainer_common/tier2_bfs"]

@@ -1,0 +1,9 @@
+[package]
+name = "windows_sandbox_common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wxc_common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

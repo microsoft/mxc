@@ -56,7 +56,7 @@ jobs:
       ${{ if eq(item.os, 'linux') }}:
         CARGO_TARGET_DIR: /tmp/target
         artifactPrefix: lxc-binaries
-        workingDirectory: $(Build.SourcesDirectory)/src/lxc
+        workingDirectory: $(Build.SourcesDirectory)/src/core/lxc
         signPattern: |
           lxc-exec
           linux-test-proxy

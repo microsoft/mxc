@@ -1,0 +1,16 @@
+[package]
+name = "mxc_darwin"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "mxc-exec-mac"
+path = "src/main.rs"
+
+[build-dependencies]
+mxc_build_common.workspace = true
+
+[dependencies]
+wxc_common = { workspace = true }
+seatbelt_common = { path = "../../backends/seatbelt/common" }
+clap = { workspace = true }
