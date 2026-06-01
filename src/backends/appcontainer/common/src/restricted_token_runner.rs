@@ -42,10 +42,10 @@ use windows::Win32::Foundation::{
 use windows::Win32::Security::Authorization::ConvertStringSidToSidW;
 use windows::Win32::Security::{
     AdjustTokenPrivileges, CreateRestrictedToken, IsValidSid, LookupPrivilegeValueW,
-    SetTokenInformation, TokenIntegrityLevel, CREATE_RESTRICTED_TOKEN_FLAGS,
-    DISABLE_MAX_PRIVILEGE, LUID_AND_ATTRIBUTES, PSID, SE_PRIVILEGE_ENABLED, SID_AND_ATTRIBUTES,
-    TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
-    TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    SetTokenInformation, TokenIntegrityLevel, CREATE_RESTRICTED_TOKEN_FLAGS, DISABLE_MAX_PRIVILEGE,
+    LUID_AND_ATTRIBUTES, PSID, SE_PRIVILEGE_ENABLED, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL,
+    TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
@@ -143,8 +143,7 @@ fn build_restricted_token() -> Result<OwnedHandle, WxcError> {
     //    be demanded alongside `SE_INCREASE_QUOTA_NAME`.
     let current_proc = unsafe { GetCurrentProcess() };
     let mut process_token = HANDLE::default();
-    let open_access =
-        TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ASSIGN_PRIMARY;
+    let open_access = TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ASSIGN_PRIMARY;
     unsafe { OpenProcessToken(current_proc, open_access, &mut process_token) }
         .map_err(|e| WxcError::Initialization(format!("OpenProcessToken failed: {e}")))?;
     let process_token = OwnedHandle::new(process_token);
@@ -796,8 +795,7 @@ fn set_privilege_enabled(name_wide: Vec<u16>) -> bool {
         // error to `ERROR_NOT_ALL_ASSIGNED`. Capture both the Result and
         // the last error so we can distinguish "API call failed
         // outright" from "privilege not assignable".
-        let adjust_result =
-            AdjustTokenPrivileges(token.get(), false, Some(&tp), 0, None, None);
+        let adjust_result = AdjustTokenPrivileges(token.get(), false, Some(&tp), 0, None, None);
         let last_err = GetLastError();
         match adjust_result {
             Ok(()) if last_err.is_ok() => true,
