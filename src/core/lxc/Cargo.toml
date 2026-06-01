@@ -8,7 +8,7 @@ name = "lxc-exec"
 path = "src/main.rs"
 
 [features]
-hyperlight = ["dep:hyperlight_common"]
+hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
 microvm = ["dep:nanvix_binaries", "dep:nanvix_runner"]
 
 [build-dependencies]
