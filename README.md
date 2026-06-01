@@ -12,7 +12,7 @@ MXC is a **sandboxed code execution system** for running untrusted code (model o
 - **Multiple Containment Backends**: ProcessContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), MicroVM (NanVix), Hyperlight, IsolationSession, and WSLC
 - **Policy-driven Sandboxing**:
     - **Filesystem Policy**: Read-only and read-write path lists (denied paths not yet supported on Windows)
-    - **Network Policy**: Proxy support; allow/block outbound and host filtering (not yet supported on Windows)
+    - **Network Policy**: Proxy support (not supported on macOS); allow/block outbound and host filtering (not yet supported on Windows)
     - **UI Policy**: Clipboard, display, and GUI access controls
 - **State-aware Lifecycle**: Multi-step sandbox lifecycle (provision → start → exec → stop → deprovision) for session sandboxes
 - **TypeScript SDK**: [`@microsoft/mxc-sdk`](https://www.npmjs.com/package/@microsoft/mxc-sdk) npm package with one-shot and state-aware APIs
@@ -26,11 +26,12 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 
 | Platform | Default backend | Other backends | Minimum build |
 | --- | --- | --- | --- |
-| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
+| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc` | — |
-| macOS ARM64 / x64 (schema `0.6.0-alpha`+) | `seatbelt` | — | — |
+| macOS ARM64 / x64 (schema `0.6.0-alpha`+) | `seatbelt` | — | — |
 
-The stable one-shot backends (`processcontainer`, `bubblewrap`, and `lxc`) do not require experimental mode; Linux hosts still need the corresponding runtime installed. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `seatbelt`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI flag.
+
+The stable one-shot backends (`processcontainer`, `bubblewrap`, and `lxc`) do not require experimental mode; Linux hosts also need the matching runtime installed: bwrap (Bubblewrap) for the default backend, or the lxc toolset for the lxc backend. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `seatbelt`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI flag.
 
 
 ### Requirements
@@ -90,13 +91,10 @@ All build scripts:
 # Rust workspace (from src/)
 cargo build --release --target x86_64-pc-windows-msvc     # Windows x64
 cargo build --release --target aarch64-pc-windows-msvc    # Windows ARM64
-cargo build --release -p lxc                               # Linux — lxc-exec
+cargo build --release -p lxc                               # Linux — lxc-exec (serves both LXC and Bubblewrap)
 cargo build --release -p mxc_darwin --target aarch64-apple-darwin  # macOS
 
 # SDK (from sdk/)
-npm install && npm run build
-
-# CLI (from cli/)
 npm install && npm run build
 ```
 
@@ -111,10 +109,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 cargo clippy -p lxc -p lxc_common -p wxc_common -p bwrap_common -p linux_test_proxy --all-targets -- -D warnings
 
+# macOS Rust (from src/)
 
-
-# CLI (from cli/)
-npx eslint src --ext .ts
+cargo clippy -p mxc_darwin -p seatbelt_common --all-targets -- -D warnings
 ```
 
 ### Tests
@@ -128,9 +125,6 @@ cargo test -p wxc_common -- config_parser     # Filter by test name
 # SDK (from sdk/)
 npm test                     # Unit tests
 npm run test:integration     # Integration tests
-
-# CLI (from cli/) — requires build first
-node --test dist/cli.test.js
 
 # E2E (from src/)
 cargo test -p wxc_e2e_tests
@@ -209,7 +203,6 @@ See the [SDK README](sdk/README.md) for full API documentation.
 |---------|--------|-------------|
 | `0.4.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](schemas/stable/mxc-config.schema.0.4.0-alpha.json) |
 | `0.5.0-alpha` | Stable (legacy) | [`schemas/stable/mxc-config.schema.0.5.0-alpha.json`](schemas/stable/mxc-config.schema.0.5.0-alpha.json) |
-| `0.5.0-alpha` (strict) | Stable strict view: non-experimental backends/fields only (CI/local validation mode) | [`schemas/stable/mxc-config.schema.0.5.0-alpha-strict.json`](schemas/stable/mxc-config.schema.0.5.0-alpha-strict.json) |
 | `0.6.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
 | `0.7.0-dev` | Dev (experimental backends, state-aware lifecycle) | [`schemas/dev/mxc-config.schema.0.7.0-dev.json`](schemas/dev/mxc-config.schema.0.7.0-dev.json) |
 
