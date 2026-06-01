@@ -2,12 +2,14 @@
 // Licensed under the MIT License.
 
 // The Hyperlight + Unikraft micro-VM host library is x86_64-only (KVM
-// on Linux, WHP on Windows). On other targets this crate compiles to
-// an empty library so workspace builds (`cargo build --workspace`) on
-// ARM64 hosts succeed; consumers gate their use of
-// `HyperlightScriptRunner` on `target_arch = "x86_64"` and the
-// `hyperlight` cargo feature.
-#![cfg(target_arch = "x86_64")]
+// on Linux, WHP on Windows) AND is an optional dependency gated by the
+// `hyperlight` cargo feature. On other targets, or when the feature is
+// disabled, this crate compiles to an empty library so workspace builds
+// (`cargo build --workspace`) on ARM64 hosts and feature-less builds
+// (e.g. `cargo build --features microvm`) succeed without pulling in
+// hyperlight-host. Consumers gate their use of `HyperlightScriptRunner`
+// on `target_arch = "x86_64"` and the `hyperlight` cargo feature.
+#![cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 
 //! `HyperlightScriptRunner` — executes Python code inside a Hyperlight + Unikraft
 //! micro-VM, driven by the `hyperlight-unikraft-host::pyhl` library.
