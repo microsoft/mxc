@@ -1,0 +1,15 @@
+[package]
+name = "nanvix_runner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wxc_common = { workspace = true, features = ["microvm"] }
+nanvix_common = { path = "../common" }
+uuid = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }

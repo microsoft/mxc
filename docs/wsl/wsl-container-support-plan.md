@@ -20,7 +20,7 @@ the WSLC SDK self-host release. Key changes:
 
 ## Problem
 
-MXC (Microsoft eXecution Container) runs untrusted code in sandboxed environments, but only supports Windows AppContainer. There is no way to run Linux apps today from Windows front-end.
+MXC (Microsoft eXecution Container) runs untrusted code in sandboxed environments. There is no way to run Linux apps today from Windows front-end.
 
 ## Proposed Solution
 

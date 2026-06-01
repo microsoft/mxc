@@ -6,7 +6,7 @@ fuzzing in CI.
 
 ## What we fuzz
 
-The `mxc_fuzz` crate at `src/fuzz/` defines three libFuzzer targets, all
+The `mxc_fuzz` crate at `src/testing/fuzz/` defines three libFuzzer targets, all
 exercising the attacker-influenced config surface consumed by `wxc-exec` and
 `lxc-exec`:
 
@@ -18,7 +18,7 @@ exercising the attacker-influenced config surface consumed by `wxc-exec` and
 
 Seed corpora for `config_parser` and `validator` targets come directly from
 `tests/configs/*.json`. The `base64_decode` target uses pre-encoded seeds in
-`src/fuzz/corpus/base64_decode/`. OneFuzz dedups by coverage server-side and
+`src/testing/fuzz/corpus/base64_decode/`. OneFuzz dedups by coverage server-side and
 grows the corpus across daily runs, so we keep the in-repo seeds small.
 
 ## Platform coverage
@@ -45,11 +45,11 @@ $asanDir = (Get-ChildItem 'C:\Program Files\Microsoft Visual Studio' -Recurse `
 $env:PATH = "$asanDir;$env:PATH"
 
 # Run a target for 30 seconds (uses tests/configs/ as the seed corpus)
-cd src\fuzz
+cd src\testing\fuzz
 cargo +nightly fuzz run config_parser ..\..\tests\configs -- -max_total_time=30
 ```
 
-Discovered crashes are written to `artifacts/<target>/` (relative to `src/fuzz/`)
+Discovered crashes are written to `artifacts/<target>/` (relative to `src/testing/fuzz/`)
 and printed to the console. Re-run a single input with:
 
 ```pwsh

@@ -1,0 +1,30 @@
+[package]
+name = "wxc_common"
+version.workspace = true
+edition.workspace = true
+
+[features]
+microvm = ["dep:nanvix_common", "dep:uuid"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+url = { workspace = true }
+getrandom = { workspace = true }
+semver = "1"
+nanvix_common = { path = "../../backends/nanvix/common", optional = true }
+uuid = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+windows-core = { workspace = true }
+widestring = { workspace = true }
+winreg = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

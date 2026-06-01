@@ -94,6 +94,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "appcontainer_common"
+version = "0.6.0"
+dependencies = [
+ "flatbuffers",
+ "getrandom 0.2.17",
+ "sandbox_spec",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "widestring",
+ "windows",
+ "windows-core",
+ "winreg",
+ "wxc_common",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -880,6 +898,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperlight_common"
+version = "0.6.0"
+dependencies = [
+ "hyperlight-unikraft-host",
+ "wxc_common",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1051,6 +1077,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "isolation_session_common"
+version = "0.6.0"
+dependencies = [
+ "isolation_session_bindings",
+ "serde",
+ "windows",
+ "windows-collections",
+ "windows-core",
+ "windows-future",
+ "wxc_common",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1208,10 +1247,12 @@ dependencies = [
  "anyhow",
  "bwrap_common",
  "clap",
+ "hyperlight_common",
  "lxc_common",
  "mxc_build_common",
  "nanvix_binaries",
  "nanvix_common",
+ "nanvix_runner",
  "wxc_common",
 ]
 
@@ -1379,6 +1420,17 @@ version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "nanvix_runner"
+version = "0.6.0"
+dependencies = [
+ "libc",
+ "nanvix_common",
+ "uuid",
+ "windows",
+ "wxc_common",
 ]
 
 [[package]]
@@ -2638,6 +2690,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 
 [[package]]
+name = "windows_sandbox_common"
+version = "0.6.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wxc_common",
+]
+
+[[package]]
 name = "windows_x86_64_gnu"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2785,13 +2846,18 @@ name = "wxc"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "appcontainer_common",
  "clap",
+ "hyperlight_common",
  "isolation_session_bindings",
+ "isolation_session_common",
  "mxc_build_common",
  "nanvix_binaries",
  "nanvix_common",
+ "nanvix_runner",
  "serde_json",
  "windows",
+ "windows_sandbox_common",
  "wslc_common",
  "wxc_common",
 ]
@@ -2801,13 +2867,9 @@ name = "wxc_common"
 version = "0.6.0"
 dependencies = [
  "base64",
- "flatbuffers",
  "getrandom 0.2.17",
- "hyperlight-unikraft-host",
- "isolation_session_bindings",
  "libc",
  "nanvix_common",
- "sandbox_spec",
  "semver",
  "serde",
  "serde_json",
@@ -2817,9 +2879,7 @@ dependencies = [
  "uuid",
  "widestring",
  "windows",
- "windows-collections",
  "windows-core",
- "windows-future",
  "winreg",
 ]
 
@@ -2885,6 +2945,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+ "windows_sandbox_common",
  "wxc_common",
 ]
 
@@ -2896,6 +2957,7 @@ dependencies = [
  "mxc_build_common",
  "serde_json",
  "tokio",
+ "windows_sandbox_common",
  "wxc_common",
 ]
 

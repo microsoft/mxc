@@ -113,8 +113,8 @@ Adding a feature may touch these files:
 | File | What to change |
 |------|----------------|
 | `schemas/dev/mxc-config.schema.0.7.0-dev.json` | Add `gpuIsolation` as a feature under `experimental` |
-| `src/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |
-| `src/wxc_common/src/config_parser.rs` | Add `gpuIsolation` field to `RawExperimental` |
+| `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |
+| `src/core/wxc_common/src/config_parser.rs` | Add `gpuIsolation` field to `RawExperimental` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
 | `tests/configs/` | Test config exercising your feature |
 
@@ -176,7 +176,7 @@ top-level config. This gives editors full autocomplete and validation.
 
 ## Step 2: Add the model struct
 
-In `src/wxc_common/src/models.rs`, `ExperimentalConfig` already exists with
+In `src/core/wxc_common/src/models.rs`, `ExperimentalConfig` already exists with
 `compartments`. Add your `GpuIsolationConfig` struct and a field for it:
 
 ```rust
@@ -200,7 +200,7 @@ pub struct ExperimentalConfig {
 
 ## Step 3: Parse the experimental section
 
-In `src/wxc_common/src/config_parser.rs`, the `RawExperimental` struct already
+In `src/core/wxc_common/src/config_parser.rs`, the `RawExperimental` struct already
 exists with `compartments`. Add `gpu_isolation`:
 
 ```rust

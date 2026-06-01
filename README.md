@@ -1,6 +1,6 @@
 # Microsoft eXecution Container (MXC)
 
-MXC is a sandboxed code execution environment.  It currently implements WXC for Windows that uses AppContainer to run untrusted code safely.  We will be adding support for VMs, WSL and other platforms shortly.
+MXC is a sandboxed code execution environment to run untrusted code safely.  It has options for many different container types on multiple platforms.
 
 > [!WARNING]
 > This repository contains preview code published to enable early integration and feedback on Microsoft Execution Containers.
@@ -120,7 +120,7 @@ wxc-exec.exe --debug config.json
 
 ### Using ETW Traces
 
-For troubleshooting AppContainer isolation, you can use Event Tracing for Windows (ETW) to capture access check events.  We recommend the use of the [Windows Performance Analyzer](https://apps.microsoft.com/detail/9n0w1b2bxgnz?launch=true&mode=full&hl=en-us&gl=us) and the XPerf tool.
+For troubleshooting process container isolation on Windows, you can use Event Tracing for Windows (ETW) to capture access check events.  We recommend the use of the [Windows Performance Analyzer](https://apps.microsoft.com/detail/9n0w1b2bxgnz?launch=true&mode=full&hl=en-us&gl=us) and the XPerf tool.
 
 #### Start Tracing
 
@@ -131,13 +131,13 @@ Start an administrator PowerShell console, then run:
 # Only saves Process/Thread Create/Delete and Image Load/Unload Events
 # Required to interpret stack traces
 xperf -on PROC_THREAD+LOADER
-# Start Tracing AppContainer Events
+# Start Tracing container Events
 xperf -start user -on a68ca8b7-004f-d7b6-a698-07e2de0f1f5d:::'stack'
 ```
 
 ### Run wxc-exec
 
-Execute your script with AppContainer in permissive learning mode (debug builds only — release builds strip this capability):
+Execute your script with the base process container in permissive learning mode (debug builds only — release builds strip this capability):
 
 ```json
 {

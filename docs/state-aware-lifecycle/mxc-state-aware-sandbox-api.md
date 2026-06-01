@@ -982,7 +982,7 @@ implements one trait, the other, or both, depending on its declared participatio
 
 ### 9.1 Wire envelope (Rust mirror)
 
-MXC's existing parser at `src/wxc_common/src/config_parser.rs` uses private `Raw*`
+MXC's existing parser at `src/core/wxc_common/src/config_parser.rs` uses private `Raw*`
 intermediate structs that mirror the wire-format JSON shape (with serde renames to handle
 camelCase keys), then converts them into typed domain models via `convert_*` helpers
 (e.g., `RawConfig` → `ExecutionRequest`) before dispatch. The state-aware path extends this
@@ -1275,7 +1275,7 @@ that shape and reuses `ExecutionRequest` for five concrete reasons:
 
 4. **The existing extraction helpers already work for state-aware exec.** The
    `IsolationSessionRunner::build_process_options(&ExecutionRequest)` function in
-   `wxc_common::isolation_session_runner` extracts process info into the runner's
+   `isolation_session_common` extracts process info into the runner's
    internal `ProcessOptions` struct used to populate `IsoSessionProcessOptions` for
    `RunProcessWithOptionsAsync`. State-aware `exec` calls the same function with the
    same `&ExecutionRequest` argument; no new public Rust type closes a semantic gap that
@@ -1815,4 +1815,3 @@ path forward.
   file descriptor, sentinel-marked envelope appended after the script's stdout, or
   switching to fully buffered, which loses live-streaming). Defer until a backend has
   a concrete need.
-

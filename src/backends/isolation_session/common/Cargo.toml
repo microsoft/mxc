@@ -1,0 +1,15 @@
+[package]
+name = "isolation_session_common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wxc_common = { workspace = true }
+serde = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+windows-core = { workspace = true }
+windows-future = "0.3"
+windows-collections = "0.3"
+isolation_session_bindings = { workspace = true }
