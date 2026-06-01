@@ -70,7 +70,7 @@ pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
             .is_some(),
         bfs_compiled_in: cfg!(feature = "tier2_bfs"),
     };
-    match fallback_detector::detect(policy, /* prefer_base_container */ true) {
+    match fallback_detector::detect(policy, /* allow_base_container */ true) {
         Ok(decision) => ProbeOutput {
             tier: Some(decision.tier.as_str()),
             needs_dacl_augmentation: Some(decision.needs_dacl_augmentation),

@@ -103,7 +103,7 @@ pub enum FallbackError {
 /// The algorithm matches the design doc:
 ///
 /// 1. If `MXC_FORCE_TIER` is set in a test build, honor it (test seam).
-/// 2. Try Tier 1 (BaseContainer) when `prefer_base_container` is true and the
+/// 2. Try Tier 1 (BaseContainer) when `allow_base_container` is true and the
 ///    API surface is detected.
 /// 3. Otherwise try Tier 2 (AppContainer + BFS), but **only when this binary
 ///    was compiled with the `tier2_bfs` Cargo feature**. With the feature on,
@@ -130,7 +130,7 @@ pub enum FallbackError {
 /// fails, which on a healthy Windows host should never happen.
 pub fn detect(
     policy: &ContainerPolicy,
-    prefer_base_container: bool,
+    allow_base_container: bool,
 ) -> Result<TierDecision, FallbackError> {
     let denied = !policy.denied_paths.is_empty();
     let has_fs_policy =
@@ -160,7 +160,7 @@ pub fn detect(
     let mut warnings: Vec<String> = Vec::new();
 
     // Tier 1 — BaseContainer
-    if prefer_base_container && is_base_container_api_present() {
+    if allow_base_container && is_base_container_api_present() {
         if denied {
             ensure_dacl_augmentation_allowed(policy)?;
             verify_write_dac_all(&policy.denied_paths)?;
@@ -938,7 +938,7 @@ mod tests {
         };
         let mut policy = empty_policy();
         policy.fallback.allow_dacl_mutation = true;
-        // `prefer_base_container = false` skips Tier 1 deterministically;
+        // `allow_base_container = false` skips Tier 1 deterministically;
         // with `tier2_bfs` off, Tier 2 is skipped too.
         let d = detect(&policy, false).expect("empty policy must resolve");
         assert!(

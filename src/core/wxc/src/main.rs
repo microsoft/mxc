@@ -7,9 +7,7 @@ use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use appcontainer_common::appcontainer_runner::{
-    delete_app_container_profile, AppContainerScriptRunner,
-};
+use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use hyperlight_common::HyperlightScriptRunner;
@@ -806,54 +804,61 @@ fn main() {
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::ProcessContainer => {
             // Compute fallback eligibility on the ProcessContainer arm
-            // only — every other `ContainmentBackend` variant is
-            // unaffected by `use_base_container` and does not need to
+            // only -- every other `ContainmentBackend` variant is
+            // unaffected by `allow_base_container` and does not need to
             // pay the (trivial) semver parse cost.
             let version_implies_base_container = is_base_container_version(&request.schema_version);
-            let use_base_container = request.experimental_enabled || version_implies_base_container;
+            let allow_base_container =
+                request.experimental_enabled || version_implies_base_container;
 
-            if use_base_container {
+            if allow_base_container {
                 let reason = if version_implies_base_container {
                     format!("schema version {}", request.schema_version)
                 } else {
                     "--experimental".to_string()
                 };
                 let _ = writeln!(logger, "Using BaseContainer-fallback dispatcher ({reason})");
-
-                match appcontainer_common::dispatcher::dispatch_with_fallback(&request) {
-                    Ok(dispatched) => {
-                        for w in &dispatched.warnings {
-                            let _ = writeln!(logger, "warning: {w}");
-                        }
-                        let _ = writeln!(
-                            logger,
-                            "selected isolation tier: {}",
-                            dispatched.tier.as_str()
-                        );
-
-                        let (dispatched_runner, dacl_manager) = dispatched.into_runner_and_guard();
-                        if let Some(mgr) = dacl_manager {
-                            park_dacl_for_cleanup(mgr);
-                        }
-                        dispatched_runner
-                    }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        if let appcontainer_common::dispatcher::DispatchError::Dacl {
-                            warnings,
-                            ..
-                        } = &e
-                        {
-                            for w in warnings {
-                                eprintln!("  dacl warning: {w}");
-                            }
-                        }
-                        eprint!("{}", logger.get_buffer());
-                        process::exit(1);
-                    }
-                }
             } else {
-                Box::new(AppContainerScriptRunner::new())
+                let _ = writeln!(
+                    logger,
+                    "Using AppContainer-only dispatcher (schema {})",
+                    request.schema_version
+                );
+            }
+
+            match appcontainer_common::dispatcher::dispatch_with_fallback(
+                &request,
+                allow_base_container,
+            ) {
+                Ok(dispatched) => {
+                    for w in &dispatched.warnings {
+                        let _ = writeln!(logger, "warning: {w}");
+                    }
+                    let _ = writeln!(
+                        logger,
+                        "selected isolation tier: {}",
+                        dispatched.tier.as_str()
+                    );
+
+                    let (dispatched_runner, dacl_manager) = dispatched.into_runner_and_guard();
+                    if let Some(mgr) = dacl_manager {
+                        park_dacl_for_cleanup(mgr);
+                    }
+                    dispatched_runner
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    if let appcontainer_common::dispatcher::DispatchError::Dacl {
+                        warnings, ..
+                    } = &e
+                    {
+                        for w in warnings {
+                            eprintln!("  dacl warning: {w}");
+                        }
+                    }
+                    eprint!("{}", logger.get_buffer());
+                    process::exit(1);
+                }
             }
         }
         ContainmentBackend::Wslc => {

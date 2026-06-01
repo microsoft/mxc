@@ -267,16 +267,24 @@ fn build_t3_dacl(
     Ok(mgr)
 }
 
-/// Build a runner with appropriate DACL augmentation for the
-/// BaseContainer-preferred path. The caller is responsible for the explicit
-/// (no-fallback) AppContainer path.
+/// Build a runner with appropriate DACL augmentation for the given
+/// base-container preference.
+///
+/// When `allow_base_container` is `true`, the detector may select Tier 1
+/// (BaseContainer) if the OS API is present. When `false`, Tier 1 is
+/// excluded and the fallback chain selects T2 (BFS, if compiled) or T3
+/// (DACL) -- use this for legacy schema versions (< 0.5.0) that must stay
+/// on AppContainer-based backends.
 ///
 /// On success the returned [`Dispatched`] contains a runner ready to
 /// execute and (when applicable) a [`DaclManager`] that has already
 /// applied its ACEs. Use [`Dispatched::into_runner_and_guard`] to
 /// extract both; the manager MUST stay alive through the run.
-pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, DispatchError> {
-    let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
+pub fn dispatch_with_fallback(
+    request: &ExecutionRequest,
+    allow_base_container: bool,
+) -> Result<Dispatched, DispatchError> {
+    let decision = fallback_detector::detect(&request.policy, allow_base_container)?;
 
     let (runner, dacl_manager): (Box<dyn ScriptRunner>, Option<DaclManager>) = match decision.tier {
         IsolationTier::BaseContainer => {
@@ -400,7 +408,7 @@ mod tests {
     fn dispatch_t1_no_denied_paths_no_dacl() {
         let _g = ForceTierGuard::set("base-container");
         let req = test_request(empty_policy());
-        let d = dispatch_with_fallback(&req).expect("T1 dispatch should succeed");
+        let d = dispatch_with_fallback(&req, true).expect("T1 dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
         assert!(
             !d.has_dacl_guard(),
@@ -418,7 +426,7 @@ mod tests {
         let _g = ForceTierGuard::set("base-container");
         let (policy, _tmp) = policy_with_denied_temp();
         let req = test_request(policy);
-        let d = dispatch_with_fallback(&req).expect("T1+deny dispatch should succeed");
+        let d = dispatch_with_fallback(&req, true).expect("T1+deny dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
         assert!(
             !d.has_dacl_guard(),
@@ -430,7 +438,7 @@ mod tests {
         let _g = ForceTierGuard::set("appcontainer-bfs");
         let (policy, _tmp) = policy_with_denied_temp();
         let req = test_request(policy);
-        let d = dispatch_with_fallback(&req).expect("T2+deny dispatch should succeed");
+        let d = dispatch_with_fallback(&req, true).expect("T2+deny dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
         assert!(d.has_dacl_guard());
     }
@@ -439,7 +447,7 @@ mod tests {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let (policy, _tmp) = policy_with_rw_temp();
         let req = test_request(policy);
-        let d = dispatch_with_fallback(&req).expect("T3 dispatch should succeed");
+        let d = dispatch_with_fallback(&req, true).expect("T3 dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
         assert!(
             d.has_dacl_guard(),
@@ -452,7 +460,7 @@ mod tests {
         let (mut policy, _tmp) = policy_with_rw_temp();
         policy.fallback.allow_dacl_mutation = false;
         let req = test_request(policy);
-        let res = dispatch_with_fallback(&req);
+        let res = dispatch_with_fallback(&req, true);
         assert!(matches!(
             res,
             Err(DispatchError::Fallback(FallbackError::DaclFallbackDisabled))
@@ -595,7 +603,40 @@ mod tests {
             return;
         }
         let req = test_request(empty_policy());
-        let d = dispatch_with_fallback(&req).expect("dispatch should succeed");
+        let d = dispatch_with_fallback(&req, true).expect("dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
+    }
+
+    #[test]
+    fn dispatch_appcontainer_only_never_selects_base_container() {
+        // Even on a host where BaseContainer is available, the
+        // appcontainer-only dispatcher must never select Tier 1.
+        let req = test_request(empty_policy());
+        let d =
+            dispatch_with_fallback(&req, false).expect("appcontainer-only dispatch should succeed");
+        assert!(
+            !matches!(d.tier, IsolationTier::BaseContainer),
+            "dispatch_appcontainer_only must not select BaseContainer, got {:?}",
+            d.tier.as_str()
+        );
+    }
+
+    #[test]
+    fn dispatch_appcontainer_only_with_fs_policy_selects_dacl_without_tier2_bfs() {
+        // Without `tier2_bfs`, the dispatcher skips T2 and lands on T3
+        // (AppContainerDacl). This is the fix path for schema 0.4.0 configs.
+        if cfg!(feature = "tier2_bfs") {
+            eprintln!("skipping: tier2_bfs is compiled in; test targets the no-BFS path");
+            return;
+        }
+        let (policy, _tmp) = policy_with_rw_temp();
+        let req = test_request(policy);
+        let d = dispatch_with_fallback(&req, false)
+            .expect("appcontainer-only+fs dispatch should succeed");
+        assert!(
+            matches!(d.tier, IsolationTier::AppContainerDacl),
+            "expected AppContainerDacl without tier2_bfs, got {:?}",
+            d.tier.as_str()
+        );
     }
 }
