@@ -17,6 +17,7 @@
 #   .\run_dacl_tests.ps1 -Debug         # debug build
 #   .\run_dacl_tests.ps1 -TestThreads 1 # explicit serialization
 
+[CmdletBinding()]
 param(
     [switch]$Debug,
     [int]$TestThreads = 1
