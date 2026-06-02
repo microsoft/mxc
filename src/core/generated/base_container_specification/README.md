@@ -13,7 +13,7 @@ From the repo root, run in PowerShell:
 
 ```powershell
 # Clean old generated output
-Remove-Item src\generated\base_container_specification\src\ -Recurse
+Remove-Item src\core\generated\base_container_specification\src\ -Recurse
 
 # Run flatc
 & "flatc.exe" `
@@ -22,15 +22,15 @@ Remove-Item src\generated\base_container_specification\src\ -Recurse
     external/windows-sdk/BaseContainerSpecification.fbs
 
 # Move output into the crate's src/ directory and rename to match our module names
-mkdir src\generated\base_container_specification\src
-mv src\generated\base_container_specification\mod.rs src\generated\base_container_specification\src\lib.rs
-mv src\generated\base_container_specification\sandbox_tech_spec_layout src\generated\base_container_specification\src\base_container_layout
+mkdir src\core\generated\base_container_specification\src
+mv src\core\generated\base_container_specification\mod.rs src\core\generated\base_container_specification\src\lib.rs
+mv src\core\generated\base_container_specification\sandbox_tech_spec_layout src\core\generated\base_container_specification\src\base_container_layout
 
 # Patch lib.rs: rename modules and suppress warnings on generated code
-(Get-Content src\generated\base_container_specification\src\lib.rs) `
+(Get-Content src\core\generated\base_container_specification\src\lib.rs) `
     -replace 'pub mod sandbox_tech_spec_layout', 'pub mod base_container_layout' `
     -replace '// @generated', "// @generated`n#![allow(unused_imports, non_snake_case, non_camel_case_types, clippy::all)]" |
-    Set-Content src\generated\base_container_specification\src\lib.rs
+    Set-Content src\core\generated\base_container_specification\src\lib.rs
 
 # Format the generated code to pass CI checks
 cd src

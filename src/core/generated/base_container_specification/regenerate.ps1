@@ -11,7 +11,7 @@
     Path to flatc.exe. Defaults to "flatc.exe" (must be on PATH).
 
 .EXAMPLE
-    pwsh -File src/generated/base_container_specification/regenerate.ps1
+    pwsh -File src/core/generated/base_container_specification/regenerate.ps1
 #>
 [CmdletBinding()]
 param(
@@ -27,7 +27,7 @@ if (-not $repoRoot) {
 }
 Set-Location $repoRoot
 
-$crateDir = "src\generated\base_container_specification"
+$crateDir = "src\core\generated\base_container_specification"
 $srcDir   = Join-Path $crateDir "src"
 $fbs      = "external\windows-sdk\BaseContainerSpecification.fbs"
 
