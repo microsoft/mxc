@@ -224,9 +224,15 @@ pub async fn launch(wsb_path: &Path) -> Result<()> {
 
 /// Tear down any running Windows Sandbox instance.
 ///
-/// Kills all sandbox and related Hyper-V processes, then polls until they
-/// are fully gone before returning. Best-effort — errors are logged but
-/// not propagated.
+/// Kills the sandbox host processes, then polls until they are gone before
+/// returning. Best-effort — errors are logged but not propagated.
+///
+/// Only the `WindowsSandbox*` host processes are treated as liveness
+/// indicators. The `vmmemWindowsSandbox` / `vmmemCmZygote` Hyper-V memory
+/// processes are intentionally NOT awaited: they are SYSTEM-owned, linger
+/// after the host processes exit, and are harmless residue — a subsequent
+/// sandbox launch succeeds while they are still present. Polling on them
+/// only wasted the full teardown timeout.
 ///
 /// TODO: `taskkill /F /IM` kills ALL sandbox instances system-wide, not
 /// just ours. If the user has a manual sandbox open, we'd kill it. Scope
@@ -234,11 +240,17 @@ pub async fn launch(wsb_path: &Path) -> Result<()> {
 pub async fn teardown() {
     eprintln!("[daemon] tearing down sandbox");
 
-    // Kill the sandbox UI and session processes.
+    // Kill the sandbox UI and session processes. The `.exe` suffix is
+    // REQUIRED: `taskkill /IM` matches the full image name, so omitting it
+    // (e.g. `WindowsSandboxServer`) silently fails to find the process. The
+    // UI client `WindowsSandbox.exe` typically exits shortly after launch,
+    // so `WindowsSandboxServer.exe` + `WindowsSandboxRemoteSession.exe` are
+    // the processes that actually keep the VM (and its single-instance slot)
+    // alive — they must be killed by their exact image names.
     for process_name in [
         "WindowsSandbox.exe",
-        "WindowsSandboxServer",
-        "WindowsSandboxRemoteSession",
+        "WindowsSandboxServer.exe",
+        "WindowsSandboxRemoteSession.exe",
     ] {
         match Command::new("taskkill")
             .args(["/F", "/IM", process_name])
@@ -261,11 +273,13 @@ pub async fn teardown() {
         }
     }
 
-    // Poll until sandbox-related processes are fully gone (up to 30s).
+    // Poll until the sandbox host processes are fully gone (up to 30s).
+    // Only `WindowsSandbox*` count as live — `vmmem*` residue is harmless
+    // (see `is_sandbox_vm_running`).
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(TEARDOWN_POLL_TIMEOUT_SECS);
     loop {
-        let still_running = is_any_sandbox_process_running().await;
+        let still_running = is_sandbox_vm_running().await;
         if !still_running {
             eprintln!("[daemon] all sandbox processes terminated");
             break;
@@ -284,14 +298,20 @@ pub async fn teardown() {
     tokio::time::sleep(std::time::Duration::from_secs(TEARDOWN_COOLDOWN_SECS)).await;
 }
 
-/// Check if any sandbox-related processes are still running.
-async fn is_any_sandbox_process_running() -> bool {
-    // Use PowerShell to check for sandbox and its backing VM processes.
+/// Check whether a Windows Sandbox VM is currently running.
+///
+/// Only the `WindowsSandbox*` host processes are considered. The
+/// `vmmem*` Hyper-V memory processes are deliberately excluded: they
+/// linger as harmless residue after the host processes exit and do not
+/// block a fresh sandbox launch, so treating them as "running" would
+/// cause teardown to wait out its full timeout for nothing.
+pub async fn is_sandbox_vm_running() -> bool {
+    // Use PowerShell to check for the sandbox host processes.
     let output = Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
-            "Get-Process -Name 'WindowsSandbox*','vmmemWindowsSandbox' -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count",
+            "Get-Process -Name 'WindowsSandbox*' -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count",
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

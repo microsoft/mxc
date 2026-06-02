@@ -56,6 +56,23 @@ async fn main() -> Result<()> {
         pipe_name, idle_timeout_ms
     );
 
+    // Best-effort orphan reconciliation. A freshly-started daemon cannot own
+    // an existing Windows Sandbox VM — we have not launched one yet. A live VM
+    // at this point is an orphan left by a previous daemon that died without
+    // tearing down (caller killed it, a crash, or machine sleep). Because WSB
+    // is single-instance per host, that orphan would block our own launch with
+    // "Only one running instance of Windows Sandbox is allowed", so we tear it
+    // down before serving. This is intentionally destructive (it also reclaims
+    // a user's manually opened sandbox); acceptable for this experimental
+    // backend, which requires exclusive ownership of the single WSB slot.
+    if sandbox_vm::is_sandbox_vm_running().await {
+        eprintln!(
+            "[daemon] WARNING: a live Windows Sandbox VM was found at startup that we did not \
+             launch; tearing it down to reclaim the single-instance slot"
+        );
+        sandbox_vm::teardown().await;
+    }
+
     let state = Arc::new(Mutex::new(DaemonState::new()));
     let shutdown = Arc::new(Notify::new());
 

@@ -320,8 +320,12 @@ fn pipe_name_to_port(name: &str) -> u16 {
     let hash: u32 = name
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-    // Map to port range 49152-65535 (IANA ephemeral range).
-    let range = 65535 - 49152;
+    // Constrain to 49152-49999, the low end of the dynamic range. WinNAT /
+    // Hyper-V reserve large port blocks (commonly 50000+ and the high
+    // 63000-64000 region) once Windows Sandbox or Hyper-V is enabled; binding
+    // a reserved port fails with WSAEACCES (os error 10013). Must stay in sync
+    // with the runner's copy in windows_sandbox_runner.rs.
+    let range = 49999u32 - 49152 + 1;
     49152 + (hash % range) as u16
 }
 

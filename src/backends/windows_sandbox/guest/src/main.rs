@@ -1,6 +1,7 @@
 //! Windows Sandbox Guest Process
 //!
 //! Runs inside Windows Sandbox as the LogonCommand. Startup sequence:
+//!   0. Pre-authorize self in Windows Firewall (avoid interactive prompt)
 //!   1. Listen on a TCP port
 //!   2. Write rendezvous file (IP + port) to the mapped folder
 //!   3. Accept 4 connections from host (control, stdin, stdout, stderr)
@@ -19,6 +20,17 @@ const RENDEZVOUS_DIR: &str = r"C:\sandbox-rendezvous";
 #[tokio::main]
 async fn main() -> Result<()> {
     eprintln!("[guest] starting");
+
+    // Step 0: pre-authorize ourselves in Windows Firewall before binding, so
+    // the host's inbound connection does not trigger an interactive "allow
+    // this app?" prompt (which would block unattended runs). Best-effort: a
+    // netsh hiccup should not abort an otherwise-working agent — the prompt
+    // reappearing is a degradation, not a hard failure.
+    if let Err(err) = firewall::pre_authorize().await {
+        eprintln!("[guest] firewall pre-authorization failed (continuing): {err:#}");
+    } else {
+        eprintln!("[guest] firewall pre-authorized");
+    }
 
     // Step 1-2: bind TCP listener, write rendezvous file.
     let (tcp_listener, local_addr) = listener::bind_and_advertise(RENDEZVOUS_DIR)

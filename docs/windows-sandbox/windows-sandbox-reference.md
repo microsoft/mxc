@@ -127,7 +127,21 @@ The sandbox runs any command through `cmd.exe /C <script>`:
 wxc-windows-sandbox-daemon.exe <pipe-name> <idle-timeout-ms>
 ```
 
-Auto-launched by `wxc-exec` if not already running.
+Auto-launched by `wxc-exec` if not already running. On Windows the daemon is
+spawned **detached** (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`) so it
+outlives the caller's console/process group — killing `wxc-exec` must not
+orphan a live VM.
+
+#### Orphan reconciliation
+
+Windows Sandbox is **single-instance per host**, so a live VM left behind by a
+previous daemon (crash, force-kill, machine sleep) would block a new launch
+with *"Only one running instance of Windows Sandbox is allowed."* To guarantee
+a clean slate, a freshly-started daemon that finds a live VM at startup tears
+it down before serving (it cannot own a VM it never launched). This is
+best-effort and intentionally destructive — it also reclaims a user's manually
+opened sandbox, which is acceptable for this experimental single-instance
+backend.
 
 ### Retry & Error Handling
 
@@ -139,9 +153,16 @@ Auto-launched by `wxc-exec` if not already running.
 
 ### Teardown
 
-1. Kills `WindowsSandbox.exe`, `WindowsSandboxServer`, `WindowsSandboxRemoteSession`
-2. Polls for process exit (up to 30s)
+1. Kills `WindowsSandbox.exe`, `WindowsSandboxServer.exe`,
+   `WindowsSandboxRemoteSession.exe` (the `.exe` suffix is required — `taskkill
+   /IM` matches the full image name)
+2. Polls until those host processes exit (up to 30s)
 3. 5s Hyper-V cooldown
+
+> The `vmmemWindowsSandbox` / `vmmemCmZygote` Hyper-V memory processes are
+> SYSTEM-owned and linger briefly after the host processes exit. They are
+> harmless residue — a fresh sandbox launches successfully while they are still
+> present — so teardown deliberately does **not** wait on them.
 
 ## Debugging
 
