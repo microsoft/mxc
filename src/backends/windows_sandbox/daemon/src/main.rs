@@ -9,14 +9,12 @@
 //!   6. Tear down the sandbox after an idle timeout
 
 mod pipe_server;
-mod rendezvous;
-mod sandbox_vm;
-mod tcp_bridge;
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::sync::{Mutex, Notify};
+use windows_sandbox_lifecycle::{bridge as tcp_bridge, vm as sandbox_vm};
 
 /// Shared state for the daemon.
 pub struct DaemonState {

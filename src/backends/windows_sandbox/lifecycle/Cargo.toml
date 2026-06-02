@@ -1,0 +1,12 @@
+[package]
+name = "windows_sandbox_lifecycle"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+windows_sandbox_common = { workspace = true }
+tokio.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

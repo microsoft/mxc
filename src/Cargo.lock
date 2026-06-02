@@ -2699,6 +2699,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows_sandbox_lifecycle"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
+ "tempfile",
+ "tokio",
+ "windows_sandbox_common",
+]
+
+[[package]]
 name = "windows_x86_64_gnu"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2946,6 +2956,7 @@ dependencies = [
  "tokio",
  "uuid",
  "windows_sandbox_common",
+ "windows_sandbox_lifecycle",
  "wxc_common",
 ]
 

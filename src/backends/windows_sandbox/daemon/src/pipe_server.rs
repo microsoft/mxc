@@ -10,9 +10,9 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, Notify};
 
-use crate::tcp_bridge;
-use crate::{rendezvous, sandbox_vm, DaemonState};
+use crate::DaemonState;
 use windows_sandbox_common::sandbox_protocol::DaemonResult;
+use windows_sandbox_lifecycle::{bridge as tcp_bridge, rendezvous, vm as sandbox_vm};
 
 /// Maximum number of sandbox launch attempts before giving up.
 const MAX_LAUNCH_ATTEMPTS: u32 = 3;
