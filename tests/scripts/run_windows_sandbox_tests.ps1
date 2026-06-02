@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $TestConfigs = Join-Path $RepoRoot "tests\configs"
 
 # Find binaries

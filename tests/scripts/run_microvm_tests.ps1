@@ -34,7 +34,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 if (-not $BinDir) {
     if ($Release) {

@@ -10,7 +10,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $TestDriverCrate = Join-Path $RepoRoot "src\wxc_test_driver"
 $TestConfigs = Join-Path $RepoRoot "tests\configs"
 
