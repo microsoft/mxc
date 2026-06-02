@@ -99,6 +99,37 @@ impl Drop for BfscfgPathGuard {
     }
 }
 
+/// RAII guard for the `MXC_FAKE_FS_DENY_FEATURE` test seam, mirroring
+/// [`ForceTierGuard`]. The `fallback_detector`'s `native_fs_deny_supported`
+/// reads this var (only under `#[cfg(test)]`) to simulate the
+/// `Feature_BfsPolicyDeny` state without a machine-dependent probe: `"1"`
+/// forces "feature enabled", any other value forces "disabled". Defaults
+/// (unset) to "enabled" so tests that don't care get the native path.
+pub(crate) struct FsDenyFeatureGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl FsDenyFeatureGuard {
+    /// Force the gate to report the feature as **disabled**.
+    pub(crate) fn disabled() -> Self {
+        let guard = lock();
+        // SAFETY: env-var mutation is gated by ENV_LOCK; see ForceTierGuard::set.
+        unsafe {
+            std::env::set_var("MXC_FAKE_FS_DENY_FEATURE", "0");
+        }
+        FsDenyFeatureGuard { _lock: guard }
+    }
+}
+
+impl Drop for FsDenyFeatureGuard {
+    fn drop(&mut self) {
+        // SAFETY: serialized by ENV_LOCK still held in `_lock`.
+        unsafe {
+            std::env::remove_var("MXC_FAKE_FS_DENY_FEATURE");
+        }
+    }
+}
+
 /// RAII helper that points `MXC_DACL_STATE_DIR` at a freshly created
 /// tempdir for the duration of a test, then restores the previous
 /// value on drop. Holds [`ENV_LOCK`] for its lifetime via [`lock`],

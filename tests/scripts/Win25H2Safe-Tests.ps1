@@ -15,10 +15,12 @@
 #     returns `Ok(None)` unconditionally and the spawn site itself is
 #     gated. The dispatcher's natural T2→T3 fallback fires for any
 #     policy with rw/ro/denied paths.
-#   * Empty-policy runs still label the selected tier "appcontainer-bfs"
-#     because `detect()` short-circuits to T2 when there is nothing to
-#     configure. At runtime that path is a no-op — `configure()`
-#     short-circuits before any bfscfg invocation.
+#   * With `tier2_bfs` off, the entire Tier 2 block is compiled out
+#     (`detect()` guards it behind `cfg!(feature = "tier2_bfs")`), so
+#     even an empty policy never selects "appcontainer-bfs". It resolves
+#     to "base-container" when the BaseContainer API is present, and
+#     otherwise falls through to "appcontainer-dacl". On this BC-absent
+#     lane the empty-policy tier is therefore "appcontainer-dacl".
 #   * Every run is post-checked: if the captured log contains the
 #     substring "bfscfg" (proof of an actual spawn), the run is
 #     reported as failed and the harness aborts before the next test.
@@ -246,12 +248,7 @@ function Assert-NoBfscfg {
     param(
         [string]$LogContent,
         [string]$Phase,
-        [string]$Name,
-        # Phases that intentionally exercise the T2-selected, no-invocation
-        # path (P2 empty policy, P3 denied-only) pass this switch. The
-        # `bfscfg` substring check still fires either way — that one
-        # signals actual invocation, which is fatal everywhere.
-        [switch]$AllowBfsTierSelection
+        [string]$Name
     )
     # The unique signature of an actual bfscfg.exe invocation is
     # `Output from bfscfg.exe:` emitted by
@@ -264,14 +261,16 @@ function Assert-NoBfscfg {
     if ($LogContent -match '(?im)Output from bfscfg\.exe') {
         throw "[$Phase :: $Name] FATAL: log contains 'Output from bfscfg.exe' (real invocation). Aborting to avoid 25H2 deadlock."
     }
-    if (-not $AllowBfsTierSelection) {
-        # Logger interleaves a `[timestamp] ` token between every
-        # write fragment, so a single `writeln!(logger, "x: {}", y)`
-        # serializes as `x: [ts] y`. Use `.*?` instead of `\s*` to
-        # bridge that token.
-        if ($LogContent -match '(?im)selected isolation tier:.*?appcontainer-bfs') {
-            throw "[$Phase :: $Name] FATAL: log shows 'selected isolation tier: appcontainer-bfs'. Aborting."
-        }
+    # With tier2_bfs off, no run on this lane may select the BFS tier
+    # (empty policy resolves to base-container or appcontainer-dacl; any
+    # rw/ro/denied policy drops to appcontainer-dacl). Selecting BFS here
+    # signals a mis-built binary, so this check is fatal everywhere.
+    #
+    # Logger interleaves a `[timestamp] ` token between every write
+    # fragment, so a single `writeln!(logger, "x: {}", y)` serializes as
+    # `x: [ts] y`. Use `.*?` instead of `\s*` to bridge that token.
+    if ($LogContent -match '(?im)selected isolation tier:.*?appcontainer-bfs') {
+        throw "[$Phase :: $Name] FATAL: log shows 'selected isolation tier: appcontainer-bfs'. Aborting."
     }
 }
 
@@ -408,12 +407,13 @@ function Invoke-Wxc {
 # Phase 1 — probes (read-only, never touches bfscfg)
 #
 # Expectations assume the `tier2_bfs` Cargo feature is OFF (Test-Preflight
-# enforces this). With the feature off, `find_bfscfg_exe` returns
-# `Ok(None)` unconditionally, so the detector drops to T3
-# (`appcontainer-dacl`) for any policy with rw/ro/denied paths. The
-# empty-policy probe still labels T2 because `detect()` short-circuits
-# to T2 when there is nothing to configure — the runtime behavior is
-# nonetheless the no-op T2 path, never spawning bfscfg.
+# enforces this). With the feature off, the entire Tier 2 block is
+# compiled out of `detect()`, so the detector never selects
+# `appcontainer-bfs` — not even for an empty policy. The probe prefers
+# BaseContainer (`detect(policy, prefer_base_container = true)`), so the
+# empty-policy tier is `base-container` when the BaseContainer API is
+# present and `appcontainer-dacl` otherwise. Any policy with rw/ro/denied
+# paths drops to T3 (`appcontainer-dacl`) on a BC-absent host.
 # -----------------------------------------------------------------------
 function Phase-Probes {
     Section 'Phase 1: --probe (read-only)'
@@ -426,8 +426,18 @@ function Phase-Probes {
         Record-Result -Phase 'P1' -Name 'BC API absent on this host' -Pass (-not $probeEmpty.probes.baseContainerApiPresent) -Detail "baseContainerApiPresent=$($probeEmpty.probes.baseContainerApiPresent)"
         Record-Result -Phase 'P1' -Name 'bfsCompiledIn=false (safety gate)' -Pass (-not $probeEmpty.probes.bfsCompiledIn) -Detail "bfsCompiledIn=$($probeEmpty.probes.bfsCompiledIn)"
         Record-Result -Phase 'P1' -Name 'bfscfgPresent=false when feature off' -Pass (-not $probeEmpty.probes.bfscfgPresent) -Detail "bfscfgPresent=$($probeEmpty.probes.bfscfgPresent)"
-        Record-Result -Phase 'P1' -Name 'empty policy probe -> tier=appcontainer-bfs (cosmetic: detect() short-circuits)' -Pass ($probeEmpty.tier -eq 'appcontainer-bfs') -Detail "tier=$($probeEmpty.tier)"
-        Record-Result -Phase 'P1' -Name 'empty policy probe -> needsDaclAugmentation=false' -Pass ($probeEmpty.needsDaclAugmentation -eq $false) -Detail "needsDaclAugmentation=$($probeEmpty.needsDaclAugmentation)"
+        # With tier2_bfs off, an empty policy resolves to base-container
+        # (BC API present) or appcontainer-dacl (BC API absent) — never
+        # appcontainer-bfs. Branch on the probed API presence so the lane
+        # is correct on both this host and a BC-capable VM.
+        if ($probeEmpty.probes.baseContainerApiPresent) {
+            Record-Result -Phase 'P1' -Name 'empty policy probe -> tier=base-container (BC API present)' -Pass ($probeEmpty.tier -eq 'base-container') -Detail "tier=$($probeEmpty.tier)"
+            Record-Result -Phase 'P1' -Name 'empty policy probe -> needsDaclAugmentation=false (T1 native)' -Pass ($probeEmpty.needsDaclAugmentation -eq $false) -Detail "needsDaclAugmentation=$($probeEmpty.needsDaclAugmentation)"
+        }
+        else {
+            Record-Result -Phase 'P1' -Name 'empty policy probe -> tier=appcontainer-dacl (T2 gated out, BC absent)' -Pass ($probeEmpty.tier -eq 'appcontainer-dacl') -Detail "tier=$($probeEmpty.tier)"
+            Record-Result -Phase 'P1' -Name 'empty policy probe -> needsDaclAugmentation=true' -Pass ($probeEmpty.needsDaclAugmentation -eq $true) -Detail "needsDaclAugmentation=$($probeEmpty.needsDaclAugmentation)"
+        }
     }
 
     $cfgRw = New-Config -Name 'probe-rw' -CommandLine 'cmd /c exit 0' -ReadWrite @($rw)
@@ -462,7 +472,8 @@ function Phase-Probes {
 }
 
 # -----------------------------------------------------------------------
-# Phase 2 — release-build empty-policy run (safe lane, T2 path but no bfscfg)
+# Phase 2 — release-build empty-policy run (safe lane; resolves to T1
+# base-container when the BC API is present, else T3 appcontainer-dacl)
 # -----------------------------------------------------------------------
 function Phase-EmptyRelease {
     if ($SkipReleaseLane) {
@@ -480,13 +491,16 @@ function Phase-EmptyRelease {
     $log = Join-Path $ScratchRoot 'logs\empty-release.log'
     $r = Invoke-Wxc -Wxc $WxcRelease -ConfigPath $cfg -LogPath $log
     $logContent = Read-Log $log
-    # Empty-policy run naturally selects T2; the assertion is that
-    # bfscfg.exe was NOT actually invoked (configure() short-circuits).
-    Assert-NoBfscfg -LogContent $logContent -Phase 'P2' -Name 'empty-release' -AllowBfsTierSelection
+    # Empty-policy run resolves to base-container (BC API present) or
+    # appcontainer-dacl (BC absent) — never appcontainer-bfs with
+    # tier2_bfs off. Assert-NoBfscfg's fatal "selected isolation tier:
+    # appcontainer-bfs" safety net therefore applies here too: this run
+    # must never select BFS, and bfscfg.exe must never spawn.
+    Assert-NoBfscfg -LogContent $logContent -Phase 'P2' -Name 'empty-release'
 
     Record-Result -Phase 'P2' -Name 'release exit=0' -Pass ($r.ExitCode -eq 0) -Detail "exit=$($r.ExitCode); stdout=$($r.Stdout.Trim())"
     Record-Result -Phase 'P2' -Name 'AppContainer ran the child (stdout round-trip)' -Pass ($r.Stdout -match 'P2-empty-release-ok')
-    Record-Result -Phase 'P2' -Name 'selected isolation tier: appcontainer-bfs (expected, no invocation)' -Pass ([bool]($logContent -match '(?im)selected isolation tier:.*?appcontainer-bfs'))
+    Record-Result -Phase 'P2' -Name 'selected isolation tier: appcontainer-dacl or base-container (never bfs)' -Pass ([bool]($logContent -match '(?im)selected isolation tier:.*?(appcontainer-dacl|base-container)')) -Detail 'empty policy must not select appcontainer-bfs with tier2_bfs off'
     Record-Result -Phase 'P2' -Name 'no bfscfg invocation in log' -Pass (-not ($logContent -match '(?im)Output from bfscfg\.exe'))
     Record-Result -Phase 'P2' -Name 'UI Job Object assigned telemetry' -Pass ([bool]($logContent -match 'UI Job Object assigned'))
 }
@@ -716,24 +730,28 @@ function Phase-T3Forced {
 }
 
 # -----------------------------------------------------------------------
-# Phase 4c — Tier 1 (BaseContainer) deny-ACE empirical test
+# Phase 4c — Tier 1 (BaseContainer) native fs_deny empirical test
 #
-# Asserts that the deny ACE the dispatcher applies on the T1 path
-# actually denies the BaseContainer-spawned child access to the path.
-# This is the empirical answer to phase-4 review #4 ("BaseContainer
-# might not run under the AppContainer SID, in which case the deny ACE
-# targets a principal the child does not run as → silent no-op").
+# Asserts that the BaseContainer's native fs_deny enforcement on the T1
+# path actually denies the BaseContainer-spawned child access to the path.
+# Unlike the DACL tiers, this does not rely on a deny ACE targeting the
+# AppContainer SID — enforcement is performed by the OS sandbox itself via
+# the fs_deny SandboxSpec field, so it is principal-independent.
 #
 # Strategy:
 #   1. Skip the phase entirely if the BaseContainer API is not present on
-#      this host (most current 25H2 hosts). T1 force without the API
-#      backing it cannot exercise the deny.
+#      this host (most current 25H2 hosts), OR if the native `fs_deny`
+#      capability (Feature_BfsPolicyDeny) is not enabled. The detector only
+#      keeps a denied-paths policy on Tier 1 when BOTH hold; otherwise it
+#      falls back to a DACL-enforcing tier, so asserting tier=base-container
+#      would fail the correct implementation. T1 force without the API (or
+#      the feature) backing it cannot exercise the native deny.
 #   2. Create a marker file under a denied directory. Force T1. Have the
 #      child try to `type` the marker. The child must exit non-zero AND
 #      not echo the marker contents.
 # -----------------------------------------------------------------------
 function Phase-T1DenyForced {
-    Section 'Phase 4c: T1 deny-ACE empirical test (skipped if BC API absent)'
+    Section 'Phase 4c: T1 native fs_deny empirical test (skipped if BC API or fs_deny feature absent)'
     Clear-StateFiles
 
     # Use the release-build probe to discover BC API presence — same JSON
@@ -747,12 +765,21 @@ function Phase-T1DenyForced {
         Record-Result -Phase 'P4c' -Name 'BC API present (required for T1 test)' -Pass $true -Detail 'SKIPPED: baseContainerApiPresent=false on this host'
         return
     }
+    # Post Feature_BfsPolicyDeny gate: BaseContainer only enforces deniedPaths
+    # natively (via fs_deny) when the feature is enabled. When it isn't, the
+    # detector correctly falls back to a DACL-enforcing tier, so the
+    # tier=base-container assertion below would fail a *correct* build. Skip
+    # unless the probe reports the native capability as available.
+    if (-not $probe.probes.nativeFsDenySupported) {
+        Record-Result -Phase 'P4c' -Name 'native fs_deny supported (required for T1 deny test)' -Pass $true -Detail 'SKIPPED: nativeFsDenySupported=false (Feature_BfsPolicyDeny not enabled) on this host'
+        return
+    }
 
     $denied = Join-Path $ScratchRoot 'deniedT1'
     New-Item -ItemType Directory -Force -Path $denied | Out-Null
     $marker = Join-Path $denied 'secret.txt'
     # Use a sentinel string the test can grep for. If the child ever
-    # echoes it, the deny ACE failed silently.
+    # echoes it, the native fs_deny failed silently.
     $sentinel = 'T1_DENY_SENTINEL_e54a23'
     Set-Content -LiteralPath $marker -Value $sentinel -Encoding utf8 -Force
 
@@ -771,7 +798,7 @@ function Phase-T1DenyForced {
     $stateAfter = @(Get-StateFiles)
 
     Record-Result -Phase 'P4c' -Name 'selected isolation tier: base-container' -Pass ([bool]($logContent -match '(?im)selected isolation tier:.*?base-container')) -Detail "log saw tier=base-container"
-    Record-Result -Phase 'P4c' -Name 'child did not echo denied-file contents (deny ACE worked)' -Pass (-not ($r.Stdout -match $sentinel)) -Detail "stdout-saw-sentinel=$([bool]($r.Stdout -match $sentinel))"
+    Record-Result -Phase 'P4c' -Name 'child did not echo denied-file contents (native fs_deny worked)' -Pass (-not ($r.Stdout -match $sentinel)) -Detail "stdout-saw-sentinel=$([bool]($r.Stdout -match $sentinel))"
     Record-Result -Phase 'P4c' -Name 'child exited non-zero (access denied)' -Pass ($r.ExitCode -ne 0) -Detail "exit=$($r.ExitCode)"
     Record-Result -Phase 'P4c' -Name 'denied ACL restored after run' -Pass ($aclBefore -eq $aclAfter)
     Record-Result -Phase 'P4c' -Name 'no orphan state files' -Pass ($stateAfter.Count -eq 0) -Detail "files=$($stateAfter.Count)"

@@ -281,12 +281,17 @@ pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, 
     let (runner, dacl_manager): (Box<dyn ScriptRunner>, Option<DaclManager>) = match decision.tier {
         IsolationTier::BaseContainer => {
             // Tier 1 delegates filesystem-policy enforcement to
-            // BaseContainer's native API. We do NOT stamp host-DACL
-            // deny ACEs here because the AppContainer SID derived from
+            // BaseContainer's native API, including `deniedPaths` via the
+            // SandboxSpec `fs_deny` field. We do NOT stamp host-DACL deny
+            // ACEs here because the AppContainer SID derived from
             // `container_name(request)` is not guaranteed to match the
             // opaque principal `Experimental_CreateProcessInSandbox`
-            // actually runs the child under; a mismatch would render
-            // the ACEs inert and silently un-enforce `deniedPaths`.
+            // actually runs the child under; a mismatch would render the
+            // ACEs inert and silently un-enforce `deniedPaths`. The
+            // detector only routes a denied-paths policy here when the OS
+            // `Feature_BfsPolicyDeny` gate is enabled (otherwise it falls
+            // through to a DACL-enforcing tier), so native enforcement is
+            // guaranteed for anything that reaches this arm.
             let runner: Box<dyn ScriptRunner> = Box::new(BaseContainerRunner::new());
             (runner, None)
         }
@@ -307,12 +312,16 @@ pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, 
                 let mgr = build_deny_only_dacl(&sid, &denied)?;
                 // Hand the derived SID string to the runner so it does
                 // not re-run `ConvertSidToStringSidW` for the firewall
-                // principal-id lookup.
+                // principal-id lookup. Mark the deny as externally enforced
+                // (this `mgr`) so the runner's `validate_runner` accepts the
+                // non-empty `denied_paths` in `Bfs` mode instead of aborting
+                // the run before `execute`.
                 let runner: Box<dyn ScriptRunner> = Box::new(
                     AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
                         FilesystemMode::Bfs,
                         sid,
-                    ),
+                    )
+                    .with_external_denied_dacl(),
                 );
                 (runner, mgr)
             }
@@ -433,6 +442,27 @@ mod tests {
         let d = dispatch_with_fallback(&req).expect("T2+deny dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
         assert!(d.has_dacl_guard());
+    }
+
+    /// Regression: the Tier 2 (`Bfs` + deny-ACE) runner the dispatcher
+    /// returns must pass the *same* `validate_runner` gate that
+    /// `ScriptRunner::run` invokes before `execute`. Previously the runner
+    /// was built in `Bfs` mode without flagging the external deny DACL, so
+    /// `validate_runner` rejected the non-empty `denied_paths` and the run
+    /// aborted before the selected fallback tier could execute. Asserting
+    /// only `has_dacl_guard()` (as the test above does) missed this because
+    /// it never drove the returned runner through validation.
+    #[test]
+    fn dispatch_t2_denied_runner_passes_validation() {
+        let _g = ForceTierGuard::set("appcontainer-bfs");
+        let (policy, _tmp) = policy_with_denied_temp();
+        let req = test_request(policy);
+        let d = dispatch_with_fallback(&req).expect("T2+deny dispatch should succeed");
+        assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
+        let (runner, _guard) = d.into_runner_and_guard();
+        runner
+            .validate_runner(&req)
+            .expect("T2 deny runner must pass validate_runner (the run() path)");
     }
     #[test]
     fn dispatch_t3_always_has_dacl() {

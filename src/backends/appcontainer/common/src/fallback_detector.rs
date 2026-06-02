@@ -49,9 +49,12 @@ pub struct TierDecision {
     /// The selected isolation tier.
     pub tier: IsolationTier,
     /// `true` if this tier needs DACL augmentation on host paths to enforce
-    /// the policy. T3 always sets this; T1/T2 set it when `denied_paths` is
-    /// non-empty (since neither BaseContainer nor BFS currently models a
-    /// "deny" semantic and we have to fall back to host DACLs for those).
+    /// the policy. T3 always sets this; T2 sets it when `denied_paths` is
+    /// non-empty (BFS models no "deny" semantic, so deny falls back to host
+    /// DACLs). T1 (BaseContainer) never sets it: it enforces deny natively
+    /// via the SandboxSpec `fs_deny` field, and is only selected for a
+    /// denied-paths policy when the OS gate (`Feature_BfsPolicyDeny`) is
+    /// enabled — otherwise selection falls through to T2/T3.
     pub needs_dacl_augmentation: bool,
     /// Absolute path to `bfscfg.exe` as resolved at probe time.
     ///
@@ -117,10 +120,19 @@ pub enum FallbackError {
 ///    `\Device\Null` descriptor) that is read-only-detected as not already in
 ///    effect on this machine.
 ///
-/// Any tier that needs to modify host DACLs (T3 always; T1/T2 when
+/// Any tier that needs to modify host DACLs (T3 always; T2 when
 /// `denied_paths` is non-empty) requires `fallback.allow_dacl_mutation = true`
 /// and `WRITE_DAC` on every target path. If either check fails the function
 /// returns the corresponding [`FallbackError`].
+///
+/// Tier 1 (BaseContainer) enforces `denied_paths` natively via the SandboxSpec
+/// `fs_deny` field rather than host DACLs, but the OS only honors that field
+/// when the `Feature_BfsPolicyDeny` feature is enabled in the runtime
+/// feature-configuration store. The OS *build number* is not a sound signal —
+/// the enabling change ships per-branch independently of build label — so
+/// Tier 1 is selected for a denied-paths policy only when
+/// [`native_fs_deny_supported`] confirms the feature is enabled; otherwise
+/// selection falls through to a DACL-enforcing tier (fail secure).
 ///
 /// Probing for Tier 2 resolves `%SystemRoot%` exclusively via the
 /// `GetWindowsDirectoryW` Win32 API — the `SystemRoot` environment
@@ -161,16 +173,27 @@ pub fn detect(
 
     // Tier 1 — BaseContainer
     if prefer_base_container && is_base_container_api_present() {
-        if denied {
-            ensure_dacl_augmentation_allowed(policy)?;
-            verify_write_dac_all(&policy.denied_paths)?;
+        // BaseContainer enforces denied paths natively through the SandboxSpec
+        // `fs_deny` field — the dispatcher attaches no host DACL at T1 (the
+        // sandbox principal is opaque, so a host ACE would be inert). The OS
+        // only honors `fs_deny` when `Feature_BfsPolicyDeny` is enabled, so a
+        // denied-paths policy can stay on T1 only when that feature is live.
+        // When it isn't, we cannot enforce deny here and must fall through to
+        // a DACL-enforcing tier.
+        if !denied || native_fs_deny_supported() {
+            return Ok(TierDecision {
+                tier: IsolationTier::BaseContainer,
+                needs_dacl_augmentation: false,
+                bfscfg_path: None,
+                warnings,
+            });
         }
-        return Ok(TierDecision {
-            tier: IsolationTier::BaseContainer,
-            needs_dacl_augmentation: denied,
-            bfscfg_path: None,
-            warnings,
-        });
+        warnings.push(
+            "BaseContainer API present but Feature_BfsPolicyDeny is not enabled on this OS; \
+             deniedPaths cannot be enforced natively (fs_deny) — falling back to AppContainer \
+             for deniedPaths enforcement"
+                .to_string(),
+        );
     }
     // Tier 2 — AppContainer + BFS
     //
@@ -425,10 +448,13 @@ fn forced_decision(
 ) -> Result<TierDecision, FallbackError> {
     // Forced tiers honor the same DACL-fallback guard the real algorithm
     // does: if the operator forbade host DACL changes we must still refuse
-    // any tier that would touch them.
+    // any tier that would touch them. BaseContainer (Tier 1) never touches
+    // host DACLs — it enforces deny natively via `fs_deny` — so it never
+    // needs augmentation regardless of `denied`.
     let needs_dacl = match tier {
         IsolationTier::AppContainerDacl => true,
-        IsolationTier::BaseContainer | IsolationTier::AppContainerBfs => denied,
+        IsolationTier::AppContainerBfs => denied,
+        IsolationTier::BaseContainer => false,
     };
     if needs_dacl && !policy.fallback.allow_dacl_mutation {
         return Err(FallbackError::DaclFallbackDisabled);
@@ -623,6 +649,161 @@ pub(crate) fn has_write_dac(path: &Path) -> Result<bool, std::io::Error> {
 }
 
 // ---------------------------------------------------------------------------
+// Native fs_deny capability gate (Feature_BfsPolicyDeny)
+// ---------------------------------------------------------------------------
+
+/// Windows Feature-Staging feature ID for `Feature_BfsPolicyDeny` — the OS
+/// gate that makes `Experimental_CreateProcessInSandbox` honor the SandboxSpec
+/// `fs_deny` (deniedPaths) field. Enablement ships per-branch via the runtime
+/// feature-configuration store independently of the OS build number, so
+/// build/UBR is not a sound capability signal; we query the effective feature
+/// state instead.
+#[cfg_attr(test, allow(dead_code))]
+const FEATURE_BFS_POLICY_DENY: u32 = 62_259_005;
+
+/// Returns `true` when the OS will actually honor the SandboxSpec `fs_deny`
+/// field — i.e. when `Feature_BfsPolicyDeny` resolves to *enabled* in the
+/// runtime feature-configuration store.
+///
+/// Fails secure: a `disabled`/`default` state, a down-level OS that lacks the
+/// feature-staging export, or any probe failure all yield `false`, so
+/// deniedPaths fall through to a DACL-enforcing tier rather than being
+/// silently dropped.
+#[cfg(not(test))]
+pub(crate) fn native_fs_deny_supported() -> bool {
+    feature_staging::is_feature_enabled(FEATURE_BFS_POLICY_DENY)
+}
+
+/// Test build: avoid a machine-dependent feature probe so tier-selection tests
+/// are deterministic. Defaults to "supported" (so tests that reach the real
+/// Tier 1 branch with denied paths behave predictably); the
+/// `MXC_FAKE_FS_DENY_FEATURE` seam — set via `test_env::FsDenyFeatureGuard` —
+/// forces the disabled path.
+#[cfg(test)]
+pub(crate) fn native_fs_deny_supported() -> bool {
+    match std::env::var("MXC_FAKE_FS_DENY_FEATURE") {
+        Ok(v) => v == "1",
+        Err(_) => true,
+    }
+}
+
+/// Thin binding over the documented Windows Feature-Staging API
+/// (`GetFeatureEnabledState`, `featurestagingapi.h`). It reads the same
+/// runtime feature-configuration store that Velocity populates as a feature
+/// rolls out, which is exactly how `Feature_BfsPolicyDeny` is being delivered.
+///
+/// The export is resolved from the feature-staging **API set contract**
+/// (`api-ms-win-core-featurestaging-l1-1-0.dll`), not `kernelbase.dll`:
+/// on current builds `GetProcAddress(kernelbase, "GetFeatureEnabledState")`
+/// returns null even though the API is present, and `wxc-exec` does not
+/// statically import the API set, so it must be `LoadLibrary`-loaded rather
+/// than found via `GetModuleHandle`. `kernelbase.dll` is kept only as a
+/// defensive secondary fallback.
+mod feature_staging {
+    /// `FEATURE_ENABLED_STATE_ENABLED` from `featurestagingapi.h`. The other
+    /// states (`DEFAULT = 0`, `DISABLED = 1`) both fail secure here: `DEFAULT`
+    /// means "no runtime-store override", leaving the value to the OS
+    /// component's compiled-in default, which an external process cannot
+    /// observe — so we treat anything but an explicit `ENABLED` as "off".
+    const FEATURE_ENABLED_STATE_ENABLED: i32 = 2;
+
+    /// `FEATURE_CHANGE_TIME_READ` from `featurestagingapi.h` — read the
+    /// current effective state without pinning to a change boundary.
+    #[cfg_attr(test, allow(dead_code))]
+    const FEATURE_CHANGE_TIME_READ: i32 = 0;
+
+    /// Maps a raw `FEATURE_ENABLED_STATE` value to "the feature is on". Only
+    /// the explicit `ENABLED` state counts; every other (or unexpected) value
+    /// fails secure to `false`. Pure, so it is unit-tested directly.
+    pub(super) fn enabled_state_means_on(state: i32) -> bool {
+        state == FEATURE_ENABLED_STATE_ENABLED
+    }
+
+    #[cfg(target_os = "windows")]
+    type GetFeatureEnabledStateFn =
+        unsafe extern "system" fn(feature_id: u32, change_time: i32) -> i32;
+
+    /// DLLs to try, in order, when resolving `GetFeatureEnabledState`. The
+    /// feature-staging API set contract is the documented home of the export
+    /// on current builds; `kernelbase.dll` is a defensive fallback only.
+    #[cfg(target_os = "windows")]
+    #[cfg_attr(test, allow(dead_code))]
+    const FEATURE_STAGING_DLLS: [windows::core::PCWSTR; 2] = [
+        windows::core::w!("api-ms-win-core-featurestaging-l1-1-0.dll"),
+        windows::core::w!("kernelbase.dll"),
+    ];
+
+    /// Resolve `GetFeatureEnabledState` from the first DLL in
+    /// [`FEATURE_STAGING_DLLS`] that both loads and exports it. Returns `None`
+    /// on down-level builds that lack the API entirely (fail secure).
+    ///
+    /// Uses `LoadLibraryExW` with `LOAD_LIBRARY_SEARCH_SYSTEM32` rather than
+    /// `GetModuleHandleW`/`LoadLibraryW`: `wxc-exec` does not statically import
+    /// the feature-staging API set, so the backing module may not already be
+    /// loaded, and a bare-name `LoadLibraryW` would honor the default search
+    /// order (executable dir, CWD, `PATH`) — a DLL-planting vector in the host
+    /// process before sandbox launch. `LOAD_LIBRARY_SEARCH_SYSTEM32` restricts
+    /// the load to `System32`, where both candidates live (the API-set
+    /// contract resolves to its System32 host module; `kernelbase.dll` is in
+    /// System32). This mirrors the hardened `processmodel.dll` loader in
+    /// `base_container_runner`. If the export cannot be resolved from a trusted
+    /// system module we fail closed (`None`), so a denied-paths policy falls
+    /// through to the DACL-enforcing tier rather than trusting an
+    /// unverifiable load. The loaded modules are core, process-lifetime system
+    /// DLLs; the handle is intentionally leaked (no `FreeLibrary`) so the
+    /// returned function pointer stays valid.
+    #[cfg(target_os = "windows")]
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) fn resolve_get_feature_enabled_state() -> Option<GetFeatureEnabledStateFn> {
+        use windows::Win32::System::LibraryLoader::{
+            GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+        };
+        for dll in FEATURE_STAGING_DLLS {
+            // SAFETY: `dll` is a static NUL-terminated wide string. A failed
+            // load or missing export simply moves on to the next candidate.
+            unsafe {
+                let Ok(module) = LoadLibraryExW(dll, None, LOAD_LIBRARY_SEARCH_SYSTEM32) else {
+                    continue;
+                };
+                if let Some(proc) =
+                    GetProcAddress(module, windows::core::s!("GetFeatureEnabledState"))
+                {
+                    // The transmuted signature matches the documented
+                    // `featurestagingapi.h` prototype (`FEATURE_ENABLED_STATE
+                    // GetFeatureEnabledState(UINT32, FEATURE_CHANGE_TIME)`),
+                    // both enum parameter/return being C `int`.
+                    return Some(std::mem::transmute::<
+                        unsafe extern "system" fn() -> isize,
+                        GetFeatureEnabledStateFn,
+                    >(proc));
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(target_os = "windows")]
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) fn is_feature_enabled(feature_id: u32) -> bool {
+        match resolve_get_feature_enabled_state() {
+            // SAFETY: `get_state` is the resolved `GetFeatureEnabledState`
+            // export; calling it with a feature id and `FEATURE_CHANGE_TIME`
+            // is the documented usage.
+            Some(get_state) => {
+                enabled_state_means_on(unsafe { get_state(feature_id, FEATURE_CHANGE_TIME_READ) })
+            }
+            None => false,
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) fn is_feature_enabled(_feature_id: u32) -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -634,7 +815,7 @@ mod tests {
     // honored uniformly across the dispatcher and fallback_detector
     // test modules. A per-module lock would let cross-module test
     // threads race on `MXC_FORCE_TIER` / `MXC_BFSCFG_PATH`.
-    use crate::test_env::{ForceTierGuard, ENV_LOCK};
+    use crate::test_env::{ForceTierGuard, FsDenyFeatureGuard, ENV_LOCK};
     // `BfscfgPathGuard` is only meaningful when the `tier2_bfs` feature
     // is compiled in; without it, `find_bfscfg_exe` ignores the env var.
     #[cfg(feature = "tier2_bfs")]
@@ -666,14 +847,73 @@ mod tests {
         assert!(!d.needs_dacl_augmentation);
     }
     #[test]
-    fn denied_paths_disabled_blocks_t1() {
+    fn forced_base_container_with_denied_enforces_natively() {
+        // BaseContainer (Tier 1) enforces deniedPaths natively via the
+        // SandboxSpec `fs_deny` field, so it needs no host DACL augmentation
+        // and is unaffected by `allow_dacl_mutation = false`.
         let _g = ForceTierGuard::set("base-container");
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
-        assert!(matches!(
-            detect(&policy, true),
-            Err(FallbackError::DaclFallbackDisabled)
-        ));
+        let d = detect(&policy, true).expect("base-container honors deny natively");
+        assert!(matches!(d.tier, IsolationTier::BaseContainer));
+        assert!(!d.needs_dacl_augmentation);
+    }
+    #[test]
+    fn denied_does_not_select_base_container_when_feature_disabled() {
+        // When `Feature_BfsPolicyDeny` is off, a denied-paths policy must not
+        // land on Tier 1 (which would silently drop deny enforcement); it
+        // falls through to a DACL-enforcing tier. Only meaningful where the
+        // BaseContainer API is actually present — otherwise T1 is unreachable
+        // regardless and the pure-function / forced tests provide coverage.
+        // BaseContainer API presence is a pure probe (no env vars), so it
+        // needs no lock; acquire the env guard only once we're going to use
+        // the feature seam.
+        if !is_base_container_api_present() {
+            return;
+        }
+        let _g = FsDenyFeatureGuard::disabled();
+        let policy = policy_with_denied();
+        // The fall-through tier may either succeed (e.g. AppContainer + DACL)
+        // or fail a downstream WRITE_DAC probe on the denied system path; the
+        // load-bearing assertion is simply that we did NOT stay on T1.
+        let result = detect(&policy, true);
+        assert!(
+            !matches!(
+                result,
+                Ok(TierDecision {
+                    tier: IsolationTier::BaseContainer,
+                    ..
+                })
+            ),
+            "deny must not select BaseContainer when the feature is disabled"
+        );
+    }
+    #[test]
+    fn feature_enabled_state_mapping_is_fail_secure() {
+        use super::feature_staging::enabled_state_means_on;
+        assert!(enabled_state_means_on(2)); // FEATURE_ENABLED_STATE_ENABLED
+        assert!(!enabled_state_means_on(0)); // FEATURE_ENABLED_STATE_DEFAULT
+        assert!(!enabled_state_means_on(1)); // FEATURE_ENABLED_STATE_DISABLED
+        assert!(!enabled_state_means_on(3)); // unexpected
+        assert!(!enabled_state_means_on(-1)); // garbage
+    }
+
+    /// The real export-resolution path is normally hidden behind the
+    /// `MXC_FAKE_FS_DENY_FEATURE` test seam (`native_fs_deny_supported`), so a
+    /// wrong-DLL regression would not surface in tier-selection tests. This
+    /// smoke test exercises the production resolver directly: every supported
+    /// Windows host (and CI) ships the feature-staging API set, so the export
+    /// MUST resolve. Resolving from `kernelbase.dll` (the prior behavior)
+    /// returns null on current builds and would fail this assertion. Calling
+    /// the resolved function must also not panic.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn feature_staging_export_resolves_on_windows() {
+        let f = super::feature_staging::resolve_get_feature_enabled_state()
+            .expect("GetFeatureEnabledState must resolve from the feature-staging API set");
+        // Exercise the call path; the concrete tri-state value is host- and
+        // rollout-dependent, so we only assert it executes without UB/panic.
+        let _state = unsafe { f(super::FEATURE_BFS_POLICY_DENY, 0) };
     }
     #[test]
     fn denied_paths_disabled_blocks_t2() {

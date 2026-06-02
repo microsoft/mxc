@@ -143,6 +143,7 @@ impl BaseContainerRunner {
     /// - `capabilities` from `policy.capabilities` (comma-joined)
     /// - `fs_read_write` from `policy.readwrite_paths`
     /// - `fs_read_only` from `policy.readonly_paths`
+    /// - `fs_deny` from `policy.denied_paths`
     /// - `disallow_win32k_system_calls` from `ui.disable`
     /// - `ui_restrictions` bitmask from `ui.to_ui_restrictions_bitmask()`
     /// - `network_policy.proxy.url` from proxy config
@@ -190,6 +191,18 @@ impl BaseContainerRunner {
             let offsets: Vec<_> = request
                 .policy
                 .readonly_paths
+                .iter()
+                .map(|s| builder.create_string(s))
+                .collect();
+            Some(builder.create_vector(&offsets))
+        };
+
+        let fs_deny = if request.policy.denied_paths.is_empty() {
+            None
+        } else {
+            let offsets: Vec<_> = request
+                .policy
+                .denied_paths
                 .iter()
                 .map(|s| builder.create_string(s))
                 .collect();
@@ -244,6 +257,7 @@ impl BaseContainerRunner {
                 capabilities,
                 fs_read_write,
                 fs_read_only,
+                fs_deny,
                 network_policy,
                 ..Default::default()
             },
@@ -410,14 +424,25 @@ impl BaseContainerRunner {
 
 impl ScriptRunner for BaseContainerRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if !request.policy.denied_paths.is_empty() {
-            return Err(ScriptResponse::error(
-                wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
-            ));
-        }
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
             return Err(ScriptResponse::error(
                 wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        // Defense in depth for direct callers. `denied_paths` is serialized
+        // into the SandboxSpec `fs_deny` field, but the OS only honors it
+        // when `Feature_BfsPolicyDeny` is enabled (see
+        // `fallback_detector::native_fs_deny_supported`). The
+        // BaseContainer-fallback dispatcher only routes a denied-paths policy
+        // to this runner when that feature is live; a caller that constructs
+        // `BaseContainerRunner` directly bypasses that gate. Reject rather
+        // than silently run with unenforced deny — this runner has no DACL
+        // fallback of its own, so fail closed.
+        if !request.policy.denied_paths.is_empty()
+            && !crate::fallback_detector::native_fs_deny_supported()
+        {
+            return Err(ScriptResponse::error(
+                wxc_common::error::DENIED_PATHS_FEATURE_DISABLED_MSG,
             ));
         }
         Self::is_base_container_api_present().map_err(|e| {
@@ -970,6 +995,7 @@ mod tests {
         request.policy.capabilities = vec!["internetClient".into(), "registryRead".into()];
         request.policy.readwrite_paths = vec!["C:\\temp".into()];
         request.policy.readonly_paths = vec!["C:\\Windows".into()];
+        request.policy.denied_paths = vec!["C:\\secret".into()];
 
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
 
@@ -1011,6 +1037,10 @@ mod tests {
         assert_eq!(ro.len(), 1);
         assert_eq!(ro.get(0), "C:\\Windows");
 
+        let deny = spec.fs_deny().unwrap();
+        assert_eq!(deny.len(), 1);
+        assert_eq!(deny.get(0), "C:\\secret");
+
         assert!(spec.network_policy().is_none());
     }
 
@@ -1031,6 +1061,7 @@ mod tests {
         assert!(spec.capabilities().is_none());
         assert!(spec.fs_read_write().is_none());
         assert!(spec.fs_read_only().is_none());
+        assert!(spec.fs_deny().is_none());
         assert!(spec.disallow_win32k_system_calls());
         assert!(spec.network_policy().is_none());
     }
@@ -1168,17 +1199,47 @@ mod tests {
     use wxc_common::script_runner::ScriptRunner;
 
     #[test]
-    fn validate_runner_rejects_denied_paths() {
+    fn validate_runner_accepts_denied_paths() {
+        // Hold ENV_LOCK so a concurrent `FsDenyFeatureGuard::disabled()`
+        // test can't flip `MXC_FAKE_FS_DENY_FEATURE` underneath this one.
+        // With the var unset the gate reports the feature enabled (the test
+        // default), so deniedPaths must be accepted.
+        let _lock = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let runner = BaseContainerRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.denied_paths = vec!["C:\\secret".into()];
+
+        // denied_paths is now honored via the SandboxSpec `fs_deny` field, so it
+        // must not be rejected. validate_runner may still fail later if the
+        // BaseContainer API is unavailable on this host, but never for deniedPaths.
+        if let Err(err) = runner.validate_runner(&request) {
+            assert!(
+                !err.error_message.contains("deniedPaths"),
+                "deniedPaths should no longer be rejected, got: {}",
+                err.error_message
+            );
+        }
+    }
+
+    #[test]
+    fn validate_runner_rejects_denied_paths_when_feature_disabled() {
+        // Defense in depth: a direct caller (bypassing the dispatcher's
+        // feature gate) must not silently run with unenforced `fs_deny` when
+        // `Feature_BfsPolicyDeny` is off. The guard forces the gate to report
+        // the feature disabled for this test's duration.
+        let _guard = crate::test_env::FsDenyFeatureGuard::disabled();
         let runner = BaseContainerRunner::new();
         let mut request = ExecutionRequest::default();
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         let err = runner
             .validate_runner(&request)
-            .expect_err("BaseContainer does not yet support deniedPaths");
+            .expect_err("deniedPaths must be rejected when the fs_deny feature is disabled");
         assert!(
-            err.error_message.contains("deniedPaths"),
-            "expected message to mention deniedPaths, got: {}",
+            err.error_message.contains("Feature_BfsPolicyDeny"),
+            "expected the feature-gate message, got: {}",
             err.error_message
         );
     }

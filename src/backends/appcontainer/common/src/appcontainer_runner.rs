@@ -329,6 +329,15 @@ pub struct AppContainerScriptRunner {
     /// [`DeriveAppContainerSidFromAppContainerName`] / `FreeSid`; that
     /// duplicate Win32 call is documented and left as a follow-up.
     preset_sid_string: Option<String>,
+    /// Set when the dispatcher enforces `denied_paths` out-of-band via a
+    /// host DACL (the Tier 2 `Bfs`-mode + deny-ACE path). BFS itself only
+    /// configures allow rules (readwrite/readonly); the dispatcher parks a
+    /// deny-only [`DaclManager`] for the denied paths. Without this flag,
+    /// [`validate_runner`](ScriptRunner::validate_runner) would reject a
+    /// non-empty `denied_paths` in any non-`Dacl` mode and abort the run
+    /// before `execute`. The flag tells validation that deny enforcement is
+    /// handled externally, so the request is legal in `Bfs` mode.
+    denied_via_external_dacl: bool,
 }
 
 impl AppContainerScriptRunner {
@@ -339,6 +348,7 @@ impl AppContainerScriptRunner {
             proxy_address: None,
             filesystem_mode: FilesystemMode::Bfs,
             preset_sid_string: None,
+            denied_via_external_dacl: false,
         }
     }
 
@@ -353,6 +363,7 @@ impl AppContainerScriptRunner {
             proxy_address: None,
             filesystem_mode: mode,
             preset_sid_string: None,
+            denied_via_external_dacl: false,
         }
     }
 
@@ -371,7 +382,27 @@ impl AppContainerScriptRunner {
             proxy_address: None,
             filesystem_mode: mode,
             preset_sid_string: Some(sid_string),
+            denied_via_external_dacl: false,
         }
+    }
+
+    /// Mark that the dispatcher enforces `denied_paths` out-of-band via a
+    /// host DACL, so [`validate_runner`](ScriptRunner::validate_runner)
+    /// accepts a non-empty `denied_paths` even though this runner is not in
+    /// [`FilesystemMode::Dacl`]. Used by the Tier 2 (`Bfs` + deny-ACE) path
+    /// where BFS configures the allow rules and a dispatcher-parked
+    /// `DaclManager` configures the deny ACEs. See
+    /// [`Self::denied_via_external_dacl`].
+    ///
+    /// `pub(crate)` by design: the **caller must have already applied (and
+    /// must keep alive) an external deny DACL** for the request's denied
+    /// paths. Only the dispatcher satisfies that invariant — it builds the
+    /// deny-only `DaclManager` and returns it alongside the runner — so this
+    /// builder is confined to the crate to keep the invariant locally
+    /// auditable. Do not expose it across crate boundaries.
+    pub(crate) fn with_external_denied_dacl(mut self) -> Self {
+        self.denied_via_external_dacl = true;
+        self
     }
 
     /// Create or derive an AppContainer SID for the given container name.
@@ -913,7 +944,10 @@ impl Default for AppContainerScriptRunner {
 
 impl ScriptRunner for AppContainerScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
+        if !request.policy.denied_paths.is_empty()
+            && self.filesystem_mode != FilesystemMode::Dacl
+            && !self.denied_via_external_dacl
+        {
             return Err(ScriptResponse::error(
                 wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
             ));
@@ -1299,6 +1333,26 @@ mod tests {
         assert!(
             runner.validate_runner(&request).is_ok(),
             "DACL mode supports deniedPaths and should not error"
+        );
+    }
+
+    #[test]
+    fn validate_runner_accepts_denied_paths_in_bfs_mode_with_external_dacl() {
+        // The Tier 2 dispatcher path runs the runner in `Bfs` mode (BFS
+        // configures the allow rules) while a dispatcher-parked
+        // `DaclManager` enforces the deny ACEs. `with_external_denied_dacl`
+        // tells validation the deny is handled out-of-band, so a non-empty
+        // `denied_paths` must NOT be rejected — otherwise `run()` aborts in
+        // `validate_runner` before `execute` and the selected fallback tier
+        // can never run.
+        let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs)
+            .with_external_denied_dacl();
+        let mut request = ExecutionRequest::default();
+        request.policy.denied_paths = vec!["C:\\secret".into()];
+
+        assert!(
+            runner.validate_runner(&request).is_ok(),
+            "Bfs mode with external deny DACL should accept deniedPaths"
         );
     }
 

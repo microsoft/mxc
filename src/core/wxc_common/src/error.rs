@@ -50,9 +50,17 @@ impl From<std::io::Error> for WxcError {
 
 #[cfg(target_os = "windows")]
 pub const DENIED_PATHS_NOT_SUPPORTED_MSG: &str =
-    "filesystem.deniedPaths is not yet supported on Windows. Paths are denied by \
-     default unless granted via readwritePaths or readonlyPaths. Remove deniedPaths, \
-     or narrow readwritePaths/readonlyPaths to exclude the path you wanted to deny.";
+    "filesystem.deniedPaths cannot be enforced by the AppContainer runner in BFS mode \
+     without an external deny DACL. Route the request through the BaseContainer-fallback \
+     dispatcher so deniedPaths are enforced natively (BaseContainer fs_deny) or via a \
+     DACL-backed tier, or remove deniedPaths.";
+
+#[cfg(target_os = "windows")]
+pub const DENIED_PATHS_FEATURE_DISABLED_MSG: &str =
+    "filesystem.deniedPaths cannot be enforced natively: the BaseContainer fs_deny capability \
+     (Feature_BfsPolicyDeny) is not enabled on this OS. Route the request through the \
+     BaseContainer-fallback dispatcher so deniedPaths can be enforced via a DACL-backed tier, \
+     or remove deniedPaths.";
 
 #[cfg(target_os = "windows")]
 pub const HOST_LISTS_NOT_SUPPORTED_MSG: &str =

@@ -57,6 +57,14 @@ pub struct ProbeFacts {
     /// 11 25H2 where `bfscfg.exe` locks `bfs.sys`) should refuse to
     /// run a binary that reports `true` here.
     pub bfs_compiled_in: bool,
+    /// Whether the OS will honor the BaseContainer SandboxSpec `fs_deny`
+    /// field — i.e. `Feature_BfsPolicyDeny` resolves to *enabled* in the
+    /// runtime feature-configuration store. When `false`, a denied-paths
+    /// policy cannot stay on Tier 1 (BaseContainer): the detector falls
+    /// through to a DACL-enforcing tier. E2E harnesses that assert Tier 1
+    /// for `deniedPaths` must skip unless this is `true` *and*
+    /// [`Self::base_container_api_present`] is `true`.
+    pub native_fs_deny_supported: bool,
 }
 
 /// Run the fallback detector against `policy` and return a JSON-shaped
@@ -69,6 +77,7 @@ pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
             .flatten()
             .is_some(),
         bfs_compiled_in: cfg!(feature = "tier2_bfs"),
+        native_fs_deny_supported: fallback_detector::native_fs_deny_supported(),
     };
     match fallback_detector::detect(policy, /* prefer_base_container */ true) {
         Ok(decision) => ProbeOutput {
@@ -127,6 +136,7 @@ mod tests {
                 base_container_api_present: true,
                 bfscfg_present: false,
                 bfs_compiled_in: false,
+                native_fs_deny_supported: true,
             },
             error: None,
         };
@@ -138,6 +148,7 @@ mod tests {
         assert_eq!(v["probes"]["baseContainerApiPresent"], true);
         assert_eq!(v["probes"]["bfscfgPresent"], false);
         assert_eq!(v["probes"]["bfsCompiledIn"], false);
+        assert_eq!(v["probes"]["nativeFsDenySupported"], true);
         assert!(v.get("error").is_none());
     }
 
