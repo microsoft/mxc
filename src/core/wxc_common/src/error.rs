@@ -55,6 +55,15 @@ pub const DENIED_PATHS_NOT_SUPPORTED_MSG: &str =
      or narrow readwritePaths/readonlyPaths to exclude the path you wanted to deny.";
 
 #[cfg(target_os = "windows")]
+pub const DENIED_PATHS_FEATURE_DISABLED_MSG: &str =
+    "filesystem.deniedPaths cannot be enforced by the BaseContainer backend on this \
+     OS build: it does not advertise the native deny-paths capability \
+     (SANDBOX_CAP_FS_DENY via Experimental_QuerySandboxSupport). Run on a build \
+     with BaseContainer deny support, or rely on the AppContainer DACL tiers (which \
+     enforce deniedPaths via DENY ACEs) by not constructing the BaseContainer runner \
+     directly.";
+
+#[cfg(target_os = "windows")]
 pub const HOST_LISTS_NOT_SUPPORTED_MSG: &str =
     "network.allowedHosts / network.blockedHosts are not yet supported on Windows. \
      Remove the host list(s) and rely on network.defaultPolicy (allow / block) or a \

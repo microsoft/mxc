@@ -59,7 +59,7 @@ pub struct ProbeFacts {
     /// run a binary that reports `true` here.
     pub bfs_compiled_in: bool,
     /// Whether the BaseContainer (Tier 1) tier can enforce
-    /// `filesystem.deniedPaths` on this host (the `SANDBOX_CAP_DENY_PATHS` bit
+    /// `filesystem.deniedPaths` on this host (the `SANDBOX_CAP_FS_DENY` bit
     /// from `Experimental_QuerySandboxSupport`). `false` on builds where deny
     /// support has not yet shipped, where `deniedPaths` is rejected at launch.
     /// Tier 3 (AppContainer + DACL) enforces `deniedPaths` via DENY ACEs
