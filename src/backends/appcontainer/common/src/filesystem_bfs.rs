@@ -72,10 +72,7 @@ impl FileSystemBfsManager {
         }
 
         if self.bfscfg_path.is_none() {
-            return Err(WxcError::FilesystemPolicy(
-                "Cannot configure BFS policy: bfscfg.exe was not resolved at probe time"
-                    .to_string(),
-            ));
+            return Err(WxcError::BfsNotAvailable);
         }
 
         for path in &policy.readwrite_paths {

@@ -23,6 +23,9 @@ pub enum WxcError {
     #[error("Filesystem policy error: {0}")]
     FilesystemPolicy(String),
 
+    #[error("Filesystem policy error: bfscfg.exe is not available on this host")]
+    BfsNotAvailable,
+
     #[error("Initialization error: {0}")]
     Initialization(String),
 
