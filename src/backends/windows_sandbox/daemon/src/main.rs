@@ -60,26 +60,69 @@ struct Args {
     nonce: String,
 }
 
-fn parse_args() -> Result<Args> {
+/// Upper bound on the auth nonce read from stdin. The nonce the backend
+/// generates is a short hex token; cap the read defensively so a wedged or
+/// hostile parent cannot stream an unbounded line into the daemon at startup.
+const MAX_NONCE_LEN: usize = 256;
+
+/// Read the auth nonce from the daemon's stdin (first line, trimmed).
+///
+/// The nonce is passed over stdin rather than on the command line so it is not
+/// observable cross-process via the PEB / `Win32_Process` command line. The
+/// parent writes `"<nonce>\n"` then closes the pipe; we read a single bounded
+/// line. An empty or oversized nonce is rejected.
+fn read_nonce_from_stdin() -> Result<String> {
+    use std::io::Read;
+    let mut buf = Vec::with_capacity(MAX_NONCE_LEN);
+    let mut byte = [0u8; 1];
+    let mut stdin = std::io::stdin().lock();
+    loop {
+        match stdin
+            .read(&mut byte)
+            .context("read nonce byte from stdin")?
+        {
+            0 => break, // EOF before newline; accept what we have.
+            _ => {
+                if byte[0] == b'\n' {
+                    break;
+                }
+                if buf.len() >= MAX_NONCE_LEN {
+                    anyhow::bail!("auth nonce on stdin exceeds {MAX_NONCE_LEN} bytes");
+                }
+                buf.push(byte[0]);
+            }
+        }
+    }
+    let nonce = String::from_utf8(buf)
+        .context("auth nonce on stdin is not valid UTF-8")?
+        .trim()
+        .to_string();
+    if nonce.is_empty() {
+        anyhow::bail!("auth nonce on stdin is empty");
+    }
+    Ok(nonce)
+}
+
+fn parse_args() -> Result<String> {
     let mut token = None;
-    let mut nonce = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--token" => token = it.next(),
-            "--nonce" => nonce = it.next(),
             other => anyhow::bail!("unexpected daemon argument {:?}", other),
         }
     }
-    Ok(Args {
-        token: token.context("--token is required")?,
-        nonce: nonce.context("--nonce is required")?,
-    })
+    token.context("--token is required")
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = parse_args()?;
+    let token = parse_args()?;
+    // Receive the auth nonce over stdin (kept off argv so it is not readable
+    // cross-process via the command line). The parent writes it immediately
+    // after spawn and closes the pipe.
+    let nonce = read_nonce_from_stdin()?;
+    let args = Args { token, nonce };
     eprintln!(
         "[wsb-daemon] starting for token={} (pid={})",
         args.token,

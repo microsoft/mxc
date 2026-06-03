@@ -273,24 +273,50 @@ fn ipc_command(port: u16, verb: &str, nonce: &str) -> Result<String, MxcError> {
     Ok(line.trim().to_string())
 }
 
-/// Spawn the detached daemon for `token` with the given auth `nonce`.
+/// Spawn the detached daemon for `token`, handing it the auth `nonce` over
+/// stdin (kept off the command line so it is not readable cross-process via the
+/// PEB / `Win32_Process`). The parent writes `"<nonce>\n"` and closes the pipe;
+/// the daemon reads a single bounded line at startup.
 fn spawn_daemon(token: &str, nonce: &str) -> Result<std::process::Child, MxcError> {
+    use std::io::Write;
     use std::os::windows::process::CommandExt;
 
     let daemon_path = resolve_sibling_binary("wxc-windows-sandbox-daemon.exe")
         .map_err(|e| MxcError::backend_error(format!("locate daemon binary: {e}")))?;
 
-    Command::new(&daemon_path)
+    let mut child = Command::new(&daemon_path)
         .arg("--token")
         .arg(token)
-        .arg("--nonce")
-        .arg(nonce)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
-        .map_err(|e| MxcError::backend_error(format!("spawn daemon {daemon_path:?}: {e}")))
+        .map_err(|e| MxcError::backend_error(format!("spawn daemon {daemon_path:?}: {e}")))?;
+
+    // Hand the nonce over stdin, then drop the pipe to deliver EOF. A one-line
+    // write is far below the pipe buffer, so this never blocks on a daemon that
+    // has not read yet. On any failure, kill the half-started daemon so it does
+    // not linger waiting for input.
+    let result = (|| {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| MxcError::backend_error("daemon stdin pipe unavailable"))?;
+        stdin
+            .write_all(format!("{nonce}\n").as_bytes())
+            .map_err(|e| MxcError::backend_error(format!("write nonce to daemon stdin: {e}")))?;
+        // `stdin` drops here, closing the write end (EOF for the daemon).
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e);
+    }
+
+    Ok(child)
 }
 
 /// Wait for the daemon process described by `pid` / `creation_time` to exit,
