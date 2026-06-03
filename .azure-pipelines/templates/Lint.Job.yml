@@ -68,6 +68,10 @@ jobs:
         parameters:
           targetTriple: $(targetTriple)
 
+      # Redirect crates.io to the public MxcDependencies feed (1ES network
+      # isolation blocks crates.io).
+      - template: Cargo.Setup.Public.yml@self
+
       - script: cargo fmt --all -- --check
         displayName: cargo fmt --check
         workingDirectory: $(workingDirectory)

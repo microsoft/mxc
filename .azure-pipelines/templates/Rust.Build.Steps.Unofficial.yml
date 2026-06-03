@@ -29,6 +29,10 @@ steps:
       targetTriple: ${{ parameters.targetTriple }}
       rustVersion: ${{ parameters.rustVersion }}
 
+  # Redirect crates.io to the public MxcDependencies feed (1ES network isolation
+  # blocks crates.io).
+  - template: Cargo.Setup.Public.yml@self
+
   - script: cargo build --locked --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
     displayName: Build
     workingDirectory: ${{ parameters.workingDirectory }}
