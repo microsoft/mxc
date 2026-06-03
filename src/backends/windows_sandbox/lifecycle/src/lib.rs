@@ -23,7 +23,22 @@
 //! protocol (`sandbox_protocol`); it never depends on a consumer crate, so
 //! backend integrations (`ScriptRunner` / `StatefulSandboxBackend`) can be
 //! built on top of it without introducing a dependency cycle.
+//!
+//! The transient one-shot `ScriptRunner` ([`WindowsSandboxRunner`]) lives in
+//! this crate (Windows-only) for exactly that reason: it composes the
+//! lifecycle primitives and depends on `wxc_common`, which `windows_sandbox_common`
+//! must not.
 
 pub mod bridge;
 pub mod rendezvous;
 pub mod vm;
+
+#[cfg(windows)]
+mod error;
+#[cfg(windows)]
+mod one_shot;
+#[cfg(windows)]
+mod teardown;
+
+#[cfg(windows)]
+pub use one_shot::WindowsSandboxRunner;

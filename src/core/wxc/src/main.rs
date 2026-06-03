@@ -17,7 +17,7 @@ use hyperlight_common::HyperlightScriptRunner;
 use isolation_session_common::IsolationSessionRunner;
 #[cfg(feature = "microvm")]
 use nanvix_runner::NanVixScriptRunner;
-use windows_sandbox_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
+use windows_sandbox_lifecycle::WindowsSandboxRunner;
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{
     is_base_container_version, load_mxc_request_with_options, load_request, LoadOptions, ParseError,
@@ -938,13 +938,12 @@ fn main() {
                 );
                 process::exit(1);
             }
-            let sandbox_config = request
-                .experimental
-                .windows_sandbox
-                .as_ref()
-                .cloned()
-                .unwrap_or_default();
-            Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
+            // Transient one-shot: each invocation launches a FRESH disposable
+            // VM and guarantees its teardown. Daemon-backed warm reuse and the
+            // `windows_sandbox` config (idle timeout / pipe name) are no longer
+            // consulted here; the long-lived VM is the state-aware lifecycle's
+            // concern.
+            Box::new(WindowsSandboxRunner::new())
         }
         ContainmentBackend::IsolationSession => {
             #[cfg(feature = "isolation_session")]

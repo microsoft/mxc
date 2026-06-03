@@ -2705,7 +2705,10 @@ dependencies = [
  "anyhow",
  "tempfile",
  "tokio",
+ "uuid",
+ "windows",
  "windows_sandbox_common",
+ "wxc_common",
 ]
 
 [[package]]
@@ -2867,7 +2870,7 @@ dependencies = [
  "nanvix_runner",
  "serde_json",
  "windows",
- "windows_sandbox_common",
+ "windows_sandbox_lifecycle",
  "wslc_common",
  "wxc_common",
 ]
