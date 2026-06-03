@@ -15,12 +15,14 @@
 //! daemon's pid, IPC port, and auth nonce). Each phase is a fresh process that
 //! reads those records to find and command the daemon.
 //!
-//! Phase semantics (4a — exec is stubbed until 4b):
+//! Phase semantics:
 //! - **provision**: pure bookkeeping. Validate + snapshot the filesystem
 //!   policy, mint `wsb:<token>`, write the per-sandbox record. No VM, no daemon.
 //! - **start**: spawn the detached daemon, which launches the VM and connects
 //!   the guest, then writes `daemon.json`. Returns only once the daemon reports
 //!   ready. Single-slot: rejected if another sandbox is already active.
+//! - **exec**: connect to the held daemon, run the script on the guest control
+//!   connection, and relay stdout/stderr live to this process's stdio.
 //! - **stop**: command the daemon to tear down its VM and exit.
 //! - **deprovision**: ensure the daemon is gone, then remove the per-sandbox
 //!   scratch + record.

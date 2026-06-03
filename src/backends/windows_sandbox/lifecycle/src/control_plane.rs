@@ -731,12 +731,12 @@ pub fn live_daemon() -> Result<Option<DaemonRecord>> {
 // Daemon IPC line protocol
 // ---------------------------------------------------------------------------
 //
-// The daemon serves a trivial line protocol on `127.0.0.1:<ipc_port>`:
+// The daemon serves a line protocol on `127.0.0.1:<ipc_port>`:
 //   request  : `<VERB> <nonce>\n`
 //   response : `OK\n` | `PONG\n` | `ERR <message>\n`
 // The nonce authenticates the caller against a process that merely squats the
-// localhost port. Exec is *not* part of the 4a protocol — it is stubbed at the
-// backend layer and lands in 4b.
+// localhost port. The `EXEC` verb continues into a binary frame stream after
+// its status line (see [`crate::ipc_exec`]).
 
 /// Liveness/echo verb. Response: `PONG`.
 pub const IPC_PING: &str = "PING";
