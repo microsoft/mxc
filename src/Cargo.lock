@@ -2973,6 +2973,7 @@ dependencies = [
  "mxc_build_common",
  "serde_json",
  "tokio",
+ "windows",
  "windows_sandbox_common",
  "wxc_common",
 ]

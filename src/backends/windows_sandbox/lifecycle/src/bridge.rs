@@ -31,6 +31,17 @@ const RECONNECT_TIMEOUT_SECS: u64 = 30;
 /// draining the guest to a clean reuse point.
 const IPC_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Defense-in-depth backstop: once the guest has reported `Exit`, bound how long
+/// we keep waiting for stdout/stderr to reach EOF before abandoning the drain
+/// and freeing the slot. The guest is the primary guarantor of liveness (it
+/// reaps its child's process tree and always sends `Exit` plus closes its data
+/// sockets); this only covers a guest that sent `Exit` yet failed to close the
+/// data sockets. Set longer than the guest's own drain grace so the guest-side
+/// mechanism fires first and this almost never trips. When it does fire, the
+/// abandoned data sockets are discarded by the next exec's reconnect, so no
+/// subsequent exec is corrupted.
+const POST_EXIT_DRAIN: Duration = Duration::from_secs(15);
+
 /// Four TCP connections to the guest agent.
 ///
 /// TODO: These TCP connections are unencrypted. Verify if this is a concern.
@@ -403,6 +414,7 @@ where
     let mut stdout_seen: u64 = 0;
     let mut stderr_seen: u64 = 0;
     let mut exit: Option<(i32, String)> = None;
+    let mut post_exit_deadline: Option<tokio::time::Instant> = None;
     let mut ctrl_buf: Vec<u8> = Vec::with_capacity(256);
     let mut so = [0u8; 8192];
     let mut se = [0u8; 8192];
@@ -452,6 +464,11 @@ where
                         } => {
                             ctrl_buf.drain(..consumed);
                             exit = Some((e.exit_code, e.error_message));
+                            // Arm the post-exit drain backstop: bound how long
+                            // we wait for stdout/stderr EOF now that the child
+                            // has reported completion.
+                            post_exit_deadline =
+                                Some(tokio::time::Instant::now() + POST_EXIT_DRAIN);
                             break;
                         }
                         DecodeResult::Message {
@@ -469,6 +486,23 @@ where
                         DecodeResult::Incomplete => break,
                     }
                 }
+            }
+            // Post-exit drain backstop. Once the guest has reported `Exit`, only
+            // wait a bounded time for stdout/stderr to EOF; if a leaked guest
+            // descendant still holds the pipes (and the guest somehow failed to
+            // close its data sockets), abandon the drain so the slot is freed.
+            _ = async {
+                match post_exit_deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if exit.is_some() && !(stdout_done && stderr_done) => {
+                eprintln!(
+                    "[daemon] post-exit drain timed out after {:?}; abandoning stdout/stderr (possible leaked guest descendant holding the pipes)",
+                    POST_EXIT_DRAIN
+                );
+                stdout_done = true;
+                stderr_done = true;
             }
         }
     }

@@ -10,6 +10,7 @@
 
 mod executor;
 mod firewall;
+mod job;
 mod listener;
 
 use anyhow::{Context, Result};
