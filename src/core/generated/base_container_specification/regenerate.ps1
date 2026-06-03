@@ -20,14 +20,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Resolve repo root (two levels up from this script's directory's parents)
+# Resolve repo root (this script lives at <repoRoot>/src/core/generated/base_container_specification).
 $repoRoot = (& git rev-parse --show-toplevel) 2>$null
 if (-not $repoRoot) {
-    throw "Not inside a git repository. Run from the repo root."
+    throw "Not inside a git repository."
 }
 Set-Location $repoRoot
 
-$crateDir = "src\core\generated\base_container_specification"
+# Derive the crate dir from the script's own location so it never goes stale if the crate moves.
+$crateDir = $PSScriptRoot
 $srcDir   = Join-Path $crateDir "src"
 $fbs      = "external\windows-sdk\BaseContainerSpecification.fbs"
 
