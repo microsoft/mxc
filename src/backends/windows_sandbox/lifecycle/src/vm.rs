@@ -348,25 +348,13 @@ pub async fn teardown() {
 /// block a fresh sandbox launch, so treating them as "running" would
 /// cause teardown to wait out its full timeout for nothing.
 pub async fn is_sandbox_vm_running() -> bool {
-    // Use PowerShell to check for the sandbox host processes.
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Get-Process -Name 'WindowsSandbox*' -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .await;
-
-    match output {
-        Ok(out) => {
-            let count_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            count_str.parse::<u32>().unwrap_or(0) > 0
-        }
-        Err(_) => false,
-    }
+    // Toolhelp32 snapshot (no PowerShell): a failed snapshot is treated as
+    // "not running" here, matching the prior probe's behavior — this is only
+    // used to decide when teardown polling can stop, never to gate a
+    // destructive decision.
+    crate::control_plane::enumerate_pids_with_prefix("WindowsSandbox")
+        .map(|pids| !pids.is_empty())
+        .unwrap_or(false)
 }
 
 /// Enumerate the currently-running Windows Sandbox host processes, returning
@@ -377,43 +365,12 @@ pub async fn is_sandbox_vm_running() -> bool {
 /// identities form the *positive ownership proof* recorded in the daemon record
 /// and matched against on a later daemon's startup reconcile.
 ///
-/// Returns `Err` if the enumeration itself could not be performed (the
-/// PowerShell probe failed to run or exited non-zero). Callers that gate a
-/// destructive decision on the result MUST treat an `Err` as "unknown" rather
-/// than "no VM", so they fail safe (refuse) instead of proceeding blind.
+/// Returns `Err` if the enumeration itself could not be performed (the Toolhelp32
+/// snapshot failed). Callers that gate a destructive decision on the result MUST
+/// treat an `Err` as "unknown" rather than "no VM", so they fail safe (refuse)
+/// instead of proceeding blind.
 pub async fn enumerate_sandbox_vm_processes() -> Result<Vec<crate::control_plane::VmProcId>> {
-    let out = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Get-Process -Name 'WindowsSandbox*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .await
-        .context("run WindowsSandbox process enumeration")?;
-
-    if !out.status.success() {
-        anyhow::bail!(
-            "WindowsSandbox process enumeration exited with {}",
-            out.status
-        );
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut procs = Vec::new();
-    for line in text.lines() {
-        let Ok(pid) = line.trim().parse::<u32>() else {
-            continue;
-        };
-        // Pair each PID with its creation time. If the process exited between
-        // enumeration and this query, skip it — it is no longer part of a live
-        // VM and contributes nothing to an ownership match.
-        if let Some(creation_time) = crate::control_plane::process_creation_time(pid) {
-            procs.push(crate::control_plane::VmProcId { pid, creation_time });
-        }
-    }
-    Ok(procs)
+    crate::control_plane::enumerate_processes_with_prefix("WindowsSandbox")
 }
 
 #[cfg(test)]

@@ -361,25 +361,11 @@ pub(crate) fn reconcile_existing_vm(root: &Path) -> Reconcile {
 /// Returns `None` if the probe itself could not be run, so callers can decide
 /// how to treat the ambiguity (reconcile refuses; teardown stops polling).
 fn wsb_vm_running() -> Option<bool> {
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Get-Process -Name 'WindowsSandbox*' -ErrorAction SilentlyContinue | \
-             Measure-Object | Select-Object -ExpandProperty Count",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse::<u32>()
-            .unwrap_or(0)
-            > 0,
-    )
+    // Toolhelp32 snapshot (no PowerShell). A snapshot failure is surfaced as
+    // `None` so the ambiguity is visible to callers.
+    crate::control_plane::enumerate_pids_with_prefix("WindowsSandbox")
+        .ok()
+        .map(|pids| !pids.is_empty())
 }
 
 /// Issue `taskkill /F /IM` for each Windows Sandbox host process, without

@@ -294,6 +294,78 @@ pub fn process_creation_time(_pid: u32) -> Option<u64> {
     None
 }
 
+/// Enumerate the PIDs of all running processes whose image name starts
+/// (case-insensitively) with `name_prefix`, via a single Toolhelp32 snapshot.
+///
+/// This replaces shelling out to PowerShell `Get-Process`: it is fast, has no
+/// external dependency, and takes one atomic snapshot of the process list —
+/// the right substrate for ownership-proof and liveness decisions. Returns
+/// `Err` only if the snapshot itself could not be taken, so callers gating a
+/// destructive decision can treat `Err` as "unknown" and fail safe.
+#[cfg(windows)]
+pub fn enumerate_pids_with_prefix(name_prefix: &str) -> Result<Vec<u32>> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    fn wide_to_string(wide: &[u16]) -> String {
+        let len = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+        String::from_utf16_lossy(&wide[..len])
+    }
+
+    let prefix_lower = name_prefix.to_lowercase();
+    let mut pids = Vec::new();
+
+    // SAFETY: the snapshot handle is closed on every return path; the
+    // PROCESSENTRY32W is fully initialised (dwSize set) before the first/next
+    // calls, and the szExeFile out-param is a fixed-size array.
+    unsafe {
+        let snapshot =
+            CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).context("CreateToolhelp32Snapshot")?;
+
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+
+        let mut ok = Process32FirstW(snapshot, &mut entry).is_ok();
+        while ok {
+            let name = wide_to_string(&entry.szExeFile);
+            if name.to_lowercase().starts_with(&prefix_lower) {
+                pids.push(entry.th32ProcessID);
+            }
+            ok = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+
+        let _ = CloseHandle(snapshot);
+    }
+
+    Ok(pids)
+}
+
+#[cfg(not(windows))]
+pub fn enumerate_pids_with_prefix(_name_prefix: &str) -> Result<Vec<u32>> {
+    Ok(Vec::new())
+}
+
+/// Enumerate the identities (PID + creation time) of all running processes
+/// whose image name starts (case-insensitively) with `name_prefix`.
+///
+/// Built on [`enumerate_pids_with_prefix`] for the snapshot, then pairs each
+/// PID with its creation time so the result is PID-reuse-safe. A process that
+/// exits between the snapshot and the creation-time query is simply dropped.
+pub fn enumerate_processes_with_prefix(name_prefix: &str) -> Result<Vec<VmProcId>> {
+    let mut procs = Vec::new();
+    for pid in enumerate_pids_with_prefix(name_prefix)? {
+        if let Some(creation_time) = process_creation_time(pid) {
+            procs.push(VmProcId { pid, creation_time });
+        }
+    }
+    Ok(procs)
+}
+
 /// True iff the daemon described by `record` is still the live process it
 /// claims to be (PID exists AND its creation time matches the recorded one).
 pub fn daemon_alive(record: &DaemonRecord) -> bool {
@@ -657,6 +729,38 @@ mod tests {
     fn dead_pid_has_no_creation_time() {
         // PID 0 is never a queryable user process.
         assert_eq!(process_creation_time(0), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn enumerate_finds_current_process_by_image_prefix() {
+        // The test runner's own image name is a stable, present process. Use a
+        // short prefix of its file stem and assert the Toolhelp32 snapshot finds
+        // our PID with a matching creation time.
+        let exe = std::env::current_exe().unwrap();
+        let stem = exe.file_stem().unwrap().to_string_lossy().into_owned();
+        let prefix: String = stem.chars().take(6).collect();
+
+        let pids = enumerate_pids_with_prefix(&prefix).unwrap();
+        assert!(
+            pids.contains(&std::process::id()),
+            "expected snapshot for prefix {prefix:?} to contain our pid {}, got {pids:?}",
+            std::process::id()
+        );
+
+        let procs = enumerate_processes_with_prefix(&prefix).unwrap();
+        let ours = procs
+            .iter()
+            .find(|p| p.pid == std::process::id())
+            .expect("our process should be enumerated with an identity");
+        assert_eq!(ours.creation_time, process_creation_time(ours.pid).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn enumerate_unmatched_prefix_is_empty() {
+        let pids = enumerate_pids_with_prefix("zzz_no_such_process_prefix_zzz").unwrap();
+        assert!(pids.is_empty(), "unexpected matches: {pids:?}");
     }
 
     #[cfg(windows)]
