@@ -25,7 +25,7 @@ use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 
 use crate::error::OneShotError;
 use crate::teardown::{self, Reconcile, VmTeardownGuard};
-use crate::{bridge, rendezvous, vm};
+use crate::{bridge, policy, rendezvous, vm};
 
 /// Maximum time to wait for the guest agent's rendezvous file. First VM boot
 /// can take several minutes; 360s covers worst-case cold starts.
@@ -68,6 +68,11 @@ impl WindowsSandboxRunner {
             vm::find_host_python().map_err(|e| OneShotError::PythonNotFound(format!("{e:#}")))?;
         let guest_dir = current_exe_dir().map_err(OneShotError::Launch)?;
 
+        // Translate the request's policy into the primitives this backend can
+        // enforce, rejecting anything it cannot. This has no side effects, so a
+        // rejection here leaves the host untouched (no VM, no scratch dirs).
+        let plan = policy::plan_policy(request)?;
+
         // Reconcile the host single-instance slot (reclaim our own orphan, or
         // refuse a foreign VM).
         let markers_root = teardown::markers_root();
@@ -100,8 +105,14 @@ impl WindowsSandboxRunner {
         // Generate the `.wsb` before arming the guard so a generation failure
         // does not trigger a (no-op but global) teardown for a VM we never
         // launched.
-        let wsb_path = vm::generate_wsb(&guest_dir, &rendezvous_dir, &python_dir, &config_dir)
-            .map_err(|e| OneShotError::Launch(format!("{e:#}")))?;
+        let wsb_path = vm::generate_wsb(
+            &guest_dir,
+            &rendezvous_dir,
+            &python_dir,
+            &config_dir,
+            &plan.mapped_folders,
+        )
+        .map_err(|e| OneShotError::Launch(format!("{e:#}")))?;
 
         // Arm guaranteed teardown BEFORE launch so there is no window in which
         // a spawned VM can leak. From here, every return path tears the VM down.

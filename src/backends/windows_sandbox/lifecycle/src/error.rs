@@ -27,6 +27,10 @@ pub(crate) enum OneShotError {
     /// Preparing or launching the VM (`.wsb` generation / `WindowsSandbox.exe`)
     /// failed.
     Launch(String),
+    /// The request's policy cannot be expressed by Windows Sandbox (e.g. host
+    /// network filtering, a proxy, a denied path inside a mapped share, or an
+    /// unmappable host path).
+    Policy(String),
     /// The guest agent never published its rendezvous address in time.
     Rendezvous(String),
     /// The TCP channels to the guest agent could not be established.
@@ -63,6 +67,11 @@ impl OneShotError {
                 d,
             ),
             OneShotError::Launch(d) => ("Failed to launch the Windows Sandbox VM.", d),
+            OneShotError::Policy(d) => (
+                "The request's policy cannot be enforced by the Windows Sandbox \
+                 backend.",
+                d,
+            ),
             OneShotError::Rendezvous(d) => (
                 "Timed out waiting for the Windows Sandbox guest agent to start.",
                 d,

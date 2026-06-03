@@ -273,7 +273,7 @@ async fn try_launch_and_connect(
             sandbox_vm::teardown().await;
 
             let wsb_path =
-                sandbox_vm::generate_wsb(guest_dir, rendezvous_dir, python_dir, temp_dir)?;
+                sandbox_vm::generate_wsb(guest_dir, rendezvous_dir, python_dir, temp_dir, &[])?;
             sandbox_vm::launch(&wsb_path).await?;
             s.sandbox_running = true;
             eprintln!("[daemon] sandbox VM launched");

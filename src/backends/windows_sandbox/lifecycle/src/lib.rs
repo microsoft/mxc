@@ -38,6 +38,8 @@ mod error;
 #[cfg(windows)]
 mod one_shot;
 #[cfg(windows)]
+mod policy;
+#[cfg(windows)]
 mod teardown;
 
 #[cfg(windows)]

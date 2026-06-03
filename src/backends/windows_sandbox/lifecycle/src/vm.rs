@@ -3,6 +3,7 @@
 //! Generates .wsb configuration files and launches/tears down
 //! `WindowsSandbox.exe`.
 
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -19,6 +20,18 @@ const SANDBOX_PYTHON_DIR: &str = r"C:\Sandbox-Python";
 
 /// Name of the guest binary that runs inside the sandbox.
 const GUEST_BINARY: &str = "wxc-windows-sandbox-guest.exe";
+
+/// A host folder mapped into the sandbox, derived from the request's
+/// filesystem policy (`readwrite_paths` / `readonly_paths`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappedFolder {
+    /// Host-side absolute path (must exist).
+    pub host: String,
+    /// Path the folder is exposed at inside the guest.
+    pub sandbox: String,
+    /// Whether the guest gets read-only access.
+    pub read_only: bool,
+}
 
 /// Maximum time (seconds) to wait for sandbox processes to exit during teardown.
 const TEARDOWN_POLL_TIMEOUT_SECS: u64 = 30;
@@ -115,18 +128,25 @@ fn is_real_python(dir: &Path) -> bool {
 /// Generate a .wsb configuration file in `output_dir` and a bootstrap script
 /// in `rendezvous_dir`.
 ///
-/// The .wsb maps three folders into the sandbox:
+/// The .wsb maps three fixed folders into the sandbox:
 ///   - `guest_dir` (read-only)        → `C:\sandbox-guest`
 ///   - `rendezvous_dir` (read-write) → `C:\sandbox-rendezvous`
 ///   - `python_dir` (read-only)      → `C:\sandbox-python`
 ///
-/// The LogonCommand runs a bootstrap script that adds Python to PATH
-/// then starts the guest agent.
+/// `extra_mapped` are additional host folders to expose inside the guest,
+/// derived from the request's filesystem policy, each mapped at the same
+/// absolute path inside the guest (host parity).
+///
+/// The LogonCommand runs a bootstrap script that adds Python to PATH then
+/// starts the guest agent. (Network isolation is enforced by the guest agent
+/// itself once the host connects — see `guest::firewall::lockdown` — so the
+/// bootstrap does not touch the firewall.)
 pub fn generate_wsb(
     guest_dir: &Path,
     rendezvous_dir: &Path,
     python_dir: &Path,
     output_dir: &Path,
+    extra_mapped: &[MappedFolder],
 ) -> Result<PathBuf> {
     // Write the bootstrap script into the rendezvous dir (read-write inside
     // the sandbox) so it can be executed by the LogonCommand.
@@ -160,6 +180,19 @@ echo [bootstrap] Guest exited with code %ERRORLEVEL% >> "%LOG%" 2>&1
     std::fs::write(&bootstrap_path, bootstrap_content)
         .with_context(|| format!("write bootstrap script {:?}", bootstrap_path))?;
 
+    let mut mapped_xml = String::new();
+    for folder in extra_mapped {
+        let _ = write!(
+            mapped_xml,
+            "\n    <MappedFolder>\n      <HostFolder>{host}</HostFolder>\n      \
+             <SandboxFolder>{sandbox}</SandboxFolder>\n      \
+             <ReadOnly>{ro}</ReadOnly>\n    </MappedFolder>",
+            host = xml_escape(&folder.host),
+            sandbox = xml_escape(&folder.sandbox),
+            ro = folder.read_only,
+        );
+    }
+
     let wsb_content = format!(
         r#"<Configuration>
   <MappedFolders>
@@ -177,7 +210,7 @@ echo [bootstrap] Guest exited with code %ERRORLEVEL% >> "%LOG%" 2>&1
       <HostFolder>{host_python}</HostFolder>
       <SandboxFolder>{sandbox_python}</SandboxFolder>
       <ReadOnly>true</ReadOnly>
-    </MappedFolder>
+    </MappedFolder>{mapped_xml}
   </MappedFolders>
   <LogonCommand>
     <Command>{sandbox_rendezvous}\bootstrap.cmd</Command>
@@ -191,6 +224,7 @@ echo [bootstrap] Guest exited with code %ERRORLEVEL% >> "%LOG%" 2>&1
         sandbox_guest = SANDBOX_GUEST_DIR,
         sandbox_rendezvous = SANDBOX_RENDEZVOUS_DIR,
         sandbox_python = SANDBOX_PYTHON_DIR,
+        mapped_xml = mapped_xml,
     );
 
     let wsb_path = output_dir.join("wxc-windows-sandbox.wsb");
@@ -198,6 +232,14 @@ echo [bootstrap] Guest exited with code %ERRORLEVEL% >> "%LOG%" 2>&1
         .with_context(|| format!("write .wsb file {:?}", wsb_path))?;
 
     Ok(wsb_path)
+}
+
+/// Minimal XML text escaping for the `&`, `<`, and `>` metacharacters that
+/// can legitimately appear in Windows paths (e.g. `&` in a folder name).
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Launch Windows Sandbox with the given .wsb file.
@@ -341,7 +383,8 @@ mod tests {
         std::fs::create_dir_all(&rendezvous_dir).unwrap();
         std::fs::create_dir_all(&python_dir).unwrap();
 
-        let wsb_path = generate_wsb(&guest_dir, &rendezvous_dir, &python_dir, dir.path()).unwrap();
+        let wsb_path =
+            generate_wsb(&guest_dir, &rendezvous_dir, &python_dir, dir.path(), &[]).unwrap();
         assert!(wsb_path.exists());
 
         let content = std::fs::read_to_string(&wsb_path).unwrap();
@@ -358,6 +401,52 @@ mod tests {
         let bootstrap_content = std::fs::read_to_string(&bootstrap).unwrap();
         assert!(bootstrap_content.contains(SANDBOX_PYTHON_DIR));
         assert!(bootstrap_content.contains(GUEST_BINARY));
+        // No policy => no extra mapped folders and no firewall step.
+        assert!(!bootstrap_content.contains("netsh advfirewall"));
+    }
+
+    #[test]
+    fn generate_wsb_emits_extra_mapped_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let guest_dir = dir.path().join("guest");
+        let rendezvous_dir = dir.path().join("rendezvous");
+        let python_dir = dir.path().join("python");
+        std::fs::create_dir_all(&guest_dir).unwrap();
+        std::fs::create_dir_all(&rendezvous_dir).unwrap();
+        std::fs::create_dir_all(&python_dir).unwrap();
+
+        let mapped = vec![
+            MappedFolder {
+                host: r"C:\work\proj".to_string(),
+                sandbox: r"C:\work\proj".to_string(),
+                read_only: false,
+            },
+            MappedFolder {
+                host: r"C:\data\ref".to_string(),
+                sandbox: r"C:\data\ref".to_string(),
+                read_only: true,
+            },
+        ];
+        let wsb_path = generate_wsb(
+            &guest_dir,
+            &rendezvous_dir,
+            &python_dir,
+            dir.path(),
+            &mapped,
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(&wsb_path).unwrap();
+        assert!(content.contains(r"C:\work\proj"));
+        assert!(content.contains(r"C:\data\ref"));
+        // The read-only flag is rendered per folder.
+        assert!(content.contains("<ReadOnly>true</ReadOnly>"));
+        assert!(content.contains("<ReadOnly>false</ReadOnly>"));
+    }
+
+    #[test]
+    fn xml_escape_escapes_metacharacters() {
+        assert_eq!(xml_escape(r"C:\a&b"), r"C:\a&amp;b");
+        assert_eq!(xml_escape("a<b>c"), "a&lt;b&gt;c");
     }
 
     #[test]

@@ -96,7 +96,23 @@ This avoids the 30-60s boot cost for subsequent executions.
 | `experimental.windows_sandbox.idleTimeoutMs` | `300000` (5 min) | Daemon idle timeout before VM teardown |
 | `experimental.windows_sandbox.daemonPipeName` | `"wxc-windows-sandbox"` | IPC identifier (determines TCP port) |
 
-When `containment` is `"windows_sandbox"`, the `processContainer`, `filesystem`, and `network` sections are ignored — isolation is managed by the sandbox VM and guest agent firewall.
+When `containment` is `"windows_sandbox"`, the `processContainer` section is ignored — UI/process isolation is managed by the sandbox VM. The `filesystem` and `network` sections are honored by the transient one-shot runner (see [Filesystem and network policy](#filesystem-and-network-policy) below).
+
+## Filesystem and network policy
+
+The transient one-shot runner (the default path through `wxc-exec`) maps the request's filesystem policy into the sandbox and validates its network policy:
+
+- **`filesystem.readwritePaths`** → each host directory is mapped into the guest **read-write** at the *same absolute path* (host parity).
+- **`filesystem.readonlyPaths`** → each host directory is mapped **read-only**; writes inside the guest fail.
+- **`filesystem.deniedPaths`** → these are *host* paths the contained code must not reach. Because Windows Sandbox shares nothing from the host by default, a denied path that lies outside every mapped share is already satisfied (no-op). A denied path that is equal to, or nested inside, a mapped share is **rejected** — Windows Sandbox has no per-path "deny" primitive, so the contradiction cannot be honored.
+- Mapped paths must **exist** and be **directories** (files are rejected — Windows Sandbox maps directories only). Overlapping/nested mapped roots and the same path listed as both read-write and read-only are rejected.
+- **`network.defaultPolicy: "block"`** (the schema default) is enforced **natively** by the guest agent's firewall lockdown (default-deny outbound); no host-side action is needed.
+- **`network.defaultPolicy: "allow"`** is currently **rejected** — the guest agent unconditionally locks down egress, so outbound access cannot be granted without a guest-side change.
+- **`network.allowedHosts` / `network.blockedHosts`** (selective per-host filtering) and an explicit **network proxy** are **rejected** — the backend has no DNS-aware filtering primitive.
+
+Policy validation runs *before* any VM is launched, so a rejected policy fails fast with a clear error and zero side effects.
+
+> The warm daemon path (used for VM reuse) does not yet forward filesystem/network policy; it relies on the VM boundary and agent firewall.
 
 ## Security Model
 
@@ -124,7 +140,7 @@ After enabling Windows Sandbox: **reboot required**.
 3. **Windows Insider regression** — builds 26100+ have confirmed sandbox boot failures (zombie VM processes)
 4. **Cold boot time** — first sandbox boot takes 15-60s; subsequent executions reuse the VM
 5. **Buffered output** — stdout/stderr are captured and returned after completion, not streamed live
-6. **No filesystem/network policy forwarding** — the `filesystem` and `network` config sections are ignored; isolation relies on the VM boundary and agent firewall
+6. **Partial policy forwarding** — the transient one-shot runner honors `filesystem` (read-write/read-only mapping, denied-path validation) and validates `network` (block enforced natively; allow / per-host filtering / proxy rejected). The warm daemon path does not yet forward these. Granting outbound network (`allow`) and DNS-aware host filtering remain future work.
 
 ## Further Reading
 
