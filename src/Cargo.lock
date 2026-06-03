@@ -2703,6 +2703,8 @@ name = "windows_sandbox_lifecycle"
 version = "0.6.1"
 dependencies = [
  "anyhow",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "uuid",

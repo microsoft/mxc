@@ -9,6 +9,8 @@ wxc_common = { workspace = true }
 tokio.workspace = true
 anyhow.workspace = true
 uuid.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }

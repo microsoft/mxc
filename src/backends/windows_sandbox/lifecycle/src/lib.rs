@@ -30,6 +30,7 @@
 //! must not.
 
 pub mod bridge;
+pub mod control_plane;
 pub mod rendezvous;
 pub mod vm;
 
@@ -39,6 +40,8 @@ mod error;
 mod one_shot;
 #[cfg(windows)]
 mod policy;
+#[cfg(windows)]
+mod state_aware;
 #[cfg(windows)]
 mod teardown;
 

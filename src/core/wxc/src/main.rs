@@ -27,7 +27,7 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
-#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+#[cfg(target_os = "windows")]
 use wxc_common::state_aware_dispatch::dispatch_state_aware;
 use wxc_common::state_aware_dispatch::{resolve_backend, run_state_aware, DispatchOutcome};
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -260,6 +260,11 @@ fn dispatch_state_aware_request(
 ) -> Result<DispatchOutcome, MxcError> {
     let backend = resolve_backend(&parsed)?;
     match backend {
+        #[cfg(target_os = "windows")]
+        wxc_common::models::ContainmentBackend::WindowsSandbox => {
+            let mut runner = WindowsSandboxRunner::new();
+            dispatch_state_aware(&mut runner, parsed, dry_run)
+        }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
