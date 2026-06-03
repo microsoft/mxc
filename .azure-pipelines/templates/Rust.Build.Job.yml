@@ -43,6 +43,9 @@ jobs:
         CARGO_TARGET_DIR: c:/t/target
         artifactPrefix: wxc-binaries
         workingDirectory: $(Build.SourcesDirectory)/src
+        # Explicit feature set (no --all-features): tier2_bfs must NOT ship
+        # on Win 11 25H2 (bfscfg.exe risks an OS hang).
+        cargoFeatures: hyperlight isolation_session microvm wslc
         signPattern: |
             wxc-exec.exe
             wxc-host-prep.exe
@@ -57,6 +60,7 @@ jobs:
         CARGO_TARGET_DIR: /tmp/target
         artifactPrefix: lxc-binaries
         workingDirectory: $(Build.SourcesDirectory)/src/core/lxc
+        cargoFeatures: hyperlight
         signPattern: |
           lxc-exec
           linux-test-proxy
@@ -74,21 +78,6 @@ jobs:
       artifactBaseName: $(artifactPrefix)-$(targetTriple)
       configTomlPath: $(Build.SourcesDirectory)/.cargo/config.toml
 
-    templateContext:
-      rust:
-        rustToolchain:
-          toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
-          version: 'ms-prod-1.93'
-          additionalTargets: $(triplet)
-        workingDirectory: $(workingDirectory)
-        authenticateOptions:
-          configFile: $(configTomlPath)
-        installOptions:
-          configFile: $(configTomlPath)
-        cacheOptions:
-          enabled: true
-          enableTargetCache: true
-
     steps:
       - checkout: self
 
@@ -99,44 +88,22 @@ jobs:
         displayName: Install ARM64 toolchain
         condition: and(eq('${{ item.os }}','linux'), eq('${{ item.arch }}','arm64'))
 
-      # Append pipeline-specific Cargo settings (registry, cross-compile linker) to the workspace config
-      - powershell: |
-          Add-Content -Path "$(configTomlPath)" -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
-        displayName: Setup Cargo Config
+      - ${{ if eq(parameters.isOfficialBuild, true) }}:
+        - template: Rust.Build.Steps.Official.yml@self
+          parameters:
+            targetTriple: $(triplet)
+            workingDirectory: $(workingDirectory)
+            cargoFeatures: $(cargoFeatures)
+            enableTest: $(isX64)
 
-      - task: 1ES.Build.Rust.Setup@1
-      - task: 1ES.Build.Rust.Restore@1
-
-      - task: 1ES.Build.Rust.Run@1
-        displayName: Build
-        inputs:
-          command: build
-          profile: release
-          target: $(triplet)
-          testCondition: "eq(variables['isX64'], 'true')" # 1ES nested template takes this as a string
-          enableTest: $(isX64)
-          publishTestResults: false
-          # Clippy + fmt run in the parallel Lint stage (Lint.Job.yml).
-          enableClippy: false
-          enableCodeStyleCheck: false
-          checkAllCodeStyle: false
-          useNextest: false
-          testAllTargets: false
-          buildAllTargets: false
-          # IMPORTANT: do not let the 1ES task default to `--all-features`. The
-          # `tier2_bfs` Cargo feature gates Tier 2 (BFS) and must NOT be
-          # compiled into production binaries on Win 11 25H2 (the embedded
-          # `bfscfg.exe` invocation risks an OS hang). See
-          # `.github/workflows/build.yml`, `tests/scripts/T3-Workloads.ps1`,
-          # and `tests/scripts/Win25H2Safe-Tests.ps1` for the safety model.
-          # Enumerate the production feature set explicitly so the shipped
-          # binary still carries every runtime backend except `tier2_bfs`.
-          # Schema reference: https://eng.ms/docs/coreai/devdiv/one-engineering-system-1es/1es-docs/1es-pipeline-templates/features/buildworkflows/rust-virtual-task
-          allFeatures: false
-          ${{ if eq(item.os, 'windows') }}:
-            activatedFeatures: 'hyperlight isolation_session microvm wslc'
-          ${{ if eq(item.os, 'linux') }}:
-            activatedFeatures: 'hyperlight'
+      - ${{ else }}:
+        # Fork-PR / Unofficial: plain rustup + crates.io, no auth tasks.
+        - template: Rust.Build.Steps.Unofficial.yml@self
+          parameters:
+            targetTriple: $(triplet)
+            workingDirectory: $(workingDirectory)
+            cargoArgs: --no-default-features --features "$(cargoFeatures)"
+            enableTest: $(isX64)
 
       # linux_test_proxy is a separate workspace member (not a dep of lxc), so
       # the workspace-member-scoped build above doesn't pick it up. Build it

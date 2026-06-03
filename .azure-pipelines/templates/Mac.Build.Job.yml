@@ -2,14 +2,7 @@
 # Licensed under the MIT License.
 #
 # Builds mxc-exec-mac (the macOS sandbox executor) on an ARM64 macOS
-# Microsoft-hosted agent and publishes the binary as a pipeline artifact
-# so the Package.NpmSdk and SDK.Integration.Test stages can consume it.
-#
-# This template uses the Microsoft Rust toolchain installer (msrustup) from
-# the Azure Artifacts NuGet feed instead of the 1ES.Build.Rust.* tasks, which
-# are not available on the Microsoft-hosted macOS pool. Crate downloads still
-# go through the centralized Azure Artifacts feed (appended via
-# .azure-pipelines/.cargo/config.toml) to satisfy supply-chain security requirements.
+# Microsoft-hosted agent and publishes the binary as a pipeline artifact.
 
 parameters:
 - name: triplet
@@ -45,48 +38,21 @@ jobs:
   steps:
     - checkout: self
 
-    # Append pipeline-specific Cargo settings (centralized registry) to
-    # the workspace config so crates are pulled from the Azure Artifacts
-    # feed (supply-chain security). Authentication is provided via env var on
-    # each cargo step since 1ES.Build.Rust.Setup is not available on macOS.
-    # The append is guarded: skip if the registry block is already present
-    # (e.g., if the workspace config gains these settings in the future).
-    - script: |
-        echo "" >> "$(Build.SourcesDirectory)/.cargo/config.toml"
-        cat "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml" >> "$(Build.SourcesDirectory)/.cargo/config.toml"
-      displayName: Setup Cargo Config
+    - ${{ if eq(parameters.isOfficialBuild, true) }}:
+      - template: Rust.Build.Steps.Official.yml@self
+        parameters:
+          targetTriple: $(targetTriple)
+          workingDirectory: $(workingDirectory)
+          # macOS-only crate set; the rest of the workspace has Windows-only
+          # crates that do not compile on macOS.
+          cargoPackages: mxc_darwin,seatbelt_common,wxc_common
 
-    # Install the Microsoft Rust toolchain from the NuGet feed instead of
-    # plain rustup. This satisfies 1ES supply-chain requirements by using
-    # the same centralized feed (Mxc-Azure-Feed) as Windows/Linux builds.
-    - task: RustInstaller@1
-      inputs:
-        toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
-        rustVersion: 'ms-prod-1.93'
-        cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/Cargo/index/
-      displayName: Install Rust toolchain
-
-    - task: CargoAuthenticate@0
-      inputs:
-        configFile: '$(Build.SourcesDirectory)/.cargo/config.toml'
-
-    - script: cargo fmt --all -- --check
-      displayName: Check formatting
-      workingDirectory: $(workingDirectory)
-
-    # Clippy is scoped to the macOS-specific crates because the full
-    # workspace includes Windows-only crates that do not compile on macOS.
-    - script: cargo clippy -p mxc_darwin -p seatbelt_common --target $(targetTriple) -- -D warnings
-      displayName: Clippy
-      workingDirectory: $(workingDirectory)
-
-    - script: cargo build --release --target $(targetTriple) -p mxc_darwin
-      displayName: Build release
-      workingDirectory: $(workingDirectory)
-
-    - script: cargo test --release --target $(targetTriple) -p mxc_darwin -p seatbelt_common -p wxc_common
-      displayName: Run tests
-      workingDirectory: $(workingDirectory)
+    - ${{ else }}:
+      - template: Rust.Build.Steps.Unofficial.yml@self
+        parameters:
+          targetTriple: $(targetTriple)
+          workingDirectory: $(workingDirectory)
+          cargoArgs: -p mxc_darwin -p seatbelt_common -p wxc_common
 
     # --- macOS Code Signing + Notarization (official builds only) ---
     # ESRP handles the full signing flow using Microsoft's Developer ID

@@ -1,0 +1,20 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Public rustup toolchain install (no auth tasks). Used by fork-PR builds,
+# the macOS build, and the Lint job. Single source of truth for the public
+# Rust version pin — keep in sync with src/rust-toolchain.toml.
+
+parameters:
+- name: targetTriple
+  type: string
+- name: rustVersion
+  type: string
+  default: '1.93.0'
+
+steps:
+  - task: RustInstaller@1
+    displayName: Install Rust toolchain (public)
+    inputs:
+      rustVersion: ${{ parameters.rustVersion }}
+      additionalTargets: ${{ parameters.targetTriple }}
