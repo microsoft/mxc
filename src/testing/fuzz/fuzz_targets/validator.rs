@@ -36,18 +36,17 @@ fuzz_target!(|data: &[u8]| {
         match req.containment {
             #[cfg(feature = "microvm")]
             ContainmentBackend::MicroVm => {
-                let runner = wxc_common::nanvix_runner::NanVixScriptRunner::new();
+                let runner = nanvix_runner::NanVixScriptRunner::new();
                 let _ = runner.validate_runner(&req);
             }
             #[cfg(feature = "hyperlight")]
             ContainmentBackend::Hyperlight => {
-                let runner = wxc_common::hyperlight_runner::HyperlightScriptRunner::new();
+                let runner = hyperlight_common::HyperlightScriptRunner::new();
                 let _ = runner.validate_runner(&req);
             }
             #[cfg(feature = "isolation_session")]
             ContainmentBackend::IsolationSession => {
-                let runner =
-                    wxc_common::isolation_session::IsolationSessionRunner::new();
+                let runner = isolation_session_common::IsolationSessionRunner::new();
                 let _ = runner.validate_runner(&req);
             }
             _ => {}

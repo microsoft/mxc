@@ -68,10 +68,6 @@ jobs:
       displayName: Install cargo-fuzz
 
     # Build all three fuzz targets with ASAN.
-    # `--fuzz-dir .` overrides cargo-fuzz's workspace-root auto-discovery,
-    # which still expects the legacy `src/fuzz/` layout. The crate now lives
-    # at `src/testing/fuzz/`, so we tell cargo-fuzz to use the current dir
-    # (= $(fuzzDir)) directly.
     - powershell: |
         cd $(fuzzDir)
         foreach ($t in 'config_parser','base64_decode') {
