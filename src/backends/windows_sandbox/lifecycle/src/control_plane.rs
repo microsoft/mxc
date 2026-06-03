@@ -365,6 +365,59 @@ pub fn process_creation_time(_pid: u32) -> Option<u64> {
     None
 }
 
+/// Creation time of `pid` **only if the process is currently running**.
+///
+/// Returns `None` when the PID cannot be opened, its times cannot be read, or —
+/// crucially — the process has already *terminated*. A terminated process whose
+/// kernel object is kept alive by a retained parent handle still opens by PID
+/// and `GetProcessTimes` reports its *original* creation time, so a plain
+/// open+times probe would mistake a crashed-but-handle-retained launcher for a
+/// live one (e.g. a one-shot `wxc-exec` killed while its SDK/shell parent still
+/// holds a handle). The signalled (exited) state is therefore excluded
+/// explicitly via a zero-timeout wait.
+#[cfg(windows)]
+pub fn running_process_creation_time(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE,
+    };
+
+    if pid == 0 {
+        return None;
+    }
+    // SAFETY: `pid` is a plain integer; the handle is closed on every path and
+    // the FILETIME out-params are fully initialised before use.
+    unsafe {
+        let handle = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        )
+        .ok()?;
+        // A process handle becomes signalled the moment the process exits. A
+        // zero-timeout wait that returns `WAIT_OBJECT_0` therefore means the
+        // process has already terminated (even if its object lingers); anything
+        // else (`WAIT_TIMEOUT`) means it is still running.
+        let exited = WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user).is_ok();
+        let _ = CloseHandle(handle);
+        if !ok || exited {
+            return None;
+        }
+        Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn running_process_creation_time(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// Enumerate the PIDs of all running processes whose image name starts
 /// (case-insensitively) with `name_prefix`, via a single Toolhelp32 snapshot.
 ///
@@ -475,9 +528,13 @@ pub fn terminate_processes(_targets: &[VmProcId]) -> usize {
 }
 
 /// True iff the daemon described by `record` is still the live process it
-/// claims to be (PID exists AND its creation time matches the recorded one).
+/// claims to be: a process with its PID is **currently running** AND its
+/// creation time matches the recorded one. Uses the liveness-aware
+/// [`running_process_creation_time`] so a terminated daemon whose object
+/// lingers behind a retained handle is correctly reported as gone rather than
+/// blocking a fresh daemon from reclaiming the slot.
 pub fn daemon_alive(record: &DaemonRecord) -> bool {
-    process_creation_time(record.pid) == Some(record.pid_creation_time)
+    running_process_creation_time(record.pid) == Some(record.pid_creation_time)
 }
 
 // ---------------------------------------------------------------------------
@@ -898,6 +955,67 @@ mod tests {
     fn dead_pid_has_no_creation_time() {
         // PID 0 is never a queryable user process.
         assert_eq!(process_creation_time(0), None);
+        assert_eq!(running_process_creation_time(0), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn running_creation_time_matches_plain_for_live_self() {
+        let pid = std::process::id();
+        assert_eq!(
+            running_process_creation_time(pid),
+            process_creation_time(pid)
+        );
+        assert!(running_process_creation_time(pid).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn running_creation_time_excludes_terminated_but_handle_retained() {
+        use std::process::{Command, Stdio};
+        // A long-lived child we control. `std::process::Child` retains the
+        // process handle until `wait()`, so after we kill it the kernel object
+        // lingers and `OpenProcess`-by-PID still resolves it — exactly the
+        // "crashed launcher whose parent kept a handle" case that wedged
+        // reclaim.
+        let mut child = Command::new("cmd")
+            .args(["/C", "ping -n 999 127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn child");
+        let pid = child.id();
+
+        // While alive both probes agree.
+        let ct = process_creation_time(pid).expect("live child has a creation time");
+        assert_eq!(running_process_creation_time(pid), Some(ct));
+
+        // Terminate but DELIBERATELY do not `wait()`: `child` keeps the handle.
+        child.kill().expect("kill child");
+        // The process handle becomes signalled shortly after termination.
+        for _ in 0..100 {
+            if running_process_creation_time(pid).is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // The lingering terminated object still resolves a creation time via the
+        // plain probe...
+        assert_eq!(
+            process_creation_time(pid),
+            Some(ct),
+            "terminated-but-handle-retained object should still resolve a creation time"
+        );
+        // ...but the liveness-aware probe correctly reports it as gone.
+        assert_eq!(
+            running_process_creation_time(pid),
+            None,
+            "a terminated process must not be reported as running"
+        );
+
+        let _ = child.wait();
     }
 
     #[cfg(windows)]

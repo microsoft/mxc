@@ -46,8 +46,8 @@ use wxc_common::state_aware_backend::{
 use windows::Win32::Foundation::HANDLE;
 
 use crate::control_plane::{
-    self, daemon_record_path, generate_nonce, live_daemon, process_creation_time,
-    read_daemon_record, read_sandbox_record, sandbox_dir, sandbox_record_path, DaemonRecord,
+    self, daemon_record_path, generate_nonce, live_daemon, read_daemon_record, read_sandbox_record,
+    running_process_creation_time, sandbox_dir, sandbox_record_path, DaemonRecord,
     MappedFolderRecord, SandboxRecord, SandboxState, TransitionLock, IPC_EXEC, IPC_OK, IPC_STOP,
 };
 use crate::error::OneShotError;
@@ -295,11 +295,14 @@ fn spawn_daemon(token: &str, nonce: &str) -> Result<std::process::Child, MxcErro
 
 /// Wait for the daemon process described by `pid` / `creation_time` to exit,
 /// up to [`DAEMON_EXIT_TIMEOUT`]. PID-reuse-safe: a recycled PID with a
-/// different creation time counts as gone.
+/// different creation time counts as gone. Uses the liveness-aware
+/// [`running_process_creation_time`] so a terminated daemon whose kernel object
+/// lingers behind a handle this very process may still hold counts as gone
+/// (otherwise the wait would spuriously time out).
 fn wait_daemon_gone(pid: u32, creation_time: u64) -> Result<(), MxcError> {
     let deadline = Instant::now() + DAEMON_EXIT_TIMEOUT;
     loop {
-        if process_creation_time(pid) != Some(creation_time) {
+        if running_process_creation_time(pid) != Some(creation_time) {
             return Ok(());
         }
         if Instant::now() >= deadline {

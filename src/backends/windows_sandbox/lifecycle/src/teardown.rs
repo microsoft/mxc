@@ -38,8 +38,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::control_plane::{
-    decide_cleanup, enumerate_processes_with_prefix, process_creation_time, terminate_processes,
-    CleanupAction, VmOwnership, VmProcId,
+    decide_cleanup, enumerate_processes_with_prefix, process_creation_time,
+    running_process_creation_time, terminate_processes, CleanupAction, VmOwnership, VmProcId,
 };
 
 /// Image-name prefix shared by every Windows Sandbox host process
@@ -354,13 +354,20 @@ fn read_marker(run_dir: &Path) -> Option<OneShotMarker> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Whether the launcher recorded in `marker` is *strongly* alive: its PID
-/// exists AND the live creation time matches the recorded one. A missing
-/// recorded creation time yields `false` (dead-or-unknown), so a recycled PID
-/// can never be mistaken for the original launcher and wedge reclaim.
+/// Whether the launcher recorded in `marker` is *strongly* alive: a process
+/// with its PID is **currently running** AND its creation time matches the
+/// recorded one. Both conditions are required:
+/// - The *running* check ([`running_process_creation_time`]) excludes a
+///   terminated launcher whose kernel object lingers because a parent retains a
+///   handle — such a process still opens by PID and reports its original
+///   creation time, so without the running check a crashed launcher would be
+///   mistaken for a live one and wedge reclaim forever.
+/// - The *creation-time* match defeats PID reuse. A missing recorded creation
+///   time yields `false` (dead-or-unknown), so a recycled PID can never be
+///   mistaken for the original launcher.
 fn launcher_strongly_alive(marker: &OneShotMarker) -> bool {
     match marker.launcher_creation_time {
-        Some(ct) => process_creation_time(marker.launcher_pid) == Some(ct),
+        Some(ct) => running_process_creation_time(marker.launcher_pid) == Some(ct),
         None => false,
     }
 }
@@ -488,6 +495,21 @@ pub(crate) fn reconcile_existing_vm(root: &Path) -> Reconcile {
                     vm_processes: Vec::new(),
                 });
             }
+        }
+    }
+
+    if std::env::var_os("WXC_WSB_RECONCILE_DEBUG").is_some() {
+        eprintln!(
+            "[one-shot][reconcile-debug] running={running:?} current_vm={current_vm:?} \
+             marker_dirs={} states={states:?}",
+            marker_dirs.len()
+        );
+        for dir in &marker_dirs {
+            eprintln!(
+                "[one-shot][reconcile-debug]   dir={} marker={:?}",
+                dir.display(),
+                read_marker(dir)
+            );
         }
     }
 
