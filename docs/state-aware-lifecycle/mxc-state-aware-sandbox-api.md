@@ -248,7 +248,7 @@ type SandboxId<C extends StateAwareContainmentBackend> =
 
 type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
 
-type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session'>;
+type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session' | 'windows_sandbox'>;
 // extended as state-aware-capable backends are added
 
 // Per-(backend, phase) Configs. Each declares only the fields valid for that backend
@@ -286,6 +286,34 @@ interface IsolationSessionProvisionMetadata {
   agentUserName: string;
 }
 
+// WindowsSandbox holds a single active sandbox behind a persistent host-side
+// daemon. It has no Entra/`user` bundle. Filesystem policy is honored at
+// provision and is immutable thereafter (see §10.3).
+
+interface WindowsSandboxProvisionConfig {
+  version?: string;
+  filesystem?: FilesystemConfig;
+}
+
+interface WindowsSandboxStartConfig {
+  version?: string;
+}
+
+interface WindowsSandboxExecConfig {
+  version?: string;
+  process: ProcessConfig;
+}
+
+interface WindowsSandboxStopConfig {
+  version?: string;
+}
+
+interface WindowsSandboxDeprovisionConfig {
+  version?: string;
+}
+
+// WindowsSandbox returns no metadata for any phase.
+
 // Backend Config bundle — outer keys are state-aware-capable backends; inner per-phase
 // entries carry the typed per-(backend, phase) Config. Used by the generic per-phase
 // helpers below.
@@ -296,6 +324,12 @@ type ConfigsForBackend<C extends StateAwareContainmentBackend> =
     exec: IsolationSessionExecConfig;
     stop: IsolationSessionStopConfig;
     deprovision: IsolationSessionDeprovisionConfig;
+  } : C extends 'windows_sandbox' ? {
+    provision: WindowsSandboxProvisionConfig;
+    start: WindowsSandboxStartConfig;
+    exec: WindowsSandboxExecConfig;
+    stop: WindowsSandboxStopConfig;
+    deprovision: WindowsSandboxDeprovisionConfig;
   } : never;
 
 type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
@@ -315,6 +349,8 @@ interface StateAwareMetadata {
     provision?: IsolationSessionProvisionMetadata;
     // IsolationSession returns no metadata for start, stop, deprovision
   };
+  windows_sandbox?: Record<never, never>;
+  // ^ WindowsSandbox returns no metadata for any phase (keyof never -> undefined)
   // future state-aware-capable backends add typed entries here
 }
 
@@ -1503,7 +1539,16 @@ documented in the backend's plan doc):
 | `network` | applied | rejected | rejected | rejected | rejected |
 | `ui` | applied | rejected | rejected | rejected | rejected |
 
-The matrix lands at two layers, each enforcing it independently:
+For WindowsSandbox, filesystem policy (readwrite/readonly/denied HOST paths) is
+applied at provision and frozen for the life of the sandbox; later phases reject it.
+`network` and `ui` are not yet honored at any phase (network isolation is enforced
+unconditionally by the in-guest agent). WindowsSandbox has no Entra `user` bundle.
+
+| Field | provision | start | exec | stop | deprovision |
+|---|---|---|---|---|---|
+| `filesystem` | applied | rejected | rejected | rejected | rejected |
+| `network` | rejected | rejected | rejected | rejected | rejected |
+| `ui` | rejected | rejected | rejected | rejected | rejected |
 
 - **Compile-time enforcement at the SDK.** Each per-(backend, phase) Config (§6.1)
   declares only the cross-cutting fields the matrix marks as `applied` for that phase

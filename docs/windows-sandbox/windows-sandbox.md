@@ -114,6 +114,52 @@ Policy validation runs *before* any VM is launched, so a rejected policy fails f
 
 > The warm daemon path (used for VM reuse) does not yet forward filesystem/network policy; it relies on the VM boundary and agent firewall.
 
+## State-aware lifecycle
+
+In addition to the one-shot path above, Windows Sandbox supports the **state-aware lifecycle** — a multi-call `provision → start → exec* → stop → deprovision` flow that holds a single live VM across separate `wxc-exec` phase processes. This mirrors the cross-backend state-aware API (see [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md)) and is the integrated, long-lived counterpart to the disposable one-shot runner.
+
+Because Windows itself permits only **one running Windows Sandbox VM per host**, MXC holds no cross-phase state in the `wxc-exec` process. Instead, a **persistent detached host-side daemon** (`wxc_windows_sandbox_daemon`) owns the live VM and the guest control connection for the sandbox's whole lifetime. Each phase process discovers the daemon via a durable control-plane record keyed by `sandboxId` (under `%TEMP%\wxc-wsb\state-aware\`) and talks to it over a localhost IPC channel.
+
+### Phases
+
+| Phase | Effect |
+|-------|--------|
+| `provision` | Records bookkeeping + an immutable snapshot of the filesystem policy. No VM yet. Returns a `sandboxId` prefixed `wsb:`. |
+| `start` | Spawns the detached daemon, which boots the VM (~35–45s) and holds the guest control connection. Reclaims an orphaned VM from a crashed prior daemon only via positive process-identity proof; otherwise refuses (never kills a foreign/manual sandbox). |
+| `exec` | Connects to the held daemon and runs a script on the live guest connection, relaying stdout/stderr live to `wxc-exec` stdio. Single-flight: one exec at a time per sandbox. Can be called repeatedly; the guest is reused. |
+| `stop` | Sends the daemon a graceful stop; the VM is fully torn down. The same `sandboxId` can be `start`ed again. |
+| `deprovision` | Stops (if needed) and removes all records. The `sandboxId` becomes invalid. |
+
+### Policy honoring
+
+Filesystem policy is honored **at provision** and is **immutable** thereafter — later phases reject `filesystem`. The honored fields are identical to the one-shot path (`readwritePaths` / `readonlyPaths` / `deniedPaths`, where denied paths name *host* paths the contained code must not reach). `network` and `ui` are not honored at any phase (network isolation is enforced unconditionally by the in-guest agent), and there is no Entra `user` bundle (unlike IsolationSession).
+
+### Robustness
+
+- An **8-byte control preamble** (magic `WSBP` + version) on the guest control channel fails fast on a protocol/identity mismatch.
+- The daemon performs **ownership-based startup reconcile**: it reclaims a VM only when the prior daemon record's recorded VM process identities intersect the live set, and otherwise refuses rather than tearing down a sandbox it cannot prove it owns. Cleanup teardown is scoped to VMs the daemon actually launched.
+- There is **no idle watchdog**: a provisioned/idle sandbox is held until an explicit `stop`/`deprovision`.
+
+### SDK usage
+
+```typescript
+import {
+  provisionSandbox, startSandbox, execInSandboxAsync, stopSandbox, deprovisionSandbox,
+} from '@microsoft/mxc-sdk';
+
+const { sandboxId } = await provisionSandbox('windows_sandbox', {
+  filesystem: { readwritePaths: ['C:\\workspace'], readonlyPaths: ['C:\\inputs'] },
+});
+await startSandbox(sandboxId);
+const { stdout, exitCode } = await execInSandboxAsync(sandboxId, {
+  process: { commandLine: 'echo hello-from-wsb' },
+});
+await stopSandbox(sandboxId);
+await deprovisionSandbox(sandboxId);
+```
+
+State-aware requests use schema version `0.6.0-alpha`. The backend is inferred from the `wsb:` prefix on the `sandboxId` for all non-provision phases.
+
 ## Security Model
 
 - **VM isolation**: Scripts run inside a separate Windows instance — full OS boundary

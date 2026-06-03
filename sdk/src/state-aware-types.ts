@@ -16,7 +16,10 @@ export type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
  * Subset of `ContainmentBackend` whose backends participate in the state-aware
  * lifecycle. Extended as more backends opt in.
  */
-export type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session'>;
+export type StateAwareContainmentBackend = Extract<
+  ContainmentBackend,
+  'isolation_session' | 'windows_sandbox'
+>;
 
 /**
  * Branded sandbox identifier returned by `provisionSandbox` and routed back
@@ -107,6 +110,44 @@ export interface IsolationSessionProvisionMetadata {
   agentUserName: string;
 }
 
+// WindowsSandbox per-(backend, phase) Configs. WindowsSandbox holds a single
+// active sandbox behind a persistent host-side daemon. Unlike IsolationSession
+// it has no Entra/`user` bundle. Filesystem policy (readwrite/readonly/denied
+// HOST paths) is honored at provision and is immutable thereafter.
+
+export interface WindowsSandboxProvisionConfig {
+  /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
+  version?: string;
+  /**
+   * Filesystem policy applied at provision and frozen for the life of the
+   * sandbox. `readwritePaths` / `readonlyPaths` are mapped into the guest at
+   * the same absolute host path; `deniedPaths` name HOST paths the contained
+   * code must not reach (rejected if equal to or nested within a mapped share).
+   */
+  filesystem?: FilesystemConfig;
+}
+
+export interface WindowsSandboxStartConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+export interface WindowsSandboxExecConfig {
+  /** Schema version (semver). */
+  version?: string;
+  process: ProcessConfig;
+}
+
+export interface WindowsSandboxStopConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+export interface WindowsSandboxDeprovisionConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
 /**
  * Per-backend per-phase typed Config bundle. Selects the correct Config
  * bundle for the backend type parameter.
@@ -120,7 +161,15 @@ export type ConfigsForBackend<C extends StateAwareContainmentBackend> =
         stop: IsolationSessionStopConfig;
         deprovision: IsolationSessionDeprovisionConfig;
       }
-    : never;
+    : C extends 'windows_sandbox'
+      ? {
+          provision: WindowsSandboxProvisionConfig;
+          start: WindowsSandboxStartConfig;
+          exec: WindowsSandboxExecConfig;
+          stop: WindowsSandboxStopConfig;
+          deprovision: WindowsSandboxDeprovisionConfig;
+        }
+      : never;
 
 export type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['provision'];
@@ -142,6 +191,11 @@ export interface StateAwareMetadata {
     provision?: IsolationSessionProvisionMetadata;
     // IsolationSession returns no metadata for start, stop, or deprovision.
   };
+  // WindowsSandbox returns no metadata for any phase (provision yields only the
+  // sandbox id). The key still participates so `StateAwareMetadata[C]` type-
+  // checks for `C = 'windows_sandbox'`. `Record<never, never>` has `keyof =
+  // never`, so every `*MetadataFor<'windows_sandbox'>` resolves to `undefined`.
+  windows_sandbox?: Record<never, never>;
   // Future state-aware-capable backends add typed entries here.
 }
 
