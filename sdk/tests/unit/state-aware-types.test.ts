@@ -19,6 +19,7 @@ import {
   WindowsSandboxProvisionConfig,
   WindowsSandboxStartConfig,
 } from '../../src/state-aware-types.js';
+import { backendForSandboxId } from '../../src/state-aware-helper.js';
 
 // These tests are primarily compile-time checks. Lines marked with
 // `// @ts-expect-error` MUST trigger a TypeScript error on the line below;
@@ -206,7 +207,12 @@ describe('WindowsSandboxProvisionConfig', () => {
       // @ts-expect-error — network is not exposed on the windows_sandbox provision config.
       network: { defaultPolicy: 'block' },
     };
+    const withUi: WindowsSandboxProvisionConfig = {
+      // @ts-expect-error — ui is not exposed on the windows_sandbox provision config.
+      ui: { disable: true, clipboard: 'none', injection: false },
+    };
     assert.ok(withNetwork);
+    assert.ok(withUi);
   });
 });
 
@@ -220,6 +226,12 @@ describe('WindowsSandboxStartConfig', () => {
       configurationId: 'small',
     };
     assert.ok(withConfigurationId);
+
+    const withUser: WindowsSandboxStartConfig = {
+      // @ts-expect-error — windows_sandbox start has no Entra `user` bundle.
+      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+    };
+    assert.ok(withUser);
   });
 });
 
@@ -257,6 +269,19 @@ describe('WindowsSandbox metadata resolves to undefined for every phase', () => 
       metadata: { agentUserName: 'nope' },
     };
     assert.ok(withBogusMetadata);
+  });
+});
+
+describe('SandboxId<C> brand is compile-time only; prefix is the runtime routing authority', () => {
+  it('routes a force-cast wsb id to windows_sandbox despite the iso brand', () => {
+    // A caller can defeat the compile-time brand with a forced cast. Routing
+    // must still follow the *runtime* prefix (`wsb:`), not the (wrong) brand —
+    // pinning that the brand is advisory and the prefix is authoritative.
+    const misbranded = 'wsb:prov-1' as unknown as SandboxId<'isolation_session'>;
+    assert.strictEqual(backendForSandboxId(misbranded), 'windows_sandbox');
+
+    const isoId = 'iso:abcd' as SandboxId<'isolation_session'>;
+    assert.strictEqual(backendForSandboxId(isoId), 'isolation_session');
   });
 });
 

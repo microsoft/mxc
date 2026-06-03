@@ -149,27 +149,57 @@ export interface WindowsSandboxDeprovisionConfig {
 }
 
 /**
+ * The five per-phase Config slots every state-aware backend must declare.
+ * `object` (not `Record<string, unknown>`) is the slot base: interfaces have
+ * no implicit index signature, so a `Record<string, unknown>` base would
+ * spuriously reject `{ version?: string }`-shaped configs.
+ */
+type StateAwarePhaseConfigs = Record<Phase, object>;
+
+/**
+ * Identity helper that constrains the registry literal to declare an entry for
+ * **every** `StateAwareContainmentBackend`. Adding a backend to the union
+ * without a registry entry below is a compile error here (the literal no
+ * longer satisfies `Record<StateAwareContainmentBackend, …>`), rather than
+ * silently widening `ConfigsForBackend` to the slot base / `never`.
+ */
+type DefineStateAwareConfigRegistry<
+  T extends Record<StateAwareContainmentBackend, StateAwarePhaseConfigs>,
+> = T;
+
+/**
+ * Closed per-backend per-phase Config registry. Keyed by backend; each entry
+ * names the concrete Config interface for each phase.
+ */
+type StateAwareConfigRegistry = DefineStateAwareConfigRegistry<{
+  isolation_session: {
+    provision: IsolationSessionProvisionConfig;
+    start: IsolationSessionStartConfig;
+    exec: IsolationSessionExecConfig;
+    stop: IsolationSessionStopConfig;
+    deprovision: IsolationSessionDeprovisionConfig;
+  };
+  windows_sandbox: {
+    provision: WindowsSandboxProvisionConfig;
+    start: WindowsSandboxStartConfig;
+    exec: WindowsSandboxExecConfig;
+    stop: WindowsSandboxStopConfig;
+    deprovision: WindowsSandboxDeprovisionConfig;
+  };
+}>;
+
+/** Compile-time guard: catches a backend with no registry entry. */
+type Assert<T extends true> = T;
+type _RegistryCoversAllBackends = Assert<
+  [StateAwareContainmentBackend] extends [keyof StateAwareConfigRegistry] ? true : false
+>;
+
+/**
  * Per-backend per-phase typed Config bundle. Selects the correct Config
  * bundle for the backend type parameter.
  */
 export type ConfigsForBackend<C extends StateAwareContainmentBackend> =
-  C extends 'isolation_session'
-    ? {
-        provision: IsolationSessionProvisionConfig;
-        start: IsolationSessionStartConfig;
-        exec: IsolationSessionExecConfig;
-        stop: IsolationSessionStopConfig;
-        deprovision: IsolationSessionDeprovisionConfig;
-      }
-    : C extends 'windows_sandbox'
-      ? {
-          provision: WindowsSandboxProvisionConfig;
-          start: WindowsSandboxStartConfig;
-          exec: WindowsSandboxExecConfig;
-          stop: WindowsSandboxStopConfig;
-          deprovision: WindowsSandboxDeprovisionConfig;
-        }
-      : never;
+  StateAwareConfigRegistry[C];
 
 export type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['provision'];
