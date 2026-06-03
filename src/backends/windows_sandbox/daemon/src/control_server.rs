@@ -29,7 +29,9 @@ use tokio::time::timeout;
 use windows_sandbox_lifecycle::bridge::{
     reconnect_data_streams, stream_exec_on_guest, write_exit_frame, GuestConnection,
 };
-use windows_sandbox_lifecycle::control_plane::{IPC_EXEC, IPC_PING, IPC_STOP};
+use windows_sandbox_lifecycle::control_plane::{
+    IPC_ERR, IPC_ERR_BUSY, IPC_ERR_NOT_READY, IPC_EXEC, IPC_PING, IPC_STOP,
+};
 use windows_sandbox_lifecycle::ipc_exec::{self, ExecStart, MAX_IPC_FRAME};
 
 /// Maximum time to wait for a client to send its request line.
@@ -162,13 +164,16 @@ async fn handle_exec(
         Ok(Ok(req)) => req,
         Ok(Err(e)) => {
             writer
-                .write_all(format!("ERR bad request: {e}\n").as_bytes())
+                .write_all(format!("{IPC_ERR} bad request: {e}\n").as_bytes())
                 .await
                 .ok();
             return Ok(());
         }
         Err(_) => {
-            writer.write_all(b"ERR request timed out\n").await.ok();
+            writer
+                .write_all(format!("{IPC_ERR} request timed out\n").as_bytes())
+                .await
+                .ok();
             return Ok(());
         }
     };
@@ -178,7 +183,10 @@ async fn handle_exec(
     let mut slot = match guest.try_lock() {
         Ok(slot) => slot,
         Err(_) => {
-            writer.write_all(b"ERR busy\n").await.ok();
+            writer
+                .write_all(format!("{IPC_ERR} {IPC_ERR_BUSY}\n").as_bytes())
+                .await
+                .ok();
             return Ok(());
         }
     };
@@ -194,11 +202,14 @@ async fn handle_exec(
         GuestSlot::Ready { conn, addr } => (conn, addr),
         GuestSlot::Booting => {
             *slot = GuestSlot::Booting;
-            writer.write_all(b"ERR not ready\n").await.ok();
+            writer
+                .write_all(format!("{IPC_ERR} {IPC_ERR_NOT_READY}\n").as_bytes())
+                .await
+                .ok();
             return Ok(());
         }
         GuestSlot::Poisoned(reason) => {
-            let msg = format!("ERR {reason}\n");
+            let msg = format!("{IPC_ERR} {reason}\n");
             *slot = GuestSlot::Poisoned(reason);
             writer.write_all(msg.as_bytes()).await.ok();
             return Ok(());

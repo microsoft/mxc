@@ -752,6 +752,12 @@ pub const IPC_OK: &str = "OK";
 pub const IPC_PONG: &str = "PONG";
 /// Error response prefix (`ERR <message>`).
 pub const IPC_ERR: &str = "ERR";
+/// Exec-admission reason token: another exec already holds the single-flight
+/// guest slot. Emitted by the daemon as `ERR busy`, matched by the client.
+pub const IPC_ERR_BUSY: &str = "busy";
+/// Exec-admission reason token: the guest slot exists but is still booting.
+/// Emitted by the daemon as `ERR not ready`, matched by the client.
+pub const IPC_ERR_NOT_READY: &str = "not ready";
 
 #[cfg(test)]
 mod tests {

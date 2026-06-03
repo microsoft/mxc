@@ -48,7 +48,8 @@ use windows::Win32::Foundation::HANDLE;
 use crate::control_plane::{
     self, daemon_record_path, generate_nonce, live_daemon, read_daemon_record, read_sandbox_record,
     running_process_creation_time, sandbox_dir, sandbox_record_path, DaemonRecord,
-    MappedFolderRecord, SandboxRecord, SandboxState, TransitionLock, IPC_EXEC, IPC_OK, IPC_STOP,
+    MappedFolderRecord, SandboxRecord, SandboxState, TransitionLock, IPC_ERR, IPC_ERR_BUSY,
+    IPC_ERR_NOT_READY, IPC_EXEC, IPC_OK, IPC_STOP,
 };
 use crate::error::OneShotError;
 use crate::ipc_exec::{self, ExecExit, ExecStart, FRAME_EXIT, FRAME_STDERR, FRAME_STDOUT};
@@ -132,11 +133,18 @@ fn reject_post_provision_policy(request: &ExecutionRequest) -> Result<(), MxcErr
 /// Map an `ERR <reason>` status line from the daemon's EXEC admission into the
 /// wire error model. Only called when the status line was not `OK`.
 fn map_exec_status_error(status: &str) -> MxcError {
-    let reason = status.strip_prefix("ERR").map(str::trim).unwrap_or(status);
+    // Require the `ERR ` prefix (with the separating space) so a malformed
+    // `ERRbusy` is not silently normalized to a recognized reason token.
+    let reason = status
+        .strip_prefix(IPC_ERR)
+        .and_then(|r| r.strip_prefix(' '))
+        .map(str::trim);
     match reason {
-        "busy" => MxcError::backend_error("sandbox is busy: another exec is already running"),
-        "not ready" => MxcError::not_started("sandbox is not ready for exec yet"),
-        other => MxcError::backend_error(format!("daemon rejected exec: {other}")),
+        Some(IPC_ERR_BUSY) => {
+            MxcError::backend_error("sandbox is busy: another exec is already running")
+        }
+        Some(IPC_ERR_NOT_READY) => MxcError::not_started("sandbox is not ready for exec yet"),
+        _ => MxcError::backend_error(format!("daemon rejected exec: {}", status.trim())),
     }
 }
 
@@ -827,5 +835,14 @@ mod tests {
         let err = map_exec_status_error("garbage");
         assert_eq!(err.code, MxcErrorCode::BackendError);
         assert!(err.message.contains("garbage"), "message: {}", err.message);
+    }
+
+    #[test]
+    fn map_exec_status_error_requires_space_after_err_prefix() {
+        // `ERRbusy` (no separating space) must NOT normalize to the busy token;
+        // it is surfaced as an unrecognized status, not a single-flight error.
+        let err = map_exec_status_error("ERRbusy");
+        assert_eq!(err.code, MxcErrorCode::BackendError);
+        assert!(err.message.contains("ERRbusy"), "message: {}", err.message);
     }
 }

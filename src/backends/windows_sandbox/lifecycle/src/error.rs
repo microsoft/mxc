@@ -44,6 +44,7 @@ impl OneShotError {
     /// lands in both `standard_err` and `error_message`; the raw detail lands
     /// in `extended_error` for diagnostics.
     pub(crate) fn into_response(self) -> ScriptResponse {
+        let failure_phase = self.failure_phase();
         let (summary, detail): (&str, String) = match self {
             OneShotError::SandboxUnavailable(d) => (
                 "Windows Sandbox is not available on this host. Enable the \
@@ -87,8 +88,31 @@ impl OneShotError {
             standard_err: summary.to_string(),
             error_message: summary.to_string(),
             extended_error: detail,
-            failure_phase: FailurePhase::LaunchFailed,
+            failure_phase,
             ..Default::default()
+        }
+    }
+
+    /// Lifecycle phase this error is attributed to, so a caller can decide
+    /// whether a retry could ever succeed.
+    fn failure_phase(&self) -> FailurePhase {
+        match self {
+            // Non-retryable preflight: the request/config cannot be honored or a
+            // required host prerequisite is missing. Retrying the same input on
+            // the same host will not succeed.
+            OneShotError::SandboxUnavailable(_)
+            | OneShotError::PythonNotFound(_)
+            | OneShotError::Policy(_) => FailurePhase::Rejected,
+            // Launch attempt failed (incl. transient single-instance contention
+            // and async-runtime setup) — generally worth retrying.
+            OneShotError::Busy(_) | OneShotError::RuntimeSetup(_) | OneShotError::Launch(_) => {
+                FailurePhase::LaunchFailed
+            }
+            // The VM launch command succeeded but the guest infrastructure or
+            // the execution relay failed before/while running user code.
+            OneShotError::Rendezvous(_) | OneShotError::Connect(_) | OneShotError::Exec(_) => {
+                FailurePhase::PostLaunchFailed
+            }
         }
     }
 }
@@ -104,6 +128,34 @@ mod tests {
         assert_eq!(resp.failure_phase, FailurePhase::LaunchFailed);
         assert_eq!(resp.extended_error, "vm already up");
         assert!(!resp.error_message.is_empty());
+    }
+
+    #[test]
+    fn policy_and_prereq_errors_map_to_rejected() {
+        for err in [
+            OneShotError::Policy("denied path in share".to_string()),
+            OneShotError::SandboxUnavailable("feature off".to_string()),
+            OneShotError::PythonNotFound("no python".to_string()),
+        ] {
+            let resp = err.into_response();
+            assert_eq!(
+                resp.failure_phase,
+                FailurePhase::Rejected,
+                "non-retryable preflight should map to Rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn post_launch_errors_map_to_post_launch_failed() {
+        for err in [
+            OneShotError::Rendezvous("no ready".to_string()),
+            OneShotError::Connect("refused".to_string()),
+            OneShotError::Exec("relay broke".to_string()),
+        ] {
+            let resp = err.into_response();
+            assert_eq!(resp.failure_phase, FailurePhase::PostLaunchFailed);
+        }
     }
 
     #[test]

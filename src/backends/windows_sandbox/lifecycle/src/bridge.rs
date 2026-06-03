@@ -42,6 +42,14 @@ const IPC_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// subsequent exec is corrupted.
 const POST_EXIT_DRAIN: Duration = Duration::from_secs(15);
 
+/// Dedicated budget for reading the fixed 8-byte guest protocol preamble, which
+/// the agent writes immediately after accepting the control connection. Bounded
+/// independently of the caller's (minutes-long) VM-ready timeout so a peer that
+/// accepts the socket but never speaks cannot pin the connect path: it fails
+/// fast instead. Generous enough to tolerate a loaded host where the kernel
+/// accepts the TCP backlog slightly before the userspace agent services it.
+const PREAMBLE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Four TCP connections to the guest agent.
 ///
 /// TODO: These TCP connections are unencrypted. Verify if this is a concern.
@@ -95,8 +103,11 @@ pub async fn connect_to_guest(
         stderr_stream,
     };
     // Validate the protocol preamble before any framed messages so we fail
-    // fast (with a clear error) on a version/identity mismatch.
-    read_and_validate_preamble(&mut conn.control, timeout).await?;
+    // fast (with a clear error) on a version/identity mismatch. The preamble
+    // is read under a dedicated short budget (not the caller's VM-ready
+    // timeout) so a silent peer cannot pin the connect path for minutes.
+    let handshake_timeout = timeout.min(PREAMBLE_HANDSHAKE_TIMEOUT);
+    read_and_validate_preamble(&mut conn.control, handshake_timeout).await?;
     wait_for_ready(&mut conn.control, timeout).await?;
 
     Ok(conn)
