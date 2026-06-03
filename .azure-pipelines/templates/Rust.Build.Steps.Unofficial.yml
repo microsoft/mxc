@@ -21,7 +21,7 @@ parameters:
   type: string
   # Public rustup channel matching the `1.93` pin in src/rust-toolchain.toml.
   # (Official builds use the internal 'ms-prod-1.93' from Mxc-Azure-Feed.)
-  default: '1.93.0'
+  default: '1.93'
 
 steps:
   - template: Rust.Toolchain.Public.yml@self

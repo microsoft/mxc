@@ -65,12 +65,6 @@ jobs:
           lxc-exec
           linux-test-proxy
 
-      ${{ if eq(item.arch, 'x64') }}:
-        isX64: true
-        
-      ${{ if eq(item.arch, 'arm64') }}:
-        isX64: false
-      
       # Paths
       targetTriple: $(triplet)
       targetTripleDir: $(CARGO_TARGET_DIR)/$(targetTriple)/release
@@ -94,7 +88,10 @@ jobs:
             targetTriple: $(triplet)
             workingDirectory: $(workingDirectory)
             cargoFeatures: $(cargoFeatures)
-            enableTest: $(isX64)
+            ${{ if eq(item.arch, 'x64') }}:
+              enableTest: 'true'
+            ${{ else }}:
+              enableTest: 'false'
 
       - ${{ else }}:
         # Fork-PR / Unofficial: plain rustup + crates.io, no auth tasks.
@@ -103,7 +100,10 @@ jobs:
             targetTriple: $(triplet)
             workingDirectory: $(workingDirectory)
             cargoArgs: --no-default-features --features "$(cargoFeatures)"
-            enableTest: $(isX64)
+            ${{ if eq(item.arch, 'x64') }}:
+              enableTest: 'true'
+            ${{ else }}:
+              enableTest: 'false'
 
       # linux_test_proxy is a separate workspace member (not a dep of lxc), so
       # the workspace-member-scoped build above doesn't pick it up. Build it
