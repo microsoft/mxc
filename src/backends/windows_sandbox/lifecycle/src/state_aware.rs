@@ -761,4 +761,37 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
+
+    #[test]
+    fn map_exec_status_error_busy_is_backend_error() {
+        let err = map_exec_status_error("ERR busy");
+        assert_eq!(err.code, MxcErrorCode::BackendError);
+        assert!(err.message.contains("busy"), "message: {}", err.message);
+    }
+
+    #[test]
+    fn map_exec_status_error_not_ready_is_not_started() {
+        let err = map_exec_status_error("ERR not ready");
+        assert_eq!(err.code, MxcErrorCode::NotStarted);
+    }
+
+    #[test]
+    fn map_exec_status_error_unknown_reason_is_backend_error_with_reason() {
+        let err = map_exec_status_error("ERR something exploded");
+        assert_eq!(err.code, MxcErrorCode::BackendError);
+        assert!(
+            err.message.contains("something exploded"),
+            "message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn map_exec_status_error_without_err_prefix_uses_whole_status() {
+        // Defensive: a status line missing the `ERR` prefix is still surfaced
+        // verbatim rather than swallowed.
+        let err = map_exec_status_error("garbage");
+        assert_eq!(err.code, MxcErrorCode::BackendError);
+        assert!(err.message.contains("garbage"), "message: {}", err.message);
+    }
 }

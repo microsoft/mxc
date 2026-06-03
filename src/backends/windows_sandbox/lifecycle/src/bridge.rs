@@ -551,3 +551,57 @@ where
         Ok(Ok(()))
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn classify_data_read_clean_eof_is_none() {
+        assert_eq!(classify_data_read(Ok(0), 0, "stdout").unwrap(), None);
+        // A clean FIN is EOF even after bytes were observed.
+        assert_eq!(classify_data_read(Ok(0), 42, "stdout").unwrap(), None);
+    }
+
+    #[test]
+    fn classify_data_read_some_bytes_passes_through() {
+        assert_eq!(classify_data_read(Ok(7), 0, "stderr").unwrap(), Some(7));
+        assert_eq!(classify_data_read(Ok(3), 100, "stderr").unwrap(), Some(3));
+    }
+
+    #[test]
+    fn classify_data_read_reset_with_no_data_is_eof() {
+        // The narrow defensive case: a reset-class error before any byte was
+        // seen is treated as EOF (RST racing ahead of FIN on the zero-output
+        // path).
+        for kind in [
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::BrokenPipe,
+        ] {
+            let r = Err(Error::new(kind, "reset"));
+            assert_eq!(
+                classify_data_read(r, 0, "stdout").unwrap(),
+                None,
+                "reset kind {kind:?} with no bytes should be EOF"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_data_read_reset_after_bytes_is_error() {
+        // Once any byte was relayed, a reset must be a hard error so we never
+        // silently truncate output.
+        let r = Err(Error::new(ErrorKind::ConnectionReset, "reset"));
+        assert!(classify_data_read(r, 1, "stdout").is_err());
+    }
+
+    #[test]
+    fn classify_data_read_other_error_is_error_regardless_of_seen() {
+        let r = Err(Error::new(ErrorKind::NotConnected, "nope"));
+        assert!(classify_data_read(r, 0, "stderr").is_err());
+        let r = Err(Error::new(ErrorKind::NotConnected, "nope"));
+        assert!(classify_data_read(r, 5, "stderr").is_err());
+    }
+}
