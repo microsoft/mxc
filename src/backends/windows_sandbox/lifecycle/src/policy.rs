@@ -11,9 +11,25 @@
 //! the same absolute path inside the guest for host parity. `deniedPaths`
 //! describe host paths the contained code must *not* reach; because the host
 //! shares nothing by default, a denied path that lies outside every mapped
-//! share is already satisfied (no-op). A denied path that is equal to, or
-//! nested inside, a mapped share is a contradiction the backend cannot honor
-//! (Windows Sandbox has no per-path Deny primitive), so it is rejected.
+//! share is already satisfied (no-op). Because Windows Sandbox has no per-path
+//! Deny primitive, the backend cannot honor a denial that *overlaps* a mapped
+//! share in either direction, so any such request is rejected:
+//!
+//! - a denied path **equal to** a mapped share,
+//! - a denied path **nested inside** a mapped share (cannot carve a hole), and
+//! - a denied path that **contains** a mapped share (a folder inside the denied
+//!   subtree is still reachable through the share).
+//!
+//! Denied paths must be **absolute** host paths (a relative path cannot be
+//! anchored to a host location, so the overlap question is undecidable and the
+//! request is rejected fail-closed). Overlap is decided on *canonicalized*
+//! components — denied paths are canonicalized exactly like mapped roots (and,
+//! when the leaf does not yet exist, the longest existing ancestor is
+//! canonicalized and the remaining tail appended) so 8.3 short names,
+//! junctions, and case variants resolve to the same components on both sides.
+//! Comparison is case-folded (Unicode-aware). The residual gap is a denied
+//! path whose overlapping portion does not exist on the host at all, which can
+//! only be compared lexically.
 //!
 //! Network model: the WSB **guest agent** already enforces network isolation
 //! unconditionally — once the host connects, `guest::firewall::lockdown` sets a
@@ -24,6 +40,8 @@
 //! so it is rejected for now. Selective host filtering
 //! (`allowedHosts`/`blockedHosts`) and an explicit proxy are likewise rejected
 //! — the backend has no DNS-aware filtering primitive.
+
+use std::path::Path;
 
 use wxc_common::models::{ExecutionRequest, NetworkPolicy};
 
@@ -104,7 +122,7 @@ fn plan_filesystem(request: &ExecutionRequest) -> Result<Vec<MappedFolder>, OneS
         add_mapped_root(&mut roots, path, true)?;
     }
 
-    reject_denied_inside_shares(&policy.denied_paths, &roots)?;
+    reject_denied_overlapping_shares(&policy.denied_paths, &roots)?;
 
     Ok(roots
         .into_iter()
@@ -171,19 +189,23 @@ fn add_mapped_root(
     Ok(())
 }
 
-/// Reject any denied path that is equal to, or nested inside, a mapped share —
-/// Windows Sandbox has no per-path Deny primitive, so the contradiction cannot
-/// be honored. Denied paths outside every share are no-ops (the host shares
+/// Reject any denied path that *overlaps* a mapped share in either direction —
+/// Windows Sandbox has no per-path Deny primitive, so neither carving a denied
+/// hole out of a share nor denying a subtree that contains a share can be
+/// honored. Denied paths outside every share are no-ops (the host shares
 /// nothing by default) and are silently accepted.
-fn reject_denied_inside_shares(
+///
+/// Denied paths must be absolute; a relative path cannot be anchored to a host
+/// location, so it is rejected fail-closed rather than silently treated as a
+/// non-overlapping no-op. Overlap is decided on canonicalized components (see
+/// [`normalize_denied`]) so short names / junctions / case cannot smuggle an
+/// overlapping path past the check.
+fn reject_denied_overlapping_shares(
     denied_paths: &[String],
     roots: &[MappedRoot],
 ) -> Result<(), OneShotError> {
     for denied in denied_paths {
-        // A denied path may not exist on the host, so normalize lexically
-        // (no filesystem access). This shares the residual symlink/junction
-        // gap noted in the module docs.
-        let denied_components = path_components(&strip_verbatim_prefix(denied));
+        let denied_components = normalize_denied(denied)?;
         if denied_components.is_empty() {
             continue;
         }
@@ -202,9 +224,69 @@ fn reject_denied_inside_shares(
                     root.display
                 )));
             }
+            if is_descendant(&root.components, &denied_components) {
+                return Err(OneShotError::Policy(format!(
+                    "denied path {denied:?} contains mapped share {:?}; the Windows Sandbox \
+                     backend cannot deny a host subtree while a folder inside it is mapped",
+                    root.display
+                )));
+            }
         }
     }
     Ok(())
+}
+
+/// Normalize a denied path to comparison components, mirroring the
+/// canonicalization applied to mapped roots so the two are compared
+/// apples-to-apples.
+///
+/// - Rejects a non-absolute path (it cannot be anchored to a host location).
+/// - Canonicalizes the full path when it exists (resolves 8.3 short names,
+///   junctions/symlinks, and case to the same form a mapped root gets).
+/// - When the leaf does not yet exist, canonicalizes the longest existing
+///   ancestor and appends the remaining lexical tail — but only when that
+///   ancestor is a genuine prefix of the lexical path, otherwise falls back to
+///   the purely lexical form rather than risk constructing a wrong path.
+/// - Falls back to lexical normalization when nothing along the path exists.
+fn normalize_denied(raw: &str) -> Result<Vec<String>, OneShotError> {
+    let p = Path::new(raw);
+    if !p.is_absolute() {
+        return Err(OneShotError::Policy(format!(
+            "denied path {raw:?} is not an absolute host path; deniedPaths must be absolute so the \
+             Windows Sandbox backend can determine whether they overlap a mapped share"
+        )));
+    }
+
+    let lexical = path_components(&strip_verbatim_prefix(raw));
+
+    if let Ok(canonical) = std::fs::canonicalize(p) {
+        return Ok(path_components(&strip_verbatim_prefix(
+            &canonical.to_string_lossy(),
+        )));
+    }
+
+    for ancestor in p.ancestors().skip(1) {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        if let Ok(canonical) = std::fs::canonicalize(ancestor) {
+            let ancestor_lexical =
+                path_components(&strip_verbatim_prefix(&ancestor.to_string_lossy()));
+            // Trust the canonical ancestor only when it is a genuine prefix of
+            // the lexical path; a `..` straddling a partially-existing path
+            // could otherwise yield a wrong reconstruction, so prefer the
+            // lexical form in that pathological case.
+            if ancestor_lexical.len() <= lexical.len() && lexical.starts_with(&ancestor_lexical) {
+                let mut components =
+                    path_components(&strip_verbatim_prefix(&canonical.to_string_lossy()));
+                components.extend_from_slice(&lexical[ancestor_lexical.len()..]);
+                return Ok(components);
+            }
+            break;
+        }
+    }
+
+    Ok(lexical)
 }
 
 /// Strip a `\\?\` or `\\?\UNC\` verbatim prefix from a Windows path string.
@@ -220,9 +302,11 @@ fn strip_verbatim_prefix(path: &str) -> String {
     }
 }
 
-/// Split a path into lowercased, normalized components for case-insensitive
+/// Split a path into case-folded, normalized components for case-insensitive
 /// comparison. `.` segments are dropped and `..` pops the previous component.
-/// Drive/separator forms are unified by splitting on both `\` and `/`.
+/// Drive/separator forms are unified by splitting on both `\` and `/`. Folding
+/// is Unicode-aware (`to_lowercase`) rather than ASCII-only so non-ASCII path
+/// segments cannot vary in case to slip a denied path past the overlap check.
 fn path_components(path: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for raw in path.split(['\\', '/']) {
@@ -231,7 +315,7 @@ fn path_components(path: &str) -> Vec<String> {
             ".." => {
                 out.pop();
             }
-            seg => out.push(seg.to_ascii_lowercase()),
+            seg => out.push(seg.to_lowercase()),
         }
     }
     out
@@ -439,6 +523,67 @@ mod tests {
         }))
         .unwrap_err();
         assert_policy_err_contains(err, "inside mapped share");
+    }
+
+    #[test]
+    fn denied_ancestor_of_mapped_share_rejected() {
+        // A denied path that *contains* a mapped share is unenforceable: the
+        // share remains reachable through the mapping despite the denial.
+        let parent = tempfile::tempdir().unwrap();
+        let child = parent.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let err = plan_policy(&request_with(ContainerPolicy {
+            readwrite_paths: vec![child.to_string_lossy().into_owned()],
+            denied_paths: vec![parent.path().to_string_lossy().into_owned()],
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert_policy_err_contains(err, "contains mapped share");
+    }
+
+    #[test]
+    fn denied_relative_path_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = plan_policy(&request_with(ContainerPolicy {
+            readwrite_paths: vec![dir.path().to_string_lossy().into_owned()],
+            denied_paths: vec![r"relative\secret".to_string()],
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert_policy_err_contains(err, "absolute");
+    }
+
+    #[test]
+    fn denied_equal_share_matches_through_case_and_separator() {
+        // The same existing directory written with different case and forward
+        // slashes must still be recognised as the mapped share (canonicalized,
+        // case-folded comparison), not slip past as a no-op.
+        let dir = tempfile::tempdir().unwrap();
+        let mapped = dir.path().to_string_lossy().into_owned();
+        let denied = mapped.replace('\\', "/").to_uppercase();
+        let err = plan_policy(&request_with(ContainerPolicy {
+            readwrite_paths: vec![mapped],
+            denied_paths: vec![denied],
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert_policy_err_contains(err, "same as mapped share");
+    }
+
+    #[test]
+    fn denied_nonexistent_outside_share_under_real_ancestor_is_noop() {
+        // A denied leaf that does not exist but whose existing ancestor is
+        // unrelated to any mapped share remains a no-op.
+        let mapped = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let denied = format!("{}\\ghost\\leaf", other.path().to_string_lossy());
+        let plan = plan_policy(&request_with(ContainerPolicy {
+            readwrite_paths: vec![mapped.path().to_string_lossy().into_owned()],
+            denied_paths: vec![denied],
+            ..Default::default()
+        }))
+        .unwrap();
+        assert_eq!(plan.mapped_folders.len(), 1);
     }
 
     // ===== component helpers =====
