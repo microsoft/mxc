@@ -23,25 +23,32 @@
 //! The guard and the console handler coordinate through a single
 //! process-global take-once slot, so the VM is torn down at most once.
 //!
-//! This is the host-global teardown the daemon already performs
-//! (`taskkill /F /IM WindowsSandbox*.exe`). It tears down *any* running
-//! Windows Sandbox, not just ours — acceptable because the host allows only a
-//! single running instance and one-shot does not support concurrent runs.
-//! Scoping teardown to a specific VM is tracked separately for the
-//! state-aware backend.
+//! Teardown is **ownership-scoped**: the slot carries a [`VmOwnership`] state
+//! (mirroring the state-aware daemon) that records how far VM ownership has
+//! progressed. Cleanup only kills processes this run provably launched — it
+//! never issues an image-wide `taskkill /F /IM WindowsSandbox*`, so a foreign
+//! or manually-opened sandbox is never disturbed. Host-global serialisation of
+//! the single VM slot is provided by the `Local\wxc-wsb-vm` mutex acquired by
+//! the one-shot runner for the whole run.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Host processes that keep a Windows Sandbox VM (and its single-instance
-/// slot) alive. The `.exe` suffix is REQUIRED: `taskkill /IM` matches the full
-/// image name, so omitting it silently fails to find the process.
-const WSB_PROCESS_NAMES: [&str; 3] = [
-    "WindowsSandbox.exe",
-    "WindowsSandboxServer.exe",
-    "WindowsSandboxRemoteSession.exe",
-];
+use serde::{Deserialize, Serialize};
+
+use crate::control_plane::{
+    decide_cleanup, enumerate_processes_with_prefix, process_creation_time, terminate_processes,
+    CleanupAction, VmOwnership, VmProcId,
+};
+
+/// Image-name prefix shared by every Windows Sandbox host process
+/// (`WindowsSandbox.exe`, `WindowsSandboxServer.exe`,
+/// `WindowsSandboxRemoteSession.exe`). Used both as the liveness probe and as
+/// the enumeration filter for scoped teardown. The SYSTEM-owned `vmmem*`
+/// Hyper-V memory processes do not share this prefix and are deliberately
+/// excluded (they linger harmlessly after teardown).
+const WSB_PROCESS_PREFIX: &str = "WindowsSandbox";
 
 /// Subdirectory (under the system temp dir) that holds Windows Sandbox scratch
 /// state across all execution models.
@@ -87,35 +94,167 @@ pub(crate) enum Reconcile {
     Busy(String),
 }
 
+/// JSON marker written into each per-run scratch directory. Records the
+/// launching process's identity (so a later run can distinguish a live
+/// concurrent run from a crashed one) and — after launch — positive proof of
+/// the VM host processes this run owns (so a later run can reclaim our orphan
+/// without ever killing a VM it cannot prove is ours).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OneShotMarker {
+    /// PID of the `wxc-exec` process that owns this run.
+    launcher_pid: u32,
+    /// Creation time of `launcher_pid` (Win32 `FILETIME`, 100ns ticks). Pairs
+    /// with the PID to defeat PID reuse. `None` if it could not be captured, in
+    /// which case the launcher is treated as *dead-or-unknown* (never as a live
+    /// blocker) so a recycled PID can never wedge reclaim.
+    #[serde(default)]
+    launcher_creation_time: Option<u64>,
+    /// Identities of the Windows Sandbox host processes this run launched,
+    /// captured just after launch. Empty before launch (and on the narrow
+    /// crash-during-boot window). The *positive ownership proof* used by a later
+    /// run's reconcile: an orphaned VM is only reclaimed when the running
+    /// sandbox processes intersect this set.
+    #[serde(default)]
+    vm_processes: Vec<VmProcId>,
+}
+
+/// Per-marker liveness/proof state, distilled from an [`OneShotMarker`] for the
+/// pure [`classify_reconcile`].
+#[derive(Debug, Clone)]
+struct MarkerState {
+    /// Whether the launching process is *strongly* alive (PID present AND
+    /// creation time matches). A missing creation time is treated as not-alive.
+    launcher_alive: bool,
+    /// The recorded VM-process ownership proof.
+    vm_processes: Vec<VmProcId>,
+}
+
+/// Why a reconcile refused to launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BusyReason {
+    /// The liveness probe itself failed; we cannot prove the slot is free.
+    ProbeFailed,
+    /// Another disposable run is active (a strongly-live launcher).
+    ActiveRun,
+    /// A VM is running but no marker positively proves we own it.
+    ForeignUnprovable,
+}
+
+impl BusyReason {
+    fn message(&self) -> String {
+        match self {
+            BusyReason::ProbeFailed => {
+                "could not determine whether a Windows Sandbox VM is running".to_string()
+            }
+            BusyReason::ActiveRun => "another disposable Windows Sandbox run is active".to_string(),
+            BusyReason::ForeignUnprovable => {
+                "a Windows Sandbox VM is running that this run cannot prove it owns".to_string()
+            }
+        }
+    }
+}
+
+/// Pure reconcile decision, derived from the probe result, the live VM process
+/// set, and the per-marker states so it is unit-testable without a real VM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReconcileDecision {
+    /// No VM is running: launch normally (caller cleans dead-launcher dirs).
+    Proceed,
+    /// A running VM is provably an orphan of a prior disposable run (its live
+    /// processes intersect a recorded proof): tear `targets` down, then launch.
+    ReclaimThenProceed { targets: Vec<VmProcId> },
+    /// Refuse to launch.
+    Busy(BusyReason),
+}
+
+/// Decide what to do about the host single-instance VM slot before launching.
+///
+/// Ordering (per design): probe-failure → `Busy(ProbeFailed)`; a running VM
+/// with any strongly-live launcher → `Busy(ActiveRun)`; a running VM whose
+/// recorded proofs intersect the live set → `ReclaimThenProceed`; a running VM
+/// with no proof intersection → `Busy(ForeignUnprovable)`; no VM → `Proceed`.
+///
+/// Launcher liveness is intentionally *strong* (PID + creation time both
+/// match). A marker whose launcher is dead-or-unknown must never block a
+/// proof-based reclaim, which is what avoids a recycled-PID wedge.
+fn classify_reconcile(
+    running: Option<bool>,
+    current_vm: &[VmProcId],
+    markers: &[MarkerState],
+) -> ReconcileDecision {
+    let running = match running {
+        None => return ReconcileDecision::Busy(BusyReason::ProbeFailed),
+        Some(r) => r,
+    };
+    if !running {
+        return ReconcileDecision::Proceed;
+    }
+    if markers.iter().any(|m| m.launcher_alive) {
+        return ReconcileDecision::Busy(BusyReason::ActiveRun);
+    }
+    // All launchers are dead-or-unknown. Reclaim only on positive proof: a
+    // recorded VM process must still be live. Otherwise treat the VM as foreign.
+    let proven = markers
+        .iter()
+        .flat_map(|m| m.vm_processes.iter())
+        .any(|recorded| current_vm.contains(recorded));
+    if proven {
+        ReconcileDecision::ReclaimThenProceed {
+            targets: current_vm.to_vec(),
+        }
+    } else {
+        ReconcileDecision::Busy(BusyReason::ForeignUnprovable)
+    }
+}
+
 /// Teardown payload parked in the global slot. Carries the per-run scratch
-/// directory so a full teardown can remove it after the VM is gone.
+/// directory (so a full teardown can remove it once the VM is gone) and the
+/// current [`VmOwnership`] (so cleanup can decide, via [`decide_cleanup`],
+/// whether and what it may kill).
 #[derive(Debug)]
 struct OneShotTeardown {
     run_dir: PathBuf,
+    ownership: VmOwnership,
 }
 
 impl OneShotTeardown {
-    /// Full teardown: kill the host processes, wait (bounded) for them to
-    /// exit, then — only once the VM is confirmed gone — remove the marker and
-    /// scratch directory. Used by the stack guard on normal-return and
-    /// panic-unwind paths.
+    /// Full teardown: consult [`decide_cleanup`] for the ownership state, kill
+    /// only the processes we provably own, wait (bounded) for the VM to exit,
+    /// then — only once it is confirmed gone — remove the marker and scratch
+    /// directory. Used by the stack guard on normal-return and panic paths.
     ///
-    /// The marker is removed *before* the directory and *only* when the VM is
-    /// confirmed gone. If the VM might still be alive (teardown timed out) the
-    /// marker is left in place so the next run reclaims it. This is what keeps
-    /// a later foreign/manual sandbox from being mistaken for our orphan: once
-    /// our VM is gone our marker is gone too.
+    /// The marker is removed *only* when the VM is confirmed gone. If teardown
+    /// could not confirm it (timeout / probe failure) the marker is left so the
+    /// next run reclaims it: once our VM is gone, our marker is gone too, which
+    /// is what keeps a later foreign sandbox from being mistaken for our orphan.
     fn full(&self, poll_budget: Duration) {
-        let gone = teardown_blocking(poll_budget);
-        if gone {
-            clear_marker_dir(&self.run_dir);
+        match decide_cleanup(&self.ownership) {
+            // Never launched: no VM exists. Our (vm-less) marker dir can go.
+            CleanupAction::Noop => clear_marker_dir(&self.run_dir),
+            // Launch in flight, ownership unprovable: never kill (a foreign VM
+            // may have won the single-instance contest). Leave the marker for
+            // the next run to reconcile.
+            CleanupAction::LeakUnowned => {}
+            CleanupAction::Teardown(targets) => {
+                if teardown_owned_blocking(&targets, poll_budget) {
+                    clear_marker_dir(&self.run_dir);
+                }
+            }
         }
     }
 
-    /// Kill-only: issue the process kills without waiting. Used by the console
-    /// handler, which must return promptly before the OS hard-terminates us.
+    /// Kill-only: issue the scoped process kills without waiting. Used by the
+    /// console handler, which must return promptly before the OS hard-
+    /// terminates us. Honours ownership exactly like [`full`].
     fn kill_only(&self) {
-        kill_wsb_processes();
+        match decide_cleanup(&self.ownership) {
+            CleanupAction::Noop | CleanupAction::LeakUnowned => {}
+            CleanupAction::Teardown(targets) => {
+                let snapshot =
+                    enumerate_processes_with_prefix(WSB_PROCESS_PREFIX).unwrap_or_default();
+                terminate_processes(&compute_kill_set(&targets, &snapshot));
+            }
+        }
     }
 }
 
@@ -137,6 +276,20 @@ fn take_parked() -> Option<OneShotTeardown> {
     })
 }
 
+/// Update the parked payload's [`VmOwnership`]. Called by the one-shot runner
+/// as the launch progresses (arm → `LaunchInFlight` → `LaunchSucceededNoProof`
+/// → `Owned`). The critical section is tiny — it performs no I/O, no awaits,
+/// and no marker rewrite while the slot mutex is held — so it cannot deadlock
+/// the guard or the console handler.
+pub(crate) fn set_vm_ownership(ownership: VmOwnership) {
+    if let Some(s) = TEARDOWN_SLOT.get() {
+        let mut guard = s.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(token) = guard.as_mut() {
+            token.ownership = ownership;
+        }
+    }
+}
+
 /// Root directory holding per-run one-shot scratch directories.
 pub(crate) fn markers_root() -> PathBuf {
     std::env::temp_dir()
@@ -144,28 +297,72 @@ pub(crate) fn markers_root() -> PathBuf {
         .join(ONESHOT_SUBDIR)
 }
 
-/// Write the disposable-run marker (carrying this process's PID) into
-/// `run_dir`. The PID lets a later run distinguish an *active* concurrent run
-/// (PID still alive → refuse) from a crashed run's orphan (PID dead →
-/// reclaim).
+/// Atomically write `marker` into `run_dir` (temp file + rename) so a crash
+/// mid-write cannot leave a half-written, unparseable marker.
+fn write_marker_struct(run_dir: &Path, marker: &OneShotMarker) -> std::io::Result<()> {
+    let path = run_dir.join(MARKER_FILE);
+    let tmp = run_dir.join(format!("{MARKER_FILE}.tmp"));
+    let bytes = serde_json::to_vec(marker)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// Write the initial disposable-run marker into `run_dir` *before* launch. It
+/// records this process's identity (PID + creation time) and an empty VM-proof
+/// set; the proof is filled in by [`rewrite_marker_with_proof`] right after the
+/// VM launches.
 ///
 /// # Errors
 /// Returns the underlying I/O error if the marker cannot be written. Marker
 /// creation is a required pre-launch step: without it a parent
 /// `TerminateProcess` / power loss would leave an unreclaimable VM.
 pub(crate) fn write_marker(run_dir: &Path) -> std::io::Result<()> {
-    let marker = run_dir.join(MARKER_FILE);
-    std::fs::write(&marker, format!("pid={}\n", std::process::id()))
+    let pid = std::process::id();
+    let marker = OneShotMarker {
+        launcher_pid: pid,
+        launcher_creation_time: process_creation_time(pid),
+        vm_processes: Vec::new(),
+    };
+    write_marker_struct(run_dir, &marker)
 }
 
-/// Read the PID recorded in a per-run directory's marker, if present and
-/// parseable.
-fn read_marker_pid(run_dir: &Path) -> Option<u32> {
-    let contents = std::fs::read_to_string(run_dir.join(MARKER_FILE)).ok()?;
-    contents
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|v| v.trim().parse::<u32>().ok())
+/// Rewrite the marker with positive VM-ownership proof captured right after
+/// launch. Preserves the launcher identity. Called before the rendezvous wait
+/// so a crash during the (long) boot still leaves a reclaimable record.
+///
+/// # Errors
+/// Returns the underlying I/O error if the marker cannot be rewritten. The
+/// caller treats this as fatal and tears the VM down rather than leave a
+/// proof-less marker that a later run could not reclaim.
+pub(crate) fn rewrite_marker_with_proof(
+    run_dir: &Path,
+    vm_processes: &[VmProcId],
+) -> std::io::Result<()> {
+    let pid = std::process::id();
+    let marker = OneShotMarker {
+        launcher_pid: pid,
+        launcher_creation_time: process_creation_time(pid),
+        vm_processes: vm_processes.to_vec(),
+    };
+    write_marker_struct(run_dir, &marker)
+}
+
+/// Read and parse a per-run directory's marker, if present and well-formed.
+fn read_marker(run_dir: &Path) -> Option<OneShotMarker> {
+    let bytes = std::fs::read(run_dir.join(MARKER_FILE)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Whether the launcher recorded in `marker` is *strongly* alive: its PID
+/// exists AND the live creation time matches the recorded one. A missing
+/// recorded creation time yields `false` (dead-or-unknown), so a recycled PID
+/// can never be mistaken for the original launcher and wedge reclaim.
+fn launcher_strongly_alive(marker: &OneShotMarker) -> bool {
+    match marker.launcher_creation_time {
+        Some(ct) => process_creation_time(marker.launcher_pid) == Some(ct),
+        None => false,
+    }
 }
 
 /// Remove a per-run scratch directory, deleting its marker file *first* so
@@ -180,44 +377,6 @@ fn read_marker_pid(run_dir: &Path) -> Option<u32> {
 fn clear_marker_dir(run_dir: &Path) {
     let _ = std::fs::remove_file(run_dir.join(MARKER_FILE));
     let _ = std::fs::remove_dir_all(run_dir);
-}
-
-/// Whether `pid` refers to a currently-running process.
-///
-/// Used to tell an active concurrent disposable run (refuse) from a crashed
-/// run's orphan (reclaim). Conservative on ambiguity: an unopenable but
-/// possibly-live process is better treated as alive (refuse) than as dead
-/// (which could reclaim a peer's live VM). `OpenProcess` failing with
-/// "invalid parameter" means the PID does not exist → dead.
-fn pid_alive(pid: u32) -> bool {
-    use windows::Win32::Foundation::{
-        CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE, WIN32_ERROR,
-    };
-    use windows::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-
-    if pid == 0 {
-        return false;
-    }
-    // SAFETY: PID is a plain integer; the returned handle is closed on every
-    // path. `GetExitCodeProcess` writes a single u32.
-    unsafe {
-        match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
-            Ok(handle) => {
-                let mut code: u32 = 0;
-                let alive =
-                    GetExitCodeProcess(handle, &mut code).is_ok() && code == STILL_ACTIVE.0 as u32;
-                let _ = CloseHandle(handle);
-                alive
-            }
-            Err(e) => {
-                // Only a non-existent PID is treated as dead; any other error
-                // (e.g. access denied) is treated as possibly-alive.
-                WIN32_ERROR::from_error(&e) != Some(ERROR_INVALID_PARAMETER)
-            }
-        }
-    }
 }
 
 /// List per-run scratch directories under `markers_root` that carry the
@@ -288,67 +447,84 @@ fn dir_older_than(path: &Path, min_age: Duration) -> bool {
 
 /// Reconcile the host single-instance slot before launching a disposable VM.
 ///
-/// Classifies any existing per-run markers by liveness, then decides:
-/// - **VM running + a live-PID marker** → another disposable run is active;
-///   refuse (the host allows only one instance) rather than kill its VM.
-/// - **VM running + no marker at all** → a foreign sandbox (a user's manual
-///   instance, or a future state-aware VM). Refuse rather than kill it. This
-///   is the core "never kill a sandbox we don't own" guarantee.
-/// - **VM running + only dead-PID markers** → an orphan from a crashed
-///   disposable run. Reclaim it (tear down + clean the stale markers).
-/// - **No VM** → clean up dead-PID marker directories and proceed.
-/// - **Probe failed** → conservatively refuse (we cannot prove the slot is
-///   free, and proceeding risks the guard later killing a foreign sandbox).
+/// Gathers the probe result, the live `WindowsSandbox*` process set, and each
+/// per-run marker's launcher-liveness + ownership-proof, then defers the
+/// decision to the pure [`classify_reconcile`]:
+/// - **VM running + a strongly-live launcher** → another disposable run is
+///   active; refuse (the host allows only one instance) rather than kill it.
+/// - **VM running + a recorded proof intersecting the live set** → an orphan
+///   from a crashed disposable run. Reclaim it (scoped teardown of exactly the
+///   live VM, then clean the stale markers — but only once teardown confirms
+///   the VM is gone).
+/// - **VM running + no proof intersection** → a foreign sandbox (a user's
+///   manual instance, or a future state-aware VM). Refuse rather than kill it.
+///   This is the core "never kill a sandbox we don't own" guarantee.
+/// - **No VM** → clean up dead-launcher marker directories and proceed.
+/// - **Probe failed** → conservatively refuse.
 pub(crate) fn reconcile_existing_vm(root: &Path) -> Reconcile {
-    let running = match wsb_vm_running() {
-        Some(r) => r,
-        None => {
-            return Reconcile::Busy(
-                "could not determine whether a Windows Sandbox VM is running".to_string(),
-            )
-        }
-    };
+    let running = wsb_vm_running();
+    let current_vm = enumerate_processes_with_prefix(WSB_PROCESS_PREFIX).unwrap_or_default();
 
-    let markers = list_marker_dirs(root);
-    let mut any_live = false;
+    let marker_dirs = list_marker_dirs(root);
+    let mut states: Vec<MarkerState> = Vec::with_capacity(marker_dirs.len());
     let mut dead_dirs: Vec<PathBuf> = Vec::new();
-    for dir in &markers {
-        match read_marker_pid(dir) {
-            Some(pid) if pid_alive(pid) => any_live = true,
-            _ => dead_dirs.push(dir.clone()),
+    for dir in &marker_dirs {
+        match read_marker(dir) {
+            Some(marker) => {
+                let alive = launcher_strongly_alive(&marker);
+                if !alive {
+                    dead_dirs.push(dir.clone());
+                }
+                states.push(MarkerState {
+                    launcher_alive: alive,
+                    vm_processes: marker.vm_processes,
+                });
+            }
+            None => {
+                // Unparseable / absent marker: a dead launcher with no proof.
+                dead_dirs.push(dir.clone());
+                states.push(MarkerState {
+                    launcher_alive: false,
+                    vm_processes: Vec::new(),
+                });
+            }
         }
     }
 
-    if running {
-        if any_live {
-            return Reconcile::Busy("another disposable Windows Sandbox run is active".to_string());
+    match classify_reconcile(running, &current_vm, &states) {
+        ReconcileDecision::Busy(reason) => Reconcile::Busy(reason.message()),
+        ReconcileDecision::Proceed => {
+            // No VM: clean dead-launcher dirs only. A strongly-live launcher dir
+            // with no VM is a peer mid-launch; leave it alone.
+            for dir in &dead_dirs {
+                clear_marker_dir(dir);
+            }
+            Reconcile::Proceed(None)
         }
-        if markers.is_empty() {
-            return Reconcile::Busy(
-                "a Windows Sandbox VM is running with no disposable-run marker".to_string(),
+        ReconcileDecision::ReclaimThenProceed { targets } => {
+            eprintln!(
+                "[one-shot] warning: reclaiming an orphaned disposable Windows Sandbox VM \
+                 (found {} stale marker dir(s))",
+                dead_dirs.len()
             );
+            if teardown_owned_blocking(&targets, TEARDOWN_POLL_TIMEOUT) {
+                for dir in &dead_dirs {
+                    clear_marker_dir(dir);
+                }
+                Reconcile::Proceed(Some(format!(
+                    "reclaimed an orphaned disposable Windows Sandbox VM from a prior run \
+                     ({} stale marker dir(s) cleaned)",
+                    dead_dirs.len()
+                )))
+            } else {
+                // Could not confirm the orphan is gone: refuse rather than
+                // launch into a still-occupied single-instance slot, and leave
+                // the markers so the next run can retry the reclaim.
+                Reconcile::Busy(
+                    "failed to tear down an orphaned disposable Windows Sandbox VM".to_string(),
+                )
+            }
         }
-        eprintln!(
-            "[one-shot] warning: reclaiming an orphaned disposable Windows Sandbox VM \
-             (found {} stale marker dir(s))",
-            dead_dirs.len()
-        );
-        teardown_blocking(TEARDOWN_POLL_TIMEOUT);
-        for dir in &dead_dirs {
-            clear_marker_dir(dir);
-        }
-        Reconcile::Proceed(Some(format!(
-            "reclaimed an orphaned disposable Windows Sandbox VM from a prior run \
-             ({} stale marker dir(s) cleaned)",
-            dead_dirs.len()
-        )))
-    } else {
-        // No VM: clean dead-PID dirs only. A live-PID dir with no VM is a peer
-        // mid-launch; leave it alone.
-        for dir in &dead_dirs {
-            clear_marker_dir(dir);
-        }
-        Reconcile::Proceed(None)
     }
 }
 
@@ -363,32 +539,52 @@ pub(crate) fn reconcile_existing_vm(root: &Path) -> Reconcile {
 fn wsb_vm_running() -> Option<bool> {
     // Toolhelp32 snapshot (no PowerShell). A snapshot failure is surfaced as
     // `None` so the ambiguity is visible to callers.
-    crate::control_plane::enumerate_pids_with_prefix("WindowsSandbox")
+    crate::control_plane::enumerate_pids_with_prefix(WSB_PROCESS_PREFIX)
         .ok()
         .map(|pids| !pids.is_empty())
 }
 
-/// Issue `taskkill /F /IM` for each Windows Sandbox host process, without
-/// waiting. Errors are best-effort: a non-zero exit means the process was not
-/// running, which is not an error worth surfacing.
-fn kill_wsb_processes() {
-    for name in WSB_PROCESS_NAMES {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/IM", name])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+/// Compute the scoped kill set from recorded `targets` and a single live
+/// `snapshot` of `WindowsSandbox*` processes.
+///
+/// - If the snapshot intersects the recorded targets we still own the same VM:
+///   kill the union (covers host processes the proof missed).
+/// - Otherwise (empty `targets`, or a non-empty set disjoint from the snapshot)
+///   kill only the recorded targets — which is nothing when empty, and likely
+///   already-dead PIDs when disjoint. The live VM is *never* enumerated into
+///   the kill set without a positive proof intersection, so a foreign or
+///   replacement VM is never touched. This deliberately prefers leaking our own
+///   (un-provable) VM over the small risk of killing one we cannot prove we
+///   own — a leaked VM is a recoverable availability issue, a wrongly-killed
+///   foreign VM is not.
+fn compute_kill_set(targets: &[VmProcId], snapshot: &[VmProcId]) -> Vec<VmProcId> {
+    let intersects = snapshot.iter().any(|p| targets.contains(p));
+    if intersects {
+        let mut kill_set = targets.to_vec();
+        for p in snapshot {
+            if !kill_set.contains(p) {
+                kill_set.push(*p);
+            }
+        }
+        kill_set
+    } else {
+        targets.to_vec()
     }
 }
 
-/// Kill the host processes, then poll (up to `poll_budget`) until they are
-/// gone. Best-effort and non-panicking — safe to call while unwinding.
+/// Tear down a Windows Sandbox VM this run provably owns, then poll (up to
+/// `poll_budget`) until the `WindowsSandbox*` processes are gone. Best-effort
+/// and non-panicking — safe to call while unwinding.
 ///
-/// Returns `true` only if the VM was *confirmed* gone. A probe failure or a
+/// The kill set is computed by [`compute_kill_set`] from `targets` and a
+/// *single* live snapshot, so a foreign VM is never killed by enumeration.
+/// Returns `true` only if the VM was *confirmed* gone; a probe failure or a
 /// timeout returns `false`, so callers leave the run marker in place for the
 /// next run to reclaim rather than deleting it prematurely.
-fn teardown_blocking(poll_budget: Duration) -> bool {
-    kill_wsb_processes();
+fn teardown_owned_blocking(targets: &[VmProcId], poll_budget: Duration) -> bool {
+    let snapshot = enumerate_processes_with_prefix(WSB_PROCESS_PREFIX).unwrap_or_default();
+    terminate_processes(&compute_kill_set(targets, &snapshot));
+
     let deadline = Instant::now() + poll_budget;
     loop {
         if wsb_vm_running() == Some(false) {
@@ -396,7 +592,8 @@ fn teardown_blocking(poll_budget: Duration) -> bool {
         }
         if Instant::now() >= deadline {
             eprintln!(
-                "[one-shot] warning: Windows Sandbox processes still running after teardown wait"
+                "[one-shot] warning: Windows Sandbox processes still running after scoped \
+                 teardown wait"
             );
             return false;
         }
@@ -422,7 +619,10 @@ impl VmTeardownGuard {
     pub(crate) fn arm(run_dir: PathBuf) -> Self {
         {
             let mut guard = slot().lock().unwrap_or_else(|p| p.into_inner());
-            *guard = Some(OneShotTeardown { run_dir });
+            *guard = Some(OneShotTeardown {
+                run_dir,
+                ownership: VmOwnership::NotLaunched,
+            });
         }
         install_ctrl_handler();
         Self
@@ -515,16 +715,47 @@ mod tests {
     }
 
     #[test]
-    fn write_then_read_marker_round_trips_pid() {
+    fn write_then_read_marker_round_trips_identity() {
         let dir = tempfile::tempdir().unwrap();
         write_marker(dir.path()).unwrap();
-        assert_eq!(read_marker_pid(dir.path()), Some(std::process::id()));
+        let marker = read_marker(dir.path()).expect("marker should parse");
+        assert_eq!(marker.launcher_pid, std::process::id());
+        assert!(marker.vm_processes.is_empty());
     }
 
     #[test]
-    fn read_marker_pid_none_when_absent() {
+    fn read_marker_none_when_absent() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(read_marker_pid(dir.path()), None);
+        assert!(read_marker(dir.path()).is_none());
+    }
+
+    #[test]
+    fn rewrite_marker_preserves_launcher_and_adds_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        write_marker(dir.path()).unwrap();
+        let proof = vec![
+            VmProcId {
+                pid: 1234,
+                creation_time: 42,
+            },
+            VmProcId {
+                pid: 5678,
+                creation_time: 99,
+            },
+        ];
+        rewrite_marker_with_proof(dir.path(), &proof).unwrap();
+        let marker = read_marker(dir.path()).expect("marker should parse");
+        assert_eq!(marker.launcher_pid, std::process::id());
+        assert_eq!(marker.vm_processes, proof);
+    }
+
+    #[test]
+    fn legacy_text_marker_is_unparseable() {
+        // A pre-JSON `pid=N` marker must not parse (treated as a dead launcher
+        // with no proof), never as a live launcher.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(MARKER_FILE), "pid=1234\n").unwrap();
+        assert!(read_marker(dir.path()).is_none());
     }
 
     #[test]
@@ -563,15 +794,109 @@ mod tests {
         assert!(young.exists(), "a freshly created dir must not be swept");
     }
 
-    #[test]
-    fn current_process_pid_is_alive() {
-        assert!(pid_alive(std::process::id()));
+    fn proc(pid: u32, ct: u64) -> VmProcId {
+        VmProcId {
+            pid,
+            creation_time: ct,
+        }
     }
 
     #[test]
-    fn unused_high_pid_is_not_alive() {
-        // PIDs are multiples of 4 on Windows and this is far above any real
-        // PID, so it should not resolve to a live process.
-        assert!(!pid_alive(0xFFFF_FFF0));
+    fn classify_probe_failure_is_busy() {
+        assert_eq!(
+            classify_reconcile(None, &[], &[]),
+            ReconcileDecision::Busy(BusyReason::ProbeFailed)
+        );
+    }
+
+    #[test]
+    fn classify_no_vm_proceeds() {
+        let markers = [MarkerState {
+            launcher_alive: false,
+            vm_processes: vec![proc(1, 1)],
+        }];
+        assert_eq!(
+            classify_reconcile(Some(false), &[], &markers),
+            ReconcileDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn classify_live_launcher_is_active_run() {
+        let current = [proc(100, 5)];
+        let markers = [MarkerState {
+            launcher_alive: true,
+            vm_processes: vec![proc(100, 5)],
+        }];
+        assert_eq!(
+            classify_reconcile(Some(true), &current, &markers),
+            ReconcileDecision::Busy(BusyReason::ActiveRun)
+        );
+    }
+
+    #[test]
+    fn classify_proof_intersection_reclaims() {
+        let current = [proc(100, 5), proc(200, 6)];
+        let markers = [MarkerState {
+            launcher_alive: false,
+            vm_processes: vec![proc(100, 5)],
+        }];
+        assert_eq!(
+            classify_reconcile(Some(true), &current, &markers),
+            ReconcileDecision::ReclaimThenProceed {
+                targets: current.to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_no_proof_intersection_is_foreign() {
+        let current = [proc(100, 5)];
+        // Recorded proof refers to a different (dead) process instance.
+        let markers = [MarkerState {
+            launcher_alive: false,
+            vm_processes: vec![proc(999, 1)],
+        }];
+        assert_eq!(
+            classify_reconcile(Some(true), &current, &markers),
+            ReconcileDecision::Busy(BusyReason::ForeignUnprovable)
+        );
+    }
+
+    #[test]
+    fn classify_running_no_markers_is_foreign() {
+        let current = [proc(100, 5)];
+        assert_eq!(
+            classify_reconcile(Some(true), &current, &[]),
+            ReconcileDecision::Busy(BusyReason::ForeignUnprovable)
+        );
+    }
+
+    #[test]
+    fn kill_set_unions_when_snapshot_intersects_targets() {
+        let targets = [proc(1, 10)];
+        let snapshot = [proc(1, 10), proc(2, 20)];
+        let set = compute_kill_set(&targets, &snapshot);
+        assert!(set.contains(&proc(1, 10)));
+        assert!(set.contains(&proc(2, 20)));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn kill_set_empty_when_targets_empty() {
+        // No positive proof: never enumerate-kill the live snapshot (it could
+        // be a foreign / replacement VM). Fail safe by killing nothing.
+        let snapshot = [proc(3, 30)];
+        assert!(compute_kill_set(&[], &snapshot).is_empty());
+    }
+
+    #[test]
+    fn kill_set_ignores_disjoint_snapshot() {
+        // Non-empty targets disjoint from the live snapshot: a replacement /
+        // foreign VM. Only the (likely-dead) recorded targets are returned;
+        // the live VM is never enumerated into the kill set.
+        let targets = [proc(1, 10)];
+        let snapshot = [proc(2, 20)];
+        assert_eq!(compute_kill_set(&targets, &snapshot), targets.to_vec());
     }
 }

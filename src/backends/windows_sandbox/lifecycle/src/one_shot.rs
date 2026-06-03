@@ -10,11 +10,13 @@
 //! one call == one disposable VM.
 //!
 //! Concurrency: the host allows only a single running Windows Sandbox
-//! instance, so concurrent one-shot invocations are not supported. A second
-//! invocation launched while a disposable VM is live is refused by
-//! [`crate::teardown::reconcile_existing_vm`] only if it carries no marker; two
-//! genuinely concurrent disposable runs would contend for the single-instance
-//! slot. State-aware addressing (separate work) lifts this restriction.
+//! instance. Each one-shot run holds the host VM-slot mutex (`Local\wxc-wsb-vm`)
+//! for its whole lifetime, which serialises one-shot against both a concurrent
+//! one-shot run and a live state-aware daemon (which holds the same mutex). A
+//! second invocation launched while a VM owner holds the slot is refused
+//! promptly as busy. Teardown is ownership-scoped (see [`crate::teardown`]): a
+//! run only ever kills the VM host processes it can positively prove it
+//! launched, never a foreign or manually-opened sandbox.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -23,6 +25,7 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 
+use crate::control_plane::{HostVmLock, VmOwnership};
 use crate::error::OneShotError;
 use crate::teardown::{self, Reconcile, VmTeardownGuard};
 use crate::{bridge, policy, rendezvous, vm};
@@ -36,6 +39,12 @@ const RENDEZVOUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Maximum time to connect to the guest agent after rendezvous.
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bounded wait to acquire the host VM-slot mutex. The host permits a single
+/// running Windows Sandbox VM; if another VM owner (a concurrent one-shot or a
+/// live state-aware daemon) holds the slot we refuse promptly as busy rather
+/// than block.
+const HOST_VM_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Stateless marker type whose [`ScriptRunner`] impl drives a disposable
 /// Windows Sandbox VM through launch → exec → teardown in a single process.
@@ -72,6 +81,18 @@ impl WindowsSandboxRunner {
         // enforce, rejecting anything it cannot. This has no side effects, so a
         // rejection here leaves the host untouched (no VM, no scratch dirs).
         let plan = policy::plan_policy(request)?;
+
+        // Acquire the host VM-slot mutex for the WHOLE run. The host permits a
+        // single running Windows Sandbox VM; holding this serialises one-shot
+        // against both concurrent one-shot runs and a live state-aware daemon,
+        // and closes the reconcile→write_marker TOCTOU. Declared first so it is
+        // dropped LAST — only after the teardown guard has confirmed our VM is
+        // gone — so the next VM owner cannot grab the slot while ours lingers.
+        let _vm_lock = HostVmLock::acquire(HOST_VM_LOCK_TIMEOUT).map_err(|e| {
+            OneShotError::Busy(format!(
+                "another Windows Sandbox VM owner holds the host slot: {e:#}"
+            ))
+        })?;
 
         // Reconcile the host single-instance slot (reclaim our own orphan, or
         // refuse a foreign VM).
@@ -132,7 +153,7 @@ impl WindowsSandboxRunner {
             .build()
             .map_err(|e| OneShotError::RuntimeSetup(format!("{e}")))?;
 
-        let exec = runtime.block_on(drive(&wsb_path, &rendezvous_dir, request))?;
+        let exec = runtime.block_on(drive(&wsb_path, &rendezvous_dir, &run_dir, request))?;
 
         let mut response = exec_to_response(exec);
         if let Some(note) = reclaim_note {
@@ -152,16 +173,43 @@ impl ScriptRunner for WindowsSandboxRunner {
     }
 }
 
-/// Drive the async portion of the lifecycle: launch → rendezvous → connect →
-/// execute. Runs to completion inside a single `block_on`.
+/// Drive the async portion of the lifecycle: launch → capture ownership proof →
+/// rendezvous → connect → execute. Runs to completion inside a single
+/// `block_on`.
+///
+/// As the launch progresses it pushes the VM-ownership state into the teardown
+/// slot (`LaunchInFlight` → `LaunchSucceededNoProof` → `Owned`) so the guard /
+/// console handler tear down exactly — and only — the VM this run provably
+/// owns. The marker is rewritten with positive process proof immediately after
+/// launch (before the long rendezvous wait) so a crash during boot still leaves
+/// a record the next run can reclaim.
 async fn drive(
     wsb_path: &std::path::Path,
     rendezvous_dir: &std::path::Path,
+    run_dir: &std::path::Path,
     request: &ExecutionRequest,
 ) -> Result<bridge::ExecResult, OneShotError> {
+    // Launch is in flight: a foreign VM could still win the single-instance
+    // contest and fail our launch, so ownership is not yet provable.
+    teardown::set_vm_ownership(VmOwnership::LaunchInFlight);
+
     vm::launch(wsb_path)
         .await
         .map_err(|e| OneShotError::Launch(format!("{e:#}")))?;
+
+    // Launch returned Ok: by the OS single-instance invariant the running VM is
+    // ours, even before we enumerate its host processes.
+    teardown::set_vm_ownership(VmOwnership::LaunchSucceededNoProof);
+
+    // Capture positive ownership proof (the VM host-process identities) and
+    // record it both in the teardown slot and the durable marker.
+    let proof = vm::capture_launch_proof().await;
+    teardown::set_vm_ownership(VmOwnership::Owned(proof.clone()));
+    teardown::rewrite_marker_with_proof(run_dir, &proof).map_err(|e| {
+        // Fatal: without a durable proof a later run could not reclaim this VM.
+        // Abort so the guard tears the VM down now rather than leak it.
+        OneShotError::Launch(format!("record VM ownership proof: {e}"))
+    })?;
 
     let addr = rendezvous::wait_for_rendezvous(
         rendezvous_dir,

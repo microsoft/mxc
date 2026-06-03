@@ -38,6 +38,16 @@ pub const RECORD_SCHEMA_VERSION: u32 = 1;
 /// single-user, single-instance backend.
 const TRANSITION_MUTEX_NAME: &str = r"Local\wxc-wsb-stateaware-transition";
 
+/// Name of the host-global "WSB VM slot" mutex. The host permits a single
+/// running Windows Sandbox VM; whoever owns that VM (a one-shot run for its
+/// whole lifetime, or a state-aware daemon for its whole lifetime) holds this
+/// mutex. It serialises VM ownership **across both modes** so a one-shot and a
+/// state-aware daemon can never both believe they launched the singleton VM
+/// (which would let the survivor's teardown kill the other's VM). `Local\`
+/// keeps it scoped to the current logon session, matching the single-user
+/// design.
+pub const HOST_VM_MUTEX_NAME: &str = r"Local\wxc-wsb-vm";
+
 /// Lifecycle state of a provisioned state-aware sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -474,6 +484,60 @@ pub fn daemon_alive(record: &DaemonRecord) -> bool {
 // Cross-process transition lock
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Cross-process named mutexes
+// ---------------------------------------------------------------------------
+
+/// Acquire a Windows named mutex, waiting up to `timeout`. Returns the handle
+/// and whether we own it (always `true` on success; the handle must be released
+/// + closed on drop). Shared by [`TransitionLock`] and [`HostVmLock`].
+#[cfg(windows)]
+fn named_mutex_acquire(
+    name: &str,
+    timeout: std::time::Duration,
+) -> Result<windows::Win32::Foundation::HANDLE> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // SAFETY: `wide` is a valid null-terminated UTF-16 buffer that outlives the
+    // call; the returned handle is owned by the caller and closed on drop.
+    let handle = unsafe { CreateMutexW(None, false, PCWSTR(wide.as_ptr())) }
+        .context("create named mutex")?;
+
+    let ms = timeout.as_millis().min(u32::MAX as u128) as u32;
+    // SAFETY: `handle` is a valid mutex handle from `CreateMutexW`.
+    let wait = unsafe { WaitForSingleObject(handle, ms) };
+    if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+        // WAIT_ABANDONED: a previous holder died without releasing. We now own
+        // the mutex; the protected state is reconciled separately via records /
+        // process-identity proof, so taking ownership here is correct.
+        Ok(handle)
+    } else {
+        // SAFETY: closing the handle we just created; we do not own the mutex.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
+        }
+        anyhow::bail!("timed out acquiring named mutex {name:?} after {timeout:?}");
+    }
+}
+
+/// Release (if owned) and close a named-mutex handle. Shared drop helper.
+#[cfg(windows)]
+fn named_mutex_release(handle: windows::Win32::Foundation::HANDLE, owned: bool) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::ReleaseMutex;
+    // SAFETY: `handle` is a valid mutex handle owned by the caller.
+    unsafe {
+        if owned {
+            let _ = ReleaseMutex(handle);
+        }
+        let _ = CloseHandle(handle);
+    }
+}
+
 /// RAII guard over the named transition mutex. While held, no other phase
 /// process can enter a `start` / `stop` / `deprovision` transition, which
 /// prevents split-brain (double-spawn, kill-wrong-target, contradictory record
@@ -490,53 +554,60 @@ pub struct TransitionLock {
 impl TransitionLock {
     /// Acquire the transition mutex, waiting up to `timeout`.
     pub fn acquire(timeout: std::time::Duration) -> Result<Self> {
-        use windows::core::PCWSTR;
-        use windows::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0};
-        use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
-
-        let name: Vec<u16> = TRANSITION_MUTEX_NAME
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-
-        // SAFETY: `name` is a valid null-terminated UTF-16 buffer that outlives
-        // the call; the returned handle is owned by `self` and closed on drop.
-        let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
-            .context("create transition mutex")?;
-
-        let ms = timeout.as_millis().min(u32::MAX as u128) as u32;
-        // SAFETY: `handle` is a valid mutex handle from `CreateMutexW`.
-        let wait = unsafe { WaitForSingleObject(handle, ms) };
-        if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
-            // WAIT_ABANDONED: a previous holder died without releasing. We now
-            // own the mutex; the protected state is reconciled separately via
-            // the records, so taking ownership here is correct.
-            Ok(Self {
-                handle,
-                owned: true,
-            })
-        } else {
-            // SAFETY: closing the handle we just created; we do not own the mutex.
-            unsafe {
-                let _ = windows::Win32::Foundation::CloseHandle(handle);
-            }
-            anyhow::bail!("timed out acquiring transition lock after {:?}", timeout);
-        }
+        let handle = named_mutex_acquire(TRANSITION_MUTEX_NAME, timeout)?;
+        Ok(Self {
+            handle,
+            owned: true,
+        })
     }
 }
 
 #[cfg(windows)]
 impl Drop for TransitionLock {
     fn drop(&mut self) {
-        use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::Threading::ReleaseMutex;
-        // SAFETY: `handle` is a valid mutex handle owned by `self`.
-        unsafe {
-            if self.owned {
-                let _ = ReleaseMutex(self.handle);
-            }
-            let _ = CloseHandle(self.handle);
-        }
+        named_mutex_release(self.handle, self.owned);
+    }
+}
+
+/// RAII guard over the host-global WSB VM-slot mutex ([`HOST_VM_MUTEX_NAME`]).
+/// Held for the entire lifetime that a process owns the host's single Windows
+/// Sandbox VM (a one-shot run, or a state-aware daemon), so the two modes can
+/// never both launch / own the singleton VM concurrently. Released on drop.
+#[cfg(windows)]
+pub struct HostVmLock {
+    handle: windows::Win32::Foundation::HANDLE,
+    owned: bool,
+}
+
+#[cfg(windows)]
+impl HostVmLock {
+    /// Acquire the host VM-slot mutex, waiting up to `timeout`. On timeout the
+    /// slot is owned by another VM owner (a concurrent one-shot or a live
+    /// state-aware daemon) — the caller should surface this as "busy".
+    pub fn acquire(timeout: std::time::Duration) -> Result<Self> {
+        let handle = named_mutex_acquire(HOST_VM_MUTEX_NAME, timeout)?;
+        Ok(Self {
+            handle,
+            owned: true,
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for HostVmLock {
+    fn drop(&mut self) {
+        named_mutex_release(self.handle, self.owned);
+    }
+}
+
+/// Non-Windows stub: the host VM mutex is a Windows-only concept.
+#[cfg(not(windows))]
+pub struct HostVmLock;
+
+#[cfg(not(windows))]
+impl HostVmLock {
+    pub fn acquire(_timeout: std::time::Duration) -> Result<Self> {
+        Ok(Self)
     }
 }
 

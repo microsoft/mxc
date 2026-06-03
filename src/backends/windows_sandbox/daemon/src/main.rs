@@ -49,6 +49,11 @@ const RENDEZVOUS_POLL_INTERVAL_MS: u64 = 500;
 /// Maximum time to connect to the guest agent after rendezvous.
 const GUEST_CONNECT_TIMEOUT_SECS: u64 = 30;
 
+/// Bounded wait to acquire the host VM-slot mutex at startup. On contention
+/// (another VM owner holds it) the daemon bails rather than block. Generous
+/// enough to ride out a previous owner's teardown but not so long as to wedge.
+const HOST_VM_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Parsed daemon command-line arguments.
 struct Args {
     token: String,
@@ -87,6 +92,15 @@ async fn main() -> Result<()> {
         .with_context(|| format!("no provisioned record for token {}", args.token))?;
     let sandbox_id = record.sandbox_id.clone();
     let mapped = to_mapped_folders(&record.mapped_folders);
+
+    // Acquire the host VM-slot mutex for the daemon's whole life. The host
+    // permits a single running Windows Sandbox VM; holding this for our entire
+    // lifetime serialises us against a concurrent one-shot run (which holds the
+    // same mutex), so the two modes can never both launch / own the singleton
+    // VM. A modest timeout bounds the wait; on contention we bail rather than
+    // block indefinitely. Held until `main` returns (after teardown).
+    let _vm_lock = control_plane::HostVmLock::acquire(HOST_VM_LOCK_TIMEOUT)
+        .context("acquire host Windows Sandbox VM slot")?;
 
     // Ownership-based startup reconcile. A freshly-started daemon has not
     // launched a VM yet, so any running Windows Sandbox VM predates us. We tear
