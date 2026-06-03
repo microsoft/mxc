@@ -357,11 +357,23 @@ pub struct StreamExecOutcome {
     /// connection is left in a clean, reusable state; only the client relay was
     /// lost.
     pub ipc_alive: bool,
+    /// The child's exit code, as reported by the guest `Exit` message. The
+    /// caller writes the terminal exit frame (via [`write_exit_frame`]) **after**
+    /// restoring/releasing the single-flight guest slot.
+    pub exit_code: i32,
+    /// The guest's error message accompanying the exit (empty on success).
+    pub error_message: String,
 }
 
 /// Run one execution on the guest, streaming its stdout/stderr **live** to the
-/// `ipc` writer as length-prefixed [`crate::ipc_exec`] frames, and emit a
-/// terminal [`ipc_exec::FRAME_EXIT`] frame once the guest reports its exit.
+/// `ipc` writer as length-prefixed [`crate::ipc_exec`] frames, and return the
+/// guest's terminal exit payload (`exit_code`/`error_message`) in the
+/// [`StreamExecOutcome`].
+///
+/// The terminal exit frame is intentionally **not** written here. The caller
+/// must first restore/release the single-flight guest slot and then call
+/// [`write_exit_frame`], so that a client observing its terminal result implies
+/// the sandbox is already free for the next exec (finding #77).
 ///
 /// Unlike [`execute_on_guest`] (which buffers output for the one-shot path),
 /// this relays bytes as they arrive so a long-running or chatty command shows
@@ -373,9 +385,9 @@ pub struct StreamExecOutcome {
 /// `Exit` **regardless** of whether the IPC client is still connected — if the
 /// client disconnects mid-stream, output frames are simply dropped (`ipc_alive`
 /// becomes `false`) but the guest protocol is still advanced to a clean
-/// boundary so the connection can be reused for the next exec. The terminal
-/// exit frame is sent only after stdout EOF + stderr EOF + the guest `Exit`,
-/// so no output is ever truncated.
+/// boundary so the connection can be reused for the next exec. The exit payload
+/// is returned only after stdout EOF + stderr EOF + the guest `Exit`, so no
+/// output is ever truncated.
 pub async fn stream_exec_on_guest<W>(
     conn: &mut GuestConnection,
     exec_id: &str,
@@ -512,26 +524,37 @@ where
         None => anyhow::bail!("internal: exec loop ended without an exit notification"),
     };
 
-    if ipc_alive {
-        match ipc_exec::encode_exit_frame(exit_code, &error_message) {
-            Ok(f) => {
-                let flushed = write_ipc(ipc, &f).await
-                    && matches!(
-                        tokio::time::timeout(IPC_WRITE_TIMEOUT, ipc.flush()).await,
-                        Ok(Ok(()))
-                    );
-                if !flushed {
-                    ipc_alive = false;
-                }
-            }
-            Err(e) => anyhow::bail!("encode exit frame: {e}"),
-        }
-    }
-
+    // The terminal exit frame is intentionally NOT written here. The caller must
+    // first restore/release the single-flight guest slot and then call
+    // [`write_exit_frame`], so that a client observing its terminal result
+    // implies the sandbox is already free for the next exec (finding #77).
     Ok(StreamExecOutcome {
         control_residual: ctrl_buf,
         ipc_alive,
+        exit_code,
+        error_message,
     })
+}
+
+/// Write the terminal exit frame to the IPC client.
+///
+/// Call this only **after** the guest slot has been restored and the
+/// single-flight lock released, so that a client observing its terminal result
+/// implies the sandbox is already free for the next exec (finding #77). Returns
+/// `true` if the frame was written and flushed (client still alive), `false`
+/// otherwise.
+pub async fn write_exit_frame<W>(ipc: &mut W, exit_code: i32, error_message: &str) -> Result<bool>
+where
+    W: AsyncWrite + Unpin,
+{
+    let frame =
+        ipc_exec::encode_exit_frame(exit_code, error_message).context("encode exit frame")?;
+    let ok = write_ipc(ipc, &frame).await
+        && matches!(
+            tokio::time::timeout(IPC_WRITE_TIMEOUT, ipc.flush()).await,
+            Ok(Ok(()))
+        );
+    Ok(ok)
 }
 
 /// Classify a data-stream (`stdout`/`stderr`) read result.
@@ -637,5 +660,28 @@ mod tests {
         assert!(classify_data_read(r, 0, "stderr").is_err());
         let r = Err(Error::new(ErrorKind::NotConnected, "nope"));
         assert!(classify_data_read(r, 5, "stderr").is_err());
+    }
+
+    #[tokio::test]
+    async fn write_exit_frame_emits_single_decodable_exit_frame() {
+        // The terminal exit frame is now written by the caller (after releasing
+        // the single-flight slot, finding #77). Verify the extracted helper
+        // emits exactly one decodable FRAME_EXIT and reports the client alive.
+        let mut buf: Vec<u8> = Vec::new();
+        let alive = write_exit_frame(&mut buf, 7, "boom").await.unwrap();
+        assert!(alive, "an in-memory writer never errors");
+
+        let mut cur = std::io::Cursor::new(buf);
+        let frame = ipc_exec::read_frame(&mut cur)
+            .unwrap()
+            .expect("one exit frame");
+        assert_eq!(frame.kind, ipc_exec::FRAME_EXIT);
+        let exit: ipc_exec::ExecExit = serde_json::from_slice(&frame.payload).unwrap();
+        assert_eq!(exit.exit_code, 7);
+        assert_eq!(exit.error_message, "boom");
+        assert!(
+            ipc_exec::read_frame(&mut cur).unwrap().is_none(),
+            "no trailing frames after the terminal exit frame"
+        );
     }
 }

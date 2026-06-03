@@ -27,7 +27,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio::time::timeout;
 
 use windows_sandbox_lifecycle::bridge::{
-    reconnect_data_streams, stream_exec_on_guest, GuestConnection,
+    reconnect_data_streams, stream_exec_on_guest, write_exit_frame, GuestConnection,
 };
 use windows_sandbox_lifecycle::control_plane::{IPC_EXEC, IPC_PING, IPC_STOP};
 use windows_sandbox_lifecycle::ipc_exec::{self, ExecStart, MAX_IPC_FRAME};
@@ -217,21 +217,40 @@ async fn handle_exec(
     match stream_exec_on_guest(&mut conn, &exec_id, &req, &mut writer).await {
         Ok(outcome) => {
             // Whether or not the IPC client survived, the guest ran to a clean
-            // boundary; re-establish the data streams for the next exec.
-            match reconnect_data_streams(&mut conn, addr, outcome.control_residual).await {
-                Ok(()) => {
-                    *slot = GuestSlot::Ready { conn, addr };
-                    if !outcome.ipc_alive {
-                        eprintln!(
-                            "[wsb-daemon] exec {exec_id}: client disconnected mid-stream; \
-                             guest reused"
-                        );
+            // boundary; re-establish the data streams for the next exec and
+            // restore the slot. Only AFTER releasing the single-flight lock do we
+            // signal the client that the exec finished — so a back-to-back exec
+            // never races the slot-release window (finding #77).
+            let reconnect = reconnect_data_streams(&mut conn, addr, outcome.control_residual).await;
+            match &reconnect {
+                Ok(()) => *slot = GuestSlot::Ready { conn, addr },
+                Err(e) => *slot = GuestSlot::Poisoned(format!("stream reconnect failed: {e}")),
+            }
+            drop(slot);
+
+            if outcome.ipc_alive {
+                match write_exit_frame(&mut writer, outcome.exit_code, &outcome.error_message).await
+                {
+                    Ok(true) => {}
+                    Ok(false) => eprintln!(
+                        "[wsb-daemon] exec {exec_id}: client disconnected before exit frame"
+                    ),
+                    Err(e) => {
+                        eprintln!("[wsb-daemon] exec {exec_id}: failed to encode exit frame: {e:#}")
                     }
                 }
-                Err(e) => {
-                    *slot = GuestSlot::Poisoned(format!("stream reconnect failed: {e}"));
-                    eprintln!("[wsb-daemon] exec {exec_id}: reconnect failed: {e:#}");
-                }
+            } else {
+                eprintln!(
+                    "[wsb-daemon] exec {exec_id}: client disconnected mid-stream; guest reused"
+                );
+            }
+
+            if let Err(e) = reconnect {
+                eprintln!(
+                    "[wsb-daemon] exec {exec_id}: completed (exit {}); stream reconnect failed, \
+                     sandbox poisoned for future execs: {e:#}",
+                    outcome.exit_code
+                );
             }
         }
         Err(e) => {
