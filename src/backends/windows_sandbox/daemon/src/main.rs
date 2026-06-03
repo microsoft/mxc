@@ -32,8 +32,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::{Mutex, Notify};
 use windows_sandbox_lifecycle::control_plane::{
-    self, daemon_record_path, process_creation_time, DaemonRecord, MappedFolderRecord,
-    RECORD_SCHEMA_VERSION,
+    self, daemon_record_path, decide_cleanup, process_creation_time, CleanupAction, DaemonRecord,
+    MappedFolderRecord, VmOwnership, RECORD_SCHEMA_VERSION,
 };
 use windows_sandbox_lifecycle::{bridge as tcp_bridge, rendezvous, vm as sandbox_vm};
 
@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
                 "[wsb-daemon] reclaiming our orphaned Windows Sandbox VM (process identity matched \
                  a prior daemon record); tearing it down"
             );
-            sandbox_vm::teardown().await;
+            sandbox_vm::teardown_owned(&current_vm).await;
         }
         control_plane::StartupAction::RefuseForeign => {
             anyhow::bail!(
@@ -164,32 +164,53 @@ async fn main() -> Result<()> {
     control_plane::atomic_write_json(&daemon_record_path(), &starting)
         .context("write starting daemon record")?;
 
-    // Tracks whether we actually issued the VM launch. The cleanup teardown is
-    // gated on this so that exit paths which never launched a VM (pre-launch
-    // setup failure, STOP before launch) do not blanket-kill a Windows Sandbox
-    // VM — which, post-reconcile, could only be a user's concurrently-opened
-    // sandbox, never ours.
-    let we_launched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Tracks how far VM ownership has progressed within this daemon. The
+    // cleanup path derives its teardown decision purely from this state
+    // (`decide_cleanup`) so it never tears down a VM it cannot prove it owns:
+    //   - `NotLaunched`           -> no launch issued (setup failure / STOP early)
+    //   - `LaunchInFlight`        -> launch in flight, outcome unknown
+    //                                (a foreign VM could have won the contest)
+    //                                -> leak, never kill
+    //   - `LaunchSucceededNoProof`-> launch returned Ok (VM is ours) but no
+    //                                host-process proof yet -> teardown by
+    //                                enumeration
+    //   - `Owned(pids)`           -> launched and proven ours -> scoped teardown
+    let ownership = Arc::new(std::sync::Mutex::new(VmOwnership::NotLaunched));
 
     // From here the IPC port is bound and a VM may come up, so guarantee
-    // record removal on every exit path, and teardown whenever we launched.
+    // record removal on every exit path, and teardown only what we own.
     let outcome = serve(
         listener,
         &args.nonce,
         &sandbox_id,
         starting,
         &mapped,
-        we_launched.clone(),
+        ownership.clone(),
     )
     .await;
 
-    if we_launched.load(std::sync::atomic::Ordering::SeqCst) {
-        eprintln!("[wsb-daemon] tearing down our VM and clearing record");
-        sandbox_vm::teardown().await;
-    } else {
-        eprintln!(
-            "[wsb-daemon] no VM was launched by this daemon; clearing record without teardown"
-        );
+    let action = decide_cleanup(&ownership.lock().expect("ownership mutex poisoned"));
+    match action {
+        CleanupAction::Noop => {
+            eprintln!("[wsb-daemon] no VM was launched by this daemon; clearing record");
+        }
+        CleanupAction::LeakUnowned => {
+            // A launch was issued but never proven ours. A VM may exist, but we
+            // cannot prove we own it (a foreign sandbox could have won the
+            // single-instance contest and failed our launch), so we must NOT
+            // kill it. Fail safe: leave it for the operator / next reconcile.
+            eprintln!(
+                "[wsb-daemon] WARNING: a VM launch was issued but ownership was never proven; \
+                 leaving any running VM untouched (fail-safe) and clearing record"
+            );
+        }
+        CleanupAction::Teardown(pids) => {
+            eprintln!(
+                "[wsb-daemon] tearing down our VM ({} recorded process(es)) and clearing record",
+                pids.len()
+            );
+            sandbox_vm::teardown_owned(&pids).await;
+        }
     }
     let _ = std::fs::remove_file(daemon_record_path());
     eprintln!("[wsb-daemon] exiting");
@@ -206,7 +227,7 @@ async fn serve(
     sandbox_id: &str,
     mut record: DaemonRecord,
     mapped: &[sandbox_vm::MappedFolder],
-    we_launched: Arc<std::sync::atomic::AtomicBool>,
+    ownership: Arc<std::sync::Mutex<VmOwnership>>,
 ) -> Result<()> {
     let shutdown = Arc::new(Notify::new());
 
@@ -223,12 +244,12 @@ async fn serve(
     ));
 
     let (conn, addr) = tokio::select! {
-        launched = launch_and_connect(mapped, &we_launched) => launched?,
+        launched = launch_and_connect(mapped, &ownership, &mut record) => launched?,
         joined = &mut server => {
             // STOP (or a server error) arrived during boot. Propagate any
             // server error; otherwise return so `main` tears the (possibly
-            // half-launched) VM down — gated on whether `launch_and_connect`
-            // already issued the launch (recorded via `we_launched`).
+            // half-launched) VM down — scoped to whatever ownership state
+            // `launch_and_connect` reached before the abort.
             joined.context("control server task panicked")??;
             eprintln!("[wsb-daemon] STOP received during boot; aborting launch");
             return Ok(());
@@ -239,23 +260,33 @@ async fn serve(
     // Publish the live connection so EXEC requests can run on it.
     *guest.lock().await = GuestSlot::Ready { conn, addr };
 
-    // The VM + guest are ready. Capture the VM host-process identities as our
-    // positive ownership proof, then re-publish the record as ready so the
-    // backend's start poll unblocks and a future daemon can reclaim only this
-    // exact VM if we crash without tearing it down.
-    record.vm_processes = match sandbox_vm::enumerate_sandbox_vm_processes().await {
-        Ok(procs) => procs,
-        Err(e) => {
-            // Non-fatal: the VM is demonstrably up (guest connected). Proceed
-            // with an empty proof set, but log it — a later daemon could not
-            // prove ownership and would refuse rather than reclaim this VM.
-            eprintln!("[wsb-daemon] WARNING: could not enumerate VM processes at ready: {e}");
-            Vec::new()
+    // The VM + guest are ready. Refresh the VM host-process proof (it was first
+    // captured right after launch, inside `launch_and_connect`). Keep the
+    // after-launch proof as a fallback if this enumeration fails so the record
+    // — and the in-memory ownership — never regress to empty.
+    match sandbox_vm::enumerate_sandbox_vm_processes().await {
+        Ok(procs) if !procs.is_empty() => {
+            record.vm_processes = procs.clone();
+            *ownership.lock().expect("ownership mutex poisoned") = VmOwnership::Owned(procs);
         }
-    };
+        Ok(_) => {
+            eprintln!(
+                "[wsb-daemon] WARNING: no Windows Sandbox host processes at ready; \
+                 keeping after-launch proof ({} process(es))",
+                record.vm_processes.len()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "[wsb-daemon] WARNING: could not enumerate VM processes at ready: {e}; \
+                 keeping after-launch proof ({} process(es))",
+                record.vm_processes.len()
+            );
+        }
+    }
     if record.vm_processes.is_empty() {
         eprintln!(
-            "[wsb-daemon] WARNING: no Windows Sandbox host processes recorded at ready; \
+            "[wsb-daemon] WARNING: no Windows Sandbox host processes recorded; \
              crash-reclaim of this VM will not be possible"
         );
     }
@@ -278,11 +309,23 @@ async fn serve(
 /// and the address it was reached at (needed to re-establish data streams
 /// between executions).
 ///
-/// Sets `we_launched` to `true` the instant the VM launch is issued, so the
-/// caller's cleanup can scope teardown to a VM this daemon actually started.
+/// Drives the ownership state machine and writes the durable proof record:
+///   1. Before issuing the launch, transition to `LaunchInFlight` (ambiguous:
+///      a foreign VM could win the single-instance contest and fail us).
+///   2. The instant `launch()` returns Ok, transition to
+///      `LaunchSucceededNoProof` — the VM is ours by the single-instance
+///      invariant — so cleanup tears it down even if proof is slow / we are
+///      cancelled before proof.
+///   3. Poll briefly for the VM's host processes; on success stamp them into
+///      `record.vm_processes`, atomically re-write the (still `ready:false`)
+///      record so a crash during the multi-minute rendezvous wait leaves a
+///      *reclaimable* record, and transition to `Owned(proof)`. A failure to
+///      persist the proof is fatal (returns an error) so cleanup tears the VM
+///      down via the in-memory proof rather than orphaning it.
 async fn launch_and_connect(
     mapped: &[sandbox_vm::MappedFolder],
-    we_launched: &std::sync::atomic::AtomicBool,
+    ownership: &Arc<std::sync::Mutex<VmOwnership>>,
+    record: &mut DaemonRecord,
 ) -> Result<(tcp_bridge::GuestConnection, std::net::SocketAddr)> {
     let exe_dir = std::env::current_exe()
         .context("current_exe")?
@@ -302,11 +345,35 @@ async fn launch_and_connect(
 
     let wsb_path =
         sandbox_vm::generate_wsb(&exe_dir, &rendezvous_dir, &python_dir, &config_dir, mapped)?;
-    // Mark that we are issuing the launch BEFORE the call: from here a VM may
-    // exist that is ours, so the caller's cleanup must be allowed to tear it
-    // down even if `launch` itself or any subsequent step returns an error.
-    we_launched.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Mark the launch as in flight BEFORE the call. If we are cancelled here or
+    // `launch()` errors, ownership is ambiguous (a foreign VM could have won
+    // the single-instance contest), so cleanup must leak rather than kill.
+    *ownership.lock().expect("ownership mutex poisoned") = VmOwnership::LaunchInFlight;
     sandbox_vm::launch(&wsb_path).await.context("launch VM")?;
+
+    // `launch()` returned Ok: by the OS single-instance guarantee plus startup
+    // reconcile, the running VM is ours. Record that immediately so even if the
+    // host processes are slow to appear (or we are cancelled before proof),
+    // cleanup tears the VM down by enumeration instead of leaking it.
+    *ownership.lock().expect("ownership mutex poisoned") = VmOwnership::LaunchSucceededNoProof;
+
+    // Capture ownership proof now, before the long rendezvous wait. Persist it
+    // into the (still not-ready) record so a crash mid-boot leaves a
+    // reclaimable orphan record. If we cannot persist the proof, tear the VM
+    // down now (we still hold in-memory proof) rather than risk a durable-less
+    // orphan: surface the error so `main`'s cleanup runs scoped teardown.
+    let proof = sandbox_vm::capture_launch_proof().await;
+    if proof.is_empty() {
+        eprintln!(
+            "[wsb-daemon] WARNING: no Windows Sandbox host processes appeared after launch; \
+             a crash before ready would leave this VM unreclaimable"
+        );
+    } else {
+        record.vm_processes = proof.clone();
+        *ownership.lock().expect("ownership mutex poisoned") = VmOwnership::Owned(proof);
+        control_plane::atomic_write_json(&daemon_record_path(), record)
+            .context("persist after-launch ownership proof record")?;
+    }
 
     let guest_addr = rendezvous::wait_for_rendezvous(
         &rendezvous_dir,

@@ -42,6 +42,16 @@ const TEARDOWN_COOLDOWN_SECS: u64 = 5;
 /// Polling interval (seconds) when checking for sandbox process exit.
 const TEARDOWN_POLL_INTERVAL_SECS: u64 = 2;
 
+/// Maximum time (seconds) to poll for the VM's host processes to appear after
+/// `launch()` returns, so we can record ownership proof before the long
+/// rendezvous wait. `launch()` returns while the VM boots in the background, so
+/// the durable host processes may take a moment to appear.
+const LAUNCH_PROOF_TIMEOUT_SECS: u64 = 30;
+
+/// Polling interval (milliseconds) while waiting for the VM's host processes to
+/// appear after launch.
+const LAUNCH_PROOF_POLL_INTERVAL_MS: u64 = 500;
+
 /// Discover the host's Python installation directory.
 ///
 /// Checks `python.exe` on PATH, then falls back to common install locations.
@@ -264,60 +274,80 @@ pub async fn launch(wsb_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Tear down any running Windows Sandbox instance.
+/// Capture the ownership proof for a VM this daemon just launched: the
+/// identities (PID + creation time) of its Windows Sandbox host processes.
 ///
-/// Kills the sandbox host processes, then polls until they are gone before
-/// returning. Best-effort — errors are logged but not propagated.
+/// `launch()` returns while the VM is still booting, so this polls (up to
+/// [`LAUNCH_PROOF_TIMEOUT_SECS`]) until at least one host process appears.
+/// Returns whatever was found when the budget elapses — possibly empty if the
+/// processes never materialised, which the caller logs but does not treat as
+/// fatal (the proof is refreshed again once the guest connects).
 ///
-/// Only the `WindowsSandbox*` host processes are treated as liveness
-/// indicators. The `vmmemWindowsSandbox` / `vmmemCmZygote` Hyper-V memory
-/// processes are intentionally NOT awaited: they are SYSTEM-owned, linger
-/// after the host processes exit, and are harmless residue — a subsequent
-/// sandbox launch succeeds while they are still present. Polling on them
-/// only wasted the full teardown timeout.
-///
-/// TODO: `taskkill /F /IM` kills ALL sandbox instances system-wide, not
-/// just ours. If the user has a manual sandbox open, we'd kill it. Scope
-/// teardown to only our process tree or track the sandbox PID at launch.
-pub async fn teardown() {
-    eprintln!("[daemon] tearing down sandbox");
+/// Safe to record as proof only when the caller knows it actually launched the
+/// VM: the host permits a single sandbox VM, and startup reconcile guarantees
+/// no foreign VM was running, so any host process present after a successful
+/// launch belongs to us.
+pub async fn capture_launch_proof() -> Vec<crate::control_plane::VmProcId> {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(LAUNCH_PROOF_TIMEOUT_SECS);
+    loop {
+        if let Ok(procs) = enumerate_sandbox_vm_processes().await {
+            if !procs.is_empty() {
+                return procs;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Vec::new();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(
+            LAUNCH_PROOF_POLL_INTERVAL_MS,
+        ))
+        .await;
+    }
+}
 
-    // Kill the sandbox UI and session processes. The `.exe` suffix is
-    // REQUIRED: `taskkill /IM` matches the full image name, so omitting it
-    // (e.g. `WindowsSandboxServer`) silently fails to find the process. The
-    // UI client `WindowsSandbox.exe` typically exits shortly after launch,
-    // so `WindowsSandboxServer.exe` + `WindowsSandboxRemoteSession.exe` are
-    // the processes that actually keep the VM (and its single-instance slot)
-    // alive — they must be killed by their exact image names.
-    for process_name in [
-        "WindowsSandbox.exe",
-        "WindowsSandboxServer.exe",
-        "WindowsSandboxRemoteSession.exe",
-    ] {
-        match Command::new("taskkill")
-            .args(["/F", "/IM", process_name])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await
-        {
-            Ok(status) if !status.success() => {
-                // Non-zero exit from taskkill is expected when the process
-                // isn't running — not an error worth logging.
+/// Tear down a Windows Sandbox VM this host provably launched.
+///
+/// The kill set is the union of the recorded `targets` and a *single* snapshot
+/// of the live `WindowsSandbox*` host processes taken at the start of teardown.
+/// Both are PID-reuse-safe (creation time verified at kill time). Killing is
+/// confined to this snapshot: a foreign VM that a user starts *after* our
+/// processes exit is never re-enumerated and so is never touched.
+///
+/// The snapshot is safe to kill wholesale because this is only reached when the
+/// caller provably holds the single-instance VM — either the `Owned` /
+/// launch-succeeded cleanup states (where `launch()` returning `Ok` plus the OS
+/// single-instance guarantee mean the running VM is ours), or the startup
+/// `ReclaimOrphan` path (where reconcile already proved no foreign VM exists
+/// and we have not launched). An empty `targets` seed is therefore still
+/// effective: the live snapshot supplies the actual processes to kill.
+///
+/// Best-effort — errors are logged but not propagated. Only the
+/// `WindowsSandbox*` host processes are treated as liveness indicators; the
+/// `vmmemWindowsSandbox` / `vmmemCmZygote` Hyper-V memory processes are
+/// SYSTEM-owned, harmless residue and are intentionally NOT awaited.
+pub async fn teardown_owned(targets: &[crate::control_plane::VmProcId]) {
+    // Snapshot the live sandbox processes NOW, while we provably hold the VM,
+    // and union with the recorded targets. All killing is restricted to this
+    // set so a VM that appears later is never killed.
+    let mut to_kill: Vec<crate::control_plane::VmProcId> = targets.to_vec();
+    if let Ok(live) = enumerate_sandbox_vm_processes().await {
+        for p in live {
+            if !to_kill.contains(&p) {
+                to_kill.push(p);
             }
-            Err(err) => {
-                eprintln!(
-                    "[daemon] failed to run taskkill for {}: {}",
-                    process_name, err
-                );
-            }
-            _ => {}
         }
     }
+    eprintln!(
+        "[daemon] tearing down sandbox ({} target process(es))",
+        to_kill.len()
+    );
+    crate::control_plane::terminate_processes(&to_kill);
 
     // Poll until the sandbox host processes are fully gone (up to 30s).
     // Only `WindowsSandbox*` count as live — `vmmem*` residue is harmless
-    // (see `is_sandbox_vm_running`).
+    // (see `is_sandbox_vm_running`). We do NOT kill anything newly observed
+    // here; we only wait for the snapshot we already terminated to disappear.
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(TEARDOWN_POLL_TIMEOUT_SECS);
     loop {

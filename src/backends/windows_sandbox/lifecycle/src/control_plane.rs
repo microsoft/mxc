@@ -174,6 +174,67 @@ pub fn classify_startup(prior: Option<&DaemonRecord>, current_vm: &[VmProcId]) -
     StartupAction::RefuseForeign
 }
 
+/// How far VM ownership has progressed within a single daemon process. The
+/// cleanup path consults this (via [`decide_cleanup`]) so it never tears down a
+/// VM it cannot prove it owns.
+///
+/// The crucial distinction is between a launch that is still *in flight* (we
+/// cannot prove a VM is ours — a foreign VM could have won the single-instance
+/// contest and made our launch fail) and a launch that *returned `Ok`* (the OS
+/// single-instance guarantee plus startup reconcile mean the running VM is
+/// definitely ours, even if its host processes have not been enumerated yet).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VmOwnership {
+    /// No VM launch was ever issued by this daemon.
+    NotLaunched,
+    /// A launch was *issued* but has not yet been observed to succeed (the
+    /// `launch()` call is in flight, or it errored, or the daemon stopped
+    /// before it returned). Ambiguous: a foreign VM could have raced in and
+    /// caused our launch to fail, so cleanup must NOT tear anything down.
+    LaunchInFlight,
+    /// `launch()` returned `Ok` — the running VM is ours by the single-instance
+    /// invariant — but no host-process proof was captured yet (slow boot).
+    /// Cleanup may tear down whatever sandbox VM is live (it is ours), but the
+    /// durable record carries no reclaim proof, so a crash here is a known
+    /// (shrinking) wedge window.
+    LaunchSucceededNoProof,
+    /// This daemon holds a launched VM and captured its host-process
+    /// identities. Cleanup may tear exactly these down (with a snapshot
+    /// fallback for any host process the proof missed).
+    Owned(Vec<VmProcId>),
+}
+
+/// What the daemon cleanup path should do, derived purely from ownership state
+/// so the decision is unit-testable without a real VM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanupAction {
+    /// Nothing was launched: do nothing.
+    Noop,
+    /// A launch is in flight but ownership is unprovable: leave any VM alone
+    /// (fail safe) and let the operator or the next startup reconcile deal with
+    /// it. Never kill in this state.
+    LeakUnowned,
+    /// Tear down the sandbox VM, seeding the kill set with `Vec<VmProcId>`
+    /// (possibly empty). `teardown_owned` additionally snapshots the live
+    /// sandbox processes at teardown start — safe because the caller only
+    /// reaches a `Teardown` action when it provably holds the single-instance
+    /// VM — so an empty seed (launch-succeeded-but-no-proof) still tears the VM
+    /// down by enumeration.
+    Teardown(Vec<VmProcId>),
+}
+
+/// Map an [`VmOwnership`] to the cleanup action the daemon should take on exit.
+pub fn decide_cleanup(ownership: &VmOwnership) -> CleanupAction {
+    match ownership {
+        VmOwnership::NotLaunched => CleanupAction::Noop,
+        VmOwnership::LaunchInFlight => CleanupAction::LeakUnowned,
+        // Launch succeeded → the VM is ours; tear it down by enumeration even
+        // without recorded proof (empty seed).
+        VmOwnership::LaunchSucceededNoProof => CleanupAction::Teardown(Vec::new()),
+        VmOwnership::Owned(pids) => CleanupAction::Teardown(pids.clone()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
@@ -364,6 +425,43 @@ pub fn enumerate_processes_with_prefix(name_prefix: &str) -> Result<Vec<VmProcId
         }
     }
     Ok(procs)
+}
+
+/// Terminate exactly the processes in `targets`, verifying each one's live
+/// creation time still matches before killing so a recycled PID is never hit.
+/// Returns the number of processes actually terminated.
+///
+/// This never enumerates or kills by image name — it can only touch processes
+/// explicitly recorded as ours — so it cannot disturb a VM this host did not
+/// launch. It is the scoped replacement for `taskkill /F /IM WindowsSandbox*`.
+#[cfg(windows)]
+pub fn terminate_processes(targets: &[VmProcId]) -> usize {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    let mut killed = 0usize;
+    for target in targets {
+        // PID-reuse guard: only kill if the live creation time still matches
+        // the recorded identity. A recycled PID gets a new creation time.
+        if process_creation_time(target.pid) != Some(target.creation_time) {
+            continue;
+        }
+        // SAFETY: `pid` is a plain integer; the handle is closed on every path.
+        unsafe {
+            if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, target.pid) {
+                if TerminateProcess(handle, 1).is_ok() {
+                    killed += 1;
+                }
+                let _ = CloseHandle(handle);
+            }
+        }
+    }
+    killed
+}
+
+#[cfg(not(windows))]
+pub fn terminate_processes(_targets: &[VmProcId]) -> usize {
+    0
 }
 
 /// True iff the daemon described by `record` is still the live process it
@@ -772,5 +870,101 @@ mod tests {
         }
         // Dropped above; a second acquire must succeed promptly.
         let _lock2 = TransitionLock::acquire(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn decide_cleanup_not_launched_is_noop() {
+        assert_eq!(
+            decide_cleanup(&VmOwnership::NotLaunched),
+            CleanupAction::Noop
+        );
+    }
+
+    #[test]
+    fn decide_cleanup_launch_in_flight_leaks() {
+        // Critical safety property: an in-flight (unproven) launch must NEVER
+        // tear anything down (a foreign VM may have won the contest).
+        assert_eq!(
+            decide_cleanup(&VmOwnership::LaunchInFlight),
+            CleanupAction::LeakUnowned
+        );
+    }
+
+    #[test]
+    fn decide_cleanup_launch_succeeded_no_proof_tears_down_by_enumeration() {
+        // launch() returned Ok -> the VM is ours; tear it down even without
+        // recorded proof, via an empty seed that teardown_owned enumerates.
+        assert_eq!(
+            decide_cleanup(&VmOwnership::LaunchSucceededNoProof),
+            CleanupAction::Teardown(Vec::new())
+        );
+    }
+
+    #[test]
+    fn decide_cleanup_owned_tears_down_recorded() {
+        let pids = vec![
+            VmProcId {
+                pid: 10,
+                creation_time: 100,
+            },
+            VmProcId {
+                pid: 20,
+                creation_time: 200,
+            },
+        ];
+        assert_eq!(
+            decide_cleanup(&VmOwnership::Owned(pids.clone())),
+            CleanupAction::Teardown(pids)
+        );
+    }
+
+    #[test]
+    fn terminate_empty_targets_kills_nothing() {
+        assert_eq!(terminate_processes(&[]), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminate_kills_recorded_process() {
+        // Spawn a long-lived child, record its identity, terminate it.
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "pause"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let creation_time = process_creation_time(pid).expect("creation time");
+        let killed = terminate_processes(&[VmProcId { pid, creation_time }]);
+        assert_eq!(killed, 1);
+        // The child must actually be reaped.
+        let status = child.wait().unwrap();
+        assert!(!status.success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminate_skips_creation_time_mismatch() {
+        // Spawn a child, but record a deliberately-wrong creation time so the
+        // PID-reuse guard refuses to kill it.
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "pause"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let real = process_creation_time(pid).expect("creation time");
+        let wrong = real.wrapping_add(1);
+        let killed = terminate_processes(&[VmProcId {
+            pid,
+            creation_time: wrong,
+        }]);
+        assert_eq!(killed, 0, "must not kill a PID whose creation time differs");
+        // The child is still alive; clean it up directly.
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
