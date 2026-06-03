@@ -272,6 +272,15 @@ pub fn daemon_record_path() -> PathBuf {
     state_aware_root().join("daemon.json")
 }
 
+/// Lock a directory MXC owns down to an owner-only, inheritable DACL so files
+/// created underneath are not cross-user readable/tamperable on a shared temp
+/// dir. Thin `anyhow` wrapper over
+/// [`wxc_common::filesystem_dacl::set_owner_only_dacl`].
+pub fn set_owner_only_dir(dir: &Path) -> Result<()> {
+    wxc_common::filesystem_dacl::set_owner_only_dacl(dir, true)
+        .map_err(|e| anyhow::Error::new(e).context(format!("secure dir {dir:?}")))
+}
+
 // ---------------------------------------------------------------------------
 // Atomic JSON read / write
 // ---------------------------------------------------------------------------
@@ -289,6 +298,17 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let json = serde_json::to_vec_pretty(value).context("serialise record")?;
     let tmp = parent.join(format!("{}.tmp", uuid::Uuid::new_v4()));
     std::fs::write(&tmp, &json).with_context(|| format!("write temp record {:?}", tmp))?;
+
+    // Lock the record down to an owner-only DACL BEFORE the atomic rename, so
+    // the published file is never momentarily readable by other users (the
+    // record carries the auth nonce; the temp dir may be shared, e.g.
+    // C:\Windows\Temp). Windows preserves the explicit DACL across the rename.
+    // Fail closed: on error, discard the temp file rather than publish an
+    // unsecured record.
+    if let Err(e) = wxc_common::filesystem_dacl::set_owner_only_dacl(&tmp, false) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::new(e)).with_context(|| format!("secure record DACL {:?}", tmp));
+    }
 
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);

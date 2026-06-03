@@ -392,6 +392,7 @@ async fn launch_and_connect(
 
     let rendezvous_dir = std::env::temp_dir().join("wxc-wsb-stateaware-rendezvous");
     std::fs::create_dir_all(&rendezvous_dir).context("create rendezvous dir")?;
+    control_plane::set_owner_only_dir(&rendezvous_dir).context("secure rendezvous dir")?;
     rendezvous::cleanup(&rendezvous_dir).await?;
 
     let python_dir = sandbox_vm::find_host_python()
@@ -399,6 +400,7 @@ async fn launch_and_connect(
 
     let config_dir = std::env::temp_dir().join("wxc-wsb-stateaware-config");
     std::fs::create_dir_all(&config_dir).context("create .wsb config dir")?;
+    control_plane::set_owner_only_dir(&config_dir).context("secure .wsb config dir")?;
 
     let wsb_path =
         sandbox_vm::generate_wsb(&exe_dir, &rendezvous_dir, &python_dir, &config_dir, mapped)?;

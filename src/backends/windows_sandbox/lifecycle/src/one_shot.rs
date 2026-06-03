@@ -114,6 +114,13 @@ impl WindowsSandboxRunner {
         let run_dir = markers_root.join(uuid::Uuid::new_v4().to_string());
         let rendezvous_dir = run_dir.join("rendezvous");
         let config_dir = run_dir.join("config");
+        // Create the run dir first and lock it owner-only (inheritable) so the
+        // rendezvous files and generated `.wsb` written underneath cannot be
+        // read or tampered with cross-user on a shared temp dir.
+        std::fs::create_dir_all(&run_dir)
+            .map_err(|e| OneShotError::Launch(format!("create run dir: {e}")))?;
+        wxc_common::filesystem_dacl::set_owner_only_dacl(&run_dir, true)
+            .map_err(|e| OneShotError::Launch(format!("secure run dir: {e}")))?;
         std::fs::create_dir_all(&rendezvous_dir)
             .map_err(|e| OneShotError::Launch(format!("create rendezvous dir: {e}")))?;
         std::fs::create_dir_all(&config_dir)

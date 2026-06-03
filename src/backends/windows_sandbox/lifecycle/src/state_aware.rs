@@ -369,6 +369,11 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         let dir = sandbox_dir(&token);
         std::fs::create_dir_all(&dir)
             .map_err(|e| MxcError::backend_error(format!("create sandbox dir {dir:?}: {e}")))?;
+        // Lock the per-sandbox scratch dir down to owner-only (inheritable), so
+        // the record.json (auth nonce) and any other state written inside are
+        // not cross-user readable/tamperable when the temp dir is shared.
+        wxc_common::filesystem_dacl::set_owner_only_dacl(&dir, true)
+            .map_err(|e| MxcError::backend_error(format!("secure sandbox dir {dir:?}: {e}")))?;
 
         let mapped_folders: Vec<MappedFolderRecord> = plan
             .mapped_folders
