@@ -27,12 +27,14 @@ mod control_server;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use windows_sandbox_lifecycle::control_plane::{
     self, daemon_record_path, process_creation_time, DaemonRecord, MappedFolderRecord,
     RECORD_SCHEMA_VERSION,
 };
 use windows_sandbox_lifecycle::{bridge as tcp_bridge, rendezvous, vm as sandbox_vm};
+
+use control_server::GuestSlot;
 
 /// Maximum time to wait for the guest agent's rendezvous file. First VM boot
 /// can take several minutes; 360s covers worst-case cold starts.
@@ -149,14 +151,19 @@ async fn serve(
 ) -> Result<()> {
     let shutdown = Arc::new(Notify::new());
 
+    // The held guest connection, shared with the control server's EXEC handler.
+    // It starts `Booting`: any EXEC that races the boot gets `ERR not ready`.
+    let guest = Arc::new(Mutex::new(GuestSlot::Booting));
+
     // Serve IPC concurrently from the start so a STOP can abort the boot.
     let mut server = tokio::spawn(control_server::run(
         listener,
         nonce.to_string(),
         shutdown.clone(),
+        guest.clone(),
     ));
 
-    let guest = tokio::select! {
+    let (conn, addr) = tokio::select! {
         launched = launch_and_connect(mapped) => launched?,
         joined = &mut server => {
             // STOP (or a server error) arrived during boot. Propagate any
@@ -167,7 +174,10 @@ async fn serve(
             return Ok(());
         }
     };
-    eprintln!("[wsb-daemon] guest connected at {}", guest.addr);
+    eprintln!("[wsb-daemon] guest connected at {addr}");
+
+    // Publish the live connection so EXEC requests can run on it.
+    *guest.lock().await = GuestSlot::Ready { conn, addr };
 
     // The VM + guest are ready. Re-publish the record as ready so the backend's
     // start poll unblocks.
@@ -180,19 +190,18 @@ async fn serve(
     server.await.context("control server task panicked")??;
 
     eprintln!("[wsb-daemon] STOP received; releasing guest");
+    // Dropping the slot drops the held GuestConnection, closing the guest
+    // control channel (the guest exits the instant it drops).
     drop(guest);
     Ok(())
 }
 
-/// A live guest connection plus the address it was reached at. Holding this
-/// keeps the guest's control channel open (the guest exits when it drops).
-struct HeldGuest {
-    _conn: tcp_bridge::GuestConnection,
-    addr: std::net::SocketAddr,
-}
-
-/// Launch the VM and connect to the guest agent. Returns the held connection.
-async fn launch_and_connect(mapped: &[sandbox_vm::MappedFolder]) -> Result<HeldGuest> {
+/// Launch the VM and connect to the guest agent. Returns the live connection
+/// and the address it was reached at (needed to re-establish data streams
+/// between executions).
+async fn launch_and_connect(
+    mapped: &[sandbox_vm::MappedFolder],
+) -> Result<(tcp_bridge::GuestConnection, std::net::SocketAddr)> {
     let exe_dir = std::env::current_exe()
         .context("current_exe")?
         .parent()
@@ -228,10 +237,7 @@ async fn launch_and_connect(mapped: &[sandbox_vm::MappedFolder]) -> Result<HeldG
     .await
     .context("connect to guest agent")?;
 
-    Ok(HeldGuest {
-        _conn: conn,
-        addr: guest_addr,
-    })
+    Ok((conn, guest_addr))
 }
 
 /// Convert the durable record's mapped-folder snapshot into the VM type.

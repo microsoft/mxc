@@ -7,18 +7,28 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use windows_sandbox_common::sandbox_protocol::{
     decode_message, encode_message, ControlMessage, DecodeResult, ExecRequest,
 };
 
+use crate::ipc_exec::{self, ExecStart, FRAME_STDERR, FRAME_STDOUT};
+
 /// Maximum time (seconds) to wait for the guest's StreamsReady message.
 const STREAMS_READY_TIMEOUT_SECS: u64 = 60;
 
 /// Maximum time (seconds) for each data stream reconnection attempt.
 const RECONNECT_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum time to wait on a single write to the IPC client before treating it
+/// as dead. Bounds head-of-line blocking: a client that stops reading (e.g. its
+/// own stdout pipe is blocked) must never stall the loop that drains the guest,
+/// or the guest child could wedge and the connection never reach a clean
+/// boundary. On timeout we drop the client (`ipc_alive = false`) and keep
+/// draining the guest to a clean reuse point.
+const IPC_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Four TCP connections to the guest agent.
 ///
@@ -300,4 +310,220 @@ pub async fn reconnect_data_streams(
         }
         buf.extend_from_slice(&tmp[..bytes_read]);
     }
+}
+
+/// Outcome of a streamed execution on the guest.
+pub struct StreamExecOutcome {
+    /// Control-channel bytes read past the `Exit` frame (may contain the
+    /// guest's `StreamsReady`). Hand this to [`reconnect_data_streams`].
+    pub control_residual: Vec<u8>,
+    /// `false` if the IPC writer (the exec-phase client) errored mid-stream and
+    /// was abandoned. The guest execution still ran to completion and the guest
+    /// connection is left in a clean, reusable state; only the client relay was
+    /// lost.
+    pub ipc_alive: bool,
+}
+
+/// Run one execution on the guest, streaming its stdout/stderr **live** to the
+/// `ipc` writer as length-prefixed [`crate::ipc_exec`] frames, and emit a
+/// terminal [`ipc_exec::FRAME_EXIT`] frame once the guest reports its exit.
+///
+/// Unlike [`execute_on_guest`] (which buffers output for the one-shot path),
+/// this relays bytes as they arrive so a long-running or chatty command shows
+/// progress immediately, which is required for state-aware exec parity with the
+/// other backends.
+///
+/// Robustness contract (see the daemon's single-flight handler): the guest's
+/// stdout and stderr are drained to EOF and the control channel is read until
+/// `Exit` **regardless** of whether the IPC client is still connected — if the
+/// client disconnects mid-stream, output frames are simply dropped (`ipc_alive`
+/// becomes `false`) but the guest protocol is still advanced to a clean
+/// boundary so the connection can be reused for the next exec. The terminal
+/// exit frame is sent only after stdout EOF + stderr EOF + the guest `Exit`,
+/// so no output is ever truncated.
+pub async fn stream_exec_on_guest<W>(
+    conn: &mut GuestConnection,
+    exec_id: &str,
+    req: &ExecStart,
+    ipc: &mut W,
+) -> Result<StreamExecOutcome>
+where
+    W: AsyncWrite + Unpin,
+{
+    // Send the EXEC command on the control channel.
+    let exec_msg = ControlMessage::Exec(ExecRequest {
+        exec_id: exec_id.to_string(),
+        script_code: req.script_code.clone(),
+        working_directory: req.working_directory.clone(),
+        timeout_ms: req.timeout_ms,
+    });
+    let frame = encode_message(&exec_msg).context("encode EXEC")?;
+    conn.control.write_all(&frame).await.context("send EXEC")?;
+
+    // No stdin in this phase: signal EOF so a command reading stdin does not
+    // block until timeout.
+    conn.stdin_stream
+        .shutdown()
+        .await
+        .context("shutdown guest stdin")?;
+
+    // Disjoint mutable borrows of the three channels so `select!` can poll them
+    // concurrently.
+    let control = &mut conn.control;
+    let stdout = &mut conn.stdout_stream;
+    let stderr = &mut conn.stderr_stream;
+
+    let mut ipc_alive = true;
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+    let mut stdout_seen: u64 = 0;
+    let mut stderr_seen: u64 = 0;
+    let mut exit: Option<(i32, String)> = None;
+    let mut ctrl_buf: Vec<u8> = Vec::with_capacity(256);
+    let mut so = [0u8; 8192];
+    let mut se = [0u8; 8192];
+    let mut cb = [0u8; 4096];
+
+    while !(stdout_done && stderr_done && exit.is_some()) {
+        tokio::select! {
+            r = stdout.read(&mut so), if !stdout_done => {
+                match classify_data_read(r, stdout_seen, "stdout")? {
+                    None => stdout_done = true,
+                    Some(n) => {
+                        stdout_seen += n as u64;
+                        if ipc_alive {
+                            let f = ipc_exec::encode_frame(FRAME_STDOUT, &so[..n]);
+                            if !write_ipc(ipc, &f).await {
+                                ipc_alive = false;
+                            }
+                        }
+                    }
+                }
+            }
+            r = stderr.read(&mut se), if !stderr_done => {
+                match classify_data_read(r, stderr_seen, "stderr")? {
+                    None => stderr_done = true,
+                    Some(n) => {
+                        stderr_seen += n as u64;
+                        if ipc_alive {
+                            let f = ipc_exec::encode_frame(FRAME_STDERR, &se[..n]);
+                            if !write_ipc(ipc, &f).await {
+                                ipc_alive = false;
+                            }
+                        }
+                    }
+                }
+            }
+            r = control.read(&mut cb), if exit.is_none() => {
+                let n = r.context("read guest control")?;
+                if n == 0 {
+                    anyhow::bail!("guest control closed before Exit");
+                }
+                ctrl_buf.extend_from_slice(&cb[..n]);
+                loop {
+                    match decode_message(&ctrl_buf).context("decode control")? {
+                        DecodeResult::Message {
+                            message: ControlMessage::Exit(e),
+                            consumed,
+                        } => {
+                            ctrl_buf.drain(..consumed);
+                            exit = Some((e.exit_code, e.error_message));
+                            break;
+                        }
+                        DecodeResult::Message {
+                            message: ControlMessage::Pong,
+                            consumed,
+                        } => {
+                            ctrl_buf.drain(..consumed);
+                        }
+                        DecodeResult::Message { message, consumed } => {
+                            // StreamsReady should not precede Exit, but stay
+                            // tolerant of reordering rather than wedging.
+                            eprintln!("[daemon] unexpected control during exec: {message:?}");
+                            ctrl_buf.drain(..consumed);
+                        }
+                        DecodeResult::Incomplete => break,
+                    }
+                }
+            }
+        }
+    }
+
+    let (exit_code, error_message) = match exit {
+        Some(e) => e,
+        None => anyhow::bail!("internal: exec loop ended without an exit notification"),
+    };
+
+    if ipc_alive {
+        match ipc_exec::encode_exit_frame(exit_code, &error_message) {
+            Ok(f) => {
+                let flushed = write_ipc(ipc, &f).await
+                    && matches!(
+                        tokio::time::timeout(IPC_WRITE_TIMEOUT, ipc.flush()).await,
+                        Ok(Ok(()))
+                    );
+                if !flushed {
+                    ipc_alive = false;
+                }
+            }
+            Err(e) => anyhow::bail!("encode exit frame: {e}"),
+        }
+    }
+
+    Ok(StreamExecOutcome {
+        control_residual: ctrl_buf,
+        ipc_alive,
+    })
+}
+
+/// Classify a data-stream (`stdout`/`stderr`) read result.
+///
+/// Returns `Ok(None)` for end-of-stream, `Ok(Some(n))` for `n > 0` bytes, and
+/// `Err` for a genuine read failure.
+///
+/// End-of-stream normally arrives as a clean `Ok(0)` (FIN). The guest also
+/// gracefully half-closes its data sockets, so a clean EOF is expected. As a
+/// narrow defensive measure we additionally treat a reset-class error
+/// (`ConnectionReset`/`ConnectionAborted`/`BrokenPipe`) as EOF **only when no
+/// bytes were ever observed on that stream** — i.e. the zero-output case where
+/// an abortive socket close (RST) can race ahead of a FIN on Windows. If any
+/// bytes were already relayed, a reset is treated as a hard error rather than
+/// silently truncating output.
+fn classify_data_read(r: std::io::Result<usize>, seen: u64, label: &str) -> Result<Option<usize>> {
+    use std::io::ErrorKind;
+    match r {
+        Ok(0) => Ok(None),
+        Ok(n) => Ok(Some(n)),
+        Err(e)
+            if seen == 0
+                && matches!(
+                    e.kind(),
+                    ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::BrokenPipe
+                ) =>
+        {
+            eprintln!(
+                "[daemon] guest {label} reset with no data ({:?}); treating as EOF",
+                e.kind()
+            );
+            Ok(None)
+        }
+        Err(e) => {
+            Err(anyhow::Error::new(e).context(format!("read guest {label} after {seen} bytes")))
+        }
+    }
+}
+
+/// Write a frame to the IPC client with a bounded timeout. Returns `true` on a
+/// fully-flushed write, `false` if the write errored or timed out (the caller
+/// then stops relaying but keeps draining the guest).
+async fn write_ipc<W>(ipc: &mut W, frame: &[u8]) -> bool
+where
+    W: AsyncWrite + Unpin,
+{
+    matches!(
+        tokio::time::timeout(IPC_WRITE_TIMEOUT, ipc.write_all(frame)).await,
+        Ok(Ok(()))
+    )
 }

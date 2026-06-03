@@ -360,6 +360,10 @@ pub fn live_daemon() -> Result<Option<DaemonRecord>> {
 pub const IPC_PING: &str = "PING";
 /// Teardown verb: the daemon tears down its VM and exits. Response: `OK`.
 pub const IPC_STOP: &str = "STOP";
+/// Exec verb: after `EXEC <nonce>\n` the client sends a framed `ExecStart`
+/// request and the daemon replies with a status line then a binary frame
+/// stream (see [`crate::ipc_exec`]). Admission response: `OK` or `ERR <msg>`.
+pub const IPC_EXEC: &str = "EXEC";
 /// Success response token.
 pub const IPC_OK: &str = "OK";
 /// Ping success response token.

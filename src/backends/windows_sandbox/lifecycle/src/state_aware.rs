@@ -38,16 +38,20 @@ use wxc_common::id::mint_random_token;
 use wxc_common::models::ExecutionRequest;
 use wxc_common::mxc_error::MxcError;
 use wxc_common::process_util::resolve_sibling_binary;
+use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::state_aware_backend::{
     DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
 };
 
+use windows::Win32::Foundation::HANDLE;
+
 use crate::control_plane::{
     self, daemon_record_path, generate_nonce, live_daemon, process_creation_time,
-    read_daemon_record, read_sandbox_record, sandbox_dir, sandbox_record_path, MappedFolderRecord,
-    SandboxRecord, SandboxState, TransitionLock, IPC_OK, IPC_STOP,
+    read_daemon_record, read_sandbox_record, sandbox_dir, sandbox_record_path, DaemonRecord,
+    MappedFolderRecord, SandboxRecord, SandboxState, TransitionLock, IPC_EXEC, IPC_OK, IPC_STOP,
 };
 use crate::error::OneShotError;
+use crate::ipc_exec::{self, ExecExit, ExecStart, FRAME_EXIT, FRAME_STDERR, FRAME_STDOUT};
 use crate::policy;
 use crate::WindowsSandboxRunner;
 
@@ -123,6 +127,127 @@ fn reject_post_provision_policy(request: &ExecutionRequest) -> Result<(), MxcErr
         ));
     }
     Ok(())
+}
+
+/// Map an `ERR <reason>` status line from the daemon's EXEC admission into the
+/// wire error model. Only called when the status line was not `OK`.
+fn map_exec_status_error(status: &str) -> MxcError {
+    let reason = status.strip_prefix("ERR").map(str::trim).unwrap_or(status);
+    match reason {
+        "busy" => MxcError::backend_error("sandbox is busy: another exec is already running"),
+        "not ready" => MxcError::not_started("sandbox is not ready for exec yet"),
+        other => MxcError::backend_error(format!("daemon rejected exec: {other}")),
+    }
+}
+
+/// Connect to the daemon's IPC port and run one execution, relaying the guest's
+/// stdout/stderr live to this process's stdio and returning the child exit
+/// code. The auth line + framed [`ExecStart`] are sent, a status line is read,
+/// and on `OK` the binary frame stream ([`crate::ipc_exec`]) is consumed until
+/// the terminal exit frame.
+fn run_exec_stream(daemon: &DaemonRecord, request: &ExecutionRequest) -> Result<i32, MxcError> {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, daemon.ipc_port));
+    let stream = TcpStream::connect_timeout(&addr, IPC_CONNECT_TIMEOUT)
+        .map_err(|e| MxcError::backend_error(format!("connect daemon IPC on {addr}: {e}")))?;
+    stream
+        .set_write_timeout(Some(IPC_IO_TIMEOUT))
+        .map_err(|e| MxcError::backend_error(format!("set IPC write timeout: {e}")))?;
+
+    let exec_start = ExecStart {
+        script_code: request.script_code.clone(),
+        working_directory: request.working_directory.clone(),
+        timeout_ms: get_timeout_milliseconds(request.script_timeout),
+    };
+
+    // Send the auth line followed immediately by the request frame.
+    {
+        let mut w = &stream;
+        writeln!(w, "{IPC_EXEC} {}", daemon.nonce)
+            .map_err(|e| MxcError::backend_error(format!("send EXEC line: {e}")))?;
+        ipc_exec::write_exec_start(&mut w, &exec_start)
+            .map_err(|e| MxcError::backend_error(format!("send ExecStart: {e}")))?;
+        w.flush()
+            .map_err(|e| MxcError::backend_error(format!("flush EXEC request: {e}")))?;
+    }
+
+    // Read the status line then the frame stream on a cloned handle so the
+    // BufReader's look-ahead cannot strand frame bytes on the raw socket.
+    let read_handle = stream
+        .try_clone()
+        .map_err(|e| MxcError::backend_error(format!("clone IPC stream: {e}")))?;
+    read_handle
+        .set_read_timeout(Some(IPC_IO_TIMEOUT))
+        .map_err(|e| MxcError::backend_error(format!("set IPC read timeout: {e}")))?;
+    let mut reader = BufReader::new(read_handle);
+
+    let mut status = String::new();
+    reader
+        .read_line(&mut status)
+        .map_err(|e| MxcError::backend_error(format!("read EXEC status: {e}")))?;
+    let status = status.trim();
+    if status != IPC_OK {
+        return Err(map_exec_status_error(status));
+    }
+
+    // The command may run arbitrarily long with no output; switch to blocking
+    // reads so a quiet command isn't mistaken for a stalled daemon. The guest
+    // enforces the script timeout and the daemon always sends a terminal exit
+    // frame, so this cannot block forever on a healthy daemon.
+    reader
+        .get_ref()
+        .set_read_timeout(None)
+        .map_err(|e| MxcError::backend_error(format!("clear IPC read timeout: {e}")))?;
+
+    let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
+    loop {
+        match ipc_exec::read_frame(&mut reader)
+            .map_err(|e| MxcError::backend_error(format!("read exec frame: {e}")))?
+        {
+            Some(frame) => match frame.kind {
+                FRAME_STDOUT => {
+                    stdout
+                        .write_all(&frame.payload)
+                        .map_err(|e| MxcError::backend_error(format!("write stdout: {e}")))?;
+                    stdout
+                        .flush()
+                        .map_err(|e| MxcError::backend_error(format!("flush stdout: {e}")))?;
+                }
+                FRAME_STDERR => {
+                    stderr
+                        .write_all(&frame.payload)
+                        .map_err(|e| MxcError::backend_error(format!("write stderr: {e}")))?;
+                    stderr
+                        .flush()
+                        .map_err(|e| MxcError::backend_error(format!("flush stderr: {e}")))?;
+                }
+                FRAME_EXIT => {
+                    let exit: ExecExit = serde_json::from_slice(&frame.payload)
+                        .map_err(|e| MxcError::backend_error(format!("decode exit frame: {e}")))?;
+                    // A negative exit code paired with a message indicates a
+                    // guest-side failure (spawn error / timeout); surface it as
+                    // an error. A plain non-zero exit is a normal exit code.
+                    if exit.exit_code < 0 && !exit.error_message.is_empty() {
+                        return Err(MxcError::backend_error(format!(
+                            "execution failed: {}",
+                            exit.error_message
+                        )));
+                    }
+                    return Ok(exit.exit_code);
+                }
+                other => {
+                    return Err(MxcError::backend_error(format!(
+                        "unexpected exec frame kind {other}"
+                    )));
+                }
+            },
+            None => {
+                return Err(MxcError::backend_error(
+                    "daemon closed the connection before sending an exit frame",
+                ));
+            }
+        }
+    }
 }
 
 /// Send a single nonce-authenticated line command to the daemon and return its
@@ -323,15 +448,42 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
     fn exec(
         &mut self,
         sandbox_id: &str,
-        _request: &ExecutionRequest,
+        request: &ExecutionRequest,
         _config: Option<()>,
     ) -> Result<ExecHandle, MxcError> {
-        // Validate the id shape so a malformed id fails consistently with the
-        // other phases even though exec is not yet wired to the guest.
-        let _token = extract_token(sandbox_id)?;
-        Err(MxcError::backend_error(
-            "Windows Sandbox state-aware exec is not yet implemented (Phase 4b)",
-        ))
+        extract_token(sandbox_id)?;
+
+        // Locate the live daemon holding this sandbox and confirm it is ready
+        // to run (the VM booted and the guest connection is held).
+        let daemon = live_daemon()
+            .map_err(|e| MxcError::backend_error(format!("{e}")))?
+            .ok_or_else(|| MxcError::not_started(format!("sandbox {sandbox_id} is not started")))?;
+        if daemon.active_sandbox_id != sandbox_id {
+            return Err(MxcError::not_started(format!(
+                "sandbox {sandbox_id} is not the active started sandbox"
+            )));
+        }
+        if !daemon.ready {
+            return Err(MxcError::not_started(format!(
+                "sandbox {sandbox_id} is still starting"
+            )));
+        }
+
+        // Stream the execution synchronously, relaying stdout/stderr live to
+        // this process's stdio. Mirrors isolation_session: the relay completes
+        // inside this call, so the returned handle carries sentinel pipe
+        // handles plus a waiter that yields the captured exit code, and the
+        // dispatcher's `relay_exec_to_stdio` is a thin call-through.
+        let exit_code = run_exec_stream(&daemon, request)?;
+
+        let null = HANDLE(std::ptr::null_mut());
+        Ok(ExecHandle {
+            stdout: null,
+            stderr: null,
+            stdin: null,
+            waiter: Box::new(move || Ok(exit_code)),
+            terminator: Box::new(|| {}),
+        })
     }
 
     fn stop(
@@ -581,16 +733,18 @@ mod tests {
     }
 
     #[test]
-    fn exec_stub_returns_backend_error() {
+    fn exec_without_live_daemon_is_not_started() {
         let mut backend = WindowsSandboxRunner::new();
         let err = backend
             .exec("wsb:abcd1234", &ExecutionRequest::default(), None)
             .unwrap_err();
-        assert_eq!(err.code, MxcErrorCode::BackendError);
+        // With no daemon holding the sandbox, exec reports NotStarted rather
+        // than running anything.
+        assert_eq!(err.code, MxcErrorCode::NotStarted);
     }
 
     #[test]
-    fn exec_stub_rejects_malformed_id_first() {
+    fn exec_rejects_malformed_id_first() {
         let mut backend = WindowsSandboxRunner::new();
         let err = backend
             .exec("iso:abc", &ExecutionRequest::default(), None)

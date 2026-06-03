@@ -31,6 +31,7 @@
 
 pub mod bridge;
 pub mod control_plane;
+pub mod ipc_exec;
 pub mod rendezvous;
 pub mod vm;
 

@@ -197,6 +197,14 @@ async fn execute_script(
             if let Err(err) = tokio::io::copy(&mut child_out, &mut tcp).await {
                 eprintln!("[guest] stdout bridge error: {}", err);
             }
+            // Half-close gracefully so the host observes a clean EOF (FIN)
+            // rather than an abortive reset (RST) when the socket is dropped.
+            // Dropping a socket with no graceful shutdown can deliver an RST to
+            // the host, which would otherwise abort an exec that completed
+            // normally (notably for zero-output commands).
+            if let Err(err) = tcp.shutdown().await {
+                eprintln!("[guest] stdout shutdown error: {}", err);
+            }
         }
     });
 
@@ -205,6 +213,11 @@ async fn execute_script(
         if let (mut tcp, Some(mut child_err)) = (stderr_stream, child_stderr) {
             if let Err(err) = tokio::io::copy(&mut child_err, &mut tcp).await {
                 eprintln!("[guest] stderr bridge error: {}", err);
+            }
+            // Half-close gracefully so the host observes a clean EOF (see the
+            // stdout bridge above).
+            if let Err(err) = tcp.shutdown().await {
+                eprintln!("[guest] stderr shutdown error: {}", err);
             }
         }
     });
