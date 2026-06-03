@@ -22,6 +22,69 @@ const PROXY_ENV_KEYS: &[&str] = &[
     "no_proxy",
 ];
 
+/// Read-only host paths bind-mounted into every Bubblewrap sandbox as the
+/// deny-by-default baseline. Mirrors the seatbelt backend's
+/// `SYSTEM_READ_ALLOW` (`src/backends/seatbelt/common/src/profile_builder.rs`):
+/// just enough of the host for a shell, the dynamic linker, libc, and
+/// system tools to work. Everything else — including the caller's `$HOME`,
+/// `/root`, `/opt`, `/var`, `/sys`, `/mnt`, `/media`, and the rest of
+/// `/run` — is invisible until the caller opts in via `readonlyPaths` /
+/// `readwritePaths`.
+///
+/// Notes:
+/// - Missing paths are silently skipped because the runner emits these
+///   via `--ro-bind-try` (e.g. `/lib32` does not exist on x86_64-only
+///   systems; `/run/systemd/resolve` does not exist on hosts without
+///   systemd-resolved).
+/// - On merged-usr distros (modern Debian, Ubuntu, Fedora, Arch) the
+///   top-level `/bin`, `/sbin`, `/lib*` entries are symlinks pointing
+///   under `/usr`. `bwrap` follows the source-side symlink, so the
+///   bind-mount still succeeds and the sandbox sees `/bin/sh` etc.
+/// - We deliberately do NOT bind `/usr` wholesale: that would expose
+///   `/usr/local`, which contains locally-installed (and sometimes
+///   user-managed) software. Callers who need `/usr/local` must list it
+///   explicitly in `readonlyPaths`.
+/// - We deliberately do NOT bind `/run` wholesale: `/run/user/<uid>`
+///   holds the caller's D-Bus session socket, keyring sockets, and
+///   ssh-agent socket. We only bind the well-known DNS stub-resolver
+///   directories so name resolution still works when `/etc/resolv.conf`
+///   is a symlink (the default on systemd-resolved hosts).
+/// - `/etc` is bound whole because cherry-picking files (`passwd`,
+///   `nsswitch.conf`, `ssl/`, `ld.so.conf*`, …) is fragile and breaks
+///   tools that read other config files. Files with sensitive contents
+///   (`/etc/shadow`, `/etc/sudoers`, `/etc/ssh/ssh_host_*_key`) are mode
+///   `0400` / `0640` root and remain unreadable to a non-root caller —
+///   user-namespace UID mapping does not bypass kernel DAC.
+const BASELINE_RO_BIND_PATHS: &[&str] = &[
+    // Top-level executable / library dirs (symlinks under /usr on
+    // merged-usr distros, real directories on Alpine and older Debian).
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    // /usr subpaths — mirrors seatbelt's baseline exactly, intentionally
+    // excluding /usr/local.
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/lib",
+    "/usr/lib32",
+    "/usr/lib64",
+    "/usr/libexec",
+    "/usr/share",
+    // System configuration (ld.so config, certs, resolv.conf, hosts,
+    // passwd, group, machine-id, …). See module-level note on DAC.
+    "/etc",
+    // DNS stub-resolver directories. /etc/resolv.conf is usually a
+    // symlink into one of these on modern Linux distros (systemd-resolved
+    // / NetworkManager / resolvconf). We bind the narrow subdirectories
+    // rather than all of /run to avoid exposing /run/user/<uid>.
+    "/run/systemd/resolve",
+    "/run/NetworkManager",
+    "/run/resolvconf",
+];
+
 /// Build the complete argument list for `bwrap` from the given request.
 ///
 /// The returned vector does **not** include the `bwrap` binary name itself —
@@ -62,13 +125,15 @@ pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddres
         args.push("--unshare-net".into());
     }
 
-    // -- Base filesystem ---------------------------------------------------
+    // -- Base filesystem (deny-by-default; see `BASELINE_RO_BIND_PATHS`) ---
     // bwrap applies mounts in order; later mounts at the same path shadow
-    // earlier ones. We therefore lay down the base + standard virtual
-    // filesystems first, then apply user-supplied policy mounts last so they
-    // always win, including when policy paths overlap a standard mount such
-    // as `/tmp` (e.g. `readwritePaths: ["/tmp/workspace"]`).
-    args.extend(["--ro-bind".into(), "/".into(), "/".into()]);
+    // earlier ones. We therefore lay the baseline + standard virtual
+    // filesystems down first, then apply user-supplied policy mounts last
+    // so they always win when paths overlap (e.g. `readwritePaths:
+    // ["/tmp/workspace"]` must beat the standard `--tmpfs /tmp`).
+    for path in BASELINE_RO_BIND_PATHS {
+        args.extend(["--ro-bind-try".into(), (*path).into(), (*path).into()]);
+    }
 
     // Standard virtual filesystems (applied before policy mounts so policy
     // paths under /dev, /proc, or /tmp survive).
@@ -206,17 +271,13 @@ mod tests {
         assert_eq!(args[rw_pos + 1], "/workspace");
         assert_eq!(args[rw_pos + 2], "/workspace");
 
-        // ro
-        let ro_positions: Vec<_> = args
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| *a == "--ro-bind")
-            .map(|(i, _)| i)
-            .collect();
-        // First --ro-bind is the base "/" mount, second is "/data"
-        assert!(ro_positions.len() >= 2);
-        let data_pos = *ro_positions.last().unwrap();
-        assert_eq!(args[data_pos + 1], "/data");
+        // ro — baseline paths are emitted via --ro-bind-try, so a bare
+        // --ro-bind must correspond to the user's readonlyPaths entry.
+        let ro_pos = args
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[1] == "/data" && w[2] == "/data")
+            .expect("readonly policy path /data should produce a --ro-bind mount");
+        assert!(ro_pos > 0);
 
         // denied
         let tmpfs_positions: Vec<_> = args
@@ -400,5 +461,157 @@ mod tests {
 
         let pos = args.iter().position(|a| a == "HTTP_PROXY").unwrap();
         assert_eq!(args[pos + 1], "http://caller.example:8080");
+    }
+
+    // ------- Deny-by-default baseline filesystem tests ------------------
+
+    /// Regression test for the original `--ro-bind / /` baseline. The
+    /// builder must NOT bind-mount the entire host root, because that
+    /// exposed `$HOME` and other confidential dirs by default. Mirrors
+    /// the seatbelt backend's `(deny default)` posture.
+    #[test]
+    fn baseline_does_not_bind_mount_host_root() {
+        let args = build_args(&base_request(), None);
+        let root_bind = args
+            .windows(3)
+            .any(|w| (w[0] == "--ro-bind" || w[0] == "--bind") && w[1] == "/" && w[2] == "/");
+        assert!(
+            !root_bind,
+            "baseline must not bind-mount host / into the sandbox; got: {:?}",
+            args
+        );
+    }
+
+    /// The minimum baseline allowlist required for a shell + dynamic
+    /// linker + libc to function inside the sandbox. Emitted via
+    /// `--ro-bind-try` so missing paths are silently skipped on distros
+    /// where they don't exist (e.g. `/lib32` on x86_64-only systems).
+    #[test]
+    fn baseline_emits_required_ro_bind_try_paths() {
+        let args = build_args(&base_request(), None);
+        let required = [
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib64",
+            "/usr/bin",
+            "/usr/lib",
+            "/usr/share",
+            "/etc",
+        ];
+        for path in required {
+            let found = args
+                .windows(3)
+                .any(|w| w[0] == "--ro-bind-try" && w[1] == path && w[2] == path);
+            assert!(
+                found,
+                "baseline must emit `--ro-bind-try {} {}` so sandboxed processes \
+                 can find sh / libc / system config",
+                path, path
+            );
+        }
+    }
+
+    /// The baseline must NOT include `/usr` wholesale because that would
+    /// expose `/usr/local` (locally-installed software, sometimes
+    /// user-managed). Seatbelt's `SYSTEM_READ_ALLOW` does not include
+    /// `/usr/local` either — match that posture.
+    #[test]
+    fn baseline_does_not_expose_usr_local() {
+        let args = build_args(&base_request(), None);
+        // No `--ro-bind /usr /usr` and no `--ro-bind-try /usr /usr`.
+        let usr_whole = args
+            .windows(3)
+            .any(|w| matches!(w[0].as_str(), "--ro-bind" | "--ro-bind-try") && w[1] == "/usr");
+        assert!(
+            !usr_whole,
+            "baseline must bind /usr subpaths individually so /usr/local is \
+             not implicitly exposed; got: {:?}",
+            args
+        );
+        // And no explicit /usr/local entry either.
+        let usr_local = args.iter().any(|a| a == "/usr/local");
+        assert!(!usr_local, "baseline must not expose /usr/local by default");
+    }
+
+    /// The baseline must keep confidential host locations out of the
+    /// sandbox. Callers who legitimately need any of these can opt in
+    /// via `readonlyPaths`.
+    #[test]
+    fn baseline_excludes_confidential_paths() {
+        let args = build_args(&base_request(), None);
+        for forbidden in [
+            "/home",
+            "/root",
+            "/opt",
+            "/srv",
+            "/var",
+            "/sys",
+            "/run/user",
+            "/run/dbus",
+        ] {
+            let exposed = args.windows(2).any(|w| {
+                matches!(w[0].as_str(), "--bind" | "--ro-bind" | "--ro-bind-try")
+                    && w[1] == forbidden
+            });
+            assert!(
+                !exposed,
+                "baseline must not bind-mount {} — that would re-expose \
+                 confidential host state",
+                forbidden
+            );
+        }
+    }
+
+    /// DNS stub-resolver dirs must be in the baseline so `/etc/resolv.conf`
+    /// symlinks resolve when the caller has network access. Emitted via
+    /// `--ro-bind-try` so hosts without systemd-resolved / NetworkManager /
+    /// resolvconf still build a valid argument vector.
+    #[test]
+    fn baseline_includes_dns_stub_resolver_dirs() {
+        let args = build_args(&base_request(), None);
+        for path in [
+            "/run/systemd/resolve",
+            "/run/NetworkManager",
+            "/run/resolvconf",
+        ] {
+            let found = args
+                .windows(3)
+                .any(|w| w[0] == "--ro-bind-try" && w[1] == path && w[2] == path);
+            assert!(
+                found,
+                "baseline must emit `--ro-bind-try {} {}` so DNS works when \
+                 /etc/resolv.conf is a symlink",
+                path, path
+            );
+        }
+    }
+
+    /// Baseline mounts must come before policy mounts so the user's
+    /// `readwritePaths` / `readonlyPaths` / `deniedPaths` always win on
+    /// conflict (same shadowing rule as the existing `/tmp` regression
+    /// test, applied here to the baseline).
+    #[test]
+    fn baseline_mounts_precede_policy_mounts() {
+        let mut r = base_request();
+        r.policy.readwrite_paths = vec!["/etc/policy-writable".into()];
+        let args = build_args(&r, None);
+
+        let baseline_etc = args
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind-try" && w[1] == "/etc" && w[2] == "/etc")
+            .expect("baseline /etc bind missing");
+        let policy_bind = args
+            .windows(3)
+            .position(|w| w[0] == "--bind" && w[1] == "/etc/policy-writable")
+            .expect("policy bind missing");
+
+        assert!(
+            policy_bind > baseline_etc,
+            "policy mount at /etc/policy-writable (pos {}) must come after \
+             baseline /etc bind (pos {}) so the policy mount wins",
+            policy_bind,
+            baseline_etc
+        );
     }
 }

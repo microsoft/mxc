@@ -54,7 +54,12 @@ lxc-exec --experimental --config-base64 "$(base64 -w0 bubblewrap_hello.json)"
 Bubblewrap creates a namespace-isolated process by:
 
 1. Unsharing user, PID, IPC, and UTS namespaces (`--unshare-*`)
-2. Bind-mounting the host root filesystem read-only as a base
+2. Bind-mounting a **minimal deny-by-default baseline** read-only into the
+   sandbox (`/bin`, `/sbin`, `/lib*`, `/usr/bin`, `/usr/sbin`, `/usr/lib*`,
+   `/usr/libexec`, `/usr/share`, `/etc`, plus DNS stub-resolver dirs
+   under `/run`). Everything else on the host — including the caller's
+   `$HOME`, `/root`, `/opt`, `/var`, `/sys`, and `/run/user/<uid>` — is
+   invisible inside the sandbox.
 3. Layering filesystem policy overrides (read-write, read-only, denied paths)
 4. Setting up minimal `/dev`, `/proc`, and `/tmp`
 5. Clearing the environment and applying only requested variables
@@ -62,6 +67,41 @@ Bubblewrap creates a namespace-isolated process by:
 
 The sandboxed process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
+
+### Deny-by-default filesystem
+
+The baseline mirrors the macOS Seatbelt backend's `(deny default)` posture:
+the sandbox can read the dynamic linker, libc, system tools, and system
+configuration — and **nothing else** — until the caller opts in via
+`readonlyPaths` / `readwritePaths`. To make a host directory visible inside
+the sandbox, list it explicitly:
+
+```json
+{
+  "filesystem": {
+    "readonlyPaths": ["/home/alice/project", "/usr/local"],
+    "readwritePaths": ["/tmp/workspace"]
+  }
+}
+```
+
+Common consequences of this default:
+
+- `$HOME` (e.g. `~/.aws/credentials`, `~/.ssh/id_*`, browser cookies) is
+  not readable from the sandbox.
+- `/opt` and `/usr/local` tooling is not on PATH; list either path under
+  `readonlyPaths` if the script depends on it.
+- `working_directory` must live under the baseline or a policy path — a
+  `cwd` of `~/project` without a matching `readonlyPaths` entry will fail.
+- DNS works on systemd-resolved, NetworkManager, and resolvconf hosts
+  because the corresponding `/run/...` directories are bound. Hosts where
+  `/etc/resolv.conf` symlinks somewhere else need that target listed in
+  `readonlyPaths`.
+
+Files in `/etc` that contain secrets (`/etc/shadow`, `/etc/sudoers`,
+`/etc/ssh/ssh_host_*_key`) are mode `0400` / `0640` `root` and remain
+unreadable to a non-root caller — user-namespace UID mapping does not
+bypass kernel DAC.
 
 ## Configuration
 
@@ -285,8 +325,12 @@ Test configs are in `tests/configs/bubblewrap_*.json`.
 
 - **Experimental** — requires `--experimental` flag
 - **Linux only** — Bubblewrap requires Linux kernel namespaces
-- **Host filesystem** — the sandbox sees the host's files (read-only by
-  default); there is no separate rootfs
+- **Deny-by-default filesystem** — the sandbox sees a minimal allowlist
+  of host paths (system binaries, libs, `/etc`, DNS stub-resolver dirs)
+  and nothing else. `$HOME`, `/opt`, `/var`, `/sys`, `/run/user/<uid>`,
+  and `/usr/local` are invisible unless explicitly listed in
+  `readonlyPaths` / `readwritePaths`. There is no separate rootfs — the
+  visible paths are bind-mounted from the host.
 - **Network filtering** — per-host `allowedHosts`/`blockedHosts` is best
   done via the cooperative env-var **network proxy** (no privilege
   required, see above). The legacy iptables path
