@@ -390,9 +390,11 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
             )));
         }
 
-        // A stale (dead) daemon record cannot belong to a live daemon — remove
-        // it so the readiness poll below cannot latch onto leftover state.
-        let _ = std::fs::remove_file(daemon_record_path());
+        // Do NOT pre-delete a stale (dead) daemon record here: the daemon we are
+        // about to spawn reads it as the `prior` record to decide whether a
+        // running VM is its own reclaimable orphan. The readiness poll below
+        // only matches a *live* daemon with our nonce, so leftover dead state
+        // cannot fool it. The new daemon overwrites the record on success.
 
         let nonce = generate_nonce();
         let mut child = spawn_daemon(token, &nonce)?;
@@ -420,16 +422,24 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
             if Instant::now() >= deadline {
                 // The daemon serves IPC throughout boot, so ask it to gracefully
                 // tear down its (possibly half-launched) VM rather than orphaning
-                // a live VM with a blind kill. Fall back to kill if no reachable
-                // record exists.
+                // a live VM with a blind kill. On graceful STOP the daemon removes
+                // its own record. We intentionally do NOT delete the record here:
+                // if the kill fallback leaves an orphan, the record (with its
+                // recorded VM process identities, when ready) is the proof a later
+                // daemon needs to reclaim it instead of refusing.
                 if let Ok(Some(d)) = read_daemon_record() {
                     if d.nonce == nonce && d.active_sandbox_id == sandbox_id {
                         let _ = ipc_command(d.ipc_port, IPC_STOP, &d.nonce);
-                        let _ = wait_daemon_gone(d.pid, d.pid_creation_time);
+                        if wait_daemon_gone(d.pid, d.pid_creation_time).is_err() {
+                            eprintln!(
+                                "[wsb] start timeout: daemon (pid {}) did not stop gracefully; \
+                                 killing it (a leftover VM, if any, will be reclaimed on next start)",
+                                d.pid
+                            );
+                        }
                     }
                 }
                 let _ = child.kill();
-                let _ = std::fs::remove_file(daemon_record_path());
                 return Err(MxcError::backend_error(format!(
                     "daemon did not become ready within {:?}",
                     START_READY_TIMEOUT

@@ -9,7 +9,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 
 use windows_sandbox_common::sandbox_protocol::{
-    decode_message, encode_message, ControlMessage, DecodeResult, ExecRequest, ExitNotification,
+    decode_message, encode_message, encode_preamble, ControlMessage, DecodeResult, ExecRequest,
+    ExitNotification,
 };
 
 /// Main command loop.  Reads control messages from the host and executes
@@ -27,6 +28,13 @@ pub async fn run_command_loop(
     stderr_stream: TcpStream,
     listener: &TcpListener,
 ) -> Result<()> {
+    // Announce the protocol magic + version so the host can fail fast on a
+    // version/identity mismatch before any framed messages are exchanged.
+    control
+        .write_all(&encode_preamble())
+        .await
+        .context("send preamble")?;
+
     // Signal readiness to the host.
     let ready_frame = encode_message(&ControlMessage::Ready).context("encode Ready")?;
     control
@@ -151,6 +159,32 @@ async fn reconnect_streams(
     Ok(streams)
 }
 
+/// Forcibly terminate a process and all of its descendants.
+///
+/// Uses `taskkill /T /F`, which walks the process tree, so workloads that
+/// spawn their own children (the common case) are fully cleaned up rather than
+/// leaking grandchildren into the reused guest.
+async fn kill_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        eprintln!("[guest] cannot tree-kill: child pid unavailable");
+        return;
+    };
+    match Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => eprintln!(
+            "[guest] taskkill tree-kill of pid {} returned {}: {}",
+            pid,
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(err) => eprintln!("[guest] failed to run taskkill for pid {}: {}", pid, err),
+    }
+}
+
 /// Spawn a child process and bridge its stdio over the TCP streams.
 async fn execute_script(
     script_code: &str,
@@ -176,6 +210,7 @@ async fn execute_script(
     cmd.stderr(std::process::Stdio::piped());
 
     let mut child = cmd.spawn().context("spawn child process")?;
+    let child_pid = child.id();
 
     // Take child stdio handles.
     let child_stdin = child.stdin.take();
@@ -231,6 +266,11 @@ async fn execute_script(
             Ok(Ok(status)) => status,
             Ok(Err(err)) => anyhow::bail!("wait failed: {}", err),
             Err(_) => {
+                // Kill the whole process tree, not just the launched `cmd.exe`.
+                // The script typically spawns descendants (the actual workload);
+                // because the guest is reused across execs, leaked grandchildren
+                // would otherwise persist into later executions.
+                kill_process_tree(child_pid).await;
                 if let Err(err) = child.kill().await {
                     eprintln!("[guest] failed to kill timed-out process: {}", err);
                 }

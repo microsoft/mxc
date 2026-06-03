@@ -33,6 +33,12 @@ use windows_sandbox_lifecycle::control_plane::{IPC_EXEC, IPC_PING, IPC_STOP};
 use windows_sandbox_lifecycle::ipc_exec::{self, ExecStart, MAX_IPC_FRAME};
 
 /// Maximum time to wait for a client to send its request line.
+///
+/// This bounds a single misbehaving *client connection* only. It is NOT a
+/// sandbox idle watchdog: a provisioned-and-started sandbox is held until an
+/// explicit `STOP` (`stop` / `deprovision`) and is never torn down by elapsed
+/// idle time. Keeping that invariant means a long-lived sandbox can sit idle
+/// between exec phases without being reclaimed out from under the caller.
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Maximum time to wait for the framed `ExecStart` request after the `EXEC`

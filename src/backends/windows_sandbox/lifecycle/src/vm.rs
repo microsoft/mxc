@@ -369,6 +369,53 @@ pub async fn is_sandbox_vm_running() -> bool {
     }
 }
 
+/// Enumerate the currently-running Windows Sandbox host processes, returning
+/// each one's identity (PID paired with creation time).
+///
+/// Only the `WindowsSandbox*` host processes are reported, matching
+/// [`is_sandbox_vm_running`]; `vmmem*` residue is excluded. The returned
+/// identities form the *positive ownership proof* recorded in the daemon record
+/// and matched against on a later daemon's startup reconcile.
+///
+/// Returns `Err` if the enumeration itself could not be performed (the
+/// PowerShell probe failed to run or exited non-zero). Callers that gate a
+/// destructive decision on the result MUST treat an `Err` as "unknown" rather
+/// than "no VM", so they fail safe (refuse) instead of proceeding blind.
+pub async fn enumerate_sandbox_vm_processes() -> Result<Vec<crate::control_plane::VmProcId>> {
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-Process -Name 'WindowsSandbox*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+        .context("run WindowsSandbox process enumeration")?;
+
+    if !out.status.success() {
+        anyhow::bail!(
+            "WindowsSandbox process enumeration exited with {}",
+            out.status
+        );
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut procs = Vec::new();
+    for line in text.lines() {
+        let Ok(pid) = line.trim().parse::<u32>() else {
+            continue;
+        };
+        // Pair each PID with its creation time. If the process exited between
+        // enumeration and this query, skip it — it is no longer part of a live
+        // VM and contributes nothing to an ownership match.
+        if let Some(creation_time) = crate::control_plane::process_creation_time(pid) {
+            procs.push(crate::control_plane::VmProcId { pid, creation_time });
+        }
+    }
+    Ok(procs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

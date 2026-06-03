@@ -11,7 +11,8 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use windows_sandbox_common::sandbox_protocol::{
-    decode_message, encode_message, ControlMessage, DecodeResult, ExecRequest,
+    decode_message, encode_message, validate_preamble, ControlMessage, DecodeResult, ExecRequest,
+    PREAMBLE_LEN,
 };
 
 use crate::ipc_exec::{self, ExecStart, FRAME_STDERR, FRAME_STDOUT};
@@ -82,9 +83,32 @@ pub async fn connect_to_guest(
         stdout_stream,
         stderr_stream,
     };
+    // Validate the protocol preamble before any framed messages so we fail
+    // fast (with a clear error) on a version/identity mismatch.
+    read_and_validate_preamble(&mut conn.control, timeout).await?;
     wait_for_ready(&mut conn.control, timeout).await?;
 
     Ok(conn)
+}
+
+/// Read the fixed 8-byte control preamble and validate magic + version.
+async fn read_and_validate_preamble(
+    control: &mut TcpStream,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    let mut preamble = [0u8; PREAMBLE_LEN];
+    tokio::time::timeout(timeout, control.read_exact(&mut preamble))
+        .await
+        .context("timeout reading guest preamble")?
+        .context("read guest preamble")?;
+    let version = validate_preamble(&preamble).map_err(|e| {
+        anyhow::anyhow!(
+            "guest protocol handshake failed: {} (refusing connection)",
+            e
+        )
+    })?;
+    eprintln!("[daemon] guest protocol handshake ok (version {})", version);
+    Ok(())
 }
 
 /// Read from the control channel until a `Ready` message arrives.

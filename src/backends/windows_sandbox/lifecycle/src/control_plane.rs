@@ -83,6 +83,15 @@ impl SandboxRecord {
     }
 }
 
+/// Identity of a single Windows Sandbox host process: its PID paired with its
+/// creation time (Win32 `FILETIME`, 100ns ticks). The creation time pins the
+/// PID to a specific process instance so PID reuse cannot cause a false match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmProcId {
+    pub pid: u32,
+    pub creation_time: u64,
+}
+
 /// Global daemon record (`daemon.json`). Present iff a daemon is (or recently
 /// was) alive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +117,61 @@ pub struct DaemonRecord {
     /// serve. The IPC port is bound and served even while `ready` is `false`, so
     /// a `STOP` can gracefully abort an in-flight boot.
     pub ready: bool,
+    /// Identities of the Windows Sandbox host processes this daemon launched,
+    /// captured once the VM is up. Empty until `ready` is `true`.
+    ///
+    /// This is the *positive ownership proof* used by a later daemon's startup
+    /// reconcile: an orphaned VM is only reclaimed (torn down) when the running
+    /// sandbox processes intersect this recorded set. A present record alone is
+    /// never sufficient — without an intersection the VM is treated as foreign
+    /// and left untouched. `#[serde(default)]` keeps older records readable.
+    #[serde(default)]
+    pub vm_processes: Vec<VmProcId>,
+}
+
+/// What a freshly-starting daemon should do about any Windows Sandbox VM it
+/// finds already running. Produced by the pure [`classify_startup`] so the
+/// decision is unit-testable without a real VM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupAction {
+    /// No VM is running (or none that matters): launch normally.
+    Proceed,
+    /// A running VM is provably ours (a prior daemon's recorded process
+    /// identities intersect the live set): tear it down, then launch.
+    ReclaimOrphan,
+    /// A running VM exists but ownership is *not* positively proven: refuse to
+    /// disturb it (it may be a user's manually-opened sandbox).
+    RefuseForeign,
+}
+
+/// Decide what to do about an already-running Windows Sandbox VM at daemon
+/// startup, given the prior global daemon record (if any) and the set of
+/// currently-running sandbox host processes.
+///
+/// Reclaim is intentionally conservative: it requires a *positive* identity
+/// intersection between the prior record's `vm_processes` and the live set.
+/// Anything else — no record, an empty `vm_processes` (e.g. a daemon that
+/// crashed before the VM became ready), or a disjoint set — yields
+/// [`StartupAction::RefuseForeign`] so we never kill a VM we cannot prove is
+/// ours.
+///
+/// The caller is responsible for first rejecting the case where `prior`
+/// describes a *live* daemon (another daemon already owns the slot); by the
+/// time this runs, `prior` is expected to be stale/dead.
+pub fn classify_startup(prior: Option<&DaemonRecord>, current_vm: &[VmProcId]) -> StartupAction {
+    if current_vm.is_empty() {
+        return StartupAction::Proceed;
+    }
+    if let Some(prior) = prior {
+        let ours = prior
+            .vm_processes
+            .iter()
+            .any(|recorded| current_vm.contains(recorded));
+        if ours {
+            return StartupAction::ReclaimOrphan;
+        }
+    }
+    StartupAction::RefuseForeign
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +481,10 @@ mod tests {
             nonce: "abc123".to_string(),
             active_sandbox_id: "wsb:deadbeef".to_string(),
             ready: true,
+            vm_processes: vec![VmProcId {
+                pid: 5678,
+                creation_time: 99,
+            }],
         };
         atomic_write_json(&path, &rec).unwrap();
         let back: DaemonRecord = read_json(&path).unwrap().unwrap();
@@ -456,6 +524,98 @@ mod tests {
         assert!(check_schema(RECORD_SCHEMA_VERSION + 1, "sandbox").is_err());
     }
 
+    fn daemon_record_with(vm_processes: Vec<VmProcId>) -> DaemonRecord {
+        DaemonRecord {
+            schema_version: RECORD_SCHEMA_VERSION,
+            pid: 1,
+            pid_creation_time: 1,
+            ipc_port: 1,
+            nonce: "n".to_string(),
+            active_sandbox_id: "wsb:x".to_string(),
+            ready: true,
+            vm_processes,
+        }
+    }
+
+    #[test]
+    fn classify_no_vm_proceeds() {
+        let prior = daemon_record_with(vec![VmProcId {
+            pid: 10,
+            creation_time: 100,
+        }]);
+        assert_eq!(classify_startup(Some(&prior), &[]), StartupAction::Proceed);
+        assert_eq!(classify_startup(None, &[]), StartupAction::Proceed);
+    }
+
+    #[test]
+    fn classify_vm_no_prior_refuses() {
+        let current = [VmProcId {
+            pid: 10,
+            creation_time: 100,
+        }];
+        assert_eq!(
+            classify_startup(None, &current),
+            StartupAction::RefuseForeign
+        );
+    }
+
+    #[test]
+    fn classify_vm_empty_prior_processes_refuses() {
+        let prior = daemon_record_with(Vec::new());
+        let current = [VmProcId {
+            pid: 10,
+            creation_time: 100,
+        }];
+        assert_eq!(
+            classify_startup(Some(&prior), &current),
+            StartupAction::RefuseForeign
+        );
+    }
+
+    #[test]
+    fn classify_disjoint_set_refuses() {
+        let prior = daemon_record_with(vec![VmProcId {
+            pid: 10,
+            creation_time: 100,
+        }]);
+        // Same pid but different creation time must NOT match (PID reuse).
+        let current = [VmProcId {
+            pid: 10,
+            creation_time: 999,
+        }];
+        assert_eq!(
+            classify_startup(Some(&prior), &current),
+            StartupAction::RefuseForeign
+        );
+    }
+
+    #[test]
+    fn classify_intersecting_set_reclaims() {
+        let shared = VmProcId {
+            pid: 10,
+            creation_time: 100,
+        };
+        let prior = daemon_record_with(vec![
+            shared,
+            VmProcId {
+                pid: 11,
+                creation_time: 101,
+            },
+        ]);
+        // current has one process not in prior plus the shared one.
+        let current = [
+            VmProcId {
+                pid: 20,
+                creation_time: 200,
+            },
+            shared,
+        ];
+        assert_eq!(
+            classify_startup(Some(&prior), &current),
+            StartupAction::ReclaimOrphan
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn current_process_is_alive_with_matching_creation_time() {
@@ -469,6 +629,7 @@ mod tests {
             nonce: "n".to_string(),
             active_sandbox_id: "wsb:x".to_string(),
             ready: true,
+            vm_processes: Vec::new(),
         };
         assert!(daemon_alive(&rec));
     }
@@ -486,6 +647,7 @@ mod tests {
             nonce: "n".to_string(),
             active_sandbox_id: "wsb:x".to_string(),
             ready: true,
+            vm_processes: Vec::new(),
         };
         assert!(!daemon_alive(&rec));
     }

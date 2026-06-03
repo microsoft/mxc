@@ -4,7 +4,9 @@
 //! Spawned (detached) by the backend's `start` phase, it:
 //!   1. Reads the per-sandbox record for its `--token` to recover the
 //!      filesystem-policy snapshot.
-//!   2. Reconciles any orphaned VM (single-instance host).
+//!   2. Reconciles a running VM by *positive ownership proof*: tears one down
+//!      only when a prior daemon record's recorded host-process identities
+//!      intersect the live set; otherwise refuses to disturb a foreign VM.
 //!   3. Binds an OS-assigned localhost IPC port and **immediately** publishes a
 //!      `ready:false` global `daemon.json` record — claiming the single-instance
 //!      slot before the VM exists and serving IPC throughout boot so a `STOP`
@@ -16,11 +18,12 @@
 //!   5. Re-publishes the record as `ready:true`, then serves `PING` / `STOP`
 //!      until told to stop.
 //!
-//! Teardown is guaranteed: once the IPC port is bound, **every** exit path
-//! (graceful STOP, launch failure, record-write failure, IPC error) tears the
-//! VM down and removes the daemon record, so a live VM is never orphaned by a
-//! daemon that is about to die. There is no idle watchdog — a state-aware
-//! sandbox is torn down only by explicit `stop` / `deprovision`.
+//! Teardown is ownership-scoped: once the IPC port is bound, every exit path
+//! removes the daemon record, and tears the VM down **whenever this daemon
+//! actually issued the launch**. Exit paths that never launched a VM (pre-launch
+//! setup failure, STOP before launch) deliberately skip teardown so they cannot
+//! kill a VM this daemon did not start. There is no idle watchdog — a
+//! state-aware sandbox is torn down only by explicit `stop` / `deprovision`.
 
 mod control_server;
 
@@ -85,18 +88,50 @@ async fn main() -> Result<()> {
     let sandbox_id = record.sandbox_id.clone();
     let mapped = to_mapped_folders(&record.mapped_folders);
 
-    // Best-effort orphan reconciliation. A freshly-started daemon cannot own an
-    // existing Windows Sandbox VM — we have not launched one yet. A live VM at
-    // this point is an orphan from a previous daemon that died without tearing
-    // down, and would block our launch with "Only one running instance of
-    // Windows Sandbox is allowed". Because this backend requires exclusive
-    // ownership of the single WSB slot, we tear it down before launching.
-    if sandbox_vm::is_sandbox_vm_running().await {
-        eprintln!(
-            "[wsb-daemon] WARNING: a live Windows Sandbox VM was found at startup that we did not \
-             launch; tearing it down to reclaim the single-instance slot"
-        );
-        sandbox_vm::teardown().await;
+    // Ownership-based startup reconcile. A freshly-started daemon has not
+    // launched a VM yet, so any running Windows Sandbox VM predates us. We tear
+    // one down ONLY when we can positively prove it is our own orphan (a prior
+    // daemon record whose recorded host-process identities intersect the live
+    // set). Anything we cannot prove is ours — no prior record, a prior that
+    // never reached `ready` (empty `vm_processes`), or a disjoint set — is
+    // treated as foreign (e.g. a user's manually-opened sandbox) and left
+    // untouched; we refuse to start rather than risk killing it.
+    let prior = control_plane::read_daemon_record().ok().flatten();
+
+    // Defensive: if the prior record describes a *still-live* daemon, another
+    // daemon owns the slot. start() should have rejected before spawning us;
+    // bail loudly (before binding IPC / launching) rather than disturb it.
+    if let Some(p) = &prior {
+        if control_plane::daemon_alive(p) {
+            anyhow::bail!(
+                "another live daemon (pid {}) already owns the slot; refusing",
+                p.pid
+            );
+        }
+    }
+
+    // Enumeration failure is "unknown", not "no VM": fail safe by refusing
+    // rather than proceeding blind into a launch that could either fail on the
+    // single-instance limit or, worse, lead us to tear down a VM we cannot
+    // account for.
+    let current_vm = sandbox_vm::enumerate_sandbox_vm_processes()
+        .await
+        .context("enumerate running Windows Sandbox processes at startup")?;
+    match control_plane::classify_startup(prior.as_ref(), &current_vm) {
+        control_plane::StartupAction::Proceed => {}
+        control_plane::StartupAction::ReclaimOrphan => {
+            eprintln!(
+                "[wsb-daemon] reclaiming our orphaned Windows Sandbox VM (process identity matched \
+                 a prior daemon record); tearing it down"
+            );
+            sandbox_vm::teardown().await;
+        }
+        control_plane::StartupAction::RefuseForeign => {
+            anyhow::bail!(
+                "a Windows Sandbox VM is already running that mxc cannot prove it launched; \
+                 refusing to disturb it. Close the existing sandbox and retry."
+            );
+        }
     }
 
     // Bind the IPC control channel on an OS-assigned localhost port BEFORE
@@ -123,16 +158,39 @@ async fn main() -> Result<()> {
         nonce: args.nonce.clone(),
         active_sandbox_id: sandbox_id.clone(),
         ready: false,
+        // Populated once the VM is up and its host processes are known.
+        vm_processes: Vec::new(),
     };
     control_plane::atomic_write_json(&daemon_record_path(), &starting)
         .context("write starting daemon record")?;
 
-    // From here the IPC port is bound and a VM may come up, so guarantee
-    // teardown + record removal on every exit path.
-    let outcome = serve(listener, &args.nonce, &sandbox_id, starting, &mapped).await;
+    // Tracks whether we actually issued the VM launch. The cleanup teardown is
+    // gated on this so that exit paths which never launched a VM (pre-launch
+    // setup failure, STOP before launch) do not blanket-kill a Windows Sandbox
+    // VM — which, post-reconcile, could only be a user's concurrently-opened
+    // sandbox, never ours.
+    let we_launched = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    eprintln!("[wsb-daemon] tearing down VM and clearing record");
-    sandbox_vm::teardown().await;
+    // From here the IPC port is bound and a VM may come up, so guarantee
+    // record removal on every exit path, and teardown whenever we launched.
+    let outcome = serve(
+        listener,
+        &args.nonce,
+        &sandbox_id,
+        starting,
+        &mapped,
+        we_launched.clone(),
+    )
+    .await;
+
+    if we_launched.load(std::sync::atomic::Ordering::SeqCst) {
+        eprintln!("[wsb-daemon] tearing down our VM and clearing record");
+        sandbox_vm::teardown().await;
+    } else {
+        eprintln!(
+            "[wsb-daemon] no VM was launched by this daemon; clearing record without teardown"
+        );
+    }
     let _ = std::fs::remove_file(daemon_record_path());
     eprintln!("[wsb-daemon] exiting");
     outcome
@@ -148,6 +206,7 @@ async fn serve(
     sandbox_id: &str,
     mut record: DaemonRecord,
     mapped: &[sandbox_vm::MappedFolder],
+    we_launched: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     let shutdown = Arc::new(Notify::new());
 
@@ -164,11 +223,12 @@ async fn serve(
     ));
 
     let (conn, addr) = tokio::select! {
-        launched = launch_and_connect(mapped) => launched?,
+        launched = launch_and_connect(mapped, &we_launched) => launched?,
         joined = &mut server => {
             // STOP (or a server error) arrived during boot. Propagate any
             // server error; otherwise return so `main` tears the (possibly
-            // half-launched) VM down.
+            // half-launched) VM down — gated on whether `launch_and_connect`
+            // already issued the launch (recorded via `we_launched`).
             joined.context("control server task panicked")??;
             eprintln!("[wsb-daemon] STOP received during boot; aborting launch");
             return Ok(());
@@ -179,8 +239,26 @@ async fn serve(
     // Publish the live connection so EXEC requests can run on it.
     *guest.lock().await = GuestSlot::Ready { conn, addr };
 
-    // The VM + guest are ready. Re-publish the record as ready so the backend's
-    // start poll unblocks.
+    // The VM + guest are ready. Capture the VM host-process identities as our
+    // positive ownership proof, then re-publish the record as ready so the
+    // backend's start poll unblocks and a future daemon can reclaim only this
+    // exact VM if we crash without tearing it down.
+    record.vm_processes = match sandbox_vm::enumerate_sandbox_vm_processes().await {
+        Ok(procs) => procs,
+        Err(e) => {
+            // Non-fatal: the VM is demonstrably up (guest connected). Proceed
+            // with an empty proof set, but log it — a later daemon could not
+            // prove ownership and would refuse rather than reclaim this VM.
+            eprintln!("[wsb-daemon] WARNING: could not enumerate VM processes at ready: {e}");
+            Vec::new()
+        }
+    };
+    if record.vm_processes.is_empty() {
+        eprintln!(
+            "[wsb-daemon] WARNING: no Windows Sandbox host processes recorded at ready; \
+             crash-reclaim of this VM will not be possible"
+        );
+    }
     record.ready = true;
     control_plane::atomic_write_json(&daemon_record_path(), &record)
         .context("write ready daemon record")?;
@@ -199,8 +277,12 @@ async fn serve(
 /// Launch the VM and connect to the guest agent. Returns the live connection
 /// and the address it was reached at (needed to re-establish data streams
 /// between executions).
+///
+/// Sets `we_launched` to `true` the instant the VM launch is issued, so the
+/// caller's cleanup can scope teardown to a VM this daemon actually started.
 async fn launch_and_connect(
     mapped: &[sandbox_vm::MappedFolder],
+    we_launched: &std::sync::atomic::AtomicBool,
 ) -> Result<(tcp_bridge::GuestConnection, std::net::SocketAddr)> {
     let exe_dir = std::env::current_exe()
         .context("current_exe")?
@@ -220,6 +302,10 @@ async fn launch_and_connect(
 
     let wsb_path =
         sandbox_vm::generate_wsb(&exe_dir, &rendezvous_dir, &python_dir, &config_dir, mapped)?;
+    // Mark that we are issuing the launch BEFORE the call: from here a VM may
+    // exist that is ours, so the caller's cleanup must be allowed to tear it
+    // down even if `launch` itself or any subsequent step returns an error.
+    we_launched.store(true, std::sync::atomic::Ordering::SeqCst);
     sandbox_vm::launch(&wsb_path).await.context("launch VM")?;
 
     let guest_addr = rendezvous::wait_for_rendezvous(
