@@ -68,6 +68,48 @@ pub fn resolve_default_lxcpath() -> String {
     resolve_lxcpath_with_env(|k| std::env::var(k).ok(), current_euid)
 }
 
+/// Build the post-binary argv for `lxc-attach` (the args that follow the
+/// `-n NAME -P lxcpath` flags already appended by `lxc_command`).
+///
+/// Extracted so the env / cwd / command layering is unit-testable without
+/// actually spawning `lxc-attach`. See [`LxcContainer::attach_run`] for
+/// the full contract.
+///
+/// Gated to Linux + test builds because `attach_run` is a Windows stub
+/// that never calls this helper, and the workspace clippy lane on
+/// `windows-latest` would otherwise flag it as dead code.
+#[cfg(any(target_os = "linux", test))]
+fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
+    let mut args: Vec<String> = Vec::with_capacity(env.len() + 6);
+
+    // Each `KEY=VAL` becomes a separate `--set-var=KEY=VAL`. Skip entries
+    // without `=` rather than letting `lxc-attach` reject the whole call —
+    // matches the permissive `split_once('=')` semantics other backends use.
+    for kv in env {
+        if kv.contains('=') {
+            args.push(format!("--set-var={}", kv));
+        }
+    }
+
+    args.push("--".to_string());
+    args.push("/bin/sh".to_string());
+    args.push("-c".to_string());
+
+    if working_directory.is_empty() {
+        args.push(command.to_string());
+    } else {
+        // Positional-arg trick: `$1` and `$2` carry the cwd and command
+        // verbatim through sh, so neither needs shell-escaping. The leading
+        // `_` is a conventional placeholder for `$0` (sh's script name slot).
+        args.push("cd -- \"$1\" && exec /bin/sh -c \"$2\"".to_string());
+        args.push("_".to_string());
+        args.push(working_directory.to_string());
+        args.push(command.to_string());
+    }
+
+    args
+}
+
 /// Safe wrapper around an LXC container.
 pub struct LxcContainer {
     name: String,
@@ -214,6 +256,17 @@ impl LxcContainer {
     /// contract (output streamed live to host stdio, stdin forwarded after
     /// first byte arrives from inner shell, etc.).
     ///
+    /// `working_directory` is honored by wrapping the user command in a
+    /// `cd -- "$1" && exec /bin/sh -c "$2"` shell prelude with cwd and
+    /// command passed as positional args so neither needs additional
+    /// shell escaping. Empty string preserves the container default cwd.
+    ///
+    /// `env` is honored by translating each `KEY=VAL` entry into a
+    /// repeated `--set-var=KEY=VAL` argument to `lxc-attach`. Entries
+    /// without `=` are skipped (matches the permissive contract Seatbelt
+    /// and WSLC apply to malformed env entries). The container's default
+    /// environment is preserved; user entries override on key collision.
+    ///
     /// We pass `unblock_signals = [SIGHUP, SIGTERM, SIGINT]` because
     /// [`crate::signal_cleanup::install`] blocks them in this process so
     /// its watchdog thread can `sigwait` on them; that mask is inherited
@@ -230,7 +283,8 @@ impl LxcContainer {
     pub fn attach_run(
         &self,
         command: &str,
-        _working_directory: &str,
+        working_directory: &str,
+        env: &[String],
         timeout: Option<std::time::Duration>,
     ) -> Result<(i32, String, String), String> {
         use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
@@ -238,7 +292,7 @@ impl LxcContainer {
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
         let mut cmd = self.lxc_command("lxc-attach");
-        cmd.args(["--", "/bin/sh", "-c", command]);
+        cmd.args(build_attach_args(env, working_directory, command));
 
         let options = PtyOptions {
             unblock_signals: UNBLOCK,
@@ -264,6 +318,7 @@ impl LxcContainer {
         &self,
         _command: &str,
         _working_directory: &str,
+        _env: &[String],
         _timeout: Option<std::time::Duration>,
     ) -> Result<(i32, String, String), String> {
         Err("LxcContainer::attach_run is only supported on Linux".to_string())
@@ -491,6 +546,102 @@ mod tests {
             err.contains("ghost/config"),
             "error must mention container config path, got: {}",
             err
+        );
+    }
+
+    // ---- build_attach_args ----------------------------------------------
+
+    #[test]
+    fn build_attach_args_no_env_no_cwd_is_unchanged_legacy_shape() {
+        // Empty env + empty cwd must reproduce the original argv shape:
+        // `-- /bin/sh -c <command>` so we don't perturb existing call sites
+        // when neither cwd nor env is set.
+        let args = build_attach_args(&[], "", "echo hi");
+        assert_eq!(args, vec!["--", "/bin/sh", "-c", "echo hi"]);
+    }
+
+    #[test]
+    fn build_attach_args_env_is_translated_to_set_var_flags() {
+        let env = vec![
+            "FOO=bar".to_string(),
+            "EMPTY=".to_string(),
+            "HAS_EQ_IN_VAL=a=b=c".to_string(),
+        ];
+        let args = build_attach_args(&env, "", "cmd");
+        assert_eq!(
+            args,
+            vec![
+                "--set-var=FOO=bar",
+                "--set-var=EMPTY=",
+                "--set-var=HAS_EQ_IN_VAL=a=b=c",
+                "--",
+                "/bin/sh",
+                "-c",
+                "cmd",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_attach_args_env_entries_without_equals_are_skipped() {
+        // Matches Seatbelt/WSLC semantics (split_once('=') drops malformed
+        // entries) so a bad entry can't break the whole attach call.
+        let env = vec!["BADENTRY".to_string(), "OK=val".to_string()];
+        let args = build_attach_args(&env, "", "cmd");
+        assert_eq!(args, vec!["--set-var=OK=val", "--", "/bin/sh", "-c", "cmd"]);
+    }
+
+    #[test]
+    fn build_attach_args_cwd_wraps_command_with_cd_prelude() {
+        let args = build_attach_args(&[], "/opt/work", "echo hi");
+        assert_eq!(
+            args,
+            vec![
+                "--",
+                "/bin/sh",
+                "-c",
+                "cd -- \"$1\" && exec /bin/sh -c \"$2\"",
+                "_",
+                "/opt/work",
+                "echo hi",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_attach_args_cwd_with_special_chars_does_not_require_escaping() {
+        // The whole point of the positional-arg trick is that nasty cwd
+        // values (spaces, single/double quotes, dollar signs, backticks)
+        // pass through sh as `$1` verbatim — no escaping needed here.
+        let cwd = "/tmp/has spaces & 'quotes' $vars `cmd`";
+        let cmd = "printf '%s' \"$PWD\"";
+        let args = build_attach_args(&[], cwd, cmd);
+
+        // cwd and command must appear verbatim as the last two argv entries.
+        assert_eq!(args[args.len() - 2], cwd);
+        assert_eq!(args[args.len() - 1], cmd);
+        // And the wrapper script must reference them positionally.
+        assert!(args
+            .iter()
+            .any(|a| a == "cd -- \"$1\" && exec /bin/sh -c \"$2\""));
+    }
+
+    #[test]
+    fn build_attach_args_combines_env_and_cwd() {
+        let env = vec!["FOO=bar".to_string()];
+        let args = build_attach_args(&env, "/work", "cmd");
+        assert_eq!(
+            args,
+            vec![
+                "--set-var=FOO=bar",
+                "--",
+                "/bin/sh",
+                "-c",
+                "cd -- \"$1\" && exec /bin/sh -c \"$2\"",
+                "_",
+                "/work",
+                "cmd",
+            ]
         );
     }
 }
