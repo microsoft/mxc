@@ -71,7 +71,7 @@ impl ContainmentBackend {
             ContainmentBackend::Lxc => Some("lxc"),
             ContainmentBackend::WindowsSandbox => Some("experimental.windows_sandbox"),
             ContainmentBackend::Wslc => Some("experimental.wslc"),
-            ContainmentBackend::Seatbelt => Some("experimental.seatbelt"),
+            ContainmentBackend::Seatbelt => Some("seatbelt"),
             ContainmentBackend::IsolationSession => Some("experimental.isolation_session"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::Hyperlight
@@ -81,8 +81,9 @@ impl ContainmentBackend {
     }
 }
 
-/// Configuration specific to the Seatbelt backend (experimental).
-/// Used under `experimental.seatbelt` when `containment == Seatbelt`.
+/// Configuration specific to the Seatbelt backend.
+/// Used under `seatbelt` (preferred) or `experimental.seatbelt` (deprecated)
+/// when `containment == Seatbelt`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SeatbeltConfig {
@@ -548,7 +549,7 @@ pub struct ExperimentalConfig {
     /// Isolation Session backend (experimental).
     #[serde(rename = "isolation_session")]
     pub isolation_session: Option<IsolationSessionConfig>,
-    /// Seatbelt (macOS) backend (experimental).
+    /// Seatbelt (macOS) backend. Deprecated location — prefer top-level `seatbelt`.
     pub seatbelt: Option<SeatbeltConfig>,
 }
 

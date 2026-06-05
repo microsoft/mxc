@@ -276,9 +276,16 @@ export interface ContainerConfig {
   experimental?: {
     /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
-    /** macOS sandbox configuration (macOS only) */
+    /**
+     * macOS sandbox configuration (macOS only).
+     * @deprecated Use the top-level {@link seatbelt} field instead. This
+     * location is retained for backward compatibility and will be removed
+     * in a future schema version.
+     */
     seatbelt?: SeatbeltConfig;
   };
+  /** macOS Seatbelt sandbox configuration (macOS only) */
+  seatbelt?: SeatbeltConfig;
   /** Cross-platform UI configuration */
   ui?: UiConfig;
 }
@@ -348,8 +355,8 @@ export interface LxcConfig {
 }
 
 /**
- * macOS Seatbelt sandbox configuration. Used under
- * `experimental.seatbelt` when containment is `'seatbelt'`.
+ * macOS Seatbelt sandbox configuration. Used under the top-level
+ * `seatbelt` key (preferred) or `experimental.seatbelt` (deprecated).
  */
 export interface SeatbeltConfig {
   /**

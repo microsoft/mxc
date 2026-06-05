@@ -228,6 +228,9 @@ struct RawConfig {
     network: Option<RawNetwork>,
     ui: Option<RawUi>,
     experimental: Option<RawExperimental>,
+    /// Top-level seatbelt config (preferred over experimental.seatbelt).
+    #[serde(alias = "macos_sandbox")]
+    seatbelt: Option<RawSeatbelt>,
 }
 
 // State-aware request shape. `phase` is required (no `#[serde(default)]` on
@@ -618,12 +621,15 @@ fn present_backend_sections(raw: &RawConfig) -> Vec<&'static str> {
         if experimental.wslc.is_some() {
             push(ContainmentBackend::Wslc);
         }
-        if experimental.seatbelt.is_some() {
+        if experimental.seatbelt.is_some() && raw.seatbelt.is_none() {
             push(ContainmentBackend::Seatbelt);
         }
         if experimental.isolation_session.is_some() {
             push(ContainmentBackend::IsolationSession);
         }
+    }
+    if raw.seatbelt.is_some() {
+        push(ContainmentBackend::Seatbelt);
     }
     sections
 }
@@ -1211,6 +1217,26 @@ fn convert_raw_config_inner(
         ExperimentalConfig::default()
     };
 
+    // Top-level `seatbelt` takes precedence over `experimental.seatbelt`.
+    // This supports the two-phase migration: new configs use the top-level key,
+    // old configs still work via the experimental path.
+    let experimental = if let Some(raw_sb) = raw.seatbelt {
+        let sb = SeatbeltConfig {
+            profile_override: raw_sb.profile_override,
+            gui_access: raw_sb.gui_access.unwrap_or(false),
+            launch_method: raw_sb.launch_method.unwrap_or_default(),
+            nested_pty: raw_sb.nested_pty.unwrap_or(true),
+            keychain_access: raw_sb.keychain_access.unwrap_or(false),
+            extra_mach_lookups: raw_sb.extra_mach_lookups.unwrap_or_default(),
+        };
+        ExperimentalConfig {
+            seatbelt: Some(sb),
+            ..experimental
+        }
+    } else {
+        experimental
+    };
+
     // UI section
     if let Some(raw_ui) = raw.ui {
         let clipboard = match raw_ui.clipboard.as_deref() {
@@ -1281,6 +1307,7 @@ fn convert_raw_state_aware(
         // one-shot RawExperimental; it is preserved separately on
         // ParsedStateAwareRequest as raw JSON.
         experimental: None,
+        seatbelt: None,
     };
 
     let require_process = phase == Phase::Exec;
@@ -3312,6 +3339,36 @@ mod tests {
         assert!(cfg.keychain_access);
     }
 
+    #[test]
+    fn top_level_seatbelt_config_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req
+            .experimental
+            .seatbelt
+            .expect("top-level seatbelt should populate experimental.seatbelt internally");
+        assert!(!cfg.nested_pty);
+        assert!(cfg.keychain_access);
+    }
+
+    #[test]
+    fn top_level_seatbelt_takes_precedence_over_experimental() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false}, "experimental": {"seatbelt": {"nestedPty": true}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req
+            .experimental
+            .seatbelt
+            .expect("seatbelt config should be set");
+        // Top-level wins over experimental.seatbelt
+        assert!(!cfg.nested_pty);
+    }
+
     // Legacy wire-name aliases. The parser accepts the pre-0.6 wire vocabulary
     // (`appcontainer`, `macos_sandbox`, and the `appContainer` /
     // `experimental.macos_sandbox` sub-block keys) so that configs declaring
@@ -3450,7 +3507,7 @@ mod tests {
         assert_multi_backend_rejected(
             "processcontainer",
             r#""experimental": {"seatbelt": {"guiAccess": true}}"#,
-            "experimental.seatbelt",
+            "seatbelt",
         );
     }
 
