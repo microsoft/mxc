@@ -182,19 +182,27 @@ async fn kill_process_tree(pid: Option<u32>) {
         eprintln!("[guest] cannot tree-kill: child pid unavailable");
         return;
     };
-    match Command::new("taskkill")
-        .args(["/T", "/F", "/PID", &pid.to_string()])
-        .output()
-        .await
-    {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => eprintln!(
+    // Bound the taskkill so a wedged taskkill (e.g. a descendant in
+    // un-interruptible I/O) cannot hang the guest's exec teardown forever. The
+    // job-object KILL_ON_JOB_CLOSE reap is the primary cleanup; this is a
+    // best-effort belt-and-suspenders sweep.
+    let killed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .output(),
+    )
+    .await;
+    match killed {
+        Ok(Ok(out)) if out.status.success() => {}
+        Ok(Ok(out)) => eprintln!(
             "[guest] taskkill tree-kill of pid {} returned {}: {}",
             pid,
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
         ),
-        Err(err) => eprintln!("[guest] failed to run taskkill for pid {}: {}", pid, err),
+        Ok(Err(err)) => eprintln!("[guest] failed to run taskkill for pid {}: {}", pid, err),
+        Err(_) => eprintln!("[guest] taskkill for pid {} timed out after 5s", pid),
     }
 }
 

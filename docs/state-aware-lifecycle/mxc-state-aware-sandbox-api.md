@@ -1544,6 +1544,11 @@ applied at provision and frozen for the life of the sandbox; later phases reject
 `network` and `ui` are not yet honored at any phase (network isolation is enforced
 unconditionally by the in-guest agent). WindowsSandbox has no Entra `user` bundle.
 
+> **Known gap (`deniedPaths`).** WindowsSandbox honors `deniedPaths` only as a
+> best-effort provision-time rejection (a `.wsb` mapped share cannot express a Deny
+> ACE), not as a hardened security boundary. See the "Known gap (`deniedPaths`)"
+> caveat in [`docs/windows-sandbox/windows-sandbox.md`](../windows-sandbox/windows-sandbox.md).
+
 | Field | provision | start | exec | stop | deprovision |
 |---|---|---|---|---|---|
 | `filesystem` | applied | rejected | rejected | rejected | rejected |

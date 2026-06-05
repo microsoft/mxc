@@ -213,11 +213,23 @@ export type DeprovisionConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['deprovision'];
 
 /**
- * Per-backend per-phase metadata bundle. Backends that don't return
- * metadata for a given phase omit that key.
+ * Identity helper that constrains the metadata registry literal to declare an
+ * entry for **every** `StateAwareContainmentBackend`. A future backend added to
+ * the union without a metadata entry below is a compile error here, symmetric
+ * to `DefineStateAwareConfigRegistry`.
  */
-export interface StateAwareMetadata {
-  isolation_session?: {
+type DefineStateAwareMetadataRegistry<
+  T extends Record<StateAwareContainmentBackend, object>,
+> = T;
+
+/**
+ * Per-backend per-phase metadata bundle. Backends that don't return metadata
+ * for a given phase omit that phase key; backends that return no metadata at
+ * all use `Record<never, never>` (so every `*MetadataFor<C>` resolves to
+ * `undefined`). Keyed by backend; every backend must declare an entry.
+ */
+export type StateAwareMetadata = DefineStateAwareMetadataRegistry<{
+  isolation_session: {
     provision?: IsolationSessionProvisionMetadata;
     // IsolationSession returns no metadata for start, stop, or deprovision.
   };
@@ -225,13 +237,18 @@ export interface StateAwareMetadata {
   // sandbox id). The key still participates so `StateAwareMetadata[C]` type-
   // checks for `C = 'windows_sandbox'`. `Record<never, never>` has `keyof =
   // never`, so every `*MetadataFor<'windows_sandbox'>` resolves to `undefined`.
-  windows_sandbox?: Record<never, never>;
+  windows_sandbox: Record<never, never>;
   // Future state-aware-capable backends add typed entries here.
-}
+}>;
+
+/** Compile-time guard: catches a backend with no metadata registry entry. */
+type _MetadataRegistryCoversAllBackends = Assert<
+  [StateAwareContainmentBackend] extends [keyof StateAwareMetadata] ? true : false
+>;
 
 type MetadataForPhase<C extends StateAwareContainmentBackend, Phase extends string> =
-  Phase extends keyof NonNullable<StateAwareMetadata[C]>
-    ? NonNullable<StateAwareMetadata[C]>[Phase]
+  Phase extends keyof StateAwareMetadata[C]
+    ? StateAwareMetadata[C][Phase]
     : undefined;
 
 export type ProvisionMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'provision'>;

@@ -326,6 +326,12 @@ pub async fn capture_launch_proof() -> Vec<crate::control_plane::VmProcId> {
 /// `WindowsSandbox*` host processes are treated as liveness indicators; the
 /// `vmmemWindowsSandbox` / `vmmemCmZygote` Hyper-V memory processes are
 /// SYSTEM-owned, harmless residue and are intentionally NOT awaited.
+///
+/// NOTE — intentional asymmetry with the one-shot path: unlike the one-shot's
+/// [`crate::teardown::compute_kill_set`] (which fails safe by leaking when it
+/// cannot prove ownership), this enumerates the live VM into the kill set even
+/// on an empty `targets` seed. That is sound here because every caller reaches
+/// this function only while it provably holds the single-instance VM.
 pub async fn teardown_owned(targets: &[crate::control_plane::VmProcId]) {
     // Snapshot the live sandbox processes NOW, while we provably hold the VM,
     // and union with the recorded targets. All killing is restricted to this

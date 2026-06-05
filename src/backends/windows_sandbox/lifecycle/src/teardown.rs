@@ -579,6 +579,13 @@ fn wsb_vm_running() -> Option<bool> {
 ///   (un-provable) VM over the small risk of killing one we cannot prove we
 ///   own — a leaked VM is a recoverable availability issue, a wrongly-killed
 ///   foreign VM is not.
+///
+/// NOTE — intentional asymmetry with the daemon path: the state-aware daemon's
+/// [`crate::vm::teardown_owned`] DOES enumerate the live VM into its kill set on
+/// an empty seed, because it only reaches teardown on paths where it provably
+/// holds the single-instance VM (launch succeeded, or `ReclaimOrphan` after
+/// reconcile proved no foreign VM). The one-shot path cannot make that proof at
+/// every teardown site, so it fails safe by leaking instead.
 fn compute_kill_set(targets: &[VmProcId], snapshot: &[VmProcId]) -> Vec<VmProcId> {
     let intersects = snapshot.iter().any(|p| targets.contains(p));
     if intersects {
