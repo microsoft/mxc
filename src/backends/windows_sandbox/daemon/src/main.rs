@@ -423,30 +423,43 @@ async fn vm_crash_watchdog(owned: Vec<VmProcId>) -> String {
     let mut gone_streak = 0u32;
     loop {
         tokio::time::sleep(interval).await;
-        let live = match sandbox_vm::enumerate_sandbox_vm_processes().await {
-            Ok(live) => live,
-            // Enumeration failed: unknown — never count as gone.
-            Err(_) => {
-                gone_streak = 0;
-                continue;
-            }
-        };
-        let gone = if owned.is_empty() {
-            // No ownership proof recorded: prefix liveness is all we have.
-            live.is_empty()
-        } else {
-            // Our VM is gone once NONE of the recorded host-process identities
-            // remain live (a foreign replacement VM's identities won't match).
-            !owned.iter().any(|p| live.contains(p))
-        };
-        if gone {
-            gone_streak += 1;
-            if gone_streak >= VM_WATCHDOG_GONE_CONFIRMATIONS {
-                return "Windows Sandbox VM exited unexpectedly (host processes gone)".to_string();
-            }
-        } else {
-            gone_streak = 0;
+        // `None` = enumeration failed (unknown); `Some(live)` = the live set.
+        let live = sandbox_vm::enumerate_sandbox_vm_processes().await.ok();
+        gone_streak = advance_watchdog_streak(&owned, live.as_deref(), gone_streak);
+        if gone_streak >= VM_WATCHDOG_GONE_CONFIRMATIONS {
+            return "Windows Sandbox VM exited unexpectedly (host processes gone)".to_string();
         }
+    }
+}
+
+/// Pure streak-advance step for [`vm_crash_watchdog`]. Extracted so the
+/// security-sensitive decision logic (identity match, prefix fallback, error
+/// reset) is unit-testable without Win32 enumeration.
+///
+/// - `live = None` means enumeration failed → "unknown": reset the streak (an
+///   error never counts as "gone").
+/// - With a recorded `owned` proof, the VM is "gone" for this poll only when
+///   NONE of the owned identities remain in `live` (a foreign single-instance
+///   replacement VM has different identities and cannot mask our VM's death).
+/// - With no `owned` proof (degraded), fall back to prefix liveness: "gone"
+///   only when `live` is empty.
+///
+/// Returns the next streak count; the caller fires once it reaches the
+/// confirmation threshold.
+fn advance_watchdog_streak(owned: &[VmProcId], live: Option<&[VmProcId]>, streak: u32) -> u32 {
+    let Some(live) = live else {
+        // Enumeration failed: unknown — never count as gone.
+        return 0;
+    };
+    let gone = if owned.is_empty() {
+        live.is_empty()
+    } else {
+        !owned.iter().any(|p| live.contains(p))
+    };
+    if gone {
+        streak + 1
+    } else {
+        0
     }
 }
 
@@ -550,4 +563,81 @@ fn to_mapped_folders(records: &[MappedFolderRecord]) -> Vec<sandbox_vm::MappedFo
             read_only: m.read_only,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proc(pid: u32, creation_time: u64) -> VmProcId {
+        VmProcId { pid, creation_time }
+    }
+
+    #[test]
+    fn streak_resets_on_enumeration_error() {
+        let owned = vec![proc(100, 1)];
+        // A failed enumeration ("unknown") must never count as gone, even at a
+        // high prior streak — it resets to 0.
+        assert_eq!(advance_watchdog_streak(&owned, None, 2), 0);
+    }
+
+    #[test]
+    fn streak_increments_only_when_all_owned_identities_absent() {
+        let owned = vec![proc(100, 1), proc(101, 2)];
+        // Owned proc still live → not gone → reset.
+        assert_eq!(advance_watchdog_streak(&owned, Some(&[proc(100, 1)]), 2), 0);
+        // None of the owned identities live → gone → increment.
+        assert_eq!(advance_watchdog_streak(&owned, Some(&[]), 2), 3);
+    }
+
+    #[test]
+    fn pid_reuse_with_different_creation_time_counts_as_gone() {
+        let owned = vec![proc(100, 1)];
+        // Same PID recycled to a different process (creation_time differs) is
+        // NOT our process → the VM is gone.
+        assert_eq!(
+            advance_watchdog_streak(&owned, Some(&[proc(100, 999)]), 0),
+            1
+        );
+    }
+
+    #[test]
+    fn foreign_replacement_vm_cannot_mask_our_death() {
+        let owned = vec![proc(100, 1), proc(101, 2)];
+        // Our VM died and a foreign single-instance VM took its place with new
+        // identities. Identity-based detection still counts our VM as gone.
+        let foreign = [proc(500, 50), proc(501, 51)];
+        assert_eq!(advance_watchdog_streak(&owned, Some(&foreign), 0), 1);
+    }
+
+    #[test]
+    fn degraded_no_proof_falls_back_to_prefix_liveness() {
+        let owned: Vec<VmProcId> = vec![];
+        // With no recorded proof, any live WSB host process means not-gone.
+        assert_eq!(advance_watchdog_streak(&owned, Some(&[proc(7, 7)]), 1), 0);
+        // Empty live set means gone.
+        assert_eq!(advance_watchdog_streak(&owned, Some(&[]), 1), 2);
+    }
+
+    #[test]
+    fn consecutive_gone_polls_reach_confirmation_threshold() {
+        let owned = vec![proc(100, 1)];
+        let mut streak = 0u32;
+        for _ in 0..VM_WATCHDOG_GONE_CONFIRMATIONS {
+            streak = advance_watchdog_streak(&owned, Some(&[]), streak);
+        }
+        assert!(streak >= VM_WATCHDOG_GONE_CONFIRMATIONS);
+    }
+
+    #[test]
+    fn a_single_live_poll_resets_an_in_progress_streak() {
+        let owned = vec![proc(100, 1)];
+        // Two gone polls, then a live poll wipes the streak (must require a
+        // fresh consecutive run), then an error also keeps it at 0.
+        let s = advance_watchdog_streak(&owned, Some(&[]), 0);
+        let s = advance_watchdog_streak(&owned, Some(&[]), s);
+        assert_eq!(s, 2);
+        let s = advance_watchdog_streak(&owned, Some(&[proc(100, 1)]), s);
+        assert_eq!(s, 0);
+    }
 }

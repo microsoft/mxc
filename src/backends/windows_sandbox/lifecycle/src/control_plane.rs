@@ -1214,4 +1214,66 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
     }
+
+    /// Regression guard for the daemon.json temp-write nonce-disclosure fix:
+    /// `atomic_write_json` must lock the record DIRECTORY to an owner-only,
+    /// PROTECTED DACL *before* it ever writes the plaintext `<uuid>.tmp`. We
+    /// assert the post-condition that survives that ordering: the parent dir's
+    /// DACL has `SE_DACL_PROTECTED` set (inherited ACEs stripped). A freshly
+    /// `create_dir_all`'d directory inherits its parent's (non-protected) ACL,
+    /// so if the `set_owner_only_dir(parent)` call were removed this assertion
+    /// would fail.
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_protects_parent_directory() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+        use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+        use windows::Win32::Security::{
+            GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            SE_DACL_PROTECTED,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        // A nested parent that `atomic_write_json` must create + secure itself,
+        // so it cannot accidentally pass by inheriting a protected tempdir.
+        let parent = dir.path().join("nested");
+        let path = parent.join("daemon.json");
+        let rec = daemon_record_with(vec![VmProcId {
+            pid: 5,
+            creation_time: 7,
+        }]);
+        atomic_write_json(&path, &rec).unwrap();
+
+        let mut wide: Vec<u16> = parent.as_os_str().encode_wide().collect();
+        wide.push(0);
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                PCWSTR(wide.as_ptr()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                None,
+                None,
+                &mut sd,
+            )
+        };
+        assert_eq!(rc, ERROR_SUCCESS, "GetNamedSecurityInfoW failed: {rc:?}");
+
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        let got = unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) };
+        let protected = (control & SE_DACL_PROTECTED.0) != 0;
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+        got.expect("GetSecurityDescriptorControl");
+        assert!(
+            protected,
+            "record parent dir must have a PROTECTED DACL (got control bits {control:#06x})"
+        );
+    }
 }

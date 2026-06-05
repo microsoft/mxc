@@ -185,11 +185,14 @@ async fn kill_process_tree(pid: Option<u32>) {
     // Bound the taskkill so a wedged taskkill (e.g. a descendant in
     // un-interruptible I/O) cannot hang the guest's exec teardown forever. The
     // job-object KILL_ON_JOB_CLOSE reap is the primary cleanup; this is a
-    // best-effort belt-and-suspenders sweep.
+    // best-effort belt-and-suspenders sweep. `kill_on_drop(true)` so that on a
+    // timeout the orphaned taskkill.exe is reaped when the future is dropped
+    // rather than lingering until VM teardown.
     let killed = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         Command::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
+            .kill_on_drop(true)
             .output(),
     )
     .await;
