@@ -212,15 +212,48 @@ fn cleanup_stale_daemon_orphan(sandbox_id: &str) -> Result<(), MxcError> {
 
 /// Parse the `wsb:<token>` form of a state-aware `sandbox_id`, returning the
 /// bare token. Surfaces format mismatches as [`MxcError::malformed_id`].
+///
+/// The token grammar is **strict**: lowercase hex, 1-128 chars (`^[a-f0-9]{1,128}$`).
+/// This forbids `.`, `/`, `\`, NUL, and any character that could be
+/// interpreted as a path segment, closing the path-traversal surface a
+/// permissive grammar opened on `sandbox_dir(token)` /
+/// `sandbox_record_path(token)` / `remove_dir_all(sandbox_dir(token))`
+/// (review finding C5). The grammar matches what `mint_random_token` and
+/// `wxc_common::id::mint_random_token` produce, plus a generous tail so a
+/// future widening (e.g. UUID v4 hex) does not break in-tree callers.
+///
+/// Defence-in-depth: callers that take the returned token straight into a
+/// `PathBuf` (everything in this module does today) can rely on the grammar
+/// alone; future callers should still prefer the path-containment check in
+/// `sandbox_dir_under_root` over re-deriving paths by hand.
 fn extract_token(sandbox_id: &str) -> Result<&str, MxcError> {
     let prefix = <WindowsSandboxRunner as StatefulSandboxBackend>::ID_PREFIX;
-    match sandbox_id.split_once(':') {
-        Some((p, rest)) if p == prefix && !rest.is_empty() => Ok(rest),
-        _ => Err(MxcError::malformed_id(format!(
+    let (p, rest) = sandbox_id.split_once(':').ok_or_else(|| {
+        MxcError::malformed_id(format!("expected {}:<token>, got {:?}", prefix, sandbox_id))
+    })?;
+    if p != prefix {
+        return Err(MxcError::malformed_id(format!(
             "expected {}:<token>, got {:?}",
             prefix, sandbox_id
-        ))),
+        )));
     }
+    if !is_valid_sandbox_token(rest) {
+        return Err(MxcError::malformed_id(format!(
+            "sandbox token must be 1-128 lowercase hex chars; got {:?}",
+            rest
+        )));
+    }
+    Ok(rest)
+}
+
+/// True iff `token` is 1-128 lowercase hex chars (`^[a-f0-9]{1,128}$`).
+/// Extracted as a pure helper so the C5 grammar is unit-testable.
+fn is_valid_sandbox_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 128
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Map a [`OneShotError`] from policy planning to the wire error model. Policy
@@ -877,6 +910,85 @@ mod tests {
     fn extract_token_rejects_empty_token() {
         let err = extract_token("wsb:").unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_token_rejects_path_traversal_dots() {
+        // The original permissive grammar allowed ".." in the token, which
+        // fed straight into sandbox_dir() and (worst case) remove_dir_all()
+        // outside state_aware_root() during deprovision. Strict
+        // [a-f0-9]{1,128} forbids ".".
+        let err = extract_token("wsb:..").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+        let err = extract_token("wsb:..\\..\\foo").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+        let err = extract_token("wsb:../../etc/passwd").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_token_rejects_absolute_path_form() {
+        let err = extract_token("wsb:/etc/shadow").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+        let err = extract_token("wsb:C:\\Windows").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_token_rejects_uppercase_hex() {
+        // Grammar is intentionally lowercase-only to match mint_random_token's
+        // output. A future widening is fine but should happen via an explicit
+        // grammar change, not via a permissive accept.
+        let err = extract_token("wsb:DEADBEEF").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_token_rejects_non_hex_chars() {
+        for s in [
+            "wsb:dead beef",
+            "wsb:dead\nbeef",
+            "wsb:dead\0beef",
+            "wsb:zzzz",
+        ] {
+            let err = extract_token(s).unwrap_err();
+            assert_eq!(
+                err.code,
+                MxcErrorCode::MalformedId,
+                "expected MalformedId for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_token_rejects_oversized_token() {
+        // Hard cap at 128 chars so a hostile caller cannot grow the token
+        // unboundedly. mint_random_token produces 8; UUID-hex would be 32.
+        let too_long = "a".repeat(129);
+        let err = extract_token(&format!("wsb:{too_long}")).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_token_accepts_8_to_128_lowercase_hex() {
+        for n in [1usize, 8, 32, 128] {
+            let token = "0".repeat(n);
+            let s = format!("wsb:{token}");
+            assert_eq!(extract_token(&s).unwrap(), token);
+        }
+    }
+
+    #[test]
+    fn is_valid_sandbox_token_rejects_each_meta_character() {
+        for ch in [
+            '.', '/', '\\', ' ', '\0', '\n', '\r', '\t', '*', '?', ':', '"',
+        ] {
+            let s = format!("dead{ch}beef");
+            assert!(
+                !is_valid_sandbox_token(&s),
+                "is_valid_sandbox_token incorrectly accepted {s:?}"
+            );
+        }
     }
 
     #[test]

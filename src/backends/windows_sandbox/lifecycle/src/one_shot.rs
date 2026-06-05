@@ -160,7 +160,13 @@ impl WindowsSandboxRunner {
             .build()
             .map_err(|e| OneShotError::RuntimeSetup(format!("{e}")))?;
 
-        let exec = runtime.block_on(drive(&wsb_path, &rendezvous_dir, &run_dir, request))?;
+        let exec = runtime.block_on(drive(
+            &wsb_path,
+            &rendezvous_dir,
+            &run_dir,
+            request,
+            &capture_host_stdin(),
+        ))?;
 
         let mut response = exec_to_response(exec);
         if let Some(note) = reclaim_note {
@@ -195,6 +201,7 @@ async fn drive(
     rendezvous_dir: &std::path::Path,
     run_dir: &std::path::Path,
     request: &ExecutionRequest,
+    host_stdin: &[u8],
 ) -> Result<bridge::ExecResult, OneShotError> {
     // Launch is in flight: a foreign VM could still win the single-instance
     // contest and fail our launch, so ownership is not yet provable.
@@ -266,10 +273,47 @@ async fn drive(
         &request.script_code,
         &request.working_directory,
         timeout_ms,
-        &[],
+        host_stdin,
     )
     .await
     .map_err(|e| OneShotError::Exec(format!("{e:#}")))
+}
+
+/// Capture wxc-exec's own stdin to a byte buffer for forwarding to the guest.
+///
+/// Behaviour:
+/// - **TTY-stdin** (interactive): returns an empty buffer. Reading from a TTY
+///   would block forever waiting for the user's input; the one-shot exec
+///   contract today is a non-interactive byte buffer (see `host_stdin: &[u8]`
+///   in [`bridge::execute_on_guest`]), so an interactive caller gets nothing
+///   forwarded — same as the previous (silently-dropping) behaviour.
+/// - **Pipe-stdin** (SDK / shell redirect): reads to EOF and returns the
+///   bytes. Errors are logged but never propagated — a failed stdin capture
+///   is degraded UX, not a reason to abort an otherwise-valid exec.
+///
+/// Review finding C3: the previous one-shot `drive` hardcoded `&[]` for the
+/// `host_stdin` argument to `execute_on_guest`, silently dropping any stdin
+/// that an SDK caller piped in (e.g. `echo hi | wxc-exec ... config.json`
+/// produced an empty stdin in the sandbox). The commit message claimed
+/// "stdin forwarding"; this restores that promise for the one-shot path.
+/// True streaming (rather than the buffered-byte-slice contract) is out of
+/// scope for Phase C and would require widening
+/// [`bridge::execute_on_guest`]'s signature.
+fn capture_host_stdin() -> Vec<u8> {
+    use std::io::{IsTerminal, Read};
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if let Err(e) = stdin.read_to_end(&mut buf) {
+        eprintln!(
+            "[one-shot] WARNING: failed to capture stdin for sandbox forwarding ({e}); \
+             continuing with empty stdin"
+        );
+        return Vec::new();
+    }
+    buf
 }
 
 /// Map a successful guest execution to a [`ScriptResponse`].

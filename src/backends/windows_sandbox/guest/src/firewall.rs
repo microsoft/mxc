@@ -51,9 +51,18 @@ pub async fn pre_authorize() -> Result<()> {
 /// already-established host connections survive.
 ///
 /// 1. Delete all existing rules.
-/// 2. Allow inbound on our listen port from the host IP.
-/// 3. Allow outbound to the host IP.
+/// 2. Allow inbound on our listen port from the host IP only.
+/// 3. Allow outbound to the host IP **only on the same `listen_port` source
+///    port** — i.e. response packets on the connections established to our
+///    listener. Untrusted scripts opening *new* outbound connections to the
+///    host (SMB, dev servers, RDP, etc.) use ephemeral source ports and are
+///    blocked by the default outbound-block policy.
 /// 4. Set default policy to block-all for both directions.
+///
+/// The previous (overly broad) rule allowed all outbound TCP to `host_ip`
+/// regardless of source port, which let untrusted workloads reach arbitrary
+/// host services on the same IP — defeating the stated "block all network"
+/// isolation (review finding C1).
 pub async fn lockdown(host_ip: IpAddr, listen_port: u16) -> Result<()> {
     let host = host_ip.to_string();
     let port = listen_port.to_string();
@@ -79,7 +88,14 @@ pub async fn lockdown(host_ip: IpAddr, listen_port: u16) -> Result<()> {
     .await
     .context("add inbound allow rule")?;
 
-    // Allow outbound to host.
+    // Allow outbound to host only when the source port is our listen port
+    // (i.e., response packets on a host-initiated connection to our
+    // listener). Without `localport=` this rule would permit any outbound
+    // TCP to the host IP — letting untrusted scripts open new connections
+    // to arbitrary host services. With the source-port restriction, only
+    // already-accepted-by-us connections can send response packets; new
+    // outbound from the script (which uses ephemeral source ports) is
+    // blocked by the default block-outbound policy below.
     run_netsh(&[
         "advfirewall",
         "firewall",
@@ -89,6 +105,7 @@ pub async fn lockdown(host_ip: IpAddr, listen_port: u16) -> Result<()> {
         "dir=out",
         "action=allow",
         "protocol=TCP",
+        &format!("localport={}", port),
         &format!("remoteip={}", host),
     ])
     .await
