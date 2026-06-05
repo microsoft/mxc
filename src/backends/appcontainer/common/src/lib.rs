@@ -34,6 +34,8 @@ pub mod process_mitigation;
 #[cfg(target_os = "windows")]
 pub mod proxy_coordinator;
 #[cfg(target_os = "windows")]
+pub mod restricted_token_runner;
+#[cfg(target_os = "windows")]
 pub mod sandbox_tracking;
 
 /// Test-only helpers shared across this crate's unit-test modules.
