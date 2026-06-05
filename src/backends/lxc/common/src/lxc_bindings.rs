@@ -80,37 +80,14 @@ pub fn resolve_default_lxcpath() -> String {
 /// `windows-latest` would otherwise flag it as dead code.
 #[cfg(any(target_os = "linux", test))]
 fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
-    // Upper bound: 1 `--clear-env` + env.len() set-vars + up to 7 fixed
-    // elements in the cwd branch (`--`, `/bin/sh`, `-c`, prelude, `_`, cwd,
-    // command). Loose by ~3 in the no-cwd branch — Vec reallocs anyway if
-    // wrong, so this is purely a "save the realloc" hint.
+    // Loose upper bound: 1 --clear-env + env.len() set-vars + up to 7 fixed
+    // elements in the cwd branch. Realloc-avoidance hint only.
     let mut args: Vec<String> = Vec::with_capacity(env.len() + 8);
 
-    // Replace, don't merge: when the caller supplies env, strip lxc-exec's
-    // own environment via `--clear-env` so host-operator vars (PATH, tokens,
-    // ambient credentials, anything else the launching shell exported) do
-    // NOT leak into the sandbox. This matches Seatbelt's `env_clear()` model
-    // (`seatbelt_runner.rs` ~line 149) and WSLC's distro-launch semantics
-    // (`wsl_container_runner.rs` ~line 929), and matches `lxc-attach(1)`'s
-    // own recommendation for non-interactive sandbox-spawn callers (the
-    // manpage flags `--keep-env`, its current default, as "likely to change
-    // in the future" because it leaks undesirable information).
-    //
-    // Residual: lxc-attach still injects a small baseline (`container`,
-    // `HOME`, `TERM`, default `PATH`, `USER`) and applies the container's
-    // `lxc.environment` config; both layers sit below the user vars and are
-    // outside this helper's control. Strict bit-identical parity with
-    // Seatbelt would require bypassing lxc-attach entirely (out of scope).
-    //
-    // Empty env (or all-malformed env after the `split_once('=')` skip)
-    // preserves the legacy keep-env shape so existing call sites without
-    // usable env are undisturbed — clearing without replacing would strand
-    // the user with only lxc-attach's baseline, which is rarely intended.
-    //
-    // Each well-formed `KEY=VAL` becomes a separate `--set-var=KEY=VAL`.
-    // Entries without `=` are silently skipped (matches the permissive
-    // `split_once('=')` semantics Seatbelt and WSLC apply to malformed
-    // entries) so one bad entry can't break the whole attach call.
+    // Replace-on-non-empty-env: when at least one well-formed entry survives
+    // the malformed-skip, emit --clear-env so lxc-exec's caller env doesn't
+    // leak into the sandbox. All-malformed and empty env both preserve
+    // keep-env semantics — see `attach_run` doc for the full contract.
     let set_vars: Vec<String> = env
         .iter()
         .filter(|kv| kv.contains('='))
@@ -128,28 +105,11 @@ fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> 
     if working_directory.is_empty() {
         args.push(command.to_string());
     } else {
-        // Positional-arg trick: `$1` and `$2` carry the cwd and command
-        // verbatim through sh, so neither needs shell-escaping. The leading
-        // `_` is a conventional placeholder for `$0` (sh's script name slot).
-        //
-        // `cd --` guards against a cwd that starts with `-` (which would
-        // otherwise be misparsed as a cd flag). The `--` is POSIX and is
-        // honored by busybox ash 1.36+ (Alpine 3.23 is the integration-test
-        // target — verified end-to-end via `tests/scripts/run_lxc_env_cwd_test.sh`).
-        //
-        // `exec` is load-bearing: it replaces the wrapper shell with the
-        // user's command in-place so signal/timeout delivery (see
-        // `unblock_signals` in `attach_run` and the pty bridge's kill path)
-        // hits the user process directly rather than the wrapper sh.
-        // Removing `exec` would silently regress the timeout/cancel contract.
-        //
-        // Failure mode: a nonexistent or non-permitted cwd makes `cd` fail,
-        // `&&` short-circuits, the user command never runs, and the wrapper
-        // sh exits with cd's status (1 for "not found", etc.). The caller
-        // sees a generic non-zero exit with no structured signal that the
-        // cwd was the cause — same observable behavior as a bad
-        // `Command::current_dir` on the other backends. Callers needing
-        // strong cwd validation should pre-check the path.
+        // Positional-arg trick: cwd and command travel through sh as $1/$2
+        // verbatim, so neither needs shell-escaping; `_` fills sh's $0 slot.
+        // `cd --` guards a leading-dash cwd; `exec` is required so signals
+        // and timeout delivery hit the user process instead of the wrapper
+        // sh. Bad-cwd surfaces as cd's exit status (see `attach_run` doc).
         args.push("cd -- \"$1\" && exec /bin/sh -c \"$2\"".to_string());
         args.push("_".to_string());
         args.push(working_directory.to_string());
