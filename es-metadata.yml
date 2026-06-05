@@ -1,0 +1,12 @@
+schemaVersion: 1.0.0
+providers:
+- provider: InventoryAsCode
+  version: 1.0.0
+  metadata:
+    isProduction: true
+    accountableOwners:
+      service: febda914-cb97-4200-899e-7dc3077438a7
+    routing:
+      defaultAreaPath:
+        org: microsoft
+        path: OS\Windows Client and Services\WinPD\AgOS-Agentic Platform\Runtime
