@@ -30,6 +30,13 @@ pub enum IsolationTier {
     AppContainerBfs,
     /// Tier 3 — AppContainer + DACL-based filesystem policy on host paths.
     AppContainerDacl,
+    /// Tier 4 — restricted primary token + DACL-based filesystem policy on
+    /// host paths. Used when Tiers 1–3 are unavailable or unable to honor
+    /// the policy (notably: workloads that enumerate / traverse, which
+    /// Tier 3 cannot satisfy without ACLing every ancestor up to the drive
+    /// root). See
+    /// `docs/proposals/downlevel_support/tier4-restricted-token.md`.
+    RestrictedToken,
 }
 
 impl IsolationTier {
@@ -39,6 +46,7 @@ impl IsolationTier {
             IsolationTier::BaseContainer => "base-container",
             IsolationTier::AppContainerBfs => "appcontainer-bfs",
             IsolationTier::AppContainerDacl => "appcontainer-dacl",
+            IsolationTier::RestrictedToken => "restricted-token",
         }
     }
 }
@@ -413,9 +421,10 @@ fn check_write_dac_path(path: &Path) -> Result<(), FallbackError> {
 #[cfg(test)]
 fn parse_force_tier(s: &str) -> Option<IsolationTier> {
     match s {
-        "base-container" => Some(IsolationTier::BaseContainer),
-        "appcontainer-bfs" => Some(IsolationTier::AppContainerBfs),
-        "appcontainer-dacl" => Some(IsolationTier::AppContainerDacl),
+        "base-container" | "t1" => Some(IsolationTier::BaseContainer),
+        "appcontainer-bfs" | "t2" => Some(IsolationTier::AppContainerBfs),
+        "appcontainer-dacl" | "t3" => Some(IsolationTier::AppContainerDacl),
+        "restricted-token" | "t4" => Some(IsolationTier::RestrictedToken),
         _ => None,
     }
 }
@@ -430,7 +439,7 @@ fn forced_decision(
     // does: if the operator forbade host DACL changes we must still refuse
     // any tier that would touch them.
     let needs_dacl = match tier {
-        IsolationTier::AppContainerDacl => true,
+        IsolationTier::AppContainerDacl | IsolationTier::RestrictedToken => true,
         IsolationTier::BaseContainer | IsolationTier::AppContainerBfs => denied,
     };
     if needs_dacl && !policy.fallback.allow_dacl_mutation {
@@ -709,7 +718,7 @@ mod tests {
         ));
     }
     #[test]
-    fn force_tier_env_var_parses_all_three_values() {
+    fn force_tier_env_var_parses_all_four_values() {
         assert!(matches!(
             parse_force_tier("base-container"),
             Some(IsolationTier::BaseContainer)
@@ -721,6 +730,31 @@ mod tests {
         assert!(matches!(
             parse_force_tier("appcontainer-dacl"),
             Some(IsolationTier::AppContainerDacl)
+        ));
+        assert!(matches!(
+            parse_force_tier("restricted-token"),
+            Some(IsolationTier::RestrictedToken)
+        ));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn force_tier_env_var_accepts_t_shortcuts() {
+        assert!(matches!(
+            parse_force_tier("t1"),
+            Some(IsolationTier::BaseContainer)
+        ));
+        assert!(matches!(
+            parse_force_tier("t2"),
+            Some(IsolationTier::AppContainerBfs)
+        ));
+        assert!(matches!(
+            parse_force_tier("t3"),
+            Some(IsolationTier::AppContainerDacl)
+        ));
+        assert!(matches!(
+            parse_force_tier("t4"),
+            Some(IsolationTier::RestrictedToken)
         ));
     }
     #[test]

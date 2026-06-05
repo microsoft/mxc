@@ -1,0 +1,11 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "CLI-Tier4-Hello",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd.exe /c exit 42"
+  },
+  "ui": {
+    "disable": false
+  }
+}
