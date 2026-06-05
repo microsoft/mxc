@@ -107,7 +107,7 @@ export type ContainmentBackend =
  * Containment values (abstract intent or concrete backend) that require
  * the `--experimental` flag.
  */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight', 'wslc', 'seatbelt', 'isolation_session'];
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight', 'wslc', 'isolation_session'];
 
 /**
  * Clipboard access policy levels
@@ -348,7 +348,7 @@ export interface LxcConfig {
 }
 
 /**
- * macOS Seatbelt sandbox configuration (experimental). Used under
+ * macOS Seatbelt sandbox configuration. Used under
  * `experimental.seatbelt` when containment is `'seatbelt'`.
  */
 export interface SeatbeltConfig {

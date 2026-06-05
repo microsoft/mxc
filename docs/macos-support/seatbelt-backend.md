@@ -132,8 +132,7 @@ You should see sandbox profile generation output followed by
 
 The macOS sandbox backend uses the same JSON configuration schema as the
 other backends, with `containment` set to `"seatbelt"`. Backend-specific
-settings live under `experimental.seatbelt`, and the `--experimental`
-flag is required to enable the backend at runtime:
+settings live under `experimental.seatbelt`:
 
 ```json
 {
@@ -214,22 +213,18 @@ SDK rejects it with a clear error, mirroring the Linux behavior.
 
 ### Command line
 
-The `seatbelt` backend is currently experimental, so every invocation
-must include the `--experimental` flag. Without it, the binary refuses to
-run with a clear error.
-
 ```bash
 # Run with config file
-./mxc-exec-mac --experimental config.json
+./mxc-exec-mac config.json
 
 # Run with base64-encoded config
-./mxc-exec-mac --experimental --config-base64 <base64-string>
+./mxc-exec-mac --config-base64 <base64-string>
 
 # Validate the config and exit without executing
-./mxc-exec-mac --experimental --dry-run config.json
+./mxc-exec-mac --dry-run config.json
 
 # Diagnostic output to console + file
-./mxc-exec-mac --experimental --debug --log-file mxc.log config.json
+./mxc-exec-mac --debug --log-file mxc.log config.json
 ```
 
 ### SDK
@@ -248,9 +243,8 @@ const policy: SandboxPolicy = {
 };
 
 // On macOS, spawnSandbox automatically resolves to mxc-exec-mac and
-// builds a seatbelt config. The backend is experimental, so the
-// caller must opt in via SandboxSpawnOptions.experimental.
-const pty = spawnSandbox('echo hello', policy, { experimental: true });
+// builds a seatbelt config.
+const pty = spawnSandbox('echo hello', policy);
 pty.onData((data) => console.log(data));
 pty.onExit((e) => console.log('Exit:', e.exitCode));
 ```

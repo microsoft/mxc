@@ -31,7 +31,7 @@
         "bubblewrap"
       ],
       "default": "process",
-      "description": "Containment value to use for execution. Accepts both abstract intents ('process', 'vm') and concrete backends ('processcontainer', 'windows_sandbox', 'lxc', 'microvm', 'hyperlight', 'wslc', 'seatbelt', 'isolation_session', 'bubblewrap'). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities (e.g., 'process' resolves to ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS; 'vm' resolves to Windows Sandbox on Windows). 'lxc' is treated as a full Linux container and is only selected when explicitly requested. Note: 'microvm', 'windows_sandbox', 'wslc', 'seatbelt', 'isolation_session', and 'hyperlight' are experimental and require the --experimental CLI flag. 'hyperlight' and 'bubblewrap' have no per-backend configuration block; they share the common filesystem/network policy fields. The legacy aliases 'appcontainer' and 'macos_sandbox' are still accepted by the parser (with a deprecation log line) but are intentionally omitted from this enum so editors steer authors toward the canonical names."
+      "description": "Containment value to use for execution. Accepts both abstract intents ('process', 'vm') and concrete backends ('processcontainer', 'windows_sandbox', 'lxc', 'microvm', 'hyperlight', 'wslc', 'seatbelt', 'isolation_session', 'bubblewrap'). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities (e.g., 'process' resolves to ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS; 'vm' resolves to Windows Sandbox on Windows). 'lxc' is treated as a full Linux container and is only selected when explicitly requested. Note: 'microvm', 'windows_sandbox', 'wslc', 'isolation_session', and 'hyperlight' are experimental and require the --experimental CLI flag. 'hyperlight' and 'bubblewrap' have no per-backend configuration block; they share the common filesystem/network policy fields. The legacy aliases 'appcontainer' and 'macos_sandbox' are still accepted by the parser (with a deprecation log line) but are intentionally omitted from this enum so editors steer authors toward the canonical names."
     },
 
     "phase": {
@@ -387,7 +387,7 @@
         },
         "seatbelt": {
           "type": "object",
-          "description": "macOS sandbox backend (experimental). Used when containment is 'seatbelt'.",
+          "description": "macOS sandbox backend configuration. Used when containment is 'seatbelt'.",
           "properties": {
             "profileOverride": {
               "type": "string",
