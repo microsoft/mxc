@@ -104,7 +104,7 @@ use windows::Win32::System::Threading::{
 // Access masks — single source of truth
 // -------------------------------------------------------------------------
 //
-// These are the masks `DaclManager::grant_appcontainer_access` actually
+// These are the masks `DaclManager::grant_principal_access` actually
 // stamps onto host paths. Other modules (the dispatcher's
 // `filter_paths_needing_grant`, the fallback detector's
 // `ensure_path_grantable_for_ac` precheck) must observe the SAME
@@ -298,9 +298,21 @@ pub struct StateFile {
 
 /// Crash-safe manager for filesystem DACL augmentation.
 ///
-/// Apply ACEs via [`grant_appcontainer_access`](Self::grant_appcontainer_access)
+/// Apply ACEs via [`grant_principal_access`](Self::grant_principal_access)
 /// and [`add_deny_aces`](Self::add_deny_aces); call [`restore`](Self::restore)
 /// to undo. On drop, [`restore`](Self::restore) is invoked best-effort.
+///
+/// # Leaf-only contract
+///
+/// `DaclManager` only ever touches the *exact* paths it is given —
+/// never an ancestor directory. This is load-bearing for Tier 4
+/// (`RestrictedTokenRunner`), where the restricted token's restricting
+/// SID set already includes a `Users`-equivalent that ancestor system
+/// DACLs grant `FILE_TRAVERSE` to, so no ancestor ACE injection is
+/// required. Adding ACEs further up the tree would change host
+/// security state unnecessarily and is explicitly not done. Callers
+/// that need traversal of ancestor directories must rely on a
+/// principal whose access the existing ancestor DACLs already grant.
 #[derive(Debug)]
 pub struct DaclManager {
     run_id: String,
@@ -354,35 +366,37 @@ impl DaclManager {
         &self.warnings
     }
 
-    /// T3: grant the AppContainer SID `rw` on `readwrite` paths and `ro` on
-    /// `readonly` paths. Caller must have already probed `WRITE_DAC` (Phase
-    /// 2 fallback detector).
-    pub fn grant_appcontainer_access(
+    /// Grant `principal_sid_str` `rw` on each path in `readwrite` and `ro`
+    /// on each path in `readonly`. ACEs are added on the **leaf paths
+    /// only** — see the [leaf-only contract](Self) on `DaclManager`.
+    /// Caller must have already probed `WRITE_DAC` (Phase 2 fallback
+    /// detector).
+    pub fn grant_principal_access(
         &mut self,
-        appcontainer_sid_str: &str,
+        principal_sid_str: &str,
         readwrite: &[PathBuf],
         readonly: &[PathBuf],
     ) -> Result<(), DaclError> {
         for p in readwrite {
-            self.apply_one(appcontainer_sid_str, p, RW_MASK, AceType::Allow)?;
+            self.apply_one(principal_sid_str, p, RW_MASK, AceType::Allow)?;
         }
         for p in readonly {
-            self.apply_one(appcontainer_sid_str, p, RO_MASK, AceType::Allow)?;
+            self.apply_one(principal_sid_str, p, RO_MASK, AceType::Allow)?;
         }
         Ok(())
     }
 
-    /// T1/T2/T3: deny all access for the AppContainer SID on each path in
-    /// `denied`.
+    /// Deny all access for `principal_sid_str` on each path in `denied`.
+    /// ACEs are added on the **leaf paths only**.
     pub fn add_deny_aces(
         &mut self,
-        appcontainer_sid_str: &str,
+        principal_sid_str: &str,
         denied: &[PathBuf],
     ) -> Result<(), DaclError> {
         // FILE_ALL_ACCESS = 0x1F01FF (STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1FF)
         let deny_mask: u32 = 0x001F_01FF;
         for p in denied {
-            self.apply_one(appcontainer_sid_str, p, deny_mask, AceType::Deny)?;
+            self.apply_one(principal_sid_str, p, deny_mask, AceType::Deny)?;
         }
         Ok(())
     }
@@ -2564,7 +2578,7 @@ mod tests {
         let _scope = ScopedStateDir::new();
         let td = tempfile::tempdir().unwrap();
         let mut m = DaclManager::new().unwrap();
-        m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[])
+        m.grant_principal_access("S-1-1-0", &[td.path().to_path_buf()], &[])
             .unwrap();
         // Now restore.
         m.restore().unwrap();
@@ -2697,7 +2711,7 @@ mod tests {
         // explicit-allow slot of the canonical layout.
         let mut allow_mgr = DaclManager::new().unwrap();
         allow_mgr
-            .grant_appcontainer_access(sid_str, std::slice::from_ref(&td.path().to_path_buf()), &[])
+            .grant_principal_access(sid_str, std::slice::from_ref(&td.path().to_path_buf()), &[])
             .unwrap();
         assert_canonical_order(&collect_full_dacl_order(td.path()), "after ALLOW apply");
 
@@ -2772,7 +2786,7 @@ mod tests {
         for i in 100..(100 + N) {
             let sid = format!("S-1-15-2-{i}");
             let mut m = DaclManager::new().unwrap();
-            m.grant_appcontainer_access(&sid, std::slice::from_ref(&td.path().to_path_buf()), &[])
+            m.grant_principal_access(&sid, std::slice::from_ref(&td.path().to_path_buf()), &[])
                 .unwrap();
             seed_managers.push(m);
         }
@@ -2845,7 +2859,7 @@ mod tests {
         let f = sub.join("file.txt");
         std::fs::write(&f, b"x").unwrap();
         let mut m = DaclManager::new().unwrap();
-        m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[])
+        m.grant_principal_access("S-1-1-0", &[td.path().to_path_buf()], &[])
             .unwrap();
         // We don't inspect the child's ACL programmatically here (that
         // would re-implement most of the apply path). The contract being
@@ -2872,7 +2886,7 @@ mod tests {
         // unwind correctly — strip the merged ACE and re-add READ.
         let mut outer = DaclManager::new().unwrap();
         outer
-            .grant_appcontainer_access(everyone, std::slice::from_ref(&target), &[])
+            .grant_principal_access(everyone, std::slice::from_ref(&target), &[])
             .unwrap();
 
         let mut inner = DaclManager::new().unwrap();
@@ -2905,7 +2919,7 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         {
             let mut m = DaclManager::new().unwrap();
-            m.grant_appcontainer_access("S-1-1-0", std::slice::from_ref(&target), &[])
+            m.grant_principal_access("S-1-1-0", std::slice::from_ref(&target), &[])
                 .unwrap();
             // Forge a state file with a dead PID so recovery picks it up.
             let dir = state_dir().unwrap();
@@ -3018,7 +3032,7 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         {
             let mut m = DaclManager::new().unwrap();
-            m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[])
+            m.grant_principal_access("S-1-1-0", &[td.path().to_path_buf()], &[])
                 .unwrap();
             // No explicit restore — drop should clean up.
         }
@@ -3028,7 +3042,7 @@ mod tests {
     fn nonexistent_path_errors_cleanly() {
         let _scope = ScopedStateDir::new();
         let mut m = DaclManager::new().unwrap();
-        let err = m.grant_appcontainer_access(
+        let err = m.grant_principal_access(
             "S-1-1-0",
             &[PathBuf::from(r"C:\__definitely_not_a_real_path__\xyzzy")],
             &[],
@@ -3040,11 +3054,8 @@ mod tests {
     fn network_path_rejected_e2e() {
         let _scope = ScopedStateDir::new();
         let mut m = DaclManager::new().unwrap();
-        let err = m.grant_appcontainer_access(
-            "S-1-1-0",
-            &[PathBuf::from(r"\\someserver\share\foo")],
-            &[],
-        );
+        let err =
+            m.grant_principal_access("S-1-1-0", &[PathBuf::from(r"\\someserver\share\foo")], &[]);
         // The test's intent is "we never silently succeed on a UNC
         // path". The exact error variant depends on how
         // `fs::canonicalize` resolves `\\someserver\share\foo` on the
@@ -3099,7 +3110,7 @@ mod tests {
         let mask = FILE_GENERIC_READ.0; // RO grant; what installers typically stamp
         {
             let mut m = DaclManager::new().unwrap();
-            m.grant_appcontainer_access("S-1-15-2-1", &[], &[td.path().to_path_buf()])
+            m.grant_principal_access("S-1-15-2-1", &[], &[td.path().to_path_buf()])
                 .unwrap();
             let observed = compute_appcontainer_effective_access(td.path())
                 .expect("effective access should not error after grant");
@@ -3127,7 +3138,7 @@ mod tests {
         // most user-owned paths anyway, but we set it explicitly so the
         // test is robust to host-specific ACL layouts.
         let mut m = DaclManager::new().unwrap();
-        m.grant_appcontainer_access("S-1-5-32-545", &[td.path().to_path_buf()], &[])
+        m.grant_principal_access("S-1-5-32-545", &[td.path().to_path_buf()], &[])
             .unwrap();
         let observed = compute_appcontainer_effective_access(td.path()).unwrap();
         assert_eq!(

@@ -41,6 +41,8 @@ pub mod ts_emit;
 // shared across host tools (e.g. wxc_host_prep, mxc_diagnostic_console)
 // and ≥1 backend stay here.
 #[cfg(target_os = "windows")]
+pub mod child_env;
+#[cfg(target_os = "windows")]
 pub mod diagnostic;
 #[cfg(target_os = "windows")]
 pub mod filesystem_dacl;

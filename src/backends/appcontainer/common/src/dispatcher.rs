@@ -256,7 +256,7 @@ fn build_t3_dacl(
         error: e,
         warnings: Vec::new(),
     })?;
-    if let Err(e) = mgr.grant_appcontainer_access(sid, readwrite, readonly) {
+    if let Err(e) = mgr.grant_principal_access(sid, readwrite, readonly) {
         return Err(dacl_err(&mgr, e));
     }
     if !denied.is_empty() {
@@ -761,11 +761,11 @@ mod tests {
         let td_grant = tempfile::tempdir().expect("temp dir grant");
         let td_no_grant = tempfile::tempdir().expect("temp dir no-grant");
 
-        // Stamp an Everyone grant on td_grant via `grant_appcontainer_access`
+        // Stamp an Everyone grant on td_grant via `grant_principal_access`
         // and persist it for the duration of the test by holding the
         // manager. Drop at end of scope rolls it back.
         let mut mgr = wxc_common::filesystem_dacl::DaclManager::new().expect("dacl mgr");
-        mgr.grant_appcontainer_access(
+        mgr.grant_principal_access(
             "S-1-1-0",
             std::slice::from_ref(&td_grant.path().to_path_buf()),
             &[],
