@@ -436,14 +436,19 @@ fn certutil_sha256(path: &Path) -> String {
     //   SHA256 hash of <file>:
     //   <hex hash>
     //   CertUtil: -hashfile command completed successfully.
-    let stdout = String::from_utf8(output.stdout).expect("certutil output not UTF-8");
+    //
+    // Use a lossy conversion because the localized header/footer lines are
+    // emitted in the console's OEM code page (e.g. CP850 on French Windows),
+    // not UTF-8 -- a strict `from_utf8` would panic on those bytes. The hash
+    // line itself is pure ASCII hex, so it survives the lossy conversion. We
+    // locate the hash by scanning for a 64-character hex line rather than
+    // relying on a fixed line index, which keeps this locale-independent.
+    let stdout = String::from_utf8_lossy(&output.stdout);
     stdout
         .lines()
-        .nth(1)
+        .map(|line| line.trim().replace(' ', "").to_lowercase())
+        .find(|line| line.len() == 64 && line.bytes().all(|b| b.is_ascii_hexdigit()))
         .unwrap_or_else(|| panic!("nanvix_binaries: unexpected certutil output: {}", stdout))
-        .trim()
-        .replace(' ', "")
-        .to_lowercase()
 }
 
 fn verify_checksums(binaries: &[&str], bin_dir: &Path, checksums: &HashMap<String, String>) {
