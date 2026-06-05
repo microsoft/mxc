@@ -2699,6 +2699,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows_sandbox_lifecycle"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "windows",
+ "windows_sandbox_common",
+ "wxc_common",
+]
+
+[[package]]
 name = "windows_x86_64_gnu"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2857,7 +2872,7 @@ dependencies = [
  "nanvix_runner",
  "serde_json",
  "windows",
- "windows_sandbox_common",
+ "windows_sandbox_lifecycle",
  "wslc_common",
  "wxc_common",
 ]
@@ -2946,6 +2961,7 @@ dependencies = [
  "tokio",
  "uuid",
  "windows_sandbox_common",
+ "windows_sandbox_lifecycle",
  "wxc_common",
 ]
 
@@ -2957,6 +2973,7 @@ dependencies = [
  "mxc_build_common",
  "serde_json",
  "tokio",
+ "windows",
  "windows_sandbox_common",
  "wxc_common",
 ]

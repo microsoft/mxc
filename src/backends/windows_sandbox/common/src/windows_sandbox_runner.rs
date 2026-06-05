@@ -32,7 +32,12 @@ impl WindowsSandboxScriptRunner {
         let hash: u32 = name
             .bytes()
             .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-        let range = 65535u32 - 49152;
+        // Constrain to 49152-49999, the low end of the dynamic range. WinNAT /
+        // Hyper-V reserve large port blocks (commonly 50000+ and the high
+        // 63000-64000 region) once Windows Sandbox or Hyper-V is enabled;
+        // binding a reserved port fails with WSAEACCES (os error 10013). Both
+        // this function and the daemon's copy must stay in sync.
+        let range = 49999u32 - 49152 + 1;
         (49152 + (hash % range)) as u16
     }
 
@@ -65,13 +70,30 @@ impl WindowsSandboxScriptRunner {
         let daemon_path = Self::daemon_exe_path()?;
         let idle_timeout = self.config.idle_timeout_ms.to_string();
 
-        // Launch daemon as a detached background process.
-        std::process::Command::new(&daemon_path)
+        // Launch daemon as a detached background process. On Windows, set
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so the daemon outlives
+        // the death of wxc-exec's console / process group. Otherwise a caller
+        // that kills wxc-exec (or the job/console it belongs to) can take the
+        // daemon down with it while the sandbox VM keeps running — orphaning a
+        // live VM that then blocks the next launch ("Only one running instance
+        // of Windows Sandbox is allowed").
+        let mut command = std::process::Command::new(&daemon_path);
+        command
             .arg(&self.config.daemon_pipe_name)
             .arg(&idle_timeout)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        }
+
+        command
             .spawn()
             .map_err(|e| format!("spawn daemon: {}", e))?;
 
@@ -90,20 +112,21 @@ impl WindowsSandboxScriptRunner {
     }
 
     /// Check if Windows Sandbox is available on this system.
+    ///
+    /// Detection is by the presence of `WindowsSandbox.exe` in the system
+    /// directory. This is deliberately preferred over a DISM feature query:
+    /// `dism /online /get-featureinfo` requires elevation, so querying it
+    /// from a non-elevated process fails with error 740 and yields a false
+    /// "not enabled" result for ordinary users. The launcher binary only
+    /// exists once the optional feature is installed, so its presence is a
+    /// reliable, elevation-free signal.
     fn check_sandbox_available() -> Result<(), String> {
-        let output = std::process::Command::new("dism")
-            .args([
-                "/online",
-                "/get-featureinfo",
-                "/featurename:Containers-DisposableClientVM",
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .map_err(|err| format!("failed to run dism: {}", err))?;
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let sandbox_exe = std::path::Path::new(&system_root)
+            .join("System32")
+            .join("WindowsSandbox.exe");
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.contains("State : Enabled") {
+        if sandbox_exe.exists() {
             Ok(())
         } else {
             Err(
@@ -224,7 +247,7 @@ mod tests {
             let hash: u32 = name
                 .bytes()
                 .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-            let range = 65535u32 - 49152;
+            let range = 49999u32 - 49152 + 1;
             (49152 + (hash % range)) as u16
         }
         assert_eq!(

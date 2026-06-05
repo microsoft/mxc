@@ -143,6 +143,7 @@ pub fn resolve_backend(parsed: &ParsedStateAwareRequest) -> Result<ContainmentBa
 fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, MxcError> {
     match prefix {
         "iso" => Ok(ContainmentBackend::IsolationSession),
+        "wsb" => Ok(ContainmentBackend::WindowsSandbox),
         // Future state-aware backends extend this list.
         other => Err(MxcError::unsupported_containment(format!(
             "no state-aware backend registered for prefix {:?}",
@@ -669,6 +670,21 @@ mod tests {
         assert_eq!(
             resolve_backend(&p).unwrap(),
             ContainmentBackend::IsolationSession
+        );
+    }
+
+    #[test]
+    fn resolve_backend_for_wsb_prefix_returns_windows_sandbox() {
+        let p = ParsedStateAwareRequest {
+            request: ExecutionRequest::default(),
+            phase: Phase::Start,
+            containment: None,
+            sandbox_id: Some("wsb:deadbeef".into()),
+            experimental_raw: None,
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            ContainmentBackend::WindowsSandbox
         );
     }
 

@@ -8,6 +8,45 @@ use std::net::IpAddr;
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
+/// Pre-authorize the guest agent in Windows Firewall *before* it binds its
+/// listener, so Windows does not raise an interactive "Do you want to allow
+/// this app?" prompt when the host first connects inbound. Without this rule
+/// the prompt blocks unattended/automated runs and can intermittently stall
+/// the per-exec data-stream reconnections.
+///
+/// The listener uses an OS-assigned (ephemeral) port that isn't known until
+/// after `bind`, and the host can connect as soon as the rendezvous file is
+/// written — so we authorize by **program path** rather than port to close
+/// the race entirely (the rule exists before the listener does). The guest
+/// runs from a space-free mapped path (`C:\sandbox-guest\...`), so the
+/// `program=` token needs no special quoting.
+///
+/// This rule is intentionally broad and short-lived: [`lockdown`] later
+/// deletes all rules (including this one) and replaces it with a tight
+/// host-IP/port-scoped rule once the connections are established.
+pub async fn pre_authorize() -> Result<()> {
+    let exe = std::env::current_exe().context("resolve guest executable path")?;
+    let program = exe.to_string_lossy();
+
+    run_netsh(&[
+        "advfirewall",
+        "firewall",
+        "add",
+        "rule",
+        "name=WxcAgentPreAuth",
+        "dir=in",
+        "action=allow",
+        "protocol=TCP",
+        "profile=any",
+        "enable=yes",
+        &format!("program={}", program),
+    ])
+    .await
+    .context("add pre-authorization inbound allow rule")?;
+
+    Ok(())
+}
+
 /// Lock down the Windows Firewall inside the sandbox so that only the
 /// already-established host connections survive.
 ///

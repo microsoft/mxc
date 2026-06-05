@@ -11,10 +11,15 @@ import {
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
   IsolationSessionUserConfig,
+  ProvisionMetadataFor,
   ProvisionResult,
   SandboxId,
+  StartMetadataFor,
   StopConfigFor,
+  WindowsSandboxProvisionConfig,
+  WindowsSandboxStartConfig,
 } from '../../src/state-aware-types.js';
+import { backendForSandboxId } from '../../src/state-aware-helper.js';
 
 // These tests are primarily compile-time checks. Lines marked with
 // `// @ts-expect-error` MUST trigger a TypeScript error on the line below;
@@ -162,6 +167,121 @@ describe('ConfigsForBackend', () => {
       deprovision: {},
     };
     assert.strictEqual(bundle.exec.process.commandLine, 'echo');
+  });
+
+  it('selects the WindowsSandbox bundle for the windows_sandbox backend', () => {
+    const bundle: ConfigsForBackend<'windows_sandbox'> = {
+      provision: { version: '0.6.0-alpha', filesystem: { readwritePaths: ['C:\\workspace'] } },
+      start: {},
+      exec: { process: { commandLine: 'echo' } },
+      stop: {},
+      deprovision: {},
+    };
+    assert.strictEqual(bundle.provision.filesystem?.readwritePaths?.[0], 'C:\\workspace');
+  });
+});
+
+describe('WindowsSandboxProvisionConfig', () => {
+  it('accepts version and filesystem (incl. deniedPaths)', () => {
+    const cfg: WindowsSandboxProvisionConfig = {
+      version: '0.6.0-alpha',
+      filesystem: {
+        readwritePaths: ['C:\\workspace'],
+        readonlyPaths: ['C:\\inputs'],
+        deniedPaths: ['C:\\secrets'],
+      },
+    };
+    assert.deepStrictEqual(cfg.filesystem?.deniedPaths, ['C:\\secrets']);
+  });
+
+  it('rejects the Entra user bundle (WindowsSandbox has no Entra surface)', () => {
+    const cfg: WindowsSandboxProvisionConfig = {
+      // @ts-expect-error — windows_sandbox provision has no `user` bundle.
+      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+    };
+    assert.ok(cfg);
+  });
+
+  it('rejects network and ui at provision', () => {
+    const withNetwork: WindowsSandboxProvisionConfig = {
+      // @ts-expect-error — network is not exposed on the windows_sandbox provision config.
+      network: { defaultPolicy: 'block' },
+    };
+    const withUi: WindowsSandboxProvisionConfig = {
+      // @ts-expect-error — ui is not exposed on the windows_sandbox provision config.
+      ui: { disable: true, clipboard: 'none', injection: false },
+    };
+    assert.ok(withNetwork);
+    assert.ok(withUi);
+  });
+});
+
+describe('WindowsSandboxStartConfig', () => {
+  it('carries only version (no configurationId, no user)', () => {
+    const ok: WindowsSandboxStartConfig = { version: '0.6.0-alpha' };
+    assert.strictEqual(ok.version, '0.6.0-alpha');
+
+    const withConfigurationId: WindowsSandboxStartConfig = {
+      // @ts-expect-error — windows_sandbox start has no configurationId.
+      configurationId: 'small',
+    };
+    assert.ok(withConfigurationId);
+
+    const withUser: WindowsSandboxStartConfig = {
+      // @ts-expect-error — windows_sandbox start has no Entra `user` bundle.
+      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+    };
+    assert.ok(withUser);
+  });
+});
+
+describe('WindowsSandbox SandboxId<C> brand', () => {
+  it('runtime value is a string and brands distinctly from isolation_session', () => {
+    const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
+    assert.strictEqual(typeof id, 'string');
+
+    function takesWsbId(_id: SandboxId<'windows_sandbox'>): void {
+      // body unused
+    }
+    // @ts-expect-error — an isolation_session id is not a windows_sandbox id.
+    takesWsbId('iso:abcd' as SandboxId<'isolation_session'>);
+    assert.ok(true);
+  });
+});
+
+describe('WindowsSandbox metadata resolves to undefined for every phase', () => {
+  it('typed metadata accessors are undefined and ProvisionResult carries no metadata', () => {
+    // These assignments only compile if the *MetadataFor<'windows_sandbox'>
+    // aliases resolve to `undefined` (not `never` / not an object).
+    const provMeta: ProvisionMetadataFor<'windows_sandbox'> = undefined;
+    const startMeta: StartMetadataFor<'windows_sandbox'> = undefined;
+    assert.strictEqual(provMeta, undefined);
+    assert.strictEqual(startMeta, undefined);
+
+    const result: ProvisionResult<'windows_sandbox'> = {
+      sandboxId: 'wsb:prov-1' as SandboxId<'windows_sandbox'>,
+    };
+    assert.strictEqual(result.metadata, undefined);
+
+    const withBogusMetadata: ProvisionResult<'windows_sandbox'> = {
+      sandboxId: 'wsb:prov-1' as SandboxId<'windows_sandbox'>,
+      // @ts-expect-error — WindowsSandbox provision returns no metadata object.
+      metadata: { agentUserName: 'nope' },
+    };
+    assert.ok(withBogusMetadata);
+  });
+});
+
+describe('SandboxId<C> brand is compile-time only; prefix is the runtime routing authority', () => {
+  it('routes a force-cast wsb id to windows_sandbox despite the iso brand', () => {
+    // A caller can defeat the compile-time brand with a forced cast. Routing
+    // must still follow the *runtime* prefix (`wsb:`), not the (wrong) brand —
+    // pinning that the brand is advisory and the prefix is authoritative.
+    const misbranded = 'wsb:prov-1' as unknown as SandboxId<'isolation_session'>;
+    assert.strictEqual(backendForSandboxId(misbranded), 'windows_sandbox');
+
+    const isoId = 'iso:abcd' as SandboxId<'isolation_session'>;
+    assert.strictEqual(backendForSandboxId(isoId), 'isolation_session');
   });
 });
 

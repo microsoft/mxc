@@ -87,10 +87,10 @@ use windows::Win32::Security::{
     GetAclInformation, GetLengthSid, InitializeAcl, IsValidSid, ACCESS_ALLOWED_ACE,
     ACCESS_DENIED_ACE, ACE_FLAGS, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION,
     CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, INHERITED_ACE, OBJECT_INHERIT_ACE,
-    PSECURITY_DESCRIPTOR, PSID,
+    OBJECT_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
 };
 use windows::Win32::Storage::FileSystem::{
-    DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    DELETE, FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
 use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
@@ -312,6 +312,12 @@ pub struct RecoveryReport {
     pub files_processed: usize,
     /// Total ACEs successfully removed across all orphan files.
     pub aces_restored: usize,
+    /// ACEs pruned because their target path no longer exists. There is
+    /// nothing to restore on a deleted file, so the entry is dropped rather
+    /// than retained-and-retried forever (which would emit perpetual
+    /// recovery errors). Counted separately from `aces_restored` so the
+    /// diagnostic line stays honest.
+    pub aces_pruned_missing: usize,
     /// Per-file or per-path errors, formatted for logging.
     pub errors: Vec<String>,
 }
@@ -563,16 +569,33 @@ pub fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
         // Reap. Failed entries are retained so the next startup retries.
         let mut remaining: Vec<AppliedAce> = Vec::new();
         for ace in state.applied.iter().rev() {
+            // Prune ACEs whose target no longer exists: there is nothing to
+            // restore on a deleted file/dir, and retaining the entry would
+            // make every future startup re-attempt the restore and fail with
+            // PATH_NOT_FOUND forever (finding #76). `try_exists() == Ok(false)`
+            // is a confirmed "not there"; an `Err` (e.g. access denied) is
+            // ambiguous, so we still attempt the restore in that case.
+            if matches!(ace.canonical_path.try_exists(), Ok(false)) {
+                report.aces_pruned_missing += 1;
+                continue;
+            }
             match restore_one(ace) {
                 Ok(_) => report.aces_restored += 1,
                 Err(e) => {
-                    report.errors.push(format!(
-                        "restore {} (pid {}): {}",
-                        ace.canonical_path.display(),
-                        state.pid,
-                        e
-                    ));
-                    remaining.push(ace.clone());
+                    // Race: the target may have been deleted between the
+                    // existence check above and the restore attempt. If it is
+                    // now confirmed gone, prune rather than retain.
+                    if matches!(ace.canonical_path.try_exists(), Ok(false)) {
+                        report.aces_pruned_missing += 1;
+                    } else {
+                        report.errors.push(format!(
+                            "restore {} (pid {}): {}",
+                            ace.canonical_path.display(),
+                            state.pid,
+                            e
+                        ));
+                        remaining.push(ace.clone());
+                    }
                 }
             }
         }
@@ -1153,8 +1176,117 @@ pub fn apply_explicit_ace(
     Ok(())
 }
 
-/// Revoke explicit ACEs on `path` for `sid_str` whose `(access_mask,
-/// ace_type, inherit_flags)` tuple exactly matches the requested one.
+/// The current process token's user SID, as an [`OwnedSid`].
+fn current_user_sid() -> Result<OwnedSid, DaclError> {
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows::Win32::System::Threading::OpenProcessToken;
+
+    let token_path = Path::new("<process token>");
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+            .map_err(|e| win32_err_str(token_path, &format!("OpenProcessToken: {e}")))?;
+
+        // First call sizes the buffer (returns ERROR_INSUFFICIENT_BUFFER).
+        let mut len = 0u32;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+        let mut buf = vec![0u8; len.max(1) as usize];
+        let info = GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr() as *mut c_void),
+            len,
+            &mut len,
+        );
+        let _ = CloseHandle(token);
+        info.map_err(|e| {
+            win32_err_str(token_path, &format!("GetTokenInformation(TokenUser): {e}"))
+        })?;
+
+        let tu = &*(buf.as_ptr() as *const TOKEN_USER);
+        let mut pstr = PWSTR::null();
+        ConvertSidToStringSidW(tu.User.Sid, &mut pstr)
+            .map_err(|e| win32_err_str(token_path, &format!("ConvertSidToStringSidW: {e}")))?;
+        let sid_string = pstr
+            .to_string()
+            .map_err(|e| DaclError::InvalidSid(format!("token user SID string not UTF-16: {e}")));
+        if !pstr.is_null() {
+            let _ = LocalFree(Some(HLOCAL(pstr.0 as *mut c_void)));
+        }
+        OwnedSid::parse(&sid_string?)
+    }
+}
+
+/// Lock `path` down to an owner-only DACL: full control for the current user
+/// and Local SYSTEM, applied as a PROTECTED DACL that strips all inherited
+/// ACEs. For a directory, pass `inheritable = true` so children created
+/// afterward inherit the same lockdown.
+///
+/// Unlike [`DaclManager`], this is deliberately NOT journaled: it stamps a
+/// permanent owner-only DACL on a path MXC owns (its own scratch dirs / record
+/// files), so there is nothing to restore on the host afterward.
+///
+/// # Threat model
+///
+/// Protects MXC state — notably the auth nonce persisted in the state-aware
+/// `daemon.json` — from CROSS-USER disclosure and tampering when the process
+/// temp directory is shared (e.g. `C:\Windows\Temp` under a service account).
+/// Same-user processes are trusted. Callers should treat an error as fatal and
+/// must not write sensitive content to a path that could not be secured
+/// (fail-closed).
+pub fn set_owner_only_dacl(path: &Path, inheritable: bool) -> Result<(), DaclError> {
+    let user = current_user_sid()?;
+    let system = OwnedSid::parse("S-1-5-18")?; // Local SYSTEM.
+
+    let inheritance: u32 = if inheritable {
+        OBJECT_INHERIT_ACE.0 | CONTAINER_INHERIT_ACE.0
+    } else {
+        0
+    };
+    let mask = FILE_ALL_ACCESS.0;
+    let grant = |sid: &OwnedSid| EXPLICIT_ACCESS_W {
+        grfAccessPermissions: mask,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: ACE_FLAGS(inheritance),
+        Trustee: trustee_for(sid),
+    };
+    let ea = [grant(&user), grant(&system)];
+
+    // Build a fresh ACL from ONLY these two entries (pass no existing ACL, so
+    // nothing is merged in), then apply it PROTECTED so inherited ACEs from the
+    // — possibly shared — parent directory are dropped.
+    let mut new_dacl: *mut ACL = ptr::null_mut();
+    let rc = unsafe { SetEntriesInAclW(Some(&ea), None, &mut new_dacl) };
+    if rc != ERROR_SUCCESS {
+        return Err(win32_err(path, "SetEntriesInAclW", rc));
+    }
+
+    let path_w = wide(path);
+    let info = OBJECT_SECURITY_INFORMATION(
+        DACL_SECURITY_INFORMATION.0 | PROTECTED_DACL_SECURITY_INFORMATION.0,
+    );
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            PCWSTR(path_w.as_ptr()),
+            SE_FILE_OBJECT,
+            info,
+            None,
+            None,
+            Some(new_dacl as *const ACL),
+            None,
+        )
+    };
+    unsafe {
+        if !new_dacl.is_null() {
+            let _ = LocalFree(Some(HLOCAL(new_dacl as *mut c_void)));
+        }
+    }
+    if rc != ERROR_SUCCESS {
+        return Err(win32_err(path, "SetNamedSecurityInfoW", rc));
+    }
+    Ok(())
+}
 /// Mirrors [`apply_explicit_ace`] in reverse: any non-matching
 /// explicit ACE for the same SID — including those authored by other
 /// tools (e.g. `icacls C:\ /grant "ALL APPLICATION PACKAGES":(R)`) —
@@ -2624,6 +2756,90 @@ mod tests {
         }
         let report = recover_orphaned_state().unwrap();
         assert!(report.files_processed >= 1);
+    }
+
+    #[test]
+    fn set_owner_only_dacl_strips_inheritance_and_grants_owner() {
+        // Parent carries an inheritable Everyone ACE; a freshly created child
+        // inherits it. Locking the child owner-only with a PROTECTED DACL must
+        // strip that inherited ACE and leave only our explicit (non-inherited)
+        // entries.
+        let parent = tempfile::tempdir().unwrap();
+        apply_explicit_ace(
+            parent.path(),
+            "S-1-1-0", // Everyone
+            FILE_ALL_ACCESS.0,
+            AceType::Allow,
+            true,
+        )
+        .unwrap();
+        let child = parent.path().join("locked");
+        std::fs::create_dir(&child).unwrap();
+
+        let before = collect_full_dacl_order(&child);
+        assert!(
+            before.iter().any(|(_, inherited)| *inherited),
+            "child should start with at least one inherited ACE: {before:?}"
+        );
+
+        set_owner_only_dacl(&child, true).unwrap();
+
+        let after = collect_full_dacl_order(&child);
+        assert!(
+            !after.is_empty() && after.iter().all(|(_, inherited)| !*inherited),
+            "PROTECTED DACL must strip all inherited ACEs and keep explicit ones: {after:?}"
+        );
+        // The inherited Everyone ACE must be gone (not re-granted).
+        assert!(
+            scan_explicit_aces_for_sid(&child, "S-1-1-0")
+                .unwrap()
+                .is_empty(),
+            "owner-only lockdown must not grant Everyone"
+        );
+    }
+
+    #[test]
+    fn recovery_prunes_ace_whose_target_is_gone() {
+        // A forged orphan (dead pid) whose single ACE targets a path that no
+        // longer exists must be pruned — not retained and re-errored forever
+        // (finding #76).
+        let _scope = ScopedStateDir::new();
+        let dir = state_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("does-not-exist-victim");
+        assert!(matches!(missing.try_exists(), Ok(false)));
+
+        let synthetic = dir.join("pid-2147483646-missing.json");
+        let s = StateFile {
+            run_id: "pid-2147483646-missing".into(),
+            pid: 0x7FFF_FFFE,
+            image_name: "wxc-exec.exe".into(),
+            started_at_filetime: 0,
+            applied: vec![AppliedAce {
+                canonical_path: missing,
+                sid_string: "S-1-1-0".into(),
+                access_mask: FILE_ALL_ACCESS.0,
+                ace_type: AceType::Allow,
+                inheritable: false,
+                prior_state: Vec::new(),
+            }],
+        };
+        write_state_file(&synthetic, &s).unwrap();
+
+        let report = recover_orphaned_state().unwrap();
+        assert!(
+            report.aces_pruned_missing >= 1,
+            "missing-target ACE should be pruned"
+        );
+        assert!(
+            report.errors.is_empty(),
+            "a pruned (missing-target) entry must not surface as an error: {:?}",
+            report.errors
+        );
+        assert!(
+            matches!(synthetic.try_exists(), Ok(false)),
+            "a fully-pruned state file should be removed"
+        );
     }
 
     #[test]

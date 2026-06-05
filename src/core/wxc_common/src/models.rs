@@ -604,16 +604,31 @@ impl Default for ExecutionRequest {
     }
 }
 
-/// Distinguishes whether an error occurred during process creation (launch)
-/// or after the process started but exited with a failure code.
+/// Attributes a failure to a lifecycle phase so a caller can decide whether a
+/// retry could ever succeed.
+///
+/// Serialized into [`ScriptResponse::failure_phase`]. New variants are additive
+/// on the wire (each serializes to its name); no in-tree consumer pins the
+/// closed set, so a tolerant reader treats an unknown value as a generic
+/// failure.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FailurePhase {
     /// No failure (process exited successfully, or has not been evaluated yet).
     #[default]
     None,
-    /// The CreateProcess (or equivalent) API call itself failed.
+    /// The launch attempt failed: the CreateProcess (or equivalent) API call,
+    /// the VM/sandbox bring-up, or a transient resource contention (e.g. a
+    /// single-instance backend already running). Generally worth retrying.
     LaunchFailed,
-    /// The process was created but exited with a non-zero code.
+    /// The request cannot be honored and will not succeed on a blind retry
+    /// without changing the input or host: a policy rejection, or a missing
+    /// host prerequisite (backend/runtime not installed).
+    Rejected,
+    /// The launch command succeeded but the guest/sandbox infrastructure failed
+    /// before or while running user code (agent rendezvous, channel connect, or
+    /// the execution relay) — i.e. the process never ran to a clean exit.
+    PostLaunchFailed,
+    /// The process was created and ran, but exited with a non-zero code.
     ProcessExited,
 }
 
@@ -663,6 +678,23 @@ impl ScriptResponse {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn failure_phase_serde_round_trips_all_variants() {
+        let cases = [
+            (FailurePhase::None, "\"None\""),
+            (FailurePhase::LaunchFailed, "\"LaunchFailed\""),
+            (FailurePhase::Rejected, "\"Rejected\""),
+            (FailurePhase::PostLaunchFailed, "\"PostLaunchFailed\""),
+            (FailurePhase::ProcessExited, "\"ProcessExited\""),
+        ];
+        for (variant, wire) in cases {
+            let s = serde_json::to_string(&variant).unwrap();
+            assert_eq!(s, wire, "serialize {variant:?}");
+            let back: FailurePhase = serde_json::from_str(wire).unwrap();
+            assert_eq!(back, variant, "round-trip {wire}");
+        }
+    }
 
     #[test]
     fn isolation_session_user_serde_round_trips_camel_case() {

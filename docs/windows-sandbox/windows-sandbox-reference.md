@@ -2,9 +2,13 @@
 
 Detailed reference for the sandbox backend internals. For the high-level design overview, see [windows-sandbox.md](windows-sandbox.md).
 
+> **Currency note:** the live backend is the `windows_sandbox_lifecycle` crate (transient **one-shot** `WindowsSandboxRunner` + the **state-aware** daemon). The `wxc-exec ↔ Daemon` *line-based* `EXEC`/`RESULT` protocol described under [IPC Protocol](#ipc-protocol) belongs to the **superseded warm-reuse daemon** (`windows_sandbox_common`), which is off all live dispatch paths. The state-aware control channel instead uses an 8-byte preamble handshake, `EXEC`/`PING`/`STOP` verbs with `OK`/`ERR <reason>` status lines, and the binary frame stream in `windows_sandbox_lifecycle::ipc_exec`. The `Daemon ↔ Agent` 4-channel framed protocol and the VM-setup/rendezvous details below are still accurate.
+
 ## IPC Protocol
 
-### wxc-exec ↔ Daemon (line-based TCP)
+### wxc-exec ↔ Daemon (line-based TCP) — *legacy warm-reuse daemon*
+
+> This `EXEC`/`RESULT` line protocol belongs to the superseded warm-reuse daemon and is **not** used by the live one-shot or state-aware paths (see the currency note at the top). The state-aware control channel uses the preamble handshake + `EXEC`/`PING`/`STOP` verbs with `OK`/`ERR <reason>` status lines and the `ipc_exec` binary frame stream.
 
 The daemon listens on a localhost TCP port derived deterministically from the pipe name:
 
@@ -119,29 +123,59 @@ The sandbox runs any command through `cmd.exe /C <script>`:
 - **cmd/batch**: Works out of the box
 - **Node.js/TypeScript**: Would need host-mapping (not implemented)
 
-## Daemon Lifecycle
+## Daemon Lifecycle (state-aware)
+
+The host-side daemon exists **only for the state-aware lifecycle**; the one-shot
+runner launches and tears down its VM in-process with no daemon.
 
 ### Startup
 
 ```
-wxc-windows-sandbox-daemon.exe <pipe-name> <idle-timeout-ms>
+wxc-windows-sandbox-daemon.exe --token <sandbox-token>
 ```
 
-Auto-launched by `wxc-exec` if not already running.
+The auth **nonce is written to the daemon's stdin** (`"<nonce>\n"`, then the
+pipe is closed) rather than passed on the command line, so it is not observable
+cross-process via the PEB / `Win32_Process` command line. The daemon reads a
+single bounded line at startup.
 
-### Retry & Error Handling
+Spawned by the `start` phase of `wxc-exec`. On Windows the daemon is spawned
+**detached** (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`) so it outlives the
+caller's console/process group — killing `wxc-exec` must not orphan a live VM.
 
-| Attempt | Backoff | Action |
-|---------|---------|--------|
-| 1 | 0s | Launch sandbox, wait up to 120s for rendezvous |
-| 2 | 10s | Teardown, cleanup, relaunch |
-| 3 | 20s | Final attempt, propagate error |
+#### Ownership-proof reconciliation
+
+Windows Sandbox is **single-instance per host**, so a live VM left behind by a
+previous daemon (crash, force-kill, machine sleep) would block a new launch with
+*"Only one running instance of Windows Sandbox is allowed."* Reconciliation is
+**ownership-proof**, never blindly destructive:
+
+- A daemon **always writes its control-plane record (`daemon.json`, `ready:false`)
+  BEFORE launching a VM** and removes it only **after** teardown, and the record
+  carries the launched VM process identities (pid + creation time). Invariant:
+  *our VM ⟺ a daemon record whose recorded VM identities intersect the live set.*
+- **VM running + a record whose VM identities match the live processes** → ours.
+  If the prior daemon is alive it is already-active (reject); if dead it is our
+  orphan and is **reclaimed** (scoped teardown of exactly those proven processes).
+- **VM running + no matching record** → a **foreign / manually-opened** sandbox.
+  The daemon **refuses to start and never tears it down.**
+
+The one-shot runner enforces the same invariant via per-run ownership markers and
+the host VM-slot mutex (`Local\wxc-wsb-vm`): it reclaims only a VM it can prove it
+launched and otherwise refuses as busy.
 
 ### Teardown
 
-1. Kills `WindowsSandbox.exe`, `WindowsSandboxServer`, `WindowsSandboxRemoteSession`
-2. Polls for process exit (up to 30s)
+1. Kills `WindowsSandbox.exe`, `WindowsSandboxServer.exe`,
+   `WindowsSandboxRemoteSession.exe` (the `.exe` suffix is required — `taskkill
+   /IM` matches the full image name)
+2. Polls until those host processes exit (up to 30s)
 3. 5s Hyper-V cooldown
+
+> The `vmmemWindowsSandbox` / `vmmemCmZygote` Hyper-V memory processes are
+> SYSTEM-owned and linger briefly after the host processes exit. They are
+> harmless residue — a fresh sandbox launches successfully while they are still
+> present — so teardown deliberately does **not** wait on them.
 
 ## Debugging
 
@@ -158,8 +192,9 @@ Get-Content "$env:TEMP\wxc-sandbox-config\wxc-windows-sandbox.wsb"
 # Check for zombie VM processes
 Get-Process | Where-Object { $_.ProcessName -match "vmmem|vmwp|sandbox" }
 
-# Run daemon manually (visible logs)
-src\target\release\wxc-windows-sandbox-daemon.exe wxc-windows-sandbox 300000
+# Run the state-aware daemon manually (visible logs)
+src\target\release\wxc-windows-sandbox-daemon.exe --token debug-token
+# (the auth nonce is supplied on the daemon's stdin, then the pipe is closed)
 # In another terminal:
 src\target\release\wxc-exec.exe --debug tests\configs\basic_windows_sandbox.json
 
@@ -174,17 +209,30 @@ Remove-Item "$env:TEMP\wxc-sandbox-rendezvous\*" -ErrorAction SilentlyContinue
 
 | File | Purpose |
 |------|---------|
-| `src/backends/windows_sandbox/common/src/windows_sandbox_runner.rs` | Client: connects to daemon, sends EXEC, reads RESULT |
-| `src/backends/windows_sandbox/common/src/sandbox_protocol.rs` | Shared control protocol |
-| `src/backends/windows_sandbox/daemon/src/main.rs` | Daemon entry point, idle watchdog |
-| `src/backends/windows_sandbox/daemon/src/pipe_server.rs` | TCP IPC server, EXEC handling, retry logic |
-| `src/backends/windows_sandbox/daemon/src/sandbox_vm.rs` | .wsb generation, Python discovery, VM launch/teardown |
-| `src/backends/windows_sandbox/daemon/src/rendezvous.rs` | Polls rendezvous.txt |
-| `src/backends/windows_sandbox/daemon/src/tcp_bridge.rs` | 4-channel TCP bridge, execute_on_guest, reconnect |
-| `src/backends/windows_sandbox/guest/src/main.rs` | Guest entry point |
-| `src/backends/windows_sandbox/guest/src/listener.rs` | TCP listener, rendezvous writer |
-| `src/backends/windows_sandbox/guest/src/executor.rs` | Command loop, stdio bridging |
-| `src/backends/windows_sandbox/guest/src/firewall.rs` | Guest firewall lockdown |
+| `src/core/wxc/src/main.rs` | CLI dispatch: routes `windows_sandbox` one-shot + state-aware phases to `WindowsSandboxRunner` |
+| **Lifecycle crate** (`src/backends/windows_sandbox/lifecycle/src/`) | |
+| `one_shot.rs` | Transient one-shot `WindowsSandboxRunner` (fresh VM per call, guaranteed teardown) |
+| `state_aware.rs` | `StatefulSandboxBackend` impl (provision/start/exec/stop/deprovision); client-side IPC + `map_exec_status_error` |
+| `control_plane.rs` | Durable records (`daemon.json` / `record.json`), IPC verb/status consts, host VM-slot lock, owner-only DACL helpers |
+| `teardown.rs` | Ownership-proof reconcile, markers, scoped process teardown, scratch GC |
+| `bridge.rs` | 4-channel TCP bridge to the guest, preamble handshake, `stream_exec_on_guest`, reconnect |
+| `ipc_exec.rs` | Binary frame stream (`ExecStart`, `MAX_IPC_FRAME`, frame kinds) for state-aware exec |
+| `vm.rs` | `.wsb` generation, host Python discovery, VM launch/teardown primitives |
+| `rendezvous.rs` | Polls the guest rendezvous file |
+| `policy.rs` | Maps filesystem policy to MappedFolders; rejects unenforceable policy |
+| `error.rs` | Typed `OneShotError` → `ScriptResponse` (with `FailurePhase`) mapping |
+| **Daemon crate** (`src/backends/windows_sandbox/daemon/src/`) | |
+| `main.rs` | State-aware daemon entry point: `--token` arg, nonce-over-stdin, VM ownership, reconcile |
+| `control_server.rs` | Localhost IPC server: `EXEC`/`PING`/`STOP` verbs, single-flight exec admission |
+| **Guest crate** (`src/backends/windows_sandbox/guest/src/`) | |
+| `main.rs` | Guest entry point |
+| `listener.rs` | TCP listener, rendezvous writer |
+| `executor.rs` | Command loop, stdio bridging |
+| `job.rs` | Job Object child-tree reaping |
+| `firewall.rs` | Guest firewall lockdown (`netsh advfirewall`) |
+| **Legacy (orphaned warm-reuse daemon, off all live paths)** | |
+| `src/backends/windows_sandbox/common/src/windows_sandbox_runner.rs` | Legacy line-protocol client (`EXEC`/`RESULT`) — retained for reference only |
+| `src/backends/windows_sandbox/common/src/sandbox_protocol.rs` | Legacy shared control protocol |
 
 ## E2E Tests
 
