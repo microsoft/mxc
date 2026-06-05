@@ -210,13 +210,41 @@ async fn drive(
 
     // Capture positive ownership proof (the VM host-process identities) and
     // record it both in the teardown slot and the durable marker.
+    //
+    // Review finding B2: if `capture_launch_proof` returns empty (slow Hyper-V
+    // worker process spawn, AV scanning the bootstrap, loaded host), DO NOT
+    // overwrite `LaunchSucceededNoProof` with `Owned(Vec::new())` and DO NOT
+    // rewrite the pre-launch marker with an empty `vm_processes` field.
+    // The previous design did both, with two bad consequences:
+    //   1. `compute_kill_set(&[], snapshot)` (now `plan_kill_set(Owned(empty),
+    //      snapshot)`) returned empty under intersection-only semantics,
+    //      leaking the VM at teardown.
+    //   2. The marker on disk lost its pre-launch state, bricking any later
+    //      one-shot's reconcile (it saw an empty proof and refused as
+    //      `ForeignUnprovable`).
+    // Keeping `LaunchSucceededNoProof` lets `plan_kill_set` enumerate-kill on
+    // a non-empty fresh snapshot at teardown (we provably hold the host VM-
+    // slot mutex, so any live `WindowsSandbox*` is ours), and keeping the
+    // pre-launch marker preserves the launcher-strongly-alive signal so a
+    // later reconcile still has SOME information to act on.
     let proof = vm::capture_launch_proof().await;
-    teardown::set_vm_ownership(VmOwnership::Owned(proof.clone()));
-    teardown::rewrite_marker_with_proof(run_dir, &proof).map_err(|e| {
-        // Fatal: without a durable proof a later run could not reclaim this VM.
-        // Abort so the guard tears the VM down now rather than leak it.
-        OneShotError::Launch(format!("record VM ownership proof: {e}"))
-    })?;
+    if proof.is_empty() {
+        eprintln!(
+            "[one-shot] WARNING: no WindowsSandbox* host processes appeared within \
+             capture_launch_proof's budget; staying at LaunchSucceededNoProof. Teardown will \
+             enumerate-kill if any host processes are visible at exit; the pre-launch marker \
+             (with empty vm_processes) is preserved so reclaim of this VM by a later one-shot is \
+             not possible by positive proof. If the daemon hard-dies before exit, the VM may \
+             require manual cleanup."
+        );
+    } else {
+        teardown::set_vm_ownership(VmOwnership::Owned(proof.clone()));
+        teardown::rewrite_marker_with_proof(run_dir, &proof).map_err(|e| {
+            // Fatal: without a durable proof a later run could not reclaim this VM.
+            // Abort so the guard tears the VM down now rather than leak it.
+            OneShotError::Launch(format!("record VM ownership proof: {e}"))
+        })?;
+    }
 
     let addr = rendezvous::wait_for_rendezvous(
         rendezvous_dir,

@@ -306,49 +306,46 @@ pub async fn capture_launch_proof() -> Vec<crate::control_plane::VmProcId> {
     }
 }
 
-/// Tear down a Windows Sandbox VM this host provably launched.
+/// Tear down a Windows Sandbox VM by terminating an already-planned kill set.
 ///
-/// The kill set is the union of the recorded `targets` and a *single* snapshot
-/// of the live `WindowsSandbox*` host processes taken at the start of teardown.
-/// Both are PID-reuse-safe (creation time verified at kill time). Killing is
-/// confined to this snapshot: a foreign VM that a user starts *after* our
-/// processes exit is never re-enumerated and so is never touched.
+/// **The kill set is computed upstream by [`crate::control_plane::plan_kill_set`].**
+/// This function is the OS-touching half of the teardown: it issues the
+/// terminations and polls for confirmation. Splitting the pure plan from the
+/// effectful kill collapses the previous asymmetry between the one-shot path
+/// (which fails safe by leaking on empty seed) and the daemon path (which used
+/// to enumerate-and-kill on empty seed, killing foreign VMs that appeared in
+/// the snapshot-to-kill window after the daemon's own VM crashed — review
+/// finding B1).
 ///
-/// The snapshot is safe to kill wholesale because this is only reached when the
-/// caller provably holds the single-instance VM — either the `Owned` /
-/// launch-succeeded cleanup states (where `launch()` returning `Ok` plus the OS
-/// single-instance guarantee mean the running VM is ours), or the startup
-/// `ReclaimOrphan` path (where reconcile already proved no foreign VM exists
-/// and we have not launched). An empty `targets` seed is therefore still
-/// effective: the live snapshot supplies the actual processes to kill.
+/// Returns a [`TeardownOutcome`] tri-state so callers can correctly decide
+/// whether to delete the durable daemon / one-shot record afterward (review
+/// finding NB-3 promoted to blocking):
 ///
-/// Best-effort — errors are logged but not propagated. Only the
+/// - [`TeardownOutcome::ConfirmedGone`]: the polling loop saw `Some(false)`
+///   from the liveness probe within the budget — every `WindowsSandbox*` host
+///   process this run launched is gone. The record may be removed.
+/// - [`TeardownOutcome::StillRunning(remaining)`]: the polling budget elapsed
+///   with at least one host process still alive. The record MUST be preserved
+///   so the next daemon's [`crate::control_plane::classify_startup`] can
+///   reclaim by positive proof intersection.
+/// - [`TeardownOutcome::ProbeFailed`]: the liveness probe itself failed
+///   (Toolhelp32 hiccup) so the post-kill state is unknown. Preserve the
+///   record on the same reasoning.
+///
+/// Best-effort — process-termination errors are logged but not propagated;
+/// the outcome reflects what the *polling loop* can confirm. Only the
 /// `WindowsSandbox*` host processes are treated as liveness indicators; the
-/// `vmmemWindowsSandbox` / `vmmemCmZygote` Hyper-V memory processes are
-/// SYSTEM-owned, harmless residue and are intentionally NOT awaited.
-///
-/// NOTE — intentional asymmetry with the one-shot path: unlike the one-shot's
-/// [`crate::teardown::compute_kill_set`] (which fails safe by leaking when it
-/// cannot prove ownership), this enumerates the live VM into the kill set even
-/// on an empty `targets` seed. That is sound here because every caller reaches
-/// this function only while it provably holds the single-instance VM.
-pub async fn teardown_owned(targets: &[crate::control_plane::VmProcId]) {
-    // Snapshot the live sandbox processes NOW, while we provably hold the VM,
-    // and union with the recorded targets. All killing is restricted to this
-    // set so a VM that appears later is never killed.
-    let mut to_kill: Vec<crate::control_plane::VmProcId> = targets.to_vec();
-    if let Ok(live) = enumerate_sandbox_vm_processes().await {
-        for p in live {
-            if !to_kill.contains(&p) {
-                to_kill.push(p);
-            }
-        }
-    }
+/// SYSTEM-owned `vmmem*` Hyper-V memory residue is intentionally NOT awaited.
+pub async fn teardown_via_plan(
+    kill_set: &[crate::control_plane::VmProcId],
+) -> crate::control_plane::TeardownOutcome {
+    use crate::control_plane::TeardownOutcome;
+
     eprintln!(
-        "[daemon] tearing down sandbox ({} target process(es))",
-        to_kill.len()
+        "[wsb-vm] tearing down sandbox ({} target process(es))",
+        kill_set.len()
     );
-    crate::control_plane::terminate_processes(&to_kill);
+    crate::control_plane::terminate_processes(kill_set);
 
     // Poll until the sandbox host processes are fully gone (up to 30s).
     // Only `WindowsSandbox*` count as live — `vmmem*` residue is harmless
@@ -357,40 +354,57 @@ pub async fn teardown_owned(targets: &[crate::control_plane::VmProcId]) {
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(TEARDOWN_POLL_TIMEOUT_SECS);
     loop {
-        let still_running = is_sandbox_vm_running().await;
-        if !still_running {
-            eprintln!("[daemon] all sandbox processes terminated");
-            break;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            eprintln!(
-                "[daemon] warning: sandbox processes still running after {}s, proceeding anyway",
-                TEARDOWN_POLL_TIMEOUT_SECS
-            );
-            break;
+        match is_sandbox_vm_running().await {
+            Some(false) => {
+                eprintln!("[wsb-vm] all sandbox host processes confirmed gone");
+                // Cooldown for Hyper-V backend / VHDX release.
+                tokio::time::sleep(std::time::Duration::from_secs(TEARDOWN_COOLDOWN_SECS)).await;
+                return TeardownOutcome::ConfirmedGone;
+            }
+            Some(true) => {
+                if tokio::time::Instant::now() >= deadline {
+                    let remaining = enumerate_sandbox_vm_processes().await.unwrap_or_default();
+                    eprintln!(
+                        "[wsb-vm] WARNING: {} sandbox host process(es) still running after {}s; \
+                         preserving record so the next daemon can reclaim",
+                        remaining.len(),
+                        TEARDOWN_POLL_TIMEOUT_SECS
+                    );
+                    return TeardownOutcome::StillRunning(remaining);
+                }
+            }
+            None => {
+                if tokio::time::Instant::now() >= deadline {
+                    eprintln!(
+                        "[wsb-vm] WARNING: liveness probe failed during teardown wait; preserving \
+                         record"
+                    );
+                    return TeardownOutcome::ProbeFailed;
+                }
+            }
         }
         tokio::time::sleep(std::time::Duration::from_secs(TEARDOWN_POLL_INTERVAL_SECS)).await;
     }
-
-    // Additional cooldown for Hyper-V backend / VHDX release.
-    tokio::time::sleep(std::time::Duration::from_secs(TEARDOWN_COOLDOWN_SECS)).await;
 }
 
 /// Check whether a Windows Sandbox VM is currently running.
 ///
-/// Only the `WindowsSandbox*` host processes are considered. The
-/// `vmmem*` Hyper-V memory processes are deliberately excluded: they
-/// linger as harmless residue after the host processes exit and do not
-/// block a fresh sandbox launch, so treating them as "running" would
-/// cause teardown to wait out its full timeout for nothing.
-pub async fn is_sandbox_vm_running() -> bool {
-    // Toolhelp32 snapshot (no PowerShell): a failed snapshot is treated as
-    // "not running" here, matching the prior probe's behavior — this is only
-    // used to decide when teardown polling can stop, never to gate a
-    // destructive decision.
+/// Returns:
+/// - `Some(true)`  — at least one `WindowsSandbox*` host process is live.
+/// - `Some(false)` — the snapshot succeeded and contained no `WindowsSandbox*`
+///   host processes (confirmed empty).
+/// - `None`        — the Toolhelp32 snapshot itself failed; the live set is
+///   unknown. Callers that gate a destructive or record-deleting decision on
+///   this MUST treat `None` as "unknown" (refuse / preserve), not as "no VM".
+///
+/// Only the `WindowsSandbox*` host processes are considered. The `vmmem*`
+/// Hyper-V memory processes are deliberately excluded: they linger as
+/// harmless residue after the host processes exit and do not block a fresh
+/// sandbox launch.
+pub async fn is_sandbox_vm_running() -> Option<bool> {
     crate::control_plane::enumerate_pids_with_prefix("WindowsSandbox")
         .map(|pids| !pids.is_empty())
-        .unwrap_or(false)
+        .ok()
 }
 
 /// Enumerate the currently-running Windows Sandbox host processes, returning

@@ -45,6 +45,44 @@ if ($sandboxFeature -notmatch "Enabled") {
 }
 
 # Helpers
+function Wait-ForSandboxIdle {
+    # Each Run-SandboxTest spawns a fresh, disposable Windows Sandbox VM. The
+    # VM's `WindowsSandbox*` host processes are reaped by the one-shot
+    # teardown path, but the `vmmem*` Hyper-V memory residue can take longer
+    # to release (Hyper-V backend cooldown). Running tests back-to-back
+    # without waiting for that residue can stack vmmem processes and OOM the
+    # host on memory-constrained machines.
+    #
+    # Wait until: no WindowsSandbox* processes remain AND fewer than 2 vmmem*
+    # processes remain (one residual is normal — vmmemCmZygote always exists
+    # on hosts with Containers feature enabled).
+    param([int]$TimeoutSec = 60)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $wsb = @(Get-Process -Name "WindowsSandbox*" -ErrorAction SilentlyContinue)
+        $vmmem = @(Get-Process -Name "vmmem*" -ErrorAction SilentlyContinue)
+        if ($wsb.Count -eq 0 -and $vmmem.Count -le 1) {
+            return $true
+        }
+        Start-Sleep -Seconds 2
+    }
+    Write-Host "    [warn] sandbox processes still present after ${TimeoutSec}s settle wait" -ForegroundColor Yellow
+    return $false
+}
+
+function Test-MemoryHeadroom {
+    # If free memory is below 2 GB we cannot safely spin another sandbox VM
+    # (each VM reserves ~1-1.5 GB minimum). Skip rather than risk OOM.
+    $os = Get-CimInstance Win32_OperatingSystem
+    $freeMb = [int]($os.FreePhysicalMemory / 1024)
+    if ($freeMb -lt 2048) {
+        Write-Host "    [skip] insufficient free memory (${freeMb} MB free, need >=2048 MB)" -ForegroundColor Yellow
+        return $false
+    }
+    return $true
+}
+
 function Run-SandboxTest {
     param(
         [string]$ConfigFile,
@@ -59,6 +97,13 @@ function Run-SandboxTest {
     }
 
     Write-Host "  Running $ConfigFile... " -NoNewline
+
+    # Pre-flight: ensure prior test's VM has fully released, and we have
+    # enough free memory to launch another VM.
+    [void](Wait-ForSandboxIdle -TimeoutSec 60)
+    if (-not (Test-MemoryHeadroom)) {
+        return @{ Name = $ConfigFile; Pass = $false; Reason = "Insufficient memory for new VM" }
+    }
 
     # wxc-exec outputs base64-encoded stdout/stderr when not attached to a
     # terminal (e.g. when daemon was started via Start-Process). We capture

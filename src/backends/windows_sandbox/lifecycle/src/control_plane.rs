@@ -142,13 +142,18 @@ pub struct DaemonRecord {
 /// What a freshly-starting daemon should do about any Windows Sandbox VM it
 /// finds already running. Produced by the pure [`classify_startup`] so the
 /// decision is unit-testable without a real VM.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupAction {
     /// No VM is running (or none that matters): launch normally.
     Proceed,
-    /// A running VM is provably ours (a prior daemon's recorded process
-    /// identities intersect the live set): tear it down, then launch.
-    ReclaimOrphan,
+    /// A running VM is provably ours: tear it down, then launch. Carries the
+    /// **prior recorded ownership proof** (the PIDs+creation_times from the
+    /// stale daemon record that intersected the live set), NOT the live
+    /// snapshot. The reclaim caller must seed [`plan_kill_set`] with this
+    /// proof; seeding with the live snapshot would promote any foreign
+    /// `WindowsSandbox*` process observed at startup into "proof" and let
+    /// teardown kill it.
+    ReclaimOrphan { proof: Vec<VmProcId> },
     /// A running VM exists but ownership is *not* positively proven: refuse to
     /// disturb it (it may be a user's manually-opened sandbox).
     RefuseForeign,
@@ -159,11 +164,12 @@ pub enum StartupAction {
 /// currently-running sandbox host processes.
 ///
 /// Reclaim is intentionally conservative: it requires a *positive* identity
-/// intersection between the prior record's `vm_processes` and the live set.
-/// Anything else — no record, an empty `vm_processes` (e.g. a daemon that
-/// crashed before the VM became ready), or a disjoint set — yields
-/// [`StartupAction::RefuseForeign`] so we never kill a VM we cannot prove is
-/// ours.
+/// intersection between the prior record's `vm_processes` and the live set,
+/// and the returned [`StartupAction::ReclaimOrphan`] carries the intersecting
+/// prior proof so the caller can pass it to [`plan_kill_set`]. Anything else —
+/// no record, an empty `vm_processes` (e.g. a daemon that crashed before the
+/// VM became ready), or a disjoint set — yields [`StartupAction::RefuseForeign`]
+/// so we never kill a VM we cannot prove is ours.
 ///
 /// The caller is responsible for first rejecting the case where `prior`
 /// describes a *live* daemon (another daemon already owns the slot); by the
@@ -178,7 +184,9 @@ pub fn classify_startup(prior: Option<&DaemonRecord>, current_vm: &[VmProcId]) -
             .iter()
             .any(|recorded| current_vm.contains(recorded));
         if ours {
-            return StartupAction::ReclaimOrphan;
+            return StartupAction::ReclaimOrphan {
+                proof: prior.vm_processes.clone(),
+            };
         }
     }
     StartupAction::RefuseForeign
@@ -234,6 +242,11 @@ pub enum CleanupAction {
 }
 
 /// Map an [`VmOwnership`] to the cleanup action the daemon should take on exit.
+///
+/// Kept for backward compatibility with the existing daemon `main` cleanup
+/// dispatch and the one-shot `OneShotTeardown::full`/`kill_only` switch. New
+/// code prefers [`plan_kill_set`] directly, which collapses the `Teardown`
+/// branch's "what to kill" question into a single pure step.
 pub fn decide_cleanup(ownership: &VmOwnership) -> CleanupAction {
     match ownership {
         VmOwnership::NotLaunched => CleanupAction::Noop,
@@ -242,6 +255,164 @@ pub fn decide_cleanup(ownership: &VmOwnership) -> CleanupAction {
         // without recorded proof (empty seed).
         VmOwnership::LaunchSucceededNoProof => CleanupAction::Teardown(Vec::new()),
         VmOwnership::Owned(pids) => CleanupAction::Teardown(pids.clone()),
+    }
+}
+
+/// Pure kill-set planner shared by every teardown site (one-shot
+/// `OneShotTeardown::{full,kill_only}`, daemon `main` exit, daemon
+/// `vm_crash_watchdog` cleanup, state-aware `stop`/`deprovision` orphan
+/// reclaim, and one-shot reconcile `ReclaimThenProceed`). Replaces both
+/// `one_shot`-side `compute_kill_set` and the daemon-side
+/// "union-without-intersection-check" in the previous `vm::teardown_owned`,
+/// closing the asymmetry that let a foreign VM be killed when the daemon's
+/// own VM crashed (review finding B1).
+///
+/// The contract for each `VmOwnership` variant:
+///
+/// - `NotLaunched` / `LaunchInFlight` → `None`. Either nothing was launched
+///   (Noop) or a launch is in flight and ownership is ambiguous; fail-safe
+///   leak in both cases.
+/// - `Owned(proof)`:
+///   - `proof ∩ snapshot ≠ ∅` → `Some(proof ∪ snapshot)`. We provably still
+///     own the same VM; union to cover host processes the proof missed.
+///   - `proof ∩ snapshot = ∅` (including empty snapshot) → `Some(proof)`.
+///     The VM in the snapshot is not ours; never enumerate-kill foreign.
+///     `proof` alone is likely already-dead PIDs which the PID+creation_time
+///     guard in [`terminate_processes`] skips harmlessly.
+/// - `LaunchSucceededNoProof`:
+///   - empty snapshot → `None`. Either we never produced visible host
+///     processes (deeply degraded) or the VM is already gone; nothing to
+///     kill, and we have no proof to seed a kill with.
+///   - non-empty snapshot → `Some(snapshot.to_vec())`. The caller reaches
+///     this state only on a `launch()` that returned `Ok` while holding the
+///     host VM-slot mutex, so by single-instance + the mutex the snapshot is
+///     ours. The narrow race (silent VM crash → manual foreign VM started
+///     before our cleanup runs) is explicitly accepted; see B4 in the review
+///     synthesis (sole-claim was rejected as a deeper invariant violation).
+pub fn plan_kill_set(ownership: &VmOwnership, snapshot: &[VmProcId]) -> Option<Vec<VmProcId>> {
+    match ownership {
+        VmOwnership::NotLaunched | VmOwnership::LaunchInFlight => None,
+        VmOwnership::Owned(proof) => {
+            let intersects = proof.iter().any(|p| snapshot.contains(p));
+            if intersects {
+                let mut kill = proof.clone();
+                for p in snapshot {
+                    if !kill.contains(p) {
+                        kill.push(*p);
+                    }
+                }
+                Some(kill)
+            } else {
+                Some(proof.clone())
+            }
+        }
+        VmOwnership::LaunchSucceededNoProof => {
+            if snapshot.is_empty() {
+                None
+            } else {
+                Some(snapshot.to_vec())
+            }
+        }
+    }
+}
+
+/// Tri-state outcome of a teardown attempt, returned by every site that may
+/// delete the durable daemon / one-shot record afterward. The record may only
+/// be removed on `ConfirmedGone`; `StillRunning` and `ProbeFailed` MUST
+/// preserve the record so the next daemon / one-shot run can reclaim the
+/// orphan (review finding NB-3, promoted to blocking).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeardownOutcome {
+    /// Teardown ran, the polling loop confirmed every `WindowsSandbox*` host
+    /// process exited within the budget. Safe to delete the durable record.
+    ConfirmedGone,
+    /// Teardown ran but the polling loop timed out with at least one host
+    /// process still alive. Carries the live snapshot at timeout so the
+    /// caller can surface actionable diagnostics.
+    StillRunning(Vec<VmProcId>),
+    /// The liveness probe itself failed (e.g. Toolhelp32 hiccup) so we
+    /// cannot prove the VM is gone. The record MUST be preserved.
+    ProbeFailed,
+}
+
+/// What `stop()` / `deprovision()` should do when [`live_daemon`] returns
+/// `None` but a stale [`DaemonRecord`] is on disk and the sandbox state was
+/// `Started`. Produced by the pure [`classify_stale_daemon_cleanup`] so the
+/// decision is unit-testable without a real VM.
+///
+/// The five branches map directly onto operator semantics:
+/// - `NoLiveVm`: stale daemon left no live orphan; advance state normally.
+/// - `Reclaim { proof }`: stale daemon's recorded `vm_processes` intersects
+///   the live snapshot; the orphan is provably ours. Caller acquires
+///   `HostVmLock` (review BLOCKING-2), kills via [`plan_kill_set`] seeded
+///   with `proof`, and may advance state only on [`TeardownOutcome::ConfirmedGone`].
+/// - `RefuseForeign { live }`: live `WindowsSandbox*` processes exist but
+///   none match the stale proof; either the stale daemon never produced
+///   proof and a user opened a manual sandbox, or our orphan exited and a
+///   replacement appeared. Refuse and surface `live` PIDs in the error so
+///   the operator can clean up manually (review NB-1).
+/// - `RefuseProbeFailed`: enumeration of `WindowsSandbox*` itself failed;
+///   refuse rather than proceed blind.
+/// - `RefuseSandboxIdMismatch { stale_active }`: the stale daemon record's
+///   `active_sandbox_id` does not match the sandbox being stopped /
+///   deprovisioned. Refuse so cleanup of sandbox A cannot reclaim or scrub
+///   the orphan / records of sandbox B (review GPT catch).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleDaemonCleanup {
+    /// No live VM and no stale record (or stale record matches sandbox_id
+    /// with no live processes). Phase may advance normally.
+    NoLiveVm,
+    /// Stale daemon's proof intersects the live VM; safe to reclaim.
+    Reclaim { proof: Vec<VmProcId> },
+    /// Live VM exists but is foreign; refuse and surface its PIDs.
+    RefuseForeign { live: Vec<VmProcId> },
+    /// Liveness probe failed; refuse to act on unknown state.
+    RefuseProbeFailed,
+    /// Stale record names a different sandbox; refuse so we never act on
+    /// another sandbox's records.
+    RefuseSandboxIdMismatch { stale_active: String },
+}
+
+/// Pure decision: what should `stop()` / `deprovision()` do when there is no
+/// live daemon but a stale [`DaemonRecord`] is on disk (or a live VM exists
+/// with no record)?
+///
+/// `live` is `None` when the `WindowsSandbox*` enumeration itself failed; the
+/// caller must surface that as `ProbeFailed` rather than treat it as
+/// "no live VM".
+///
+/// The `sandbox_id` mismatch check fires before the live-set inspection so a
+/// stale-record-for-sandbox-B can never authorise action against sandbox A
+/// regardless of what is running.
+pub fn classify_stale_daemon_cleanup(
+    stale: Option<&DaemonRecord>,
+    sandbox_id: &str,
+    live: Option<&[VmProcId]>,
+) -> StaleDaemonCleanup {
+    if let Some(stale) = stale {
+        if stale.active_sandbox_id != sandbox_id {
+            return StaleDaemonCleanup::RefuseSandboxIdMismatch {
+                stale_active: stale.active_sandbox_id.clone(),
+            };
+        }
+    }
+    let live = match live {
+        None => return StaleDaemonCleanup::RefuseProbeFailed,
+        Some(l) => l,
+    };
+    if live.is_empty() {
+        return StaleDaemonCleanup::NoLiveVm;
+    }
+    if let Some(stale) = stale {
+        let intersects = stale.vm_processes.iter().any(|p| live.contains(p));
+        if intersects {
+            return StaleDaemonCleanup::Reclaim {
+                proof: stale.vm_processes.clone(),
+            };
+        }
+    }
+    StaleDaemonCleanup::RefuseForeign {
+        live: live.to_vec(),
     }
 }
 
@@ -978,13 +1149,11 @@ mod tests {
             pid: 10,
             creation_time: 100,
         };
-        let prior = daemon_record_with(vec![
-            shared,
-            VmProcId {
-                pid: 11,
-                creation_time: 101,
-            },
-        ]);
+        let other_prior = VmProcId {
+            pid: 11,
+            creation_time: 101,
+        };
+        let prior = daemon_record_with(vec![shared, other_prior]);
         // current has one process not in prior plus the shared one.
         let current = [
             VmProcId {
@@ -993,9 +1162,244 @@ mod tests {
             },
             shared,
         ];
+        // Reclaim returns the PRIOR proof (used to seed plan_kill_set), not
+        // the live snapshot. Seeding with the snapshot would promote any
+        // foreign WindowsSandbox* process observed at startup into "proof".
         assert_eq!(
             classify_startup(Some(&prior), &current),
-            StartupAction::ReclaimOrphan
+            StartupAction::ReclaimOrphan {
+                proof: vec![shared, other_prior]
+            }
+        );
+    }
+
+    // ----- plan_kill_set: pure kill planner --------------------------------
+
+    fn pid(p: u32, ct: u64) -> VmProcId {
+        VmProcId {
+            pid: p,
+            creation_time: ct,
+        }
+    }
+
+    #[test]
+    fn plan_kill_set_not_launched_is_none_regardless_of_snapshot() {
+        assert_eq!(plan_kill_set(&VmOwnership::NotLaunched, &[]), None);
+        assert_eq!(
+            plan_kill_set(&VmOwnership::NotLaunched, &[pid(1, 1), pid(2, 2)]),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_kill_set_launch_in_flight_is_none_regardless_of_snapshot() {
+        // Critical safety property: an in-flight launch is ambiguous (a
+        // foreign VM could have won the contest) so we must never kill
+        // anything, even if WindowsSandbox* processes are visible.
+        assert_eq!(plan_kill_set(&VmOwnership::LaunchInFlight, &[]), None);
+        assert_eq!(
+            plan_kill_set(&VmOwnership::LaunchInFlight, &[pid(1, 1)]),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_kill_set_owned_with_empty_snapshot_returns_proof() {
+        // The recorded proof may be dead PIDs but `terminate_processes`
+        // checks creation_time, so killing already-dead identities is a no-op.
+        // Critically we DO NOT enumerate-kill on empty snapshot in `Owned`.
+        let proof = vec![pid(10, 100), pid(11, 101)];
+        assert_eq!(
+            plan_kill_set(&VmOwnership::Owned(proof.clone()), &[]),
+            Some(proof)
+        );
+    }
+
+    #[test]
+    fn plan_kill_set_owned_intersect_unions_proof_and_snapshot() {
+        let shared = pid(10, 100);
+        let proof_only = pid(11, 101);
+        let snapshot_only = pid(20, 200);
+        let proof = vec![shared, proof_only];
+        let snapshot = vec![snapshot_only, shared];
+        let kill = plan_kill_set(&VmOwnership::Owned(proof), &snapshot).unwrap();
+        // Order: proof first, snapshot extras appended.
+        assert_eq!(kill, vec![shared, proof_only, snapshot_only]);
+    }
+
+    #[test]
+    fn plan_kill_set_owned_disjoint_returns_only_proof() {
+        // The live VM is NOT ours; never enumerate-kill foreign. We still
+        // return the recorded proof so any of our still-alive recorded
+        // processes get cleaned up, but PID+creation_time matching makes a
+        // dead-recorded-PID kill a safe no-op.
+        let proof = vec![pid(10, 100)];
+        let foreign = vec![pid(99, 999)];
+        assert_eq!(
+            plan_kill_set(&VmOwnership::Owned(proof.clone()), &foreign),
+            Some(proof)
+        );
+    }
+
+    #[test]
+    fn plan_kill_set_owned_pid_match_but_different_creation_time_is_disjoint() {
+        // PID reuse defence: same PID, different creation_time is NOT a
+        // match. Must return only the recorded proof, never the snapshot's
+        // recycled-PID identity.
+        let proof = vec![pid(10, 100)];
+        let snapshot = vec![pid(10, 999)];
+        assert_eq!(
+            plan_kill_set(&VmOwnership::Owned(proof.clone()), &snapshot),
+            Some(proof)
+        );
+    }
+
+    #[test]
+    fn plan_kill_set_launch_succeeded_no_proof_empty_snapshot_is_none() {
+        // No proof and no live VM: nothing to kill. The narrow
+        // "VM never produced visible processes" wedge is accepted here.
+        assert_eq!(
+            plan_kill_set(&VmOwnership::LaunchSucceededNoProof, &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_kill_set_launch_succeeded_no_proof_with_snapshot_enumerates() {
+        // The caller reaches this state only on a launch() Ok while holding
+        // the host VM-slot mutex; by single-instance + the mutex the snapshot
+        // is ours. This is the empty-proof recovery path that B1's previous
+        // (broken) intersection-only kill missed.
+        let snapshot = vec![pid(10, 100), pid(11, 101)];
+        assert_eq!(
+            plan_kill_set(&VmOwnership::LaunchSucceededNoProof, &snapshot),
+            Some(snapshot)
+        );
+    }
+
+    // ----- classify_stale_daemon_cleanup -----------------------------------
+
+    fn stale_with(active: &str, vm_processes: Vec<VmProcId>) -> DaemonRecord {
+        DaemonRecord {
+            schema_version: RECORD_SCHEMA_VERSION,
+            pid: 1,
+            pid_creation_time: 1,
+            ipc_port: 1,
+            nonce: "n".to_string(),
+            active_sandbox_id: active.to_string(),
+            ready: true,
+            vm_processes,
+        }
+    }
+
+    #[test]
+    fn stale_cleanup_no_stale_record_no_live_is_no_live_vm() {
+        assert_eq!(
+            classify_stale_daemon_cleanup(None, "wsb:x", Some(&[])),
+            StaleDaemonCleanup::NoLiveVm
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_probe_failed_refuses() {
+        assert_eq!(
+            classify_stale_daemon_cleanup(None, "wsb:x", None),
+            StaleDaemonCleanup::RefuseProbeFailed
+        );
+        // Probe-failed wins even when a stale record exists.
+        let stale = stale_with("wsb:x", vec![pid(10, 100)]);
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:x", None),
+            StaleDaemonCleanup::RefuseProbeFailed
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_sandbox_id_mismatch_refuses_before_anything_else() {
+        // Even with an intersecting live VM, a mismatched stale record must
+        // refuse: cleanup of sandbox A must NEVER reclaim sandbox B's orphan.
+        let stale = stale_with("wsb:b", vec![pid(10, 100)]);
+        let live = vec![pid(10, 100)];
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:a", Some(&live)),
+            StaleDaemonCleanup::RefuseSandboxIdMismatch {
+                stale_active: "wsb:b".to_string()
+            }
+        );
+        // Mismatch even fires on an empty live set so the operator gets a
+        // clear diagnostic (the alternative is "looks fine, advance state"
+        // which silently corrupts cross-sandbox bookkeeping).
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:a", Some(&[])),
+            StaleDaemonCleanup::RefuseSandboxIdMismatch {
+                stale_active: "wsb:b".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_matching_record_empty_live_is_no_live_vm() {
+        let stale = stale_with("wsb:x", vec![pid(10, 100)]);
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:x", Some(&[])),
+            StaleDaemonCleanup::NoLiveVm
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_intersection_reclaims_with_prior_proof() {
+        let shared = pid(10, 100);
+        let proof = vec![shared, pid(11, 101)];
+        let stale = stale_with("wsb:x", proof.clone());
+        let live = vec![shared, pid(20, 200)];
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:x", Some(&live)),
+            StaleDaemonCleanup::Reclaim { proof }
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_empty_stale_proof_with_live_refuses_foreign() {
+        // The B4 wedge surface in stop/deprovision: a daemon died before
+        // capture_launch_proof populated vm_processes; a live VM exists but
+        // we have no positive proof it is ours. RefuseForeign (no sole-claim
+        // weakening of the positive-proof invariant).
+        let stale = stale_with("wsb:x", Vec::new());
+        let live = vec![pid(10, 100)];
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:x", Some(&live)),
+            StaleDaemonCleanup::RefuseForeign { live }
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_disjoint_live_refuses_foreign() {
+        let stale = stale_with("wsb:x", vec![pid(10, 100)]);
+        let live = vec![pid(20, 200)];
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:x", Some(&live)),
+            StaleDaemonCleanup::RefuseForeign { live }
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_pid_match_creation_time_diff_refuses() {
+        // PID reuse defence at the stop/deprovision orphan-cleanup site.
+        let stale = stale_with("wsb:x", vec![pid(10, 100)]);
+        let live = vec![pid(10, 999)];
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:x", Some(&live)),
+            StaleDaemonCleanup::RefuseForeign { live }
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_no_stale_record_with_live_refuses_foreign() {
+        // No record at all but a live VM: definitely not ours.
+        let live = vec![pid(10, 100)];
+        assert_eq!(
+            classify_stale_daemon_cleanup(None, "wsb:x", Some(&live)),
+            StaleDaemonCleanup::RefuseForeign { live }
         );
     }
 

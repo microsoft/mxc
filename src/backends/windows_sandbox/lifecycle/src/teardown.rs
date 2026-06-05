@@ -38,8 +38,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::control_plane::{
-    decide_cleanup, enumerate_processes_with_prefix, process_creation_time,
-    running_process_creation_time, terminate_processes, CleanupAction, VmOwnership, VmProcId,
+    enumerate_processes_with_prefix, plan_kill_set, process_creation_time,
+    running_process_creation_time, terminate_processes, TeardownOutcome, VmOwnership, VmProcId,
 };
 
 /// Image-name prefix shared by every Windows Sandbox host process
@@ -161,8 +161,15 @@ enum ReconcileDecision {
     /// No VM is running: launch normally (caller cleans dead-launcher dirs).
     Proceed,
     /// A running VM is provably an orphan of a prior disposable run (its live
-    /// processes intersect a recorded proof): tear `targets` down, then launch.
-    ReclaimThenProceed { targets: Vec<VmProcId> },
+    /// processes intersect a recorded proof): tear the orphan down using the
+    /// **prior recorded proof** as the kill seed (NOT the live snapshot), then
+    /// launch. Seeding with the live snapshot would promote any foreign
+    /// `WindowsSandbox*` process observed at reconcile time into "proof" once
+    /// the kill planner (`plan_kill_set`) starts honoring intersection
+    /// semantics. The caller passes `proof` to `plan_kill_set(Owned(proof),
+    /// snapshot)` to compute the actual kill set (intersect ⇒ union; disjoint
+    /// ⇒ proof only — never enumerate-kill foreign).
+    ReclaimThenProceed { proof: Vec<VmProcId> },
     /// Refuse to launch.
     Busy(BusyReason),
 }
@@ -177,6 +184,12 @@ enum ReconcileDecision {
 /// Launcher liveness is intentionally *strong* (PID + creation time both
 /// match). A marker whose launcher is dead-or-unknown must never block a
 /// proof-based reclaim, which is what avoids a recycled-PID wedge.
+///
+/// Review GPT catch: the previous design returned `ReclaimThenProceed { targets:
+/// current_vm.to_vec() }`, which was sound only because the legacy
+/// `compute_kill_set` had no intersection check. With the new `plan_kill_set`,
+/// the kill seed MUST be the prior recorded proof so a foreign VM observed in
+/// the snapshot is not accidentally promoted into "ownership".
 fn classify_reconcile(
     running: Option<bool>,
     current_vm: &[VmProcId],
@@ -193,15 +206,28 @@ fn classify_reconcile(
         return ReconcileDecision::Busy(BusyReason::ActiveRun);
     }
     // All launchers are dead-or-unknown. Reclaim only on positive proof: a
-    // recorded VM process must still be live. Otherwise treat the VM as foreign.
-    let proven = markers
-        .iter()
-        .flat_map(|m| m.vm_processes.iter())
-        .any(|recorded| current_vm.contains(recorded));
-    if proven {
-        ReconcileDecision::ReclaimThenProceed {
-            targets: current_vm.to_vec(),
+    // recorded VM process must still be live. Collect ALL recorded proofs
+    // from intersecting markers (a single launch may have spawned multiple
+    // host processes, and a marker may be partial). Returning the union of
+    // recorded proofs (rather than `current_vm`) is what closes the GPT-
+    // identified latent bug: the kill seed is bounded by recorded
+    // identities and `plan_kill_set` can apply its intersection check
+    // soundly.
+    let mut proof: Vec<VmProcId> = Vec::new();
+    let mut any_intersect = false;
+    for marker in markers {
+        let intersects = marker.vm_processes.iter().any(|p| current_vm.contains(p));
+        if intersects {
+            any_intersect = true;
+            for p in &marker.vm_processes {
+                if !proof.contains(p) {
+                    proof.push(*p);
+                }
+            }
         }
+    }
+    if any_intersect {
+        ReconcileDecision::ReclaimThenProceed { proof }
     } else {
         ReconcileDecision::Busy(BusyReason::ForeignUnprovable)
     }
@@ -218,42 +244,63 @@ struct OneShotTeardown {
 }
 
 impl OneShotTeardown {
-    /// Full teardown: consult [`decide_cleanup`] for the ownership state, kill
-    /// only the processes we provably own, wait (bounded) for the VM to exit,
-    /// then — only once it is confirmed gone — remove the marker and scratch
-    /// directory. Used by the stack guard on normal-return and panic paths.
+    /// Full teardown: plan via [`plan_kill_set`], terminate, wait for confirmed
+    /// exit, then — only when the polling loop returns [`TeardownOutcome::ConfirmedGone`] —
+    /// remove the marker and scratch directory. Used by the stack guard on
+    /// normal-return and panic paths.
     ///
     /// The marker is removed *only* when the VM is confirmed gone. If teardown
     /// could not confirm it (timeout / probe failure) the marker is left so the
     /// next run reclaims it: once our VM is gone, our marker is gone too, which
     /// is what keeps a later foreign sandbox from being mistaken for our orphan.
+    ///
+    /// `kill_only` (the Ctrl-C path) intentionally shares the same kill-plan
+    /// derivation so an asymmetry cannot leak a VM on Ctrl-C that the normal
+    /// drop would have torn down (review BLOCKING-3).
     fn full(&self, poll_budget: Duration) {
-        match decide_cleanup(&self.ownership) {
-            // Never launched: no VM exists. Our (vm-less) marker dir can go.
-            CleanupAction::Noop => clear_marker_dir(&self.run_dir),
-            // Launch in flight, ownership unprovable: never kill (a foreign VM
-            // may have won the single-instance contest). Leave the marker for
-            // the next run to reconcile.
-            CleanupAction::LeakUnowned => {}
-            CleanupAction::Teardown(targets) => {
-                if teardown_owned_blocking(&targets, poll_budget) {
-                    clear_marker_dir(&self.run_dir);
+        let snapshot = enumerate_processes_with_prefix(WSB_PROCESS_PREFIX).unwrap_or_default();
+        let plan = plan_kill_set(&self.ownership, &snapshot);
+        match plan {
+            None => {
+                // NotLaunched / LaunchInFlight / LaunchSucceededNoProof+empty
+                // snapshot. Either nothing was launched (safe to clear) or
+                // there is nothing left to confirm (also safe to clear), or
+                // we cannot prove ownership (must leak — leave the marker).
+                match &self.ownership {
+                    VmOwnership::NotLaunched | VmOwnership::LaunchSucceededNoProof => {
+                        // Empty live set ⇒ nothing to wait for; safe to clear.
+                        clear_marker_dir(&self.run_dir);
+                    }
+                    VmOwnership::LaunchInFlight => {
+                        // Ambiguous launch: leak the marker for the next run
+                        // to reconcile rather than presume ownership.
+                    }
+                    VmOwnership::Owned(_) => {
+                        // plan_kill_set(Owned, _) is always Some.
+                        unreachable!("Owned with any snapshot always returns Some kill plan");
+                    }
                 }
             }
+            Some(kill_set) => match teardown_owned_blocking(&kill_set, poll_budget) {
+                TeardownOutcome::ConfirmedGone => {
+                    clear_marker_dir(&self.run_dir);
+                }
+                TeardownOutcome::StillRunning(_) | TeardownOutcome::ProbeFailed => {
+                    // Preserve the marker so the next run can reclaim.
+                }
+            },
         }
     }
 
     /// Kill-only: issue the scoped process kills without waiting. Used by the
     /// console handler, which must return promptly before the OS hard-
-    /// terminates us. Honours ownership exactly like [`full`].
+    /// terminates us. Honours ownership exactly like [`full`] — drives off
+    /// the SAME [`plan_kill_set`] so Ctrl-C cannot leak a VM that the normal
+    /// drop would have torn down (review BLOCKING-3).
     fn kill_only(&self) {
-        match decide_cleanup(&self.ownership) {
-            CleanupAction::Noop | CleanupAction::LeakUnowned => {}
-            CleanupAction::Teardown(targets) => {
-                let snapshot =
-                    enumerate_processes_with_prefix(WSB_PROCESS_PREFIX).unwrap_or_default();
-                terminate_processes(&compute_kill_set(&targets, &snapshot));
-            }
+        let snapshot = enumerate_processes_with_prefix(WSB_PROCESS_PREFIX).unwrap_or_default();
+        if let Some(kill_set) = plan_kill_set(&self.ownership, &snapshot) {
+            terminate_processes(&kill_set);
         }
     }
 }
@@ -523,28 +570,46 @@ pub(crate) fn reconcile_existing_vm(root: &Path) -> Reconcile {
             }
             Reconcile::Proceed(None)
         }
-        ReconcileDecision::ReclaimThenProceed { targets } => {
+        ReconcileDecision::ReclaimThenProceed { proof } => {
             eprintln!(
                 "[one-shot] warning: reclaiming an orphaned disposable Windows Sandbox VM \
-                 (found {} stale marker dir(s))",
-                dead_dirs.len()
+                 (found {} stale marker dir(s), {} recorded host process identity/identities \
+                 from intersecting markers)",
+                dead_dirs.len(),
+                proof.len()
             );
-            if teardown_owned_blocking(&targets, TEARDOWN_POLL_TIMEOUT) {
-                for dir in &dead_dirs {
-                    clear_marker_dir(dir);
+            // Seed kill via plan_kill_set with the RECORDED proof (not the
+            // live snapshot). Same reasoning as the daemon's startup reclaim:
+            // an intersection check on (proof, snapshot) ensures any foreign
+            // WindowsSandbox* process visible at reconcile time is excluded
+            // from the kill set. (Review GPT catch: the previous design
+            // passed `current_vm` as the kill seed, which was sound only
+            // because the legacy `compute_kill_set` had no intersection
+            // check.)
+            let kill_plan =
+                plan_kill_set(&VmOwnership::Owned(proof), &current_vm).unwrap_or_default();
+            match teardown_owned_blocking(&kill_plan, TEARDOWN_POLL_TIMEOUT) {
+                TeardownOutcome::ConfirmedGone => {
+                    for dir in &dead_dirs {
+                        clear_marker_dir(dir);
+                    }
+                    Reconcile::Proceed(Some(format!(
+                        "reclaimed an orphaned disposable Windows Sandbox VM from a prior run \
+                         ({} stale marker dir(s) cleaned)",
+                        dead_dirs.len()
+                    )))
                 }
-                Reconcile::Proceed(Some(format!(
-                    "reclaimed an orphaned disposable Windows Sandbox VM from a prior run \
-                     ({} stale marker dir(s) cleaned)",
-                    dead_dirs.len()
-                )))
-            } else {
-                // Could not confirm the orphan is gone: refuse rather than
-                // launch into a still-occupied single-instance slot, and leave
-                // the markers so the next run can retry the reclaim.
-                Reconcile::Busy(
-                    "failed to tear down an orphaned disposable Windows Sandbox VM".to_string(),
-                )
+                TeardownOutcome::StillRunning(remaining) => Reconcile::Busy(format!(
+                    "failed to tear down an orphaned disposable Windows Sandbox VM ({} host \
+                     process(es) still alive: {:?})",
+                    remaining.len(),
+                    remaining
+                )),
+                TeardownOutcome::ProbeFailed => Reconcile::Busy(
+                    "failed to tear down an orphaned disposable Windows Sandbox VM (liveness \
+                     probe failed)"
+                        .to_string(),
+                ),
             }
         }
     }
@@ -566,65 +631,49 @@ fn wsb_vm_running() -> Option<bool> {
         .map(|pids| !pids.is_empty())
 }
 
-/// Compute the scoped kill set from recorded `targets` and a single live
-/// `snapshot` of `WindowsSandbox*` processes.
+/// Tear down a Windows Sandbox VM with an already-planned kill set, then poll
+/// (up to `poll_budget`) until the `WindowsSandbox*` processes are gone.
+/// Best-effort and non-panicking — safe to call while unwinding.
 ///
-/// - If the snapshot intersects the recorded targets we still own the same VM:
-///   kill the union (covers host processes the proof missed).
-/// - Otherwise (empty `targets`, or a non-empty set disjoint from the snapshot)
-///   kill only the recorded targets — which is nothing when empty, and likely
-///   already-dead PIDs when disjoint. The live VM is *never* enumerated into
-///   the kill set without a positive proof intersection, so a foreign or
-///   replacement VM is never touched. This deliberately prefers leaking our own
-///   (un-provable) VM over the small risk of killing one we cannot prove we
-///   own — a leaked VM is a recoverable availability issue, a wrongly-killed
-///   foreign VM is not.
+/// **The kill set is computed upstream by [`plan_kill_set`].** This split
+/// (planner / killer) matches the daemon-side [`crate::vm::teardown_via_plan`]
+/// so the two backends derive their kill sets the same way, closing the
+/// asymmetry that previously let the daemon kill foreign VMs that appeared in
+/// its snapshot-to-kill window (review finding B1).
 ///
-/// NOTE — intentional asymmetry with the daemon path: the state-aware daemon's
-/// [`crate::vm::teardown_owned`] DOES enumerate the live VM into its kill set on
-/// an empty seed, because it only reaches teardown on paths where it provably
-/// holds the single-instance VM (launch succeeded, or `ReclaimOrphan` after
-/// reconcile proved no foreign VM). The one-shot path cannot make that proof at
-/// every teardown site, so it fails safe by leaking instead.
-fn compute_kill_set(targets: &[VmProcId], snapshot: &[VmProcId]) -> Vec<VmProcId> {
-    let intersects = snapshot.iter().any(|p| targets.contains(p));
-    if intersects {
-        let mut kill_set = targets.to_vec();
-        for p in snapshot {
-            if !kill_set.contains(p) {
-                kill_set.push(*p);
-            }
-        }
-        kill_set
-    } else {
-        targets.to_vec()
-    }
-}
-
-/// Tear down a Windows Sandbox VM this run provably owns, then poll (up to
-/// `poll_budget`) until the `WindowsSandbox*` processes are gone. Best-effort
-/// and non-panicking — safe to call while unwinding.
-///
-/// The kill set is computed by [`compute_kill_set`] from `targets` and a
-/// *single* live snapshot, so a foreign VM is never killed by enumeration.
-/// Returns `true` only if the VM was *confirmed* gone; a probe failure or a
-/// timeout returns `false`, so callers leave the run marker in place for the
-/// next run to reclaim rather than deleting it prematurely.
-fn teardown_owned_blocking(targets: &[VmProcId], poll_budget: Duration) -> bool {
-    let snapshot = enumerate_processes_with_prefix(WSB_PROCESS_PREFIX).unwrap_or_default();
-    terminate_processes(&compute_kill_set(targets, &snapshot));
+/// Returns a [`TeardownOutcome`] tri-state so callers can decide whether to
+/// clear the marker (review NB-3 promoted to blocking): only on
+/// [`TeardownOutcome::ConfirmedGone`] is the live set provably empty; on
+/// `StillRunning` and `ProbeFailed` the marker MUST persist so the next run
+/// can reclaim by positive proof intersection.
+fn teardown_owned_blocking(kill_set: &[VmProcId], poll_budget: Duration) -> TeardownOutcome {
+    terminate_processes(kill_set);
 
     let deadline = Instant::now() + poll_budget;
     loop {
-        if wsb_vm_running() == Some(false) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            eprintln!(
-                "[one-shot] warning: Windows Sandbox processes still running after scoped \
-                 teardown wait"
-            );
-            return false;
+        match wsb_vm_running() {
+            Some(false) => return TeardownOutcome::ConfirmedGone,
+            Some(true) => {
+                if Instant::now() >= deadline {
+                    let remaining =
+                        enumerate_processes_with_prefix(WSB_PROCESS_PREFIX).unwrap_or_default();
+                    eprintln!(
+                        "[one-shot] warning: {} Windows Sandbox host process(es) still running \
+                         after scoped teardown wait",
+                        remaining.len()
+                    );
+                    return TeardownOutcome::StillRunning(remaining);
+                }
+            }
+            None => {
+                if Instant::now() >= deadline {
+                    eprintln!(
+                        "[one-shot] warning: liveness probe failed during teardown wait; \
+                         preserving marker"
+                    );
+                    return TeardownOutcome::ProbeFailed;
+                }
+            }
         }
         std::thread::sleep(TEARDOWN_POLL_INTERVAL);
     }
@@ -864,16 +913,48 @@ mod tests {
     }
 
     #[test]
-    fn classify_proof_intersection_reclaims() {
+    fn classify_proof_intersection_reclaims_with_recorded_proof() {
         let current = [proc(100, 5), proc(200, 6)];
         let markers = [MarkerState {
             launcher_alive: false,
             vm_processes: vec![proc(100, 5)],
         }];
+        // ReclaimThenProceed carries the PRIOR recorded proof (deduped union
+        // across intersecting markers), NOT the live snapshot. Seeding with
+        // the snapshot would promote any foreign WindowsSandbox* process at
+        // reconcile time into "proof" once plan_kill_set's intersection check
+        // is applied downstream.
         assert_eq!(
             classify_reconcile(Some(true), &current, &markers),
             ReconcileDecision::ReclaimThenProceed {
-                targets: current.to_vec()
+                proof: vec![proc(100, 5)]
+            }
+        );
+    }
+
+    #[test]
+    fn classify_proof_intersection_dedupes_across_markers() {
+        // Two intersecting markers (e.g. a multi-process orphan that two prior
+        // launches each partially recorded) - their proofs are unioned with
+        // dedup, never the live snapshot.
+        let shared = proc(100, 5);
+        let extra = proc(101, 6);
+        let foreign = proc(999, 999);
+        let current = [shared, foreign];
+        let markers = [
+            MarkerState {
+                launcher_alive: false,
+                vm_processes: vec![shared],
+            },
+            MarkerState {
+                launcher_alive: false,
+                vm_processes: vec![shared, extra],
+            },
+        ];
+        assert_eq!(
+            classify_reconcile(Some(true), &current, &markers),
+            ReconcileDecision::ReclaimThenProceed {
+                proof: vec![shared, extra]
             }
         );
     }
@@ -893,39 +974,26 @@ mod tests {
     }
 
     #[test]
+    fn classify_pid_match_creation_time_diff_is_foreign() {
+        // PID reuse defence: recorded proof has the same PID as a live
+        // process but a different creation_time. Must NOT intersect.
+        let current = [proc(100, 999)];
+        let markers = [MarkerState {
+            launcher_alive: false,
+            vm_processes: vec![proc(100, 5)],
+        }];
+        assert_eq!(
+            classify_reconcile(Some(true), &current, &markers),
+            ReconcileDecision::Busy(BusyReason::ForeignUnprovable)
+        );
+    }
+
+    #[test]
     fn classify_running_no_markers_is_foreign() {
         let current = [proc(100, 5)];
         assert_eq!(
             classify_reconcile(Some(true), &current, &[]),
             ReconcileDecision::Busy(BusyReason::ForeignUnprovable)
         );
-    }
-
-    #[test]
-    fn kill_set_unions_when_snapshot_intersects_targets() {
-        let targets = [proc(1, 10)];
-        let snapshot = [proc(1, 10), proc(2, 20)];
-        let set = compute_kill_set(&targets, &snapshot);
-        assert!(set.contains(&proc(1, 10)));
-        assert!(set.contains(&proc(2, 20)));
-        assert_eq!(set.len(), 2);
-    }
-
-    #[test]
-    fn kill_set_empty_when_targets_empty() {
-        // No positive proof: never enumerate-kill the live snapshot (it could
-        // be a foreign / replacement VM). Fail safe by killing nothing.
-        let snapshot = [proc(3, 30)];
-        assert!(compute_kill_set(&[], &snapshot).is_empty());
-    }
-
-    #[test]
-    fn kill_set_ignores_disjoint_snapshot() {
-        // Non-empty targets disjoint from the live snapshot: a replacement /
-        // foreign VM. Only the (likely-dead) recorded targets are returned;
-        // the live VM is never enumerated into the kill set.
-        let targets = [proc(1, 10)];
-        let snapshot = [proc(2, 20)];
-        assert_eq!(compute_kill_set(&targets, &snapshot), targets.to_vec());
     }
 }

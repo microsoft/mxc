@@ -88,6 +88,128 @@ const IPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout for an IPC request/response round-trip.
 const IPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long to wait for the host VM-slot mutex during stop/deprovision orphan
+/// cleanup. The mutex is held by any other VM owner (a concurrent one-shot
+/// run, or the daemon while it lived). A modest wait covers a previous
+/// owner's teardown but bails rather than block stop/deprovision indefinitely.
+const ORPHAN_CLEANUP_VM_LOCK_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Drive the stale-daemon orphan VM cleanup that `stop`/`deprovision` must
+/// perform when [`live_daemon`] returns `None` but the sandbox state was
+/// [`SandboxState::Started`]. Implements review BLOCKING-2 + B5 fix:
+///
+/// 1. Reads the stale [`DaemonRecord`] (the on-disk record whose live-daemon
+///    check failed — its owner is dead, but the VM it launched may still be).
+/// 2. Snapshots live `WindowsSandbox*` host processes.
+/// 3. Classifies via the pure [`control_plane::classify_stale_daemon_cleanup`]:
+///    - [`StaleDaemonCleanup::NoLiveVm`]: nothing to do; the phase may
+///      advance, and the (now-irrelevant) stale daemon record is removed.
+///    - [`StaleDaemonCleanup::Reclaim { proof }`]: acquire [`control_plane::HostVmLock`]
+///      (BLOCKING-2: serialises against a concurrent one-shot's launch /
+///      reconcile), then [`crate::vm::teardown_via_plan`] seeded with the
+///      stale proof. Daemon record removed only on [`TeardownOutcome::ConfirmedGone`];
+///      `StillRunning` / `ProbeFailed` preserves the record and refuses.
+///    - [`StaleDaemonCleanup::RefuseForeign { live }`]: surface the live PIDs
+///      so the operator can clean up manually (review NB-1).
+///    - [`StaleDaemonCleanup::RefuseProbeFailed`]: refuse — unknown state.
+///    - [`StaleDaemonCleanup::RefuseSandboxIdMismatch`]: refuse — cleanup of
+///      sandbox A must never act on sandbox B's records (GPT catch).
+fn cleanup_stale_daemon_orphan(sandbox_id: &str) -> Result<(), MxcError> {
+    let stale = read_daemon_record()
+        .map_err(|e| MxcError::backend_error(format!("read stale daemon record: {e}")))?;
+
+    // Build a minimal current-thread tokio runtime for the OS-touching async
+    // calls. cleanup is rare (only the stale-daemon path) and the OS
+    // enumeration / kill / poll is short.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| MxcError::backend_error(format!("build cleanup runtime: {e}")))?;
+
+    let live_result = rt.block_on(async { crate::vm::enumerate_sandbox_vm_processes().await.ok() });
+
+    let plan = control_plane::classify_stale_daemon_cleanup(
+        stale.as_ref(),
+        sandbox_id,
+        live_result.as_deref(),
+    );
+
+    match plan {
+        control_plane::StaleDaemonCleanup::NoLiveVm => {
+            // Stale record is irrelevant — its VM (if any) is gone. Remove it
+            // so future phases (and a future start) start clean.
+            let _ = std::fs::remove_file(daemon_record_path());
+            Ok(())
+        }
+        control_plane::StaleDaemonCleanup::Reclaim { proof } => {
+            // Acquire HostVmLock for the snapshot-to-kill window (BLOCKING-2):
+            // a concurrent one-shot may reach `reconcile_existing_vm` between
+            // our snapshot and our terminate_processes call. Without this
+            // mutex, the one-shot could observe our orphan + launch its own
+            // VM before we kill ours, and the two VM owners' kill sets could
+            // race on the single-instance slot.
+            let _vm_lock = control_plane::HostVmLock::acquire(ORPHAN_CLEANUP_VM_LOCK_TIMEOUT)
+                .map_err(|e| {
+                    MxcError::backend_error(format!(
+                        "acquire host Windows Sandbox VM slot for orphan cleanup: {e}"
+                    ))
+                })?;
+            // Re-snapshot under the lock so the kill set is consistent with
+            // the post-lock world (the proof was captured before we held
+            // HostVmLock; another VM owner could have launched and exited in
+            // between).
+            let snapshot = rt
+                .block_on(async { crate::vm::enumerate_sandbox_vm_processes().await })
+                .unwrap_or_default();
+            let kill_set =
+                control_plane::plan_kill_set(&control_plane::VmOwnership::Owned(proof), &snapshot)
+                    .unwrap_or_default();
+            let outcome = rt.block_on(crate::vm::teardown_via_plan(&kill_set));
+            match outcome {
+                control_plane::TeardownOutcome::ConfirmedGone => {
+                    let _ = std::fs::remove_file(daemon_record_path());
+                    Ok(())
+                }
+                control_plane::TeardownOutcome::StillRunning(remaining) => {
+                    Err(MxcError::backend_error(format!(
+                        "orphan WindowsSandbox VM teardown timed out with {} host process(es) \
+                         still alive: {:?}. Preserving stale daemon record so a next stop/start \
+                         can retry. If this persists, kill these PIDs manually and retry.",
+                        remaining.len(),
+                        remaining.iter().map(|p| p.pid).collect::<Vec<_>>()
+                    )))
+                }
+                control_plane::TeardownOutcome::ProbeFailed => Err(MxcError::backend_error(
+                    "orphan WindowsSandbox VM teardown could not confirm exit (Toolhelp32 probe \
+                     failed). Preserving stale daemon record so a next stop/start can retry."
+                        .to_string(),
+                )),
+            }
+        }
+        control_plane::StaleDaemonCleanup::RefuseForeign { live } => {
+            Err(MxcError::backend_error(format!(
+                "a foreign WindowsSandbox VM is running that this sandbox cannot prove it \
+                 launched ({} live host process(es), PIDs: {:?}). Refusing to disturb it. Kill \
+                 these PIDs manually and retry.",
+                live.len(),
+                live.iter().map(|p| p.pid).collect::<Vec<_>>()
+            )))
+        }
+        control_plane::StaleDaemonCleanup::RefuseProbeFailed => Err(MxcError::backend_error(
+            "could not enumerate WindowsSandbox host processes (Toolhelp32 probe failed); \
+                 refusing to act on unknown VM state. Retry later."
+                .to_string(),
+        )),
+        control_plane::StaleDaemonCleanup::RefuseSandboxIdMismatch { stale_active } => {
+            Err(MxcError::backend_error(format!(
+                "stale daemon record on disk belongs to sandbox {stale_active}, not {sandbox_id}; \
+                 refusing to act on another sandbox's bookkeeping. Stop/deprovision \
+                 {stale_active} first."
+            )))
+        }
+    }
+}
+
 /// Parse the `wsb:<token>` form of a state-aware `sandbox_id`, returning the
 /// bare token. Surfaces format mismatches as [`MxcError::malformed_id`].
 fn extract_token(sandbox_id: &str) -> Result<&str, MxcError> {
@@ -567,16 +689,27 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
                 wait_daemon_gone(d.pid, d.pid_creation_time)?;
                 let _ = std::fs::remove_file(daemon_record_path());
             }
-            _ => {
-                // No live daemon holds this sandbox. If the record never
-                // reached Started (or was already stopped), this is a no-op
-                // already-stopped; otherwise reconcile the crashed-daemon case
-                // by recording Stopped.
+            Some(d) => {
+                // A live daemon exists but is holding a different sandbox.
+                // Refuse rather than silently no-op (which would let the
+                // user think `stop` succeeded while another sandbox is
+                // still active).
+                return Err(MxcError::backend_error(format!(
+                    "a different sandbox is currently active in the host slot: {}",
+                    d.active_sandbox_id
+                )));
+            }
+            None => {
+                // No live daemon. If the record never reached Started this is
+                // a no-op already-stopped; otherwise the daemon crashed and
+                // may have left a live orphan VM. Reclaim per review B5:
+                // pure classifier + HostVmLock + ConfirmedGone gate.
                 if record.state != SandboxState::Started {
                     return Err(MxcError::already_stopped(format!(
                         "sandbox {sandbox_id} is not started"
                     )));
                 }
+                cleanup_stale_daemon_orphan(sandbox_id)?;
             }
         }
 
@@ -597,21 +730,18 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         let _lock = TransitionLock::acquire(TRANSITION_LOCK_TIMEOUT)
             .map_err(|e| MxcError::backend_error(format!("{e}")))?;
 
-        if read_sandbox_record(token)
+        let record = read_sandbox_record(token)
             .map_err(|e| MxcError::backend_error(format!("{e}")))?
-            .is_none()
-        {
-            return Err(MxcError::not_provisioned(format!(
-                "sandbox {sandbox_id} is not provisioned"
-            )));
-        }
+            .ok_or_else(|| {
+                MxcError::not_provisioned(format!("sandbox {sandbox_id} is not provisioned"))
+            })?;
 
         // If a daemon still holds this sandbox, it owns a live VM that MUST be
         // torn down before we delete the records that let us find it again. A
         // failed stop here is fatal: deleting the records would orphan the VM
         // and strand the single-instance slot.
-        if let Some(d) = live_daemon().map_err(|e| MxcError::backend_error(format!("{e}")))? {
-            if d.active_sandbox_id == sandbox_id {
+        match live_daemon().map_err(|e| MxcError::backend_error(format!("{e}")))? {
+            Some(d) if d.active_sandbox_id == sandbox_id => {
                 let resp = ipc_command(d.ipc_port, IPC_STOP, &d.nonce)?;
                 if resp != IPC_OK {
                     return Err(MxcError::backend_error(format!(
@@ -620,6 +750,24 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
                 }
                 wait_daemon_gone(d.pid, d.pid_creation_time)?;
                 let _ = std::fs::remove_file(daemon_record_path());
+            }
+            Some(d) => {
+                return Err(MxcError::backend_error(format!(
+                    "a different sandbox is currently active in the host slot: {}; deprovision \
+                     {} first",
+                    d.active_sandbox_id, d.active_sandbox_id
+                )));
+            }
+            None => {
+                // No live daemon. If the sandbox was ever started, a crashed
+                // daemon may have left a live orphan VM that must be torn
+                // down before we delete the per-sandbox records (else the
+                // single-instance slot is stranded with no record to find
+                // it). For sandboxes that never reached Started, there can
+                // be no orphan, so skip the cleanup path entirely.
+                if record.state == SandboxState::Started {
+                    cleanup_stale_daemon_orphan(sandbox_id)?;
+                }
             }
         }
 

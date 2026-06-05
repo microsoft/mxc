@@ -36,8 +36,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::{Mutex, Notify};
 use windows_sandbox_lifecycle::control_plane::{
-    self, daemon_record_path, decide_cleanup, process_creation_time, CleanupAction, DaemonRecord,
-    MappedFolderRecord, VmOwnership, VmProcId, RECORD_SCHEMA_VERSION,
+    self, daemon_record_path, process_creation_time, DaemonRecord, MappedFolderRecord, VmOwnership,
+    VmProcId, RECORD_SCHEMA_VERSION,
 };
 use windows_sandbox_lifecycle::{bridge as tcp_bridge, rendezvous, vm as sandbox_vm};
 
@@ -190,12 +190,45 @@ async fn main() -> Result<()> {
         .context("enumerate running Windows Sandbox processes at startup")?;
     match control_plane::classify_startup(prior.as_ref(), &current_vm) {
         control_plane::StartupAction::Proceed => {}
-        control_plane::StartupAction::ReclaimOrphan => {
+        control_plane::StartupAction::ReclaimOrphan { proof } => {
             eprintln!(
-                "[wsb-daemon] reclaiming our orphaned Windows Sandbox VM (process identity matched \
-                 a prior daemon record); tearing it down"
+                "[wsb-daemon] reclaiming our orphaned Windows Sandbox VM (prior daemon record's \
+                 {} recorded host process identity/identities intersect the live set); tearing it \
+                 down",
+                proof.len()
             );
-            sandbox_vm::teardown_owned(&current_vm).await;
+            // Seed teardown with the PRIOR recorded proof, NOT the live
+            // snapshot. plan_kill_set then unions snapshot processes only
+            // when at least one identity intersects — so any foreign
+            // WindowsSandbox* process in the snapshot is excluded from the
+            // kill set. (Review GPT catch: the previous design passed
+            // &current_vm here, which promoted observed live processes into
+            // "proof" once the daemon-side teardown gained an intersection
+            // check.)
+            let snapshot = current_vm.clone();
+            let plan = control_plane::plan_kill_set(&VmOwnership::Owned(proof), &snapshot)
+                .unwrap_or_default();
+            let outcome = sandbox_vm::teardown_via_plan(&plan).await;
+            match outcome {
+                control_plane::TeardownOutcome::ConfirmedGone => {
+                    eprintln!("[wsb-daemon] orphan reclaim confirmed gone");
+                }
+                control_plane::TeardownOutcome::StillRunning(remaining) => {
+                    anyhow::bail!(
+                        "orphan reclaim failed: {} WindowsSandbox* process(es) still alive after \
+                         teardown ({:?}); refusing to start a daemon on top of a partially-torn-down \
+                         VM",
+                        remaining.len(),
+                        remaining
+                    );
+                }
+                control_plane::TeardownOutcome::ProbeFailed => {
+                    anyhow::bail!(
+                        "orphan reclaim could not confirm the VM is gone (liveness probe failed); \
+                         refusing to start a daemon while VM state is unknown"
+                    );
+                }
+            }
         }
         control_plane::StartupAction::RefuseForeign => {
             anyhow::bail!(
@@ -260,30 +293,84 @@ async fn main() -> Result<()> {
     )
     .await;
 
-    let action = decide_cleanup(&ownership.lock().expect("ownership mutex poisoned"));
-    match action {
-        CleanupAction::Noop => {
-            eprintln!("[wsb-daemon] no VM was launched by this daemon; clearing record");
+    // Take a fresh snapshot of WindowsSandbox* host processes so the kill
+    // planner can decide (per `plan_kill_set` semantics):
+    //   - NotLaunched / LaunchInFlight       -> never kill
+    //   - Owned(proof)                       -> proof ∪ snap-if-intersect, else proof
+    //   - LaunchSucceededNoProof + non-empty -> snapshot (we provably hold the slot)
+    //   - LaunchSucceededNoProof + empty     -> nothing to kill
+    //
+    // The record is removed ONLY on TeardownOutcome::ConfirmedGone (and on
+    // the leak/noop branches where there is nothing to confirm). On
+    // StillRunning / ProbeFailed the record persists so the next daemon's
+    // classify_startup can reclaim by positive proof intersection.
+    let snapshot = sandbox_vm::enumerate_sandbox_vm_processes()
+        .await
+        .unwrap_or_default();
+    let ownership_now = ownership.lock().expect("ownership mutex poisoned").clone();
+    let plan = control_plane::plan_kill_set(&ownership_now, &snapshot);
+    let may_clear_record = match plan {
+        None => {
+            // NotLaunched / LaunchInFlight / LaunchSucceededNoProof + empty
+            // snapshot. Nothing to kill. Removing the record is safe in the
+            // first two cases (we never launched / we cannot prove anything).
+            // For LaunchSucceededNoProof + empty snapshot, removing the
+            // record matches the existing behaviour: there is no live VM and
+            // no proof to preserve for reclaim.
+            match &ownership_now {
+                VmOwnership::NotLaunched => {
+                    eprintln!("[wsb-daemon] no VM was launched by this daemon; clearing record");
+                }
+                VmOwnership::LaunchInFlight => {
+                    eprintln!(
+                        "[wsb-daemon] WARNING: a VM launch was issued but ownership was never \
+                         proven; leaving any running VM untouched (fail-safe) and clearing record"
+                    );
+                }
+                VmOwnership::LaunchSucceededNoProof => {
+                    eprintln!(
+                        "[wsb-daemon] no live WindowsSandbox* processes after launch-succeeded; \
+                         clearing record (nothing to reclaim)"
+                    );
+                }
+                VmOwnership::Owned(_) => unreachable!("Owned with snapshot always plans a kill"),
+            }
+            true
         }
-        CleanupAction::LeakUnowned => {
-            // A launch was issued but never proven ours. A VM may exist, but we
-            // cannot prove we own it (a foreign sandbox could have won the
-            // single-instance contest and failed our launch), so we must NOT
-            // kill it. Fail safe: leave it for the operator / next reconcile.
+        Some(kill) => {
             eprintln!(
-                "[wsb-daemon] WARNING: a VM launch was issued but ownership was never proven; \
-                 leaving any running VM untouched (fail-safe) and clearing record"
+                "[wsb-daemon] tearing down our VM ({} target process(es))",
+                kill.len()
             );
+            let outcome = sandbox_vm::teardown_via_plan(&kill).await;
+            match &outcome {
+                control_plane::TeardownOutcome::ConfirmedGone => {
+                    eprintln!("[wsb-daemon] teardown confirmed VM gone; clearing record");
+                    true
+                }
+                control_plane::TeardownOutcome::StillRunning(remaining) => {
+                    eprintln!(
+                        "[wsb-daemon] WARNING: teardown timed out with {} WindowsSandbox* \
+                         process(es) still alive ({:?}); preserving record for next daemon to \
+                         reclaim",
+                        remaining.len(),
+                        remaining
+                    );
+                    false
+                }
+                control_plane::TeardownOutcome::ProbeFailed => {
+                    eprintln!(
+                        "[wsb-daemon] WARNING: liveness probe failed during teardown; preserving \
+                         record for next daemon to reclaim"
+                    );
+                    false
+                }
+            }
         }
-        CleanupAction::Teardown(pids) => {
-            eprintln!(
-                "[wsb-daemon] tearing down our VM ({} recorded process(es)) and clearing record",
-                pids.len()
-            );
-            sandbox_vm::teardown_owned(&pids).await;
-        }
+    };
+    if may_clear_record {
+        let _ = std::fs::remove_file(daemon_record_path());
     }
-    let _ = std::fs::remove_file(daemon_record_path());
     eprintln!("[wsb-daemon] exiting");
     outcome
 }
