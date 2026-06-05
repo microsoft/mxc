@@ -34,6 +34,23 @@ use std::process::Command;
 use nanvix_common::{github_download_url, load_checksums, load_json, ReleaseConfig, RepoConfig};
 
 fn main() {
+    // The expensive work in this build script — downloading NanVix release
+    // assets and verifying their checksums via `certutil` — is only needed
+    // when the micro-VM backend is actually being built. Gate it behind this
+    // crate's `microvm` feature so that a default `cargo build` (which still
+    // compiles this crate as a workspace member) performs no network or hashing
+    // work. `wxc` and `lxc` enable `nanvix_binaries/microvm` through their own
+    // `microvm` features.
+    //
+    // `NANVIX_BIN_DIR` must still be emitted in every configuration because
+    // `lib.rs` references it via `env!`.
+    if std::env::var_os("CARGO_FEATURE_MICROVM").is_none() {
+        let out_dir = std::env::var("OUT_DIR").unwrap();
+        println!("cargo:rustc-env=NANVIX_BIN_DIR={}", out_dir);
+        println!("cargo:rerun-if-changed=build.rs");
+        return;
+    }
+
     // Check the TARGET platform (not host). NanVix binaries are only needed when
     // the output binary will run on Windows or Linux with KVM.
     let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();

@@ -34,7 +34,7 @@ nanvix_common = { path = "../../backends/nanvix/common" }
 
 [features]
 default = []
-microvm = ["nanvix_binaries", "dep:nanvix_runner"]
+microvm = ["nanvix_binaries/microvm", "dep:nanvix_runner"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
 isolation_session = [
