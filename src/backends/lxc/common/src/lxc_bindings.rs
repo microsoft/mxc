@@ -80,15 +80,45 @@ pub fn resolve_default_lxcpath() -> String {
 /// `windows-latest` would otherwise flag it as dead code.
 #[cfg(any(target_os = "linux", test))]
 fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
-    let mut args: Vec<String> = Vec::with_capacity(env.len() + 6);
+    // Upper bound: 1 `--clear-env` + env.len() set-vars + up to 7 fixed
+    // elements in the cwd branch (`--`, `/bin/sh`, `-c`, prelude, `_`, cwd,
+    // command). Loose by ~3 in the no-cwd branch — Vec reallocs anyway if
+    // wrong, so this is purely a "save the realloc" hint.
+    let mut args: Vec<String> = Vec::with_capacity(env.len() + 8);
 
-    // Each `KEY=VAL` becomes a separate `--set-var=KEY=VAL`. Skip entries
-    // without `=` rather than letting `lxc-attach` reject the whole call —
-    // matches the permissive `split_once('=')` semantics other backends use.
-    for kv in env {
-        if kv.contains('=') {
-            args.push(format!("--set-var={}", kv));
-        }
+    // Replace, don't merge: when the caller supplies env, strip lxc-exec's
+    // own environment via `--clear-env` so host-operator vars (PATH, tokens,
+    // ambient credentials, anything else the launching shell exported) do
+    // NOT leak into the sandbox. This matches Seatbelt's `env_clear()` model
+    // (`seatbelt_runner.rs` ~line 149) and WSLC's distro-launch semantics
+    // (`wsl_container_runner.rs` ~line 929), and matches `lxc-attach(1)`'s
+    // own recommendation for non-interactive sandbox-spawn callers (the
+    // manpage flags `--keep-env`, its current default, as "likely to change
+    // in the future" because it leaks undesirable information).
+    //
+    // Residual: lxc-attach still injects a small baseline (`container`,
+    // `HOME`, `TERM`, default `PATH`, `USER`) and applies the container's
+    // `lxc.environment` config; both layers sit below the user vars and are
+    // outside this helper's control. Strict bit-identical parity with
+    // Seatbelt would require bypassing lxc-attach entirely (out of scope).
+    //
+    // Empty env (or all-malformed env after the `split_once('=')` skip)
+    // preserves the legacy keep-env shape so existing call sites without
+    // usable env are undisturbed — clearing without replacing would strand
+    // the user with only lxc-attach's baseline, which is rarely intended.
+    //
+    // Each well-formed `KEY=VAL` becomes a separate `--set-var=KEY=VAL`.
+    // Entries without `=` are silently skipped (matches the permissive
+    // `split_once('=')` semantics Seatbelt and WSLC apply to malformed
+    // entries) so one bad entry can't break the whole attach call.
+    let set_vars: Vec<String> = env
+        .iter()
+        .filter(|kv| kv.contains('='))
+        .map(|kv| format!("--set-var={}", kv))
+        .collect();
+    if !set_vars.is_empty() {
+        args.push("--clear-env".to_string());
+        args.extend(set_vars);
     }
 
     args.push("--".to_string());
@@ -101,6 +131,25 @@ fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> 
         // Positional-arg trick: `$1` and `$2` carry the cwd and command
         // verbatim through sh, so neither needs shell-escaping. The leading
         // `_` is a conventional placeholder for `$0` (sh's script name slot).
+        //
+        // `cd --` guards against a cwd that starts with `-` (which would
+        // otherwise be misparsed as a cd flag). The `--` is POSIX and is
+        // honored by busybox ash 1.36+ (Alpine 3.23 is the integration-test
+        // target — verified end-to-end via `tests/scripts/run_lxc_env_cwd_test.sh`).
+        //
+        // `exec` is load-bearing: it replaces the wrapper shell with the
+        // user's command in-place so signal/timeout delivery (see
+        // `unblock_signals` in `attach_run` and the pty bridge's kill path)
+        // hits the user process directly rather than the wrapper sh.
+        // Removing `exec` would silently regress the timeout/cancel contract.
+        //
+        // Failure mode: a nonexistent or non-permitted cwd makes `cd` fail,
+        // `&&` short-circuits, the user command never runs, and the wrapper
+        // sh exits with cd's status (1 for "not found", etc.). The caller
+        // sees a generic non-zero exit with no structured signal that the
+        // cwd was the cause — same observable behavior as a bad
+        // `Command::current_dir` on the other backends. Callers needing
+        // strong cwd validation should pre-check the path.
         args.push("cd -- \"$1\" && exec /bin/sh -c \"$2\"".to_string());
         args.push("_".to_string());
         args.push(working_directory.to_string());
@@ -260,12 +309,28 @@ impl LxcContainer {
     /// `cd -- "$1" && exec /bin/sh -c "$2"` shell prelude with cwd and
     /// command passed as positional args so neither needs additional
     /// shell escaping. Empty string preserves the container default cwd.
+    /// A nonexistent or non-permitted cwd surfaces as a generic non-zero
+    /// exit (typically 1, from `cd`'s own status) with no structured
+    /// signal that the cwd was the cause — same observable behavior as
+    /// a bad `Command::current_dir` on the other backends. Callers
+    /// needing strong cwd validation should pre-check the path.
     ///
     /// `env` is honored by translating each `KEY=VAL` entry into a
     /// repeated `--set-var=KEY=VAL` argument to `lxc-attach`. Entries
-    /// without `=` are skipped (matches the permissive contract Seatbelt
-    /// and WSLC apply to malformed env entries). The container's default
-    /// environment is preserved; user entries override on key collision.
+    /// without `=` are silently skipped (matches the permissive
+    /// `split_once('=')` semantics Seatbelt and WSLC apply).
+    ///
+    /// When `env` is non-empty, `--clear-env` is also passed so
+    /// `lxc-exec`'s own caller environment does **not** leak into the
+    /// sandbox — this is the replace-on-non-empty-env contract Seatbelt
+    /// and WSLC apply, and the posture `lxc-attach(1)` itself recommends
+    /// for sandbox-spawn callers. `lxc-attach` still injects a small
+    /// baseline (`container`, `HOME`, `TERM`, default `PATH`, `USER`) and
+    /// applies the container's `lxc.environment` config; those layers sit
+    /// below the user vars and are outside this function's control.
+    ///
+    /// When `env` is empty, the legacy keep-env behavior is preserved so
+    /// existing call sites without explicit env are undisturbed.
     ///
     /// We pass `unblock_signals = [SIGHUP, SIGTERM, SIGINT]` because
     /// [`crate::signal_cleanup::install`] blocks them in this process so
@@ -571,6 +636,7 @@ mod tests {
         assert_eq!(
             args,
             vec![
+                "--clear-env",
                 "--set-var=FOO=bar",
                 "--set-var=EMPTY=",
                 "--set-var=HAS_EQ_IN_VAL=a=b=c",
@@ -588,7 +654,17 @@ mod tests {
         // entries) so a bad entry can't break the whole attach call.
         let env = vec!["BADENTRY".to_string(), "OK=val".to_string()];
         let args = build_attach_args(&env, "", "cmd");
-        assert_eq!(args, vec!["--set-var=OK=val", "--", "/bin/sh", "-c", "cmd"]);
+        assert_eq!(
+            args,
+            vec![
+                "--clear-env",
+                "--set-var=OK=val",
+                "--",
+                "/bin/sh",
+                "-c",
+                "cmd",
+            ]
+        );
     }
 
     #[test]
@@ -633,6 +709,7 @@ mod tests {
         assert_eq!(
             args,
             vec![
+                "--clear-env",
                 "--set-var=FOO=bar",
                 "--",
                 "/bin/sh",
@@ -643,5 +720,59 @@ mod tests {
                 "cmd",
             ]
         );
+    }
+
+    #[test]
+    fn build_attach_args_emits_clear_env_when_env_non_empty() {
+        // Containment guarantee: when the caller supplies env, lxc-exec's
+        // own environment must NOT leak into the sandbox. `--clear-env`
+        // also has to land BEFORE the `--set-var` entries so lxc-attach
+        // clears first, then applies user vars on top.
+        let env = vec!["FOO=bar".to_string()];
+        let args = build_attach_args(&env, "", "cmd");
+        let clear_idx = args
+            .iter()
+            .position(|a| a == "--clear-env")
+            .expect("--clear-env should be present when env is non-empty");
+        let set_idx = args
+            .iter()
+            .position(|a| a == "--set-var=FOO=bar")
+            .expect("--set-var entry should be present");
+        assert!(
+            clear_idx < set_idx,
+            "--clear-env must precede --set-var entries, got {:?}",
+            args
+        );
+    }
+
+    #[test]
+    fn build_attach_args_omits_clear_env_when_env_empty() {
+        // Backward-compat guarantee: empty env preserves the legacy
+        // keep-env shape so existing call sites with no explicit env are
+        // undisturbed.
+        let args = build_attach_args(&[], "", "echo hi");
+        assert!(
+            !args.iter().any(|a| a == "--clear-env"),
+            "--clear-env must not appear when env is empty, got {:?}",
+            args
+        );
+    }
+
+    #[test]
+    fn build_attach_args_omits_clear_env_when_env_is_only_malformed() {
+        // Edge case: caller passed env but every entry was malformed
+        // (no `=`). After the permissive skip there are no user vars to
+        // apply, so `--clear-env` would strip the inherited env without
+        // replacing it with anything — exactly the surprise we want to
+        // avoid. Treat all-malformed as "no env supplied" and preserve
+        // the keep-env shape.
+        let env = vec!["BADENTRY".to_string(), "ALSO_BAD".to_string()];
+        let args = build_attach_args(&env, "", "cmd");
+        assert!(
+            !args.iter().any(|a| a == "--clear-env"),
+            "--clear-env must not appear when no entry survives the malformed-skip, got {:?}",
+            args
+        );
+        assert_eq!(args, vec!["--", "/bin/sh", "-c", "cmd"]);
     }
 }
