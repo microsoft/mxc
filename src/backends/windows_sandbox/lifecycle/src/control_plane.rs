@@ -295,16 +295,27 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         .context("record path has no parent directory")?;
     std::fs::create_dir_all(parent).with_context(|| format!("create record dir {:?}", parent))?;
 
+    // Lock the record DIRECTORY down to an owner-only, inheritable DACL BEFORE
+    // creating the temp file, so the temp file inherits owner-only from the
+    // instant it exists. Without this, the temp file would first materialise
+    // under the parent's default (possibly cross-user-readable) ACL — e.g. the
+    // global daemon record lives directly under %TEMP%\wxc-wsb\state-aware,
+    // which is C:\Windows\Temp for a service account. A cross-user attacker
+    // polling the dir could open the `<uuid>.tmp` with FILE_SHARE_READ and
+    // RETAIN that handle past a later per-file DACL change (Windows does not
+    // revoke existing opens on a DACL replacement), reading the persisted auth
+    // nonce after the rename. Securing the parent first closes that window.
+    // Fail closed: never write a nonce-bearing record into an unsecured dir.
+    set_owner_only_dir(parent).with_context(|| format!("secure record dir {:?}", parent))?;
+
     let json = serde_json::to_vec_pretty(value).context("serialise record")?;
     let tmp = parent.join(format!("{}.tmp", uuid::Uuid::new_v4()));
     std::fs::write(&tmp, &json).with_context(|| format!("write temp record {:?}", tmp))?;
 
-    // Lock the record down to an owner-only DACL BEFORE the atomic rename, so
-    // the published file is never momentarily readable by other users (the
-    // record carries the auth nonce; the temp dir may be shared, e.g.
-    // C:\Windows\Temp). Windows preserves the explicit DACL across the rename.
-    // Fail closed: on error, discard the temp file rather than publish an
-    // unsecured record.
+    // Belt-and-suspenders: stamp the file itself owner-only too (the parent
+    // DACL already makes the inherited ACL owner-only; this also strips any
+    // inherited ACE should the parent ever not be inheritable). Fail closed: on
+    // error, discard the temp file rather than publish an unsecured record.
     if let Err(e) = wxc_common::filesystem_dacl::set_owner_only_dacl(&tmp, false) {
         let _ = std::fs::remove_file(&tmp);
         return Err(anyhow::Error::new(e)).with_context(|| format!("secure record DACL {:?}", tmp));
@@ -519,24 +530,45 @@ pub fn enumerate_processes_with_prefix(name_prefix: &str) -> Result<Vec<VmProcId
 /// launch. It is the scoped replacement for `taskkill /F /IM WindowsSandbox*`.
 #[cfg(windows)]
 pub fn terminate_processes(targets: &[VmProcId]) -> usize {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    use windows::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_TERMINATE,
+    };
 
     let mut killed = 0usize;
     for target in targets {
-        // PID-reuse guard: only kill if the live creation time still matches
-        // the recorded identity. A recycled PID gets a new creation time.
-        if process_creation_time(target.pid) != Some(target.creation_time) {
+        if target.pid == 0 {
             continue;
         }
-        // SAFETY: `pid` is a plain integer; the handle is closed on every path.
+        // SAFETY: `pid` is a plain integer; the handle is closed on every path
+        // and the FILETIME out-params are fully initialised before use.
         unsafe {
-            if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, target.pid) {
-                if TerminateProcess(handle, 1).is_ok() {
-                    killed += 1;
-                }
-                let _ = CloseHandle(handle);
+            // Open FIRST, then verify the creation time on the SAME handle we
+            // will terminate through. A process handle pins one specific process
+            // instance, so the OS cannot recycle the PID to a different live
+            // process between the identity check and the kill (the previous
+            // check-by-PID-then-open-by-PID sequence had exactly that TOCTOU
+            // window: a recycled PID could resolve `OpenProcess` to a foreign
+            // process that `TerminateProcess` would then kill).
+            let Ok(handle) = OpenProcess(
+                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                target.pid,
+            ) else {
+                continue;
+            };
+            let mut creation = FILETIME::default();
+            let mut exit = FILETIME::default();
+            let mut kernel = FILETIME::default();
+            let mut user = FILETIME::default();
+            let times_ok =
+                GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user).is_ok();
+            let ct = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+            if times_ok && ct == target.creation_time && TerminateProcess(handle, 1).is_ok() {
+                killed += 1;
             }
+            let _ = CloseHandle(handle);
         }
     }
     killed

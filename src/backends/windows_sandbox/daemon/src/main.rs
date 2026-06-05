@@ -16,14 +16,18 @@
 //!      it holds open for the sandbox's whole lifetime (the guest exits the
 //!      instant that connection drops).
 //!   5. Re-publishes the record as `ready:true`, then serves `PING` / `STOP`
-//!      until told to stop.
+//!      until told to stop — while a watchdog concurrently polls for the VM's
+//!      host processes, so if the sandbox is closed / crashes out from under the
+//!      daemon, it stops holding a dead slot and exits (rather than answering
+//!      PING/STOP and admitting EXECs against a half-dead connection).
 //!
 //! Teardown is ownership-scoped: once the IPC port is bound, every exit path
 //! removes the daemon record, and tears the VM down **whenever this daemon
 //! actually issued the launch**. Exit paths that never launched a VM (pre-launch
 //! setup failure, STOP before launch) deliberately skip teardown so they cannot
-//! kill a VM this daemon did not start. There is no idle watchdog — a
-//! state-aware sandbox is torn down only by explicit `stop` / `deprovision`.
+//! kill a VM this daemon did not start. There is no *idle* watchdog — a healthy
+//! state-aware sandbox is torn down only by explicit `stop` / `deprovision`; the
+//! VM-crash watchdog fires only on confirmed VM death, never on mere idleness.
 
 mod control_server;
 
@@ -33,7 +37,7 @@ use anyhow::{Context, Result};
 use tokio::sync::{Mutex, Notify};
 use windows_sandbox_lifecycle::control_plane::{
     self, daemon_record_path, decide_cleanup, process_creation_time, CleanupAction, DaemonRecord,
-    MappedFolderRecord, VmOwnership, RECORD_SCHEMA_VERSION,
+    MappedFolderRecord, VmOwnership, VmProcId, RECORD_SCHEMA_VERSION,
 };
 use windows_sandbox_lifecycle::{bridge as tcp_bridge, rendezvous, vm as sandbox_vm};
 
@@ -48,6 +52,16 @@ const RENDEZVOUS_POLL_INTERVAL_MS: u64 = 500;
 
 /// Maximum time to connect to the guest agent after rendezvous.
 const GUEST_CONNECT_TIMEOUT_SECS: u64 = 30;
+
+/// Interval at which the VM-crash watchdog polls for live Windows Sandbox host
+/// processes once the sandbox is `ready`.
+const VM_WATCHDOG_POLL_INTERVAL_SECS: u64 = 5;
+
+/// Number of *consecutive* polls that must confirm zero Windows Sandbox host
+/// processes before the watchdog declares the VM gone. Requiring a streak (and
+/// treating an enumeration error as "unknown", not "gone") prevents a transient
+/// Toolhelp32 hiccup from shutting down a healthy daemon.
+const VM_WATCHDOG_GONE_CONFIRMATIONS: u32 = 3;
 
 /// Bounded wait to acquire the host VM-slot mutex at startup. On contention
 /// (another VM owner holds it) the daemon bails rather than block. Generous
@@ -352,14 +366,88 @@ async fn serve(
         .context("write ready daemon record")?;
     eprintln!("[wsb-daemon] ready; holding {sandbox_id}");
 
-    // Hold the guest connection alive while serving IPC until STOP.
-    server.await.context("control server task panicked")??;
+    // Hold the guest connection alive while serving IPC until either an
+    // explicit STOP arrives (the control server task returns) OR the VM dies
+    // under us (the crash watchdog fires). Racing the two means a sandbox that
+    // is closed / crashes is not held as a dead slot answering PING/STOP and
+    // admitting EXECs against a half-dead connection.
+    tokio::select! {
+        joined = &mut server => {
+            joined.context("control server task panicked")??;
+            eprintln!("[wsb-daemon] STOP received; releasing guest");
+        }
+        reason = vm_crash_watchdog(record.vm_processes.clone()) => {
+            eprintln!("[wsb-daemon] {reason}; shutting down (the VM is gone)");
+            // Best-effort: poison the slot so a racing/next EXEC fails fast with
+            // a clear reason instead of dispatching to a dead guest. Use a
+            // non-blocking lock — if an exec is mid-flight it holds the lock and
+            // will itself poison the slot when its guest I/O fails, so we must
+            // not block shutdown waiting on it.
+            if let Ok(mut slot) = guest.try_lock() {
+                *slot = GuestSlot::Poisoned(reason);
+            }
+            // Tell the control server to stop accepting and reap its task.
+            shutdown.notify_one();
+            let _ = (&mut server).await;
+        }
+    }
 
-    eprintln!("[wsb-daemon] STOP received; releasing guest");
     // Dropping the slot drops the held GuestConnection, closing the guest
     // control channel (the guest exits the instant it drops).
     drop(guest);
     Ok(())
+}
+
+/// Watch for unexpected death of the Windows Sandbox VM this daemon holds.
+///
+/// Polls every [`VM_WATCHDOG_POLL_INTERVAL_SECS`] and resolves (with a
+/// human-readable reason) only once [`VM_WATCHDOG_GONE_CONFIRMATIONS`]
+/// *consecutive* polls confirm the VM is gone.
+///
+/// Detection is **identity-based**: the VM is considered gone once none of the
+/// `owned` host-process identities (pid + creation_time, captured at ready)
+/// remain live. The `WindowsSandboxServer` / `WindowsSandboxRemoteSession` host
+/// processes live for the whole life of the VM, so this never false-fires on a
+/// healthy VM, and — because Windows Sandbox is single-instance — a *foreign*
+/// replacement VM that appears after ours crashed has different identities and
+/// therefore cannot mask our VM's death (a prefix-only check could). If no
+/// ownership proof was recorded (degraded), fall back to prefix liveness so a
+/// crash is still detectable without false-firing on a healthy VM.
+///
+/// Fail-safe posture: an enumeration error is treated as "unknown" — it resets
+/// the streak and never counts as "gone" — so a transient Toolhelp32 hiccup
+/// cannot tear down a healthy daemon. Never resolves while the VM is alive, so
+/// an idle-but-healthy sandbox is held until an explicit STOP.
+async fn vm_crash_watchdog(owned: Vec<VmProcId>) -> String {
+    let interval = std::time::Duration::from_secs(VM_WATCHDOG_POLL_INTERVAL_SECS);
+    let mut gone_streak = 0u32;
+    loop {
+        tokio::time::sleep(interval).await;
+        let live = match sandbox_vm::enumerate_sandbox_vm_processes().await {
+            Ok(live) => live,
+            // Enumeration failed: unknown — never count as gone.
+            Err(_) => {
+                gone_streak = 0;
+                continue;
+            }
+        };
+        let gone = if owned.is_empty() {
+            // No ownership proof recorded: prefix liveness is all we have.
+            live.is_empty()
+        } else {
+            // Our VM is gone once NONE of the recorded host-process identities
+            // remain live (a foreign replacement VM's identities won't match).
+            !owned.iter().any(|p| live.contains(p))
+        };
+        if gone {
+            gone_streak += 1;
+            if gone_streak >= VM_WATCHDOG_GONE_CONFIRMATIONS {
+                return "Windows Sandbox VM exited unexpectedly (host processes gone)".to_string();
+            }
+        } else {
+            gone_streak = 0;
+        }
+    }
 }
 
 /// Launch the VM and connect to the guest agent. Returns the live connection
