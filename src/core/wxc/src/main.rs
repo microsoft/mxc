@@ -17,6 +17,7 @@ use hyperlight_common::HyperlightScriptRunner;
 use isolation_session_common::IsolationSessionRunner;
 #[cfg(feature = "microvm")]
 use nanvix_runner::NanVixScriptRunner;
+#[cfg(target_os = "windows")]
 use windows_sandbox_lifecycle::WindowsSandboxRunner;
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{

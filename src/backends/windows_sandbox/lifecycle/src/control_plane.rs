@@ -276,9 +276,36 @@ pub fn daemon_record_path() -> PathBuf {
 /// created underneath are not cross-user readable/tamperable on a shared temp
 /// dir. Thin `anyhow` wrapper over
 /// [`wxc_common::filesystem_dacl::set_owner_only_dacl`].
+#[cfg(windows)]
 pub fn set_owner_only_dir(dir: &Path) -> Result<()> {
     wxc_common::filesystem_dacl::set_owner_only_dacl(dir, true)
         .map_err(|e| anyhow::Error::new(e).context(format!("secure dir {dir:?}")))
+}
+
+/// No-op stub for non-Windows: the DACL primitives are Windows-only, and the
+/// state-aware Windows Sandbox backend that calls them does not run on other
+/// platforms. The stub exists so the rest of this crate (pure decision logic +
+/// path helpers + record I/O) stays buildable as part of `cargo check
+/// --workspace` on Linux/macOS.
+#[cfg(not(windows))]
+pub fn set_owner_only_dir(_dir: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Stamp a single file (already created) with the owner-only DACL. Used as
+/// belt-and-suspenders on the temp record file inside [`atomic_write_json`];
+/// see the comment there for why this is needed even when the parent dir
+/// already has an inheritable owner-only DACL. No-op on non-Windows so the
+/// crate compiles as part of `cargo check --workspace`.
+#[cfg(windows)]
+fn set_owner_only_file(path: &Path) -> Result<()> {
+    wxc_common::filesystem_dacl::set_owner_only_dacl(path, false)
+        .map_err(|e| anyhow::Error::new(e).context(format!("secure file {path:?}")))
+}
+
+#[cfg(not(windows))]
+fn set_owner_only_file(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -316,9 +343,9 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     // DACL already makes the inherited ACL owner-only; this also strips any
     // inherited ACE should the parent ever not be inheritable). Fail closed: on
     // error, discard the temp file rather than publish an unsecured record.
-    if let Err(e) = wxc_common::filesystem_dacl::set_owner_only_dacl(&tmp, false) {
+    if let Err(e) = set_owner_only_file(&tmp) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(anyhow::Error::new(e)).with_context(|| format!("secure record DACL {:?}", tmp));
+        return Err(e).with_context(|| format!("secure record DACL {:?}", tmp));
     }
 
     if let Err(e) = std::fs::rename(&tmp, path) {

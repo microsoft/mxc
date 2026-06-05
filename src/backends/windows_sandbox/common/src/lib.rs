@@ -6,6 +6,3 @@
 //! `wxc-windows-sandbox-guest` agent inside the VM.
 
 pub mod sandbox_protocol;
-
-#[cfg(target_os = "windows")]
-pub mod windows_sandbox_runner;

@@ -28,15 +28,10 @@ if (-not $BinDir) {
 }
 
 $WxcExec = Join-Path $BinDir "wxc-exec.exe"
-$Daemon = Join-Path $BinDir "wxc-windows-sandbox-daemon.exe"
 
 if (-not (Test-Path $WxcExec)) {
     Write-Host "ERROR: wxc-exec.exe not found at $WxcExec" -ForegroundColor Red
     Write-Host "Run 'cargo build$(if ($Release) { ' --release' })' first." -ForegroundColor Yellow
-    exit 1
-}
-if (-not (Test-Path $Daemon)) {
-    Write-Host "ERROR: wxc-windows-sandbox-daemon.exe not found at $Daemon" -ForegroundColor Red
     exit 1
 }
 
@@ -128,17 +123,15 @@ Get-Process -Name "wxc-windows-sandbox-daemon","WindowsSandbox*" -ErrorAction Si
 Remove-Item "$env:TEMP\wxc-sandbox-rendezvous\*" -ErrorAction SilentlyContinue
 Start-Sleep 5
 
-# Start daemon
-Write-Host "Starting sandbox daemon..." -ForegroundColor Yellow
-$daemonProc = Start-Process -FilePath $Daemon -ArgumentList "wxc-windows-sandbox","300000" `
-    -PassThru -NoNewWindow -RedirectStandardError "$env:TEMP\wxc-windows-sandbox-daemon.log"
-Start-Sleep 2
-
-if ($daemonProc.HasExited) {
-    Write-Host "ERROR: Daemon exited immediately. Check $env:TEMP\wxc-windows-sandbox-daemon.log" -ForegroundColor Red
-    exit 1
-}
-Write-Host "Daemon started (PID $($daemonProc.Id))`n" -ForegroundColor Green
+# The one-shot Windows Sandbox path (`containment: "windows_sandbox"` with no
+# state-aware phase envelope) spawns a fresh, disposable VM per invocation
+# directly from `wxc-exec.exe`. It does NOT use the persistent
+# `wxc-windows-sandbox-daemon.exe` — that daemon is now exclusively for the
+# state-aware lifecycle (see run_windows_sandbox_state_aware_tests.ps1).
+# Earlier versions of this script pre-spawned the daemon to drive a
+# warm-reuse one-shot path that no longer exists; that pre-spawn now just
+# breaks (the daemon requires `--token` + stdin nonce, not positional args).
+Write-Host "Using fresh-VM-per-call one-shot path (no pre-spawned daemon).`n" -ForegroundColor Yellow
 
 # Run tests
 [System.Collections.ArrayList]$results = @()
@@ -154,7 +147,7 @@ $null = $results.Add((Run-SandboxTest "windows_sandbox_exit_code.json" -Expected
 Write-Host "`n--- Timeout Test ---" -ForegroundColor Cyan
 $null = $results.Add((Run-SandboxTest "windows_sandbox_timeout.json" -ExpectNonZero))
 
-Write-Host "`n--- Multi-Exec Test (3x echo on same VM) ---" -ForegroundColor Cyan
+Write-Host "`n--- Multi-Exec Test (3x echo, each on its own fresh VM) ---" -ForegroundColor Cyan
 for ($iter = 1; $iter -le 3; $iter++) {
     $result = Run-SandboxTest "windows_sandbox_echo.json" -OutputContains "Hello from sandbox!"
     $result.Name = "multi-exec #$iter (windows_sandbox_echo.json)"
@@ -177,13 +170,8 @@ if ($failed -eq 0) {
 }
 
 # Cleanup
-Write-Host "`nStopping daemon..." -ForegroundColor Yellow
-if (-not $daemonProc.HasExited) {
-    Stop-Process -Id $daemonProc.Id -Force -ErrorAction SilentlyContinue
-}
-Get-Process -Name "WindowsSandbox*" -ErrorAction SilentlyContinue |
+Write-Host "`nFinal cleanup of any lingering Windows Sandbox processes..." -ForegroundColor Yellow
+Get-Process -Name "WindowsSandbox*","wxc-windows-sandbox-daemon" -ErrorAction SilentlyContinue |
     ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
-
-Write-Host "Daemon log: $env:TEMP\wxc-windows-sandbox-daemon.log" -ForegroundColor Gray
 
 exit $(if ($failed -gt 0) { 1 } else { 0 })
