@@ -34,6 +34,13 @@ use std::process::Command;
 use nanvix_common::{github_download_url, load_checksums, load_json, ReleaseConfig, RepoConfig};
 
 fn main() {
+    // The build script's output (`NANVIX_BIN_DIR` and whether the download /
+    // verify path runs) depends on the `microvm` feature, surfaced here as the
+    // `CARGO_FEATURE_MICROVM` env var. Declare it as a rerun trigger so toggling
+    // the feature between builds re-runs this script instead of reusing stale
+    // output.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_MICROVM");
+
     // The expensive work in this build script — downloading NanVix release
     // assets and verifying their checksums via `certutil` — is only needed
     // when the micro-VM backend is actually being built. Gate it behind this
