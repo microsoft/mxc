@@ -910,7 +910,7 @@ mod tests {
         );
 
         let mut mgr = DaclManager::new().unwrap();
-        mgr.grant_appcontainer_access("S-1-15-2-1", &[], &[td.path().to_path_buf()])
+        mgr.grant_principal_access("S-1-15-2-1", &[], &[td.path().to_path_buf()])
             .unwrap();
         assert!(
             appcontainer_already_grants(td.path(), mask),
