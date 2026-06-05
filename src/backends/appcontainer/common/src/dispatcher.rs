@@ -70,6 +70,7 @@ use std::path::PathBuf;
 use crate::appcontainer_runner::{derive_sid_string, AppContainerScriptRunner, FilesystemMode};
 use crate::base_container_runner::BaseContainerRunner;
 use crate::fallback_detector::{self, FallbackError, IsolationTier};
+use crate::restricted_token_runner::RestrictedTokenRunner;
 use wxc_common::error::WxcError;
 use wxc_common::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
 use wxc_common::logger::Logger;
@@ -408,6 +409,13 @@ fn select_backend_with_fallback(
                 ),
                 Some(mgr),
             )
+        }
+        IsolationTier::RestrictedToken => {
+            // Phase 1: minimal arm — runner only, no DACL integration
+            // yet. Phase 4 wires up the leaf-only DACL setup against
+            // the Restricted Code SID (S-1-5-12).
+            let runner: Box<dyn ScriptRunner> = Box::new(RestrictedTokenRunner::new());
+            (runner, None)
         }
     };
 
