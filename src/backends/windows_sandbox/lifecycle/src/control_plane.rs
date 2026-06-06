@@ -421,9 +421,52 @@ pub fn classify_stale_daemon_cleanup(
 // ---------------------------------------------------------------------------
 
 /// Root directory for all state-aware records: `%TEMP%\wxc-wsb\state-aware`.
+///
+/// Tests within this crate can redirect to a per-test tempdir via
+/// [`set_state_aware_root_for_test`] (held under [`STATE_AWARE_TEST_LOCK`]
+/// to serialise concurrent tests) so the illegal-transition matrix can
+/// exercise stop/deprovision/etc. without touching the host's real TEMP
+/// or racing other tests.
 pub fn state_aware_root() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Some(p) = test_root::get() {
+            return p;
+        }
+    }
     std::env::temp_dir().join("wxc-wsb").join("state-aware")
 }
+
+#[cfg(test)]
+mod test_root {
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    static OVERRIDE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    fn slot() -> &'static Mutex<Option<PathBuf>> {
+        OVERRIDE.get_or_init(|| Mutex::new(None))
+    }
+    pub fn set(p: Option<PathBuf>) {
+        *slot().lock().expect("test_root mutex poisoned") = p;
+    }
+    pub fn get() -> Option<PathBuf> {
+        slot().lock().expect("test_root mutex poisoned").clone()
+    }
+}
+
+/// Test-only: redirect [`state_aware_root`] to `path` for the duration of a
+/// test. Pair with [`STATE_AWARE_TEST_LOCK`] (or your own serialisation) so
+/// concurrent tests don't race the global override.
+#[cfg(test)]
+pub fn set_state_aware_root_for_test(path: Option<PathBuf>) {
+    test_root::set(path);
+}
+
+/// Test-only: process-wide mutex tests must hold while
+/// [`set_state_aware_root_for_test`] is in effect so they don't race each
+/// other's override.
+#[cfg(test)]
+pub static STATE_AWARE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Per-sandbox scratch directory: `<root>\<token>`.
 ///

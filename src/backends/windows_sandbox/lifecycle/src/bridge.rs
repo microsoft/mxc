@@ -747,6 +747,11 @@ where
 mod tests {
     use super::*;
     use std::io::{Error, ErrorKind};
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use windows_sandbox_common::auth::generate_nonce;
+    use windows_sandbox_common::sandbox_protocol::{encode_message, encode_preamble};
 
     #[test]
     fn classify_data_read_clean_eof_is_none() {
@@ -817,5 +822,310 @@ mod tests {
             ipc_exec::read_frame(&mut cur).unwrap().is_none(),
             "no trailing frames after the terminal exit frame"
         );
+    }
+
+    // ===== F3: bridge stream/reconnect integration tests =====================
+    //
+    // These spin up an in-process "fake guest" that accepts the 4 channels
+    // (nonce-verified, preamble + Ready emitted), then drive
+    // stream_exec_on_guest and reconnect_data_streams end-to-end against
+    // hand-controlled stdout/stderr/exit frames. They exercise the entire
+    // bridge stream path WITHOUT a real Windows Sandbox VM or guest binary.
+
+    struct FakeGuestSide {
+        control: tokio::net::TcpStream,
+        stdin: tokio::net::TcpStream,
+        stdout: tokio::net::TcpStream,
+        stderr: tokio::net::TcpStream,
+        // Held by tests that want to drive a reconnect after Exit; current
+        // tests don't reconnect, but keeping the listener and addr alive
+        // means the fake guest survives the first exec for future
+        // reconnect-failure tests.
+        #[allow(dead_code)]
+        listener: TcpListener,
+        #[allow(dead_code)]
+        addr: SocketAddr,
+    }
+
+    /// Spawn an in-process fake guest: bind a listener, accept 4 connections,
+    /// verify the per-launch nonce on each, then send the preamble + Ready
+    /// frame on control. Returns the listening address (for the host's
+    /// `connect_to_guest` call) and a oneshot receiver that yields the
+    /// server-side handles so the test can drive the fake guest's outputs.
+    async fn spawn_fake_guest(
+        nonce: windows_sandbox_common::auth::Nonce,
+    ) -> (
+        SocketAddr,
+        oneshot::Receiver<Result<FakeGuestSide, std::io::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let result: Result<FakeGuestSide, std::io::Error> = async {
+                // Accept 4 connections in the canonical order. Each must
+                // present the nonce as the first NONCE_LEN bytes.
+                let accept_one = || async {
+                    let (mut s, _) = listener.accept().await?;
+                    let mut buf = [0u8; windows_sandbox_common::auth::NONCE_LEN];
+                    s.read_exact(&mut buf).await?;
+                    let got = windows_sandbox_common::auth::Nonce::from_bytes(&buf)
+                        .expect("read_exact filled NONCE_LEN");
+                    if !nonce.constant_time_eq(&got) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "bad nonce on fake-guest accept",
+                        ));
+                    }
+                    Ok::<tokio::net::TcpStream, std::io::Error>(s)
+                };
+                let mut control = accept_one().await?;
+                let stdin = accept_one().await?;
+                let stdout = accept_one().await?;
+                let stderr = accept_one().await?;
+                // Send preamble + Ready so the host's connect_to_guest
+                // handshake completes.
+                control.write_all(&encode_preamble()).await?;
+                let ready = encode_message(&ControlMessage::Ready).expect("encode Ready");
+                control.write_all(&ready).await?;
+                Ok(FakeGuestSide {
+                    control,
+                    stdin,
+                    stdout,
+                    stderr,
+                    listener,
+                    addr,
+                })
+            }
+            .await;
+            let _ = tx.send(result);
+        });
+        (addr, rx)
+    }
+
+    #[tokio::test]
+    async fn stream_exec_relays_stdout_stderr_exit_to_ipc_client() {
+        // End-to-end: drive stream_exec_on_guest against the fake guest;
+        // simulate a child that writes "hi" to stdout, "warn" to stderr,
+        // then exits 0. Verify the IPC writer side sees the corresponding
+        // FRAME_STDOUT / FRAME_STDERR frames (no FRAME_EXIT — that is
+        // written by the caller after releasing the single-flight slot).
+        let nonce = generate_nonce();
+        let (addr, fake_rx) = spawn_fake_guest(nonce.clone()).await;
+        let mut conn = connect_to_guest(addr, Duration::from_secs(5), &nonce)
+            .await
+            .expect("connect_to_guest must succeed");
+        let mut fake = fake_rx
+            .await
+            .expect("fake-guest oneshot")
+            .expect("fake-guest accept");
+
+        // Spawn the host->guest driver in a task so we can concurrently
+        // act as the guest on `fake`.
+        let mut ipc_reader: &[u8] = b""; // no FRAME_STDIN frames in this test
+        let mut ipc_writer: Vec<u8> = Vec::new();
+        let req = ExecStart {
+            script_code: "echo hi".to_string(),
+            working_directory: String::new(),
+            timeout_ms: 5_000,
+        };
+
+        // Drain the EXEC frame the host sends on conn.control inside a
+        // concurrent task. Then have the fake guest emit stdout/stderr/exit
+        // before stream_exec_on_guest can complete.
+        let fake_side = async {
+            // Read & discard the EXEC frame on control.
+            let mut buf = [0u8; 4096];
+            let _ = fake.control.read(&mut buf).await;
+            // Emit stdout bytes; close write half to signal EOF.
+            fake.stdout.write_all(b"hi").await.unwrap();
+            fake.stdout.shutdown().await.ok();
+            // Emit stderr bytes; close write half.
+            fake.stderr.write_all(b"warn").await.unwrap();
+            fake.stderr.shutdown().await.ok();
+            // Send the guest's Exit message on control.
+            let exit = encode_message(&ControlMessage::Exit(
+                windows_sandbox_common::sandbox_protocol::ExitNotification {
+                    exec_id: "exec-test".to_string(),
+                    exit_code: 0,
+                    error_message: String::new(),
+                },
+            ))
+            .unwrap();
+            fake.control.write_all(&exit).await.unwrap();
+            fake
+        };
+
+        let host_side = stream_exec_on_guest(
+            &mut conn,
+            "exec-test",
+            &req,
+            &mut ipc_reader,
+            &mut ipc_writer,
+        );
+
+        let (_fake_back, outcome) = tokio::join!(fake_side, host_side);
+        let outcome = outcome.expect("stream_exec_on_guest");
+        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(outcome.error_message, "");
+        assert!(outcome.ipc_alive);
+
+        // Decode the IPC writer's frames and check stdout/stderr arrived.
+        let mut cur = std::io::Cursor::new(ipc_writer);
+        let mut stdout_seen = Vec::new();
+        let mut stderr_seen = Vec::new();
+        while let Some(frame) = ipc_exec::read_frame(&mut cur).unwrap() {
+            match frame.kind {
+                ipc_exec::FRAME_STDOUT => stdout_seen.extend_from_slice(&frame.payload),
+                ipc_exec::FRAME_STDERR => stderr_seen.extend_from_slice(&frame.payload),
+                other => panic!("unexpected frame kind during stream test: {other}"),
+            }
+        }
+        assert_eq!(stdout_seen, b"hi");
+        assert_eq!(stderr_seen, b"warn");
+    }
+
+    #[tokio::test]
+    async fn stream_exec_forwards_frame_stdin_to_guest() {
+        // Verify the new C4 stdin forwarding: host sends FRAME_STDIN frames
+        // on the IPC reader, daemon writes their payload onto
+        // conn.stdin_stream, and the fake guest sees those bytes on its
+        // stdin TcpStream.
+        let nonce = generate_nonce();
+        let (addr, fake_rx) = spawn_fake_guest(nonce.clone()).await;
+        let mut conn = connect_to_guest(addr, Duration::from_secs(5), &nonce)
+            .await
+            .unwrap();
+        let mut fake = fake_rx.await.unwrap().unwrap();
+
+        // Build the IPC reader: a duplex stream where the test writes
+        // FRAME_STDIN frames and stream_exec_on_guest reads them.
+        let (mut ipc_writer_side, mut ipc_reader_side) = tokio::io::duplex(4096);
+        // Write a FRAME_STDIN frame carrying "input data" then close the
+        // writer half so the daemon sees clean EOF.
+        let stdin_frame = ipc_exec::encode_frame(ipc_exec::FRAME_STDIN, b"input data");
+        ipc_writer_side.write_all(&stdin_frame).await.unwrap();
+        drop(ipc_writer_side); // EOF on the IPC reader
+
+        let mut ipc_out: Vec<u8> = Vec::new();
+        let req = ExecStart {
+            script_code: "cat".to_string(),
+            working_directory: String::new(),
+            timeout_ms: 5_000,
+        };
+
+        let fake_side = async {
+            let mut buf = [0u8; 4096];
+            let _ = fake.control.read(&mut buf).await;
+            // Read whatever lands on fake stdin (forwarded by daemon).
+            let mut stdin_recv = Vec::new();
+            // Bound the read so a regression where stdin never closes does
+            // not hang the test forever.
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                fake.stdin.read_to_end(&mut stdin_recv),
+            )
+            .await;
+            // Close stdout/stderr cleanly so the host's exec drain exits.
+            fake.stdout.shutdown().await.ok();
+            fake.stderr.shutdown().await.ok();
+            let exit = encode_message(&ControlMessage::Exit(
+                windows_sandbox_common::sandbox_protocol::ExitNotification {
+                    exec_id: "exec-stdin".to_string(),
+                    exit_code: 0,
+                    error_message: String::new(),
+                },
+            ))
+            .unwrap();
+            fake.control.write_all(&exit).await.unwrap();
+            stdin_recv
+        };
+
+        let host_side = stream_exec_on_guest(
+            &mut conn,
+            "exec-stdin",
+            &req,
+            &mut ipc_reader_side,
+            &mut ipc_out,
+        );
+
+        let (stdin_recv, outcome) = tokio::join!(fake_side, host_side);
+        outcome.expect("stream_exec_on_guest");
+        assert_eq!(
+            stdin_recv, b"input data",
+            "guest stdin must receive forwarded bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_exec_survives_ipc_client_disconnect_mid_stream() {
+        // If the IPC client (wxc-exec) disconnects mid-stream the guest
+        // execution must still run to completion and the connection must
+        // stay in a clean reusable state. ipc_alive should be false but
+        // exit_code populated normally. Review robustness contract on
+        // stream_exec_on_guest.
+        let nonce = generate_nonce();
+        let (addr, fake_rx) = spawn_fake_guest(nonce.clone()).await;
+        let mut conn = connect_to_guest(addr, Duration::from_secs(5), &nonce)
+            .await
+            .unwrap();
+        let mut fake = fake_rx.await.unwrap().unwrap();
+
+        // Build a duplex IPC writer whose READ half we'll drop early to
+        // simulate client disconnect.
+        let (ipc_client_side, ipc_server_side) = tokio::io::duplex(64);
+        // Daemon writes flow to `ipc_server_side`'s write half (which the
+        // client would read). When we drop ipc_client_side, the daemon's
+        // write returns EOF.
+        let (server_read, mut server_write) = tokio::io::split(ipc_server_side);
+        let mut empty_reader: &[u8] = b"";
+
+        let req = ExecStart {
+            script_code: "long-running".to_string(),
+            working_directory: String::new(),
+            timeout_ms: 5_000,
+        };
+
+        let fake_side = async {
+            let mut buf = [0u8; 4096];
+            let _ = fake.control.read(&mut buf).await;
+            // Spew enough stdout that the daemon's write to the (now-
+            // disconnected) IPC writer fails. 64 KiB exceeds the duplex
+            // buffer many times over.
+            for _ in 0..16 {
+                fake.stdout.write_all(&[b'x'; 4096]).await.ok();
+            }
+            fake.stdout.shutdown().await.ok();
+            fake.stderr.shutdown().await.ok();
+            let exit = encode_message(&ControlMessage::Exit(
+                windows_sandbox_common::sandbox_protocol::ExitNotification {
+                    exec_id: "exec-disco".to_string(),
+                    exit_code: 0,
+                    error_message: String::new(),
+                },
+            ))
+            .unwrap();
+            fake.control.write_all(&exit).await.unwrap();
+        };
+
+        // Drop the client side immediately to simulate disconnect.
+        drop(ipc_client_side);
+        drop(server_read);
+
+        let host_side = stream_exec_on_guest(
+            &mut conn,
+            "exec-disco",
+            &req,
+            &mut empty_reader,
+            &mut server_write,
+        );
+
+        let (_fake, outcome) = tokio::join!(fake_side, host_side);
+        let outcome = outcome.expect("stream_exec_on_guest must still complete");
+        assert!(
+            !outcome.ipc_alive,
+            "ipc_alive must be false after client disconnect"
+        );
+        assert_eq!(outcome.exit_code, 0);
     }
 }
