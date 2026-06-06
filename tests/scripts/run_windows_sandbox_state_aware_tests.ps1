@@ -90,6 +90,34 @@ if (-not (Test-Path 'C:\Windows\System32\WindowsSandbox.exe')) {
     exit 0
 }
 
+# Pre-flight: reap stale state from a prior failed run, and wait for vmmem
+# residue to release before we try to start a new VM. The state-aware path
+# only ever holds ONE VM (vs the one-shot script's 10), so memory pressure
+# is normally fine, but vmmem from a recent prior run can transiently reserve
+# 2+ GB; starting before it releases risks OOM on a small host.
+Write-Host "Pre-flight: reaping any stale wxc-windows-sandbox-daemon / WindowsSandbox processes..." -ForegroundColor Yellow
+Get-Process -Name 'wxc-windows-sandbox-daemon', 'WindowsSandbox*' -ErrorAction SilentlyContinue |
+    ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+# Also nuke any stale state-aware records so a prior crashed daemon does not
+# trip start with "another sandbox is already active" diagnostics.
+Remove-Item -Recurse -Force (Join-Path $env:TEMP 'wxc-wsb\state-aware') -ErrorAction SilentlyContinue
+
+$preflightDeadline = (Get-Date).AddSeconds(120)
+while ((Get-Date) -lt $preflightDeadline) {
+    $vmmem = @(Get-Process -Name 'vmmem*' -ErrorAction SilentlyContinue)
+    # vmmemCmZygote is always present on hosts with the Containers feature;
+    # we only wait for any *additional* vmmem from a prior sandbox to release.
+    if ($vmmem.Count -le 1) { break }
+    Start-Sleep -Seconds 5
+}
+$os = Get-CimInstance Win32_OperatingSystem
+$freeMb = [int]($os.FreePhysicalMemory / 1024)
+if ($freeMb -lt 2048) {
+    Write-Host "SKIPPED: insufficient free memory before start ($freeMb MB free, need >=2048 MB). Close other workloads and retry." -ForegroundColor Yellow
+    exit 0
+}
+Write-Host "Pre-flight OK: $freeMb MB free, no orphan vmmem`n" -ForegroundColor DarkGray
+
 # ---------------- Helpers ----------------
 
 # Encode a state-aware request envelope and run wxc-exec against it. Captures
@@ -293,5 +321,12 @@ foreach ($t in $script:TestResults) {
     }
 }
 Write-Host ("PASS: {0}   FAIL: {1}" -f $pass, $fail) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
+
+# Final reap so a failed run does not strand a daemon or VM that would block
+# the next attempt's pre-flight memory check.
+Write-Host ""
+Write-Host "Final reap of any lingering daemon / VM processes..." -ForegroundColor Yellow
+Get-Process -Name 'wxc-windows-sandbox-daemon', 'WindowsSandbox*' -ErrorAction SilentlyContinue |
+    ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 
 exit $(if ($fail -eq 0) { 0 } else { 1 })
