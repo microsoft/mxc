@@ -48,10 +48,10 @@ use wxc_common::state_aware_backend::{
 use windows::Win32::Foundation::HANDLE;
 
 use crate::control_plane::{
-    self, daemon_record_path, generate_nonce, live_daemon, read_daemon_record, read_sandbox_record,
-    running_process_creation_time, sandbox_dir, sandbox_record_path, DaemonRecord,
-    MappedFolderRecord, SandboxRecord, SandboxState, TransitionLock, IPC_ERR, IPC_ERR_BUSY,
-    IPC_ERR_NOT_READY, IPC_EXEC, IPC_OK, IPC_STOP,
+    self, generate_nonce, live_daemon, read_daemon_record, read_sandbox_record,
+    running_process_creation_time, sandbox_dir, DaemonRecord, MappedFolderRecord, SandboxRecord,
+    SandboxState, TransitionLock, IPC_ERR, IPC_ERR_BUSY, IPC_ERR_NOT_READY, IPC_EXEC, IPC_OK,
+    IPC_STOP,
 };
 use crate::error::OneShotError;
 use crate::ipc_exec::{self, ExecExit, ExecStart, FRAME_EXIT, FRAME_STDERR, FRAME_STDOUT};
@@ -138,7 +138,7 @@ fn cleanup_stale_daemon_orphan(sandbox_id: &str) -> Result<(), MxcError> {
         control_plane::StaleDaemonCleanup::NoLiveVm => {
             // Stale record is irrelevant — its VM (if any) is gone. Remove it
             // so future phases (and a future start) start clean.
-            let _ = std::fs::remove_file(daemon_record_path());
+            let _ = control_plane::remove_daemon_record();
             Ok(())
         }
         control_plane::StaleDaemonCleanup::Reclaim { proof } => {
@@ -167,7 +167,7 @@ fn cleanup_stale_daemon_orphan(sandbox_id: &str) -> Result<(), MxcError> {
             let outcome = rt.block_on(crate::vm::teardown_via_plan(&kill_set));
             match outcome {
                 control_plane::TeardownOutcome::ConfirmedGone => {
-                    let _ = std::fs::remove_file(daemon_record_path());
+                    let _ = control_plane::remove_daemon_record();
                     Ok(())
                 }
                 control_plane::TeardownOutcome::StillRunning(remaining) => {
@@ -621,7 +621,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
             .collect();
 
         let record = SandboxRecord::new_provisioned(sandbox_id.clone(), mapped_folders);
-        control_plane::atomic_write_json(&sandbox_record_path(&token), &record)
+        control_plane::write_sandbox_record(&token, &record)
             .map_err(|e| MxcError::backend_error(format!("write sandbox record: {e}")))?;
 
         Ok(ProvisionResult {
@@ -718,7 +718,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         }
 
         record.state = SandboxState::Started;
-        control_plane::atomic_write_json(&sandbox_record_path(token), &record)
+        control_plane::write_sandbox_record(token, &record)
             .map_err(|e| MxcError::backend_error(format!("update sandbox record: {e}")))?;
 
         Ok(StartResult { metadata: None })
@@ -790,7 +790,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
                     )));
                 }
                 wait_daemon_gone(d.pid, d.pid_creation_time)?;
-                let _ = std::fs::remove_file(daemon_record_path());
+                let _ = control_plane::remove_daemon_record();
             }
             Some(d) => {
                 // A live daemon exists but is holding a different sandbox.
@@ -817,7 +817,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         }
 
         record.state = SandboxState::Stopped;
-        control_plane::atomic_write_json(&sandbox_record_path(token), &record)
+        control_plane::write_sandbox_record(token, &record)
             .map_err(|e| MxcError::backend_error(format!("update sandbox record: {e}")))?;
 
         Ok(StopResult { metadata: None })
@@ -852,7 +852,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
                     )));
                 }
                 wait_daemon_gone(d.pid, d.pid_creation_time)?;
-                let _ = std::fs::remove_file(daemon_record_path());
+                let _ = control_plane::remove_daemon_record();
             }
             Some(d) => {
                 return Err(MxcError::backend_error(format!(
@@ -874,14 +874,9 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
             }
         }
 
-        let dir = sandbox_dir(token);
-        if let Err(e) = std::fs::remove_dir_all(&dir) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(MxcError::backend_error(format!(
-                    "remove sandbox dir {dir:?}: {e}"
-                )));
-            }
-        }
+        control_plane::remove_sandbox_dir(token).map_err(|e| {
+            MxcError::backend_error(format!("remove sandbox dir for {sandbox_id}: {e}"))
+        })?;
 
         Ok(DeprovisionResult { metadata: None })
     }

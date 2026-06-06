@@ -950,6 +950,29 @@ fn main() {
             // `windows_sandbox` config (idle timeout / pipe name) are no longer
             // consulted here; the long-lived VM is the state-aware lifecycle's
             // concern.
+            //
+            // Review G8: if the caller supplied a non-default
+            // `experimental.windows_sandbox` block, warn explicitly that the
+            // settings are being ignored - the previous code silently dropped
+            // them, which made a perf-regression diagnosis ("my warm reuse
+            // stopped working") much harder than it needed to be. Default
+            // values are not warned about (a request with no explicit block
+            // deserialises to the same default, so warning would be noise).
+            if let Some(ref ws) = request.experimental.windows_sandbox {
+                let default = wxc_common::models::WindowsSandboxConfig::default();
+                if ws.idle_timeout_ms != default.idle_timeout_ms
+                    || ws.daemon_pipe_name != default.daemon_pipe_name
+                {
+                    eprintln!(
+                        "[wxc-exec] WARNING: experimental.windows_sandbox.idle_timeout_ms / \
+                         daemon_pipe_name are no longer honored by the one-shot path (each call \
+                         spawns a fresh, disposable VM). For warm reuse, switch to the \
+                         state-aware lifecycle (provisionSandbox / startSandbox / execInSandbox \
+                         / stopSandbox / deprovisionSandbox) - see \
+                         docs/windows-sandbox/windows-sandbox.md."
+                    );
+                }
+            }
             Box::new(WindowsSandboxRunner::new())
         }
         ContainmentBackend::IsolationSession => {

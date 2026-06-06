@@ -128,20 +128,33 @@ Filesystem policy is honored **at provision** and is **immutable** thereafter â€
 
 ### SDK usage
 
+> **Note**: Windows Sandbox is an experimental backend; every state-aware
+> SDK call must pass `{ experimental: true }` in the options or the
+> underlying `wxc-exec` binary will refuse with
+> `Error: Windows Sandbox is an experimental feature. Use --experimental flag.`
+> Once Windows Sandbox is promoted out of experimental (tracked in
+> [`docs/versioning.md`](../versioning.md)), the option will become unnecessary.
+
 ```typescript
 import {
   provisionSandbox, startSandbox, execInSandboxAsync, stopSandbox, deprovisionSandbox,
 } from '@microsoft/mxc-sdk';
 
-const { sandboxId } = await provisionSandbox('windows_sandbox', {
-  filesystem: { readwritePaths: ['C:\\workspace'], readonlyPaths: ['C:\\inputs'] },
-});
-await startSandbox(sandboxId);
-const { stdout, exitCode } = await execInSandboxAsync(sandboxId, {
-  process: { commandLine: 'echo hello-from-wsb' },
-});
-await stopSandbox(sandboxId);
-await deprovisionSandbox(sandboxId);
+const opts = { experimental: true };
+
+const { sandboxId } = await provisionSandbox(
+  'windows_sandbox',
+  { filesystem: { readwritePaths: ['C:\\workspace'], readonlyPaths: ['C:\\inputs'] } },
+  opts,
+);
+await startSandbox(sandboxId, undefined, opts);
+const { stdout, exitCode } = await execInSandboxAsync(
+  sandboxId,
+  { process: { commandLine: 'echo hello-from-wsb' } },
+  opts,
+);
+await stopSandbox(sandboxId, undefined, opts);
+await deprovisionSandbox(sandboxId, undefined, opts);
 ```
 
 State-aware requests use schema version `0.6.0-alpha`. The backend is inferred from the `wsb:` prefix on the `sandboxId` for all non-provision phases.

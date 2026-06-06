@@ -1001,6 +1001,51 @@ pub fn live_daemon() -> Result<Option<DaemonRecord>> {
 }
 
 // ---------------------------------------------------------------------------
+// Record CRUD helpers (review G6)
+// ---------------------------------------------------------------------------
+//
+// Earlier code reached directly into atomic_write_json + path-derivation
+// (sandbox_record_path / daemon_record_path) from consumers. That leaked the
+// FS-storage mechanism (atomic temp-and-rename, owner-only DACL on the parent)
+// out of this module and made it easy to forget the DACL hardening at a new
+// call site. The helpers below encapsulate the storage contract: callers say
+// "write this DaemonRecord" / "remove the sandbox dir for this token" and the
+// helper does the right thing.
+
+/// Atomically write `record` to the global daemon record path. Wraps
+/// [`atomic_write_json`] so consumers do not see the temp-and-rename or
+/// owner-only-DACL hardening details.
+pub fn write_daemon_record(record: &DaemonRecord) -> Result<()> {
+    atomic_write_json(&daemon_record_path(), record)
+}
+
+/// Remove the global daemon record file (best-effort: returns the io::Error
+/// only on a hard failure, treats NotFound as success).
+pub fn remove_daemon_record() -> std::io::Result<()> {
+    match std::fs::remove_file(daemon_record_path()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Atomically write the per-sandbox `record` for `token` to disk.
+pub fn write_sandbox_record(token: &str, record: &SandboxRecord) -> Result<()> {
+    atomic_write_json(&sandbox_record_path(token), record)
+}
+
+/// Remove the per-sandbox scratch directory and all records inside it (best
+/// effort: NotFound is treated as success). Used by `deprovision` after the
+/// orphan-cleanup classifier has confirmed no live VM holds the slot.
+pub fn remove_sandbox_dir(token: &str) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(sandbox_dir(token)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Daemon IPC line protocol
 // ---------------------------------------------------------------------------
 //

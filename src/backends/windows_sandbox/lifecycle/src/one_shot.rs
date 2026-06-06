@@ -27,20 +27,11 @@ use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 
 use crate::control_plane::{HostVmLock, VmOwnership};
 use crate::error::OneShotError;
+use crate::rendezvous::{GUEST_CONNECT_TIMEOUT, RENDEZVOUS_POLL_INTERVAL, RENDEZVOUS_TIMEOUT};
 use crate::teardown::{self, Reconcile, VmTeardownGuard};
 use crate::{bridge, policy, rendezvous, vm};
 
 use windows_sandbox_common::auth as wsb_auth;
-
-/// Maximum time to wait for the guest agent's rendezvous file. First VM boot
-/// can take several minutes; 360s covers worst-case cold starts.
-const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(360);
-
-/// Polling interval when checking for the rendezvous file.
-const RENDEZVOUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
-
-/// Maximum time to connect to the guest agent after rendezvous.
-const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Bounded wait to acquire the host VM-slot mutex. The host permits a single
 /// running Windows Sandbox VM; if another VM owner (a concurrent one-shot or a

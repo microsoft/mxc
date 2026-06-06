@@ -36,22 +36,15 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::{Mutex, Notify};
 use windows_sandbox_lifecycle::control_plane::{
-    self, daemon_record_path, process_creation_time, DaemonRecord, MappedFolderRecord, VmOwnership,
-    VmProcId, RECORD_SCHEMA_VERSION,
+    self, process_creation_time, DaemonRecord, MappedFolderRecord, VmOwnership, VmProcId,
+    RECORD_SCHEMA_VERSION,
+};
+use windows_sandbox_lifecycle::rendezvous::{
+    GUEST_CONNECT_TIMEOUT, RENDEZVOUS_POLL_INTERVAL, RENDEZVOUS_TIMEOUT,
 };
 use windows_sandbox_lifecycle::{bridge as tcp_bridge, rendezvous, vm as sandbox_vm};
 
 use control_server::GuestSlot;
-
-/// Maximum time to wait for the guest agent's rendezvous file. First VM boot
-/// can take several minutes; 360s covers worst-case cold starts.
-const RENDEZVOUS_TIMEOUT_SECS: u64 = 360;
-
-/// Polling interval when checking for the rendezvous file.
-const RENDEZVOUS_POLL_INTERVAL_MS: u64 = 500;
-
-/// Maximum time to connect to the guest agent after rendezvous.
-const GUEST_CONNECT_TIMEOUT_SECS: u64 = 30;
 
 /// Interval at which the VM-crash watchdog polls for live Windows Sandbox host
 /// processes once the sandbox is `ready`.
@@ -265,8 +258,7 @@ async fn main() -> Result<()> {
         // Populated once the VM is up and its host processes are known.
         vm_processes: Vec::new(),
     };
-    control_plane::atomic_write_json(&daemon_record_path(), &starting)
-        .context("write starting daemon record")?;
+    control_plane::write_daemon_record(&starting).context("write starting daemon record")?;
 
     // Tracks how far VM ownership has progressed within this daemon. The
     // cleanup path derives its teardown decision purely from this state
@@ -369,7 +361,7 @@ async fn main() -> Result<()> {
         }
     };
     if may_clear_record {
-        let _ = std::fs::remove_file(daemon_record_path());
+        let _ = control_plane::remove_daemon_record();
     }
     eprintln!("[wsb-daemon] exiting");
     outcome
@@ -459,8 +451,7 @@ async fn serve(
         );
     }
     record.ready = true;
-    control_plane::atomic_write_json(&daemon_record_path(), &record)
-        .context("write ready daemon record")?;
+    control_plane::write_daemon_record(&record).context("write ready daemon record")?;
     eprintln!("[wsb-daemon] ready; holding {sandbox_id}");
 
     // Hold the guest connection alive while serving IPC until either an
@@ -637,25 +628,21 @@ async fn launch_and_connect(
     } else {
         record.vm_processes = proof.clone();
         *ownership.lock().expect("ownership mutex poisoned") = VmOwnership::Owned(proof);
-        control_plane::atomic_write_json(&daemon_record_path(), record)
+        control_plane::write_daemon_record(record)
             .context("persist after-launch ownership proof record")?;
     }
 
     let guest_addr = rendezvous::wait_for_rendezvous(
         &rendezvous_dir,
-        std::time::Duration::from_secs(RENDEZVOUS_TIMEOUT_SECS),
-        std::time::Duration::from_millis(RENDEZVOUS_POLL_INTERVAL_MS),
+        RENDEZVOUS_TIMEOUT,
+        RENDEZVOUS_POLL_INTERVAL,
     )
     .await
     .context("rendezvous failed")?;
 
-    let conn = tcp_bridge::connect_to_guest(
-        guest_addr,
-        std::time::Duration::from_secs(GUEST_CONNECT_TIMEOUT_SECS),
-        guest_nonce,
-    )
-    .await
-    .context("connect to guest agent")?;
+    let conn = tcp_bridge::connect_to_guest(guest_addr, GUEST_CONNECT_TIMEOUT, guest_nonce)
+        .await
+        .context("connect to guest agent")?;
 
     Ok((conn, guest_addr))
 }

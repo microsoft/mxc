@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `getPlatformSupport()` now reports `uiCapabilities` on Windows when the
   native probe can determine which UI restrictions the host can enforce.
+- **State-aware lifecycle support for `windows_sandbox`** (Windows-only,
+  still experimental — every call must pass `{ experimental: true }`).
+  The new `WindowsSandboxProvisionConfig` / `WindowsSandboxStartConfig` /
+  `WindowsSandboxExecConfig` / `WindowsSandboxStopConfig` /
+  `WindowsSandboxDeprovisionConfig` types are exported via
+  `state-aware-types`; `provisionSandbox('windows_sandbox', …)` mints a
+  `wsb:<token>` sandboxId that the rest of the lifecycle (`startSandbox`
+  / `execInSandbox` / `execInSandboxAsync` / `stopSandbox` /
+  `deprovisionSandbox`) routes to the new host-side daemon. Filesystem
+  policy (`readwritePaths` / `readonlyPaths` / `deniedPaths`) is honored
+  at provision and is immutable thereafter; `network` / `ui` / Entra
+  `user` bundles are not honored on this backend. See
+  [`docs/windows-sandbox/windows-sandbox.md`](../docs/windows-sandbox/windows-sandbox.md)
+  for the full per-phase config matrix.
 
 ## [0.3.0]
 
