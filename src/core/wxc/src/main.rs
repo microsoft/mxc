@@ -17,7 +17,8 @@ use hyperlight_common::HyperlightScriptRunner;
 use isolation_session_common::IsolationSessionRunner;
 #[cfg(feature = "microvm")]
 use nanvix_runner::NanVixScriptRunner;
-use windows_sandbox_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
+#[cfg(target_os = "windows")]
+use windows_sandbox_lifecycle::WindowsSandboxRunner;
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{
     is_base_container_version, load_mxc_request_with_options, load_request, LoadOptions, ParseError,
@@ -27,7 +28,7 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
-#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+#[cfg(target_os = "windows")]
 use wxc_common::state_aware_dispatch::dispatch_state_aware;
 use wxc_common::state_aware_dispatch::{resolve_backend, run_state_aware, DispatchOutcome};
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -260,6 +261,11 @@ fn dispatch_state_aware_request(
 ) -> Result<DispatchOutcome, MxcError> {
     let backend = resolve_backend(&parsed)?;
     match backend {
+        #[cfg(target_os = "windows")]
+        wxc_common::models::ContainmentBackend::WindowsSandbox => {
+            let mut runner = WindowsSandboxRunner::new();
+            dispatch_state_aware(&mut runner, parsed, dry_run)
+        }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
@@ -447,9 +453,10 @@ fn main() {
         Ok(report) => {
             if report.files_processed > 0 || !report.errors.is_empty() {
                 eprintln!(
-                    "DACL recovery: {} file(s), {} ACE(s) restored, {} error(s)",
+                    "DACL recovery: {} file(s), {} ACE(s) restored, {} pruned (missing), {} error(s)",
                     report.files_processed,
                     report.aces_restored,
+                    report.aces_pruned_missing,
                     report.errors.len()
                 );
                 for e in &report.errors {
@@ -938,13 +945,35 @@ fn main() {
                 );
                 process::exit(1);
             }
-            let sandbox_config = request
-                .experimental
-                .windows_sandbox
-                .as_ref()
-                .cloned()
-                .unwrap_or_default();
-            Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
+            // Transient one-shot: each invocation launches a FRESH disposable
+            // VM and guarantees its teardown. Daemon-backed warm reuse and the
+            // `windows_sandbox` config (idle timeout / pipe name) are no longer
+            // consulted here; the long-lived VM is the state-aware lifecycle's
+            // concern.
+            //
+            // Review G8: if the caller supplied a non-default
+            // `experimental.windows_sandbox` block, warn explicitly that the
+            // settings are being ignored - the previous code silently dropped
+            // them, which made a perf-regression diagnosis ("my warm reuse
+            // stopped working") much harder than it needed to be. Default
+            // values are not warned about (a request with no explicit block
+            // deserialises to the same default, so warning would be noise).
+            if let Some(ref ws) = request.experimental.windows_sandbox {
+                let default = wxc_common::models::WindowsSandboxConfig::default();
+                if ws.idle_timeout_ms != default.idle_timeout_ms
+                    || ws.daemon_pipe_name != default.daemon_pipe_name
+                {
+                    eprintln!(
+                        "[wxc-exec] WARNING: experimental.windows_sandbox.idle_timeout_ms / \
+                         daemon_pipe_name are no longer honored by the one-shot path (each call \
+                         spawns a fresh, disposable VM). For warm reuse, switch to the \
+                         state-aware lifecycle (provisionSandbox / startSandbox / execInSandbox \
+                         / stopSandbox / deprovisionSandbox) - see \
+                         docs/windows-sandbox/windows-sandbox.md."
+                    );
+                }
+            }
+            Box::new(WindowsSandboxRunner::new())
         }
         ContainmentBackend::IsolationSession => {
             #[cfg(feature = "isolation_session")]
