@@ -40,6 +40,7 @@ pub async fn run_command_loop(
     stdout_stream: TcpStream,
     stderr_stream: TcpStream,
     listener: &TcpListener,
+    expected_nonce: &windows_sandbox_common::auth::Nonce,
 ) -> Result<()> {
     // Announce the protocol magic + version so the host can fail fast on a
     // version/identity mismatch before any framed messages are exchanged.
@@ -94,7 +95,7 @@ pub async fn run_command_loop(
                             // execution. The listener is already bound so the
                             // daemon's connects queue in the TCP backlog.
                             let (new_stdin, new_stdout, new_stderr) =
-                                reconnect_streams(&mut control, listener).await?;
+                                reconnect_streams(&mut control, listener, expected_nonce).await?;
                             current_stdin = new_stdin;
                             current_stdout = new_stdout;
                             current_stderr = new_stderr;
@@ -156,6 +157,7 @@ async fn handle_exec(
 async fn reconnect_streams(
     control: &mut TcpStream,
     listener: &TcpListener,
+    expected_nonce: &windows_sandbox_common::auth::Nonce,
 ) -> Result<(TcpStream, TcpStream, TcpStream)> {
     let ready_frame =
         encode_message(&ControlMessage::StreamsReady).context("encode StreamsReady")?;
@@ -165,7 +167,7 @@ async fn reconnect_streams(
         .context("send StreamsReady")?;
     eprintln!("[guest] StreamsReady sent, accepting new data connections");
 
-    let streams = crate::listener::accept_data_connections(listener)
+    let streams = crate::listener::accept_data_connections(listener, expected_nonce)
         .await
         .context("re-accept data connections")?;
     eprintln!("[guest] new data connections accepted, ready for next exec");

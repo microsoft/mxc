@@ -29,6 +29,7 @@
 use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Data-frame kind: raw stdout bytes from the guest child process.
 pub const FRAME_STDOUT: u8 = 1;
@@ -36,6 +37,11 @@ pub const FRAME_STDOUT: u8 = 1;
 pub const FRAME_STDERR: u8 = 2;
 /// Data-frame kind: terminal exit frame (payload = JSON [`ExecExit`]).
 pub const FRAME_EXIT: u8 = 3;
+/// Data-frame kind: raw stdin bytes from the exec-phase client to the daemon,
+/// forwarded onto the guest child's stdin. Zero-payload frames are valid (and
+/// ignored); a clean EOF on the IPC reader is what triggers guest stdin
+/// shutdown, not a special "end of stdin" frame. See [`crate::bridge::stream_exec_on_guest`].
+pub const FRAME_STDIN: u8 = 4;
 
 /// Upper bound on a single IPC frame's payload (defensive against a malformed
 /// or hostile localhost client that holds the nonce). Matches the guest
@@ -140,6 +146,37 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Option<DataFrame>> {
     }
     let mut payload = vec![0u8; len];
     r.read_exact(&mut payload)?;
+    Ok(Some(DataFrame { kind, payload }))
+}
+
+/// Read one data frame from an async stream. The exact tokio mirror of
+/// [`read_frame`] used by the daemon's [`crate::bridge::stream_exec_on_guest`]
+/// to drain inbound [`FRAME_STDIN`] frames from the IPC client concurrently
+/// with the guest's stdout/stderr/control streams.
+///
+/// Returns `Ok(None)` on a *clean* EOF at a frame boundary (the IPC client
+/// closed its half of the connection — this is the daemon's signal to
+/// shutdown the guest's stdin). A partial frame followed by EOF is surfaced
+/// as `UnexpectedEof`.
+pub async fn read_frame_async<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<DataFrame>> {
+    let mut first = [0u8; 1];
+    match r.read(&mut first).await? {
+        0 => return Ok(None),
+        1 => {}
+        _ => unreachable!("read into a 1-byte slice cannot exceed 1"),
+    }
+    let mut tail = [0u8; 4];
+    r.read_exact(&mut tail).await?;
+    let kind = first[0];
+    let len = u32::from_le_bytes(tail) as usize;
+    if len > MAX_IPC_FRAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("IPC frame too large: {len} bytes"),
+        ));
+    }
+    let mut payload = vec![0u8; len];
+    r.read_exact(&mut payload).await?;
     Ok(Some(DataFrame { kind, payload }))
 }
 

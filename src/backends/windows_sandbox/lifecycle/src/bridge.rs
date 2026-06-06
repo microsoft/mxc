@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use windows_sandbox_common::auth::{self, Nonce};
 use windows_sandbox_common::sandbox_protocol::{
     decode_message, encode_message, validate_preamble, ControlMessage, DecodeResult, ExecRequest,
     PREAMBLE_LEN,
@@ -77,15 +78,32 @@ pub struct ExecResult {
 
 /// Connect to the guest agent at `addr`, establishing all 4 channels.
 /// Waits for the `Ready` message on the control channel before returning.
+///
+/// `nonce` is the per-launch authentication token that the host wrote to
+/// the rendezvous folder's `nonce.bin` before launching the VM, and that
+/// the guest read + deleted at boot. Each TCP connection's first
+/// [`auth::NONCE_LEN`] bytes are this nonce; the guest verifies it
+/// (constant-time compare) and drops the connection on mismatch — closing
+/// the local-process hijack window the previous "accept-by-order" design
+/// left open (review finding C2).
 pub async fn connect_to_guest(
     addr: SocketAddr,
     timeout: std::time::Duration,
+    nonce: &Nonce,
 ) -> Result<GuestConnection> {
     let connect = |label: &'static str| async move {
-        tokio::time::timeout(timeout, TcpStream::connect(addr))
+        let mut stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
             .await
             .with_context(|| format!("timeout connecting {} to {}", label, addr))?
-            .with_context(|| format!("connect {} to {}", label, addr))
+            .with_context(|| format!("connect {} to {}", label, addr))?;
+        // Authenticate immediately so a local-process accept-race that
+        // beats the legitimate connect is detected before any protocol
+        // bytes are exchanged. Bounded by the same `timeout` budget.
+        tokio::time::timeout(timeout, auth::write_nonce(&mut stream, nonce))
+            .await
+            .with_context(|| format!("timeout writing nonce on {} to {}", label, addr))?
+            .with_context(|| format!("write nonce on {} to {}", label, addr))?;
+        Ok::<TcpStream, anyhow::Error>(stream)
     };
 
     let control = connect("control").await?;
@@ -283,10 +301,16 @@ pub async fn execute_on_guest(
 ///
 /// `control_residual` is any bytes already read from the control channel
 /// beyond the EXIT frame (they may contain the StreamsReady message).
+///
+/// `nonce` is the same per-launch nonce passed to [`connect_to_guest`];
+/// each reconnected data stream re-authenticates with it so a local-
+/// process hijacker cannot steal a per-exec data stream either (the
+/// hijack threat is identical at boot and at reconnect — review C2).
 pub async fn reconnect_data_streams(
     conn: &mut GuestConnection,
     addr: SocketAddr,
     control_residual: Vec<u8>,
+    nonce: &Nonce,
 ) -> Result<()> {
     let mut buf = control_residual;
     let mut tmp = [0u8; 256];
@@ -308,12 +332,25 @@ pub async fn reconnect_data_streams(
                     let connect = |label: &'static str| {
                         let target = addr;
                         async move {
-                            tokio::time::timeout(connect_timeout, TcpStream::connect(target))
-                                .await
-                                .with_context(|| {
-                                    format!("timeout reconnecting {} to {}", label, target)
-                                })?
-                                .with_context(|| format!("reconnect {} to {}", label, target))
+                            let mut stream =
+                                tokio::time::timeout(connect_timeout, TcpStream::connect(target))
+                                    .await
+                                    .with_context(|| {
+                                        format!("timeout reconnecting {} to {}", label, target)
+                                    })?
+                                    .with_context(|| {
+                                        format!("reconnect {} to {}", label, target)
+                                    })?;
+                            tokio::time::timeout(
+                                connect_timeout,
+                                auth::write_nonce(&mut stream, nonce),
+                            )
+                            .await
+                            .with_context(|| format!("timeout writing reconnect nonce on {label}"))?
+                            .with_context(|| {
+                                format!("write reconnect nonce on {label} to {target}")
+                            })?;
+                            Ok::<TcpStream, anyhow::Error>(stream)
                         }
                     };
 
@@ -399,13 +436,15 @@ pub struct StreamExecOutcome {
 /// boundary so the connection can be reused for the next exec. The exit payload
 /// is returned only after stdout EOF + stderr EOF + the guest `Exit`, so no
 /// output is ever truncated.
-pub async fn stream_exec_on_guest<W>(
+pub async fn stream_exec_on_guest<R, W>(
     conn: &mut GuestConnection,
     exec_id: &str,
     req: &ExecStart,
+    ipc_reader: &mut R,
     ipc: &mut W,
 ) -> Result<StreamExecOutcome>
 where
+    R: tokio::io::AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     // Send the EXEC command on the control channel.
@@ -418,22 +457,22 @@ where
     let frame = encode_message(&exec_msg).context("encode EXEC")?;
     conn.control.write_all(&frame).await.context("send EXEC")?;
 
-    // No stdin in this phase: signal EOF so a command reading stdin does not
-    // block until timeout.
-    conn.stdin_stream
-        .shutdown()
-        .await
-        .context("shutdown guest stdin")?;
-
-    // Disjoint mutable borrows of the three channels so `select!` can poll them
-    // concurrently.
+    // Disjoint mutable borrows of the four channels so `select!` can poll
+    // them concurrently. Note: stdin is NOT shutdown up-front — review C4.
+    // Instead the select! loop drains FRAME_STDIN frames from `ipc_reader`
+    // and writes their payloads onto `conn.stdin_stream` as they arrive. A
+    // clean EOF on `ipc_reader` triggers a graceful `stdin_stream.shutdown()`
+    // so commands reading stdin see EOF and do not block until timeout.
     let control = &mut conn.control;
     let stdout = &mut conn.stdout_stream;
     let stderr = &mut conn.stderr_stream;
+    let stdin_out = &mut conn.stdin_stream;
 
     let mut ipc_alive = true;
     let mut stdout_done = false;
     let mut stderr_done = false;
+    let mut stdin_in_done = false;
+    let mut stdin_out_closed = false;
     let mut stdout_seen: u64 = 0;
     let mut stderr_seen: u64 = 0;
     let mut exit: Option<(i32, String)> = None;
@@ -473,6 +512,51 @@ where
                     }
                 }
             }
+            r = ipc_exec::read_frame_async(ipc_reader), if !stdin_in_done => {
+                match r {
+                    Ok(None) => {
+                        // IPC client closed its half cleanly: signal guest
+                        // stdin EOF so commands reading stdin can exit.
+                        stdin_in_done = true;
+                        if !stdin_out_closed {
+                            let _ = stdin_out.shutdown().await;
+                            stdin_out_closed = true;
+                        }
+                    }
+                    Ok(Some(frame)) if frame.kind == ipc_exec::FRAME_STDIN => {
+                        if !frame.payload.is_empty() && !stdin_out_closed {
+                            if let Err(e) = stdin_out.write_all(&frame.payload).await {
+                                eprintln!(
+                                    "[daemon] guest stdin write failed: {e}; closing stdin and \
+                                     continuing exec"
+                                );
+                                let _ = stdin_out.shutdown().await;
+                                stdin_out_closed = true;
+                            }
+                        }
+                    }
+                    Ok(Some(frame)) => {
+                        // Tolerate unexpected frame kinds from the client
+                        // (e.g. a forward-compatible client speaking a newer
+                        // frame type). Skip the payload, keep draining.
+                        eprintln!(
+                            "[daemon] ignoring unexpected IPC frame kind {} during exec",
+                            frame.kind
+                        );
+                    }
+                    Err(e) => {
+                        // A malformed / oversized / abrupt-close IPC frame:
+                        // stop forwarding stdin but keep draining the guest
+                        // to completion so the slot is freed cleanly.
+                        eprintln!("[daemon] IPC stdin reader errored: {e}; closing guest stdin");
+                        stdin_in_done = true;
+                        if !stdin_out_closed {
+                            let _ = stdin_out.shutdown().await;
+                            stdin_out_closed = true;
+                        }
+                    }
+                }
+            }
             r = control.read(&mut cb), if exit.is_none() => {
                 let n = r.context("read guest control")?;
                 if n == 0 {
@@ -489,9 +573,16 @@ where
                             exit = Some((e.exit_code, e.error_message));
                             // Arm the post-exit drain backstop: bound how long
                             // we wait for stdout/stderr EOF now that the child
-                            // has reported completion.
+                            // has reported completion. Also close guest stdin
+                            // if the client never sent EOF; the child has
+                            // already exited so any further stdin is moot.
                             post_exit_deadline =
                                 Some(tokio::time::Instant::now() + POST_EXIT_DRAIN);
+                            if !stdin_out_closed {
+                                let _ = stdin_out.shutdown().await;
+                                stdin_out_closed = true;
+                            }
+                            stdin_in_done = true;
                             break;
                         }
                         DecodeResult::Message {

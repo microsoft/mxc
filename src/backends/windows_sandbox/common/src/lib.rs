@@ -5,4 +5,5 @@
 //! `wxc-windows-sandbox-daemon` host process, and the
 //! `wxc-windows-sandbox-guest` agent inside the VM.
 
+pub mod auth;
 pub mod sandbox_protocol;

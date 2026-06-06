@@ -335,6 +335,58 @@ fn run_exec_stream(daemon: &DaemonRecord, request: &ExecutionRequest) -> Result<
             .map_err(|e| MxcError::backend_error(format!("flush EXEC request: {e}")))?;
     }
 
+    // Spawn a background thread that pipes wxc-exec's own stdin to the
+    // daemon as FRAME_STDIN frames, so commands running in the sandbox
+    // receive whatever the SDK / shell piped in. Review C4.
+    //
+    // - TTY-stdin: shutdown the IPC writer's write half (sends EOF to
+    //   the daemon, which closes guest stdin) and skip the thread; an
+    //   interactive caller does not pipe data anyway, and a blocking
+    //   stdin read would never return.
+    // - Pipe-stdin: spawn a detached thread that reads stdin to EOF and
+    //   writes FRAME_STDIN frames. The thread holds its own try_clone of
+    //   the IPC stream so it shares the underlying socket without
+    //   contending with the read loop below.
+    //
+    // The thread is detached: when wxc-exec's main process exits shortly
+    // after this function returns, the OS reaps the thread. For pipe
+    // stdin the parent (SDK) closes its write end before reading the
+    // response, so the thread exits naturally on EOF before that point.
+    {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            // No data to forward; close the daemon's view of our stdin so
+            // the guest sees EOF immediately and `read` calls don't block.
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+        } else {
+            let stdin_writer = stream
+                .try_clone()
+                .map_err(|e| MxcError::backend_error(format!("clone IPC for stdin: {e}")))?;
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = [0u8; 8192];
+                let mut writer = stdin_writer;
+                let mut stdin = std::io::stdin().lock();
+                loop {
+                    match stdin.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let frame = ipc_exec::encode_frame(ipc_exec::FRAME_STDIN, &buf[..n]);
+                            if writer.write_all(&frame).is_err() {
+                                break;
+                            }
+                            let _ = writer.flush();
+                        }
+                        Err(_) => break,
+                    }
+                }
+                // EOF / error: close our half so the daemon sees EOF on
+                // its IPC reader and shuts down the guest's stdin.
+                let _ = writer.shutdown(std::net::Shutdown::Write);
+            });
+        }
+    }
+
     // Read the status line then the frame stream on a cloned handle so the
     // BufReader's look-ahead cannot strand frame bytes on the raw socket.
     let read_handle = stream

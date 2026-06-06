@@ -389,6 +389,15 @@ async fn serve(
 ) -> Result<()> {
     let shutdown = Arc::new(Notify::new());
 
+    // Per-launch authentication nonce for the daemon<->guest TCP channel.
+    // Distinct from the daemon's IPC nonce (`nonce` arg above, which auths
+    // wxc-exec phase processes to this daemon); this one auths the daemon
+    // to the in-VM guest agent on every accept. Generated once per VM
+    // lifetime, written to the rendezvous folder for the guest to pick up
+    // (and immediately delete), and re-used on every post-StreamsReady data
+    // stream reconnect. See review C2.
+    let guest_nonce = Arc::new(windows_sandbox_common::auth::generate_nonce());
+
     // The held guest connection, shared with the control server's EXEC handler.
     // It starts `Booting`: any EXEC that races the boot gets `ERR not ready`.
     let guest = Arc::new(Mutex::new(GuestSlot::Booting));
@@ -399,10 +408,11 @@ async fn serve(
         nonce.to_string(),
         shutdown.clone(),
         guest.clone(),
+        guest_nonce.clone(),
     ));
 
     let (conn, addr) = tokio::select! {
-        launched = launch_and_connect(mapped, &ownership, &mut record) => launched?,
+        launched = launch_and_connect(mapped, &ownership, &mut record, &guest_nonce) => launched?,
         joined = &mut server => {
             // STOP (or a server error) arrived during boot. Propagate any
             // server error; otherwise return so `main` tears the (possibly
@@ -571,6 +581,7 @@ async fn launch_and_connect(
     mapped: &[sandbox_vm::MappedFolder],
     ownership: &Arc<std::sync::Mutex<VmOwnership>>,
     record: &mut DaemonRecord,
+    guest_nonce: &windows_sandbox_common::auth::Nonce,
 ) -> Result<(tcp_bridge::GuestConnection, std::net::SocketAddr)> {
     let exe_dir = std::env::current_exe()
         .context("current_exe")?
@@ -582,6 +593,14 @@ async fn launch_and_connect(
     std::fs::create_dir_all(&rendezvous_dir).context("create rendezvous dir")?;
     control_plane::set_owner_only_dir(&rendezvous_dir).context("secure rendezvous dir")?;
     rendezvous::cleanup(&rendezvous_dir).await?;
+
+    // Write the per-launch guest authentication nonce into the (owner-only
+    // DACL'd) rendezvous folder before launching the VM. The guest reads
+    // and deletes the file at boot, then verifies the nonce on every
+    // accept; a local-process accept-race that does not present the nonce
+    // is rejected before any protocol bytes are exchanged (review C2).
+    windows_sandbox_common::auth::write_nonce_file(&rendezvous_dir, guest_nonce)
+        .context("write guest nonce file")?;
 
     let python_dir = sandbox_vm::find_host_python()
         .context("Python is required on the host for sandbox execution")?;
@@ -633,6 +652,7 @@ async fn launch_and_connect(
     let conn = tcp_bridge::connect_to_guest(
         guest_addr,
         std::time::Duration::from_secs(GUEST_CONNECT_TIMEOUT_SECS),
+        guest_nonce,
     )
     .await
     .context("connect to guest agent")?;

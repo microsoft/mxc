@@ -2693,8 +2693,10 @@ checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 name = "windows_sandbox_common"
 version = "0.6.1"
 dependencies = [
+ "getrandom 0.2.17",
  "serde",
  "serde_json",
+ "tokio",
  "wxc_common",
 ]
 

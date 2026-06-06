@@ -34,6 +34,8 @@ use windows_sandbox_lifecycle::control_plane::{
 };
 use windows_sandbox_lifecycle::ipc_exec::{self, ExecStart, MAX_IPC_FRAME};
 
+use windows_sandbox_common::auth::Nonce as GuestNonce;
+
 /// Maximum time to wait for a client to send its request line.
 ///
 /// This bounds a single misbehaving *client connection* only. It is NOT a
@@ -83,11 +85,18 @@ impl std::fmt::Debug for GuestSlot {
 /// `shutdown` notify fires). Returns once the daemon should tear down. Each
 /// client is dispatched to its own task so no verb can be head-of-line blocked
 /// by an in-flight exec.
+///
+/// `guest_nonce` is the per-launch authentication nonce for the
+/// daemon-to-guest TCP channel (distinct from `nonce` above, which auths
+/// IPC callers to *this* daemon). It is re-presented on every
+/// post-StreamsReady data-stream reconnect so a local-process hijacker
+/// cannot steal a per-exec stream (review C2).
 pub async fn run(
     listener: TcpListener,
     nonce: String,
     shutdown: Arc<Notify>,
     guest: Arc<Mutex<GuestSlot>>,
+    guest_nonce: Arc<GuestNonce>,
 ) -> Result<()> {
     let nonce = Arc::new(nonce);
     loop {
@@ -97,8 +106,9 @@ pub async fn run(
                 let nonce = nonce.clone();
                 let guest = guest.clone();
                 let shutdown = shutdown.clone();
+                let guest_nonce = guest_nonce.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, &nonce, &guest, &shutdown).await {
+                    if let Err(e) = handle_client(stream, &nonce, &guest, &shutdown, &guest_nonce).await {
                         eprintln!("[wsb-daemon] IPC client error: {e:#}");
                     }
                 });
@@ -115,6 +125,7 @@ async fn handle_client(
     nonce: &str,
     guest: &Arc<Mutex<GuestSlot>>,
     shutdown: &Arc<Notify>,
+    guest_nonce: &GuestNonce,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -145,7 +156,7 @@ async fn handle_client(
         shutdown.notify_one();
         Ok(())
     } else if verb == IPC_EXEC {
-        handle_exec(reader, writer, guest).await
+        handle_exec(reader, writer, guest, guest_nonce).await
     } else {
         writer.write_all(b"ERR unknown command\n").await.ok();
         Ok(())
@@ -159,6 +170,7 @@ async fn handle_exec(
     mut reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
     mut writer: tokio::net::tcp::OwnedWriteHalf,
     guest: &Arc<Mutex<GuestSlot>>,
+    guest_nonce: &GuestNonce,
 ) -> Result<()> {
     let req = match timeout(EXEC_REQUEST_TIMEOUT, read_exec_start(&mut reader)).await {
         Ok(Ok(req)) => req,
@@ -225,14 +237,16 @@ async fn handle_exec(
     }
 
     let exec_id = format!("exec-{}", EXEC_COUNTER.fetch_add(1, Ordering::Relaxed));
-    match stream_exec_on_guest(&mut conn, &exec_id, &req, &mut writer).await {
+    match stream_exec_on_guest(&mut conn, &exec_id, &req, &mut reader, &mut writer).await {
         Ok(outcome) => {
             // Whether or not the IPC client survived, the guest ran to a clean
             // boundary; re-establish the data streams for the next exec and
             // restore the slot. Only AFTER releasing the single-flight lock do we
             // signal the client that the exec finished — so a back-to-back exec
             // never races the slot-release window (finding #77).
-            let reconnect = reconnect_data_streams(&mut conn, addr, outcome.control_residual).await;
+            let reconnect =
+                reconnect_data_streams(&mut conn, addr, outcome.control_residual, guest_nonce)
+                    .await;
             match &reconnect {
                 Ok(()) => *slot = GuestSlot::Ready { conn, addr },
                 Err(e) => *slot = GuestSlot::Poisoned(format!("stream reconnect failed: {e}")),

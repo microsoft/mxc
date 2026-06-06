@@ -30,6 +30,8 @@ use crate::error::OneShotError;
 use crate::teardown::{self, Reconcile, VmTeardownGuard};
 use crate::{bridge, policy, rendezvous, vm};
 
+use windows_sandbox_common::auth as wsb_auth;
+
 /// Maximum time to wait for the guest agent's rendezvous file. First VM boot
 /// can take several minutes; 360s covers worst-case cold starts.
 const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(360);
@@ -203,6 +205,16 @@ async fn drive(
     request: &ExecutionRequest,
     host_stdin: &[u8],
 ) -> Result<bridge::ExecResult, OneShotError> {
+    // Generate the per-launch authentication nonce and write it into the
+    // (already owner-only DACL'd) rendezvous directory BEFORE issuing the
+    // VM launch. The guest reads + deletes this file at boot and then
+    // verifies it on every accept; a local-process accept-race that does
+    // not present the nonce is rejected before any protocol bytes are
+    // exchanged (review C2).
+    let nonce = wsb_auth::generate_nonce();
+    wsb_auth::write_nonce_file(rendezvous_dir, &nonce)
+        .map_err(|e| OneShotError::Launch(format!("write nonce file: {e}")))?;
+
     // Launch is in flight: a foreign VM could still win the single-instance
     // contest and fail our launch, so ownership is not yet provable.
     teardown::set_vm_ownership(VmOwnership::LaunchInFlight);
@@ -261,7 +273,7 @@ async fn drive(
     .await
     .map_err(|e| OneShotError::Rendezvous(format!("{e:#}")))?;
 
-    let mut conn = bridge::connect_to_guest(addr, GUEST_CONNECT_TIMEOUT)
+    let mut conn = bridge::connect_to_guest(addr, GUEST_CONNECT_TIMEOUT, &nonce)
         .await
         .map_err(|e| OneShotError::Connect(format!("{e:#}")))?;
 
