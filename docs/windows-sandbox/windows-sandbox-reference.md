@@ -242,7 +242,7 @@ Manual-only — requires Hyper-V + Windows Sandbox feature (cannot run in GitHub
 
 ```powershell
 cd tests\scripts
-.\run_windows_sandbox_tests.ps1 -Release
+.\run_windows_sandbox_one_shot_tests.ps1 -Release
 ```
 
 ### Test Configs

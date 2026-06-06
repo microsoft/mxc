@@ -88,6 +88,7 @@ tests\scripts\run_test_configs.ps1            # All test configs via wxc_test_dr
 tests\scripts\run_basicprocess_test.ps1            # Single process container test
 tests\scripts\run_isolation_session_tests.ps1                # IsolationSession one-shot E2E (requires host with the OS-side IsoSessionOps service)
 tests\scripts\run_isolation_session_state_aware_tests.ps1    # IsolationSession state-aware lifecycle E2E (multi-invocation provision/start/exec/stop/deprovision, same host requirements)
+tests\scripts\run_windows_sandbox_one_shot_tests.ps1       # Windows Sandbox one-shot E2E (fresh disposable VM per test; requires the Windows Sandbox optional feature)
 tests\scripts\run_windows_sandbox_state_aware_tests.ps1     # Windows Sandbox state-aware lifecycle E2E (provision/start/exec*/stop/deprovision; requires the Windows Sandbox optional feature; skips if absent)
 tests\scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
 tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap)

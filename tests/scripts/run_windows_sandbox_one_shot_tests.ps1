@@ -1,13 +1,20 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Windows Sandbox E2E test runner.
+# Windows Sandbox ONE-SHOT E2E test runner.
+#
+# Exercises the disposable / fresh-VM-per-call path: every test invocation
+# launches its own brand-new Windows Sandbox VM, runs one command, then tears
+# the VM down. Each test config is independent; there is no warm-VM reuse and
+# no persistent host-side daemon. See `run_windows_sandbox_state_aware_tests.ps1`
+# for the sibling lifecycle (one provisioned VM held across multiple execs).
+#
 # Requires: Windows 11 Pro/Enterprise, Windows Sandbox enabled, Python on host.
 # Cannot run in GitHub Actions CI (needs Hyper-V + Sandbox feature).
 #
 # Usage:
-#   .\run_windows_sandbox_tests.ps1              # debug build
-#   .\run_windows_sandbox_tests.ps1 -Release     # release build
+#   .\run_windows_sandbox_one_shot_tests.ps1              # debug build
+#   .\run_windows_sandbox_one_shot_tests.ps1 -Release     # release build
 
 param(
     [switch]$Release,
