@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use windows_sandbox_common::auth::{self, Nonce};
+use windows_sandbox_common::auth::{self, ChannelRole, Nonce};
 use windows_sandbox_common::sandbox_protocol::{
     decode_message, encode_message, validate_preamble, ControlMessage, DecodeResult, ExecRequest,
     PREAMBLE_LEN,
@@ -91,25 +91,29 @@ pub async fn connect_to_guest(
     timeout: std::time::Duration,
     nonce: &Nonce,
 ) -> Result<GuestConnection> {
-    let connect = |label: &'static str| async move {
+    let connect = |role: ChannelRole| async move {
+        let label = role.label();
         let mut stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
             .await
             .with_context(|| format!("timeout connecting {} to {}", label, addr))?
             .with_context(|| format!("connect {} to {}", label, addr))?;
-        // Authenticate immediately so a local-process accept-race that
-        // beats the legitimate connect is detected before any protocol
-        // bytes are exchanged. Bounded by the same `timeout` budget.
-        tokio::time::timeout(timeout, auth::write_nonce(&mut stream, nonce))
+        // Authenticate AND declare the channel role immediately. The role
+        // tag lets the guest assign each accepted socket by identity
+        // rather than by accept order — the previous positional-only
+        // protocol broke on intermittent Hyper-V vNIC accept-queue
+        // reordering (see ChannelRole docs and `accept_one_authed` on the
+        // guest). Bounded by the same `timeout` budget.
+        tokio::time::timeout(timeout, auth::write_nonce(&mut stream, nonce, role))
             .await
             .with_context(|| format!("timeout writing nonce on {} to {}", label, addr))?
             .with_context(|| format!("write nonce on {} to {}", label, addr))?;
         Ok::<TcpStream, anyhow::Error>(stream)
     };
 
-    let control = connect("control").await?;
-    let stdin_stream = connect("stdin").await?;
-    let stdout_stream = connect("stdout").await?;
-    let stderr_stream = connect("stderr").await?;
+    let control = connect(ChannelRole::Control).await?;
+    let stdin_stream = connect(ChannelRole::Stdin).await?;
+    let stdout_stream = connect(ChannelRole::Stdout).await?;
+    let stderr_stream = connect(ChannelRole::Stderr).await?;
 
     eprintln!("[daemon] 4 TCP connections established to {}", addr);
 
@@ -329,9 +333,10 @@ pub async fn reconnect_data_streams(
                     eprintln!("[daemon] received StreamsReady, reconnecting data streams");
 
                     let connect_timeout = std::time::Duration::from_secs(RECONNECT_TIMEOUT_SECS);
-                    let connect = |label: &'static str| {
+                    let connect = |role: ChannelRole| {
                         let target = addr;
                         async move {
+                            let label = role.label();
                             let mut stream =
                                 tokio::time::timeout(connect_timeout, TcpStream::connect(target))
                                     .await
@@ -343,7 +348,7 @@ pub async fn reconnect_data_streams(
                                     })?;
                             tokio::time::timeout(
                                 connect_timeout,
-                                auth::write_nonce(&mut stream, nonce),
+                                auth::write_nonce(&mut stream, nonce, role),
                             )
                             .await
                             .with_context(|| format!("timeout writing reconnect nonce on {label}"))?
@@ -354,9 +359,9 @@ pub async fn reconnect_data_streams(
                         }
                     };
 
-                    conn.stdin_stream = connect("stdin").await?;
-                    conn.stdout_stream = connect("stdout").await?;
-                    conn.stderr_stream = connect("stderr").await?;
+                    conn.stdin_stream = connect(ChannelRole::Stdin).await?;
+                    conn.stdout_stream = connect(ChannelRole::Stdout).await?;
+                    conn.stderr_stream = connect(ChannelRole::Stderr).await?;
 
                     eprintln!("[daemon] data streams reconnected to {}", addr);
                     return Ok(());
@@ -486,7 +491,9 @@ where
         tokio::select! {
             r = stdout.read(&mut so), if !stdout_done => {
                 match classify_data_read(r, stdout_seen, "stdout")? {
-                    None => stdout_done = true,
+                    None => {
+                        stdout_done = true;
+                    }
                     Some(n) => {
                         stdout_seen += n as u64;
                         if ipc_alive
@@ -499,7 +506,9 @@ where
             }
             r = stderr.read(&mut se), if !stderr_done => {
                 match classify_data_read(r, stderr_seen, "stderr")? {
-                    None => stderr_done = true,
+                    None => {
+                        stderr_done = true;
+                    }
                     Some(n) => {
                         stderr_seen += n as u64;
                         if ipc_alive
@@ -848,23 +857,33 @@ mod tests {
     }
 
     /// Spawn an in-process fake guest: bind a listener, accept 4 connections,
-    /// verify the per-launch nonce on each, then send the preamble + Ready
-    /// frame on control. Returns the listening address (for the host's
+    /// verify the per-launch nonce + decode the channel role tag on each, then
+    /// send the preamble + Ready frame on whichever socket was tagged as
+    /// `control`. Returns the listening address (for the host's
     /// `connect_to_guest` call) and a oneshot receiver that yields the
     /// server-side handles so the test can drive the fake guest's outputs.
+    ///
+    /// Pairing is by **declared role**, not accept order — matching the real
+    /// guest's `listener::accept_connections` after the role-tag protocol
+    /// change. The test fake's "pair by role" stays even when accept order
+    /// would happen to match, so the tests catch any regression where the
+    /// host stops emitting the role byte.
     async fn spawn_fake_guest(
         nonce: windows_sandbox_common::auth::Nonce,
     ) -> (
         SocketAddr,
         oneshot::Receiver<Result<FakeGuestSide, std::io::Error>>,
     ) {
+        use windows_sandbox_common::auth::ChannelRole;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let result: Result<FakeGuestSide, std::io::Error> = async {
-                // Accept 4 connections in the canonical order. Each must
-                // present the nonce as the first NONCE_LEN bytes.
+                // Accept 4 connections, each presenting the nonce as the
+                // first NONCE_LEN bytes and a 1-byte role tag immediately
+                // after. Assign each socket to the slot matching its
+                // declared role.
                 let accept_one = || async {
                     let (mut s, _) = listener.accept().await?;
                     let mut buf = [0u8; windows_sandbox_common::auth::NONCE_LEN];
@@ -877,12 +896,40 @@ mod tests {
                             "bad nonce on fake-guest accept",
                         ));
                     }
-                    Ok::<tokio::net::TcpStream, std::io::Error>(s)
+                    let mut role_buf = [0u8; 1];
+                    s.read_exact(&mut role_buf).await?;
+                    let role = ChannelRole::from_wire(role_buf[0]).ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("unknown channel role 0x{:02x}", role_buf[0]),
+                        )
+                    })?;
+                    Ok::<(tokio::net::TcpStream, ChannelRole), std::io::Error>((s, role))
                 };
-                let mut control = accept_one().await?;
-                let stdin = accept_one().await?;
-                let stdout = accept_one().await?;
-                let stderr = accept_one().await?;
+                let mut control: Option<tokio::net::TcpStream> = None;
+                let mut stdin_stream: Option<tokio::net::TcpStream> = None;
+                let mut stdout_stream: Option<tokio::net::TcpStream> = None;
+                let mut stderr_stream: Option<tokio::net::TcpStream> = None;
+                for _ in 0..4 {
+                    let (s, role) = accept_one().await?;
+                    let slot = match role {
+                        ChannelRole::Control => &mut control,
+                        ChannelRole::Stdin => &mut stdin_stream,
+                        ChannelRole::Stdout => &mut stdout_stream,
+                        ChannelRole::Stderr => &mut stderr_stream,
+                    };
+                    if slot.is_some() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("duplicate role {:?} on fake-guest accept", role),
+                        ));
+                    }
+                    *slot = Some(s);
+                }
+                let mut control = control.expect("control role declared");
+                let stdin = stdin_stream.expect("stdin role declared");
+                let stdout = stdout_stream.expect("stdout role declared");
+                let stderr = stderr_stream.expect("stderr role declared");
                 // Send preamble + Ready so the host's connect_to_guest
                 // handshake completes.
                 control.write_all(&encode_preamble()).await?;

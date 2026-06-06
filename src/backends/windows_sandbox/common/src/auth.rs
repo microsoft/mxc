@@ -109,6 +109,64 @@ pub const NONCE_READ_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Clone)]
 pub struct Nonce([u8; NONCE_LEN]);
 
+/// Role tag exchanged after the nonce so the guest assigns each accepted
+/// socket to the correct logical channel by **identity, not by accept
+/// order**.
+///
+/// Without this tag the guest assumed accept-FIFO order matched the
+/// host's connect order. That assumption held on most runs but
+/// intermittently broke on Hyper-V vNIC paths (or under any kernel /
+/// firewall scheduling that delivered the second listen-queue entry
+/// before the first under unrelated load) — when it did, the guest's
+/// "stdout" stream was paired with the host's "stdin" socket (and so
+/// on), every byte the child wrote vanished into a reader nobody
+/// consulted, and the host's stdout reader blocked forever on a socket
+/// the guest never wrote to. The symptom was a small-payload exec
+/// returning `exit 0` with empty stdout roughly 20–30% of the time on
+/// the very first exec after `start`.
+///
+/// One byte after the nonce on every TCP connection (boot and reconnect)
+/// is now a `ChannelRole`. The guest reads it under the same auth
+/// timeout, drops the socket on an unknown / duplicate / EOF role, and
+/// assigns the surviving sockets to the host-declared logical channels.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ChannelRole {
+    Control = 0,
+    Stdin = 1,
+    Stdout = 2,
+    Stderr = 3,
+}
+
+impl ChannelRole {
+    /// Decode the wire byte. Returns `None` for any unknown value so the
+    /// guest fails closed on a malformed (or wrong-version) host.
+    pub fn from_wire(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Control),
+            1 => Some(Self::Stdin),
+            2 => Some(Self::Stdout),
+            3 => Some(Self::Stderr),
+            _ => None,
+        }
+    }
+
+    /// Encode as the single wire byte sent after the nonce.
+    pub fn to_wire(self) -> u8 {
+        self as u8
+    }
+
+    /// Human-readable label for diagnostics.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Stdin => "stdin",
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+}
+
 impl Nonce {
     /// Wrap an already-materialised byte buffer (e.g. read from
     /// `nonce.bin`) into a [`Nonce`]. Returns `None` if the slice is the
@@ -148,7 +206,7 @@ pub fn generate_nonce() -> Nonce {
     Nonce(buf)
 }
 
-/// Reason a nonce handshake failed.
+/// Reason a nonce + role handshake failed.
 #[derive(Debug)]
 pub enum HandshakeError {
     /// Could not read the full [`NONCE_LEN`] bytes from the peer (EOF, I/O
@@ -159,6 +217,16 @@ pub enum HandshakeError {
     /// Could not write the full [`NONCE_LEN`] bytes to the peer (broken pipe
     /// / timeout). Only used host-side.
     Write(std::io::Error),
+    /// Could not read the trailing role byte (EOF or I/O error during the
+    /// post-nonce read). Treated identically to a nonce-read failure by
+    /// the caller — drop the socket and wait for the legitimate peer to
+    /// retry.
+    RoleRead(std::io::Error),
+    /// Role byte did not decode to any known [`ChannelRole`] — the peer is
+    /// speaking a newer / unknown protocol and we fail closed.
+    RoleUnknown(u8),
+    /// Could not write the role byte (host-side only).
+    RoleWrite(std::io::Error),
 }
 
 impl std::fmt::Display for HandshakeError {
@@ -167,31 +235,47 @@ impl std::fmt::Display for HandshakeError {
             HandshakeError::Read(e) => write!(f, "read nonce from peer: {e}"),
             HandshakeError::Mismatch => write!(f, "peer presented an incorrect nonce"),
             HandshakeError::Write(e) => write!(f, "write nonce to peer: {e}"),
+            HandshakeError::RoleRead(e) => write!(f, "read role byte from peer: {e}"),
+            HandshakeError::RoleUnknown(b) => {
+                write!(f, "peer declared unknown channel role 0x{b:02x}")
+            }
+            HandshakeError::RoleWrite(e) => write!(f, "write role byte to peer: {e}"),
         }
     }
 }
 
 impl std::error::Error for HandshakeError {}
 
-/// Write the nonce to a freshly-accepted TCP stream as the first
-/// [`NONCE_LEN`] bytes. Host-side helper used by every host->guest
-/// connect.
-pub async fn write_nonce(stream: &mut TcpStream, nonce: &Nonce) -> Result<(), HandshakeError> {
+/// Write the nonce **and** the channel role tag to a freshly-accepted TCP
+/// stream as the first [`NONCE_LEN`]+1 bytes. Host-side helper used by
+/// every host->guest connect.
+pub async fn write_nonce(
+    stream: &mut TcpStream,
+    nonce: &Nonce,
+    role: ChannelRole,
+) -> Result<(), HandshakeError> {
     stream
         .write_all(nonce.as_bytes())
         .await
-        .map_err(HandshakeError::Write)
+        .map_err(HandshakeError::Write)?;
+    stream
+        .write_all(&[role.to_wire()])
+        .await
+        .map_err(HandshakeError::RoleWrite)
 }
 
-/// Read the first [`NONCE_LEN`] bytes from a freshly-accepted TCP stream
-/// and constant-time compare against the expected nonce. Guest-side
-/// helper used by every accept.
+/// Read the first [`NONCE_LEN`] bytes from a freshly-accepted TCP stream,
+/// constant-time compare against the expected nonce, then read and decode
+/// the trailing role byte. Guest-side helper used by every accept.
 ///
-/// On mismatch the stream is left for the caller to drop. The caller must
-/// not write anything to the socket before this returns Ok — even an
-/// error frame could leak structural information about our protocol to a
-/// hostile peer.
-pub async fn verify_nonce(stream: &mut TcpStream, expected: &Nonce) -> Result<(), HandshakeError> {
+/// On any handshake failure the stream is left for the caller to drop.
+/// The caller must not write anything to the socket before this returns
+/// Ok — even an error frame could leak structural information about our
+/// protocol to a hostile peer.
+pub async fn verify_nonce(
+    stream: &mut TcpStream,
+    expected: &Nonce,
+) -> Result<ChannelRole, HandshakeError> {
     let mut buf = [0u8; NONCE_LEN];
     stream
         .read_exact(&mut buf)
@@ -199,11 +283,15 @@ pub async fn verify_nonce(stream: &mut TcpStream, expected: &Nonce) -> Result<()
         .map_err(HandshakeError::Read)?;
     let got = Nonce::from_bytes(&buf)
         .expect("read_exact filled NONCE_LEN bytes, Nonce::from_bytes must succeed");
-    if expected.constant_time_eq(&got) {
-        Ok(())
-    } else {
-        Err(HandshakeError::Mismatch)
+    if !expected.constant_time_eq(&got) {
+        return Err(HandshakeError::Mismatch);
     }
+    let mut role_buf = [0u8; 1];
+    stream
+        .read_exact(&mut role_buf)
+        .await
+        .map_err(HandshakeError::RoleRead)?;
+    ChannelRole::from_wire(role_buf[0]).ok_or(HandshakeError::RoleUnknown(role_buf[0]))
 }
 
 /// Host-side: write the nonce to `<dir>/nonce.bin` before launching the
@@ -307,6 +395,35 @@ mod tests {
         let a = Nonce::from_bytes(&[0x00; NONCE_LEN]).unwrap();
         let b = Nonce::from_bytes(&[0xFF; NONCE_LEN]).unwrap();
         assert!(!a.constant_time_eq(&b));
+    }
+
+    #[test]
+    fn channel_role_roundtrip() {
+        for role in [
+            ChannelRole::Control,
+            ChannelRole::Stdin,
+            ChannelRole::Stdout,
+            ChannelRole::Stderr,
+        ] {
+            assert_eq!(ChannelRole::from_wire(role.to_wire()), Some(role));
+        }
+    }
+
+    #[test]
+    fn channel_role_rejects_unknown_wire_bytes() {
+        for b in [4u8, 5, 7, 0x10, 0x80, 0xFE, 0xFF] {
+            assert!(ChannelRole::from_wire(b).is_none(), "byte {b:#x} accepted");
+        }
+    }
+
+    #[test]
+    fn channel_role_label_is_stable() {
+        // The bridge logs use these labels; review-stage diagnostics depend
+        // on them being canonical.
+        assert_eq!(ChannelRole::Control.label(), "control");
+        assert_eq!(ChannelRole::Stdin.label(), "stdin");
+        assert_eq!(ChannelRole::Stdout.label(), "stdout");
+        assert_eq!(ChannelRole::Stderr.label(), "stderr");
     }
 
     #[test]

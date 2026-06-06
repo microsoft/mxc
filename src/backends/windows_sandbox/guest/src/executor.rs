@@ -24,6 +24,17 @@ use crate::job::Job;
 /// this budget so the guest always reaches the `Exit` send and the reused guest
 /// is not wedged. Generous so it does not truncate legitimate output under
 /// normal backpressure.
+///
+/// Historical note: while diagnosing an intermittent ~25%-of-first-exec
+/// `exit 0` + empty-stdout failure mode we bumped this to 60s on the
+/// suspicion that Windows pipe-close detection lag was the cause. That
+/// turned out to be the wrong diagnosis — the real cause was
+/// **socket-role misordering** between the host's sequential connects
+/// and the guest's accept-FIFO assumption: the guest's "stdout" stream
+/// was sometimes paired with the host's "stdin" socket. Once
+/// `ChannelRole` tagging was added to the post-nonce handshake the bug
+/// went away across 5×9 = 45 consecutive state-aware E2E execs, so this
+/// constant was restored to its original 10-second drain backstop.
 const BRIDGE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Main command loop.  Reads control messages from the host and executes
@@ -265,6 +276,11 @@ async fn execute_script(
     // Bridge stdin: TCP → child
     let mut stdin_task = tokio::spawn(async move {
         if let (mut tcp, Some(mut child_in)) = (stdin_stream, child_stdin) {
+            // Disable Nagle: stdin chunks are small and we want them on the
+            // wire immediately so commands waiting on stdin don't see
+            // ~200ms-delayed read availability. See the stdout note below
+            // for the broader rationale.
+            let _ = tcp.set_nodelay(true);
             if let Err(err) = tokio::io::copy(&mut tcp, &mut child_in).await {
                 eprintln!("[guest] stdin bridge error: {}", err);
             }
@@ -274,6 +290,19 @@ async fn execute_script(
     // Bridge stdout: child → TCP
     let mut stdout_task = tokio::spawn(async move {
         if let (mut tcp, Some(mut child_out)) = (stdout_stream, child_stdout) {
+            // Disable Nagle's algorithm on the data stream. Small payloads
+            // ("hello-from-wsb\r\n" — 16 bytes) on a fast-exiting child
+            // would otherwise be held by Nagle for ~200ms waiting for more
+            // data to coalesce. When the child exits and the bridge task
+            // immediately calls tcp.shutdown() below, the FIN can race
+            // ahead of the data in a way that could leave a few-byte
+            // window where the host observes EOF before the payload. The
+            // role-tag handshake change (see `ChannelRole`) was the
+            // primary fix for the historic empty-stdout flake, but
+            // NODELAY remains the right default for a small, latency-
+            // sensitive command-output stream and removes one variable
+            // from any future investigation.
+            let _ = tcp.set_nodelay(true);
             if let Err(err) = tokio::io::copy(&mut child_out, &mut tcp).await {
                 eprintln!("[guest] stdout bridge error: {}", err);
             }
@@ -291,6 +320,8 @@ async fn execute_script(
     // Bridge stderr: child → TCP
     let mut stderr_task = tokio::spawn(async move {
         if let (mut tcp, Some(mut child_err)) = (stderr_stream, child_stderr) {
+            // Same NODELAY rationale as stdout (see the stdout bridge above).
+            let _ = tcp.set_nodelay(true);
             if let Err(err) = tokio::io::copy(&mut child_err, &mut tcp).await {
                 eprintln!("[guest] stderr bridge error: {}", err);
             }
