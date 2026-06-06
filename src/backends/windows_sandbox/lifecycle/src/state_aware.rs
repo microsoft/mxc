@@ -417,6 +417,15 @@ fn run_exec_stream(daemon: &DaemonRecord, request: &ExecutionRequest) -> Result<
 
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
+    // Review D4: only force-flush per frame when stdout/stderr is a TTY
+    // (where users expect immediate output). On a pipe/file, Rust's
+    // line-buffered Stdout already flushes on newlines, and the OS flushes
+    // on process exit, so a per-frame flush adds a syscall per chunk for
+    // negligible benefit. The explicit flush on FRAME_EXIT below covers
+    // the "no-newline output to a pipe" case so nothing is lost.
+    use std::io::IsTerminal;
+    let stdout_is_tty = stdout.is_terminal();
+    let stderr_is_tty = stderr.is_terminal();
     loop {
         match ipc_exec::read_frame(&mut reader)
             .map_err(|e| MxcError::backend_error(format!("read exec frame: {e}")))?
@@ -426,19 +435,28 @@ fn run_exec_stream(daemon: &DaemonRecord, request: &ExecutionRequest) -> Result<
                     stdout
                         .write_all(&frame.payload)
                         .map_err(|e| MxcError::backend_error(format!("write stdout: {e}")))?;
-                    stdout
-                        .flush()
-                        .map_err(|e| MxcError::backend_error(format!("flush stdout: {e}")))?;
+                    if stdout_is_tty {
+                        stdout
+                            .flush()
+                            .map_err(|e| MxcError::backend_error(format!("flush stdout: {e}")))?;
+                    }
                 }
                 FRAME_STDERR => {
                     stderr
                         .write_all(&frame.payload)
                         .map_err(|e| MxcError::backend_error(format!("write stderr: {e}")))?;
-                    stderr
-                        .flush()
-                        .map_err(|e| MxcError::backend_error(format!("flush stderr: {e}")))?;
+                    if stderr_is_tty {
+                        stderr
+                            .flush()
+                            .map_err(|e| MxcError::backend_error(format!("flush stderr: {e}")))?;
+                    }
                 }
                 FRAME_EXIT => {
+                    // Final flush before returning so the caller (and any
+                    // downstream pipe consumer) sees every byte written above
+                    // even if the destination was fully-buffered (file).
+                    let _ = stdout.flush();
+                    let _ = stderr.flush();
                     let exit: ExecExit = serde_json::from_slice(&frame.payload)
                         .map_err(|e| MxcError::backend_error(format!("decode exit frame: {e}")))?;
                     // A negative exit code paired with a message indicates a

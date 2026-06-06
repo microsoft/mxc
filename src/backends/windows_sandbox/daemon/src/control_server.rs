@@ -23,7 +23,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::time::timeout;
 
 use windows_sandbox_lifecycle::bridge::{
@@ -48,6 +48,25 @@ const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum time to wait for the framed `ExecStart` request after the `EXEC`
 /// auth line.
 const EXEC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Hard cap on the pre-auth request line length. Bounds the memory a hostile
+/// local process can force the daemon to allocate by writing a long line and
+/// then idling: without this cap, `read_line` would grow its `String` until
+/// the [`CLIENT_READ_TIMEOUT`] elapsed (review D1). The legitimate verbs
+/// (`PING`/`STOP`/`EXEC`) plus a space plus the IPC nonce + newline are well
+/// under 256 bytes; 1 KiB leaves comfortable headroom and is still trivial
+/// memory if every concurrent connection used the full budget.
+const MAX_AUTH_LINE_BYTES: u64 = 1024;
+
+/// Bound on the number of pre-auth client connections handled concurrently.
+/// Each connection's `handle_client` task can sit on `read_line` for up to
+/// [`CLIENT_READ_TIMEOUT`] waiting for input; without a cap, a burst of slow
+/// or idle localhost connections accumulates tasks, sockets, and per-task
+/// stacks indefinitely, crowding out real EXEC/STOP traffic (review D2). The
+/// permit is held only until the client's verb is dispatched (after the
+/// `EXEC`/`STOP`/`PING` branch is entered) so a long-running EXEC does not
+/// hold a pre-auth slot.
+const MAX_CONCURRENT_PREAUTH: usize = 32;
 
 /// Monotonic source of per-exec correlation ids (unique within this daemon).
 static EXEC_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -99,16 +118,38 @@ pub async fn run(
     guest_nonce: Arc<GuestNonce>,
 ) -> Result<()> {
     let nonce = Arc::new(nonce);
+    // Pre-auth concurrency cap (review D2). Bounds the number of unauthenticated
+    // client tasks the daemon will spawn at once; excess connections are
+    // dropped immediately rather than queued so a slow-loris burst cannot
+    // accumulate tasks, sockets, and read buffers.
+    let preauth_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_PREAUTH));
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _peer) = accepted.context("accept IPC client")?;
+                let (stream, peer) = accepted.context("accept IPC client")?;
+                // try_acquire (non-blocking): excess pre-auth connections are
+                // dropped at accept rather than parked. This keeps the
+                // pre-auth budget genuinely bounded - if we waited on the
+                // semaphore we would still be holding the socket open and
+                // contributing to FD pressure.
+                let permit = match preauth_permits.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        eprintln!(
+                            "[wsb-daemon] pre-auth slot exhausted; dropping incoming IPC \
+                             client {peer} ({MAX_CONCURRENT_PREAUTH} concurrent pre-auth tasks \
+                             already in flight)"
+                        );
+                        drop(stream);
+                        continue;
+                    }
+                };
                 let nonce = nonce.clone();
                 let guest = guest.clone();
                 let shutdown = shutdown.clone();
                 let guest_nonce = guest_nonce.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, &nonce, &guest, &shutdown, &guest_nonce).await {
+                    if let Err(e) = handle_client(stream, &nonce, &guest, &shutdown, &guest_nonce, permit).await {
                         eprintln!("[wsb-daemon] IPC client error: {e:#}");
                     }
                 });
@@ -120,20 +161,52 @@ pub async fn run(
 }
 
 /// Read one request line, authenticate it, and dispatch on the verb.
+///
+/// `permit` is the pre-auth concurrency token (review D2). It is held for the
+/// auth read + verb-prefix dispatch only; long-running EXECs explicitly drop
+/// it before entering [`handle_exec`] so a single exec does not hold a
+/// pre-auth slot for the duration of a command.
 async fn handle_client(
     stream: TcpStream,
     nonce: &str,
     guest: &Arc<Mutex<GuestSlot>>,
     shutdown: &Arc<Notify>,
     guest_nonce: &GuestNonce,
+    permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut line = String::new();
-    timeout(CLIENT_READ_TIMEOUT, reader.read_line(&mut line))
-        .await
-        .context("client read timed out")?
-        .context("read client request")?;
+    // Cap the pre-auth read at MAX_AUTH_LINE_BYTES (review D1). Without this
+    // bound, read_line grows its String for up to CLIENT_READ_TIMEOUT seconds
+    // for any client that sends a long line and then idles - a trivial memory
+    // sink against the persistent daemon. The cap is generous (1 KiB) so a
+    // legitimate (~80-byte) verb-plus-nonce line is never truncated; an over-
+    // long line is treated the same as malformed input and rejected.
+    let mut line_bytes: Vec<u8> = Vec::with_capacity(128);
+    let read_result = timeout(CLIENT_READ_TIMEOUT, async {
+        let mut limited = (&mut reader).take(MAX_AUTH_LINE_BYTES);
+        limited.read_until(b'\n', &mut line_bytes).await
+    })
+    .await
+    .context("client read timed out")?
+    .context("read client request")?;
+    if read_result == 0 {
+        return Ok(());
+    }
+    // A line that reached the cap without terminating with '\n' is treated as
+    // malformed: do not waste the writer / a slot on it.
+    let hit_cap = line_bytes.len() as u64 >= MAX_AUTH_LINE_BYTES && !line_bytes.ends_with(b"\n");
+    if hit_cap {
+        writer.write_all(b"ERR request too large\n").await.ok();
+        return Ok(());
+    }
+    let line = match std::str::from_utf8(&line_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            writer.write_all(b"ERR not utf8\n").await.ok();
+            return Ok(());
+        }
+    };
 
     let trimmed = line.trim();
     let mut parts = trimmed.splitn(2, ' ');
@@ -156,6 +229,12 @@ async fn handle_client(
         shutdown.notify_one();
         Ok(())
     } else if verb == IPC_EXEC {
+        // Release the pre-auth concurrency slot (review D2) before entering
+        // the (potentially long-running) exec path: an EXEC of a multi-minute
+        // command must not pin a pre-auth slot for the duration of the
+        // command. Single-flight admission inside handle_exec independently
+        // ensures only one exec runs at a time per sandbox.
+        drop(permit);
         handle_exec(reader, writer, guest, guest_nonce).await
     } else {
         writer.write_all(b"ERR unknown command\n").await.ok();

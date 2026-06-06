@@ -489,11 +489,10 @@ where
                     None => stdout_done = true,
                     Some(n) => {
                         stdout_seen += n as u64;
-                        if ipc_alive {
-                            let f = ipc_exec::encode_frame(FRAME_STDOUT, &so[..n]);
-                            if !write_ipc(ipc, &f).await {
-                                ipc_alive = false;
-                            }
+                        if ipc_alive
+                            && !write_data_frame_split(ipc, FRAME_STDOUT, &so[..n]).await
+                        {
+                            ipc_alive = false;
                         }
                     }
                 }
@@ -503,11 +502,10 @@ where
                     None => stderr_done = true,
                     Some(n) => {
                         stderr_seen += n as u64;
-                        if ipc_alive {
-                            let f = ipc_exec::encode_frame(FRAME_STDERR, &se[..n]);
-                            if !write_ipc(ipc, &f).await {
-                                ipc_alive = false;
-                            }
+                        if ipc_alive
+                            && !write_data_frame_split(ipc, FRAME_STDERR, &se[..n]).await
+                        {
+                            ipc_alive = false;
                         }
                     }
                 }
@@ -707,6 +705,40 @@ where
 {
     matches!(
         tokio::time::timeout(IPC_WRITE_TIMEOUT, ipc.write_all(frame)).await,
+        Ok(Ok(()))
+    )
+}
+
+/// Write a data frame to the IPC client as two back-to-back `write_all`s
+/// (header then payload) without materialising a fresh `Vec` per chunk.
+///
+/// Each stdout/stderr read produces a frame; the previous implementation
+/// allocated a `5 + payload.len()` buffer per call via `encode_frame`,
+/// copied the 5-byte header, copied the payload, then handed it to
+/// `write_ipc`. On large-output workloads (8 KiB reads) the hot path was
+/// "allocate + copy + write" per chunk — review D3. Splitting the write
+/// into header + payload removes both the per-chunk allocation and the
+/// full payload memcpy; the kernel coalesces the two writes on localhost
+/// (and TCP coalesces them on any path).
+///
+/// Returns the same `true`/`false` contract as [`write_ipc`]. The two
+/// writes share a single timeout budget; an interrupted write between
+/// header and payload poisons the frame stream, but the caller already
+/// treats any `false` return as "stop relaying" and reuses neither side.
+async fn write_data_frame_split<W>(ipc: &mut W, kind: u8, payload: &[u8]) -> bool
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut header = [0u8; 5];
+    header[0] = kind;
+    header[1..5].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+    let combined = async {
+        ipc.write_all(&header).await?;
+        ipc.write_all(payload).await?;
+        Ok::<(), std::io::Error>(())
+    };
+    matches!(
+        tokio::time::timeout(IPC_WRITE_TIMEOUT, combined).await,
         Ok(Ok(()))
     )
 }
