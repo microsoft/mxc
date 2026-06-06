@@ -281,6 +281,31 @@ try {
                 Assert-True ($r.Stdout -match 'second-exec') "reuse exec stdout contains the marker (got '[$($r.Stdout.Trim())]')"
             } | Out-Null
 
+            # Python and PowerShell on the held VM: parity with the one-shot
+            # suite's `basic_windows_sandbox.json` + `windows_sandbox_powershell.json`
+            # configs. The point of running these against the SAME held VM
+            # (instead of cold-booting a fresh VM each time, as one-shot
+            # does) is to exercise interpreter spin-up after multiple
+            # bridge reconnects. -NoProfile keeps PowerShell from loading
+            # the user profile inside the sandbox (which can take seconds
+            # and isn't part of the test's behavioural contract).
+            Run-StateAwareTest 'python exec on held VM prints expected markers' {
+                $cmd = 'python -S -B -c "import sys; print(''Hello from Windows Sandbox!''); print(''pyver:''+sys.version.split()[0]); print(''Script executed successfully in sandbox isolation'')"'
+                $r = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = $cmd } } -TimeoutSec 120
+                Assert-True ($r.ExitCode -eq 0) "python exec exit 0 (got $($r.ExitCode))"
+                Assert-True ($r.Stdout -match 'Hello from Windows Sandbox!') "python stdout greets (got '[$($r.Stdout.Trim())]')"
+                Assert-True ($r.Stdout -match 'executed successfully') "python stdout reports success (got '[$($r.Stdout.Trim())]')"
+                Assert-True ($r.Stdout -match 'pyver:\d+\.\d+') "python stdout reports interpreter version (got '[$($r.Stdout.Trim())]')"
+            } | Out-Null
+
+            Run-StateAwareTest 'powershell exec on held VM prints expected markers' {
+                $cmd = 'powershell -NoProfile -Command "Write-Output ''PowerShell works''; Write-Output (''psver:''+$PSVersionTable.PSVersion.ToString())"'
+                $r = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = $cmd } } -TimeoutSec 120
+                Assert-True ($r.ExitCode -eq 0) "powershell exec exit 0 (got $($r.ExitCode))"
+                Assert-True ($r.Stdout -match 'PowerShell works') "powershell stdout greets (got '[$($r.Stdout.Trim())]')"
+                Assert-True ($r.Stdout -match 'psver:\d+\.\d+') "powershell stdout reports version (got '[$($r.Stdout.Trim())]')"
+            } | Out-Null
+
             Run-StateAwareTest 'exec propagates a non-zero child exit code' {
                 $r = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = 'exit 7' } } -TimeoutSec 120
                 Assert-True ($r.ExitCode -eq 7) "exec surfaces child exit 7 (got $($r.ExitCode))"
