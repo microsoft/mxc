@@ -27,6 +27,15 @@ use super::VmProcId;
 /// Name of the cross-process transition mutex. `Local\` keeps it scoped to the
 /// current logon session, which is the right blast radius: state-aware WSB is a
 /// single-user, single-instance backend.
+///
+/// **Same-user scope (review M2):** the mutex name is fixed and the
+/// object is created without an explicit security descriptor, so
+/// another process running under the same user account can pre-create
+/// it (or hold it) and deny service. This is consistent with the
+/// `windows_sandbox_common::auth` threat model — same-user processes
+/// are inside the trust boundary on the single-user developer-
+/// workstation target this backend is designed for, and a same-user
+/// attacker has many cheaper DoS levers than mutex squatting.
 const TRANSITION_MUTEX_NAME: &str = r"Local\wxc-wsb-stateaware-transition";
 
 /// Name of the host-global "WSB VM slot" mutex. The host permits a single
@@ -37,6 +46,11 @@ const TRANSITION_MUTEX_NAME: &str = r"Local\wxc-wsb-stateaware-transition";
 /// (which would let the survivor's teardown kill the other's VM). `Local\`
 /// keeps it scoped to the current logon session, matching the single-user
 /// design.
+///
+/// Same-user squatting scope: identical to [`TRANSITION_MUTEX_NAME`]
+/// above — a same-user process can pre-create or hold this mutex to
+/// deny service. Out of scope for the same single-user threat-model
+/// reason.
 pub const HOST_VM_MUTEX_NAME: &str = r"Local\wxc-wsb-vm";
 
 // ---------------------------------------------------------------------------

@@ -247,6 +247,15 @@ async fn main() -> Result<()> {
     // Publish the `ready:false` record now: this claims the single-instance
     // slot for `sandbox_id` from this instant (defeating a double-spawn race),
     // even though the VM is not up yet.
+    //
+    // The record carries the daemon's IPC nonce (`args.nonce`, which auths
+    // wxc-exec phase processes to this daemon) and its localhost IPC port.
+    // Both are persisted via [`control_plane::write_daemon_record`] under
+    // an owner-only DACL — see `windows_sandbox_common::auth` for the
+    // scope: this protects cross-user readers on a shared host but **does
+    // not** protect against a same-user attacker (consistent with the
+    // rest of the Windows Sandbox backend's single-user developer-
+    // workstation threat model).
     let starting = DaemonRecord {
         schema_version: RECORD_SCHEMA_VERSION,
         pid,
@@ -588,8 +597,12 @@ async fn launch_and_connect(
     // Write the per-launch guest authentication nonce into the (owner-only
     // DACL'd) rendezvous folder before launching the VM. The guest reads
     // and deletes the file at boot, then verifies the nonce on every
-    // accept; a local-process accept-race that does not present the nonce
-    // is rejected before any protocol bytes are exchanged (review C2).
+    // accept; a cross-user accept-race that does not present the nonce
+    // is rejected before any protocol bytes are exchanged (review C2;
+    // see `windows_sandbox_common::auth` for the same-user-trusted
+    // scope — a same-user attacker who can read the rendezvous folder
+    // can recover the nonce, which is consistent with the rest of the
+    // Windows Sandbox backend's single-user threat model).
     windows_sandbox_common::auth::write_nonce_file(&rendezvous_dir, guest_nonce)
         .context("write guest nonce file")?;
 

@@ -12,14 +12,36 @@
 //! 8-byte magic/version preamble for protocol identification (no
 //! authentication). On the host side the firewall lockdown
 //! ([`crate::firewall`] in the guest crate) restricts the guest-side
-//! socket to the host IP — but **every local process on the host shares
-//! that IP**. A malicious local host process can therefore race
-//! `TcpStream::connect` against the legitimate daemon at startup or per
-//! reconnect, steal stdout/stderr, inject stdin, or wedge the boot by
-//! taking the control slot first. The 8-byte preamble cannot defend
-//! against this because the attacker is a real `wxc`-aware peer that
-//! sends the correct magic/version — it just isn't the daemon that
-//! launched this VM. (Review finding C2.)
+//! socket to the host IP — but **every process under any other user
+//! account on the host shares that IP**. A process owned by a *different*
+//! user can therefore race `TcpStream::connect` against the legitimate
+//! daemon at startup or per reconnect, steal stdout/stderr, inject
+//! stdin, or wedge the boot by taking the control slot first. The
+//! 8-byte preamble cannot defend against this because the attacker is a
+//! real `wxc`-aware peer that sends the correct magic/version — it just
+//! isn't the daemon that launched this VM. (Review finding C2.)
+//!
+//! ## Scope (what this protects, what it does NOT)
+//!
+//! This handshake defends against **cross-user** hijack on a shared
+//! host. The nonce file (`nonce.bin`) and the daemon record
+//! (`daemon.json`) are written with an owner-only DACL via
+//! [`wxc_common::filesystem_dacl::set_owner_only_dacl`], whose own
+//! threat model explicitly states that **processes running under the
+//! same user account are trusted** (they can already read each other's
+//! files, attach debuggers, etc., independently of MXC's protections).
+//!
+//! As a direct consequence: a same-user attacker who can read the
+//! rendezvous folder can recover the nonce and successfully present it.
+//! That is **out of scope** for this fix and consistent with the rest
+//! of the Windows Sandbox backend's security model — the design target
+//! is a single-user developer workstation where same-user processes are
+//! already inside the trust boundary, not a multi-tenant host where
+//! same-user isolation would have to be enforced. Hardening the
+//! same-user case would require (a) keeping the nonce off disk
+//! entirely (e.g. inherited pipe handles) and (b) reworking the
+//! cross-process daemon discovery surface to match — both are real
+//! engineering work outside the scope of this handshake.
 //!
 //! ## Fix
 //!
@@ -38,7 +60,9 @@
 //!    │  generate_nonce()  →  Nonce                  │
 //!    │  write to <rendezvous_dir>/nonce.bin         │
 //!    │  (parent dir is owner-only DACL, so the      │
-//!    │   file is too via inheritance)               │
+//!    │   file is too via inheritance — see          │
+//!    │   "Scope" above for what owner-only does     │
+//!    │   and does NOT defend)                       │
 //!    │  launch VM ──────────────────────────────►   │
 //!    │                                              │ read & verify_nonce_file
 //!    │                                              │ (then DELETE the file
@@ -58,20 +82,21 @@
 //! ```
 //!
 //! The same handshake is applied on the post-`StreamsReady` 3-stream
-//! reconnects so a local-process hijacker cannot steal a per-exec data
+//! reconnects so a cross-user hijacker cannot steal a per-exec data
 //! stream either.
 //!
 //! ## Why not TLS?
 //!
-//! A localhost mutual-TLS channel would also defeat the hijack and add
-//! transport confidentiality / integrity. The nonce handshake is chosen
-//! here because (a) the guest-side cert provisioning channel does not
-//! exist yet (and adding one is materially more work than this), (b) the
-//! threat is **local hijack**, not eavesdropping on the wire — both
-//! peers' loopback traffic is unobservable to network-level attackers
-//! anyway — and (c) the secrecy of the nonce is bounded by the in-VM
-//! lifetime of one boot, so a `mmap` / page-cache snoop window is small.
-//! TLS is left as a future hardening.
+//! A localhost mutual-TLS channel would also defeat cross-user hijack
+//! and add transport confidentiality / integrity. The nonce handshake
+//! is chosen here because (a) the guest-side cert provisioning channel
+//! does not exist yet (and adding one is materially more work than
+//! this), (b) the threat is **cross-user hijack**, not eavesdropping on
+//! the wire — both peers' loopback traffic is unobservable to
+//! network-level attackers anyway — and (c) the secrecy of the nonce
+//! is bounded by the in-VM lifetime of one boot, so a `mmap` /
+//! page-cache snoop window is small. TLS is left as a future
+//! hardening.
 
 use std::path::Path;
 use std::time::Duration;

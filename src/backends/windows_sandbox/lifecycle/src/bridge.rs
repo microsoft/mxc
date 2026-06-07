@@ -84,8 +84,11 @@ pub struct ExecResult {
 /// the guest read + deleted at boot. Each TCP connection's first
 /// [`auth::NONCE_LEN`] bytes are this nonce; the guest verifies it
 /// (constant-time compare) and drops the connection on mismatch — closing
-/// the local-process hijack window the previous "accept-by-order" design
-/// left open (review finding C2).
+/// the **cross-user** hijack window the previous "accept-by-order" design
+/// left open (review finding C2). See [`auth`] for the full threat model
+/// and what this protection does and does NOT cover (same-user processes
+/// remain trusted, consistent with the rest of the Windows Sandbox
+/// backend's security model).
 pub async fn connect_to_guest(
     addr: SocketAddr,
     timeout: std::time::Duration,
@@ -307,9 +310,10 @@ pub async fn execute_on_guest(
 /// beyond the EXIT frame (they may contain the StreamsReady message).
 ///
 /// `nonce` is the same per-launch nonce passed to [`connect_to_guest`];
-/// each reconnected data stream re-authenticates with it so a local-
-/// process hijacker cannot steal a per-exec data stream either (the
-/// hijack threat is identical at boot and at reconnect — review C2).
+/// each reconnected data stream re-authenticates with it so a cross-
+/// user hijacker cannot steal a per-exec data stream either (the
+/// threat is identical at boot and at reconnect — review C2; see the
+/// [`auth`] module for the same-user-trusted scope).
 pub async fn reconnect_data_streams(
     conn: &mut GuestConnection,
     addr: SocketAddr,

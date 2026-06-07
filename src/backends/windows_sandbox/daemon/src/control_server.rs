@@ -152,8 +152,10 @@ pub fn classify_admission(slot_state: &GuestSlot, slot_held_elsewhere: bool) -> 
 /// `guest_nonce` is the per-launch authentication nonce for the
 /// daemon-to-guest TCP channel (distinct from `nonce` above, which auths
 /// IPC callers to *this* daemon). It is re-presented on every
-/// post-StreamsReady data-stream reconnect so a local-process hijacker
-/// cannot steal a per-exec stream (review C2).
+/// post-StreamsReady data-stream reconnect so a cross-user hijacker
+/// cannot steal a per-exec stream (review C2; see the
+/// `windows_sandbox_common::auth` module for the same-user-trusted
+/// scope of both nonces).
 pub async fn run(
     listener: TcpListener,
     nonce: String,

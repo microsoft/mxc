@@ -46,3 +46,4 @@ pathrel_test.exe
 
 # Claude
 .claude/
+review_windows_sandbox_*.md

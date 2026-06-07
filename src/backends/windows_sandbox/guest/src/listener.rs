@@ -146,8 +146,10 @@ fn assign_role(
 
 /// Accept the next connection from `listener`, then verify the per-launch
 /// nonce + read the declared role tag. Loops on any handshake failure —
-/// a hostile local-process accept-race is detected and dropped silently;
-/// the legitimate host's next attempt succeeds.
+/// a cross-user accept-race is detected and dropped silently; the
+/// legitimate host's next attempt succeeds. (Same-user processes are
+/// already inside the trust boundary and could have read the nonce
+/// directly; see [`windows_sandbox_common::auth`] for the full scope.)
 ///
 /// Any I/O error during the nonce or role read (e.g. peer disconnect
 /// mid-handshake) is treated the same as a mismatch: drop and retry.
@@ -162,7 +164,7 @@ async fn accept_one_authed(
             Ok(role) => return Ok((stream, role)),
             Err(e) => {
                 eprintln!(
-                    "[guest][auth] rejecting connection from {peer}: {e} (likely a local-process \
+                    "[guest][auth] rejecting connection from {peer}: {e} (likely a cross-user \
                      accept-race or protocol mismatch; dropping and waiting for the legitimate \
                      host)"
                 );
