@@ -781,38 +781,99 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
                 MxcError::not_provisioned(format!("sandbox {sandbox_id} is not provisioned"))
             })?;
 
-        match live_daemon().map_err(|e| MxcError::backend_error(format!("{e}")))? {
-            Some(d) if d.active_sandbox_id == sandbox_id => {
-                let resp = ipc_command(d.ipc_port, IPC_STOP, &d.nonce)?;
-                if resp != IPC_OK {
-                    return Err(MxcError::backend_error(format!(
-                        "daemon rejected STOP: {resp}"
-                    )));
+        // Branch on OUR record's state first (review H7 / M4 ordering fix).
+        // An unrelated active sandbox's daemon must NOT make `stop` of a
+        // not-Started sandbox fail with `backend_error` — the caller is
+        // entitled to a clean `already_stopped` regardless of what else is
+        // running.
+        //
+        // Note: review H3 calls out interrupted `start` leaving a
+        // Provisioned record + a daemon-spawned orphan VM that current code
+        // skipped. Cleanup now triggers off the presence of a daemon record
+        // (the daemon writes its record before launching the VM), not off
+        // SandboxState::Started, so an interrupted-start orphan is always
+        // reaped on the next `stop`/`deprovision`.
+        match record.state {
+            SandboxState::Started => {
+                match live_daemon().map_err(|e| MxcError::backend_error(format!("{e}")))? {
+                    Some(d) if d.active_sandbox_id == sandbox_id => {
+                        let resp = ipc_command(d.ipc_port, IPC_STOP, &d.nonce)?;
+                        if resp != IPC_OK {
+                            return Err(MxcError::backend_error(format!(
+                                "daemon rejected STOP: {resp}"
+                            )));
+                        }
+                        wait_daemon_gone(d.pid, d.pid_creation_time)?;
+                        let _ = control_plane::remove_daemon_record();
+                    }
+                    Some(d) => {
+                        // Single-daemon invariant violation: our record says
+                        // Started but a daemon for a different sandbox is
+                        // live. The on-disk record set is contradictory and
+                        // we cannot prove which side is correct — refuse
+                        // rather than silently fix one or the other.
+                        return Err(MxcError::backend_error(format!(
+                            "inconsistent state: sandbox {sandbox_id} is marked Started but the \
+                             host slot is held by {} (single-daemon invariant violated)",
+                            d.active_sandbox_id
+                        )));
+                    }
+                    None => {
+                        // Our daemon is gone. May have left a live VM behind
+                        // (review B5 cleanup path: positive-proof gated, will
+                        // refuse a foreign VM).
+                        cleanup_stale_daemon_orphan(sandbox_id)?;
+                    }
                 }
-                wait_daemon_gone(d.pid, d.pid_creation_time)?;
-                let _ = control_plane::remove_daemon_record();
             }
-            Some(d) => {
-                // A live daemon exists but is holding a different sandbox.
-                // Refuse rather than silently no-op (which would let the
-                // user think `stop` succeeded while another sandbox is
-                // still active).
-                return Err(MxcError::backend_error(format!(
-                    "a different sandbox is currently active in the host slot: {}",
-                    d.active_sandbox_id
+            SandboxState::Stopped => {
+                // Idempotent: already stopped is success-y, surface it as a
+                // distinct error code for callers that want to discriminate
+                // (e.g. CI scripts that always tear down at the end).
+                return Err(MxcError::already_stopped(format!(
+                    "sandbox {sandbox_id} is already stopped"
                 )));
             }
-            None => {
-                // No live daemon. If the record never reached Started this is
-                // a no-op already-stopped; otherwise the daemon crashed and
-                // may have left a live orphan VM. Reclaim per review B5:
-                // pure classifier + HostVmLock + ConfirmedGone gate.
-                if record.state != SandboxState::Started {
-                    return Err(MxcError::already_stopped(format!(
-                        "sandbox {sandbox_id} is not started"
-                    )));
+            SandboxState::Provisioned => {
+                // Never reached Started. Two sub-cases:
+                //   (a) start was never attempted, or attempted with no
+                //       daemon spawned -- no orphan possible.
+                //   (b) start was attempted and interrupted between daemon
+                //       spawn and the parent observing readiness -- the
+                //       daemon may have launched a VM that is now orphaned
+                //       (review H3). The daemon writes its record BEFORE
+                //       launching the VM, so a stale (dead) daemon record
+                //       is the reliable trigger for cleanup.
+                //
+                // The "stale" check is `live_daemon() == None AND
+                // read_daemon_record() == Some`: a LIVE daemon record means
+                // another sandbox is currently running and is none of our
+                // business; we must NOT call cleanup_stale_daemon_orphan
+                // against that record because it would refuse with a
+                // "belongs to different sandbox" error and surface as our
+                // own backend_error.
+                //
+                // cleanup_stale_daemon_orphan is positive-proof gated, so
+                // even when triggered it refuses to touch a VM this host
+                // did not launch -- safe to call when the dead record
+                // exists.
+                if live_daemon()
+                    .map_err(|e| MxcError::backend_error(format!("{e}")))?
+                    .is_none()
+                {
+                    let stale = read_daemon_record()
+                        .map_err(|e| MxcError::backend_error(format!("read daemon record: {e}")))?;
+                    if stale.is_some() {
+                        cleanup_stale_daemon_orphan(sandbox_id)?;
+                    }
                 }
-                cleanup_stale_daemon_orphan(sandbox_id)?;
+                // Preserve the historic idempotency contract: stop of a
+                // never-Started sandbox is AlreadyStopped, not a silent
+                // success. The cleanup side-effect above is the meaningful
+                // work for the H3 case.
+                return Err(MxcError::already_stopped(format!(
+                    "sandbox {sandbox_id} is not started"
+                )));
             }
         }
 
@@ -839,37 +900,74 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
                 MxcError::not_provisioned(format!("sandbox {sandbox_id} is not provisioned"))
             })?;
 
-        // If a daemon still holds this sandbox, it owns a live VM that MUST be
-        // torn down before we delete the records that let us find it again. A
-        // failed stop here is fatal: deleting the records would orphan the VM
-        // and strand the single-instance slot.
-        match live_daemon().map_err(|e| MxcError::backend_error(format!("{e}")))? {
-            Some(d) if d.active_sandbox_id == sandbox_id => {
-                let resp = ipc_command(d.ipc_port, IPC_STOP, &d.nonce)?;
-                if resp != IPC_OK {
-                    return Err(MxcError::backend_error(format!(
-                        "daemon rejected STOP during deprovision: {resp}"
-                    )));
+        // Branch on OUR record's state first (review H7 ordering fix). An
+        // unrelated active sandbox's daemon must NOT block deprovision of a
+        // Stopped or interrupted-Provisioned sandbox -- we only need to
+        // remove our own record directory, not coordinate with anything
+        // else. The previous catch-all incorrectly returned backend_error
+        // for "sandbox A is stopped, sandbox B is running".
+        //
+        // Stale orphan cleanup triggers off DaemonRecord existence (review
+        // H3), so an interrupted start that left a daemon-spawned VM is
+        // reaped on deprovision too.
+        match record.state {
+            SandboxState::Started => {
+                // If a daemon still holds this sandbox, it owns a live VM
+                // that MUST be torn down before we delete the records that
+                // let us find it again. A failed stop here is fatal:
+                // deleting the records would orphan the VM and strand the
+                // single-instance slot.
+                match live_daemon().map_err(|e| MxcError::backend_error(format!("{e}")))? {
+                    Some(d) if d.active_sandbox_id == sandbox_id => {
+                        let resp = ipc_command(d.ipc_port, IPC_STOP, &d.nonce)?;
+                        if resp != IPC_OK {
+                            return Err(MxcError::backend_error(format!(
+                                "daemon rejected STOP during deprovision: {resp}"
+                            )));
+                        }
+                        wait_daemon_gone(d.pid, d.pid_creation_time)?;
+                        let _ = control_plane::remove_daemon_record();
+                    }
+                    Some(d) => {
+                        // Same single-daemon invariant violation as in stop:
+                        // our record is Started but a different sandbox's
+                        // daemon is live. The on-disk record set is
+                        // contradictory and we cannot safely proceed.
+                        return Err(MxcError::backend_error(format!(
+                            "inconsistent state: sandbox {sandbox_id} is marked Started but the \
+                             host slot is held by {} (single-daemon invariant violated)",
+                            d.active_sandbox_id
+                        )));
+                    }
+                    None => {
+                        cleanup_stale_daemon_orphan(sandbox_id)?;
+                    }
                 }
-                wait_daemon_gone(d.pid, d.pid_creation_time)?;
-                let _ = control_plane::remove_daemon_record();
             }
-            Some(d) => {
-                return Err(MxcError::backend_error(format!(
-                    "a different sandbox is currently active in the host slot: {}; deprovision \
-                     {} first",
-                    d.active_sandbox_id, d.active_sandbox_id
-                )));
-            }
-            None => {
-                // No live daemon. If the sandbox was ever started, a crashed
-                // daemon may have left a live orphan VM that must be torn
-                // down before we delete the per-sandbox records (else the
-                // single-instance slot is stranded with no record to find
-                // it). For sandboxes that never reached Started, there can
-                // be no orphan, so skip the cleanup path entirely.
-                if record.state == SandboxState::Started {
-                    cleanup_stale_daemon_orphan(sandbox_id)?;
+            SandboxState::Provisioned | SandboxState::Stopped => {
+                // No live activity claimed for THIS sandbox. Whether some
+                // OTHER sandbox is currently active is irrelevant -- we are
+                // about to delete only this sandbox's record directory. The
+                // single-instance VM slot is owned by record-id, so deleting
+                // our (inactive) record cannot disturb another sandbox's
+                // live VM.
+                //
+                // Still run orphan cleanup if a stale (dead) daemon record
+                // exists, to cover the interrupted-start case (review H3):
+                // a daemon crash between VM launch and ready could leave a
+                // VM that outlives the daemon, with our record still in
+                // Provisioned. A LIVE daemon record means another sandbox
+                // is currently active and is none of our business -- we
+                // must NOT call cleanup_stale_daemon_orphan against it.
+                if live_daemon()
+                    .map_err(|e| MxcError::backend_error(format!("{e}")))?
+                    .is_none()
+                {
+                    let stale = read_daemon_record()
+                        .map_err(|e| MxcError::backend_error(format!("read daemon record: {e}")))?;
+                    if stale.is_some() {
+                        cleanup_stale_daemon_orphan(sandbox_id)?;
+                    }
                 }
             }
         }
@@ -1188,8 +1286,9 @@ mod tests {
     // Sandbox feature and live in tests/scripts/run_windows_sandbox_state_aware_tests.ps1.
 
     use control_plane::{
-        atomic_write_json, sandbox_dir, sandbox_record_path, set_state_aware_root_for_test,
-        state_aware_root, MappedFolderRecord, SandboxRecord, SandboxState, STATE_AWARE_TEST_LOCK,
+        atomic_write_json, read_json, sandbox_dir, sandbox_record_path,
+        set_state_aware_root_for_test, state_aware_root, DaemonRecord, MappedFolderRecord,
+        SandboxRecord, SandboxState, STATE_AWARE_TEST_LOCK,
     };
 
     /// RAII guard that swaps in a tempdir-rooted state_aware_root for the
@@ -1330,6 +1429,217 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::NotStarted);
     }
+
+    // ===== Review H3 / H7 / M4: ordering fix for stop / deprovision =========
+    //
+    // The previous match arms checked `live_daemon()` BEFORE branching on
+    // `record.state`, so an unrelated active sandbox's daemon turned every
+    // stop/deprovision of a Stopped or Provisioned sandbox into
+    // backend_error (H7/M4), and the orphan-cleanup path only fired on
+    // `record.state == Started` so an interrupted start that crashed the
+    // daemon after VM launch left the VM permanently leaked (H3).
+    //
+    // Tests below assert each branch in isolation by seeding the on-disk
+    // record set under a tempdir-rooted state_aware_root.
+
+    /// Write a `daemon.json` whose PID is **this test process** (so
+    /// `live_daemon()` reports it alive) but whose `active_sandbox_id` is
+    /// some unrelated sandbox. Simulates "sandbox B's daemon is running
+    /// while the caller asks about sandbox A".
+    fn write_live_daemon_record_for_other_sandbox(other_sandbox_id: &str) {
+        let pid = std::process::id();
+        let creation = control_plane::process_creation_time(pid)
+            .expect("query own process creation time for fixture");
+        let record = DaemonRecord {
+            schema_version: control_plane::RECORD_SCHEMA_VERSION,
+            pid,
+            pid_creation_time: creation,
+            ipc_port: 0,
+            nonce: "fixture".into(),
+            active_sandbox_id: other_sandbox_id.into(),
+            ready: true,
+            vm_processes: Vec::new(),
+        };
+        control_plane::write_daemon_record(&record).expect("write fixture daemon record");
+    }
+
+    /// Write a `daemon.json` whose PID has almost certainly been recycled
+    /// (high u32, no matching creation time). `live_daemon()` reports it
+    /// dead, which is what an "interrupted-start crash" looks like to
+    /// stop/deprovision.
+    fn write_stale_dead_daemon_record(active_sandbox_id: &str) {
+        let record = DaemonRecord {
+            schema_version: control_plane::RECORD_SCHEMA_VERSION,
+            // 0xFFFF_FFFE is reserved-ish and won't match a live process'
+            // creation time, so running_process_creation_time -> None.
+            pid: 0xFFFF_FFFE,
+            pid_creation_time: 1,
+            ipc_port: 0,
+            nonce: "stale".into(),
+            active_sandbox_id: active_sandbox_id.into(),
+            ready: false,
+            vm_processes: Vec::new(),
+        };
+        control_plane::write_daemon_record(&record).expect("write stale daemon record");
+    }
+
+    #[test]
+    fn stop_of_stopped_returns_already_stopped_even_when_other_sandbox_live() {
+        // Review M4: a different sandbox's live daemon must NOT turn
+        // `stop` of an already-Stopped sandbox into backend_error.
+        let _g = StateAwareRootGuard::new();
+        let me = "aaaa0001";
+        let other = "bbbb0001";
+        write_provisioned_record(me);
+        // Mark self as Stopped (idempotent retry scenario).
+        {
+            let path = sandbox_record_path(me);
+            let mut record: SandboxRecord = read_json(&path)
+                .expect("read seeded record")
+                .expect("present");
+            record.state = SandboxState::Stopped;
+            atomic_write_json(&path, &record).expect("seed Stopped");
+        }
+        write_live_daemon_record_for_other_sandbox(&format!("wsb:{other}"));
+
+        let mut backend = WindowsSandboxRunner::new();
+        let err = backend
+            .stop(&format!("wsb:{me}"), &ExecutionRequest::default(), None)
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            MxcErrorCode::AlreadyStopped,
+            "stop of Stopped sandbox must surface AlreadyStopped regardless of other daemons"
+        );
+    }
+
+    #[test]
+    fn deprovision_of_stopped_succeeds_even_when_other_sandbox_live() {
+        // Review H7: an unrelated live daemon must NOT block
+        // deprovisioning a Stopped sandbox -- we only need to delete that
+        // sandbox's record directory.
+        let _g = StateAwareRootGuard::new();
+        let me = "aaaa0002";
+        let other = "bbbb0002";
+        write_provisioned_record(me);
+        {
+            let path = sandbox_record_path(me);
+            let mut record: SandboxRecord = read_json(&path)
+                .expect("read seeded record")
+                .expect("present");
+            record.state = SandboxState::Stopped;
+            atomic_write_json(&path, &record).expect("seed Stopped");
+        }
+        write_live_daemon_record_for_other_sandbox(&format!("wsb:{other}"));
+
+        let mut backend = WindowsSandboxRunner::new();
+        backend
+            .deprovision(&format!("wsb:{me}"), &ExecutionRequest::default(), None)
+            .expect("deprovision of Stopped must succeed regardless of other daemons");
+        assert!(
+            !sandbox_dir(me).exists(),
+            "deprovision must remove the per-sandbox dir"
+        );
+    }
+
+    #[test]
+    fn deprovision_of_provisioned_succeeds_even_when_other_sandbox_live() {
+        // Review H7 sibling: an unrelated live daemon must NOT block
+        // deprovisioning a never-Started sandbox.
+        let _g = StateAwareRootGuard::new();
+        let me = "aaaa0003";
+        let other = "bbbb0003";
+        write_provisioned_record(me);
+        write_live_daemon_record_for_other_sandbox(&format!("wsb:{other}"));
+
+        let mut backend = WindowsSandboxRunner::new();
+        backend
+            .deprovision(&format!("wsb:{me}"), &ExecutionRequest::default(), None)
+            .expect("deprovision of Provisioned must succeed regardless of other daemons");
+        assert!(!sandbox_dir(me).exists());
+    }
+
+    #[test]
+    fn stop_of_provisioned_runs_orphan_cleanup_when_stale_daemon_exists() {
+        // Review H3: an interrupted `start` that crashed AFTER the daemon
+        // wrote its record but BEFORE the parent observed readiness leaves
+        // the per-sandbox record in Provisioned and a stale daemon record
+        // pointing at a possibly-orphaned VM. Stop must trigger
+        // orphan cleanup even though state != Started; otherwise the VM
+        // leaks permanently.
+        //
+        // Without a real WindowsSandbox VM in the test environment the
+        // enumeration step returns empty and cleanup classifies as
+        // NoLiveVm, which removes the stale daemon record and succeeds.
+        // The assertion below proves cleanup ran (record gone) -- the
+        // pre-fix code skipped cleanup entirely and left the stale
+        // record in place.
+        let _g = StateAwareRootGuard::new();
+        let token = "aaaa0004";
+        write_provisioned_record(token);
+        write_stale_dead_daemon_record(&format!("wsb:{token}"));
+        assert!(
+            control_plane::read_daemon_record().expect("read").is_some(),
+            "fixture must seed a stale daemon record"
+        );
+
+        let mut backend = WindowsSandboxRunner::new();
+        let err = backend
+            .stop(&format!("wsb:{token}"), &ExecutionRequest::default(), None)
+            .unwrap_err();
+        // Provisioned + cleanup -> AlreadyStopped (sandbox was never
+        // Started so there is no Started -> Stopped transition to report;
+        // the cleanup side effect is the meaningful work).
+        assert_eq!(err.code, MxcErrorCode::AlreadyStopped);
+        assert!(
+            control_plane::read_daemon_record().expect("read").is_none(),
+            "orphan cleanup must remove the stale daemon record (H3 regression)"
+        );
+    }
+
+    #[test]
+    fn deprovision_of_provisioned_runs_orphan_cleanup_when_stale_daemon_exists() {
+        // Mirror of the previous test for deprovision (review H3).
+        let _g = StateAwareRootGuard::new();
+        let token = "aaaa0005";
+        write_provisioned_record(token);
+        write_stale_dead_daemon_record(&format!("wsb:{token}"));
+
+        let mut backend = WindowsSandboxRunner::new();
+        backend
+            .deprovision(&format!("wsb:{token}"), &ExecutionRequest::default(), None)
+            .expect("deprovision of Provisioned with stale daemon record must succeed");
+        assert!(!sandbox_dir(token).exists());
+        assert!(
+            control_plane::read_daemon_record().expect("read").is_none(),
+            "orphan cleanup must remove the stale daemon record (H3 regression)"
+        );
+    }
+
+    #[test]
+    fn stop_of_started_with_other_sandbox_live_returns_inconsistent_error() {
+        // Single-daemon invariant: if our record says Started but a
+        // DIFFERENT sandbox's daemon is live, the on-disk record set is
+        // contradictory. Refuse rather than silently override one side.
+        let _g = StateAwareRootGuard::new();
+        let me = "aaaa0006";
+        let other = "bbbb0006";
+        write_started_record(me);
+        write_live_daemon_record_for_other_sandbox(&format!("wsb:{other}"));
+
+        let mut backend = WindowsSandboxRunner::new();
+        let err = backend
+            .stop(&format!("wsb:{me}"), &ExecutionRequest::default(), None)
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::BackendError);
+        assert!(
+            err.message.contains("single-daemon invariant violated"),
+            "expected invariant-violation message, got: {}",
+            err.message
+        );
+    }
+
+    // ===== end review H3 / H7 / M4 regression tests =========================
 
     #[test]
     fn validate_provision_rejects_invalid_policy() {
