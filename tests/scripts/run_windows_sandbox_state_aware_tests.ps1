@@ -310,6 +310,41 @@ try {
                 $r = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = 'exit 7' } } -TimeoutSec 120
                 Assert-True ($r.ExitCode -eq 7) "exec surfaces child exit 7 (got $($r.ExitCode))"
             } | Out-Null
+
+            # Review H10: timeout cleanup must leave the VM reusable.
+            # The hardest path in `executor.rs` is "timed-out exec, reap
+            # the descendant tree via the Job Object, abort the bridge
+            # drains, return to the command loop ready for the next
+            # exec." If the timeout cleanup wedged pipes or left a
+            # descendant holding the stdio handles, the *next* exec
+            # would either hang or see empty output -- which is the
+            # whole state-aware value proposition broken. The previous
+            # E2E coverage only exercised this path in one-shot
+            # (`windows_sandbox_timeout.json`), which cannot prove
+            # reuse survives because each one-shot is a fresh VM.
+            #
+            # The test runs a command that exits well past the
+            # configured timeout (PowerShell `Start-Sleep 30` against a
+            # 2s timeout), expects a non-zero result, then immediately
+            # runs a normal echo and asserts it succeeds with the
+            # expected stdout.
+            Run-StateAwareTest 'reused VM survives a timed-out exec' {
+                $sleepCmd = 'powershell -NoProfile -Command "Start-Sleep -Seconds 30"'
+                $timed = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = $sleepCmd; timeout = 2000 } } -TimeoutSec 30
+                # The exact exit code on timeout is backend-defined
+                # (currently non-zero "process timed out"); we just
+                # require it to be non-zero so the test does not get
+                # locked to a specific code.
+                Assert-True ($timed.ExitCode -ne 0) "timed-out exec surfaces non-zero exit (got $($timed.ExitCode); stderr was '[$($timed.Stderr.Trim())]')"
+                # Immediately reuse the VM with a normal echo. If the
+                # bridge / pipes / Job Object cleanup wedged
+                # something, this will either hang to the script's
+                # outer timeout or come back with empty stdout. The
+                # assertion catches both.
+                $r = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = 'echo post-timeout-still-alive' } } -TimeoutSec 120
+                Assert-True ($r.ExitCode -eq 0) "post-timeout exec exit 0 (got $($r.ExitCode))"
+                Assert-True ($r.Stdout -match 'post-timeout-still-alive') "post-timeout exec stdout (got '[$($r.Stdout.Trim())]')"
+            } | Out-Null
         }
     }
 } finally {

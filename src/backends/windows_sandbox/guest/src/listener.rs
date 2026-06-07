@@ -228,6 +228,9 @@ fn find_guest_ip() -> Result<std::net::IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sandbox_common::auth::{
+        generate_nonce, write_nonce, ChannelRole, Nonce, NONCE_LEN,
+    };
 
     #[test]
     fn find_guest_ip_returns_non_loopback() {
@@ -237,5 +240,291 @@ mod tests {
         if let Ok(ip) = find_guest_ip() {
             assert!(!ip.is_loopback());
         }
+    }
+
+    // ===== Review H9: role-tag handshake regression tests ===================
+    //
+    // The role-tag fix on the guest accept loop (drop sockets by declared
+    // role, not by accept order) eliminated a ~25-30%-rate "exit 0 with
+    // empty stdout" intermittent failure caused by Hyper-V vNIC accept-
+    // queue reordering. There was previously no regression coverage for:
+    //   (a) wrong-nonce peer that should be dropped silently;
+    //   (b) the role tag being decoded correctly across all four channels;
+    //   (c) duplicate-role declaration being dropped silently while still
+    //       allowing the legitimate peer to win the slot;
+    //   (d) accept ORDER vs. declared role ORDER differing -- the case the
+    //       fix targeted.
+    //
+    // These tests use the real `auth::write_nonce` host helper and the
+    // real `accept_connections` / `accept_data_connections` guest helpers,
+    // so the same protocol code-path the production daemon and guest run
+    // is exercised end-to-end over a `127.0.0.1:0` loopback listener.
+
+    /// Bind a loopback listener for tests; returns (listener, addr).
+    async fn bind_loopback() -> (TcpListener, std::net::SocketAddr) {
+        let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let a = l.local_addr().expect("local_addr");
+        (l, a)
+    }
+
+    /// Open a TCP connection to `addr`, write the nonce + role tag using
+    /// the host-side helper, and hand the stream back to the caller.
+    async fn host_connect(
+        addr: std::net::SocketAddr,
+        nonce: &Nonce,
+        role: ChannelRole,
+    ) -> TcpStream {
+        let mut s = TcpStream::connect(addr).await.expect("connect");
+        write_nonce(&mut s, nonce, role).await.expect("write nonce");
+        s
+    }
+
+    #[tokio::test]
+    async fn accept_connections_pairs_by_declared_role_not_accept_order() {
+        // Review H9 regression: connect in a *different* order than the
+        // guest historically expected (stderr -> stdout -> control -> stdin),
+        // and assert each guest-side slot receives the correctly-paired
+        // socket regardless of arrival order. The pre-fix code would have
+        // assigned by FIFO and the test would observe stderr-bytes on
+        // the control slot etc.
+        let (listener, addr) = bind_loopback().await;
+        let nonce = generate_nonce();
+        let expected = nonce.clone();
+        let guest = tokio::spawn(async move { accept_connections(&listener, &expected).await });
+
+        // Connect in reversed-from-canonical order:
+        let mut stderr_host = host_connect(addr, &nonce, ChannelRole::Stderr).await;
+        let mut stdout_host = host_connect(addr, &nonce, ChannelRole::Stdout).await;
+        let mut control_host = host_connect(addr, &nonce, ChannelRole::Control).await;
+        let mut stdin_host = host_connect(addr, &nonce, ChannelRole::Stdin).await;
+
+        let (mut control, mut stdin, mut stdout, mut stderr) =
+            guest.await.expect("guest task join").expect("accept ok");
+
+        // Tag each host side with a single byte and assert the GUEST side
+        // of the slot reads exactly that byte. If the slots were misordered
+        // we would read the wrong byte (or hang).
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (host, sentinel, slot) in [
+            (&mut control_host, b'C', &mut control),
+            (&mut stdin_host, b'I', &mut stdin),
+            (&mut stdout_host, b'O', &mut stdout),
+            (&mut stderr_host, b'E', &mut stderr),
+        ] {
+            host.write_all(&[sentinel]).await.expect("host write");
+            host.shutdown().await.ok();
+            let mut byte = [0u8; 1];
+            let n = slot.read(&mut byte).await.expect("read slot");
+            assert_eq!(n, 1);
+            assert_eq!(
+                byte[0], sentinel,
+                "slot for {} sentinel mismatch (role-tag pairing regression)",
+                sentinel as char
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_drops_wrong_nonce_and_keeps_waiting_for_legitimate_peer() {
+        // Review H9 (b): a wrong-nonce peer must be dropped silently
+        // before any protocol bytes are exchanged, and the accept loop
+        // must continue serving the legitimate peer. Previously
+        // covered only by the auth-module unit tests; this test
+        // exercises the guest's drop-and-retry loop against a real
+        // socket.
+        let (listener, addr) = bind_loopback().await;
+        let expected = generate_nonce();
+        let cloned_expected = expected.clone();
+        let guest =
+            tokio::spawn(async move { accept_connections(&listener, &cloned_expected).await });
+
+        // Hostile connect: wrong nonce. The guest drops the socket and
+        // returns to accept(); the host sees EOF on the read attempt.
+        let bad_nonce = generate_nonce();
+        let mut hostile = TcpStream::connect(addr).await.expect("hostile connect");
+        write_nonce(&mut hostile, &bad_nonce, ChannelRole::Control)
+            .await
+            .expect("hostile write");
+        use tokio::io::AsyncReadExt;
+        let mut buf = [0u8; 1];
+        // We may or may not see EOF before the legitimate connects below
+        // depending on scheduling -- the important property is that
+        // accept_connections still completes once all four legitimate
+        // sockets arrive.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            hostile.read(&mut buf),
+        )
+        .await;
+
+        let _legit_c = host_connect(addr, &expected, ChannelRole::Control).await;
+        let _legit_i = host_connect(addr, &expected, ChannelRole::Stdin).await;
+        let _legit_o = host_connect(addr, &expected, ChannelRole::Stdout).await;
+        let _legit_e = host_connect(addr, &expected, ChannelRole::Stderr).await;
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), guest)
+            .await
+            .expect("accept_connections completes within budget after wrong-nonce drop")
+            .expect("guest task join")
+            .expect("accept ok");
+        let (_c, _i, _o, _e) = result;
+        // If we reach here, the loop survived the wrong-nonce peer and
+        // returned all four sockets paired by role.
+        drop(hostile);
+    }
+
+    #[tokio::test]
+    async fn accept_drops_duplicate_role_keeps_first_socket() {
+        // Review H9 (c): a peer declaring an already-paired role must be
+        // dropped; the first socket to claim that role keeps it. Without
+        // this guard a buggy / hostile second peer could displace the
+        // legitimate first connection mid-handshake.
+        let (listener, addr) = bind_loopback().await;
+        let nonce = generate_nonce();
+        let expected = nonce.clone();
+        let guest = tokio::spawn(async move { accept_connections(&listener, &expected).await });
+
+        // Connect the legitimate control first.
+        let mut legit_control = host_connect(addr, &nonce, ChannelRole::Control).await;
+        // Immediately connect a duplicate-Control peer that the guest
+        // should drop.
+        let mut dup_control = host_connect(addr, &nonce, ChannelRole::Control).await;
+
+        // Now the rest of the legitimate channels.
+        let _legit_i = host_connect(addr, &nonce, ChannelRole::Stdin).await;
+        let _legit_o = host_connect(addr, &nonce, ChannelRole::Stdout).await;
+        let _legit_e = host_connect(addr, &nonce, ChannelRole::Stderr).await;
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), guest)
+            .await
+            .expect("accept completes")
+            .expect("guest task join")
+            .expect("accept ok");
+        let (mut control, _stdin, _stdout, _stderr) = result;
+
+        // Prove the FIRST control survived by exchanging a sentinel byte
+        // and confirming it arrives on the guest-side control socket.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        legit_control
+            .write_all(b"A")
+            .await
+            .expect("first control writes");
+        legit_control.shutdown().await.ok();
+        let mut byte = [0u8; 1];
+        let n = control.read(&mut byte).await.expect("guest control reads");
+        assert_eq!((n, byte[0]), (1, b'A'));
+
+        // The duplicate connection should have been dropped by the guest.
+        // It may or may not have observed EOF yet (depends on scheduling),
+        // but a write to it will eventually fail; verify the WRITE does
+        // not get echoed onto the same guest-side slot (that would
+        // indicate the dup displaced the original).
+        let _ = dup_control.write_all(b"Z").await; // may succeed locally
+        let _ = dup_control.shutdown().await;
+        // Re-read the same slot with a tight timeout; nothing should arrive.
+        let mut extra = [0u8; 1];
+        let extra_read = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            control.read(&mut extra),
+        )
+        .await;
+        match extra_read {
+            // EOF on the held socket is fine (no displacement).
+            Ok(Ok(0)) => {}
+            // Any byte read here means the dup wrote onto our slot -- regression.
+            Ok(Ok(n)) => panic!(
+                "duplicate-role peer wrote {n} bytes onto the held control slot ({:?})",
+                &extra[..n]
+            ),
+            // Timeout = nothing happened, also fine.
+            Err(_) => {}
+            // Read error on the held socket is fine.
+            Ok(Err(_)) => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_data_connections_pairs_three_by_role() {
+        // Review H9 (d) for the post-StreamsReady data-stream reconnect
+        // path. Same property as accept_connections but only three roles
+        // (stdin, stdout, stderr) and a Control declaration must be
+        // dropped.
+        let (listener, addr) = bind_loopback().await;
+        let nonce = generate_nonce();
+        let expected = nonce.clone();
+        let guest =
+            tokio::spawn(async move { accept_data_connections(&listener, &expected).await });
+
+        // A peer declaring Control on the data path must be dropped (only
+        // stdin/stdout/stderr are valid on reconnect).
+        let mut bogus = host_connect(addr, &nonce, ChannelRole::Control).await;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _ = bogus.shutdown().await;
+
+        // Now connect the three legitimate data channels in a non-canonical
+        // order.
+        let mut stderr_host = host_connect(addr, &nonce, ChannelRole::Stderr).await;
+        let mut stdin_host = host_connect(addr, &nonce, ChannelRole::Stdin).await;
+        let mut stdout_host = host_connect(addr, &nonce, ChannelRole::Stdout).await;
+
+        let (mut stdin, mut stdout, mut stderr) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), guest)
+                .await
+                .expect("accept_data completes")
+                .expect("join")
+                .expect("accept ok");
+
+        for (host, sentinel, slot) in [
+            (&mut stdin_host, b'I', &mut stdin),
+            (&mut stdout_host, b'O', &mut stdout),
+            (&mut stderr_host, b'E', &mut stderr),
+        ] {
+            host.write_all(&[sentinel]).await.expect("host write");
+            host.shutdown().await.ok();
+            let mut byte = [0u8; 1];
+            let n = slot.read(&mut byte).await.expect("slot read");
+            assert_eq!((n, byte[0]), (1, sentinel));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_drops_stalled_handshake_within_handshake_timeout() {
+        // Review H11 regression (sibling of H9): a peer that connects
+        // and never writes must NOT wedge the accept loop. The guest
+        // wraps verify_nonce in `tokio::time::timeout(HANDSHAKE_TIMEOUT,
+        // ...)`; this test asserts the stalled connection is dropped
+        // and the legitimate four-way handshake then completes.
+        let (listener, addr) = bind_loopback().await;
+        let nonce = generate_nonce();
+        let expected = nonce.clone();
+        let guest = tokio::spawn(async move { accept_connections(&listener, &expected).await });
+
+        // Stalled peer: connect, write nothing.
+        let _stalled = TcpStream::connect(addr).await.expect("stalled connect");
+
+        // Advance time past HANDSHAKE_TIMEOUT so the guest drops the stalled
+        // socket and returns to accept(). Yield repeatedly to give the
+        // guest's spawned task a chance to observe the timeout.
+        tokio::time::advance(HANDSHAKE_TIMEOUT + std::time::Duration::from_millis(100)).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        // Now do a legitimate full handshake. Under paused time the
+        // network ops here resolve via the runtime's IO driver, which
+        // tokio::time::pause leaves intact.
+        let _legit_c = host_connect(addr, &nonce, ChannelRole::Control).await;
+        let _legit_i = host_connect(addr, &nonce, ChannelRole::Stdin).await;
+        let _legit_o = host_connect(addr, &nonce, ChannelRole::Stdout).await;
+        let _legit_e = host_connect(addr, &nonce, ChannelRole::Stderr).await;
+
+        // Bounded timeout in case the loop did NOT recover (regression).
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), guest).await;
+        assert!(
+            result.is_ok(),
+            "accept_connections did not complete after handshake-timeout recovery; \
+             stalled peer wedged the loop (H11 regression)"
+        );
+        let _ = NONCE_LEN; // silence unused-import warning if compiler over-eagerly trims
     }
 }
