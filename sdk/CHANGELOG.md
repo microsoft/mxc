@@ -5,9 +5,9 @@ All notable changes to `@microsoft/mxc-sdk` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.1]
 
-### Added
+### Added (additive — no breaking changes)
 
 - `getPlatformSupport()` now reports `uiCapabilities` on Windows when the
   native probe can determine which UI restrictions the host can enforce.
@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WindowsSandboxExecConfig` / `WindowsSandboxStopConfig` /
   `WindowsSandboxDeprovisionConfig` types are exported via
   `state-aware-types`; `provisionSandbox('windows_sandbox', …)` mints a
-  `wsb:<token>` sandboxId that the rest of the lifecycle (`startSandbox`
+  `wsb:<8-hex>` sandboxId that the rest of the lifecycle (`startSandbox`
   / `execInSandbox` / `execInSandboxAsync` / `stopSandbox` /
   `deprovisionSandbox`) routes to the new host-side daemon. Filesystem
   policy (`readwritePaths` / `readonlyPaths` / `deniedPaths`) is honored
@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `user` bundles are not honored on this backend. See
   [`docs/windows-sandbox/windows-sandbox.md`](../docs/windows-sandbox/windows-sandbox.md)
   for the full per-phase config matrix.
+
+### Changed
+
+- One-shot `windows_sandbox` calls now launch a fresh disposable VM per
+  invocation instead of reusing a long-lived warm VM. Every call emits
+  a one-line stderr WARNING calling out the model change and pointing at
+  the state-aware lifecycle for warm reuse; set
+  `WXC_WSB_ACK_ONESHOT_FRESH_VM=1` in the environment to suppress the
+  warning after auditing. The legacy `experimental.windows_sandbox`
+  `idleTimeoutMs` / `daemonPipeName` fields are still accepted by the
+  parser for back-compat but no longer have any effect; setting them to
+  a non-default value also emits a stderr WARNING.
 
 ## [0.3.0]
 

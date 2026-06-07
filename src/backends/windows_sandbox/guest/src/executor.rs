@@ -91,7 +91,19 @@ pub async fn run_command_loop(
                     buf.drain(..consumed);
                     match message {
                         ControlMessage::Exec(req) => {
-                            eprintln!("[guest] exec {}: {}", req.exec_id, req.script_code);
+                            // Review M1: do NOT log the raw `script_code`.
+                            // The script body can carry secrets (env-var
+                            // assignments, command-line passwords, inline
+                            // config), and the bootstrap.log in the
+                            // rendezvous folder persists on the host past
+                            // stop/deprovision. Log only the exec id and
+                            // payload length so a diagnostic still shows
+                            // exec sequencing without leaking content.
+                            eprintln!(
+                                "[guest] exec {} ({} bytes)",
+                                req.exec_id,
+                                req.script_code.len()
+                            );
 
                             handle_exec(
                                 &req,

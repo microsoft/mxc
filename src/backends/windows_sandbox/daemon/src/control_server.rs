@@ -572,9 +572,13 @@ mod tests {
             tokio::spawn(
                 async move { run(listener, nonce, server_shutdown, guest, guest_nonce).await },
             );
-        // Give the listener a tick to start polling. Without this, the very
-        // first connect_to_string can race the accept.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Review L4: no sleep needed here. `TcpListener::bind` has already
+        // succeeded synchronously on `127.0.0.1:0`; the OS keeps incoming
+        // SYNs in the listen backlog (default ~128) until the spawned
+        // `run` task calls `accept`, so the test's first
+        // `TcpStream::connect` cannot race the accept loop -- it
+        // succeeds at the TCP layer either way and gets serviced as
+        // soon as the accept catches up.
         (addr, shutdown, handle)
     }
 
@@ -776,7 +780,9 @@ mod tests {
             tokio::spawn(
                 async move { run(listener, nonce, server_shutdown, guest, guest_nonce).await },
             );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Same review-L4 reasoning as the spawn_test_server helper above:
+        // the OS TCP backlog already absorbs the immediate connect, so
+        // we don't need to give the spawned `run` task a head start.
 
         // Acquire the slot lock and HOLD it for the duration of the EXEC.
         let _held = holder.lock().await;

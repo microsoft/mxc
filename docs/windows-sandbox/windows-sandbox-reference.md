@@ -2,35 +2,36 @@
 
 Detailed reference for the sandbox backend internals. For the high-level design overview, see [windows-sandbox.md](windows-sandbox.md).
 
-> **Currency note:** the live backend is the `windows_sandbox_lifecycle` crate (transient **one-shot** `WindowsSandboxRunner` + the **state-aware** daemon). The `wxc-exec ↔ Daemon` *line-based* `EXEC`/`RESULT` protocol described under [IPC Protocol](#ipc-protocol) belongs to the **superseded warm-reuse daemon** (`windows_sandbox_common`), which is off all live dispatch paths. The state-aware control channel instead uses an 8-byte preamble handshake, `EXEC`/`PING`/`STOP` verbs with `OK`/`ERR <reason>` status lines, and the binary frame stream in `windows_sandbox_lifecycle::ipc_exec`. The `Daemon ↔ Agent` 4-channel framed protocol and the VM-setup/rendezvous details below are still accurate.
-
 ## IPC Protocol
 
-### wxc-exec ↔ Daemon (line-based TCP) — *legacy warm-reuse daemon*
+### wxc-exec ↔ Daemon (state-aware: localhost TCP control channel)
 
-> This `EXEC`/`RESULT` line protocol belongs to the superseded warm-reuse daemon and is **not** used by the live one-shot or state-aware paths (see the currency note at the top). The state-aware control channel uses the preamble handshake + `EXEC`/`PING`/`STOP` verbs with `OK`/`ERR <reason>` status lines and the `ipc_exec` binary frame stream.
+The state-aware daemon listens on an OS-assigned localhost TCP port (recorded in its `daemon.json` record). Clients (`wxc-exec` phase processes) connect, present an 8-byte preamble handshake, then issue a verb on a single line:
 
-The daemon listens on a localhost TCP port derived deterministically from the pipe name:
+| Verb | Payload | Reply |
+|------|---------|-------|
+| `PING <nonce>` | none | `PONG\n` |
+| `STOP <nonce>` | none | `OK\n` then daemon teardown |
+| `EXEC <nonce>` | binary `ipc_exec::ExecStart` frame on the same stream | `OK\n` then `FRAME_STDOUT`/`FRAME_STDERR`/`FRAME_EXIT` frames; finally `ERR <reason>\n` if anything beneath fails |
 
-```rust
-fn pipe_name_to_port(name: &str) -> u16 {
-    let hash: u32 = name.bytes()
-        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-    let range = 65535 - 49152;
-    49152 + (hash % range) as u16
-}
-```
+The `<nonce>` is the daemon IPC auth nonce (separate from the daemon↔guest TCP `Nonce`). The frame stream and codec live in `windows_sandbox_lifecycle::ipc_exec`.
 
-**Protocol:**
-- Client → Daemon: `EXEC <json>\n`
-- Daemon → Client: `RESULT <exit-code> <stdout-base64> <stderr-base64> <error-message>\n`
-- Daemon → Client: `ERROR <message>\n`
+### Daemon ↔ Agent (per-launch nonce + role-tag handshake, then length-prefixed JSON)
 
-### Daemon ↔ Agent (length-prefixed JSON over TCP)
+4 TCP connections on initial boot (control + stdin + stdout + stderr), 3 on each post-`StreamsReady` reconnect.
 
-4 TCP connections: control channel + stdin + stdout + stderr.
+**Handshake — every connection:**
 
-Control channel frame format: `[4 bytes: u32 LE length][JSON payload]`
+| Step | Bytes | From | Purpose |
+|------|-------|------|---------|
+| 1. Per-launch nonce | 32 bytes (`auth::NONCE_LEN`) | Host → Guest | Defeats cross-user accept-race hijack |
+| 2. Channel role tag | 1 byte (`auth::ChannelRole`: `0=Control`, `1=Stdin`, `2=Stdout`, `3=Stderr`) | Host → Guest | Guest pairs the accepted socket by **declared role**, not by accept order |
+
+A connection whose nonce does not constant-time-equal the launch nonce — or whose role tag duplicates a slot already filled — is dropped silently. The host writes both elements via `windows_sandbox_common::auth::write_nonce`; the guest reads them via `auth::verify_nonce` under a 1-second `HANDSHAKE_TIMEOUT` so a stalled peer cannot wedge the accept loop. See [`windows_sandbox_common::auth`](../../src/backends/windows_sandbox/common/src/auth.rs) for the full threat-model scope (the handshake defends cross-user hijack; same-user processes remain inside the trust boundary).
+
+**Framed control-channel messages — after handshake:**
+
+Frame format: `[4 bytes: u32 LE length][JSON payload]`
 
 | Message | Direction | Purpose |
 |---------|-----------|---------|
@@ -215,24 +216,24 @@ Remove-Item "$env:TEMP\wxc-sandbox-rendezvous\*" -ErrorAction SilentlyContinue
 | `state_aware.rs` | `StatefulSandboxBackend` impl (provision/start/exec/stop/deprovision); client-side IPC + `map_exec_status_error` |
 | `control_plane.rs` | Durable records (`daemon.json` / `record.json`), IPC verb/status consts, host VM-slot lock, owner-only DACL helpers |
 | `teardown.rs` | Ownership-proof reconcile, markers, scoped process teardown, scratch GC |
-| `bridge.rs` | 4-channel TCP bridge to the guest, preamble handshake, `stream_exec_on_guest`, reconnect |
+| `bridge.rs` | 4-channel TCP bridge to the guest, per-connection `Nonce` + `ChannelRole` handshake, preamble handshake, `stream_exec_on_guest`, reconnect |
 | `ipc_exec.rs` | Binary frame stream (`ExecStart`, `MAX_IPC_FRAME`, frame kinds) for state-aware exec |
-| `vm.rs` | `.wsb` generation, host Python discovery, VM launch/teardown primitives |
+| `vm.rs` | `.wsb` generation, host Python discovery, VM launch/teardown primitives, `launch_managed_vm` shared boot-sequence helper |
 | `rendezvous.rs` | Polls the guest rendezvous file |
 | `policy.rs` | Maps filesystem policy to MappedFolders; rejects unenforceable policy |
 | `error.rs` | Typed `OneShotError` → `ScriptResponse` (with `FailurePhase`) mapping |
 | **Daemon crate** (`src/backends/windows_sandbox/daemon/src/`) | |
-| `main.rs` | State-aware daemon entry point: `--token` arg, nonce-over-stdin, VM ownership, reconcile |
-| `control_server.rs` | Localhost IPC server: `EXEC`/`PING`/`STOP` verbs, single-flight exec admission |
+| `main.rs` | State-aware daemon entry point: `--token` arg, nonce-over-stdin, VM ownership, reconcile, `DaemonLaunchObserver` wiring for `vm::launch_managed_vm` |
+| `control_server.rs` | Localhost IPC server: `EXEC`/`PING`/`STOP` verbs, single-flight exec admission, bounded-wait pre-auth permit |
 | **Guest crate** (`src/backends/windows_sandbox/guest/src/`) | |
 | `main.rs` | Guest entry point |
-| `listener.rs` | TCP listener, rendezvous writer |
+| `listener.rs` | TCP listener, rendezvous writer, role-tag pairing of accepted sockets |
 | `executor.rs` | Command loop, stdio bridging |
 | `job.rs` | Job Object child-tree reaping |
 | `firewall.rs` | Guest firewall lockdown (`netsh advfirewall`) |
-| **Legacy (orphaned warm-reuse daemon, off all live paths)** | |
-| `src/backends/windows_sandbox/common/src/windows_sandbox_runner.rs` | Legacy line-protocol client (`EXEC`/`RESULT`) — retained for reference only |
-| `src/backends/windows_sandbox/common/src/sandbox_protocol.rs` | Legacy shared control protocol |
+| **Common crate** (`src/backends/windows_sandbox/common/src/`) | |
+| `auth.rs` | Per-launch `Nonce`, `ChannelRole`, host/guest handshake helpers; nonce-file write + delete-after-read |
+| `sandbox_protocol.rs` | Shared control-channel preamble + JSON message codec |
 
 ## E2E Tests
 

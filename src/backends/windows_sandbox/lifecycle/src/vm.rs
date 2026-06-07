@@ -160,9 +160,23 @@ pub fn generate_wsb(
 ) -> Result<PathBuf> {
     // Write the bootstrap script into the rendezvous dir (read-write inside
     // the sandbox) so it can be executed by the LogonCommand.
+    //
+    // Review M1: truncate the log on every guest startup. The bootstrap
+    // log persists in the host-side rendezvous folder past stop /
+    // deprovision, and prior to the M1 fix the guest also logged each
+    // exec's raw `script_code` -- so an attacker (or a curious admin)
+    // with same-user read access to %TEMP%\wxc-wsb-stateaware-rendezvous
+    // could see every script body MXC ever ran on this host. The guest
+    // side no longer logs script_code (see executor.rs), and we
+    // truncate the log on each fresh boot here so even old contents
+    // from a previous-version guest do not accumulate.
     let bootstrap_content = format!(
         r#"@echo off
 set "LOG={rendezvous}\bootstrap.log"
+:: Truncate any prior bootstrap.log content on this boot (review M1).
+:: Prevents log contents from a previous run -- including, in pre-fix
+:: versions, raw exec script_code -- from accumulating on the host.
+type nul > "%LOG%"
 
 echo [bootstrap] Starting at %date% %time% >> "%LOG%" 2>&1
 
