@@ -68,6 +68,17 @@ const MAX_AUTH_LINE_BYTES: u64 = 1024;
 /// hold a pre-auth slot.
 const MAX_CONCURRENT_PREAUTH: usize = 32;
 
+/// How long an incoming pre-auth connection waits for a [`MAX_CONCURRENT_PREAUTH`]
+/// permit before being dropped (review H4). The previous design used
+/// `try_acquire_owned()` and instant-dropped the 33rd concurrent connection;
+/// a legitimate burst from `make -j` or a CI batch that briefly exceeded the
+/// cap therefore surfaced as a spurious backend error with no retry on the
+/// client side. Permits are released in milliseconds for normal traffic
+/// (auth read + verb dispatch only -- EXEC drops the permit before the long
+/// child wait), so a short bounded wait absorbs realistic bursts while still
+/// dropping a sustained slow-loris flood that would otherwise pile up.
+const PREAUTH_PERMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Monotonic source of per-exec correlation ids (unique within this daemon).
 static EXEC_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -173,18 +184,38 @@ pub async fn run(
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, peer) = accepted.context("accept IPC client")?;
-                // try_acquire (non-blocking): excess pre-auth connections are
-                // dropped at accept rather than parked. This keeps the
-                // pre-auth budget genuinely bounded - if we waited on the
-                // semaphore we would still be holding the socket open and
-                // contributing to FD pressure.
-                let permit = match preauth_permits.clone().try_acquire_owned() {
-                    Ok(p) => p,
+                // Bounded-wait acquire (review H4): wait up to
+                // PREAUTH_PERMIT_WAIT for a permit so a transient
+                // make-j-style burst that briefly exceeds
+                // MAX_CONCURRENT_PREAUTH does not surface as a spurious
+                // backend error on the client. If the wait expires the
+                // connection is dropped to bound FD pressure under a
+                // sustained slow-loris flood. The Semaphore is never
+                // closed in this daemon's lifetime, so acquire_owned()
+                // cannot resolve to Err during the wait.
+                let permits = preauth_permits.clone();
+                let acquire_result = tokio::time::timeout(
+                    PREAUTH_PERMIT_WAIT,
+                    permits.acquire_owned(),
+                )
+                .await;
+                let permit = match acquire_result {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(_)) => {
+                        // Semaphore::acquire_owned only Errs on closed,
+                        // which we never do.
+                        eprintln!(
+                            "[wsb-daemon] BUG: pre-auth semaphore closed; dropping {peer}"
+                        );
+                        drop(stream);
+                        continue;
+                    }
                     Err(_) => {
                         eprintln!(
-                            "[wsb-daemon] pre-auth slot exhausted; dropping incoming IPC \
-                             client {peer} ({MAX_CONCURRENT_PREAUTH} concurrent pre-auth tasks \
-                             already in flight)"
+                            "[wsb-daemon] pre-auth slot wait timed out after {:?}; dropping \
+                             incoming IPC client {peer} ({MAX_CONCURRENT_PREAUTH} concurrent \
+                             pre-auth tasks still in flight)",
+                            PREAUTH_PERMIT_WAIT
                         );
                         drop(stream);
                         continue;
@@ -772,13 +803,15 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
-    #[tokio::test]
-    async fn pre_auth_concurrency_cap_drops_excess_connections() {
+    #[tokio::test(start_paused = true)]
+    async fn pre_auth_concurrency_cap_drops_after_wait_timeout() {
         // Saturate MAX_CONCURRENT_PREAUTH (32) slots with slow-loris clients
         // that never send a newline, then attempt one more connection. The
-        // daemon drops the excess at accept time (closes the socket
-        // without writing anything), so the excess connect_to_string
-        // returns empty after the server's close.
+        // 33rd connection now waits up to PREAUTH_PERMIT_WAIT for a permit
+        // (review H4 -- was instant-drop); under the saturating fixture the
+        // wait elapses and the daemon drops the excess. Fast-forwards
+        // virtual time so the test stays sub-second despite the 5s
+        // production wait.
         let (addr, shutdown, handle) = spawn_test_server(GuestSlot::Booting).await;
 
         // Open MAX_CONCURRENT_PREAUTH slow-loris connections and hold them.
@@ -788,17 +821,73 @@ mod tests {
             held.push(s);
         }
 
-        // Give the daemon a moment to spin up handler tasks for all of those.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Yield to let the daemon spin up handler tasks for all 32.
+        tokio::task::yield_now().await;
 
-        // The next connection should be accepted then immediately dropped by
-        // the daemon (no read line, no write response). Reading to EOF on
-        // the excess client returns an empty string.
+        // The 33rd connection sits on `acquire_owned()` because all
+        // permits are held. Connect, then advance virtual time past
+        // PREAUTH_PERMIT_WAIT and read to EOF -- the daemon should drop
+        // the socket once the wait timeout fires.
         let mut excess = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // Bump time a small amount past the production wait.
+        tokio::time::advance(PREAUTH_PERMIT_WAIT + Duration::from_millis(100)).await;
         let resp = read_to_string(&mut excess).await;
         assert_eq!(
             resp, "",
-            "excess connection should be dropped silently; got {resp:?}"
+            "excess connection should be dropped after PREAUTH_PERMIT_WAIT; got {resp:?}"
+        );
+
+        drop(held);
+        shutdown.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pre_auth_burst_within_wait_window_succeeds() {
+        // Review H4 regression: a brief burst that briefly exceeds
+        // MAX_CONCURRENT_PREAUTH must NOT surface as a backend error. The
+        // 33rd connection waits up to PREAUTH_PERMIT_WAIT; if even a
+        // single held connection is released within that window, the 33rd
+        // wins a permit and the daemon proceeds with the auth read
+        // instead of dropping. We assert "proceeds" by sending a
+        // verb-less line and observing the daemon's `ERR unknown` reply
+        // -- the pre-fix code would have closed the socket silently
+        // (empty read).
+        let (addr, shutdown, handle) = spawn_test_server(GuestSlot::Booting).await;
+
+        // Saturate the cap with slow-loris clients we *will* release.
+        let mut held: Vec<tokio::net::TcpStream> = Vec::new();
+        for _ in 0..MAX_CONCURRENT_PREAUTH {
+            held.push(tokio::net::TcpStream::connect(addr).await.unwrap());
+        }
+        tokio::task::yield_now().await;
+
+        let mut excess = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // Release one held connection well inside the wait window. The
+        // dropped TcpStream causes the daemon-side handle_client task to
+        // return, which releases its permit; the 33rd connection's
+        // acquire_owned() then completes and handle_client runs.
+        tokio::time::advance(Duration::from_millis(50)).await;
+        held.pop();
+        // Yield repeatedly so the daemon's released-permit -> excess-wakes
+        // chain has time to schedule under paused time.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Send a verb-less line so the daemon's auth-first guard
+        // dispatches and replies with ERR unknown. (The point is just
+        // that *something* came back -- the connection was not silently
+        // dropped.)
+        excess
+            .write_all(b"junkverb fake-nonce\n")
+            .await
+            .expect("write should succeed once handler is reading");
+        excess.shutdown().await.ok();
+        let resp = read_to_string(&mut excess).await;
+        assert!(
+            !resp.is_empty(),
+            "burst within wait window must reach the daemon's auth path, got empty (= silent drop)"
         );
 
         drop(held);

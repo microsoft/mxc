@@ -517,7 +517,26 @@ fn dir_older_than(path: &Path, min_age: Duration) -> bool {
 /// - **Probe failed** → conservatively refuse.
 pub(crate) fn reconcile_existing_vm(root: &Path) -> Reconcile {
     let running = wsb_vm_running();
-    let current_vm = enumerate_processes_with_prefix(WSB_PROCESS_PREFIX).unwrap_or_default();
+
+    // Review M3: a Toolhelp32 snapshot failure here (AV interference,
+    // handle exhaustion, transient kernel error) used to land as an
+    // EMPTY process list via `unwrap_or_default()`. The classifier then
+    // saw "no WindowsSandbox* processes" and let us launch a fresh VM
+    // even though one may have been running, violating the
+    // single-instance constraint and producing either a Windows-side UI
+    // dialog or a hung process. Fail safe instead: refuse to act on
+    // unknown VM state and ask the operator to retry.
+    let current_vm = match enumerate_processes_with_prefix(WSB_PROCESS_PREFIX) {
+        Ok(v) => v,
+        Err(e) => {
+            return Reconcile::Busy(format!(
+                "could not enumerate WindowsSandbox host processes (Toolhelp32 snapshot \
+                 failed: {e}); refusing to launch a new VM because doing so on top of an \
+                 unknown live VM would violate the host single-instance constraint. Retry; \
+                 if persistent, restart the Windows Sandbox service."
+            ));
+        }
+    };
 
     let marker_dirs = list_marker_dirs(root);
     let mut states: Vec<MarkerState> = Vec::with_capacity(marker_dirs.len());

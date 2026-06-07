@@ -144,12 +144,32 @@ fn assign_role(
     *slot = Some(stream);
 }
 
+/// Maximum time the guest will wait for the post-nonce handshake
+/// (32-byte nonce + 1-byte role tag) to arrive on a freshly-accepted
+/// connection before dropping the socket and returning to `accept()`.
+///
+/// Review H11: without a bound here, a same-VM process that opens a
+/// TCP connection to the listener port and then never writes anything
+/// (intentionally or because it crashed mid-handshake) would block
+/// `accept_one_authed` forever, wedging the entire accept loop and
+/// preventing the legitimate host from completing its connect-and-
+/// authenticate sequence. The guest then never reaches the command
+/// loop and the host times out the start. 1 second is generous for a
+/// loopback handshake (the host writes 33 bytes in one `write_all`)
+/// and tight enough that a flood of stalled peers is shaken out at
+/// a usable rate.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Accept the next connection from `listener`, then verify the per-launch
 /// nonce + read the declared role tag. Loops on any handshake failure —
 /// a cross-user accept-race is detected and dropped silently; the
 /// legitimate host's next attempt succeeds. (Same-user processes are
 /// already inside the trust boundary and could have read the nonce
 /// directly; see [`windows_sandbox_common::auth`] for the full scope.)
+///
+/// The handshake read is bounded by [`HANDSHAKE_TIMEOUT`] so a peer
+/// that opens a connection and then never writes (review H11
+/// Slowloris) cannot wedge the guest's accept loop.
 ///
 /// Any I/O error during the nonce or role read (e.g. peer disconnect
 /// mid-handshake) is treated the same as a mismatch: drop and retry.
@@ -160,13 +180,27 @@ async fn accept_one_authed(
 ) -> Result<(TcpStream, ChannelRole)> {
     loop {
         let (mut stream, peer) = listener.accept().await.context("accept")?;
-        match auth::verify_nonce(&mut stream, expected_nonce).await {
-            Ok(role) => return Ok((stream, role)),
-            Err(e) => {
+        let verified = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            auth::verify_nonce(&mut stream, expected_nonce),
+        )
+        .await;
+        match verified {
+            Ok(Ok(role)) => return Ok((stream, role)),
+            Ok(Err(e)) => {
                 eprintln!(
                     "[guest][auth] rejecting connection from {peer}: {e} (likely a cross-user \
                      accept-race or protocol mismatch; dropping and waiting for the legitimate \
                      host)"
+                );
+                drop(stream);
+            }
+            Err(_) => {
+                eprintln!(
+                    "[guest][auth] handshake from {peer} timed out after {:?} (no nonce + role \
+                     bytes received); dropping socket and continuing accept loop (review H11 \
+                     stalled-handshake DoS guard)",
+                    HANDSHAKE_TIMEOUT
                 );
                 drop(stream);
             }

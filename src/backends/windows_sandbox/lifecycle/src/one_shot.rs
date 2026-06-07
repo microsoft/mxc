@@ -141,6 +141,21 @@ impl WindowsSandboxRunner {
 
         let _ = writeln!(logger, "Windows Sandbox: launching disposable VM");
 
+        // Spool host stdin on a dedicated thread BEFORE driving the boot
+        // sequence (review H5). The previous arrangement evaluated
+        // `capture_host_stdin()` synchronously as an argument to `drive`,
+        // which meant `cat huge | wxc-exec ...` had to fully drain the
+        // producer before the VM even started -- adding the producer's
+        // wall-clock to boot. Now boot and stdin spool run concurrently;
+        // `drive` joins this thread just before invoking
+        // `bridge::execute_on_guest`.
+        let stdin_handle = std::thread::Builder::new()
+            .name("wxc-host-stdin-spool".into())
+            .spawn(capture_host_stdin)
+            .map_err(|e| {
+                OneShotError::RuntimeSetup(format!("spawn host stdin spool thread: {e}"))
+            })?;
+
         // The lifecycle primitives are async; bridge them with a dedicated
         // current-thread runtime. Declared after the guard so it is dropped
         // first, leaving the guard to run teardown once the runtime is gone.
@@ -158,7 +173,7 @@ impl WindowsSandboxRunner {
             &rendezvous_dir,
             &run_dir,
             request,
-            &capture_host_stdin(),
+            stdin_handle,
         ))?;
 
         let mut response = exec_to_response(exec);
@@ -194,7 +209,7 @@ async fn drive(
     rendezvous_dir: &std::path::Path,
     run_dir: &std::path::Path,
     request: &ExecutionRequest,
-    host_stdin: &[u8],
+    host_stdin: std::thread::JoinHandle<Vec<u8>>,
 ) -> Result<bridge::ExecResult, OneShotError> {
     // Generate the per-launch authentication nonce and write it into the
     // (already owner-only DACL'd) rendezvous directory BEFORE issuing the
@@ -268,6 +283,20 @@ async fn drive(
         .await
         .map_err(|e| OneShotError::Connect(format!("{e:#}")))?;
 
+    // Boot + stdin spool ran concurrently (review H5). Join the spool
+    // here, just before the exec frame is sent: if the producer was
+    // faster than boot, this is non-blocking; if it was slower, we wait
+    // for it now but at least it overlapped with the boot we just
+    // finished. A panicked spool falls back to empty stdin -- a stdin
+    // capture failure is degraded UX, not a reason to abort.
+    let host_stdin_bytes = host_stdin.join().unwrap_or_else(|panic| {
+        eprintln!(
+            "[one-shot] WARNING: host stdin spool thread panicked: {panic:?}; continuing with \
+             empty stdin"
+        );
+        Vec::new()
+    });
+
     let exec_id = uuid::Uuid::new_v4().to_string();
     let timeout_ms = get_timeout_milliseconds(request.script_timeout);
     bridge::execute_on_guest(
@@ -276,11 +305,23 @@ async fn drive(
         &request.script_code,
         &request.working_directory,
         timeout_ms,
-        host_stdin,
+        &host_stdin_bytes,
     )
     .await
     .map_err(|e| OneShotError::Exec(format!("{e:#}")))
 }
+
+/// Maximum host stdin we buffer before forwarding to the guest. The one-shot
+/// protocol delivers stdin as a byte buffer (not a stream), so an unbounded
+/// `read_to_end` would grow host memory linearly with the producer's output
+/// for a `cat huge | wxc-exec ...` pattern. 64 MiB is well above what any
+/// reasonable interactive / script-piped exec uses while still bounding the
+/// damage when something accidentally pipes a multi-GB stream in.
+///
+/// Bytes beyond the cap are discarded (with a one-shot warning to stderr).
+/// True streaming would lift this entirely and is the proper fix; see
+/// [`capture_host_stdin`] for the scope note.
+const MAX_HOST_STDIN_BYTES: usize = 64 * 1024 * 1024;
 
 /// Capture wxc-exec's own stdin to a byte buffer for forwarding to the guest.
 ///
@@ -290,17 +331,26 @@ async fn drive(
 ///   contract today is a non-interactive byte buffer (see `host_stdin: &[u8]`
 ///   in [`bridge::execute_on_guest`]), so an interactive caller gets nothing
 ///   forwarded — same as the previous (silently-dropping) behaviour.
-/// - **Pipe-stdin** (SDK / shell redirect): reads to EOF and returns the
-///   bytes. Errors are logged but never propagated — a failed stdin capture
-///   is degraded UX, not a reason to abort an otherwise-valid exec.
+/// - **Pipe-stdin** (SDK / shell redirect): reads up to
+///   [`MAX_HOST_STDIN_BYTES`] and returns the bytes; anything past the cap is
+///   discarded with a one-line stderr warning so a runaway producer cannot
+///   exhaust host memory (review H5). Errors are logged but never propagated
+///   — a failed stdin capture is degraded UX, not a reason to abort an
+///   otherwise-valid exec.
 ///
 /// Review finding C3: the previous one-shot `drive` hardcoded `&[]` for the
 /// `host_stdin` argument to `execute_on_guest`, silently dropping any stdin
 /// that an SDK caller piped in (e.g. `echo hi | wxc-exec ... config.json`
 /// produced an empty stdin in the sandbox). The commit message claimed
 /// "stdin forwarding"; this restores that promise for the one-shot path.
+///
+/// Review finding H5: this function is spawned on a dedicated host thread
+/// from [`WindowsSandboxRunner::run_one_shot`] so its (possibly slow) read
+/// runs concurrently with the VM-boot critical path -- the previous
+/// arrangement read to EOF BEFORE launching the sandbox, blocking boot on
+/// the producer and forcing wall-clock latency to be the sum of the two.
 /// True streaming (rather than the buffered-byte-slice contract) is out of
-/// scope for Phase C and would require widening
+/// scope for this review fix and would require widening
 /// [`bridge::execute_on_guest`]'s signature.
 fn capture_host_stdin() -> Vec<u8> {
     use std::io::{IsTerminal, Read};
@@ -309,12 +359,27 @@ fn capture_host_stdin() -> Vec<u8> {
         return Vec::new();
     }
     let mut buf = Vec::new();
-    if let Err(e) = stdin.read_to_end(&mut buf) {
+    // Read in chunks so we can short-circuit at the cap without first
+    // materialising the whole stream. `take(MAX_HOST_STDIN_BYTES + 1)`
+    // limits the read by one extra byte so we can detect overflow.
+    if let Err(e) = stdin
+        .by_ref()
+        .take((MAX_HOST_STDIN_BYTES as u64) + 1)
+        .read_to_end(&mut buf)
+    {
         eprintln!(
             "[one-shot] WARNING: failed to capture stdin for sandbox forwarding ({e}); \
              continuing with empty stdin"
         );
         return Vec::new();
+    }
+    if buf.len() > MAX_HOST_STDIN_BYTES {
+        eprintln!(
+            "[one-shot] WARNING: host stdin exceeds {MAX_HOST_STDIN_BYTES} bytes; truncating to \
+             the cap and discarding the remainder. Use the state-aware backend (which streams \
+             stdin) for large stdin workloads."
+        );
+        buf.truncate(MAX_HOST_STDIN_BYTES);
     }
     buf
 }
