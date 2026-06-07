@@ -594,18 +594,6 @@ async fn launch_and_connect(
     control_plane::set_owner_only_dir(&rendezvous_dir).context("secure rendezvous dir")?;
     rendezvous::cleanup(&rendezvous_dir).await?;
 
-    // Write the per-launch guest authentication nonce into the (owner-only
-    // DACL'd) rendezvous folder before launching the VM. The guest reads
-    // and deletes the file at boot, then verifies the nonce on every
-    // accept; a cross-user accept-race that does not present the nonce
-    // is rejected before any protocol bytes are exchanged (review C2;
-    // see `windows_sandbox_common::auth` for the same-user-trusted
-    // scope — a same-user attacker who can read the rendezvous folder
-    // can recover the nonce, which is consistent with the rest of the
-    // Windows Sandbox backend's single-user threat model).
-    windows_sandbox_common::auth::write_nonce_file(&rendezvous_dir, guest_nonce)
-        .context("write guest nonce file")?;
-
     let python_dir = sandbox_vm::find_host_python()
         .context("Python is required on the host for sandbox execution")?;
 
@@ -615,49 +603,54 @@ async fn launch_and_connect(
 
     let wsb_path =
         sandbox_vm::generate_wsb(&exe_dir, &rendezvous_dir, &python_dir, &config_dir, mapped)?;
-    // Mark the launch as in flight BEFORE the call. If we are cancelled here or
-    // `launch()` errors, ownership is ambiguous (a foreign VM could have won
-    // the single-instance contest), so cleanup must leak rather than kill.
-    *ownership.lock().expect("ownership mutex poisoned") = VmOwnership::LaunchInFlight;
-    sandbox_vm::launch(&wsb_path).await.context("launch VM")?;
 
-    // `launch()` returned Ok: by the OS single-instance guarantee plus startup
-    // reconcile, the running VM is ours. Record that immediately so even if the
-    // host processes are slow to appear (or we are cancelled before proof),
-    // cleanup tears the VM down by enumeration instead of leaking it.
-    *ownership.lock().expect("ownership mutex poisoned") = VmOwnership::LaunchSucceededNoProof;
+    // The nonce-write + launch + capture-proof + rendezvous + connect
+    // sequence is shared with one_shot::drive via vm::launch_managed_vm
+    // (review M7 DRY). The daemon's per-caller bookkeeping wires up:
+    //   - ownership: the long-lived Arc<Mutex<VmOwnership>> that the
+    //     daemon's cleanup path reads at exit;
+    //   - persist_proof: write the daemon record on disk so a crashed
+    //     daemon's orphan VM can be reclaimed by a later daemon's
+    //     startup classifier.
+    let mut observer = DaemonLaunchObserver { ownership, record };
+    sandbox_vm::launch_managed_vm(
+        &wsb_path,
+        &rendezvous_dir,
+        guest_nonce,
+        RENDEZVOUS_TIMEOUT,
+        RENDEZVOUS_POLL_INTERVAL,
+        GUEST_CONNECT_TIMEOUT,
+        &mut observer,
+    )
+    .await
+}
 
-    // Capture ownership proof now, before the long rendezvous wait. Persist it
-    // into the (still not-ready) record so a crash mid-boot leaves a
-    // reclaimable orphan record. If we cannot persist the proof, tear the VM
-    // down now (we still hold in-memory proof) rather than risk a durable-less
-    // orphan: surface the error so `main`'s cleanup runs scoped teardown.
-    let proof = sandbox_vm::capture_launch_proof().await;
-    if proof.is_empty() {
+/// Daemon's [`sandbox_vm::LaunchObserver`] adapter. Sibling of
+/// `one_shot::OneShotLaunchObserver` -- see [`sandbox_vm::launch_managed_vm`]
+/// docs for the shared sequence and the per-caller seam rationale
+/// (review M7 DRY).
+struct DaemonLaunchObserver<'a> {
+    ownership: &'a Arc<std::sync::Mutex<VmOwnership>>,
+    record: &'a mut DaemonRecord,
+}
+
+impl<'a> sandbox_vm::LaunchObserver for DaemonLaunchObserver<'a> {
+    fn set_ownership(&mut self, state: VmOwnership) {
+        *self.ownership.lock().expect("ownership mutex poisoned") = state;
+    }
+
+    fn persist_proof(&mut self, proof: &[control_plane::VmProcId]) -> Result<()> {
+        self.record.vm_processes = proof.to_vec();
+        control_plane::write_daemon_record(self.record)
+            .context("persist after-launch ownership proof record")
+    }
+
+    fn note_empty_proof(&self) {
         eprintln!(
             "[wsb-daemon] WARNING: no Windows Sandbox host processes appeared after launch; \
              a crash before ready would leave this VM unreclaimable"
         );
-    } else {
-        record.vm_processes = proof.clone();
-        *ownership.lock().expect("ownership mutex poisoned") = VmOwnership::Owned(proof);
-        control_plane::write_daemon_record(record)
-            .context("persist after-launch ownership proof record")?;
     }
-
-    let guest_addr = rendezvous::wait_for_rendezvous(
-        &rendezvous_dir,
-        RENDEZVOUS_TIMEOUT,
-        RENDEZVOUS_POLL_INTERVAL,
-    )
-    .await
-    .context("rendezvous failed")?;
-
-    let conn = tcp_bridge::connect_to_guest(guest_addr, GUEST_CONNECT_TIMEOUT, guest_nonce)
-        .await
-        .context("connect to guest agent")?;
-
-    Ok((conn, guest_addr))
 }
 
 /// Convert the durable record's mapped-folder snapshot into the VM type.

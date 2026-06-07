@@ -423,6 +423,148 @@ pub async fn enumerate_sandbox_vm_processes() -> Result<Vec<crate::control_plane
     crate::control_plane::enumerate_processes_with_prefix("WindowsSandbox")
 }
 
+// ---------------------------------------------------------------------------
+// Shared "launch a managed VM and connect to its guest" sequence (review M7)
+// ---------------------------------------------------------------------------
+
+/// Caller-provided bookkeeping hooks for [`launch_managed_vm`]. Both the
+/// one-shot runner (`one_shot::drive`) and the state-aware daemon
+/// (`daemon::launch_and_connect`) used to inline an identical
+/// nonce-write -> launch -> capture-proof -> rendezvous -> connect
+/// sequence around their own per-caller ownership / proof
+/// bookkeeping; this trait factors out the bookkeeping seam so the
+/// shared sequence lives in one place.
+///
+/// The two methods correspond to the two transitions a managed launch
+/// goes through that callers need to react to:
+///   1. [`set_ownership`](Self::set_ownership) -- VM-ownership state
+///      transitions (`LaunchInFlight` -> `LaunchSucceededNoProof` ->
+///      `Owned(proof)`); callers update their own ownership record so
+///      cleanup tears down (or leaks) the VM correctly.
+///   2. [`persist_proof`](Self::persist_proof) -- a non-empty
+///      capture-launch-proof is available and must be persisted
+///      durably (one-shot writes a per-run marker file; daemon writes
+///      the daemon record). Failing to persist is treated as fatal
+///      (the launch is aborted) so cleanup never leaves a VM with no
+///      durable trail to reclaim it.
+pub trait LaunchObserver {
+    /// Notify the caller that the launch sequence has reached a new
+    /// VM-ownership state. Always called in the order
+    /// `LaunchInFlight` -> `LaunchSucceededNoProof` -> `Owned(proof)`
+    /// (the third only on a non-empty proof).
+    fn set_ownership(&mut self, state: crate::control_plane::VmOwnership);
+
+    /// Persist `proof` durably. Called at most once per launch, only
+    /// when `capture_launch_proof` returns a non-empty proof. A
+    /// non-`Ok` return is fatal -- [`launch_managed_vm`] propagates
+    /// the error and the caller's teardown then runs from the
+    /// in-memory `Owned(proof)` ownership state.
+    fn persist_proof(&mut self, proof: &[crate::control_plane::VmProcId]) -> anyhow::Result<()>;
+
+    /// Optional: caller-specific warning when `capture_launch_proof`
+    /// returns empty. Default is a generic stderr line so callers do
+    /// not need to repeat boilerplate; override when a more specific
+    /// message is useful (e.g. one-shot wants to mention that the
+    /// pre-launch marker preserves a reclaim-by-launcher-liveness
+    /// fallback).
+    fn note_empty_proof(&self) {
+        eprintln!(
+            "[wsb-vm] WARNING: no WindowsSandbox* host processes appeared within \
+             capture_launch_proof's budget; staying at LaunchSucceededNoProof. Teardown will \
+             enumerate-kill if any host processes are visible at exit. If the launcher hard-dies \
+             before exit, the VM may require manual cleanup."
+        );
+    }
+}
+
+/// Drive the boot half of a managed Windows Sandbox VM lifecycle:
+/// write the per-launch guest nonce, launch the VM, capture ownership
+/// proof, wait for rendezvous, and connect to the guest agent. Calls
+/// back into the caller via [`LaunchObserver`] at each ownership
+/// transition and (on non-empty proof) at the proof-persistence step.
+///
+/// The returned [`bridge::GuestConnection`] is fully ready for EXEC
+/// dispatch -- preamble + Ready have been validated as part of
+/// `bridge::connect_to_guest`.
+///
+/// Used by both:
+///   * `one_shot::drive` -- one-shot disposable VM per call;
+///     observer writes a per-run marker file.
+///   * `daemon::launch_and_connect` -- long-lived state-aware
+///     daemon; observer writes the daemon record.
+///
+/// Each caller's pre-launch bookkeeping (rendezvous-dir setup, .wsb
+/// generation, config-dir DACL, etc.) is still per-caller because
+/// those steps differ structurally (one-shot uses a per-run
+/// directory; daemon uses a fixed `wxc-wsb-stateaware-*` set). The
+/// helper assumes `wsb_path` already exists and `rendezvous_dir`
+/// already has its owner-only DACL applied.
+pub async fn launch_managed_vm(
+    wsb_path: &Path,
+    rendezvous_dir: &Path,
+    nonce: &windows_sandbox_common::auth::Nonce,
+    rendezvous_timeout: std::time::Duration,
+    rendezvous_poll_interval: std::time::Duration,
+    connect_timeout: std::time::Duration,
+    observer: &mut dyn LaunchObserver,
+) -> Result<(crate::bridge::GuestConnection, std::net::SocketAddr)> {
+    // Write the per-launch guest authentication nonce into the (already
+    // owner-only DACL'd) rendezvous directory BEFORE launching the VM.
+    // The guest reads + deletes the file at boot and verifies the nonce
+    // on every accept; see `windows_sandbox_common::auth` for the full
+    // threat model and the same-user-trusted scope (review C2 + A).
+    windows_sandbox_common::auth::write_nonce_file(rendezvous_dir, nonce)
+        .context("write guest nonce file")?;
+
+    // Mark the launch in flight BEFORE the call. If we are cancelled
+    // here or `launch()` errors, ownership is ambiguous (a foreign VM
+    // could have won the single-instance contest), so cleanup must leak
+    // rather than kill.
+    observer.set_ownership(crate::control_plane::VmOwnership::LaunchInFlight);
+
+    launch(wsb_path).await.context("launch VM")?;
+
+    // `launch()` returned Ok: by the OS single-instance guarantee plus
+    // startup reconcile, the running VM is ours. Record that immediately
+    // so even if the host processes are slow to appear (or we are
+    // cancelled before proof), cleanup tears the VM down by enumeration
+    // instead of leaking it.
+    observer.set_ownership(crate::control_plane::VmOwnership::LaunchSucceededNoProof);
+
+    // Capture ownership proof now, before the long rendezvous wait.
+    // Persist it via the observer so a crash mid-boot leaves a durable
+    // reclaim trail. If proof is empty (slow Hyper-V worker spawn, AV
+    // scanning the bootstrap, loaded host), stay at
+    // `LaunchSucceededNoProof` rather than overwriting with
+    // `Owned(Vec::new())` -- review finding B2 explains why: empty Owned
+    // proof would defeat intersection-only teardown semantics and leak
+    // the VM at exit.
+    let proof = capture_launch_proof().await;
+    if proof.is_empty() {
+        observer.note_empty_proof();
+    } else {
+        observer.set_ownership(crate::control_plane::VmOwnership::Owned(proof.clone()));
+        // A persist failure is fatal: better to fail the launch now
+        // (cleanup runs from in-memory Owned(proof) state) than to
+        // proceed and have a later cleanup find no durable trail.
+        observer.persist_proof(&proof)?;
+    }
+
+    let addr = crate::rendezvous::wait_for_rendezvous(
+        rendezvous_dir,
+        rendezvous_timeout,
+        rendezvous_poll_interval,
+    )
+    .await
+    .context("rendezvous failed")?;
+
+    let conn = crate::bridge::connect_to_guest(addr, connect_timeout, nonce)
+        .await
+        .context("connect to guest agent")?;
+
+    Ok((conn, addr))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

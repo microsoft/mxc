@@ -24,17 +24,20 @@ pub(crate) enum OneShotError {
     Busy(String),
     /// The current-thread tokio runtime could not be created.
     RuntimeSetup(String),
-    /// Preparing or launching the VM (`.wsb` generation / `WindowsSandbox.exe`)
-    /// failed.
+    /// Preparing or launching the VM (`.wsb` generation /
+    /// `WindowsSandbox.exe`), capturing ownership proof, waiting for the
+    /// guest to publish its rendezvous address, or establishing the TCP
+    /// channels to the guest agent. Collapsed into a single variant after
+    /// the shared [`crate::vm::launch_managed_vm`] helper consolidated the
+    /// boot sequence into one call (review M7); the previous per-phase
+    /// variants (`Rendezvous`, `Connect`) survived only as part of the
+    /// per-step orchestration the helper now owns and were never observed
+    /// distinctly by callers (`OneShotError` is `pub(crate)`).
     Launch(String),
     /// The request's policy cannot be expressed by Windows Sandbox (e.g. host
     /// network filtering, a proxy, a denied path inside a mapped share, or an
     /// unmappable host path).
     Policy(String),
-    /// The guest agent never published its rendezvous address in time.
-    Rendezvous(String),
-    /// The TCP channels to the guest agent could not be established.
-    Connect(String),
     /// Relaying the execution over the guest channels failed.
     Exec(String),
 }
@@ -67,19 +70,15 @@ impl OneShotError {
                 "Failed to initialise the async runtime for Windows Sandbox.",
                 d,
             ),
-            OneShotError::Launch(d) => ("Failed to launch the Windows Sandbox VM.", d),
+            OneShotError::Launch(d) => (
+                "Failed to launch the Windows Sandbox VM or connect to the guest agent.",
+                d,
+            ),
             OneShotError::Policy(d) => (
                 "The request's policy cannot be enforced by the Windows Sandbox \
                  backend.",
                 d,
             ),
-            OneShotError::Rendezvous(d) => (
-                "Timed out waiting for the Windows Sandbox guest agent to start.",
-                d,
-            ),
-            OneShotError::Connect(d) => {
-                ("Failed to connect to the Windows Sandbox guest agent.", d)
-            }
             OneShotError::Exec(d) => ("Execution inside the Windows Sandbox failed.", d),
         };
 
@@ -103,16 +102,14 @@ impl OneShotError {
             OneShotError::SandboxUnavailable(_)
             | OneShotError::PythonNotFound(_)
             | OneShotError::Policy(_) => FailurePhase::Rejected,
-            // Launch attempt failed (incl. transient single-instance contention
-            // and async-runtime setup) — generally worth retrying.
+            // Launch attempt failed (incl. transient single-instance contention,
+            // async-runtime setup, capture-proof, rendezvous wait, and the
+            // initial guest connect) — generally worth retrying.
             OneShotError::Busy(_) | OneShotError::RuntimeSetup(_) | OneShotError::Launch(_) => {
                 FailurePhase::LaunchFailed
             }
-            // The VM launch command succeeded but the guest infrastructure or
-            // the execution relay failed before/while running user code.
-            OneShotError::Rendezvous(_) | OneShotError::Connect(_) | OneShotError::Exec(_) => {
-                FailurePhase::PostLaunchFailed
-            }
+            // The execution relay failed while running user code.
+            OneShotError::Exec(_) => FailurePhase::PostLaunchFailed,
         }
     }
 }
@@ -147,21 +144,31 @@ mod tests {
     }
 
     #[test]
-    fn post_launch_errors_map_to_post_launch_failed() {
-        for err in [
-            OneShotError::Rendezvous("no ready".to_string()),
-            OneShotError::Connect("refused".to_string()),
-            OneShotError::Exec("relay broke".to_string()),
-        ] {
-            let resp = err.into_response();
-            assert_eq!(resp.failure_phase, FailurePhase::PostLaunchFailed);
-        }
+    fn launch_and_exec_errors_map_to_post_launch_phases() {
+        // After the M7 DRY collapse (`Rendezvous` / `Connect` merged into
+        // `Launch`), only Launch + Exec remain as the post-pre-flight
+        // failure categories. Launch -> retry-the-launch
+        // (LaunchFailed); Exec -> the relay broke after a successful
+        // launch (PostLaunchFailed).
+        assert_eq!(
+            OneShotError::Launch("rendezvous timed out after 360s".to_string())
+                .into_response()
+                .failure_phase,
+            FailurePhase::LaunchFailed
+        );
+        assert_eq!(
+            OneShotError::Exec("relay broke".to_string())
+                .into_response()
+                .failure_phase,
+            FailurePhase::PostLaunchFailed
+        );
     }
 
     #[test]
-    fn rendezvous_detail_preserved_in_extended_error() {
-        let resp = OneShotError::Rendezvous("timed out after 360s".to_string()).into_response();
-        assert_eq!(resp.extended_error, "timed out after 360s");
-        assert!(resp.error_message.contains("guest agent"));
+    fn launch_detail_preserved_in_extended_error() {
+        let resp =
+            OneShotError::Launch("rendezvous timed out after 360s".to_string()).into_response();
+        assert_eq!(resp.extended_error, "rendezvous timed out after 360s");
+        assert!(resp.error_message.contains("launch"));
     }
 }

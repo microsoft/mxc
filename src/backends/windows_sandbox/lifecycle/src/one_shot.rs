@@ -25,11 +25,11 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 
-use crate::control_plane::{HostVmLock, VmOwnership};
+use crate::control_plane::{self, HostVmLock};
 use crate::error::OneShotError;
 use crate::rendezvous::{GUEST_CONNECT_TIMEOUT, RENDEZVOUS_POLL_INTERVAL, RENDEZVOUS_TIMEOUT};
 use crate::teardown::{self, Reconcile, VmTeardownGuard};
-use crate::{bridge, policy, rendezvous, vm};
+use crate::{bridge, policy, vm};
 
 use windows_sandbox_common::auth as wsb_auth;
 
@@ -211,77 +211,27 @@ async fn drive(
     request: &ExecutionRequest,
     host_stdin: std::thread::JoinHandle<Vec<u8>>,
 ) -> Result<bridge::ExecResult, OneShotError> {
-    // Generate the per-launch authentication nonce and write it into the
-    // (already owner-only DACL'd) rendezvous directory BEFORE issuing the
-    // VM launch. The guest reads + deletes this file at boot and then
-    // verifies it on every accept; a local-process accept-race that does
-    // not present the nonce is rejected before any protocol bytes are
-    // exchanged (review C2).
+    // Generate the per-launch authentication nonce. The shared
+    // `vm::launch_managed_vm` helper writes the nonce file, runs the
+    // launch sequence, captures proof, waits for rendezvous, and
+    // returns a ready-to-EXEC `GuestConnection`. The per-caller
+    // observer wires up one-shot's ownership + marker bookkeeping
+    // (process-global teardown slot + per-run marker file). See
+    // `vm::LaunchObserver` for the seam rationale (review M7 DRY).
     let nonce = wsb_auth::generate_nonce();
-    wsb_auth::write_nonce_file(rendezvous_dir, &nonce)
-        .map_err(|e| OneShotError::Launch(format!("write nonce file: {e}")))?;
 
-    // Launch is in flight: a foreign VM could still win the single-instance
-    // contest and fail our launch, so ownership is not yet provable.
-    teardown::set_vm_ownership(VmOwnership::LaunchInFlight);
-
-    vm::launch(wsb_path)
-        .await
-        .map_err(|e| OneShotError::Launch(format!("{e:#}")))?;
-
-    // Launch returned Ok: by the OS single-instance invariant the running VM is
-    // ours, even before we enumerate its host processes.
-    teardown::set_vm_ownership(VmOwnership::LaunchSucceededNoProof);
-
-    // Capture positive ownership proof (the VM host-process identities) and
-    // record it both in the teardown slot and the durable marker.
-    //
-    // Review finding B2: if `capture_launch_proof` returns empty (slow Hyper-V
-    // worker process spawn, AV scanning the bootstrap, loaded host), DO NOT
-    // overwrite `LaunchSucceededNoProof` with `Owned(Vec::new())` and DO NOT
-    // rewrite the pre-launch marker with an empty `vm_processes` field.
-    // The previous design did both, with two bad consequences:
-    //   1. `compute_kill_set(&[], snapshot)` (now `plan_kill_set(Owned(empty),
-    //      snapshot)`) returned empty under intersection-only semantics,
-    //      leaking the VM at teardown.
-    //   2. The marker on disk lost its pre-launch state, bricking any later
-    //      one-shot's reconcile (it saw an empty proof and refused as
-    //      `ForeignUnprovable`).
-    // Keeping `LaunchSucceededNoProof` lets `plan_kill_set` enumerate-kill on
-    // a non-empty fresh snapshot at teardown (we provably hold the host VM-
-    // slot mutex, so any live `WindowsSandbox*` is ours), and keeping the
-    // pre-launch marker preserves the launcher-strongly-alive signal so a
-    // later reconcile still has SOME information to act on.
-    let proof = vm::capture_launch_proof().await;
-    if proof.is_empty() {
-        eprintln!(
-            "[one-shot] WARNING: no WindowsSandbox* host processes appeared within \
-             capture_launch_proof's budget; staying at LaunchSucceededNoProof. Teardown will \
-             enumerate-kill if any host processes are visible at exit; the pre-launch marker \
-             (with empty vm_processes) is preserved so reclaim of this VM by a later one-shot is \
-             not possible by positive proof. If the daemon hard-dies before exit, the VM may \
-             require manual cleanup."
-        );
-    } else {
-        teardown::set_vm_ownership(VmOwnership::Owned(proof.clone()));
-        teardown::rewrite_marker_with_proof(run_dir, &proof).map_err(|e| {
-            // Fatal: without a durable proof a later run could not reclaim this VM.
-            // Abort so the guard tears the VM down now rather than leak it.
-            OneShotError::Launch(format!("record VM ownership proof: {e}"))
-        })?;
-    }
-
-    let addr = rendezvous::wait_for_rendezvous(
+    let mut observer = OneShotLaunchObserver { run_dir };
+    let (mut conn, _addr) = vm::launch_managed_vm(
+        wsb_path,
         rendezvous_dir,
+        &nonce,
         RENDEZVOUS_TIMEOUT,
         RENDEZVOUS_POLL_INTERVAL,
+        GUEST_CONNECT_TIMEOUT,
+        &mut observer,
     )
     .await
-    .map_err(|e| OneShotError::Rendezvous(format!("{e:#}")))?;
-
-    let mut conn = bridge::connect_to_guest(addr, GUEST_CONNECT_TIMEOUT, &nonce)
-        .await
-        .map_err(|e| OneShotError::Connect(format!("{e:#}")))?;
+    .map_err(|e| OneShotError::Launch(format!("{e:#}")))?;
 
     // Boot + stdin spool ran concurrently (review H5). Join the spool
     // here, just before the exec frame is sent: if the producer was
@@ -309,6 +259,43 @@ async fn drive(
     )
     .await
     .map_err(|e| OneShotError::Exec(format!("{e:#}")))
+}
+
+/// One-shot's [`vm::LaunchObserver`] adapter.
+///
+/// * `set_ownership` -> pushes the state into the process-global
+///   teardown slot ([`teardown::set_vm_ownership`]) so the
+///   teardown guard / console handler tear down the right VM.
+/// * `persist_proof` -> rewrites the per-run marker file with the
+///   captured proof so a later one-shot run can reclaim this VM if
+///   the current run hard-dies.
+/// * `note_empty_proof` -> the one-shot-specific warning calling
+///   out the loss of marker-based reclaim and the fallback to
+///   enumerate-kill at exit.
+struct OneShotLaunchObserver<'a> {
+    run_dir: &'a std::path::Path,
+}
+
+impl<'a> vm::LaunchObserver for OneShotLaunchObserver<'a> {
+    fn set_ownership(&mut self, state: control_plane::VmOwnership) {
+        teardown::set_vm_ownership(state);
+    }
+
+    fn persist_proof(&mut self, proof: &[control_plane::VmProcId]) -> anyhow::Result<()> {
+        teardown::rewrite_marker_with_proof(self.run_dir, proof)
+            .map_err(|e| anyhow::anyhow!("record VM ownership proof: {e}"))
+    }
+
+    fn note_empty_proof(&self) {
+        eprintln!(
+            "[one-shot] WARNING: no WindowsSandbox* host processes appeared within \
+             capture_launch_proof's budget; staying at LaunchSucceededNoProof. Teardown will \
+             enumerate-kill if any host processes are visible at exit; the pre-launch marker \
+             (with empty vm_processes) is preserved so reclaim of this VM by a later one-shot is \
+             not possible by positive proof. If the launcher hard-dies before exit, the VM may \
+             require manual cleanup."
+        );
+    }
 }
 
 /// Maximum host stdin we buffer before forwarding to the guest. The one-shot
