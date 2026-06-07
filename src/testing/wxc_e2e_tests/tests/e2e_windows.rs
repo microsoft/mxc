@@ -7,25 +7,20 @@
 //! PowerShell test scripts, so failures can be debugged from Rust test code.
 //! Tests skip gracefully when prerequisites (binaries or features) are missing.
 
-use std::fs::File;
-use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use wxc_e2e_tests::{
     assert_exit, assert_pwsh, assert_python, assert_success,
-    assert_success_or_skip_missing_prerequisite, examples_dir, find_binary, has_daemon,
-    has_hyperlight_snapshot, has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature,
-    has_wxc_exe, repo_root, run_test_driver, run_wxc_config, run_wxc_state_aware, test_configs_dir,
-    TempDirs,
+    assert_success_or_skip_missing_prerequisite, examples_dir, has_hyperlight_snapshot,
+    has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature, has_wxc_exe, repo_root,
+    run_test_driver, run_wxc_config, run_wxc_state_aware, test_configs_dir, TempDirs,
 };
 
 static HAS_WXC_EXE: OnceLock<bool> = OnceLock::new();
 static HAS_TEST_DRIVER: OnceLock<bool> = OnceLock::new();
 static HAS_NANVIX_BINARIES: OnceLock<bool> = OnceLock::new();
-static HAS_DAEMON: OnceLock<bool> = OnceLock::new();
 static HAS_WINDOWS_SANDBOX: OnceLock<bool> = OnceLock::new();
 static HAS_HYPERLIGHT: OnceLock<bool> = OnceLock::new();
 static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -46,10 +41,9 @@ fn cached_has_nanvix_binaries() -> bool {
     *HAS_NANVIX_BINARIES.get_or_init(has_nanvix_binaries)
 }
 
-/// Caches the daemon probe to keep logs readable across multiple tests.
-fn cached_has_daemon() -> bool {
-    *HAS_DAEMON.get_or_init(has_daemon)
-}
+// The one-shot `test_windows_sandbox` suite needs no daemon prerequisite.
+// State-aware coverage lives in
+// `tests/scripts/run_windows_sandbox_state_aware_tests.ps1`.
 
 /// Caches the Windows Sandbox feature probe.
 fn cached_has_windows_sandbox_feature() -> bool {
@@ -237,12 +231,13 @@ fn test_windows_sandbox() {
     if !cached_has_wxc_exe() {
         return;
     }
-    if !cached_has_daemon() {
-        return;
-    }
     if !cached_has_windows_sandbox_feature() {
         return;
     }
+    // No daemon prerequisite: the one-shot path launches a fresh disposable VM
+    // per call directly. State-aware coverage (provision -> start -> exec ->
+    // stop -> deprovision) lives in
+    // tests/scripts/run_windows_sandbox_state_aware_tests.ps1.
     with_test_lock(windows_sandbox_suite);
 }
 
@@ -298,7 +293,11 @@ struct SandboxCase {
 }
 
 fn windows_sandbox_suite() {
-    let _daemon = SandboxDaemon::start();
+    // No daemon pre-spawn: the one-shot path returns `Busy` when a live
+    // state-aware daemon owns the host VM slot, so each `run_wxc_config` below
+    // launches its own fresh disposable VM via the one-shot path. The daemon is
+    // owned by the state-aware lifecycle (requires `--token <id>` plus a nonce
+    // on stdin), not by one-shot.
     let cases = [
         SandboxCase {
             config: "windows_sandbox_echo.json",
@@ -378,50 +377,11 @@ fn run_sandbox_case(case: &SandboxCase) {
     );
 }
 
-struct SandboxDaemon {
-    child: Child,
-}
-
-impl SandboxDaemon {
-    fn start() -> Self {
-        let daemon = find_binary("wxc-windows-sandbox-daemon.exe")
-            .expect("wxc-windows-sandbox-daemon.exe should be available");
-        let log_path = std::env::temp_dir().join("wxc-windows-sandbox-daemon.log");
-        let stderr = File::create(&log_path).unwrap_or_else(|error| {
-            panic!(
-                "failed to create daemon log {}: {error}",
-                log_path.display()
-            )
-        });
-
-        let mut child = Command::new(&daemon)
-            .args(["wxc-windows-sandbox", "300000"])
-            .stderr(Stdio::from(stderr))
-            .spawn()
-            .unwrap_or_else(|error| panic!("failed to start {}: {error}", daemon.display()));
-
-        thread::sleep(Duration::from_secs(2));
-        if let Some(status) = child
-            .try_wait()
-            .unwrap_or_else(|error| panic!("failed to inspect daemon process: {error}"))
-        {
-            panic!(
-                "sandbox daemon exited immediately with {status}; log: {}",
-                log_path.display()
-            );
-        }
-
-        println!("Started sandbox daemon with PID {}", child.id());
-        Self { child }
-    }
-}
-
-impl Drop for SandboxDaemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
+// The one-shot suite above needs no pre-spawned daemon -- each
+// `run_wxc_config` launches its own fresh disposable VM. The daemon is owned by
+// the state-aware lifecycle (requires `--token <id>` plus a nonce on stdin).
+// State-aware coverage lives in
+// `tests/scripts/run_windows_sandbox_state_aware_tests.ps1`.
 
 // ---------------------------------------------------------------------------
 // MicroVM suite

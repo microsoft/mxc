@@ -2,20 +2,26 @@
 ## Configuration Schema
 
 MXC uses a JSON configuration file. The current stable schema is at
-[`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](../schemas/stable/mxc-config.schema.0.4.0-alpha.json).
+[`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](../schemas/stable/mxc-config.schema.0.6.0-alpha.json).
 For development, the dev schema at
 [`schemas/dev/mxc-config.schema.0.7.0-dev.json`](../schemas/dev/mxc-config.schema.0.7.0-dev.json)
-includes experimental features and may change without notice.
+includes experimental features (state-aware lifecycle envelope, the
+`experimental.*` block, experimental backends) and may change without notice.
+
+Older stable schemas (`0.4.0-alpha`, `0.5.0-alpha`, `0.5.0-alpha-strict`) are
+retained as immutable release artifacts but are not the recommended target for
+new code; the parser still accepts them within the supported version range
+(`>=0.4, <=0.7`).
 
 Editors that support JSON Schema will provide autocomplete and validation when
 you add a `"$schema"` reference to your config file. Use the stable schema for
 production configs and the dev schema when working on experimental features:
 
 ```json
-// Production
-"$schema": "./schemas/stable/mxc-config.schema.0.4.0-alpha.json"
+// Production (current stable)
+"$schema": "./schemas/stable/mxc-config.schema.0.6.0-alpha.json"
 
-// Development (experimental features)
+// Development (experimental features, state-aware lifecycle)
 "$schema": "./schemas/dev/mxc-config.schema.0.7.0-dev.json"
 ```
 
@@ -23,7 +29,7 @@ production configs and the dev schema when working on experimental features:
 
 ```json
 {
-    "version": "0.4.0-alpha",              // Schema version (semver). Current stable: "0.4.0-alpha". Also accepts "0.5.0-alpha".
+    "version": "0.6.0-alpha",              // Schema version (semver). Current stable: "0.6.0-alpha". Range accepted: >=0.4, <=0.7.
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -133,6 +139,55 @@ force a particular backend.
 Only the backend section matching the selected `containment` value is used;
 other backend sections are ignored.
 
+### State-aware lifecycle envelope (request `version: "0.6.0-alpha"`, envelope shape from the `0.7.0-dev` schema)
+
+The dev schema additionally documents a multi-phase envelope shape for the
+state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
+`deprovision`). Where the one-shot config above is a self-contained
+`ExecutionRequest` to run once, a state-aware envelope identifies which
+phase is being driven against an existing provisioned sandbox.
+
+Note the two version axes are distinct: the envelope's **field shape**
+(`phase` / `sandboxId`) is only declared in the `0.7.0-dev` schema, but the
+`version` string a state-aware request carries on the wire is
+**`0.6.0-alpha`** — that is the value the SDK stamps on every lifecycle call
+(`STATE_AWARE_VERSION`). The parser accepts the whole `>=0.4, <=0.7` range
+for either request kind, so `0.7.0-alpha` also parses, but `0.6.0-alpha` is
+the canonical value emitted by the shipping SDK:
+
+```json
+{
+    "$schema": "./schemas/dev/mxc-config.schema.0.7.0-dev.json",
+    "version": "0.6.0-alpha",
+    "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
+    "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
+                                           // Prefix routes to the backend (wsb: -> windows_sandbox,
+                                           // iso: -> isolation_session).
+    "containment": "windows_sandbox",      // Required for `provision`; ignored for other phases
+                                           // (the backend is inferred from sandboxId).
+    "config": {                            // Backend-specific per-phase config (typed in the
+                                           // SDK; opaque JSON object on the wire).
+        "process": { "commandLine": "echo hi" }
+    }
+}
+```
+
+Phase / sandboxId / containment validation:
+
+| Phase | `sandboxId` | `containment` |
+|---|---|---|
+| `provision`     | (not allowed) | **Required** — picks the backend whose `provision` mints a fresh sandboxId |
+| `start`         | **Required** (`<prefix>:<token>`) | Ignored if present |
+| `exec`          | **Required** | Ignored if present |
+| `stop`          | **Required** | Ignored if present |
+| `deprovision`   | **Required** | Ignored if present |
+
+State-aware-capable backends today: `isolation_session` and `windows_sandbox`
+(both Windows-only, both still experimental). The dispatcher rejects
+state-aware envelopes for backends that have not opted in.
+
+Full lifecycle API: [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md).
+
 ### Schema Versioning
 
 MXC config files include an optional `version` field using
@@ -150,12 +205,14 @@ The parser compares the config's major.minor against its supported version
 
 | Config `version` | Parser supports | Result |
 |---|---|---|
-| absent | >=0.4, <=0.5 | Accepted (assumed compatible) |
-| `"0.3.0-alpha"` | >=0.4, <=0.5 | **Rejected** — "older than supported" |
-| `"0.4.0-alpha"` | >=0.4, <=0.5 | Accepted (0.4 in range) |
-| `"0.5.0-alpha"` | >=0.4, <=0.5 | Accepted (0.5 in range) |
-| `"0.6.0"` | >=0.4, <=0.5 | **Rejected** — "newer than supported" |
-| `"1.0.0"` | >=0.4, <=0.5 | **Rejected** — "newer than supported" |
+| absent | >=0.4, <=0.7 | Accepted (assumed compatible) |
+| `"0.3.0-alpha"` | >=0.4, <=0.7 | **Rejected** — "older than supported" |
+| `"0.4.0-alpha"` | >=0.4, <=0.7 | Accepted (0.4 in range) |
+| `"0.5.0-alpha"` | >=0.4, <=0.7 | Accepted (0.5 in range) |
+| `"0.6.0-alpha"` | >=0.4, <=0.7 | Accepted (0.6 in range; current stable) |
+| `"0.7.0-dev"` / `"0.7.0-alpha"` | >=0.4, <=0.7 | Accepted (0.7 in range; dev schema, requires `--experimental` for the features it gates) |
+| `"0.8.0"` | >=0.4, <=0.7 | **Rejected** — "newer than supported" |
+| `"1.0.0"` | >=0.4, <=0.7 | **Rejected** — "newer than supported" |
 
 #### When to bump
 

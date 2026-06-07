@@ -1,0 +1,1404 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! State-aware control-plane primitives: the durable on-disk records that let
+//! separate `wxc-exec` phase processes (provision / start / exec / stop /
+//! deprovision) find and coordinate the single host-side daemon that holds the
+//! live Windows Sandbox VM, plus the cross-process transition lock and the
+//! PID-reuse-safe liveness check that make those coordinations correct.
+//!
+//! Two record kinds live under [`state_aware_root`] (`%TEMP%\wxc-wsb\state-aware`):
+//!
+//! - **Per-sandbox record** (`<token>\record.json`): the source of truth for a
+//!   provisioned sandbox — its lifecycle [`SandboxState`] and the immutable
+//!   filesystem-policy snapshot captured at provision. Written by `provision`,
+//!   transitioned by `start` / `stop`, removed by `deprovision`.
+//! - **Global daemon record** (`daemon.json`): present only while the single
+//!   daemon is alive. Carries the daemon's PID (+ creation time for
+//!   PID-reuse safety), the localhost IPC port, an auth `nonce`, and the
+//!   `active_sandbox_id` it currently holds. This is both the discovery
+//!   channel and the single-active-sandbox guard.
+//!
+//! All writes go through [`atomic_write_json`] (temp file + rename) so a crash
+//! mid-write never leaves a half-written, unparseable record. Every record
+//! carries a `schema_version` so a future format change can be detected rather
+//! than silently misparsed.
+//!
+//! ## Module layout
+//!
+//! The Win32 FFI plumbing (DACL stamping, PID-reuse-safe process times,
+//! scoped image-prefix process enumeration / termination, named-mutex RAII
+//! guards) lives in the [`os`] sub-module and is re-exported here via
+//! `pub use os::*;` so every previously-published path
+//! (`control_plane::process_creation_time`, `control_plane::TransitionLock`,
+//! `control_plane::HOST_VM_MUTEX_NAME`, etc.) continues to resolve. The split
+//! is purely organisational — there is no behavioural change between the
+//! single-file historical layout and the current `control_plane.rs` +
+//! `control_plane/os.rs` shape.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+pub mod os;
+pub use os::*;
+
+/// Current on-disk record schema. Bump when the record shape changes
+/// incompatibly; readers reject mismatches via [`check_schema`].
+pub const RECORD_SCHEMA_VERSION: u32 = 1;
+
+/// Lifecycle state of a provisioned state-aware sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxState {
+    /// Bookkeeping exists (record + policy snapshot); no daemon, no VM.
+    Provisioned,
+    /// The daemon is up and holds a live VM + guest connection.
+    Started,
+    /// The VM has been torn down; the record persists for a later `start`.
+    Stopped,
+}
+
+/// A serialisable snapshot of one mapped folder, mirroring [`crate::vm::MappedFolder`]
+/// but decoupled from it so the on-disk format is independent of the in-memory
+/// type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MappedFolderRecord {
+    pub host: String,
+    pub sandbox: String,
+    pub read_only: bool,
+}
+
+/// Per-sandbox durable record (`<token>\record.json`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxRecord {
+    pub schema_version: u32,
+    pub sandbox_id: String,
+    pub state: SandboxState,
+    /// Filesystem-policy snapshot captured at provision and applied verbatim at
+    /// every `start`. Immutable for the life of the sandbox.
+    pub mapped_folders: Vec<MappedFolderRecord>,
+}
+
+impl SandboxRecord {
+    /// Construct a freshly-provisioned record.
+    pub fn new_provisioned(sandbox_id: String, mapped_folders: Vec<MappedFolderRecord>) -> Self {
+        Self {
+            schema_version: RECORD_SCHEMA_VERSION,
+            sandbox_id,
+            state: SandboxState::Provisioned,
+            mapped_folders,
+        }
+    }
+}
+
+/// Identity of a single Windows Sandbox host process: its PID paired with its
+/// creation time (Win32 `FILETIME`, 100ns ticks). The creation time pins the
+/// PID to a specific process instance so PID reuse cannot cause a false match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmProcId {
+    pub pid: u32,
+    pub creation_time: u64,
+}
+
+/// Global daemon record (`daemon.json`). Present iff a daemon is (or recently
+/// was) alive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonRecord {
+    pub schema_version: u32,
+    /// Daemon process id.
+    pub pid: u32,
+    /// Daemon process creation time (Win32 `FILETIME`, 100ns ticks). Paired
+    /// with `pid` to defeat PID reuse: a recycled PID will not match.
+    pub pid_creation_time: u64,
+    /// Localhost TCP port the daemon serves its line protocol on.
+    pub ipc_port: u16,
+    /// Shared secret the backend generated and passed to the daemon at spawn.
+    /// Echoed here so the backend can (a) confirm this record belongs to the
+    /// daemon it just spawned and (b) authenticate later IPC connects against a
+    /// process squatting the port.
+    pub nonce: String,
+    /// The single sandbox this daemon currently holds.
+    pub active_sandbox_id: String,
+    /// `false` while the daemon is still booting the VM (record published
+    /// *before* launch so the daemon occupies the single-instance slot from the
+    /// moment it starts), `true` once the VM + guest are connected and ready to
+    /// serve. The IPC port is bound and served even while `ready` is `false`, so
+    /// a `STOP` can gracefully abort an in-flight boot.
+    pub ready: bool,
+    /// Identities of the Windows Sandbox host processes this daemon launched,
+    /// captured once the VM is up. Empty until `ready` is `true`.
+    ///
+    /// This is the *positive ownership proof* used by a later daemon's startup
+    /// reconcile: an orphaned VM is only reclaimed (torn down) when the running
+    /// sandbox processes intersect this recorded set. A present record alone is
+    /// never sufficient — without an intersection the VM is treated as foreign
+    /// and left untouched. `#[serde(default)]` keeps older records readable.
+    #[serde(default)]
+    pub vm_processes: Vec<VmProcId>,
+}
+
+/// What a freshly-starting daemon should do about any Windows Sandbox VM it
+/// finds already running. Produced by the pure [`classify_startup`] so the
+/// decision is unit-testable without a real VM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupAction {
+    /// No VM is running (or none that matters): launch normally.
+    Proceed,
+    /// A running VM is provably ours: tear it down, then launch. Carries the
+    /// **prior recorded ownership proof** (the PIDs+creation_times from the
+    /// stale daemon record that intersected the live set), NOT the live
+    /// snapshot. The reclaim caller must seed [`plan_kill_set`] with this
+    /// proof; seeding with the live snapshot would promote any foreign
+    /// `WindowsSandbox*` process observed at startup into "proof" and let
+    /// teardown kill it.
+    ReclaimOrphan { proof: Vec<VmProcId> },
+    /// A running VM exists but ownership is *not* positively proven: refuse to
+    /// disturb it (it may be a user's manually-opened sandbox).
+    RefuseForeign,
+}
+
+/// Decide what to do about an already-running Windows Sandbox VM at daemon
+/// startup, given the prior global daemon record (if any) and the set of
+/// currently-running sandbox host processes.
+///
+/// Reclaim is intentionally conservative: it requires a *positive* identity
+/// intersection between the prior record's `vm_processes` and the live set,
+/// and the returned [`StartupAction::ReclaimOrphan`] carries the intersecting
+/// prior proof so the caller can pass it to [`plan_kill_set`]. Anything else —
+/// no record, an empty `vm_processes` (e.g. a daemon that crashed before the
+/// VM became ready), or a disjoint set — yields [`StartupAction::RefuseForeign`]
+/// so we never kill a VM we cannot prove is ours.
+///
+/// The caller is responsible for first rejecting the case where `prior`
+/// describes a *live* daemon (another daemon already owns the slot); by the
+/// time this runs, `prior` is expected to be stale/dead.
+pub fn classify_startup(prior: Option<&DaemonRecord>, current_vm: &[VmProcId]) -> StartupAction {
+    if current_vm.is_empty() {
+        return StartupAction::Proceed;
+    }
+    if let Some(prior) = prior {
+        let ours = prior
+            .vm_processes
+            .iter()
+            .any(|recorded| current_vm.contains(recorded));
+        if ours {
+            return StartupAction::ReclaimOrphan {
+                proof: prior.vm_processes.clone(),
+            };
+        }
+    }
+    StartupAction::RefuseForeign
+}
+
+/// How far VM ownership has progressed within a single daemon process. The
+/// cleanup path consults this (via [`decide_cleanup`]) so it never tears down a
+/// VM it cannot prove it owns.
+///
+/// The crucial distinction is between a launch that is still *in flight* (we
+/// cannot prove a VM is ours — a foreign VM could have won the single-instance
+/// contest and made our launch fail) and a launch that *returned `Ok`* (the OS
+/// single-instance guarantee plus startup reconcile mean the running VM is
+/// definitely ours, even if its host processes have not been enumerated yet).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VmOwnership {
+    /// No VM launch was ever issued by this daemon.
+    NotLaunched,
+    /// A launch was *issued* but has not yet been observed to succeed (the
+    /// `launch()` call is in flight, or it errored, or the daemon stopped
+    /// before it returned). Ambiguous: a foreign VM could have raced in and
+    /// caused our launch to fail, so cleanup must NOT tear anything down.
+    LaunchInFlight,
+    /// `launch()` returned `Ok` — the running VM is ours by the single-instance
+    /// invariant — but no host-process proof was captured yet (slow boot).
+    /// Cleanup may tear down whatever sandbox VM is live (it is ours), but the
+    /// durable record carries no reclaim proof, so a crash here is a known
+    /// (shrinking) wedge window.
+    LaunchSucceededNoProof,
+    /// This daemon holds a launched VM and captured its host-process
+    /// identities. Cleanup may tear exactly these down (with a snapshot
+    /// fallback for any host process the proof missed).
+    Owned(Vec<VmProcId>),
+}
+
+/// What the daemon cleanup path should do, derived purely from ownership state
+/// so the decision is unit-testable without a real VM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanupAction {
+    /// Nothing was launched: do nothing.
+    Noop,
+    /// A launch is in flight but ownership is unprovable: leave any VM alone
+    /// (fail safe) and let the operator or the next startup reconcile deal with
+    /// it. Never kill in this state.
+    LeakUnowned,
+    /// Tear down the sandbox VM, seeding the kill set with `Vec<VmProcId>`
+    /// (possibly empty). `teardown_owned` additionally snapshots the live
+    /// sandbox processes at teardown start — safe because the caller only
+    /// reaches a `Teardown` action when it provably holds the single-instance
+    /// VM — so an empty seed (launch-succeeded-but-no-proof) still tears the VM
+    /// down by enumeration.
+    Teardown(Vec<VmProcId>),
+}
+
+/// Map an [`VmOwnership`] to the cleanup action the daemon should take on exit.
+///
+/// Kept for backward compatibility with the existing daemon `main` cleanup
+/// dispatch and the one-shot `OneShotTeardown::full`/`kill_only` switch. New
+/// code prefers [`plan_kill_set`] directly, which collapses the `Teardown`
+/// branch's "what to kill" question into a single pure step.
+pub fn decide_cleanup(ownership: &VmOwnership) -> CleanupAction {
+    match ownership {
+        VmOwnership::NotLaunched => CleanupAction::Noop,
+        VmOwnership::LaunchInFlight => CleanupAction::LeakUnowned,
+        // Launch succeeded → the VM is ours; tear it down by enumeration even
+        // without recorded proof (empty seed).
+        VmOwnership::LaunchSucceededNoProof => CleanupAction::Teardown(Vec::new()),
+        VmOwnership::Owned(pids) => CleanupAction::Teardown(pids.clone()),
+    }
+}
+
+/// Pure kill-set planner shared by every teardown site (one-shot
+/// `OneShotTeardown::{full,kill_only}`, daemon `main` exit, daemon
+/// `vm_crash_watchdog` cleanup, state-aware `stop`/`deprovision` orphan
+/// reclaim, and one-shot reconcile `ReclaimThenProceed`). A single
+/// intersection-checked rule for every path so none of them can kill a
+/// foreign VM that merely appears in a snapshot while the daemon's own VM
+/// has crashed.
+///
+/// The contract for each `VmOwnership` variant:
+///
+/// - `NotLaunched` / `LaunchInFlight` → `None`. Either nothing was launched
+///   (Noop) or a launch is in flight and ownership is ambiguous; fail-safe
+///   leak in both cases.
+/// - `Owned(proof)`:
+///   - `proof ∩ snapshot ≠ ∅` → `Some(proof ∪ snapshot)`. We provably still
+///     own the same VM; union to cover host processes the proof missed.
+///   - `proof ∩ snapshot = ∅` (including empty snapshot) → `Some(proof)`.
+///     The VM in the snapshot is not ours; never enumerate-kill foreign.
+///     `proof` alone is likely already-dead PIDs which the PID+creation_time
+///     guard in [`terminate_processes`] skips harmlessly.
+/// - `LaunchSucceededNoProof`:
+///   - empty snapshot → `None`. Either we never produced visible host
+///     processes (deeply degraded) or the VM is already gone; nothing to
+///     kill, and we have no proof to seed a kill with.
+///   - non-empty snapshot → `Some(snapshot.to_vec())`. The caller reaches
+///     this state only on a `launch()` that returned `Ok` while holding the
+///     host VM-slot mutex, so by single-instance + the mutex the snapshot is
+///     ours. The narrow race (silent VM crash → manual foreign VM started
+///     before our cleanup runs) is explicitly accepted; sole-claim was
+///     rejected as a deeper invariant violation.
+pub fn plan_kill_set(ownership: &VmOwnership, snapshot: &[VmProcId]) -> Option<Vec<VmProcId>> {
+    match ownership {
+        VmOwnership::NotLaunched | VmOwnership::LaunchInFlight => None,
+        VmOwnership::Owned(proof) => {
+            let intersects = proof.iter().any(|p| snapshot.contains(p));
+            if intersects {
+                let mut kill = proof.clone();
+                for p in snapshot {
+                    if !kill.contains(p) {
+                        kill.push(*p);
+                    }
+                }
+                Some(kill)
+            } else {
+                Some(proof.clone())
+            }
+        }
+        VmOwnership::LaunchSucceededNoProof => {
+            if snapshot.is_empty() {
+                None
+            } else {
+                Some(snapshot.to_vec())
+            }
+        }
+    }
+}
+
+/// Tri-state outcome of a teardown attempt, returned by every site that may
+/// delete the durable daemon / one-shot record afterward. The record may only
+/// be removed on `ConfirmedGone`; `StillRunning` and `ProbeFailed` MUST
+/// preserve the record so the next daemon / one-shot run can reclaim the
+/// orphan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeardownOutcome {
+    /// Teardown ran, the polling loop confirmed every `WindowsSandbox*` host
+    /// process exited within the budget. Safe to delete the durable record.
+    ConfirmedGone,
+    /// Teardown ran but the polling loop timed out with at least one host
+    /// process still alive. Carries the live snapshot at timeout so the
+    /// caller can surface actionable diagnostics.
+    StillRunning(Vec<VmProcId>),
+    /// The liveness probe itself failed (e.g. Toolhelp32 hiccup) so we
+    /// cannot prove the VM is gone. The record MUST be preserved.
+    ProbeFailed,
+}
+
+/// What `stop()` / `deprovision()` should do when [`live_daemon`] returns
+/// `None` but a stale [`DaemonRecord`] is on disk and the sandbox state was
+/// `Started`. Produced by the pure [`classify_stale_daemon_cleanup`] so the
+/// decision is unit-testable without a real VM.
+///
+/// The five branches map directly onto operator semantics:
+/// - `NoLiveVm`: stale daemon left no live orphan; advance state normally.
+/// - `Reclaim { proof }`: stale daemon's recorded `vm_processes` intersects
+///   the live snapshot; the orphan is provably ours. Caller acquires
+///   `HostVmLock`, kills via [`plan_kill_set`] seeded
+///   with `proof`, and may advance state only on [`TeardownOutcome::ConfirmedGone`].
+/// - `RefuseForeign { live }`: live `WindowsSandbox*` processes exist but
+///   none match the stale proof; either the stale daemon never produced
+///   proof and a user opened a manual sandbox, or our orphan exited and a
+///   replacement appeared. Refuse and surface `live` PIDs in the error so
+///   the operator can clean up manually.
+/// - `RefuseProbeFailed`: enumeration of `WindowsSandbox*` itself failed;
+///   refuse rather than proceed blind.
+/// - `RefuseSandboxIdMismatch { stale_active }`: the stale daemon record's
+///   `active_sandbox_id` does not match the sandbox being stopped /
+///   deprovisioned. Refuse so cleanup of sandbox A cannot reclaim or scrub
+///   the orphan / records of sandbox B.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleDaemonCleanup {
+    /// No live VM and no stale record (or stale record matches sandbox_id
+    /// with no live processes). Phase may advance normally.
+    NoLiveVm,
+    /// Stale daemon's proof intersects the live VM; safe to reclaim.
+    Reclaim { proof: Vec<VmProcId> },
+    /// Live VM exists but is foreign; refuse and surface its PIDs.
+    RefuseForeign { live: Vec<VmProcId> },
+    /// Liveness probe failed; refuse to act on unknown state.
+    RefuseProbeFailed,
+    /// Stale record names a different sandbox; refuse so we never act on
+    /// another sandbox's records.
+    RefuseSandboxIdMismatch { stale_active: String },
+}
+
+/// Pure decision: what should `stop()` / `deprovision()` do when there is no
+/// live daemon but a stale [`DaemonRecord`] is on disk (or a live VM exists
+/// with no record)?
+///
+/// `live` is `None` when the `WindowsSandbox*` enumeration itself failed; the
+/// caller must surface that as `ProbeFailed` rather than treat it as
+/// "no live VM".
+///
+/// The `sandbox_id` mismatch check fires before the live-set inspection so a
+/// stale-record-for-sandbox-B can never authorise action against sandbox A
+/// regardless of what is running.
+pub fn classify_stale_daemon_cleanup(
+    stale: Option<&DaemonRecord>,
+    sandbox_id: &str,
+    live: Option<&[VmProcId]>,
+) -> StaleDaemonCleanup {
+    if let Some(stale) = stale {
+        if stale.active_sandbox_id != sandbox_id {
+            return StaleDaemonCleanup::RefuseSandboxIdMismatch {
+                stale_active: stale.active_sandbox_id.clone(),
+            };
+        }
+    }
+    let live = match live {
+        None => return StaleDaemonCleanup::RefuseProbeFailed,
+        Some(l) => l,
+    };
+    if live.is_empty() {
+        return StaleDaemonCleanup::NoLiveVm;
+    }
+    if let Some(stale) = stale {
+        let intersects = stale.vm_processes.iter().any(|p| live.contains(p));
+        if intersects {
+            return StaleDaemonCleanup::Reclaim {
+                proof: stale.vm_processes.clone(),
+            };
+        }
+    }
+    StaleDaemonCleanup::RefuseForeign {
+        live: live.to_vec(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
+
+/// Root directory for all state-aware records: `%TEMP%\wxc-wsb\state-aware`.
+///
+/// Tests within this crate can redirect to a per-test tempdir via
+/// [`set_state_aware_root_for_test`] (held under [`STATE_AWARE_TEST_LOCK`]
+/// to serialise concurrent tests) so the illegal-transition matrix can
+/// exercise stop/deprovision/etc. without touching the host's real TEMP
+/// or racing other tests.
+pub fn state_aware_root() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Some(p) = test_root::get() {
+            return p;
+        }
+    }
+    std::env::temp_dir().join("wxc-wsb").join("state-aware")
+}
+
+#[cfg(test)]
+mod test_root {
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    static OVERRIDE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    fn slot() -> &'static Mutex<Option<PathBuf>> {
+        OVERRIDE.get_or_init(|| Mutex::new(None))
+    }
+    pub fn set(p: Option<PathBuf>) {
+        *slot().lock().expect("test_root mutex poisoned") = p;
+    }
+    pub fn get() -> Option<PathBuf> {
+        slot().lock().expect("test_root mutex poisoned").clone()
+    }
+}
+
+/// Test-only: redirect [`state_aware_root`] to `path` for the duration of a
+/// test. Pair with [`STATE_AWARE_TEST_LOCK`] (or your own serialisation) so
+/// concurrent tests don't race the global override.
+#[cfg(test)]
+pub fn set_state_aware_root_for_test(path: Option<PathBuf>) {
+    test_root::set(path);
+}
+
+/// Test-only: process-wide mutex tests must hold while
+/// [`set_state_aware_root_for_test`] is in effect so they don't race each
+/// other's override.
+#[cfg(test)]
+pub static STATE_AWARE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Per-sandbox scratch directory: `<root>\<token>`.
+///
+/// `token` is the tail of `sandbox_id` (`wsb:<token>`); callers pass the bare
+/// token so the path stays free of the `:` separator.
+pub fn sandbox_dir(token: &str) -> PathBuf {
+    state_aware_root().join(token)
+}
+
+/// Per-sandbox record file: `<root>\<token>\record.json`.
+pub fn sandbox_record_path(token: &str) -> PathBuf {
+    sandbox_dir(token).join("record.json")
+}
+
+/// Global daemon record file: `<root>\daemon.json`.
+pub fn daemon_record_path() -> PathBuf {
+    state_aware_root().join("daemon.json")
+}
+
+/// Serialise `value` to `path` atomically: write a uniquely-named temp file in
+/// the same directory, then rename it over `path`. The rename is atomic on
+/// Windows (and replaces any existing file), so a reader sees either the old or
+/// the new content, never a partial write.
+pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("record path has no parent directory")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create record dir {:?}", parent))?;
+
+    // Lock the record DIRECTORY down to an owner-only, inheritable DACL BEFORE
+    // creating the temp file, so the temp file inherits owner-only from the
+    // instant it exists. Without this, the temp file would first materialise
+    // under the parent's default (possibly cross-user-readable) ACL — e.g. the
+    // global daemon record lives directly under %TEMP%\wxc-wsb\state-aware,
+    // which is C:\Windows\Temp for a service account. A cross-user attacker
+    // polling the dir could open the `<uuid>.tmp` with FILE_SHARE_READ and
+    // RETAIN that handle past a later per-file DACL change (Windows does not
+    // revoke existing opens on a DACL replacement), reading the persisted auth
+    // nonce after the rename. Securing the parent first closes that window.
+    // Fail closed: never write a nonce-bearing record into an unsecured dir.
+    os::set_owner_only_dir(parent).with_context(|| format!("secure record dir {:?}", parent))?;
+
+    let json = serde_json::to_vec_pretty(value).context("serialise record")?;
+    let tmp = parent.join(format!("{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&tmp, &json).with_context(|| format!("write temp record {:?}", tmp))?;
+
+    // Belt-and-suspenders: stamp the file itself owner-only too (the parent
+    // DACL already makes the inherited ACL owner-only; this also strips any
+    // inherited ACE should the parent ever not be inheritable). Fail closed: on
+    // error, discard the temp file rather than publish an unsecured record.
+    if let Err(e) = os::set_owner_only_file(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("secure record DACL {:?}", tmp));
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("rename {:?} -> {:?}", tmp, path));
+    }
+    Ok(())
+}
+
+/// Read and deserialise a JSON record. Returns `Ok(None)` if the file does not
+/// exist; an `Err` for a present-but-unreadable / unparseable file.
+pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => {
+            let value =
+                serde_json::from_str(&s).with_context(|| format!("parse record {:?}", path))?;
+            Ok(Some(value))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("read record {:?}", path)),
+    }
+}
+
+/// Reject a record whose schema does not match what this build understands.
+pub fn check_schema(found: u32, what: &str) -> Result<()> {
+    if found != RECORD_SCHEMA_VERSION {
+        anyhow::bail!(
+            "{} record schema {} is incompatible with supported schema {}",
+            what,
+            found,
+            RECORD_SCHEMA_VERSION
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Daemon liveness
+// ---------------------------------------------------------------------------
+
+/// True iff the daemon described by `record` is still the live process it
+/// claims to be: a process with its PID is **currently running** AND its
+/// creation time matches the recorded one. Uses the liveness-aware
+/// [`running_process_creation_time`] so a terminated daemon whose object
+/// lingers behind a retained handle is correctly reported as gone rather than
+/// blocking a fresh daemon from reclaiming the slot.
+pub fn daemon_alive(record: &DaemonRecord) -> bool {
+    running_process_creation_time(record.pid) == Some(record.pid_creation_time)
+}
+
+/// Generate a fresh random auth nonce for the daemon record.
+pub fn generate_nonce() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Record convenience readers
+// ---------------------------------------------------------------------------
+
+/// Read the per-sandbox record for `token`, validating its schema. Returns
+/// `Ok(None)` if the record does not exist.
+pub fn read_sandbox_record(token: &str) -> Result<Option<SandboxRecord>> {
+    let Some(record) = read_json::<SandboxRecord>(&sandbox_record_path(token))? else {
+        return Ok(None);
+    };
+    check_schema(record.schema_version, "sandbox")?;
+    Ok(Some(record))
+}
+
+/// Read the global daemon record, validating its schema. Returns `Ok(None)` if
+/// the record does not exist. A present record does **not** imply the daemon is
+/// alive — pair with [`daemon_alive`].
+pub fn read_daemon_record() -> Result<Option<DaemonRecord>> {
+    let Some(record) = read_json::<DaemonRecord>(&daemon_record_path())? else {
+        return Ok(None);
+    };
+    check_schema(record.schema_version, "daemon")?;
+    Ok(Some(record))
+}
+
+/// Read the daemon record only if it describes a process that is still alive.
+/// A present-but-dead record (daemon crashed without cleanup) yields `None`.
+pub fn live_daemon() -> Result<Option<DaemonRecord>> {
+    match read_daemon_record()? {
+        Some(record) if daemon_alive(&record) => Ok(Some(record)),
+        _ => Ok(None),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Record CRUD helpers
+// ---------------------------------------------------------------------------
+//
+// These helpers encapsulate the FS-storage contract (atomic temp-and-rename,
+// owner-only DACL on the parent) so consumers never reach directly into
+// atomic_write_json + path-derivation (sandbox_record_path /
+// daemon_record_path) and risk forgetting the DACL hardening at a new call
+// site. Callers say "write this DaemonRecord" / "remove the sandbox dir for
+// this token" and the helper does the right thing.
+
+/// Atomically write `record` to the global daemon record path. Wraps
+/// [`atomic_write_json`] so consumers do not see the temp-and-rename or
+/// owner-only-DACL hardening details.
+pub fn write_daemon_record(record: &DaemonRecord) -> Result<()> {
+    atomic_write_json(&daemon_record_path(), record)
+}
+
+/// Remove the global daemon record file (best-effort: returns the io::Error
+/// only on a hard failure, treats NotFound as success).
+pub fn remove_daemon_record() -> std::io::Result<()> {
+    match std::fs::remove_file(daemon_record_path()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Atomically write the per-sandbox `record` for `token` to disk.
+pub fn write_sandbox_record(token: &str, record: &SandboxRecord) -> Result<()> {
+    atomic_write_json(&sandbox_record_path(token), record)
+}
+
+/// Remove the per-sandbox scratch directory and all records inside it (best
+/// effort: NotFound is treated as success). Used by `deprovision` after the
+/// orphan-cleanup classifier has confirmed no live VM holds the slot.
+pub fn remove_sandbox_dir(token: &str) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(sandbox_dir(token)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Daemon IPC line protocol
+// ---------------------------------------------------------------------------
+//
+// The daemon serves a line protocol on `127.0.0.1:<ipc_port>`:
+//   request  : `<VERB> <nonce>\n`
+//   response : `OK\n` | `PONG\n` | `ERR <message>\n`
+// The nonce authenticates the caller against a process that merely squats the
+// localhost port. The `EXEC` verb continues into a binary frame stream after
+// its status line (see [`crate::ipc_exec`]).
+
+/// Liveness/echo verb. Response: `PONG`.
+pub const IPC_PING: &str = "PING";
+/// Teardown verb: the daemon tears down its VM and exits. Response: `OK`.
+pub const IPC_STOP: &str = "STOP";
+/// Exec verb: after `EXEC <nonce>\n` the client sends a framed `ExecStart`
+/// request and the daemon replies with a status line then a binary frame
+/// stream (see [`crate::ipc_exec`]). Admission response: `OK` or `ERR <msg>`.
+pub const IPC_EXEC: &str = "EXEC";
+/// Success response token.
+pub const IPC_OK: &str = "OK";
+/// Ping success response token.
+pub const IPC_PONG: &str = "PONG";
+/// Error response prefix (`ERR <message>`).
+pub const IPC_ERR: &str = "ERR";
+/// Exec-admission reason token: another exec already holds the single-flight
+/// guest slot. Emitted by the daemon as `ERR busy`, matched by the client.
+pub const IPC_ERR_BUSY: &str = "busy";
+/// Exec-admission reason token: the guest slot exists but is still booting.
+/// Emitted by the daemon as `ERR not ready`, matched by the client.
+pub const IPC_ERR_NOT_READY: &str = "not ready";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paths_are_nested_under_root() {
+        let root = state_aware_root();
+        assert!(root.ends_with("state-aware"));
+        assert_eq!(sandbox_dir("abc"), root.join("abc"));
+        assert_eq!(
+            sandbox_record_path("abc"),
+            root.join("abc").join("record.json")
+        );
+        assert_eq!(daemon_record_path(), root.join("daemon.json"));
+    }
+
+    #[test]
+    fn sandbox_record_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record.json");
+        let rec = SandboxRecord::new_provisioned(
+            "wsb:deadbeef".to_string(),
+            vec![MappedFolderRecord {
+                host: r"C:\work".to_string(),
+                sandbox: r"C:\work".to_string(),
+                read_only: false,
+            }],
+        );
+        atomic_write_json(&path, &rec).unwrap();
+        let back: SandboxRecord = read_json(&path).unwrap().unwrap();
+        assert_eq!(back, rec);
+        assert_eq!(back.state, SandboxState::Provisioned);
+    }
+
+    #[test]
+    fn daemon_record_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.json");
+        let rec = DaemonRecord {
+            schema_version: RECORD_SCHEMA_VERSION,
+            pid: 1234,
+            pid_creation_time: 42,
+            ipc_port: 49500,
+            nonce: "abc123".to_string(),
+            active_sandbox_id: "wsb:deadbeef".to_string(),
+            ready: true,
+            vm_processes: vec![VmProcId {
+                pid: 5678,
+                creation_time: 99,
+            }],
+        };
+        atomic_write_json(&path, &rec).unwrap();
+        let back: DaemonRecord = read_json(&path).unwrap().unwrap();
+        assert_eq!(back, rec);
+    }
+
+    #[test]
+    fn read_json_missing_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nope.json");
+        let back: Option<SandboxRecord> = read_json(&path).unwrap();
+        assert!(back.is_none());
+    }
+
+    #[test]
+    fn atomic_write_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record.json");
+        let mut rec = SandboxRecord::new_provisioned("wsb:x".to_string(), Vec::new());
+        atomic_write_json(&path, &rec).unwrap();
+        rec.state = SandboxState::Started;
+        atomic_write_json(&path, &rec).unwrap();
+        let back: SandboxRecord = read_json(&path).unwrap().unwrap();
+        assert_eq!(back.state, SandboxState::Started);
+        // No stray temp files left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked: {:?}", leftovers);
+    }
+
+    #[test]
+    fn check_schema_rejects_mismatch() {
+        assert!(check_schema(RECORD_SCHEMA_VERSION, "sandbox").is_ok());
+        assert!(check_schema(RECORD_SCHEMA_VERSION + 1, "sandbox").is_err());
+    }
+
+    fn daemon_record_with(vm_processes: Vec<VmProcId>) -> DaemonRecord {
+        DaemonRecord {
+            schema_version: RECORD_SCHEMA_VERSION,
+            pid: 1,
+            pid_creation_time: 1,
+            ipc_port: 1,
+            nonce: "n".to_string(),
+            active_sandbox_id: "wsb:x".to_string(),
+            ready: true,
+            vm_processes,
+        }
+    }
+
+    #[test]
+    fn classify_no_vm_proceeds() {
+        let prior = daemon_record_with(vec![VmProcId {
+            pid: 10,
+            creation_time: 100,
+        }]);
+        assert_eq!(classify_startup(Some(&prior), &[]), StartupAction::Proceed);
+        assert_eq!(classify_startup(None, &[]), StartupAction::Proceed);
+    }
+
+    #[test]
+    fn classify_vm_no_prior_refuses() {
+        let current = [VmProcId {
+            pid: 10,
+            creation_time: 100,
+        }];
+        assert_eq!(
+            classify_startup(None, &current),
+            StartupAction::RefuseForeign
+        );
+    }
+
+    #[test]
+    fn classify_vm_empty_prior_processes_refuses() {
+        let prior = daemon_record_with(Vec::new());
+        let current = [VmProcId {
+            pid: 10,
+            creation_time: 100,
+        }];
+        assert_eq!(
+            classify_startup(Some(&prior), &current),
+            StartupAction::RefuseForeign
+        );
+    }
+
+    #[test]
+    fn classify_disjoint_set_refuses() {
+        let prior = daemon_record_with(vec![VmProcId {
+            pid: 10,
+            creation_time: 100,
+        }]);
+        // Same pid but different creation time must NOT match (PID reuse).
+        let current = [VmProcId {
+            pid: 10,
+            creation_time: 999,
+        }];
+        assert_eq!(
+            classify_startup(Some(&prior), &current),
+            StartupAction::RefuseForeign
+        );
+    }
+
+    #[test]
+    fn classify_intersecting_set_reclaims() {
+        let shared = VmProcId {
+            pid: 10,
+            creation_time: 100,
+        };
+        let other_prior = VmProcId {
+            pid: 11,
+            creation_time: 101,
+        };
+        let prior = daemon_record_with(vec![shared, other_prior]);
+        // current has one process not in prior plus the shared one.
+        let current = [
+            VmProcId {
+                pid: 20,
+                creation_time: 200,
+            },
+            shared,
+        ];
+        // Reclaim returns the PRIOR proof (used to seed plan_kill_set), not
+        // the live snapshot. Seeding with the snapshot would promote any
+        // foreign WindowsSandbox* process observed at startup into "proof".
+        assert_eq!(
+            classify_startup(Some(&prior), &current),
+            StartupAction::ReclaimOrphan {
+                proof: vec![shared, other_prior]
+            }
+        );
+    }
+
+    // ----- plan_kill_set: pure kill planner --------------------------------
+
+    fn pid(p: u32, ct: u64) -> VmProcId {
+        VmProcId {
+            pid: p,
+            creation_time: ct,
+        }
+    }
+
+    #[test]
+    fn plan_kill_set_not_launched_is_none_regardless_of_snapshot() {
+        assert_eq!(plan_kill_set(&VmOwnership::NotLaunched, &[]), None);
+        assert_eq!(
+            plan_kill_set(&VmOwnership::NotLaunched, &[pid(1, 1), pid(2, 2)]),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_kill_set_launch_in_flight_is_none_regardless_of_snapshot() {
+        // Critical safety property: an in-flight launch is ambiguous (a
+        // foreign VM could have won the contest) so we must never kill
+        // anything, even if WindowsSandbox* processes are visible.
+        assert_eq!(plan_kill_set(&VmOwnership::LaunchInFlight, &[]), None);
+        assert_eq!(
+            plan_kill_set(&VmOwnership::LaunchInFlight, &[pid(1, 1)]),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_kill_set_owned_with_empty_snapshot_returns_proof() {
+        // The recorded proof may be dead PIDs but `terminate_processes`
+        // checks creation_time, so killing already-dead identities is a no-op.
+        // Critically we DO NOT enumerate-kill on empty snapshot in `Owned`.
+        let proof = vec![pid(10, 100), pid(11, 101)];
+        assert_eq!(
+            plan_kill_set(&VmOwnership::Owned(proof.clone()), &[]),
+            Some(proof)
+        );
+    }
+
+    #[test]
+    fn plan_kill_set_owned_intersect_unions_proof_and_snapshot() {
+        let shared = pid(10, 100);
+        let proof_only = pid(11, 101);
+        let snapshot_only = pid(20, 200);
+        let proof = vec![shared, proof_only];
+        let snapshot = vec![snapshot_only, shared];
+        let kill = plan_kill_set(&VmOwnership::Owned(proof), &snapshot).unwrap();
+        // Order: proof first, snapshot extras appended.
+        assert_eq!(kill, vec![shared, proof_only, snapshot_only]);
+    }
+
+    #[test]
+    fn plan_kill_set_owned_disjoint_returns_only_proof() {
+        // The live VM is NOT ours; never enumerate-kill foreign. We still
+        // return the recorded proof so any of our still-alive recorded
+        // processes get cleaned up, but PID+creation_time matching makes a
+        // dead-recorded-PID kill a safe no-op.
+        let proof = vec![pid(10, 100)];
+        let foreign = vec![pid(99, 999)];
+        assert_eq!(
+            plan_kill_set(&VmOwnership::Owned(proof.clone()), &foreign),
+            Some(proof)
+        );
+    }
+
+    #[test]
+    fn plan_kill_set_owned_pid_match_but_different_creation_time_is_disjoint() {
+        // PID reuse defence: same PID, different creation_time is NOT a
+        // match. Must return only the recorded proof, never the snapshot's
+        // recycled-PID identity.
+        let proof = vec![pid(10, 100)];
+        let snapshot = vec![pid(10, 999)];
+        assert_eq!(
+            plan_kill_set(&VmOwnership::Owned(proof.clone()), &snapshot),
+            Some(proof)
+        );
+    }
+
+    #[test]
+    fn plan_kill_set_launch_succeeded_no_proof_empty_snapshot_is_none() {
+        // No proof and no live VM: nothing to kill. The narrow
+        // "VM never produced visible processes" wedge is accepted here.
+        assert_eq!(
+            plan_kill_set(&VmOwnership::LaunchSucceededNoProof, &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_kill_set_launch_succeeded_no_proof_with_snapshot_enumerates() {
+        // The caller reaches this state only on a launch() Ok while holding
+        // the host VM-slot mutex; by single-instance + the mutex the snapshot
+        // is ours. This is the empty-proof recovery path: an intersection-only
+        // kill would miss it because there is no proof to intersect.
+        let snapshot = vec![pid(10, 100), pid(11, 101)];
+        assert_eq!(
+            plan_kill_set(&VmOwnership::LaunchSucceededNoProof, &snapshot),
+            Some(snapshot)
+        );
+    }
+
+    // ----- classify_stale_daemon_cleanup -----------------------------------
+
+    fn stale_with(active: &str, vm_processes: Vec<VmProcId>) -> DaemonRecord {
+        DaemonRecord {
+            schema_version: RECORD_SCHEMA_VERSION,
+            pid: 1,
+            pid_creation_time: 1,
+            ipc_port: 1,
+            nonce: "n".to_string(),
+            active_sandbox_id: active.to_string(),
+            ready: true,
+            vm_processes,
+        }
+    }
+
+    #[test]
+    fn stale_cleanup_no_stale_record_no_live_is_no_live_vm() {
+        assert_eq!(
+            classify_stale_daemon_cleanup(None, "wsb:x", Some(&[])),
+            StaleDaemonCleanup::NoLiveVm
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_probe_failed_refuses() {
+        assert_eq!(
+            classify_stale_daemon_cleanup(None, "wsb:x", None),
+            StaleDaemonCleanup::RefuseProbeFailed
+        );
+        // Probe-failed wins even when a stale record exists.
+        let stale = stale_with("wsb:x", vec![pid(10, 100)]);
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:x", None),
+            StaleDaemonCleanup::RefuseProbeFailed
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_sandbox_id_mismatch_refuses_before_anything_else() {
+        // Even with an intersecting live VM, a mismatched stale record must
+        // refuse: cleanup of sandbox A must NEVER reclaim sandbox B's orphan.
+        let stale = stale_with("wsb:b", vec![pid(10, 100)]);
+        let live = vec![pid(10, 100)];
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:a", Some(&live)),
+            StaleDaemonCleanup::RefuseSandboxIdMismatch {
+                stale_active: "wsb:b".to_string()
+            }
+        );
+        // Mismatch even fires on an empty live set so the operator gets a
+        // clear diagnostic (the alternative is "looks fine, advance state"
+        // which silently corrupts cross-sandbox bookkeeping).
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:a", Some(&[])),
+            StaleDaemonCleanup::RefuseSandboxIdMismatch {
+                stale_active: "wsb:b".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_matching_record_empty_live_is_no_live_vm() {
+        let stale = stale_with("wsb:x", vec![pid(10, 100)]);
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:x", Some(&[])),
+            StaleDaemonCleanup::NoLiveVm
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_intersection_reclaims_with_prior_proof() {
+        let shared = pid(10, 100);
+        let proof = vec![shared, pid(11, 101)];
+        let stale = stale_with("wsb:x", proof.clone());
+        let live = vec![shared, pid(20, 200)];
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:x", Some(&live)),
+            StaleDaemonCleanup::Reclaim { proof }
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_empty_stale_proof_with_live_refuses_foreign() {
+        // The empty-proof wedge surface in stop/deprovision: a daemon died before
+        // capture_launch_proof populated vm_processes; a live VM exists but
+        // we have no positive proof it is ours. RefuseForeign (no sole-claim
+        // weakening of the positive-proof invariant).
+        let stale = stale_with("wsb:x", Vec::new());
+        let live = vec![pid(10, 100)];
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:x", Some(&live)),
+            StaleDaemonCleanup::RefuseForeign { live }
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_disjoint_live_refuses_foreign() {
+        let stale = stale_with("wsb:x", vec![pid(10, 100)]);
+        let live = vec![pid(20, 200)];
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:x", Some(&live)),
+            StaleDaemonCleanup::RefuseForeign { live }
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_pid_match_creation_time_diff_refuses() {
+        // PID reuse defence at the stop/deprovision orphan-cleanup site.
+        let stale = stale_with("wsb:x", vec![pid(10, 100)]);
+        let live = vec![pid(10, 999)];
+        assert_eq!(
+            classify_stale_daemon_cleanup(Some(&stale), "wsb:x", Some(&live)),
+            StaleDaemonCleanup::RefuseForeign { live }
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_no_stale_record_with_live_refuses_foreign() {
+        // No record at all but a live VM: definitely not ours.
+        let live = vec![pid(10, 100)];
+        assert_eq!(
+            classify_stale_daemon_cleanup(None, "wsb:x", Some(&live)),
+            StaleDaemonCleanup::RefuseForeign { live }
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn current_process_is_alive_with_matching_creation_time() {
+        let pid = std::process::id();
+        let ct = process_creation_time(pid).expect("current process should have a creation time");
+        let rec = DaemonRecord {
+            schema_version: RECORD_SCHEMA_VERSION,
+            pid,
+            pid_creation_time: ct,
+            ipc_port: 1,
+            nonce: "n".to_string(),
+            active_sandbox_id: "wsb:x".to_string(),
+            ready: true,
+            vm_processes: Vec::new(),
+        };
+        assert!(daemon_alive(&rec));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wrong_creation_time_is_not_alive() {
+        let pid = std::process::id();
+        let ct = process_creation_time(pid).unwrap();
+        let rec = DaemonRecord {
+            schema_version: RECORD_SCHEMA_VERSION,
+            pid,
+            pid_creation_time: ct ^ 0xFFFF,
+            ipc_port: 1,
+            nonce: "n".to_string(),
+            active_sandbox_id: "wsb:x".to_string(),
+            ready: true,
+            vm_processes: Vec::new(),
+        };
+        assert!(!daemon_alive(&rec));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dead_pid_has_no_creation_time() {
+        // PID 0 is never a queryable user process.
+        assert_eq!(process_creation_time(0), None);
+        assert_eq!(running_process_creation_time(0), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn running_creation_time_matches_plain_for_live_self() {
+        let pid = std::process::id();
+        assert_eq!(
+            running_process_creation_time(pid),
+            process_creation_time(pid)
+        );
+        assert!(running_process_creation_time(pid).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn running_creation_time_excludes_terminated_but_handle_retained() {
+        use std::process::{Command, Stdio};
+        // A long-lived child we control. `std::process::Child` retains the
+        // process handle until `wait()`, so after we kill it the kernel object
+        // lingers and `OpenProcess`-by-PID still resolves it — exactly the
+        // "crashed launcher whose parent kept a handle" case that wedged
+        // reclaim.
+        let mut child = Command::new("cmd")
+            .args(["/C", "ping -n 999 127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn child");
+        let pid = child.id();
+
+        // While alive both probes agree.
+        let ct = process_creation_time(pid).expect("live child has a creation time");
+        assert_eq!(running_process_creation_time(pid), Some(ct));
+
+        // Terminate but DELIBERATELY do not `wait()`: `child` keeps the handle.
+        child.kill().expect("kill child");
+        // The process handle becomes signalled shortly after termination.
+        for _ in 0..100 {
+            if running_process_creation_time(pid).is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // The lingering terminated object still resolves a creation time via the
+        // plain probe...
+        assert_eq!(
+            process_creation_time(pid),
+            Some(ct),
+            "terminated-but-handle-retained object should still resolve a creation time"
+        );
+        // ...but the liveness-aware probe correctly reports it as gone.
+        assert_eq!(
+            running_process_creation_time(pid),
+            None,
+            "a terminated process must not be reported as running"
+        );
+
+        let _ = child.wait();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn enumerate_finds_current_process_by_image_prefix() {
+        // The test runner's own image name is a stable, present process. Use a
+        // short prefix of its file stem and assert the Toolhelp32 snapshot finds
+        // our PID with a matching creation time.
+        let exe = std::env::current_exe().unwrap();
+        let stem = exe.file_stem().unwrap().to_string_lossy().into_owned();
+        let prefix: String = stem.chars().take(6).collect();
+
+        let pids = enumerate_pids_with_prefix(&prefix).unwrap();
+        assert!(
+            pids.contains(&std::process::id()),
+            "expected snapshot for prefix {prefix:?} to contain our pid {}, got {pids:?}",
+            std::process::id()
+        );
+
+        let procs = enumerate_processes_with_prefix(&prefix).unwrap();
+        let ours = procs
+            .iter()
+            .find(|p| p.pid == std::process::id())
+            .expect("our process should be enumerated with an identity");
+        assert_eq!(ours.creation_time, process_creation_time(ours.pid).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn enumerate_unmatched_prefix_is_empty() {
+        let pids = enumerate_pids_with_prefix("zzz_no_such_process_prefix_zzz").unwrap();
+        assert!(pids.is_empty(), "unexpected matches: {pids:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transition_lock_acquire_release_reacquire() {
+        use std::time::Duration;
+        {
+            let _lock = TransitionLock::acquire(Duration::from_secs(5)).unwrap();
+        }
+        // Dropped above; a second acquire must succeed promptly.
+        let _lock2 = TransitionLock::acquire(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn decide_cleanup_not_launched_is_noop() {
+        assert_eq!(
+            decide_cleanup(&VmOwnership::NotLaunched),
+            CleanupAction::Noop
+        );
+    }
+
+    #[test]
+    fn decide_cleanup_launch_in_flight_leaks() {
+        // Critical safety property: an in-flight (unproven) launch must NEVER
+        // tear anything down (a foreign VM may have won the contest).
+        assert_eq!(
+            decide_cleanup(&VmOwnership::LaunchInFlight),
+            CleanupAction::LeakUnowned
+        );
+    }
+
+    #[test]
+    fn decide_cleanup_launch_succeeded_no_proof_tears_down_by_enumeration() {
+        // launch() returned Ok -> the VM is ours; tear it down even without
+        // recorded proof, via an empty seed that teardown_owned enumerates.
+        assert_eq!(
+            decide_cleanup(&VmOwnership::LaunchSucceededNoProof),
+            CleanupAction::Teardown(Vec::new())
+        );
+    }
+
+    #[test]
+    fn decide_cleanup_owned_tears_down_recorded() {
+        let pids = vec![
+            VmProcId {
+                pid: 10,
+                creation_time: 100,
+            },
+            VmProcId {
+                pid: 20,
+                creation_time: 200,
+            },
+        ];
+        assert_eq!(
+            decide_cleanup(&VmOwnership::Owned(pids.clone())),
+            CleanupAction::Teardown(pids)
+        );
+    }
+
+    #[test]
+    fn terminate_empty_targets_kills_nothing() {
+        assert_eq!(terminate_processes(&[]), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminate_kills_recorded_process() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "pause"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let creation_time = process_creation_time(pid).expect("creation time");
+        let killed = terminate_processes(&[VmProcId { pid, creation_time }]);
+        assert_eq!(killed, 1);
+        // The child must actually be reaped.
+        let status = child.wait().unwrap();
+        assert!(!status.success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminate_skips_creation_time_mismatch() {
+        // Spawn a child, but record a deliberately-wrong creation time so the
+        // PID-reuse guard refuses to kill it.
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "pause"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let real = process_creation_time(pid).expect("creation time");
+        let wrong = real.wrapping_add(1);
+        let killed = terminate_processes(&[VmProcId {
+            pid,
+            creation_time: wrong,
+        }]);
+        assert_eq!(killed, 0, "must not kill a PID whose creation time differs");
+        // The child is still alive; clean it up directly.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Regression guard for the daemon.json temp-write nonce-disclosure fix:
+    /// `atomic_write_json` must lock the record DIRECTORY to an owner-only,
+    /// PROTECTED DACL *before* it ever writes the plaintext `<uuid>.tmp`. We
+    /// assert the post-condition that survives that ordering: the parent dir's
+    /// DACL has `SE_DACL_PROTECTED` set (inherited ACEs stripped). A freshly
+    /// `create_dir_all`'d directory inherits its parent's (non-protected) ACL,
+    /// so if the `set_owner_only_dir(parent)` call were removed this assertion
+    /// would fail.
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_protects_parent_directory() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+        use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+        use windows::Win32::Security::{
+            GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            SE_DACL_PROTECTED,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        // A nested parent that `atomic_write_json` must create + secure itself,
+        // so it cannot accidentally pass by inheriting a protected tempdir.
+        let parent = dir.path().join("nested");
+        let path = parent.join("daemon.json");
+        let rec = daemon_record_with(vec![VmProcId {
+            pid: 5,
+            creation_time: 7,
+        }]);
+        atomic_write_json(&path, &rec).unwrap();
+
+        let mut wide: Vec<u16> = parent.as_os_str().encode_wide().collect();
+        wide.push(0);
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                PCWSTR(wide.as_ptr()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                None,
+                None,
+                &mut sd,
+            )
+        };
+        assert_eq!(rc, ERROR_SUCCESS, "GetNamedSecurityInfoW failed: {rc:?}");
+
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        let got = unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) };
+        let protected = (control & SE_DACL_PROTECTED.0) != 0;
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+        got.expect("GetSecurityDescriptorControl");
+        assert!(
+            protected,
+            "record parent dir must have a PROTECTED DACL (got control bits {control:#06x})"
+        );
+    }
+}

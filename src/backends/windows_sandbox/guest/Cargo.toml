@@ -13,6 +13,10 @@ windows_sandbox_common = { workspace = true }
 tokio.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+windows.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [build-dependencies]
 mxc_build_common.workspace = true

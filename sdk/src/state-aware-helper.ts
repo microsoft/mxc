@@ -20,11 +20,13 @@ export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process'] a
 // `sandboxId` produced by that backend. Each future state-aware backend
 // declares its own `<BACKEND>_ID_PREFIX` const here.
 export const ISOLATION_SESSION_ID_PREFIX = 'iso';
+export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
 
 // Mapping from a sandboxId's leading prefix segment to the wire-format
 // backend key. Extended as more state-aware backends opt in.
 export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = {
   [ISOLATION_SESSION_ID_PREFIX]: 'isolation_session',
+  [WINDOWS_SANDBOX_ID_PREFIX]: 'windows_sandbox',
 };
 
 /**

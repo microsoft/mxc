@@ -27,4 +27,4 @@ mxc_build_common = { workspace = true }
 embed-manifest = "1.4"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
