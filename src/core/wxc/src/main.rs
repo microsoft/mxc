@@ -260,6 +260,24 @@ fn dispatch_state_aware_request(
     dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
     let backend = resolve_backend(&parsed)?;
+    // Mirror the one-shot dispatch's experimental-backend gating
+    // (review M12). The state-aware path was previously dispatching to
+    // experimental backends without checking `--experimental`, so a
+    // phase-envelope request could provision/start/exec Windows Sandbox
+    // or IsolationSession without the flag the equivalent one-shot
+    // request would have required.
+    if matches!(
+        backend,
+        wxc_common::models::ContainmentBackend::WindowsSandbox
+            | wxc_common::models::ContainmentBackend::IsolationSession
+    ) && !parsed.request.experimental_enabled
+    {
+        return Err(MxcError::backend_unavailable(format!(
+            "{:?} is an experimental backend; pass --experimental to enable state-aware \
+             dispatch against it",
+            backend
+        )));
+    }
     match backend {
         #[cfg(target_os = "windows")]
         wxc_common::models::ContainmentBackend::WindowsSandbox => {
@@ -688,6 +706,16 @@ fn main() {
                 command_override.as_deref(),
                 &mut logger,
             );
+            // Mirror what the one-shot path does at the post-dispatch stage
+            // below: copy the CLI `--experimental` flag into the parsed
+            // request so backends that gate on it (e.g. Windows Sandbox
+            // experimental features) see the same value regardless of which
+            // dispatch branch the request entered through. Without this
+            // the state-aware path silently ran without the gate (review
+            // M12) -- a phase-envelope request could provision/start/exec
+            // experimental backends with no `--experimental` on the CLI.
+            parsed.request.experimental_enabled = cli.experimental;
+            parsed.request.dry_run = cli.dry_run;
             run_state_aware_main(parsed, cli.dry_run, &mut logger)
         }
         Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {

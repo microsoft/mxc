@@ -213,14 +213,23 @@ fn cleanup_stale_daemon_orphan(sandbox_id: &str) -> Result<(), MxcError> {
 /// Parse the `wsb:<token>` form of a state-aware `sandbox_id`, returning the
 /// bare token. Surfaces format mismatches as [`MxcError::malformed_id`].
 ///
-/// The token grammar is **strict**: lowercase hex, 1-128 chars (`^[a-f0-9]{1,128}$`).
-/// This forbids `.`, `/`, `\`, NUL, and any character that could be
-/// interpreted as a path segment, closing the path-traversal surface a
-/// permissive grammar opened on `sandbox_dir(token)` /
+/// The token grammar is **strict**: exactly 8 lowercase hex chars
+/// (`^[a-f0-9]{8}$`). This forbids `.`, `/`, `\`, NUL, and any character
+/// that could be interpreted as a path segment, closing the path-traversal
+/// surface a permissive grammar opened on `sandbox_dir(token)` /
 /// `sandbox_record_path(token)` / `remove_dir_all(sandbox_dir(token))`
-/// (review finding C5). The grammar matches what `mint_random_token` and
-/// `wxc_common::id::mint_random_token` produce, plus a generous tail so a
-/// future widening (e.g. UUID v4 hex) does not break in-tree callers.
+/// (review finding C5).
+///
+/// Length is locked to exactly 8 (review M5) because that is what
+/// [`wxc_common::id::mint_random_token`] produces and what the SDK + docs
+/// promise (`wsb:<8-hex>`). The previous permissive 1-128 range accepted
+/// truncated IDs like `wsb:1` that would have fallen through to
+/// `not_provisioned` / `not_started` instead of being rejected as
+/// `malformed_id`, which obscures programmer error -- a typo like
+/// `wsb:dead` becoming "not provisioned" is much less actionable than
+/// "malformed id". If a future token format change (e.g. UUID hex) is
+/// needed, widen the constant and grow the helper's branch list rather
+/// than reverting to range-based acceptance.
 ///
 /// Defence-in-depth: callers that take the returned token straight into a
 /// `PathBuf` (everything in this module does today) can rely on the grammar
@@ -239,18 +248,23 @@ fn extract_token(sandbox_id: &str) -> Result<&str, MxcError> {
     }
     if !is_valid_sandbox_token(rest) {
         return Err(MxcError::malformed_id(format!(
-            "sandbox token must be 1-128 lowercase hex chars; got {:?}",
+            "sandbox token must be exactly {SANDBOX_TOKEN_LEN} lowercase hex chars; got {:?}",
             rest
         )));
     }
     Ok(rest)
 }
 
-/// True iff `token` is 1-128 lowercase hex chars (`^[a-f0-9]{1,128}$`).
-/// Extracted as a pure helper so the C5 grammar is unit-testable.
+/// Exact length of a valid sandbox token. See [`extract_token`] /
+/// [`is_valid_sandbox_token`] for the grammar rationale (review C5/M5);
+/// matches [`wxc_common::id::mint_random_token`].
+const SANDBOX_TOKEN_LEN: usize = 8;
+
+/// True iff `token` is exactly [`SANDBOX_TOKEN_LEN`] lowercase hex chars
+/// (`^[a-f0-9]{8}$`). Extracted as a pure helper so the C5/M5 grammar is
+/// unit-testable.
 fn is_valid_sandbox_token(token: &str) -> bool {
-    !token.is_empty()
-        && token.len() <= 128
+    token.len() == SANDBOX_TOKEN_LEN
         && token
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -342,7 +356,23 @@ fn run_exec_stream(daemon: &DaemonRecord, request: &ExecutionRequest) -> Result<
     // - TTY-stdin: shutdown the IPC writer's write half (sends EOF to
     //   the daemon, which closes guest stdin) and skip the thread; an
     //   interactive caller does not pipe data anyway, and a blocking
-    //   stdin read would never return.
+    // Stdin forwarding (review C4): we share the IPC stream with a
+    // detached writer thread that copies our stdin into FRAME_STDIN frames.
+    //
+    // Two modes:
+    // - TTY-stdin: drop with a loud stderr warning (review H6). The
+    //   state-aware exec path does not yet plumb a real interactive PTY
+    //   to the in-VM child -- to do that properly we would need to
+    //   carry a TTY bit + ConPTY console geometry through ExecStart and
+    //   then build a ConPTY pump on the guest side, both real
+    //   engineering work outside the scope of this review-fix cluster.
+    //   Until that work lands, ANY data the user types at the host
+    //   terminal is silently lost between this process and the guest;
+    //   the warning surfaces that explicitly so the SDK's
+    //   `execInSandbox` PTY users (the main case the reviewer flagged)
+    //   stop seeing typed input vanish without any signal. Reading the
+    //   TTY here is not an option -- it would block until the user
+    //   sends Ctrl-Z/Ctrl-D, which is not the exec contract.
     // - Pipe-stdin: spawn a detached thread that reads stdin to EOF and
     //   writes FRAME_STDIN frames. The thread holds its own try_clone of
     //   the IPC stream so it shares the underlying socket without
@@ -352,9 +382,22 @@ fn run_exec_stream(daemon: &DaemonRecord, request: &ExecutionRequest) -> Result<
     // after this function returns, the OS reaps the thread. For pipe
     // stdin the parent (SDK) closes its write end before reading the
     // response, so the thread exits naturally on EOF before that point.
+    //
+    // TODO(h6-pty-plumbing): widen ExecStart with `tty: bool` and
+    // `cols`/`rows`, allocate a ConPTY in the guest's `execute_script`
+    // when set, and bridge typed input from the host PTY to that
+    // ConPTY's input side. Until then, interactive `execInSandbox` use
+    // is a known limitation.
     {
         use std::io::IsTerminal;
         if std::io::stdin().is_terminal() {
+            eprintln!(
+                "[wxc-exec] WARNING: stdin is a TTY but the state-aware Windows Sandbox exec \
+                 path does not currently forward interactive PTY input to the guest. Any data \
+                 you type will be dropped; the guest child will see immediate EOF on stdin. \
+                 Pipe stdin instead (e.g. `< /dev/null` or `< file`), or use the one-shot \
+                 backend for now. (Tracked: TODO h6-pty-plumbing -- ConPTY support.)"
+            );
             // No data to forward; close the daemon's view of our stdin so
             // the guest sees EOF immediately and `read` calls don't block.
             let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -1125,28 +1168,46 @@ mod tests {
 
     #[test]
     fn extract_token_rejects_oversized_token() {
-        // Hard cap at 128 chars so a hostile caller cannot grow the token
-        // unboundedly. mint_random_token produces 8; UUID-hex would be 32.
+        // Hard cap at exactly SANDBOX_TOKEN_LEN (review M5). 129 chars is
+        // both wrong-length and would have been the old upper bound; both
+        // failure modes resolve to MalformedId.
         let too_long = "a".repeat(129);
         let err = extract_token(&format!("wsb:{too_long}")).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
 
     #[test]
-    fn extract_token_accepts_8_to_128_lowercase_hex() {
-        for n in [1usize, 8, 32, 128] {
-            let token = "0".repeat(n);
-            let s = format!("wsb:{token}");
-            assert_eq!(extract_token(&s).unwrap(), token);
+    fn extract_token_accepts_exactly_8_lowercase_hex() {
+        // Review M5: the grammar is exact-length, matching mint_random_token.
+        assert_eq!(extract_token("wsb:00000000").unwrap(), "00000000");
+        assert_eq!(extract_token("wsb:deadbeef").unwrap(), "deadbeef");
+        assert_eq!(extract_token("wsb:ffffffff").unwrap(), "ffffffff");
+    }
+
+    #[test]
+    fn extract_token_rejects_wrong_length_hex() {
+        // Review M5 regression: the previous 1-128 range accepted truncated
+        // IDs like wsb:1 and wsb:dead, obscuring programmer error.
+        for token in ["", "1", "dead", "deadbee", "deadbeefa", "deadbeefdeadbeef"] {
+            let err = extract_token(&format!("wsb:{token}")).unwrap_err();
+            assert_eq!(
+                err.code,
+                MxcErrorCode::MalformedId,
+                "expected MalformedId for token {token:?}"
+            );
         }
     }
 
     #[test]
     fn is_valid_sandbox_token_rejects_each_meta_character() {
+        // 7-char base + 1 meta char keeps the length at SANDBOX_TOKEN_LEN so
+        // the test specifically exercises the character-set rejection (not
+        // length).
         for ch in [
             '.', '/', '\\', ' ', '\0', '\n', '\r', '\t', '*', '?', ':', '"',
         ] {
-            let s = format!("dead{ch}beef");
+            let s = format!("dedbe{ch}ef");
+            assert_eq!(s.chars().count(), 8);
             assert!(
                 !is_valid_sandbox_token(&s),
                 "is_valid_sandbox_token incorrectly accepted {s:?}"
