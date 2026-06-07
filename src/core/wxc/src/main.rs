@@ -979,13 +979,38 @@ fn main() {
             // consulted here; the long-lived VM is the state-aware lifecycle's
             // concern.
             //
+            // Review H12: the one-shot dispatch silently switched from
+            // warm-reuse (the historic behaviour) to fresh-VM-per-call,
+            // which is a real performance regression for any caller that
+            // was relying on warm reuse (boot tax ~12-15s vs ~ms for the
+            // reused-VM exec). The previous G8 warning was gated on a
+            // non-default `experimental.windows_sandbox` block, so the
+            // typical caller -- who never had to set those fields to get
+            // warm reuse -- got no signal at all and saw their pipeline
+            // wall-clock balloon. Warn unconditionally now; callers who
+            // have explicitly migrated and acknowledge the model can set
+            // `WXC_WSB_ACK_ONESHOT_FRESH_VM=1` to suppress.
+            if std::env::var_os("WXC_WSB_ACK_ONESHOT_FRESH_VM").is_none() {
+                eprintln!(
+                    "[wxc-exec] WARNING: one-shot `containment: \"windows_sandbox\"` now \
+                     launches a FRESH disposable VM per call (boot ~12-15s) instead of the \
+                     legacy warm-reuse daemon. If you were relying on warm reuse for \
+                     repeated calls, switch to the state-aware lifecycle (provisionSandbox / \
+                     startSandbox / execInSandbox / stopSandbox / deprovisionSandbox) -- see \
+                     docs/windows-sandbox/windows-sandbox.md and docs/state-aware-lifecycle/. \
+                     Set WXC_WSB_ACK_ONESHOT_FRESH_VM=1 to silence this warning once you \
+                     have audited your usage."
+                );
+            }
+            //
             // Review G8: if the caller supplied a non-default
-            // `experimental.windows_sandbox` block, warn explicitly that the
-            // settings are being ignored - the previous code silently dropped
-            // them, which made a perf-regression diagnosis ("my warm reuse
-            // stopped working") much harder than it needed to be. Default
-            // values are not warned about (a request with no explicit block
-            // deserialises to the same default, so warning would be noise).
+            // `experimental.windows_sandbox` block, warn separately and more
+            // specifically that those settings are being ignored - the
+            // previous code silently dropped them, which made a
+            // perf-regression diagnosis ("my warm reuse stopped working")
+            // much harder than it needed to be. Default values are not
+            // warned about (a request with no explicit block deserialises
+            // to the same default, so warning would be noise).
             if let Some(ref ws) = request.experimental.windows_sandbox {
                 let default = wxc_common::models::WindowsSandboxConfig::default();
                 if ws.idle_timeout_ms != default.idle_timeout_ms
