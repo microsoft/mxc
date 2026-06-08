@@ -38,7 +38,7 @@ jobs:
         # Use the Microsoft-hosted 'Azure Pipelines' pool instead which
         # uses 'vmImage' (not 'image') per ADO hosted-pool schema.
         name: Azure Pipelines
-        vmImage: macOS-14-arm64
+        vmImage: macOS-latest-internal
         os: macOS
 
     variables:
