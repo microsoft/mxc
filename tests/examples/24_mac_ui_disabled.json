@@ -12,9 +12,7 @@
     "ui": {
         "disable": true
     },
-    "experimental": {
-        "seatbelt": {
-            "mode": "exec"
-        }
+    "seatbelt": {
+        "mode": "exec"
     }
 }

@@ -8,11 +8,11 @@
     },
     "network": {
         "defaultPolicy": "allow",
-        "blockedHosts": ["evil.example.com"]
+        "blockedHosts": [
+            "evil.example.com"
+        ]
     },
-    "experimental": {
-        "seatbelt": {
-            "mode": "exec"
-        }
+    "seatbelt": {
+        "mode": "exec"
     }
 }

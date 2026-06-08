@@ -33,7 +33,7 @@ pub enum ContainmentBackend {
     /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
     #[serde(rename = "isolation_session")]
     IsolationSession,
-    /// macOS Seatbelt — experimental sandbox backend (requires --experimental).
+    /// macOS Seatbelt sandbox backend.
     /// Implemented on top of the OS-bundled sandbox facility (Apple's
     /// internal codename for the App Sandbox / `sandbox-exec` machinery
     /// is "Seatbelt"); selected on the wire as `"seatbelt"`.
@@ -82,8 +82,7 @@ impl ContainmentBackend {
 }
 
 /// Configuration specific to the Seatbelt backend.
-/// Used under `seatbelt` (preferred) or `experimental.seatbelt` (deprecated)
-/// when `containment == Seatbelt`.
+/// Used under the top-level `seatbelt` key when `containment == Seatbelt`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SeatbeltConfig {
@@ -549,8 +548,6 @@ pub struct ExperimentalConfig {
     /// Isolation Session backend (experimental).
     #[serde(rename = "isolation_session")]
     pub isolation_session: Option<IsolationSessionConfig>,
-    /// Seatbelt (macOS) backend. Deprecated location — prefer top-level `seatbelt`.
-    pub seatbelt: Option<SeatbeltConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -575,6 +572,8 @@ pub struct ExecutionRequest {
     pub policy: ContainerPolicy,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
+    /// Seatbelt (macOS) backend configuration (used when containment == Seatbelt).
+    pub seatbelt: Option<SeatbeltConfig>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
     /// Experimental feature configs (only applied when experimental_enabled is true).
@@ -598,6 +597,7 @@ impl Default for ExecutionRequest {
             lifecycle: LifecycleConfig::default(),
             policy: ContainerPolicy::default(),
             lxc_config: LxcConfig::default(),
+            seatbelt: None,
             experimental_enabled: false,
             experimental: ExperimentalConfig::default(),
             dry_run: false,

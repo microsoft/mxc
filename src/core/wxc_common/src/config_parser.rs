@@ -228,7 +228,7 @@ struct RawConfig {
     network: Option<RawNetwork>,
     ui: Option<RawUi>,
     experimental: Option<RawExperimental>,
-    /// Top-level seatbelt config (preferred over experimental.seatbelt).
+    /// Top-level seatbelt config.
     #[serde(alias = "macos_sandbox")]
     seatbelt: Option<RawSeatbelt>,
 }
@@ -614,6 +614,9 @@ fn present_backend_sections(raw: &RawConfig) -> Vec<&'static str> {
     if raw.lxc.is_some() {
         push(ContainmentBackend::Lxc);
     }
+    if raw.seatbelt.is_some() {
+        push(ContainmentBackend::Seatbelt);
+    }
     if let Some(experimental) = raw.experimental.as_ref() {
         if experimental.windows_sandbox.is_some() {
             push(ContainmentBackend::WindowsSandbox);
@@ -621,15 +624,9 @@ fn present_backend_sections(raw: &RawConfig) -> Vec<&'static str> {
         if experimental.wslc.is_some() {
             push(ContainmentBackend::Wslc);
         }
-        if experimental.seatbelt.is_some() && raw.seatbelt.is_none() {
-            push(ContainmentBackend::Seatbelt);
-        }
         if experimental.isolation_session.is_some() {
             push(ContainmentBackend::IsolationSession);
         }
-    }
-    if raw.seatbelt.is_some() {
-        push(ContainmentBackend::Seatbelt);
     }
     sections
 }
@@ -721,6 +718,18 @@ fn validate_experimental_backend_keys(
 // `process` block entirely; those phases leave `script_code` / `working_directory`
 // / `script_timeout` / `env` at their defaults and never read them.
 //
+/// Convert a raw seatbelt JSON block into the validated domain struct.
+fn make_seatbelt_config(raw_sb: RawSeatbelt) -> SeatbeltConfig {
+    SeatbeltConfig {
+        profile_override: raw_sb.profile_override,
+        gui_access: raw_sb.gui_access.unwrap_or(false),
+        launch_method: raw_sb.launch_method.unwrap_or_default(),
+        nested_pty: raw_sb.nested_pty.unwrap_or(true),
+        keychain_access: raw_sb.keychain_access.unwrap_or(false),
+        extra_mach_lookups: raw_sb.extra_mach_lookups.unwrap_or_default(),
+    }
+}
+
 // `allow_missing_command` further relaxes the `require_process == true` arms
 // so that a CLI command-line override (provided by the driver after parsing)
 // can stand in for `process.commandLine`. When set, a missing or empty
@@ -1198,44 +1207,27 @@ fn convert_raw_config_inner(
             config.user = as_cfg.user;
             config
         });
-        let seatbelt = raw_exp.seatbelt.map(|raw_sb| SeatbeltConfig {
-            profile_override: raw_sb.profile_override,
-            gui_access: raw_sb.gui_access.unwrap_or(false),
-            launch_method: raw_sb.launch_method.unwrap_or_default(),
-            nested_pty: raw_sb.nested_pty.unwrap_or(true),
-            keychain_access: raw_sb.keychain_access.unwrap_or(false),
-            extra_mach_lookups: raw_sb.extra_mach_lookups.unwrap_or_default(),
-        });
+        let seatbelt = raw_exp.seatbelt;
+        if seatbelt.is_some() {
+            let msg = "'experimental.seatbelt' has moved to the stable section; \
+                       use top-level 'seatbelt' instead."
+                .to_string();
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
             isolation_session,
-            seatbelt,
         }
     } else {
         ExperimentalConfig::default()
     };
 
-    // Top-level `seatbelt` takes precedence over `experimental.seatbelt`.
-    // This supports the two-phase migration: new configs use the top-level key,
-    // old configs still work via the experimental path.
-    let experimental = if let Some(raw_sb) = raw.seatbelt {
-        let sb = SeatbeltConfig {
-            profile_override: raw_sb.profile_override,
-            gui_access: raw_sb.gui_access.unwrap_or(false),
-            launch_method: raw_sb.launch_method.unwrap_or_default(),
-            nested_pty: raw_sb.nested_pty.unwrap_or(true),
-            keychain_access: raw_sb.keychain_access.unwrap_or(false),
-            extra_mach_lookups: raw_sb.extra_mach_lookups.unwrap_or_default(),
-        };
-        ExperimentalConfig {
-            seatbelt: Some(sb),
-            ..experimental
-        }
-    } else {
-        experimental
-    };
+    // Top-level `seatbelt` config. Configs using `experimental.seatbelt` are
+    // rejected above.
+    let seatbelt = raw.seatbelt.map(make_seatbelt_config);
 
     // UI section
     if let Some(raw_ui) = raw.ui {
@@ -1264,6 +1256,7 @@ fn convert_raw_config_inner(
         lifecycle,
         policy,
         lxc_config,
+        seatbelt,
         experimental_enabled: false,
         experimental,
         dry_run: false,
@@ -3280,27 +3273,23 @@ mod tests {
 
     #[test]
     fn seatbelt_config_defaults() {
-        // When no experimental.seatbelt block is provided the parser
-        // leaves it unset (None) — runners should fall back to defaults.
+        // When no seatbelt block is provided the parser leaves it unset.
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.experimental.seatbelt.is_none());
+        assert!(req.seatbelt.is_none());
     }
 
     #[test]
     fn seatbelt_profile_override_passed_through() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"profileOverride": "(version 1)(deny default)"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"profileOverride": "(version 1)(deny default)"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("experimental.seatbelt should be populated");
+        let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert_eq!(
             cfg.profile_override.as_deref(),
             Some("(version 1)(deny default)")
@@ -3309,32 +3298,27 @@ mod tests {
 
     #[test]
     fn seatbelt_nested_pty_defaults_to_true_when_block_present_but_field_absent() {
-        // experimental.seatbelt is present but nestedPty is not specified;
+        // seatbelt block is present but nestedPty is not specified;
         // the parser should fill in true to match the schema default.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {}}}"#;
+        let json =
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("experimental.seatbelt should be populated");
+        let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert!(cfg.nested_pty);
         assert!(!cfg.keychain_access);
     }
 
     #[test]
     fn seatbelt_nested_pty_and_keychain_access_pass_through() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"nestedPty": false, "keychainAccess": true}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("experimental.seatbelt should be populated");
+        let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert!(!cfg.nested_pty);
         assert!(cfg.keychain_access);
     }
@@ -3346,27 +3330,25 @@ mod tests {
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("top-level seatbelt should populate experimental.seatbelt internally");
+        let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert!(!cfg.nested_pty);
         assert!(cfg.keychain_access);
     }
 
     #[test]
-    fn top_level_seatbelt_takes_precedence_over_experimental() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false}, "experimental": {"seatbelt": {"nestedPty": true}}}"#;
+    fn experimental_seatbelt_errors_with_migration_message() {
+        // After promotion, configs using experimental.seatbelt must error.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"nestedPty": true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("seatbelt config should be set");
-        // Top-level wins over experimental.seatbelt
-        assert!(!cfg.nested_pty);
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("has moved to the stable section"),
+            "expected migration error, got: {}",
+            msg
+        );
     }
 
     // Legacy wire-name aliases. The parser accepts the pre-0.6 wire vocabulary
@@ -3418,9 +3400,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_experimental_macos_sandbox_subblock_alias_accepted() {
-        // `experimental.macos_sandbox` is the pre-rename key; serde's alias
-        // routes it to the same `seatbelt` parsing path.
+    fn legacy_experimental_macos_sandbox_subblock_alias_rejected() {
+        // `experimental.macos_sandbox` is the pre-rename key; after promotion
+        // it should be rejected with a migration error.
         let json = r#"{
             "process": {"commandLine": "echo hi"},
             "containment": "macos_sandbox",
@@ -3429,14 +3411,12 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("experimental.seatbelt should be populated (via macos_sandbox alias)");
-        assert_eq!(
-            cfg.profile_override.as_deref(),
-            Some("(version 1)(allow default)")
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("has moved to the stable section"),
+            "expected migration error, got: {}",
+            msg
         );
     }
 
@@ -3504,9 +3484,10 @@ mod tests {
     // check as top-level blocks.
     #[test]
     fn experimental_backend_section_for_other_containment_rejected() {
+        // seatbelt is now top-level, so use it to test cross-backend rejection
         assert_multi_backend_rejected(
             "processcontainer",
-            r#""experimental": {"seatbelt": {"guiAccess": true}}"#,
+            r#""seatbelt": {"guiAccess": true}"#,
             "seatbelt",
         );
     }
@@ -3601,7 +3582,7 @@ mod tests {
         let json = r#"{
             "process": {"commandLine": "echo hi"},
             "containment": "process",
-            "experimental": {"seatbelt": {}}
+            "seatbelt": {}
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();

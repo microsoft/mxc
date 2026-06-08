@@ -109,14 +109,12 @@ impl ScriptRunner for SeatbeltScriptRunner {
 
         // Determine launch method from seatbelt config.
         let launch_method = request
-            .experimental
             .seatbelt
             .as_ref()
             .map(|s| s.launch_method.clone())
             .unwrap_or_default();
 
         let gui_access = request
-            .experimental
             .seatbelt
             .as_ref()
             .map(|s| s.gui_access)
@@ -522,7 +520,7 @@ mod tests {
     fn base_request() -> ExecutionRequest {
         let mut request = ExecutionRequest::default();
         request.experimental_enabled = true;
-        request.experimental.seatbelt = Some(SeatbeltConfig::default());
+        request.seatbelt = Some(SeatbeltConfig::default());
         request
     }
 

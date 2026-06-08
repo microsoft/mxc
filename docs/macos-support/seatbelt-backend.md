@@ -132,9 +132,7 @@ You should see sandbox profile generation output followed by
 
 The macOS sandbox backend uses the same JSON configuration schema as the
 other backends, with `containment` set to `"seatbelt"`. Backend-specific
-settings live under a top-level `seatbelt` key (preferred) or under
-`experimental.seatbelt` (deprecated, still accepted for backward
-compatibility):
+settings live under a top-level `seatbelt` key:
 
 ```json
 {

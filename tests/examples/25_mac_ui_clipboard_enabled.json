@@ -13,9 +13,7 @@
         "disable": false,
         "clipboard": "all"
     },
-    "experimental": {
-        "seatbelt": {
-            "mode": "exec"
-        }
+    "seatbelt": {
+        "mode": "exec"
     }
 }
