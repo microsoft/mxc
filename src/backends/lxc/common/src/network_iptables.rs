@@ -81,16 +81,33 @@ impl NetworkIptablesManager {
         self.veth_interface = Some(iface.to_string());
     }
 
-    /// Resolve a hostname to IP addresses.
+    /// Resolve a hostname to IPv4 addresses.
+    ///
+    /// IPv6 records (AAAA from DNS, or IPv6 literals like `"::1"` /
+    /// IPv4-mapped IPv6 like `"::ffff:127.0.0.1"`) are silently dropped
+    /// because `apply_firewall_rules` only invokes `iptables` (the IPv4
+    /// tool), which rejects IPv6 destinations. Full dual-stack support
+    /// via parallel `ip6tables` rules would require a separate change.
+    /// A host that resolves only to AAAA records will return an empty
+    /// vec, meaning no allow/deny rule is emitted and the host is
+    /// effectively unreachable from the sandbox under firewall mode.
     fn resolve_host(host: &str) -> Vec<String> {
         // Try as IP address first
-        if host.parse::<std::net::IpAddr>().is_ok() {
-            return vec![host.to_string()];
+        if let Ok(addr) = host.parse::<std::net::IpAddr>() {
+            return if addr.is_ipv4() {
+                vec![host.to_string()]
+            } else {
+                Vec::new()
+            };
         }
 
         // Try DNS resolution
         match format!("{}:0", host).to_socket_addrs() {
-            Ok(addrs) => addrs.map(|a| a.ip().to_string()).collect(),
+            Ok(addrs) => addrs
+                .map(|a| a.ip())
+                .filter(|ip| ip.is_ipv4())
+                .map(|ip| ip.to_string())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -307,5 +324,38 @@ mod tests {
     fn resolve_ip_address() {
         let ips = NetworkIptablesManager::resolve_host("127.0.0.1");
         assert_eq!(ips, vec!["127.0.0.1"]);
+    }
+
+    #[test]
+    fn resolve_host_drops_ipv6_literal() {
+        // IPv6 literals must be silently dropped — `iptables` (v4) would
+        // reject them and fail the whole `apply_firewall_rules` call.
+        let ips = NetworkIptablesManager::resolve_host("::1");
+        assert!(
+            ips.is_empty(),
+            "expected empty vec for IPv6 literal, got {:?}",
+            ips
+        );
+    }
+
+    #[test]
+    fn resolve_host_drops_ipv4_mapped_ipv6_literal() {
+        // `::ffff:127.0.0.1` parses as `IpAddr::V6` and is the v6
+        // wire-format encoding of an v4 address — `iptables` would
+        // still reject it as a v6 destination, so we drop it.
+        let ips = NetworkIptablesManager::resolve_host("::ffff:127.0.0.1");
+        assert!(
+            ips.is_empty(),
+            "expected empty vec for v4-mapped-v6 literal, got {:?}",
+            ips
+        );
+    }
+
+    #[test]
+    fn resolve_host_keeps_ipv4_literal_unchanged() {
+        // Round-trip: v4 literals must pass through verbatim — the
+        // IPv4-only filter must not regress the happy path.
+        let ips = NetworkIptablesManager::resolve_host("10.0.0.1");
+        assert_eq!(ips, vec!["10.0.0.1"]);
     }
 }

@@ -114,6 +114,12 @@ network namespace and applies iptables rules via `NetworkIptablesManager`
 (the same approach used by the LXC backend). **Requires root** for
 iptables.
 
+> **IPv4 only.** Host names are resolved to IPv4 addresses only; AAAA
+> records and IPv6 literals are silently dropped because `iptables` (the
+> IPv4 tool) cannot accept IPv6 destinations. A host with only AAAA
+> records is effectively unreachable under firewall mode. For dual-stack
+> hosts, use proxy mode (below) instead.
+
 ```json
 {
   "network": {
