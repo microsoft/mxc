@@ -24,7 +24,7 @@ jobs:
     # macOS-14-arm64 (and later) images are Apple Silicon (arm64). macOS-latest
     # currently still points to an x86_64 image, which cannot execute the
     # cross-compiled aarch64 test binaries.
-    vmImage: macOS-14-arm64
+    vmImage: macOS-15-arm64
     os: macOS
 
   variables:
