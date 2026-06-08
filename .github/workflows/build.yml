@@ -9,6 +9,35 @@ on:
 
 jobs:
 
+  # Validate versioning contracts: the product version (Cargo == npm) is in
+  # sync; the schema-version constants are in sync across the Rust parser, SDK,
+  # and schema filenames; and the example/test config corpus validates against
+  # the dev JSON schema.
+  versioning-checks:
+    name: Versioning Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check product version sync (Cargo == npm)
+        run: node scripts/check-version-sync.js
+
+      - name: Install tooling deps
+        working-directory: scripts/versioning
+        run: npm ci
+
+      - name: Check schema version sync
+        run: node scripts/versioning/check-schema-versions.js
+
+      - name: Validate config corpus against dev schema
+        run: node scripts/versioning/validate-configs.js
+
+
   # Check formatting and linting for the Rust code
   wxc-exec-lint:
     name: WXC Exec Lint
