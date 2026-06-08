@@ -29,5 +29,7 @@ if [ ! -f "$LXC_EXEC" ]; then
 fi
 
 echo "Running LXC env+cwd test..."
+# Pre-set MXC_TEST_FOO so the in-container assertion also proves caller-wins-over-host.
+export MXC_TEST_FOO="HOST_LEAK_SHOULD_NOT_APPEAR"
 "$LXC_EXEC" "$REPO_DIR/tests/configs/lxc_env_cwd_test.json"
 echo "LXC env+cwd test complete."

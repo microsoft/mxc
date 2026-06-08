@@ -80,22 +80,25 @@ pub fn resolve_default_lxcpath() -> String {
 /// `windows-latest` would otherwise flag it as dead code.
 #[cfg(any(target_os = "linux", test))]
 fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
-    // Loose upper bound: 1 --clear-env + env.len() set-vars + up to 7 fixed
-    // elements in the cwd branch. Realloc-avoidance hint only.
+    // Loose upper bound; realloc-avoidance hint only.
     let mut args: Vec<String> = Vec::with_capacity(env.len() + 8);
 
-    // Replace-on-non-empty-env: when at least one well-formed entry survives
-    // the malformed-skip, emit --clear-env so lxc-exec's caller env doesn't
-    // leak into the sandbox. All-malformed and empty env both preserve
-    // keep-env semantics — see `attach_run` doc for the full contract.
-    let set_vars: Vec<String> = env
-        .iter()
-        .filter(|kv| kv.contains('='))
-        .map(|kv| format!("--set-var={}", kv))
-        .collect();
-    if !set_vars.is_empty() {
+    // Replace semantics: any non-empty env opts the caller into a clean
+    // slate, even if every entry is malformed. Matches Seatbelt exactly
+    // and is the posture lxc-attach(1) recommends for sandbox callers.
+    // See `attach_run` doc for the full contract.
+    if !env.is_empty() {
         args.push("--clear-env".to_string());
-        args.extend(set_vars);
+        for kv in env {
+            // Well-formed = "KEY=VAL" with a non-empty KEY. `"=foo"` and
+            // `"BADENTRY"` are both silently skipped; embedded `=` in
+            // VAL is fine because split_once stops at the first one.
+            if let Some((key, _)) = kv.split_once('=') {
+                if !key.is_empty() {
+                    args.push(format!("--set-var={}", kv));
+                }
+            }
+        }
     }
 
     args.push("--".to_string());
@@ -277,17 +280,18 @@ impl LxcContainer {
     ///
     /// `env` is honored by translating each `KEY=VAL` entry into a
     /// repeated `--set-var=KEY=VAL` argument to `lxc-attach`. Entries
-    /// without `=` are silently skipped (matches the permissive
-    /// `split_once('=')` semantics Seatbelt and WSLC apply).
+    /// that are malformed — no `=` (e.g. `"BADENTRY"`) or an empty key
+    /// (e.g. `"=foo"`) — are silently skipped.
     ///
-    /// When `env` is non-empty, `--clear-env` is also passed so
-    /// `lxc-exec`'s own caller environment does **not** leak into the
-    /// sandbox — this is the replace-on-non-empty-env contract Seatbelt
-    /// and WSLC apply, and the posture `lxc-attach(1)` itself recommends
-    /// for sandbox-spawn callers. `lxc-attach` still injects a small
-    /// baseline (`container`, `HOME`, `TERM`, default `PATH`, `USER`) and
-    /// applies the container's `lxc.environment` config; those layers sit
-    /// below the user vars and are outside this function's control.
+    /// When `env` is non-empty, `--clear-env` is also passed (regardless
+    /// of how many entries survive validation) so `lxc-exec`'s own caller
+    /// environment does **not** leak into the sandbox. This matches
+    /// Seatbelt's `env_clear()`-on-non-empty contract and is the posture
+    /// `lxc-attach(1)` recommends for sandbox-spawn callers. `lxc-attach`
+    /// still injects a small baseline (`container`, `HOME`, `TERM`,
+    /// default `PATH`, `USER`) and applies the container's
+    /// `lxc.environment` config; those layers sit below the user vars
+    /// and are outside this function's control.
     ///
     /// When `env` is empty, the legacy keep-env behavior is preserved so
     /// existing call sites without explicit env are undisturbed.
@@ -610,9 +614,33 @@ mod tests {
 
     #[test]
     fn build_attach_args_env_entries_without_equals_are_skipped() {
-        // Matches Seatbelt/WSLC semantics (split_once('=') drops malformed
-        // entries) so a bad entry can't break the whole attach call.
+        // Malformed entry can't poison the whole attach call.
         let env = vec!["BADENTRY".to_string(), "OK=val".to_string()];
+        let args = build_attach_args(&env, "", "cmd");
+        assert_eq!(
+            args,
+            vec![
+                "--clear-env",
+                "--set-var=OK=val",
+                "--",
+                "/bin/sh",
+                "-c",
+                "cmd",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_attach_args_empty_key_entries_are_skipped() {
+        // `"=foo"` and `"="` both have an empty key — `--set-var==foo`
+        // would either be rejected by lxc-attach or create a phantom
+        // unnamed var. Drop them the same way we drop entries without `=`.
+        let env = vec![
+            "=foo".to_string(),
+            "=".to_string(),
+            "=val=more".to_string(),
+            "OK=val".to_string(),
+        ];
         let args = build_attach_args(&env, "", "cmd");
         assert_eq!(
             args,
@@ -719,20 +747,37 @@ mod tests {
     }
 
     #[test]
-    fn build_attach_args_omits_clear_env_when_env_is_only_malformed() {
-        // Edge case: caller passed env but every entry was malformed
-        // (no `=`). After the permissive skip there are no user vars to
-        // apply, so `--clear-env` would strip the inherited env without
-        // replacing it with anything — exactly the surprise we want to
-        // avoid. Treat all-malformed as "no env supplied" and preserve
-        // the keep-env shape.
-        let env = vec!["BADENTRY".to_string(), "ALSO_BAD".to_string()];
+    fn build_attach_args_clears_env_even_when_all_entries_malformed() {
+        // Caller opted into env control by populating the field. Even if
+        // every entry is malformed, `--clear-env` must still fire so the
+        // host env doesn't leak in through a back door. lxc-attach's own
+        // baseline (HOME, PATH, USER, ...) keeps the child runnable.
+        let env = vec!["BADENTRY".to_string(), "=alsobad".to_string()];
         let args = build_attach_args(&env, "", "cmd");
+        assert_eq!(args, vec!["--clear-env", "--", "/bin/sh", "-c", "cmd"]);
+    }
+
+    #[test]
+    fn build_attach_args_caller_env_replaces_host_env() {
+        // Documents the host-vs-caller collision contract: when both the
+        // host and the caller set the same KEY, the caller's value wins
+        // because `--clear-env` lands BEFORE the `--set-var` entries, so
+        // lxc-attach wipes the inherited slot and then re-sets it from
+        // the caller's value. The integration test in
+        // `tests/scripts/run_lxc_env_cwd_test.sh` exports a host-side
+        // `MXC_TEST_FOO=HOST_LEAK_SHOULD_NOT_APPEAR` and asserts the
+        // child sees the config's `MXC_TEST_FOO=bar baz`.
+        let env = vec!["MXC_TEST_FOO=bar baz".to_string()];
+        let args = build_attach_args(&env, "", "cmd");
+        let clear_idx = args.iter().position(|a| a == "--clear-env").unwrap();
+        let set_idx = args
+            .iter()
+            .position(|a| a == "--set-var=MXC_TEST_FOO=bar baz")
+            .unwrap();
         assert!(
-            !args.iter().any(|a| a == "--clear-env"),
-            "--clear-env must not appear when no entry survives the malformed-skip, got {:?}",
+            clear_idx < set_idx,
+            "--clear-env must precede --set-var so caller value wins, got {:?}",
             args
         );
-        assert_eq!(args, vec!["--", "/bin/sh", "-c", "cmd"]);
     }
 }

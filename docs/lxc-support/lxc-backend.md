@@ -78,6 +78,21 @@ The `distribution` and `release` fields control which LXC template is used to cr
 | `debian` | `bookworm`, `trixie` | Stable, well-tested |
 | `fedora` | `39`, `40` | Modern packages |
 
+### Process Environment and Working Directory
+
+The `process.cwd` and `process.env` fields from the standard schema are honored inside the container:
+
+| Field | LXC Implementation | Notes |
+|-------|-------------------|-------|
+| `process.cwd` | `cd -- "$1" && exec /bin/sh -c "$2"` wrapper prelude, with the cwd passed as a positional argument | Empty string preserves the container default cwd. A nonexistent or non-permitted path surfaces as a generic non-zero exit (typically `1`, from `cd`'s own status); callers needing strong cwd validation should pre-check the path. The positional-arg trick means cwd values with spaces, quotes, `$vars`, or backticks pass through verbatim with no shell escaping. |
+| `process.env` | Each `KEY=VAL` entry becomes a repeated `--set-var=KEY=VAL` flag to `lxc-attach` | Malformed entries — those without `=` (e.g. `"BADENTRY"`) or with an empty key (e.g. `"=foo"`) — are silently skipped. Embedded `=` in the value (e.g. `"X=a=b=c"`) is preserved. |
+
+**Replace semantics.** When `process.env` is non-empty, `lxc-exec` also passes `--clear-env` to `lxc-attach` so the host environment does **not** leak into the sandbox, regardless of how many entries survive the malformed-skip. This matches the Seatbelt backend's `env_clear()`-on-non-empty contract and is the posture `lxc-attach(1)` recommends for sandbox-spawn callers. If a variable is set in both the host and `process.env`, the `process.env` value wins.
+
+When `process.env` is empty (or absent), the legacy keep-env behavior is preserved and the host environment is inherited.
+
+**Residual baseline.** Even with `--clear-env`, `lxc-attach` injects a small baseline (`container`, `HOME`, `TERM`, a default `PATH`, `USER`) and applies any `lxc.environment` entries from the container config. These layers sit below the user vars from `process.env`.
+
 ## Filesystem Policy
 
 Filesystem policies are enforced via bind mounts in the container configuration:
