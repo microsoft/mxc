@@ -1,0 +1,66 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Official-build Rust toolchain + build/test. Uses the internal
+# Mxc-Azure-Feed (requires System.AccessToken) and the 1ES.Build.Rust.Run
+# virtual task, which emits the SBOM into RustBuildEvidence_<triplet>_release.
+# Use Rust.Build.Steps.Unofficial.yml for fork/PR builds.
+
+parameters:
+- name: targetTriple
+  type: string
+- name: workingDirectory
+  type: string
+- name: cargoFeatures
+  type: string
+  default: ''
+- name: cargoPackages
+  type: string
+  default: ''
+- name: enableTest
+  type: string
+  default: 'true'
+- name: rustVersion
+  type: string
+  default: 'ms-prod-1.93'
+
+steps:
+  # Append pipeline-specific Cargo settings (centralized registry) to the
+  # workspace config so crates are pulled from the Azure Artifacts feed
+  # (supply-chain security).
+  - pwsh: |
+      Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
+    displayName: Setup Cargo Config (Mxc-Azure-Feed)
+
+  - task: RustInstaller@1
+    displayName: Install Rust toolchain (Mxc-Azure-Feed)
+    inputs:
+      toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+      rustVersion: ${{ parameters.rustVersion }}
+      additionalTargets: ${{ parameters.targetTriple }}
+      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/Cargo/index/
+
+  - task: CargoAuthenticate@0
+    displayName: Cargo Authenticate
+    inputs:
+      configFile: '$(Build.SourcesDirectory)/.cargo/config.toml'
+
+  - task: 1ES.Build.Rust.Run@1
+    displayName: Build + Test (1ES)
+    inputs:
+      command: build
+      profile: release
+      target: ${{ parameters.targetTriple }}
+      enableTest: ${{ parameters.enableTest }}
+      testCondition: ${{ parameters.enableTest }}
+      publishTestResults: false
+      enableClippy: false
+      enableCodeStyleCheck: false
+      checkAllCodeStyle: false
+      useNextest: false
+      testAllTargets: false
+      buildAllTargets: false
+      allFeatures: false
+      activatedFeatures: ${{ parameters.cargoFeatures }}
+      packages: ${{ parameters.cargoPackages }}
+      workingDirectory: ${{ parameters.workingDirectory }}
