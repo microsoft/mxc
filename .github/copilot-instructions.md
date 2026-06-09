@@ -130,10 +130,11 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 
 ### Schema system
 
-- **Stable schemas**: `schemas/stable/mxc-config.schema.0.4.0-alpha.json` and `schemas/stable/mxc-config.schema.0.5.0-alpha.json` — immutable after release
-- **Dev schema**: `schemas/dev/mxc-config.schema.0.7.0-dev.json`
-- Current schema version: `0.5.0-alpha`
-- Config files can reference schemas via `"$schema"` for editor validation
+- **Stable schemas**: `schemas/stable/mxc-config.schema.0.4.0-alpha.json`, `0.5.0-alpha.json`, and `0.6.0-alpha.json` — immutable after release (plus a `0.5.0-alpha-strict` view)
+- **Dev schema**: `schemas/dev/mxc-config.schema.0.7.0-dev.json` (configs targeting it declare `version: 0.7.0-alpha`)
+- **Canonical schema-version source**: `schemas/schema-version.json` — the single source of truth for the schema-version constants (min/maxSupported/state-aware/stable/dev). `scripts/versioning/check-schema-versions.js` enforces that the Rust parser, SDK, and schema filenames all agree with it; do not hand-edit a schema-version constant without updating the canonical file.
+- Current schema version: `0.7.0-alpha` (latest stable: `0.6.0-alpha`)
+- Config files can reference schemas via `"$schema"` for editor validation. `scripts/versioning/validate-configs.js` validates the `tests/examples` + `tests/configs` corpus against the dev schema in CI.
 
 ### Key documentation (`docs/`)
 
@@ -231,7 +232,7 @@ When changing behavior covered by existing documentation, update the relevant do
 
 ### Policy versioning
 
-The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.4.0-alpha` minimum, `0.6.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. See `docs/versioning.md` for the full design.
+The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.4.0-alpha` minimum, `0.7.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. These bounds are mirrored from the canonical `schemas/schema-version.json` and enforced by `scripts/versioning/check-schema-versions.js`. See `docs/versioning.md` for the full design.
 
 ## Creating Issues
 

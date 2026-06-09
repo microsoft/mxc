@@ -497,7 +497,7 @@
   "allOf": [
     {
       "$comment": "Enforce single backend section: each per-backend section requires the matching `containment` value (concrete backend or matching abstract intent). Requiring `containment` to be present when a backend section is provided also rules out the ambiguous case where two backend sections appear with no `containment` set.",
-      "if": { "required": ["processContainer"] },
+      "if": { "required": ["processContainer"], "not": { "required": ["phase"] } },
       "then": {
         "required": ["containment"],
         "properties": { "containment": { "enum": ["processcontainer", "process"] } }
@@ -505,14 +505,14 @@
     },
     {
       "$comment": "`appContainer` is the deprecated alias for `processContainer`; same containment values are valid.",
-      "if": { "required": ["appContainer"] },
+      "if": { "required": ["appContainer"], "not": { "required": ["phase"] } },
       "then": {
         "required": ["containment"],
         "properties": { "containment": { "enum": ["processcontainer", "process"] } }
       }
     },
     {
-      "if": { "required": ["lxc"] },
+      "if": { "required": ["lxc"], "not": { "required": ["phase"] } },
       "then": {
         "required": ["containment"],
         "properties": { "containment": { "enum": ["lxc"] } }
@@ -521,6 +521,7 @@
     {
       "if": {
         "required": ["experimental"],
+        "not": { "required": ["phase"] },
         "properties": { "experimental": { "required": ["windows_sandbox"] } }
       },
       "then": {
@@ -531,6 +532,7 @@
     {
       "if": {
         "required": ["experimental"],
+        "not": { "required": ["phase"] },
         "properties": { "experimental": { "required": ["wslc"] } }
       },
       "then": {
@@ -541,6 +543,7 @@
     {
       "if": {
         "required": ["experimental"],
+        "not": { "required": ["phase"] },
         "properties": { "experimental": { "required": ["seatbelt"] } }
       },
       "then": {
@@ -551,6 +554,7 @@
     {
       "if": {
         "required": ["experimental"],
+        "not": { "required": ["phase"] },
         "properties": { "experimental": { "required": ["isolation_session"] } }
       },
       "then": {

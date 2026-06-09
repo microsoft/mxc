@@ -214,8 +214,12 @@ impl LxcScriptRunner {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
         let _ = writeln!(logger, "Executing script inside container...");
-        let result =
-            container.attach_run(&request.script_code, &request.working_directory, timeout);
+        let result = container.attach_run(
+            &request.script_code,
+            &request.working_directory,
+            &request.env,
+            timeout,
+        );
 
         let response = match result {
             Ok((exit_code, stdout, stderr)) => ScriptResponse {

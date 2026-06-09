@@ -1,0 +1,9 @@
+{
+  "$comment": "Canonical source of truth for MXC CONFIG SCHEMA versions. Separate from the PRODUCT version (src/Cargo.toml [workspace.package] and sdk/package.json), which tracks the binaries/npm package and is checked independently by check-version-sync.js. Fields: min = lowest schema version the parser/SDK accept; maxSupported = highest version they accept (the in-development 0.7 line; equals Rust CURRENT_SCHEMA_VERSION, the SUPPORTED_VERSION upper bound, and the SDK SUPPORTED_VERSION) \u2014 note this is NOT a released stable schema, it is the dev line; stableLatest = highest released immutable stable schema file; stateAware = schema version state-aware lifecycle requests use; devSchemaFile = filename suffix of the in-progress dev schema. Every matching constant in the Rust parser, the SDK, and the schema filenames must agree with these values; check-schema-versions.js enforces it in CI. When you bump a schema version, change it HERE and run `node scripts/versioning/check-schema-versions.js` to find every place that must follow.",
+  "min": "0.4.0-alpha",
+  "maxSupported": "0.7.0-alpha",
+  "stateAware": "0.6.0-alpha",
+  "stableLatest": "0.6.0-alpha",
+  "devSchemaFile": "0.7.0-dev"
+}
+

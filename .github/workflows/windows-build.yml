@@ -1,0 +1,67 @@
+name: Windows Build
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    name: Windows Build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            # arm64 can't be exec-tested on x64; mirrors 1ES enableTest=false.
+            skip-tests: true
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: src
+    env:
+      NEXTEST_NO_TESTS: pass
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          # rust-toolchain.toml under src/ supplies the channel.
+          rustflags: ''
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src -> target
+          key: ${{ matrix.target }}
+
+      # tier2_bfs must NOT ship on Win 11 25H2 (bfscfg.exe hangs the host).
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }}
+             --no-default-features
+             --features "hyperlight isolation_session microvm wslc"
+
+      - name: Test
+        if: ${{ !matrix.skip-tests }}
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             --no-default-features
+             --features "hyperlight isolation_session microvm wslc"
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: wxc-binaries-${{ matrix.target }}
+          path: |
+            src/target/${{ matrix.target }}/release/wxc-exec.exe
+            src/target/${{ matrix.target }}/release/wxc-host-prep.exe
+            src/target/${{ matrix.target }}/release/winhttp-proxy-shim.exe
+            src/target/${{ matrix.target }}/release/wxc-windows-sandbox-daemon.exe
+            src/target/${{ matrix.target }}/release/wxc-windows-sandbox-guest.exe
+            src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
+            src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
+            src/target/${{ matrix.target }}/release/wslcsdk.dll
+          if-no-files-found: warn
+          retention-days: 7

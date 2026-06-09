@@ -20,7 +20,6 @@ jobs:
             component: LXC
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            # cwd matches the build job so cargo target-dir caches align.
             working-directory: src/core/lxc
             clippy-args: --locked --all-targets --all-features --release
           - os_label: macos
@@ -37,13 +36,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Rust toolchain
-        shell: bash
-        working-directory: src
-        run: |
-          rustup show active-toolchain || rustup toolchain install
-          rustup component add rustfmt clippy
-          rustup target add ${{ matrix.target }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          components: rustfmt, clippy
+          rustflags: ''
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.working-directory }} -> target
+          key: lint-${{ matrix.target }}
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check

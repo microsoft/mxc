@@ -1,4 +1,4 @@
-# Main GitHub Actions entry point for PR/CI builds and as the upstream of
+# Main GitHub Actions entry point for PR/CI builds and the upstream of
 # `publish.yml`. Each stage lives in its own reusable workflow so this file
 # stays a thin orchestrator (mirrors the 1ES `1ES.Build.yml` split).
 
@@ -38,19 +38,28 @@ permissions:
   contents: read
 
 jobs:
-  lint:
-    uses: ./.github/workflows/_lint.yml
+  versioning-checks:
+    uses: ./.github/workflows/versioning-checks.yml
 
-  rust-build:
-    uses: ./.github/workflows/_rust-build.yml
+  lint:
+    uses: ./.github/workflows/lint.yml
+
+  windows-build:
+    uses: ./.github/workflows/windows-build.yml
+
+  linux-build:
+    uses: ./.github/workflows/linux-build.yml
+
+  macos-build:
+    uses: ./.github/workflows/macos-build.yml
 
   sdk-unit-tests:
-    uses: ./.github/workflows/_sdk-unit-tests.yml
+    uses: ./.github/workflows/sdk-unit-tests.yml
 
   package-npm-sdk:
-    needs: rust-build
-    uses: ./.github/workflows/_package-npm-sdk.yml
+    needs: [windows-build, linux-build, macos-build]
+    uses: ./.github/workflows/package-npm-sdk.yml
 
   sdk-integration-tests:
     needs: package-npm-sdk
-    uses: ./.github/workflows/_sdk-integration-tests.yml
+    uses: ./.github/workflows/sdk-integration-tests.yml
