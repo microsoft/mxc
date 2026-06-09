@@ -1,0 +1,58 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+# Entry point for the official, signed MXC build. Registered as a separate
+# ADO pipeline (distinct from `1ES.Build.yml`, the PR/CI validation
+# pipeline) so policies, retention, and queuing rules for official builds
+# can be managed independently.
+#
+# No `trigger:`/`pr:` block — official builds are manually queued or
+# scheduled externally. The actual stage list lives in
+# `1ES.Build.Stages.yml`, shared with `1ES.Build.yml`; any
+# build-content changes belong there, not here.
+
+trigger: none
+pr: none
+
+name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+
+resources:
+  repositories:
+  - repository: 1ESPipelineTemplates
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
+
+parameters:
+  - name: debug
+    displayName: Enable debug output for SDK tests
+    type: boolean
+    default: false
+
+variables:
+  # Variable group managed in Dart — see the pipeline's variable group list.
+  - group: MXC-ESRP-Signing
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: windows-2022
+      os: windows
+
+    customBuildTags:
+    - ES365AIMigrationTooling
+
+    stages:
+    - template: .azure-pipelines/1ES.Build.Stages.yml@self
+      parameters:
+        isOfficialBuild: true
+        debug: ${{ parameters.debug }}
+        ESRPInfo:
+          serviceName: $(serviceName)
+          tenantId: $(tenantId)
+          azureKeyVaultName: $(azureKeyVaultName)
+          authCertName: $(authCertName)
+          signCertName: $(signCertName)
+          clientId: $(clientId)
