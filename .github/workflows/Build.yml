@@ -1,6 +1,5 @@
-# Main GitHub Actions entry point for PR/CI builds and the upstream of
-# `publish.yml`. Each stage lives in its own reusable workflow so this file
-# stays a thin orchestrator (mirrors the 1ES `1ES.Build.yml` split).
+# Entry point for GHA PR/CI validation. Mirrors the 1ES `1ES.Build.yml`
+# split: this file orchestrates, each stage lives in its own reusable.
 
 name: Build
 
@@ -9,7 +8,6 @@ on:
     branches: [main]
     paths-ignore:
       - 'docs/**'
-      - 'tests/examples/**'
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/PULL_REQUEST_TEMPLATE.md'
       - '.github/copilot-instructions.md'
@@ -20,7 +18,6 @@ on:
     branches: [main, 'feature/*', 'user/*']
     paths-ignore:
       - 'docs/**'
-      - 'tests/examples/**'
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/PULL_REQUEST_TEMPLATE.md'
       - '.github/copilot-instructions.md'
@@ -44,20 +41,20 @@ jobs:
   lint:
     uses: ./.github/workflows/Lint.Job.yml
 
-  windows-build:
+  windows:
     uses: ./.github/workflows/Build.Windows.Job.yml
 
-  linux-build:
+  linux:
     uses: ./.github/workflows/Build.Linux.Job.yml
 
-  macos-build:
+  macos:
     uses: ./.github/workflows/Build.MacOS.Job.yml
 
   sdk-unit-tests:
     uses: ./.github/workflows/SDK.Unit.Test.Job.yml
 
   package-npm-sdk:
-    needs: [windows-build, linux-build, macos-build]
+    needs: [windows, linux, macos]
     uses: ./.github/workflows/Package.NpmSdk.Job.yml
 
   sdk-integration-tests:

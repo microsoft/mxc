@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    name: macOS Build (arm64)
+    name: arm64
     # macos-14 / macos-latest are Apple Silicon (arm64); older labels are Intel.
     runs-on: macos-14
     defaults:
@@ -16,7 +16,11 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          # Match src/rust-toolchain.toml — bump together.
+          toolchain: '1.93'
           target: aarch64-apple-darwin
+          components: rustfmt, clippy
+          override: false
           rustflags: ''
 
       - uses: Swatinem/rust-cache@v2

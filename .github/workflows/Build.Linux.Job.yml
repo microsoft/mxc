@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    name: Linux Build (${{ matrix.arch }})
+    name: ${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
@@ -25,7 +25,11 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          # Match src/rust-toolchain.toml — bump together.
+          toolchain: '1.93'
           target: ${{ matrix.target }}
+          components: rustfmt, clippy
+          override: false
           rustflags: ''
 
       - uses: Swatinem/rust-cache@v2

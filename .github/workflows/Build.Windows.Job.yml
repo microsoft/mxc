@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    name: Windows Build (${{ matrix.arch }})
+    name: ${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
@@ -13,9 +13,13 @@ jobs:
           - arch: x64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
+            # tier2_bfs must NOT ship on Win 11 25H2 (bfscfg.exe hangs the host).
+            features: hyperlight isolation_session microvm wslc
           - arch: arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
+            # nanvixd.exe is x64-only, so microvm tests can't run on arm64.
+            features: hyperlight isolation_session wslc
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -25,8 +29,11 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          # Match src/rust-toolchain.toml — bump together.
+          toolchain: '1.93'
           target: ${{ matrix.target }}
-          # rust-toolchain.toml under src/ supplies the channel.
+          components: rustfmt, clippy
+          override: false
           rustflags: ''
 
       - uses: Swatinem/rust-cache@v2
@@ -34,16 +41,15 @@ jobs:
           workspaces: src -> target
           key: ${{ matrix.target }}
 
-      # tier2_bfs must NOT ship on Win 11 25H2 (bfscfg.exe hangs the host).
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
              --no-default-features
-             --features "hyperlight isolation_session microvm wslc"
+             --features "${{ matrix.features }}"
 
       - name: Test
         run: cargo test --locked --release --target ${{ matrix.target }}
              --no-default-features
-             --features "hyperlight isolation_session microvm wslc"
+             --features "${{ matrix.features }}"
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
