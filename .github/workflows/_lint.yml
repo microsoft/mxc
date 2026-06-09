@@ -1,0 +1,52 @@
+name: Lint
+
+on:
+  workflow_call:
+
+jobs:
+  lint:
+    name: Lint (${{ matrix.component }} ${{ matrix.os_label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_label: windows
+            component: WXC
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            working-directory: src
+            clippy-args: --locked --all-targets --all-features --release
+          - os_label: linux
+            component: LXC
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            # cwd matches the build job so cargo target-dir caches align.
+            working-directory: src/core/lxc
+            clippy-args: --locked --all-targets --all-features --release
+          - os_label: macos
+            component: MAC
+            runner: macos-14
+            target: aarch64-apple-darwin
+            working-directory: src
+            # Workspace has Windows-only crates, so --all-features won't build on macOS.
+            clippy-args: --locked --release -p mxc_darwin -p seatbelt_common
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        shell: bash
+        working-directory: src
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add rustfmt clippy
+          rustup target add ${{ matrix.target }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --target ${{ matrix.target }} ${{ matrix.clippy-args }} -- -D warnings

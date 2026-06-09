@@ -1,0 +1,179 @@
+name: Rust Build
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }} ${{ matrix.component }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            component: WXC
+            os_label: windows
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            working-directory: src
+            artifact-prefix: wxc-binaries
+            # Explicit feature set (no --all-features): tier2_bfs must NOT ship
+            # on Win 11 25H2 — bfscfg.exe hangs the host.
+            cargo-features: hyperlight isolation_session microvm wslc
+            run-tests: 'true'
+          - arch: arm64
+            component: WXC
+            os_label: windows
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            working-directory: src
+            artifact-prefix: wxc-binaries
+            cargo-features: hyperlight isolation_session microvm wslc
+            # arm64 can't be exec-tested on x64; mirrors the 1ES enableTest=false split.
+            run-tests: 'false'
+          - arch: x64
+            component: LXC
+            os_label: linux
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            working-directory: src/core/lxc
+            artifact-prefix: lxc-binaries
+            cargo-features: hyperlight
+            run-tests: 'true'
+          - arch: arm64
+            component: LXC
+            os_label: linux
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            working-directory: src/core/lxc
+            artifact-prefix: lxc-binaries
+            cargo-features: hyperlight
+            run-tests: 'true'
+          # macos-14 / macos-latest are Apple Silicon (arm64); older labels are Intel.
+          - arch: arm64
+            component: MAC
+            os_label: macos
+            runner: macos-14
+            target: aarch64-apple-darwin
+            working-directory: src
+            artifact-prefix: mxc-binaries
+            # Mac uses package selection rather than feature selection.
+            cargo-features: ''
+            cargo-packages: '-p mxc_darwin -p seatbelt_common -p wxc_common'
+            run-tests: 'true'
+    runs-on: ${{ matrix.runner }}
+    env:
+      NEXTEST_NO_TESTS: pass
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        shell: bash
+        working-directory: src
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ matrix.working-directory }}/target
+            src/target
+          key: cargo-target-${{ matrix.os_label }}-${{ matrix.target }}-${{ hashFiles('src/Cargo.lock') }}
+          restore-keys: |
+            cargo-target-${{ matrix.os_label }}-${{ matrix.target }}-
+
+      - name: Build
+        working-directory: ${{ matrix.working-directory }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARGS="--locked --release --target ${{ matrix.target }}"
+          if [ -n "${{ matrix.cargo-features }}" ]; then
+            ARGS="$ARGS --no-default-features --features '${{ matrix.cargo-features }}'"
+          fi
+          if [ -n "${{ matrix.cargo-packages || '' }}" ]; then
+            ARGS="$ARGS ${{ matrix.cargo-packages }}"
+          fi
+          eval cargo build $ARGS
+
+      - name: Test
+        if: matrix.run-tests == 'true'
+        working-directory: ${{ matrix.working-directory }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARGS="--locked --release --target ${{ matrix.target }}"
+          if [ -n "${{ matrix.cargo-features }}" ]; then
+            ARGS="$ARGS --no-default-features --features '${{ matrix.cargo-features }}'"
+          fi
+          if [ -n "${{ matrix.cargo-packages || '' }}" ]; then
+            ARGS="$ARGS ${{ matrix.cargo-packages }}"
+          fi
+          eval cargo test $ARGS
+
+      # linux_test_proxy is a separate workspace member, not a dep of lxc.
+      - name: Build linux-test-proxy
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          cargo build --locked --release --target ${{ matrix.target }} \
+            -p linux_test_proxy \
+            --manifest-path src/Cargo.toml
+
+      - name: Stage Windows binaries
+        if: matrix.os_label == 'windows'
+        shell: pwsh
+        run: |
+          $src = "src/target/${{ matrix.target }}/release"
+          $dst = "out/${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          $patterns = @(
+            'wxc-exec.exe',
+            'wxc-host-prep.exe',
+            'winhttp-proxy-shim.exe',
+            'wxc-windows-sandbox-daemon.exe',
+            'wxc-windows-sandbox-guest.exe',
+            'wxc-test-proxy.exe',
+            'mxc-diagnostic-console.exe',
+            'wslcsdk.dll'
+          )
+          foreach ($p in $patterns) {
+            $f = Join-Path $src $p
+            if (Test-Path $f) { Copy-Item $f $dst }
+          }
+
+      - name: Stage Linux binaries
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="src/target/${{ matrix.target }}/release"
+          dst="out/${{ matrix.target }}"
+          mkdir -p "$dst"
+          for f in lxc-exec linux-test-proxy; do
+            if [ -f "$src/$f" ]; then
+              cp "$src/$f" "$dst/"
+              chmod +x "$dst/$f"
+            fi
+          done
+
+      - name: Stage macOS binaries
+        if: matrix.os_label == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="src/target/${{ matrix.target }}/release"
+          dst="out/${{ matrix.target }}"
+          mkdir -p "$dst"
+          cp "$src/mxc-exec-mac" "$dst/"
+          chmod +x "$dst/mxc-exec-mac"
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-prefix }}-${{ matrix.target }}
+          path: out/${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 7
