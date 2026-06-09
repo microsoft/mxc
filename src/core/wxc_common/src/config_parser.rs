@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 
@@ -231,6 +232,12 @@ struct RawConfig {
     /// Top-level seatbelt config.
     #[serde(alias = "macos_sandbox")]
     seatbelt: Option<RawSeatbelt>,
+    // Captures any top-level key not matched above so unrecognised fields can
+    // be rejected at the trust boundary instead of being silently dropped.
+    // Allowed annotation keys ($schema, _comment) are filtered out in
+    // `reject_unknown_top_level_fields`.
+    #[serde(flatten)]
+    unknown: HashMap<String, serde_json::Value>,
 }
 
 // State-aware request shape. `phase` is required (no `#[serde(default)]` on
@@ -260,6 +267,10 @@ struct RawStateAwareRequest {
     ui: Option<RawUi>,
     #[serde(default)]
     experimental: Option<serde_json::Value>,
+    // See `RawConfig::unknown`. Mirrored here so unrecognised top-level keys are
+    // rejected on the state-aware path too.
+    #[serde(flatten)]
+    unknown: HashMap<String, serde_json::Value>,
 }
 
 // Untagged enum: serde tries `StateAware` first (requires `phase`), falls
@@ -600,6 +611,40 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
 
 // ---------- Conversion from raw JSON to domain model ----------
 
+/// Top-level keys that are permitted but carry no semantic meaning: `$schema`
+/// (editor hint) and `_comment` (human annotation). They are accepted at the
+/// trust boundary but ignored by the model.
+const ALLOWED_TOP_LEVEL_ANNOTATIONS: &[&str] = &["$schema", "_comment"];
+
+/// Rejects unrecognised top-level fields captured by a `#[serde(flatten)]` map.
+///
+/// This is the structural half of schema enforcement at the trust boundary:
+/// typos and silently-dropped fields (for example `fileSystem` instead of
+/// `filesystem`, or a stray `policy` block) now fail loudly with a precise
+/// error instead of being ignored, which previously meant the associated
+/// policy was never applied.
+fn reject_unknown_top_level_fields(
+    unknown: &HashMap<String, serde_json::Value>,
+    logger: &mut Logger,
+) -> Result<(), WxcError> {
+    let mut keys: Vec<&str> = unknown
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !ALLOWED_TOP_LEVEL_ANNOTATIONS.contains(k))
+        .collect();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    keys.sort_unstable();
+    let msg = format!(
+        "Unknown top-level field(s) in config: {}. Remove them or check for typos \
+         (field names are case-sensitive, e.g. 'filesystem' not 'fileSystem').",
+        keys.join(", ")
+    );
+    logger.log_line(&msg);
+    Err(WxcError::ConfigParse(msg))
+}
+
 fn present_backend_sections(raw: &RawConfig) -> Vec<&'static str> {
     let mut sections: Vec<&'static str> = Vec::new();
     let mut push = |backend: ContainmentBackend| {
@@ -739,11 +784,20 @@ fn convert_raw_config_inner(
     require_process: bool,
     allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
+    // Reject unrecognised top-level fields before anything else, so typos and
+    // stray sections fail loudly instead of being silently ignored.
+    reject_unknown_top_level_fields(&raw.unknown, logger)?;
+
     // Captured before `raw` fields are moved out below.
     let present_backend_sections = present_backend_sections(&raw);
 
     // New top-level fields
     let schema_version = raw.version.unwrap_or_default();
+
+    // Validate the schema version up front so an unsupported version fails fast,
+    // before any of the per-section conversion work below.
+    validate_schema_version(&schema_version, logger)?;
+
     let container_id = raw.container_id.unwrap_or_default();
     let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
 
@@ -1126,9 +1180,6 @@ fn convert_raw_config_inner(
         }
     };
 
-    // Schema version check
-    validate_schema_version(&schema_version, logger)?;
-
     // Experimental section (parsed but only applied when --experimental flag is set)
     let experimental = if let Some(raw_exp) = raw.experimental {
         let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
@@ -1267,6 +1318,10 @@ fn convert_raw_state_aware(
     logger: &mut Logger,
     allow_missing_command: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
+    // Reject unrecognised top-level fields on the state-aware envelope before
+    // building the one-shot surrogate (whose `unknown` map is always empty).
+    reject_unknown_top_level_fields(&raw.unknown, logger)?;
+
     let phase = Phase::from_wire(&raw.phase).map_err(|e| {
         let msg = e.message.clone();
         logger.log_line(&msg);
@@ -1300,6 +1355,7 @@ fn convert_raw_state_aware(
         // ParsedStateAwareRequest as raw JSON.
         experimental: None,
         seatbelt: None,
+        unknown: HashMap::new(),
     };
 
     let require_process = phase == Phase::Exec;
@@ -2744,6 +2800,74 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "0.7.0-alpha");
+    }
+
+    #[test]
+    fn unknown_top_level_field_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "bogusField": true}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(
+            result.is_err(),
+            "unknown top-level field should be rejected"
+        );
+    }
+
+    #[test]
+    fn filesystem_typo_rejected() {
+        // `fileSystem` (capital S) used to be silently dropped, so the policy
+        // never applied. It must now be rejected as an unknown field.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "fileSystem": {"readwritePaths": ["C:\\x"]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err(), "fileSystem typo should be rejected");
+    }
+
+    #[test]
+    fn top_level_annotations_allowed() {
+        // `$schema` and `_comment` are permitted but ignored.
+        let json = r#"{
+            "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
+            "_comment": "annotation that the parser ignores",
+            "version": "0.7.0-alpha",
+            "process": {"commandLine": "echo hi"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.script_code, "echo hi");
+    }
+
+    #[test]
+    fn state_aware_unknown_top_level_field_rejected() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "bogusField": true
+        }"#;
+        let result = load_mxc(json);
+        assert!(
+            result.is_err(),
+            "unknown top-level field on a state-aware request should be rejected"
+        );
+    }
+
+    #[test]
+    fn state_aware_top_level_annotation_allowed() {
+        let json = r#"{
+            "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
+            "phase": "provision",
+            "containment": "isolation_session"
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert_eq!(p.phase, Phase::Provision),
+            _ => panic!("expected state-aware request"),
+        }
     }
 
     #[test]
