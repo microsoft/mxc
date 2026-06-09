@@ -16,14 +16,10 @@ jobs:
           - arch: arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
-            # arm64 can't be exec-tested on x64; mirrors 1ES enableTest=false.
-            skip-tests: true
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: src
-    env:
-      NEXTEST_NO_TESTS: pass
     steps:
       - uses: actions/checkout@v4
 
@@ -45,7 +41,6 @@ jobs:
              --features "hyperlight isolation_session microvm wslc"
 
       - name: Test
-        if: ${{ !matrix.skip-tests }}
         run: cargo test --locked --release --target ${{ matrix.target }}
              --no-default-features
              --features "hyperlight isolation_session microvm wslc"

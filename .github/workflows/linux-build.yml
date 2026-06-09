@@ -20,8 +20,6 @@ jobs:
     defaults:
       run:
         working-directory: src/core/lxc
-    env:
-      NEXTEST_NO_TESTS: pass
     steps:
       - uses: actions/checkout@v4
 

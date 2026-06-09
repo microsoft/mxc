@@ -11,8 +11,6 @@ jobs:
     defaults:
       run:
         working-directory: src
-    env:
-      NEXTEST_NO_TESTS: pass
     steps:
       - uses: actions/checkout@v4
 
