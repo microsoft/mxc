@@ -240,6 +240,15 @@ export interface PortMapping {
   protocol?: string;
 }
 
+/** Telemetry configuration for experimental TraceLogging ETW support. */
+export interface TelemetryConfig {
+  /**
+   * Explicit telemetry override.
+   * `true` = force on, `false` = force off, `undefined` = build-type default (off).
+   */
+  enabled?: boolean;
+}
+
 /**
  * Main WXC configuration
  */
@@ -278,6 +287,8 @@ export interface ContainerConfig {
     wslc?: WslcConfig;
     /** macOS sandbox configuration (macOS only) */
     seatbelt?: SeatbeltConfig;
+    /** Telemetry configuration */
+    telemetry?: TelemetryConfig;
   };
   /** Cross-platform UI configuration */
   ui?: UiConfig;

@@ -18,8 +18,8 @@ use wxc_e2e_tests::{
     assert_exit, assert_pwsh, assert_python, assert_success,
     assert_success_or_skip_missing_prerequisite, examples_dir, find_binary, has_daemon,
     has_hyperlight_snapshot, has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature,
-    has_wxc_exe, repo_root, run_test_driver, run_wxc_config, run_wxc_state_aware, test_configs_dir,
-    TempDirs,
+    has_wxc_exe, repo_root, run_test_driver, run_wxc_config, run_wxc_example, run_wxc_state_aware,
+    test_configs_dir, TempDirs,
 };
 
 static HAS_WXC_EXE: OnceLock<bool> = OnceLock::new();
@@ -283,6 +283,41 @@ fn test_on_repeat() {
             processcontainer_lpac();
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry tests
+// ---------------------------------------------------------------------------
+
+fn telemetry_enabled() {
+    let result = run_wxc_example("28_telemetry_enabled.json", &["--debug", "--experimental"]);
+    assert_success_or_skip_missing_prerequisite(&result);
+}
+
+fn telemetry_disabled() {
+    // Run a basic config without telemetry — verifies the disabled path doesn't
+    // regress when telemetry code is linked in.
+    assert_wxc_success("basic_processcontainer.json", &["--debug"]);
+}
+
+#[test]
+#[ignore] // Requires AppContainer support
+fn test_telemetry_enabled() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+    assert_python();
+    with_test_lock(telemetry_enabled);
+}
+
+#[test]
+#[ignore] // Requires AppContainer support
+fn test_telemetry_disabled() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+    assert_python();
+    with_test_lock(telemetry_disabled);
 }
 
 // ---------------------------------------------------------------------------
