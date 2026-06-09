@@ -49,12 +49,13 @@ jobs:
       - name: npm run build
         run: npm run build
 
-      - name: Install LXC + bubblewrap (Linux only)
+      # bubblewrap and iptables ship in the ubuntu-24.04 image; only LXC + dnsmasq-base need installing.
+      - name: Install LXC (Linux only, cached)
         if: matrix.os_label == 'linux'
-        shell: bash
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq lxc lxc-utils dnsmasq-base iptables bubblewrap
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: lxc lxc-utils dnsmasq-base
+          version: 1.0
 
       - name: Restore execute permission on mxc-exec-mac
         if: matrix.os_label == 'macos'
