@@ -101,6 +101,8 @@ Network policies are enforced via iptables/nftables rules applied to the contain
 
 Rules are automatically cleaned up when the container exits (if `removeRulesOnExit` is `true`).
 
+**IPv4 only.** Firewall mode resolves `allowedHosts` / `blockedHosts` to IPv4 addresses only; AAAA (IPv6) records and IPv6 literals are silently dropped. A host that has only AAAA records is effectively unreachable from the sandbox under firewall mode.
+
 ## Usage
 
 ### Command Line

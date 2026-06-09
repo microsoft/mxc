@@ -79,6 +79,8 @@ The default `processcontainer`, `bubblewrap`, and `lxc` backends work out of the
 
 > **Hyperlight** is an opt-in build flavor (Linux x64 and Windows x64) gated by the `--with-hyperlight` cargo feature. Default shipped binaries do not include it; build from source with `build.bat --with-hyperlight` (Windows) or the equivalent cargo invocation on Linux.
 
+`getPlatformSupport()` reports backend availability and, when the native probe can determine it, `uiCapabilities`: a platform-neutral view of which UI restrictions the host can enforce. This is currently populated only by the Windows native probe, where it is derived from `JOB_OBJECT_UILIMIT_*` support; Linux and macOS omit the field until their probes expose equivalent data.
+
 **Node.js:** ≥ 18.
 
 ---
@@ -363,6 +365,9 @@ getPlatformSupport() → PlatformSupport
 getAvailableToolsPolicy(env?, options?) → FilesystemPolicyResult
 getUserProfilePolicy()                  → FilesystemPolicyResult
 getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
+
+// Capability types
+UiCapabilitySupport
 
 // Errors (typed wire-format errors from wxc-exec)
 ErrorCode, MxcError, mxcErrorFromCode(code)

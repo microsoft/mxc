@@ -1,0 +1,43 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Unofficial / fork-PR Rust toolchain + cargo build/test. Public crates.io,
+# no auth tasks. (Fork PRs against a public upstream lose System.AccessToken,
+# so any task that defaults its authenticationToken to $(System.AccessToken)
+# fails at prep time — that rules out 1ES.Build.Rust.* and CargoAuthenticate.)
+
+parameters:
+- name: targetTriple
+  type: string
+- name: workingDirectory
+  type: string
+- name: cargoArgs
+  type: string
+  default: ''
+- name: enableTest
+  type: string
+  default: 'true'
+- name: rustVersion
+  type: string
+  # Public rustup channel matching the `1.93` pin in src/rust-toolchain.toml.
+  # (Official builds use the internal 'ms-prod-1.93' from Mxc-Azure-Feed.)
+  default: '1.93'
+
+steps:
+  - template: Rust.Toolchain.Public.yml@self
+    parameters:
+      targetTriple: ${{ parameters.targetTriple }}
+      rustVersion: ${{ parameters.rustVersion }}
+
+  # Redirect crates.io to the public MxcDependencies feed (1ES network isolation
+  # blocks crates.io).
+  - template: Cargo.Setup.Public.yml@self
+
+  - script: cargo build --locked --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
+    displayName: Build
+    workingDirectory: ${{ parameters.workingDirectory }}
+
+  - script: cargo test --locked --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
+    displayName: Test
+    workingDirectory: ${{ parameters.workingDirectory }}
+    condition: eq('${{ parameters.enableTest }}', 'true')

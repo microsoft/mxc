@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::fallback_detector::{self, FallbackError};
 use wxc_common::models::ContainerPolicy;
+use wxc_common::ui_policy::EffectiveUiRestrictions;
 
 /// JSON output emitted by `wxc-exec --probe`.
 #[derive(Serialize, Debug)]
@@ -57,6 +58,51 @@ pub struct ProbeFacts {
     /// 11 25H2 where `bfscfg.exe` locks `bfs.sys`) should refuse to
     /// run a binary that reports `true` here.
     pub bfs_compiled_in: bool,
+    /// Platform-agnostic UI restrictions this host can enforce.
+    pub ui_capabilities: UiCapabilitySupport,
+}
+
+/// Host support for enforcing sandbox UI restrictions.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCapabilitySupport {
+    /// Whether the host can block reads from the clipboard.
+    pub can_block_clipboard_read: bool,
+    /// Whether the host can block writes to the clipboard.
+    pub can_block_clipboard_write: bool,
+    /// Whether the host can block synthetic keyboard/mouse input.
+    pub can_block_input_injection: bool,
+    /// Whether the host can block input method / IME changes.
+    pub can_block_input_method_changes: bool,
+    /// Whether the host can block access to external UI object handles.
+    pub can_block_external_ui_objects: bool,
+    /// Whether the host can block access to global UI namespaces.
+    pub can_block_global_ui_namespace: bool,
+    /// Whether the host can block desktop switching.
+    pub can_block_desktop_switching: bool,
+    /// Whether the host can block logoff or shutdown requests.
+    pub can_block_logoff_or_shutdown: bool,
+    /// Whether the host can block system parameter changes.
+    pub can_block_system_parameter_changes: bool,
+    /// Whether the host can block display settings changes.
+    pub can_block_display_settings_changes: bool,
+}
+
+impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
+    fn from(value: EffectiveUiRestrictions) -> Self {
+        Self {
+            can_block_clipboard_read: value.block_clipboard_read,
+            can_block_clipboard_write: value.block_clipboard_write,
+            can_block_input_injection: value.block_input_injection,
+            can_block_input_method_changes: value.block_input_method_changes,
+            can_block_external_ui_objects: value.block_external_ui_objects,
+            can_block_global_ui_namespace: value.block_global_ui_namespace,
+            can_block_desktop_switching: value.block_desktop_switching,
+            can_block_logoff_or_shutdown: value.block_logoff_or_shutdown,
+            can_block_system_parameter_changes: value.block_system_parameter_changes,
+            can_block_display_settings_changes: value.block_display_settings_changes,
+        }
+    }
 }
 
 /// Run the fallback detector against `policy` and return a JSON-shaped
@@ -69,6 +115,7 @@ pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
             .flatten()
             .is_some(),
         bfs_compiled_in: cfg!(feature = "tier2_bfs"),
+        ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
     };
     match fallback_detector::detect(policy, /* prefer_base_container */ true) {
         Ok(decision) => ProbeOutput {
@@ -117,6 +164,21 @@ mod tests {
     use crate::fallback_detector::IsolationTier;
     use crate::test_env::ForceTierGuard;
 
+    fn all_ui_capabilities() -> UiCapabilitySupport {
+        UiCapabilitySupport {
+            can_block_clipboard_read: true,
+            can_block_clipboard_write: true,
+            can_block_input_injection: true,
+            can_block_input_method_changes: true,
+            can_block_external_ui_objects: true,
+            can_block_global_ui_namespace: true,
+            can_block_desktop_switching: true,
+            can_block_logoff_or_shutdown: true,
+            can_block_system_parameter_changes: true,
+            can_block_display_settings_changes: true,
+        }
+    }
+
     #[test]
     fn probe_output_serializes() {
         let out = ProbeOutput {
@@ -127,6 +189,7 @@ mod tests {
                 base_container_api_present: true,
                 bfscfg_present: false,
                 bfs_compiled_in: false,
+                ui_capabilities: all_ui_capabilities(),
             },
             error: None,
         };
@@ -138,7 +201,48 @@ mod tests {
         assert_eq!(v["probes"]["baseContainerApiPresent"], true);
         assert_eq!(v["probes"]["bfscfgPresent"], false);
         assert_eq!(v["probes"]["bfsCompiledIn"], false);
+        assert_eq!(v["probes"]["uiCapabilities"]["canBlockClipboardRead"], true);
+        assert_eq!(
+            v["probes"]["uiCapabilities"]["canBlockInputInjection"],
+            true
+        );
+        assert_eq!(
+            v["probes"]["uiCapabilities"]["canBlockInputMethodChanges"],
+            true
+        );
         assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn probe_serializes_partial_ui_capabilities() {
+        let out = ProbeOutput {
+            tier: Some("appcontainer-dacl"),
+            needs_dacl_augmentation: Some(true),
+            warnings: vec![],
+            probes: ProbeFacts {
+                base_container_api_present: false,
+                bfscfg_present: false,
+                bfs_compiled_in: false,
+                ui_capabilities: UiCapabilitySupport {
+                    can_block_input_injection: false,
+                    can_block_input_method_changes: false,
+                    ..all_ui_capabilities()
+                },
+            },
+            error: None,
+        };
+        let v = serde_json::to_value(&out).expect("to_value");
+        let probes = v["probes"].as_object().expect("probes object");
+        assert!(probes.contains_key("uiCapabilities"));
+        assert_eq!(
+            v["probes"]["uiCapabilities"]["canBlockInputInjection"],
+            false
+        );
+        assert_eq!(
+            v["probes"]["uiCapabilities"]["canBlockInputMethodChanges"],
+            false
+        );
+        assert_eq!(v["probes"]["uiCapabilities"]["canBlockClipboardRead"], true);
     }
 
     #[test]

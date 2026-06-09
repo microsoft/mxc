@@ -1,13 +1,12 @@
 #!/bin/bash
 # MXC Linux Build Script
-# Builds the lxc-exec binary and TypeScript SDK/CLI
+# Builds the lxc-exec binary and TypeScript SDK
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/src"
 SDK_DIR="$SCRIPT_DIR/sdk"
-CLI_DIR="$SCRIPT_DIR/cli"
 
 # Parse arguments
 BUILD_TYPE="release"
@@ -39,7 +38,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --debug             Build in debug mode (default: release)"
-            echo "  --rust-only         Only build Rust binaries, skip SDK/CLI"
+            echo "  --rust-only         Only build Rust binaries, skip SDK"
             echo "  --with-hyperlight   Build with Hyperlight (micro-VM) backend (x86_64 only)"
             echo "  --with-microvm      Build with NanVix MicroVM backend (KVM required at runtime)"
             echo "  -h, --help          Show this help message"
@@ -140,18 +139,12 @@ if [ -n "$TARGET_TRIPLE" ]; then
     fi
 fi
 
-# Build SDK and CLI
+# Build SDK
 if [ "$BUILD_SDK" = true ]; then
     echo ""
     echo "=== Building TypeScript SDK ==="
     cd "$SDK_DIR"
     npm install --ignore-scripts 2>/dev/null || true
-    npm run build
-
-    echo ""
-    echo "=== Building TypeScript CLI ==="
-    cd "$CLI_DIR"
-    npm install 2>/dev/null || true
     npm run build
 fi
 

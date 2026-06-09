@@ -1,0 +1,14 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Appends the public MxcDependencies cargo feed (config.public.toml) to the
+# workspace .cargo/config.toml. Used by Unofficial / fork-PR Rust steps so
+# crate downloads work under 1ES pool network isolation (crates.io is not on
+# the allowlist). Mirrors the Official setup step in Rust.Build.Steps.Official.yml.
+
+steps:
+  - pwsh: |
+      $cfg = "$(Build.SourcesDirectory)/.cargo/config.toml"
+      New-Item -ItemType Directory -Force -Path (Split-Path $cfg) | Out-Null
+      Add-Content -Path $cfg -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.public.toml"))
+    displayName: Setup Cargo Config (public feed)

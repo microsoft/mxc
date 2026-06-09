@@ -34,6 +34,30 @@ use std::process::Command;
 use nanvix_common::{github_download_url, load_checksums, load_json, ReleaseConfig, RepoConfig};
 
 fn main() {
+    // The build script's output (`NANVIX_BIN_DIR` and whether the download /
+    // verify path runs) depends on the `microvm` feature, surfaced here as the
+    // `CARGO_FEATURE_MICROVM` env var. Declare it as a rerun trigger so toggling
+    // the feature between builds re-runs this script instead of reusing stale
+    // output.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_MICROVM");
+
+    // The expensive work in this build script — downloading NanVix release
+    // assets and verifying their checksums via `certutil` — is only needed
+    // when the micro-VM backend is actually being built. Gate it behind this
+    // crate's `microvm` feature so that a default `cargo build` (which still
+    // compiles this crate as a workspace member) performs no network or hashing
+    // work. `wxc` and `lxc` enable `nanvix_binaries/microvm` through their own
+    // `microvm` features.
+    //
+    // `NANVIX_BIN_DIR` must still be emitted in every configuration because
+    // `lib.rs` references it via `env!`.
+    if std::env::var_os("CARGO_FEATURE_MICROVM").is_none() {
+        let out_dir = std::env::var("OUT_DIR").unwrap();
+        println!("cargo:rustc-env=NANVIX_BIN_DIR={}", out_dir);
+        println!("cargo:rerun-if-changed=build.rs");
+        return;
+    }
+
     // Check the TARGET platform (not host). NanVix binaries are only needed when
     // the output binary will run on Windows or Linux with KVM.
     let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -436,14 +460,19 @@ fn certutil_sha256(path: &Path) -> String {
     //   SHA256 hash of <file>:
     //   <hex hash>
     //   CertUtil: -hashfile command completed successfully.
-    let stdout = String::from_utf8(output.stdout).expect("certutil output not UTF-8");
+    //
+    // Use a lossy conversion because the localized header/footer lines are
+    // emitted in the console's OEM code page (e.g. CP850 on French Windows),
+    // not UTF-8 -- a strict `from_utf8` would panic on those bytes. The hash
+    // line itself is pure ASCII hex, so it survives the lossy conversion. We
+    // locate the hash by scanning for a 64-character hex line rather than
+    // relying on a fixed line index, which keeps this locale-independent.
+    let stdout = String::from_utf8_lossy(&output.stdout);
     stdout
         .lines()
-        .nth(1)
+        .map(|line| line.trim().replace(' ', "").to_lowercase())
+        .find(|line| line.len() == 64 && line.bytes().all(|b| b.is_ascii_hexdigit()))
         .unwrap_or_else(|| panic!("nanvix_binaries: unexpected certutil output: {}", stdout))
-        .trim()
-        .replace(' ', "")
-        .to_lowercase()
 }
 
 fn verify_checksums(binaries: &[&str], bin_dir: &Path, checksums: &HashMap<String, String>) {

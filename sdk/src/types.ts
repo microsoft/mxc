@@ -408,6 +408,39 @@ export type IsolationTier =
   | 'appcontainer-dacl';
 
 /**
+ * Host support for enforcing sandbox UI restrictions.
+ *
+ * The fields describe platform-agnostic restriction intents, not the
+ * OS-specific primitive used to enforce them. For example, Windows derives
+ * these values from `JOB_OBJECT_UILIMIT_*` support. The SDK currently
+ * receives this object only from the Windows native probe; other platforms
+ * omit `PlatformSupport.uiCapabilities` until they expose equivalent probe
+ * data.
+ */
+export interface UiCapabilitySupport {
+  /** Whether the host can block reads from the clipboard. */
+  canBlockClipboardRead: boolean;
+  /** Whether the host can block writes to the clipboard. */
+  canBlockClipboardWrite: boolean;
+  /** Whether the host can block synthetic keyboard/mouse input. */
+  canBlockInputInjection: boolean;
+  /** Whether the host can block input method / IME changes. */
+  canBlockInputMethodChanges: boolean;
+  /** Whether the host can block access to external UI object handles. */
+  canBlockExternalUiObjects: boolean;
+  /** Whether the host can block access to global UI namespaces. */
+  canBlockGlobalUiNamespace: boolean;
+  /** Whether the host can block desktop switching. */
+  canBlockDesktopSwitching: boolean;
+  /** Whether the host can block logoff or shutdown requests. */
+  canBlockLogoffOrShutdown: boolean;
+  /** Whether the host can block system parameter changes. */
+  canBlockSystemParameterChanges: boolean;
+  /** Whether the host can block display settings changes. */
+  canBlockDisplaySettingsChanges: boolean;
+}
+
+/**
  * Platform support information
  */
 export interface PlatformSupport {
@@ -427,4 +460,9 @@ export interface PlatformSupport {
    * Omitted on non-Windows platforms or when the probe fails.
    */
   isolationWarnings?: string[];
+  /**
+   * Host UI-restriction capabilities. Omitted when the backend probe cannot
+   * determine them, including on Linux and macOS today.
+   */
+  uiCapabilities?: UiCapabilitySupport;
 }

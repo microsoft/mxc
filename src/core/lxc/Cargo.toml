@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [features]
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
-microvm = ["dep:nanvix_binaries", "dep:nanvix_runner"]
+microvm = ["dep:nanvix_binaries", "nanvix_binaries/microvm", "dep:nanvix_runner"]
 
 [build-dependencies]
 mxc_build_common.workspace = true

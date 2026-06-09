@@ -72,11 +72,11 @@ jobs:
         cd $(fuzzDir)
         foreach ($t in 'config_parser','base64_decode') {
           Write-Host "===== building $t ====="
-          cargo +$(rustNightly) fuzz build $t --release
+          cargo +$(rustNightly) fuzz build --fuzz-dir . $t --release
           if ($LASTEXITCODE -ne 0) { throw "fuzz build failed for $t" }
         }
         Write-Host "===== building validator ====="
-        cargo +$(rustNightly) fuzz build validator --release --features hyperlight,isolation_session,microvm
+        cargo +$(rustNightly) fuzz build --fuzz-dir . validator --release --features hyperlight,isolation_session,microvm
         if ($LASTEXITCODE -ne 0) { throw "fuzz build failed for validator" }
       displayName: Build fuzz targets (ASAN)
 

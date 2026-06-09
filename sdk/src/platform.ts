@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync, execFileSync } from 'child_process';
 import { fileURLToPath } from 'node:url';
-import { ContainmentBackend, IsolationTier, PlatformSupport } from './types.js';
+import { ContainmentBackend, IsolationTier, PlatformSupport, UiCapabilitySupport } from './types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -141,11 +141,12 @@ function isWindowsSandboxAvailable(): boolean {
 /**
  * Get platform support information.
  *
- * On Windows, when the host build is supported, this also invokes
- * `wxc-exec --probe` to populate `isolationTier` and (if any) the
- * `isolationWarnings` array. The result is cached for the lifetime of
- * the SDK module — the underlying machine state is not expected to
- * change at runtime.
+ * On Windows, this also invokes `wxc-exec --probe` to populate
+ * `isolationTier`, the `isolationWarnings` array (if any), and portable UI
+ * capability facts. Linux and macOS currently do not expose native probe data,
+ * so `uiCapabilities` is omitted on those platforms. The result is cached for
+ * the lifetime of the SDK module — the underlying machine state is not
+ * expected to change at runtime.
  *
  * @returns Platform support details including available sandboxing methods
  */
@@ -194,6 +195,27 @@ function isValidTier(s: unknown): s is IsolationTier {
   return s === 'base-container' || s === 'appcontainer-bfs' || s === 'appcontainer-dacl';
 }
 
+const UI_CAPABILITY_FIELDS: readonly (keyof UiCapabilitySupport)[] = [
+  'canBlockClipboardRead',
+  'canBlockClipboardWrite',
+  'canBlockInputInjection',
+  'canBlockInputMethodChanges',
+  'canBlockExternalUiObjects',
+  'canBlockGlobalUiNamespace',
+  'canBlockDesktopSwitching',
+  'canBlockLogoffOrShutdown',
+  'canBlockSystemParameterChanges',
+  'canBlockDisplaySettingsChanges',
+];
+
+function isUiCapabilitySupport(value: unknown): value is UiCapabilitySupport {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const capabilities = value as Record<keyof UiCapabilitySupport, unknown>;
+  return UI_CAPABILITY_FIELDS.every((field) => typeof capabilities[field] === 'boolean');
+}
+
 /**
  * Run the probe binary and merge its results into `support`. On any
  * failure (binary missing, timeout, malformed JSON, unknown tier), the
@@ -215,6 +237,12 @@ function populateIsolationFromProbe(support: PlatformSupport): void {
           support.isolationWarnings = warnings;
         }
       }
+      const facts = probe.probes;
+      if (facts && typeof facts === 'object') {
+        if (isUiCapabilitySupport(facts.uiCapabilities)) {
+          support.uiCapabilities = facts.uiCapabilities;
+        }
+      }
     }
   } catch {
     // Graceful degradation: leave isolation fields unset.
@@ -225,7 +253,8 @@ function computeSupport(): PlatformSupport {
   const platform = os.platform();
   const support: PlatformSupport = { isSupported: false, reason: '', availableMethods: [] };
 
-  // Non-Windows platforms
+  // Non-Windows platforms do not currently have native probes, so fields that
+  // depend on probe data (including uiCapabilities) stay omitted.
   if (platform === 'darwin') {
     // seatbelt is the only containment backend on macOS.
     // /usr/bin/sandbox-exec ships with every release of macOS so the check

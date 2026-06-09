@@ -1,0 +1,29 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Public rustup toolchain install (no 1ES tasks, no auth). Used by fork-PR
+# builds, the macOS build, and the Lint job. Single source of truth for the
+# public Rust version pin — keep in sync with src/rust-toolchain.toml.
+
+parameters:
+- name: targetTriple
+  type: string
+- name: rustVersion
+  type: string
+  default: '1.93'
+
+steps:
+  - pwsh: |
+      $ver = '${{ parameters.rustVersion }}'
+      $triple = '${{ parameters.targetTriple }}'
+      if ($IsWindows) {
+        Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+        .\rustup-init.exe -y --default-toolchain $ver --target $triple --profile minimal --component clippy --component rustfmt --no-modify-path
+        Write-Host "##vso[task.prependpath]$env:USERPROFILE\.cargo\bin"
+      } else {
+        Invoke-WebRequest -Uri https://sh.rustup.rs -OutFile rustup-init.sh
+        chmod +x rustup-init.sh
+        ./rustup-init.sh -y --default-toolchain $ver --target $triple --profile minimal --component clippy --component rustfmt --no-modify-path
+        Write-Host "##vso[task.prependpath]$env:HOME/.cargo/bin"
+      }
+    displayName: Install Rust toolchain (rustup)
