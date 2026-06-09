@@ -64,7 +64,7 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
     "/lib32",
     "/lib64",
     "/libx32",
-    // /usr subpaths — mirrors seatbelt's baseline exactly, intentionally
+    // /usr subpaths — aligned with seatbelt's baseline, intentionally
     // excluding /usr/local.
     "/usr/bin",
     "/usr/sbin",
@@ -273,11 +273,9 @@ mod tests {
 
         // ro — baseline paths are emitted via --ro-bind-try, so a bare
         // --ro-bind must correspond to the user's readonlyPaths entry.
-        let ro_pos = args
-            .windows(3)
+        args.windows(3)
             .position(|w| w[0] == "--ro-bind" && w[1] == "/data" && w[2] == "/data")
             .expect("readonly policy path /data should produce a --ro-bind mount");
-        assert!(ro_pos > 0);
 
         // denied
         let tmpfs_positions: Vec<_> = args
@@ -529,8 +527,13 @@ mod tests {
              not implicitly exposed; got: {:?}",
             args
         );
-        // And no explicit /usr/local entry either.
-        let usr_local = args.iter().any(|a| a == "/usr/local");
+        // And no explicit /usr/local mount either. Restrict the scan to
+        // mount-argument windows so a script body that merely mentions
+        // `/usr/local` cannot trigger a false positive.
+        let usr_local = args.windows(3).any(|w| {
+            matches!(w[0].as_str(), "--bind" | "--ro-bind" | "--ro-bind-try")
+                && w[1] == "/usr/local"
+        });
         assert!(!usr_local, "baseline must not expose /usr/local by default");
     }
 

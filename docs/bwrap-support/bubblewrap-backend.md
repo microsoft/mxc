@@ -21,6 +21,9 @@ requiring root privileges or a container runtime.
   # Alpine
   apk add bubblewrap
   ```
+  The deny-by-default baseline (see [How It Works](#how-it-works)) emits its
+  read-only mounts via `--ro-bind-try`, which requires **bwrap 0.3.0+**
+  (released 2017; every currently-supported distro ships a newer version).
 - User namespaces must be enabled:
   ```bash
   # Check: should print "1"

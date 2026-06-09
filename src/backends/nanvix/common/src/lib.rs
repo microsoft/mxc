@@ -39,8 +39,12 @@ pub const NANVIXD_BINARY: &str = "nanvixd.exe";
 pub const NANVIXD_BINARY: &str = "nanvixd.elf";
 
 /// Fallback for non-Windows/Linux hosts. See `REQUIRED_BINARIES` above.
+/// A descriptive sentinel (rather than an empty string) so that if any
+/// code path ever does construct a `Command` from this on an unsupported
+/// host, the failure clearly names the cause instead of reporting an
+/// empty program name.
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-pub const NANVIXD_BINARY: &str = "";
+pub const NANVIXD_BINARY: &str = "nanvixd-unsupported-host";
 
 /// Multi-binary initrd (daemons + CPython) loaded by NanVix at warm start.
 pub const INITRD_BINARY: &str = "python3.initrd";
