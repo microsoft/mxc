@@ -40,4 +40,4 @@ jobs:
           name: mxc-binaries-aarch64-apple-darwin
           path: src/target/aarch64-apple-darwin/release/mxc-exec-mac
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1

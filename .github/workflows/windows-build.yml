@@ -59,4 +59,4 @@ jobs:
             src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
             src/target/${{ matrix.target }}/release/wslcsdk.dll
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 1

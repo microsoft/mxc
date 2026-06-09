@@ -57,4 +57,4 @@ jobs:
             src/target/${{ matrix.target }}/release/lxc-exec
             src/target/${{ matrix.target }}/release/linux-test-proxy
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
