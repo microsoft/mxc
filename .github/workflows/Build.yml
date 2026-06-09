@@ -39,27 +39,27 @@ permissions:
 
 jobs:
   versioning-checks:
-    uses: ./.github/workflows/versioning-checks.yml
+    uses: ./.github/workflows/Versioning.Checks.Job.yml
 
   lint:
-    uses: ./.github/workflows/lint.yml
+    uses: ./.github/workflows/Lint.Job.yml
 
   windows-build:
-    uses: ./.github/workflows/windows-build.yml
+    uses: ./.github/workflows/Build.Windows.Job.yml
 
   linux-build:
-    uses: ./.github/workflows/linux-build.yml
+    uses: ./.github/workflows/Build.Linux.Job.yml
 
   macos-build:
-    uses: ./.github/workflows/macos-build.yml
+    uses: ./.github/workflows/Build.MacOS.Job.yml
 
   sdk-unit-tests:
-    uses: ./.github/workflows/sdk-unit-tests.yml
+    uses: ./.github/workflows/SDK.Unit.Test.Job.yml
 
   package-npm-sdk:
     needs: [windows-build, linux-build, macos-build]
-    uses: ./.github/workflows/package-npm-sdk.yml
+    uses: ./.github/workflows/Package.NpmSdk.Job.yml
 
   sdk-integration-tests:
     needs: package-npm-sdk
-    uses: ./.github/workflows/sdk-integration-tests.yml
+    uses: ./.github/workflows/SDK.Integration.Test.Job.yml
