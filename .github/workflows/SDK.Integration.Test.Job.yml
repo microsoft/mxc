@@ -20,6 +20,9 @@ jobs:
     defaults:
       run:
         working-directory: sdk/tests/integration
+    env:
+      MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
+      MXC_SKIP_LXC_NETWORK_TESTS: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -53,11 +56,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq lxc lxc-utils dnsmasq-base iptables bubblewrap
 
-      - name: npm test (Linux, sudo, with LXC)
-        if: matrix.os_label == 'linux'
-        shell: bash
-        run: sudo MXC_SKIP_LXC_NETWORK_TESTS=1 npm test
-
       - name: Restore execute permission on mxc-exec-mac
         if: matrix.os_label == 'macos'
         shell: bash
@@ -66,8 +64,12 @@ jobs:
           BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
           if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found" && exit 1; fi
 
-      - name: npm test (Windows / macOS)
-        if: matrix.os_label != 'linux'
-        env:
-          MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
-        run: npm test
+      # Linux needs root for LXC; `sudo -E` preserves the env vars above.
+      - name: npm test
+        shell: bash
+        run: |
+          if [ "${{ matrix.os_label }}" = "linux" ]; then
+            sudo -E npm test
+          else
+            npm test
+          fi
