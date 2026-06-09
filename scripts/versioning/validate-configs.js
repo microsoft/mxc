@@ -14,7 +14,7 @@
 //   node scripts/versioning/validate-configs.js
 
 const { readFileSync, readdirSync, existsSync } = require("fs");
-const { join, relative, resolve } = require("path");
+const { join, resolve } = require("path");
 const Ajv = require("ajv");
 
 const repoRoot = resolve(__dirname, "..", "..");
@@ -31,7 +31,7 @@ const devSchemaPath = join(
 );
 const schema = readJson(devSchemaPath);
 
-// Directories whose *.json files are configs we expect to validate.
+// Directories whose *.json files (recursively) are configs we expect to validate.
 const CONFIG_DIRS = [join("tests", "examples"), join("tests", "configs")];
 
 // Files that are intentionally invalid (negative tests) and must NOT validate.
@@ -43,19 +43,43 @@ const exemptions = existsSync(exemptionsPath)
 const ajv = new Ajv({ allErrors: true, strict: false });
 const validate = ajv.compile(schema);
 
+// Recursively collect repo-root-relative paths of *.json files under `dir`, so
+// configs in nested directories are not silently skipped.
 function listJson(dir) {
   const abs = join(repoRoot, dir);
   if (!existsSync(abs)) return [];
-  return readdirSync(abs)
-    .filter((f) => f.endsWith(".json"))
-    .map((f) => join(dir, f));
+  const out = [];
+  for (const entry of readdirSync(abs, { withFileTypes: true })) {
+    const childRel = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...listJson(childRel));
+    } else if (entry.name.endsWith(".json")) {
+      out.push(childRel);
+    }
+  }
+  return out;
 }
 
 const files = CONFIG_DIRS.flatMap(listJson).sort();
 
 let unexpectedInvalid = 0;
 let unexpectedValid = 0;
+let staleExemptions = 0;
 const unexpectedInvalidDetails = [];
+
+// Keep the exemption list from rotting: every listed file must still exist.
+const knownFiles = new Set(files.map((f) => f.split("\\").join("/")));
+for (const ex of exemptions) {
+  if (!knownFiles.has(ex)) {
+    staleExemptions++;
+    const reason = existsSync(join(repoRoot, ex))
+      ? "exists but is not under a scanned config dir"
+      : "does not exist";
+    unexpectedInvalidDetails.push(
+      `${ex}: listed as intentionallyInvalid but ${reason} — fix or remove the exemption`
+    );
+  }
+}
 
 for (const rel of files) {
   const relNorm = rel.split("\\").join("/");
@@ -91,11 +115,11 @@ console.log(
     `(${exemptions.size} exempt as intentionally-invalid).`
 );
 
-if (unexpectedInvalid > 0 || unexpectedValid > 0) {
+if (unexpectedInvalid > 0 || unexpectedValid > 0 || staleExemptions > 0) {
   console.error("\nConfig schema validation FAILED:");
   for (const d of unexpectedInvalidDetails) console.error(`  - ${d}`);
   console.error(
-    `\n${unexpectedInvalid} unexpected invalid, ${unexpectedValid} exemptions that now pass.`
+    `\n${unexpectedInvalid} unexpected invalid, ${unexpectedValid} exemptions that now pass, ${staleExemptions} stale exemption(s).`
   );
   process.exit(1);
 }

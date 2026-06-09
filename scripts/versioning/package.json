@@ -4,7 +4,7 @@
   "private": true,
   "description": "Repository tooling: version-sync and config schema validation gates. Not published.",
   "scripts": {
-    "check-version-sync": "node check-version-sync.js",
+    "check-schema-versions": "node check-schema-versions.js",
     "validate-configs": "node validate-configs.js"
   },
   "dependencies": {
