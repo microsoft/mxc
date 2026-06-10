@@ -15,12 +15,19 @@
 //! ## Environment variables
 //!
 //! - `GITHUB_TOKEN` / `GH_TOKEN` — optional; increases API rate limit
+//! - `NANVIX_BIN` — optional; path to a directory of pre-fetched NanVix
+//!   binaries. When set, the build uses that directory directly and performs
+//!   no network downloads, enabling fully offline builds where all dynamic
+//!   build inputs are pre-fetched. The directory must already contain the
+//!   required binaries (flat files plus the `bin/` subdirectory); checksums
+//!   are still verified against `checksums.json`.
 //!
 //! ## Caching
 //!
-//! Binaries are cached in OUT_DIR. Checksums are verified whenever this
-//! build script runs (triggered by changes to build.rs, versions.json,
-//! or checksums.json) to catch corrupted or truncated files.
+//! Binaries are cached in OUT_DIR (or read from `NANVIX_BIN` when set).
+//! Checksums are verified whenever this build script runs (triggered by
+//! changes to build.rs, versions.json, or checksums.json) to catch corrupted
+//! or truncated files.
 //!
 //! # TODO(security): NanVix binaries are not ESRP-signed. Before shipping in
 //! # official MXC releases, either extend ESRP to cover these binaries or
@@ -69,8 +76,48 @@ fn main() {
     }
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let bin_dir = out_dir.join("nanvix-binaries");
-    fs::create_dir_all(&bin_dir).expect("failed to create nanvix-binaries dir");
+
+    // When `NANVIX_BIN` is set, use the caller-provided directory of
+    // pre-fetched binaries and skip all network downloads. This enables fully
+    // offline builds where every dynamic build input has been pre-fetched.
+    // Otherwise, download into a subdirectory of OUT_DIR as before.
+    let offline_bin_dir = std::env::var_os("NANVIX_BIN").map(PathBuf::from);
+    let use_prefetched_binaries = offline_bin_dir.is_some();
+    let bin_dir = match offline_bin_dir {
+        Some(dir) => {
+            if !dir.is_dir() {
+                panic!(
+                    "nanvix_binaries: NANVIX_BIN is set to '{}', but that directory \
+                     does not exist. Point NANVIX_BIN at a directory containing the \
+                     pre-fetched NanVix binaries.",
+                    dir.display()
+                );
+            }
+            // Canonicalize to an absolute path. The directory is emitted as
+            // `cargo:BIN_DIR` and consumed by the `wxc`/`lxc` build scripts
+            // (via `DEP_NANVIX_BINARIES_BIN_DIR`) to copy artifacts next to the
+            // final executable. Those scripts run with a different working
+            // directory, so a relative `NANVIX_BIN` would otherwise resolve
+            // against the wrong directory and silently copy nothing.
+            let dir = fs::canonicalize(&dir).unwrap_or_else(|e| {
+                panic!(
+                    "nanvix_binaries: failed to canonicalize NANVIX_BIN '{}': {}",
+                    dir.display(),
+                    e
+                )
+            });
+            eprintln!(
+                "nanvix_binaries: NANVIX_BIN set — using pre-fetched binaries from '{}' (offline)",
+                dir.display()
+            );
+            dir
+        }
+        None => {
+            let dir = out_dir.join("nanvix-binaries");
+            fs::create_dir_all(&dir).expect("failed to create nanvix-binaries dir");
+            dir
+        }
+    };
 
     let versions: ReleaseConfig = load_json("versions.json");
     let checksums: HashMap<String, String> = load_checksums("checksums.json", &target);
@@ -89,19 +136,29 @@ fn main() {
             .map(|v| v.iter().map(|s| s.as_str()).collect())
             .unwrap_or_else(|| nanvix_common::REQUIRED_BINARIES.to_vec());
 
-        let needs_download = needs_download_linux(&binaries, &bin_dir, &checksums);
+        let needs_download =
+            !use_prefetched_binaries && needs_download_linux(&binaries, &bin_dir, &checksums);
         if needs_download {
             eprintln!(
                 "nanvix_binaries: downloading nanvix/nanvix-python {} (Linux)...",
                 versions.nanvix_python.tag
             );
             download_and_extract_linux(&versions.nanvix_python.tag, asset, &binaries, &bin_dir);
+        } else if use_prefetched_binaries {
+            eprintln!(
+                "nanvix_binaries: offline — verifying pre-fetched Linux binaries in '{}'",
+                bin_dir.display()
+            );
         } else {
             eprintln!("nanvix_binaries: all Linux binaries cached and verified");
         }
 
         verify_checksums_linux(&binaries, &bin_dir, &checksums);
         verify_bin_subdir_checksums_linux(&bin_dir, &checksums);
+
+        if use_prefetched_binaries {
+            emit_rerun_for_offline_inputs(&bin_dir, &binaries);
+        }
     } else {
         // Windows: original logic
         let all_binaries: Vec<&str> = versions
@@ -111,7 +168,8 @@ fn main() {
             .map(|s| s.as_str())
             .collect();
 
-        let needs_nanvix_python = needs_download(&versions.nanvix_python, &bin_dir, &checksums);
+        let needs_nanvix_python = !use_prefetched_binaries
+            && needs_download(&versions.nanvix_python, &bin_dir, &checksums);
 
         if needs_nanvix_python {
             eprintln!(
@@ -119,12 +177,21 @@ fn main() {
                 versions.nanvix_python.tag
             );
             download_and_extract(&versions.nanvix_python, "nanvix/nanvix-python", &bin_dir);
+        } else if use_prefetched_binaries {
+            eprintln!(
+                "nanvix_binaries: offline — verifying pre-fetched binaries in '{}'",
+                bin_dir.display()
+            );
         } else {
             eprintln!("nanvix_binaries: all binaries cached and verified");
         }
 
         verify_checksums(&all_binaries, &bin_dir, &checksums);
         verify_bin_subdir_checksums(&bin_dir, &checksums);
+
+        if use_prefetched_binaries {
+            emit_rerun_for_offline_inputs(&bin_dir, &all_binaries);
+        }
 
         // Generate host-local WHP snapshots at build time so even the first
         // runtime execution uses warm start. The runtime fallback in
@@ -149,12 +216,22 @@ fn main() {
             let snapshots_present = nanvix_common::SNAPSHOT_FILES
                 .iter()
                 .all(|name| snapshots_dir.join(name).exists());
-            if !snapshots_present {
+            if snapshots_present {
+                eprintln!("nanvix_binaries: host-local snapshots already present");
+            } else if use_prefetched_binaries {
+                // In offline mode the NANVIX_BIN directory is treated as an
+                // immutable, pre-fetched input — it may be a read-only or
+                // shared cache. Do not run nanvixd.exe to generate snapshots
+                // into it. The runtime fallback in nanvix_runner.rs cold-boots
+                // when snapshots are absent.
+                eprintln!(
+                    "nanvix_binaries: offline — snapshots absent in NANVIX_BIN; \
+                     skipping generation (runtime will cold-boot on first use)."
+                );
+            } else {
                 fs::create_dir_all(&snapshots_dir).expect("failed to create snapshots dir");
                 eprintln!("nanvix_binaries: generating host-local snapshots (cold boot)...");
                 generate_snapshots_locally(&bin_dir);
-            } else {
-                eprintln!("nanvix_binaries: host-local snapshots already present");
             }
         }
     }
@@ -166,9 +243,35 @@ fn main() {
     println!("cargo:rerun-if-changed=checksums.json");
     println!("cargo:rerun-if-env-changed=GITHUB_TOKEN");
     println!("cargo:rerun-if-env-changed=GH_TOKEN");
+    println!("cargo:rerun-if-env-changed=NANVIX_BIN");
 }
 
 // -- Download logic ----------------------------------------------------------
+
+/// Emit `cargo:rerun-if-changed` for every pre-fetched input file so that
+/// replacing binaries in place under the same `NANVIX_BIN` path re-triggers
+/// checksum verification (and the downstream `wxc`/`lxc` artifact copy). The
+/// `rerun-if-env-changed=NANVIX_BIN` trigger only fires when the path value
+/// changes, not when the directory's contents change.
+fn emit_rerun_for_offline_inputs(bin_dir: &Path, binaries: &[&str]) {
+    for name in binaries {
+        println!("cargo:rerun-if-changed={}", bin_dir.join(name).display());
+    }
+    let bin_subdir = bin_dir.join(nanvix_common::BIN_SUBDIR);
+    for name in nanvix_common::BIN_SUBDIR_FILES {
+        println!("cargo:rerun-if-changed={}", bin_subdir.join(name).display());
+    }
+    // Track snapshots too: adding/removing/updating them under the same
+    // NANVIX_BIN path must re-trigger the build (and the downstream copy/purge)
+    // so the runtime never uses a stale or mismatched warm-start snapshot.
+    let snapshots_subdir = bin_dir.join(nanvix_common::SNAPSHOTS_SUBDIR);
+    for name in nanvix_common::SNAPSHOT_FILES {
+        println!(
+            "cargo:rerun-if-changed={}",
+            snapshots_subdir.join(name).display()
+        );
+    }
+}
 
 fn needs_download(
     config: &RepoConfig,

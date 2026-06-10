@@ -261,20 +261,34 @@ pub fn copy_artifacts_to_target(src_dir: &Path, target_dir: &Path) {
     }
 
     // Snapshot files (snapshots/kernel.vmem, snapshots/kernel.whp.cbor).
+    // Mirror source -> target: copy newer files, but also remove any target
+    // snapshot that is absent from the source. Otherwise a stale warm-start
+    // snapshot left over from a previous build (e.g. one produced for a
+    // different set of binaries, or an offline build whose prefetch dir ships
+    // no snapshots) could be picked up at runtime and used against mismatched
+    // binaries. In the normal online build the source always contains every
+    // snapshot, so nothing is removed and behavior is unchanged.
     let snapshots_src = src_dir.join(SNAPSHOTS_SUBDIR);
     let snapshots_dst = target_dir.join(SNAPSHOTS_SUBDIR);
-    if snapshots_src.exists() {
-        let _ = fs::create_dir_all(&snapshots_dst);
-        for name in SNAPSHOT_FILES {
-            let src = snapshots_src.join(name);
-            let dst = snapshots_dst.join(name);
-            if src.exists() && (!dst.exists() || is_newer(&src, &dst)) {
+    for name in SNAPSHOT_FILES {
+        let src = snapshots_src.join(name);
+        let dst = snapshots_dst.join(name);
+        if src.exists() {
+            let _ = fs::create_dir_all(&snapshots_dst);
+            if !dst.exists() || is_newer(&src, &dst) {
                 eprintln!("nanvix: copying snapshots/{} -> {}", name, dst.display());
                 if let Err(e) = fs::copy(&src, &dst) {
                     let _ = fs::remove_file(&dst);
                     eprintln!("nanvix: WARNING: failed to copy snapshots/{}: {}", name, e);
                 }
             }
+        } else if dst.exists() {
+            eprintln!(
+                "nanvix: removing stale snapshots/{} (absent in source) -> {}",
+                name,
+                dst.display()
+            );
+            let _ = fs::remove_file(&dst);
         }
     }
 
@@ -294,6 +308,26 @@ pub fn copy_artifacts_to_target(src_dir: &Path, target_dir: &Path) {
                 }
             }
         }
+    }
+}
+
+/// Emit `cargo:rerun-if-changed` for every artifact that
+/// [`copy_artifacts_to_target`] reads from `src_dir`. Call this from a
+/// consuming crate's build script so the copy reruns when the source contents
+/// change in place — for example when an offline `NANVIX_BIN` prefetch
+/// directory is updated at the same path. Without it, the consumer only reruns
+/// when the source *path* changes, leaving stale artifacts next to the exe.
+pub fn emit_rerun_for_copied_artifacts(src_dir: &Path) {
+    for name in REQUIRED_BINARIES {
+        println!("cargo:rerun-if-changed={}", src_dir.join(name).display());
+    }
+    let bin_subdir = src_dir.join(BIN_SUBDIR);
+    for name in BIN_SUBDIR_FILES {
+        println!("cargo:rerun-if-changed={}", bin_subdir.join(name).display());
+    }
+    let snapshots = src_dir.join(SNAPSHOTS_SUBDIR);
+    for name in SNAPSHOT_FILES {
+        println!("cargo:rerun-if-changed={}", snapshots.join(name).display());
     }
 }
 

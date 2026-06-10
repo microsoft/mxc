@@ -43,5 +43,9 @@ fn copy_nanvix_binaries() {
 
     nanvix_common::copy_artifacts_to_target(Path::new(&nanvix_bin_dir), target_dir);
 
+    // Re-run when the source path changes and when the source artifacts
+    // themselves change in place (e.g. an offline NANVIX_BIN prefetch dir
+    // updated at the same path).
+    nanvix_common::emit_rerun_for_copied_artifacts(Path::new(&nanvix_bin_dir));
     println!("cargo:rerun-if-env-changed=DEP_NANVIX_BINARIES_BIN_DIR");
 }
