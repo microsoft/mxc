@@ -1,12 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import pty from 'node-pty';
+import type pty from 'node-pty';
 import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
 import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } from './types.js';
+import { loadPty } from './lazyPty.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromCode } from './errors.js';
@@ -493,7 +494,7 @@ function injectEnvIntoConfig(
 /**
  * Internal helper: resolves the executor binary path and spawns a PTY process.
  */
-function spawnWithConfig(
+function spawnPtyWithConfig(
   config: ContainerConfig,
   options: SandboxSpawnOptions,
   workingDirectory?: string,
@@ -516,9 +517,9 @@ function spawnWithConfig(
       cwd: workingDirectory || process.cwd(),
     };
 
-    diagLog(`spawnWithConfig: spawning PTY process, cwd=${ptyOpts.cwd}`);
+    diagLog(`spawnPtyWithConfig: spawning PTY process, cwd=${ptyOpts.cwd}`);
 
-    const ptyProcess = pty.spawn(executablePath, args, ptyOpts);
+    const ptyProcess = loadPty().spawn(executablePath, args, ptyOpts);
 
     ptyProcess.onExit((event) => {
       logger?.log('info', 'mxc.spawn.exit', {
@@ -567,7 +568,7 @@ export function spawnSandbox(
   env?: { [key: string]: string | undefined },
 ): pty.IPty {
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
-  return spawnWithConfig(config, options, workingDirectory, env);
+  return spawnPtyWithConfig(config, options, workingDirectory, env);
 }
 
 /**
@@ -645,7 +646,7 @@ export function spawnSandboxFromConfig(
   }
 
   diagLogVersion();
-  return spawnWithConfig(config, options, workingDirectory, env);
+  return spawnPtyWithConfig(config, options, workingDirectory, env);
 }
 
 /**

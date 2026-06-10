@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `getPlatformSupport()` now reports `uiCapabilities` on Windows when the
   native probe can determine which UI restrictions the host can enforce.
 
+## [0.6.2]
+
+### Changed
+
+- `node-pty` is now loaded lazily, only when a PTY is actually spawned (the
+  default/`usePty: true` path). Importing the SDK and spawning with
+  `usePty: false` no longer evaluates `node-pty` or loads its native addon, so
+  pipe-only consumers don't need the `node-pty` binary present.
+- `node-pty` moved from `dependencies` to an optional `peerDependency`. Pipe-only
+  consumers (`usePty: false`) no longer pull it in transitively; consumers that
+  use PTY mode must install `node-pty` themselves.
+
 ## [0.3.0]
 
 ### ⚠️ Breaking changes
