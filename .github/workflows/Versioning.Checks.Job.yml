@@ -24,5 +24,8 @@ jobs:
       - name: Check schema version sync
         run: node scripts/versioning/check-schema-versions.js
 
+      - name: Check Rust toolchain sync (rust-toolchain.toml == ADO template)
+        run: node scripts/versioning/check-rust-toolchain-sync.js
+
       - name: Validate config corpus against dev schema
         run: node scripts/versioning/validate-configs.js
