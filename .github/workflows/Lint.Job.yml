@@ -56,12 +56,17 @@ jobs:
           workspaces: ${{ matrix.working-directory }} -> target
           key: lint-${{ matrix.target }}-v2
           cache-on-failure: false
-          # See Build.Windows.Job.yml — same hyperlight surrogate cache hint.
-          cache-directories: |
-            src/target/${{ matrix.target }}/release/build/hls
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
+
+      # See Build.Windows.Job.yml — force hyperlight-host's build script to
+      # re-run so its hls/ output is regenerated before clippy expands the
+      # RustEmbed proc-macro.
+      - name: Force hyperlight-host rebuild (cache workaround)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: cargo clean --release --target ${{ matrix.target }} -p hyperlight-host
 
       - name: cargo clippy
         run: cargo clippy --target ${{ matrix.target }} ${{ matrix.clippy-args }} -- -D warnings

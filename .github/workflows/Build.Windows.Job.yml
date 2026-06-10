@@ -46,15 +46,17 @@ jobs:
         with:
           workspaces: src -> target
           key: ${{ matrix.target }}-v2
-          # Don't persist cache from failed builds — Hyperlight's nested-cargo
-          # build script can leave the target dir half-populated and poison
-          # subsequent restores.
           cache-on-failure: false
-          # Hyperlight's hyperlight_surrogate writes to a non-standard
-          # target/<target>/release/build/hls/... path that rust-cache's default
-          # include rules can drop.
-          cache-directories: |
-            src/target/${{ matrix.target }}/release/build/hls
+
+      # hyperlight-host's build.rs writes hyperlight_surrogate.exe to a
+      # non-standard target/.../build/hls/ path that rust-cache prunes on save.
+      # On a cache hit, cargo thinks the build script is "fresh" and skips it,
+      # but the RustEmbed proc-macro then can't find the missing folder. Force
+      # the build script to re-run by clearing the crate's fingerprint.
+      - name: Force hyperlight-host rebuild (cache workaround)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: cargo clean --release --target ${{ matrix.target }} -p hyperlight-host
 
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
