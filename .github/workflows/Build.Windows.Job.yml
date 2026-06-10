@@ -32,6 +32,7 @@ jobs:
       # 1.93 pin is honored without duplicating the version in this workflow.
       - name: Surface toolchain file at repo root
         shell: bash
+        working-directory: ${{ github.workspace }}
         run: cp src/rust-toolchain.toml rust-toolchain.toml
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
