@@ -36,10 +36,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # actions-rust-lang/setup-rust-toolchain auto-reads rust-toolchain.toml
+      # from the repo root only. Surface src/rust-toolchain.toml there so the
+      # 1.93 pin is honored without duplicating the version in this workflow.
+      - name: Surface toolchain file at repo root
+        shell: bash
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          # Match src/rust-toolchain.toml — bump together.
-          toolchain: '1.93'
           target: ${{ matrix.target }}
           components: rustfmt, clippy
           override: false
