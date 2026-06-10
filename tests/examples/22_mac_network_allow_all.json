@@ -7,14 +7,14 @@
         "timeout": 30000
     },
     "filesystem": {
-        "readwritePaths": ["/tmp"]
+        "readwritePaths": [
+            "/tmp"
+        ]
     },
     "network": {
         "defaultPolicy": "allow"
     },
-    "experimental": {
-        "seatbelt": {
-            "mode": "exec"
-        }
+    "seatbelt": {
+        "mode": "exec"
     }
 }

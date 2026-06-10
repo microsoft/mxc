@@ -4,12 +4,14 @@
   "title": "MXC Configuration",
   "description": "Configuration schema for MXC container execution engine. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. The parser also accepts legacy fields not listed here during the migration period.",
   "type": "object",
-
   "properties": {
     "version": {
       "type": "string",
       "description": "MXC config schema version (semver). Current stable: '0.6.0-alpha'. Configs targeting this in-progress 0.7.0-dev schema should declare 'version: 0.7.0-alpha'.",
-      "examples": ["0.6.0-alpha", "0.7.0-alpha"]
+      "examples": [
+        "0.6.0-alpha",
+        "0.7.0-alpha"
+      ]
     },
     "containerId": {
       "type": "string",
@@ -31,19 +33,23 @@
         "bubblewrap"
       ],
       "default": "process",
-      "description": "Containment value to use for execution. Accepts both abstract intents ('process', 'vm') and concrete backends ('processcontainer', 'windows_sandbox', 'lxc', 'microvm', 'hyperlight', 'wslc', 'seatbelt', 'isolation_session', 'bubblewrap'). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities (e.g., 'process' resolves to ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS; 'vm' resolves to Windows Sandbox on Windows). 'lxc' is treated as a full Linux container and is only selected when explicitly requested. Note: 'microvm', 'windows_sandbox', 'wslc', 'seatbelt', 'isolation_session', and 'hyperlight' are experimental and require the --experimental CLI flag. 'hyperlight' and 'bubblewrap' have no per-backend configuration block; they share the common filesystem/network policy fields. The legacy aliases 'appcontainer' and 'macos_sandbox' are still accepted by the parser (with a deprecation log line) but are intentionally omitted from this enum so editors steer authors toward the canonical names."
+      "description": "Containment value to use for execution. Accepts both abstract intents ('process', 'vm') and concrete backends ('processcontainer', 'windows_sandbox', 'lxc', 'microvm', 'hyperlight', 'wslc', 'seatbelt', 'isolation_session', 'bubblewrap'). The native binary resolves abstract intents to a concrete backend at run time based on host capabilities (e.g., 'process' resolves to ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS; 'vm' resolves to Windows Sandbox on Windows). 'lxc' is treated as a full Linux container and is only selected when explicitly requested. Note: 'microvm', 'windows_sandbox', 'wslc', 'isolation_session', and 'hyperlight' are experimental and require the --experimental CLI flag. 'hyperlight' and 'bubblewrap' have no per-backend configuration block; they share the common filesystem/network policy fields. The legacy aliases 'appcontainer' and 'macos_sandbox' are still accepted by the parser (with a deprecation log line) but are intentionally omitted from this enum so editors steer authors toward the canonical names."
     },
-
     "phase": {
       "type": "string",
-      "enum": ["provision", "start", "exec", "stop", "deprovision"],
+      "enum": [
+        "provision",
+        "start",
+        "exec",
+        "stop",
+        "deprovision"
+      ],
       "description": "State-aware lifecycle phase. When present, the request is a state-aware request: 'sandboxId' is required for non-provision phases, and 'process' is required only for the 'exec' phase. When absent, the request is a one-shot request and 'process' is required."
     },
     "sandboxId": {
       "type": "string",
       "description": "Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases ('start', 'exec', 'stop', 'deprovision')."
     },
-
     "lifecycle": {
       "type": "object",
       "description": "Container lifecycle settings shared across all backends.",
@@ -60,11 +66,12 @@
         }
       }
     },
-
     "process": {
       "type": "object",
       "description": "Process execution settings. Required for one-shot requests and for the state-aware 'exec' phase; omitted for non-exec state-aware phases.",
-      "required": ["commandLine"],
+      "required": [
+        "commandLine"
+      ],
       "properties": {
         "commandLine": {
           "type": "string",
@@ -77,9 +84,16 @@
         },
         "env": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Environment variables as KEY=VALUE strings.",
-          "examples": [["MY_VAR=value", "PATH=/usr/bin"]]
+          "examples": [
+            [
+              "MY_VAR=value",
+              "PATH=/usr/bin"
+            ]
+          ]
         },
         "timeout": {
           "type": "integer",
@@ -89,32 +103,36 @@
         }
       }
     },
-
     "filesystem": {
       "type": "object",
       "description": "Filesystem access policy. Shared across all backends.",
       "properties": {
         "readwritePaths": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Paths the process can read and write."
         },
         "readonlyPaths": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Paths the process can read but not write."
         },
         "deniedPaths": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Paths the process cannot access at all."
         }
       }
     },
-
     "fallback": {
       "type": "object",
       "description": "Operator consent for host-impacting containment fallbacks. Each flag gates a specific fallback mechanism the runner may otherwise pick when the preferred primitive is unavailable. Defaults preserve the pre-fallback-section behavior (all permitted).",
@@ -122,35 +140,45 @@
         "allowDaclMutation": {
           "type": "boolean",
           "default": true,
-          "description": "When the BaseContainer API is absent and bfscfg.exe is unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). MODIFIES HOST FILESYSTEM SECURITY DESCRIPTORS — original DACLs are restored on exit. Set to false to refuse this fallback (the run will fail on machines that need Tier 3)."
+          "description": "When the BaseContainer API is absent and bfscfg.exe is unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). MODIFIES HOST FILESYSTEM SECURITY DESCRIPTORS \u2014 original DACLs are restored on exit. Set to false to refuse this fallback (the run will fail on machines that need Tier 3)."
         }
       }
     },
-
     "network": {
       "type": "object",
       "description": "Network access policy. Shared across all backends.",
       "properties": {
         "defaultPolicy": {
           "type": "string",
-          "enum": ["allow", "block"],
+          "enum": [
+            "allow",
+            "block"
+          ],
           "default": "block",
           "description": "Default network posture. Deny-by-default."
         },
         "enforcementMode": {
           "type": "string",
-          "enum": ["capabilities", "firewall", "both"],
+          "enum": [
+            "capabilities",
+            "firewall",
+            "both"
+          ],
           "default": "capabilities",
           "description": "How network policy is enforced."
         },
         "allowedHosts": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Enforced by 'lxc', 'processcontainer', 'bubblewrap', 'wslc', and 'hyperlight' containment backends."
         },
         "blockedHosts": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc', 'processcontainer', 'bubblewrap', 'wslc', and 'hyperlight' containment backends."
         },
         "allowLocalNetwork": {
@@ -171,7 +199,9 @@
                   "description": "Port of an external already running proxy on localhost."
                 }
               },
-              "required": ["localhost"],
+              "required": [
+                "localhost"
+              ],
               "additionalProperties": false
             },
             {
@@ -182,7 +212,9 @@
                   "description": "Use WXC's built-in test proxy server. Mutually exclusive with localhost."
                 }
               },
-              "required": ["builtinTestServer"],
+              "required": [
+                "builtinTestServer"
+              ],
               "additionalProperties": false
             },
             {
@@ -192,14 +224,15 @@
                   "description": "Full proxy URL including port (e.g., http://proxy.example.com:8080). Host and port are extracted from the URL."
                 }
               },
-              "required": ["url"],
+              "required": [
+                "url"
+              ],
               "additionalProperties": false
             }
           ]
         }
       }
     },
-
     "ui": {
       "type": "object",
       "description": "Cross-platform UI policy. Mapped from SandboxPolicy.ui by createConfigFromPolicy.",
@@ -211,7 +244,12 @@
         },
         "clipboard": {
           "type": "string",
-          "enum": ["none", "read", "write", "all"],
+          "enum": [
+            "none",
+            "read",
+            "write",
+            "all"
+          ],
           "default": "none",
           "description": "Clipboard access level."
         },
@@ -222,7 +260,6 @@
         }
       }
     },
-
     "processContainer": {
       "type": "object",
       "description": "ProcessContainer-specific settings. Used when containment is 'processcontainer'. The runner picks the legacy AppContainer implementation (which honors `capabilities` and `leastPrivilege`) or the newer BaseContainer implementation (which honors `ui`) at run time based on the host OS and the --experimental flag.",
@@ -234,7 +271,9 @@
         },
         "capabilities": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "AppContainer capabilities (e.g., 'internetClient', 'registryRead')."
         },
@@ -244,7 +283,12 @@
           "properties": {
             "isolation": {
               "type": "string",
-              "enum": ["desktop", "handles", "atoms", "container"],
+              "enum": [
+                "desktop",
+                "handles",
+                "atoms",
+                "container"
+              ],
               "default": "container",
               "description": "UI isolation level for the desktop."
             },
@@ -267,11 +311,13 @@
         }
       }
     },
-
     "lxc": {
       "type": "object",
       "description": "LXC-specific settings. Used when containment is 'lxc'.",
-      "required": ["distribution", "release"],
+      "required": [
+        "distribution",
+        "release"
+      ],
       "properties": {
         "distribution": {
           "type": "string",
@@ -283,7 +329,6 @@
         }
       }
     },
-
     "experimental": {
       "type": "object",
       "description": "Experimental features. Only active when --experimental is passed.",
@@ -328,12 +373,19 @@
               "type": "string",
               "default": "alpine:latest",
               "description": "Container image name (e.g., 'alpine:latest', 'python:3.12').",
-              "examples": ["alpine:latest", "python:3.12", "ubuntu:24.04"]
+              "examples": [
+                "alpine:latest",
+                "python:3.12",
+                "ubuntu:24.04"
+              ]
             },
             "imageTarPath": {
               "type": "string",
               "description": "Path to a local tar file to import as the container image. Supports both rootfs tars (from `docker export`) and Docker image archives (from `docker save`). When set, the image is imported from this file instead of pulling from a registry. The format is auto-detected: archives containing `manifest.json` are treated as Docker image format, archives with Linux root directories (bin/, etc/, usr/) are treated as rootfs tars, and unrecognized formats are rejected.",
-              "examples": ["C:\\images\\alpine.tar", "/home/user/images/alpine.tar"]
+              "examples": [
+                "C:\\images\\alpine.tar",
+                "/home/user/images/alpine.tar"
+              ]
             },
             "cpuCount": {
               "type": "integer",
@@ -374,51 +426,20 @@
                   },
                   "protocol": {
                     "type": "string",
-                    "enum": ["tcp", "udp"],
+                    "enum": [
+                      "tcp",
+                      "udp"
+                    ],
                     "default": "tcp",
                     "description": "Transport protocol for the mapping."
                   }
                 },
-                "required": ["windowsPort", "containerPort"],
+                "required": [
+                  "windowsPort",
+                  "containerPort"
+                ],
                 "additionalProperties": false
               }
-            }
-          }
-        },
-        "seatbelt": {
-          "type": "object",
-          "description": "macOS sandbox backend (experimental). Used when containment is 'seatbelt'.",
-          "properties": {
-            "profileOverride": {
-              "type": "string",
-              "description": "Optional override of the generated TinyScheme sandbox profile."
-            },
-            "guiAccess": {
-              "type": "boolean",
-              "default": false,
-              "description": "Allow the Mach IPC services that GUI applications need to draw windows, composite frames, resolve fonts, and register with the Dock. Without this, GUI apps are killed on launch."
-            },
-            "launchMethod": {
-              "type": "string",
-              "enum": ["exec", "open"],
-              "default": "exec",
-              "description": "How to launch the sandboxed process. 'exec' (default) uses sandbox_init + exec and works for third-party GUI apps (e.g. Alacritty). 'open' uses LaunchServices ('open -n -W -a Terminal') to satisfy Apple Launch Constraints, then applies the sandbox to the inner shell via sandbox-exec. Required for system apps like Terminal.app that enforce launch constraints."
-            },
-            "nestedPty": {
-              "type": "boolean",
-              "default": true,
-              "description": "Allow the inner process to allocate its own pseudo-terminals via posix_openpt (needed by tests, git, gh, REPLs and other tools that spawn a shell). Adds (allow pseudo-tty) and read/write/ioctl on /dev/ptmx. Defaults to true; set to false for the tightest possible sandbox when the inner command does not need to allocate new ttys."
-            },
-            "keychainAccess": {
-              "type": "boolean",
-              "default": false,
-              "description": "Allow the inner process to use the macOS Keychain (e.g. via keytar or Security.framework) end-to-end. Adds Mach lookup for com.apple.SecurityServer, com.apple.securityd, com.apple.trustd, com.apple.ocspd, com.apple.cfprefsd.daemon, com.apple.xpcd and the com.apple.lsd.* family; read access to /private/var/db/mds and /private/var/protected/trustd; and read+write access to ~/Library/Keychains and /private/var/folders (XPC cache). System keychain stores under /Library and /System/Library are already covered by the baseline read-only allows. Defaults to false; opt in only when the inner workload genuinely needs Keychain access."
-            },
-            "extraMachLookups": {
-              "type": "array",
-              "items": { "type": "string" },
-              "default": [],
-              "description": "Caller-provided Mach service global-names the inner process may resolve. Each entry is emitted into the generated TinyScheme profile as `(allow mach-lookup (global-name \"...\"))`. Use this as a targeted escape hatch when a workload needs a Mach service the baseline profile does not already grant, without resorting to 'profileOverride' to replace the whole profile."
             }
           }
         },
@@ -428,7 +449,12 @@
           "properties": {
             "configurationId": {
               "type": "string",
-              "enum": ["small", "medium", "large", "composable"],
+              "enum": [
+                "small",
+                "medium",
+                "large",
+                "composable"
+              ],
               "default": "composable",
               "description": "IsoSession configuration ID for one-shot requests. For state-aware requests, place this under 'start.configurationId' instead. The schema enforces this enum; the runtime additionally accepts unknown values and downgrades them to 'composable' with a warning, for back-compat."
             },
@@ -439,7 +465,10 @@
                 "user": {
                   "type": "object",
                   "description": "Optional Entra credentials. When supplied, provisioning uses the Entra identity for the sandbox; the same 'user' must be supplied at start.",
-                  "required": ["upn", "wamToken"],
+                  "required": [
+                    "upn",
+                    "wamToken"
+                  ],
                   "properties": {
                     "upn": {
                       "type": "string",
@@ -459,14 +488,22 @@
               "properties": {
                 "configurationId": {
                   "type": "string",
-                  "enum": ["small", "medium", "large", "composable"],
+                  "enum": [
+                    "small",
+                    "medium",
+                    "large",
+                    "composable"
+                  ],
                   "default": "composable",
                   "description": "IsoSession configuration ID. The schema enforces this enum; the runtime additionally accepts unknown values and downgrades them to 'composable' with a warning, for back-compat."
                 },
                 "user": {
                   "type": "object",
                   "description": "Required when the sandbox was provisioned with a 'user' bundle; rejected otherwise. When required, 'upn' must match the UPN supplied at provision (case-insensitive).",
-                  "required": ["upn", "wamToken"],
+                  "required": [
+                    "upn",
+                    "wamToken"
+                  ],
                   "properties": {
                     "upn": {
                       "type": "string",
@@ -491,75 +528,244 @@
           }
         }
       }
+    },
+    "seatbelt": {
+      "type": "object",
+      "description": "macOS Seatbelt sandbox backend configuration (top-level). Used when containment is 'seatbelt'.",
+      "properties": {
+        "profileOverride": {
+          "type": "string",
+          "description": "Optional override of the generated TinyScheme sandbox profile."
+        },
+        "guiAccess": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow the Mach IPC services that GUI applications need to draw windows, composite frames, resolve fonts, and register with the Dock. Without this, GUI apps are killed on launch."
+        },
+        "launchMethod": {
+          "type": "string",
+          "enum": [
+            "exec",
+            "open"
+          ],
+          "default": "exec",
+          "description": "How to launch the sandboxed process. 'exec' (default) uses sandbox_init + exec and works for third-party GUI apps (e.g. Alacritty). 'open' uses LaunchServices ('open -n -W -a Terminal') to satisfy Apple Launch Constraints, then applies the sandbox to the inner shell via sandbox-exec. Required for system apps like Terminal.app that enforce launch constraints."
+        },
+        "nestedPty": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the inner process to allocate its own pseudo-terminals via posix_openpt (needed by tests, git, gh, REPLs and other tools that spawn a shell). Adds (allow pseudo-tty) and read/write/ioctl on /dev/ptmx. Defaults to true; set to false for the tightest possible sandbox when the inner command does not need to allocate new ttys."
+        },
+        "keychainAccess": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow the inner process to use the macOS Keychain (e.g. via keytar or Security.framework) end-to-end. Adds Mach lookup for com.apple.SecurityServer, com.apple.securityd, com.apple.trustd, com.apple.ocspd, com.apple.cfprefsd.daemon, com.apple.xpcd and the com.apple.lsd.* family; read access to /private/var/db/mds and /private/var/protected/trustd; and read+write access to ~/Library/Keychains and /private/var/folders (XPC cache). System keychain stores under /Library and /System/Library are already covered by the baseline read-only allows. Defaults to false; opt in only when the inner workload genuinely needs Keychain access."
+        },
+        "extraMachLookups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Caller-provided Mach service global-names the inner process may resolve. Each entry is emitted into the generated TinyScheme profile as `(allow mach-lookup (global-name \"...\"))`. Use this as a targeted escape hatch when a workload needs a Mach service the baseline profile does not already grant, without resorting to 'profileOverride' to replace the whole profile."
+        }
+      }
     }
   },
-
   "allOf": [
     {
       "$comment": "Enforce single backend section: each per-backend section requires the matching `containment` value (concrete backend or matching abstract intent). Requiring `containment` to be present when a backend section is provided also rules out the ambiguous case where two backend sections appear with no `containment` set.",
-      "if": { "required": ["processContainer"], "not": { "required": ["phase"] } },
+      "if": {
+        "required": [
+          "processContainer"
+        ],
+        "not": {
+          "required": [
+            "phase"
+          ]
+        }
+      },
       "then": {
-        "required": ["containment"],
-        "properties": { "containment": { "enum": ["processcontainer", "process"] } }
+        "required": [
+          "containment"
+        ],
+        "properties": {
+          "containment": {
+            "enum": [
+              "processcontainer",
+              "process"
+            ]
+          }
+        }
       }
     },
     {
       "$comment": "`appContainer` is the deprecated alias for `processContainer`; same containment values are valid.",
-      "if": { "required": ["appContainer"], "not": { "required": ["phase"] } },
+      "if": {
+        "required": [
+          "appContainer"
+        ],
+        "not": {
+          "required": [
+            "phase"
+          ]
+        }
+      },
       "then": {
-        "required": ["containment"],
-        "properties": { "containment": { "enum": ["processcontainer", "process"] } }
-      }
-    },
-    {
-      "if": { "required": ["lxc"], "not": { "required": ["phase"] } },
-      "then": {
-        "required": ["containment"],
-        "properties": { "containment": { "enum": ["lxc"] } }
+        "required": [
+          "containment"
+        ],
+        "properties": {
+          "containment": {
+            "enum": [
+              "processcontainer",
+              "process"
+            ]
+          }
+        }
       }
     },
     {
       "if": {
-        "required": ["experimental"],
-        "not": { "required": ["phase"] },
-        "properties": { "experimental": { "required": ["windows_sandbox"] } }
+        "required": [
+          "lxc"
+        ],
+        "not": {
+          "required": [
+            "phase"
+          ]
+        }
       },
       "then": {
-        "required": ["containment"],
-        "properties": { "containment": { "enum": ["windows_sandbox", "vm"] } }
+        "required": [
+          "containment"
+        ],
+        "properties": {
+          "containment": {
+            "enum": [
+              "lxc"
+            ]
+          }
+        }
       }
     },
     {
       "if": {
-        "required": ["experimental"],
-        "not": { "required": ["phase"] },
-        "properties": { "experimental": { "required": ["wslc"] } }
+        "required": [
+          "seatbelt"
+        ],
+        "not": {
+          "required": [
+            "phase"
+          ]
+        }
       },
       "then": {
-        "required": ["containment"],
-        "properties": { "containment": { "enum": ["wslc"] } }
+        "required": [
+          "containment"
+        ],
+        "properties": {
+          "containment": {
+            "enum": [
+              "seatbelt",
+              "process"
+            ]
+          }
+        }
       }
     },
     {
       "if": {
-        "required": ["experimental"],
-        "not": { "required": ["phase"] },
-        "properties": { "experimental": { "required": ["seatbelt"] } }
+        "required": [
+          "experimental"
+        ],
+        "not": {
+          "required": [
+            "phase"
+          ]
+        },
+        "properties": {
+          "experimental": {
+            "required": [
+              "windows_sandbox"
+            ]
+          }
+        }
       },
       "then": {
-        "required": ["containment"],
-        "properties": { "containment": { "enum": ["seatbelt", "process"] } }
+        "required": [
+          "containment"
+        ],
+        "properties": {
+          "containment": {
+            "enum": [
+              "windows_sandbox",
+              "vm"
+            ]
+          }
+        }
       }
     },
     {
       "if": {
-        "required": ["experimental"],
-        "not": { "required": ["phase"] },
-        "properties": { "experimental": { "required": ["isolation_session"] } }
+        "required": [
+          "experimental"
+        ],
+        "not": {
+          "required": [
+            "phase"
+          ]
+        },
+        "properties": {
+          "experimental": {
+            "required": [
+              "wslc"
+            ]
+          }
+        }
       },
       "then": {
-        "required": ["containment"],
-        "properties": { "containment": { "enum": ["isolation_session"] } }
+        "required": [
+          "containment"
+        ],
+        "properties": {
+          "containment": {
+            "enum": [
+              "wslc"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "experimental"
+        ],
+        "not": {
+          "required": [
+            "phase"
+          ]
+        },
+        "properties": {
+          "experimental": {
+            "required": [
+              "isolation_session"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "containment"
+        ],
+        "properties": {
+          "containment": {
+            "enum": [
+              "isolation_session"
+            ]
+          }
+        }
       }
     }
   ]

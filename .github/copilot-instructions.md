@@ -153,7 +153,7 @@ Per-backend guides:
 - `docs/base-process-container/guide.md` — process container (Windows AppContainer / BaseContainer)
 - `docs/base-process-container/UIPolicy_Schema.md` — UI policy schema (JOB_OBJECT_UILIMIT_* mappings)
 - `docs/lxc-support/lxc-backend.md` — LXC container backend (Linux)
-- `docs/macos-support/seatbelt-backend.md` — macOS Seatbelt backend (experimental)
+- `docs/macos-support/seatbelt-backend.md` — macOS Seatbelt backend
 - `docs/windows-sandbox/windows-sandbox.md` / `docs/windows-sandbox/windows-sandbox-reference.md` — Windows Sandbox backend
 - `docs/wsl/wsl-container-getting-started.md` / `docs/wsl/wsl-container-support-plan.md` — WSL Container (WSLC SDK)
 - `docs/nanvix-microvm/nanvix.md` / `docs/nanvix-microvm/nanvix-integration-plan.md` — MicroVM via NanVix

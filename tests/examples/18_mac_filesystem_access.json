@@ -7,15 +7,17 @@
         "timeout": 15000
     },
     "filesystem": {
-        "readwritePaths": ["/tmp"],
-        "deniedPaths": ["/Users"]
+        "readwritePaths": [
+            "/tmp"
+        ],
+        "deniedPaths": [
+            "/Users"
+        ]
     },
     "network": {
         "defaultPolicy": "block"
     },
-    "experimental": {
-        "seatbelt": {
-            "mode": "exec"
-        }
+    "seatbelt": {
+        "mode": "exec"
     }
 }

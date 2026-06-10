@@ -8,15 +8,17 @@
         "timeout": 10000
     },
     "filesystem": {
-        "readwritePaths": ["/tmp"],
-        "readonlyPaths": ["/opt/homebrew"]
+        "readwritePaths": [
+            "/tmp"
+        ],
+        "readonlyPaths": [
+            "/opt/homebrew"
+        ]
     },
     "network": {
         "defaultPolicy": "block"
     },
-    "experimental": {
-        "seatbelt": {
-            "mode": "exec"
-        }
+    "seatbelt": {
+        "mode": "exec"
     }
 }

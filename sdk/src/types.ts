@@ -107,7 +107,7 @@ export type ContainmentBackend =
  * Containment values (abstract intent or concrete backend) that require
  * the `--experimental` flag.
  */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight', 'wslc', 'seatbelt', 'isolation_session'];
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight', 'wslc', 'isolation_session'];
 
 /**
  * Clipboard access policy levels
@@ -276,9 +276,9 @@ export interface ContainerConfig {
   experimental?: {
     /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
-    /** macOS sandbox configuration (macOS only) */
-    seatbelt?: SeatbeltConfig;
   };
+  /** macOS Seatbelt sandbox configuration (macOS only) */
+  seatbelt?: SeatbeltConfig;
   /** Cross-platform UI configuration */
   ui?: UiConfig;
 }
@@ -348,8 +348,8 @@ export interface LxcConfig {
 }
 
 /**
- * macOS Seatbelt sandbox configuration (experimental). Used under
- * `experimental.seatbelt` when containment is `'seatbelt'`.
+ * macOS Seatbelt sandbox configuration. Used under the top-level
+ * `seatbelt` key when `containment == "seatbelt"`.
  */
 export interface SeatbeltConfig {
   /**

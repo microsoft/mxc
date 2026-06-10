@@ -127,7 +127,7 @@ force a particular backend.
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
-| `"seatbelt"` | macOS sandbox isolation (Seatbelt; experimental) |
+| `"seatbelt"` | macOS sandbox isolation (Seatbelt) |
 | `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces (experimental) |
 
 Only the backend section matching the selected `containment` value is used;

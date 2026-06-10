@@ -122,18 +122,15 @@ function buildLinuxProcessConfig(
  *
  * The seatbelt backend's `sandbox-exec` reads a TinyScheme profile
  * generated server-side by `seatbelt_common::profile_builder`, so the SDK
- * only needs to set the containment type and the mode selector under the
- * experimental block — the policy fields on `ContainerConfig` (filesystem /
+ * only needs to set the containment type and ensure the top-level `seatbelt`
+ * config block exists — the policy fields on `ContainerConfig` (filesystem /
  * network / ui) drive the actual rules.
  */
 function buildDarwinProcessConfig(
     config: ContainerConfig,
 ): ContainerConfig {
     config.containment = 'seatbelt';
-    config.experimental = {
-        ...(config.experimental ?? {}),
-        seatbelt: {},
-    };
+    config.seatbelt = config.seatbelt ?? {};
     return config;
 }
 

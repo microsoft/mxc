@@ -7,16 +7,20 @@
         "timeout": 45000
     },
     "filesystem": {
-        "readwritePaths": ["/tmp"],
-        "deniedPaths": ["/Users"]
+        "readwritePaths": [
+            "/tmp"
+        ],
+        "deniedPaths": [
+            "/Users"
+        ]
     },
     "network": {
         "defaultPolicy": "block",
-        "allowedHosts": ["api.github.com"]
+        "allowedHosts": [
+            "api.github.com"
+        ]
     },
-    "experimental": {
-        "seatbelt": {
-            "mode": "exec"
-        }
+    "seatbelt": {
+        "mode": "exec"
     }
 }
