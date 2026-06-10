@@ -13,11 +13,7 @@ jobs:
           - os_label: windows
             runner: windows-latest
           - os_label: linux
-            # Pin to 22.04: classic LXC on ubuntu-24.04 is partially broken
-            # (Canonical deprecated `lxc` in favor of Incus/LXD), and lxc-start
-            # aborts before reaching RUNNING. ADO's ubuntu-latest is still
-            # 22.04 today, so the ADO template doesn't need to pin.
-            runner: ubuntu-22.04
+            runner: ubuntu-latest
           - os_label: macos
             runner: macos-14
     runs-on: ${{ matrix.runner }}
@@ -59,6 +55,21 @@ jobs:
         with:
           packages: lxc lxc-utils dnsmasq-base bubblewrap
           version: 1.1
+
+      # Ubuntu 24.04 ships AppArmor's unprivileged-userns restriction enabled
+      # by default, and the apt-cache restore path skips the lxc postinstall
+      # hook that loads /etc/apparmor.d/lxc-containers — so lxc-start aborts
+      # before reaching RUNNING. Disable the restriction and force-load the
+      # LXC profile.
+      - name: Configure AppArmor for LXC
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          if [ -f /etc/apparmor.d/lxc-containers ]; then
+            sudo apparmor_parser -r /etc/apparmor.d/lxc-containers || true
+          fi
 
       - name: Restore execute permission on mxc-exec-mac
         if: matrix.os_label == 'macos'
