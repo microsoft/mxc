@@ -489,6 +489,17 @@
               "description": "State-aware: deprovision-phase configuration. No fields defined yet."
             }
           }
+        },
+        "telemetry": {
+          "type": "object",
+          "description": "Telemetry configuration (experimental). When enabled, emits TraceLogging ETW events for execution observability.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Explicit telemetry override. true = force on, false = force off. Default is off."
+            }
+          }
         }
       }
     }

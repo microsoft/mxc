@@ -46,3 +46,15 @@ pathrel_test.exe
 
 # Claude
 .claude/
+
+# Private telemetry config (restored from internal NuGet feed at build time).
+# The Microsoft.Telemetry.Inbox.Native package provides MicrosoftTelemetry.h
+# which contains the real Microsoft telemetry group GUID — must never be
+# committed. See docs/telemetry-wil-integration.md for details.
+build/telemetry/packages/
+
+# Private EULA override (injected at npm-publish time via MXC_LICENSE_OVERRIDE).
+# The private EULA includes the Section 2 DATA clause for telemetry disclosure
+# and must never be committed. See docs/telemetry-wil-integration.md for details.
+sdk/LICENSE.md.public
+build/eula/

@@ -219,6 +219,24 @@ wxc-exec.exe --debug config.json
 
 See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 
+## Telemetry (Experimental)
+
+MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution` and `MXC.Error`) are emitted to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
+
+Telemetry is **experimental** and requires:
+1. The `--experimental` CLI flag
+2. `"experimental": { "telemetry": { "enabled": true } }` in the JSON config
+
+On non-Windows platforms, all telemetry functions are no-ops.
+
+### Data collection
+
+This project may collect usage data and send it to Microsoft to help improve our products and services. Note, however, that **no data collection is performed when using your private builds** — the public source code ships with empty TraceLogging provider group macros that do not route events to any Microsoft collection pipeline.
+
+No PII is collected. Events contain only execution metrics (duration, backend type, exit code) and error context (phase, sanitized message). If you use the SDK to build applications, you are responsible for providing appropriate telemetry notices to your own users.
+
+Privacy information can be found at https://privacy.microsoft.com.
+
 ## Documentation
 
 | Document | Description |
@@ -235,6 +253,7 @@ See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 | [docs/macos-support/seatbelt-backend.md](docs/macos-support/seatbelt-backend.md) | Seatbelt backend (macOS) |
 | [docs/windows-sandbox/windows-sandbox.md](docs/windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
 | [docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md](docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md) | State-aware sandbox lifecycle API |
+| [docs/telemetry-wil-integration.md](docs/telemetry-wil-integration.md) | TraceLogging telemetry architecture |
 
 ## Contributing
 

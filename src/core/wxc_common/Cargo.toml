@@ -22,6 +22,7 @@ windows = { workspace = true }
 windows-core = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }
+mxc_telemetry = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
