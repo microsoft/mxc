@@ -46,6 +46,12 @@ jobs:
         with:
           workspaces: src -> target
           key: ${{ matrix.target }}
+          # Hyperlight's hyperlight_surrogate crate writes its compiled surrogate
+          # to a non-standard target/<target>/release/build/hls/... path. Without
+          # this hint, rust-cache can restore hyperlight-host's compiled artifacts
+          # without the surrogate output, causing the RustEmbed proc-macro to fail.
+          cache-directories: |
+            src/target/${{ matrix.target }}/release/build/hls
 
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
