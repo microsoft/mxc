@@ -13,8 +13,13 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
 (Microsoft engineers can consult the internal "Central Feed Services" documentation for setup details; external readers can treat the centralized feed as a Microsoft-internal Azure Artifacts mirror of the public registries.)
 
 ### Production Build and Release pipelines
-- We use Azure pipelines for official builds with signing and public releases.
+- The ADO pipeline is the official build pipeline that signs the binaries and
+  drives public releases. It runs on merge to `main` and on a nightly schedule.
 
 ### PR Pipelines
-- We use github actions but will be consolidated to use the azure pipelines which
-  contain governance tasks, like binary scanning etc in the future.
+- GitHub Actions runs the PR validation build automatically on every pull
+  request â€” it mirrors the ADO build stages on native hardware for faster
+  developer iteration.
+- The ADO pipeline can also be triggered on PRs via `/azp run`
+  (see [docs/pull-requests.md](../docs/pull-requests.md)) when reviewers want
+  to run the official build against a change before merge.
