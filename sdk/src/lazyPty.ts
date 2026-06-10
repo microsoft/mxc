@@ -19,5 +19,20 @@ let cached: typeof import('node-pty') | undefined;
  * synchronous.
  */
 export function loadPty(): typeof import('node-pty') {
-  return (cached ??= require('node-pty') as typeof import('node-pty'));
+  if (cached) {
+    return cached;
+  }
+  try {
+    cached = require('node-pty') as typeof import('node-pty');
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e?.code === 'MODULE_NOT_FOUND' && /'node-pty'/.test(e.message)) {
+      throw new Error(
+        "PTY mode requires the optional peer dependency 'node-pty', which is not " +
+          'installed. Install it (e.g. `npm install node-pty`) or spawn with `usePty: false`.',
+      );
+    }
+    throw err;
+  }
+  return cached;
 }

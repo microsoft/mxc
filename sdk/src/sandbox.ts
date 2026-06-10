@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import type pty from 'node-pty';
+import type * as pty from 'node-pty';
 import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";

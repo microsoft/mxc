@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `getPlatformSupport()` now reports `uiCapabilities` on Windows when the
   native probe can determine which UI restrictions the host can enforce.
 
-## [0.6.2]
+## [0.7.0]
 
 ### Changed
 

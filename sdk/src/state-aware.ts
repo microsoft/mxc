@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import type pty from 'node-pty';
+import type * as pty from 'node-pty';
 import { resolveBinaryAndCommonArgs } from './helper.js';
 import { loadPty } from './lazyPty.js';
 import { SandboxSpawnOptions } from './sandbox.js';
