@@ -515,8 +515,7 @@ const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
 /// experimental backend sections that don't match the selected
 /// `containment`. Add a new entry when promoting a backend to a top-level
 /// section or graduating one from experimental.
-const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] =
-    &["windows_sandbox", "wslc", "seatbelt", "isolation_session"];
+const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
 
 /// Returns `true` if `version` is a BaseContainer-era schema version (>= 0.5.0).
 ///
