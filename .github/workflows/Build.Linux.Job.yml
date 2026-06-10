@@ -43,7 +43,8 @@ jobs:
           workspaces: |
             src -> target
             src/core/lxc -> target
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}-v2
+          cache-on-failure: false
 
       - name: Build lxc
         run: cargo build --locked --release --target ${{ matrix.target }}

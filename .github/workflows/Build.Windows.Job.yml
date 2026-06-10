@@ -45,11 +45,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src -> target
-          key: ${{ matrix.target }}
-          # Hyperlight's hyperlight_surrogate crate writes its compiled surrogate
-          # to a non-standard target/<target>/release/build/hls/... path. Without
-          # this hint, rust-cache can restore hyperlight-host's compiled artifacts
-          # without the surrogate output, causing the RustEmbed proc-macro to fail.
+          key: ${{ matrix.target }}-v2
+          # Don't persist cache from failed builds — Hyperlight's nested-cargo
+          # build script can leave the target dir half-populated and poison
+          # subsequent restores.
+          cache-on-failure: false
+          # Hyperlight's hyperlight_surrogate writes to a non-standard
+          # target/<target>/release/build/hls/... path that rust-cache's default
+          # include rules can drop.
           cache-directories: |
             src/target/${{ matrix.target }}/release/build/hls
 

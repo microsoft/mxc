@@ -32,7 +32,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src -> target
-          key: aarch64-apple-darwin
+          key: aarch64-apple-darwin-v2
+          cache-on-failure: false
 
       # Mac uses package selection rather than feature selection — the
       # workspace has Windows-only crates that won't compile here.

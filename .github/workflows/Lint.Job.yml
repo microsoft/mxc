@@ -54,7 +54,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.working-directory }} -> target
-          key: lint-${{ matrix.target }}
+          key: lint-${{ matrix.target }}-v2
+          cache-on-failure: false
+          # See Build.Windows.Job.yml — same hyperlight surrogate cache hint.
+          cache-directories: |
+            src/target/${{ matrix.target }}/release/build/hls
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
