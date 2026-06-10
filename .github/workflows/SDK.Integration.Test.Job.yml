@@ -23,6 +23,9 @@ jobs:
     env:
       MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
       MXC_SKIP_LXC_NETWORK_TESTS: '1'
+      # Classic LXC is unreliable on the GHA ubuntu-latest (24.04) runner; full
+      # LXC coverage runs in the ADO pipeline on merge to main and nightly.
+      MXC_SKIP_LXC_TESTS: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -49,27 +52,12 @@ jobs:
       - name: npm run build
         run: npm run build
 
-      - name: Install LXC + bubblewrap (Linux only, cached)
+      - name: Install bubblewrap (Linux only, cached)
         if: matrix.os_label == 'linux'
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: lxc lxc-utils dnsmasq-base bubblewrap
-          version: 1.1
-
-      # Ubuntu 24.04 ships AppArmor's unprivileged-userns restriction enabled
-      # by default, and the apt-cache restore path skips the lxc postinstall
-      # hook that loads /etc/apparmor.d/lxc-containers — so lxc-start aborts
-      # before reaching RUNNING. Disable the restriction and force-load the
-      # LXC profile.
-      - name: Configure AppArmor for LXC
-        if: matrix.os_label == 'linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          if [ -f /etc/apparmor.d/lxc-containers ]; then
-            sudo apparmor_parser -r /etc/apparmor.d/lxc-containers || true
-          fi
+          packages: bubblewrap
+          version: 1.2
 
       - name: Restore execute permission on mxc-exec-mac
         if: matrix.os_label == 'macos'
@@ -79,7 +67,8 @@ jobs:
           BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
           if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found" && exit 1; fi
 
-      # Linux needs root for LXC; `sudo -E` preserves the env vars above.
+      # Linux needs root for Bubblewrap unprivileged-userns paths; `sudo -E`
+      # preserves the env vars above.
       - name: npm test
         shell: bash
         run: |
@@ -88,34 +77,3 @@ jobs:
           else
             npm test
           fi
-
-      - name: LXC diagnostics on failure
-        if: failure() && matrix.os_label == 'linux'
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: |
-          set +e
-          echo "=== AppArmor status ==="
-          sudo aa-status 2>&1 | head -20
-          echo
-          echo "=== AppArmor profiles matching lxc ==="
-          sudo aa-status 2>&1 | grep -i lxc || echo "(no lxc profile loaded)"
-          echo
-          echo "=== /var/lib/lxc ==="
-          sudo ls -la /var/lib/lxc/ 2>&1
-          echo
-          echo "=== Search anywhere for lxc-probe logs/dirs ==="
-          sudo find / -name 'lxc-probe*' 2>/dev/null | head -50
-          echo
-          echo "=== Any .log under /tmp/mxc* or /tmp/lxc* or /tmp/wxc* ==="
-          sudo find /tmp -maxdepth 4 \( -name '*.log' -o -name 'lxc.conf' \) 2>/dev/null | head -80 | while read -r f; do
-            echo "--- $f ---"
-            sudo tail -50 "$f" 2>&1
-          done
-          echo
-          echo "=== journalctl tail for apparmor + audit ==="
-          sudo journalctl -k --since '5 minutes ago' --no-pager 2>&1 | grep -iE 'apparmor|denied|lxc' | tail -50
-          echo
-          echo "=== dmesg tail ==="
-          sudo dmesg 2>&1 | tail -100
-          true
