@@ -88,3 +88,26 @@ jobs:
           else
             npm test
           fi
+
+      - name: LXC diagnostics on failure
+        if: failure() && matrix.os_label == 'linux'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "=== AppArmor status ==="
+          sudo aa-status 2>&1 | head -50 || true
+          echo
+          echo "=== lxc-checkconfig ==="
+          sudo lxc-checkconfig 2>&1 || true
+          echo
+          echo "=== /var/lib/lxc ==="
+          sudo ls -la /var/lib/lxc/ 2>&1 || true
+          echo
+          echo "=== LXC log files ==="
+          sudo find /var/lib/lxc /var/log/lxc /tmp -maxdepth 5 -name '*.log' 2>/dev/null | while read -r f; do
+            echo "--- $f ---"
+            sudo tail -40 "$f"
+          done
+          echo
+          echo "=== dmesg tail ==="
+          sudo dmesg | tail -80 || true
