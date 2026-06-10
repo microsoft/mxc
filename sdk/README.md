@@ -8,6 +8,15 @@
 npm install @microsoft/mxc-sdk
 ```
 
+`node-pty` is an **optional peer dependency**, loaded lazily only when you spawn in
+PTY mode (`spawnSandbox`, `spawnSandboxAsync`, `execInSandbox`, or
+`spawnSandboxFromConfig` with the default `usePty: true`). Pipe-only consumers
+(`usePty: false`) don't need it; if you use PTY mode, install it alongside the SDK:
+
+```bash
+npm install node-pty
+```
+
 ```typescript
 import {
   spawnSandboxFromConfig, createConfigFromPolicy,
