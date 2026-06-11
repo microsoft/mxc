@@ -57,6 +57,10 @@ parameters:
     type: boolean
     default: false
 
+variables:
+  - name: NEXTEST_NO_TESTS
+    value: pass
+
 extends:
   template: v1/1ES.Unofficial.PipelineTemplate.yml@1ESPipelineTemplates
   parameters:

@@ -32,6 +32,8 @@ parameters:
 variables:
   # Variable group managed in Dart — see the pipeline's variable group list.
   - group: MXC-ESRP-Signing
+  - name: NEXTEST_NO_TESTS
+    value: pass
 
 extends:
   template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates

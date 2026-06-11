@@ -24,10 +24,6 @@ parameters:
       signCertName: ''
       clientId: ''
 
-variables:
-  - name: NEXTEST_NO_TESTS
-    value: pass
-
 stages:
 - stage: Build_Binaries
   displayName: 'Build Executables'
