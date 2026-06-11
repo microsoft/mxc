@@ -69,7 +69,7 @@ extends:
     - ES365AIMigrationTooling
 
     stages:
-    - template: .azure-pipelines/1ES.Build.Stages.yml@self
+    - template: 1ES.Build.Stages.yml@self
       parameters:
         isOfficialBuild: false
         debug: ${{ parameters.debug }}
