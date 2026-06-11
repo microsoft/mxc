@@ -217,12 +217,35 @@ pub fn spawn_runner(
     ensure_host_supported()?;
     match &request.containment {
         ContainmentBackend::Seatbelt => spawn_seatbelt(request, logger),
+        ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc library does not yet support streaming for the '{}' backend",
             other.wire_name()
         ))),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_bubblewrap(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use wxc_common::sandbox_process::StreamingRunner;
+    let mut runner = bwrap_common::bwrap_runner::BubblewrapScriptRunner::new();
+    runner
+        .spawn_streaming(request, logger)
+        .map_err(|resp| MxcError::backend_error(resp.error_message))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_bubblewrap(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    Err(MxcError::unsupported_containment(
+        "Bubblewrap is only available on Linux",
+    ))
 }
 
 #[cfg(target_os = "macos")]

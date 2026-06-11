@@ -84,10 +84,9 @@ The handle is modelled on [`std::process::Child`]:
   plus captured output. With no streams taken, `spawn_sandbox(..).wait()`
   behaves like a run-to-completion capture.
 
-Streaming is implemented for **Seatbelt (macOS)** and **Windows
-ProcessContainer (AppContainer + BaseContainer)**. Linux/Bubblewrap streaming
-is not implemented yet and returns [`MxcError::unsupported_containment`] from
-`spawn_sandbox`.
+Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**, and
+**Windows ProcessContainer (AppContainer + BaseContainer)** — i.e. every
+backend the library supports.
 
 ## Supported backends
 
