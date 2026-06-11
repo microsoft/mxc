@@ -1,0 +1,305 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+  "title": "MXC Configuration",
+  "description": "Configuration schema for MXC container execution engine. Defines the stable, non-experimental surface for one-shot sandbox execution requests. The parser accepts a superset (legacy fields, experimental backends, the experimental.* block, state-aware sandbox lifecycle); validate against the current dev schema if your config uses any of those.",
+  "type": "object",
+
+  "required": ["process"],
+
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "MXC config schema version (semver). Current: '0.7.0-alpha'.",
+      "examples": ["0.7.0-alpha"]
+    },
+    "containerId": {
+      "type": "string",
+      "description": "Externally assigned container identifier."
+    },
+    "containment": {
+      "type": "string",
+      "enum": ["process", "processcontainer", "lxc", "bubblewrap", "seatbelt"],
+      "default": "process",
+      "description": "Containment backend to use for execution. 'process' is the cross-platform abstract intent; the binary resolves it per-OS at runtime (Windows → processcontainer; Linux → bubblewrap; macOS → seatbelt). Concrete backends in this stable enum: 'processcontainer' (Windows); 'bubblewrap' (default) and 'lxc' on Linux; 'seatbelt' (macOS). To use experimental concrete backends ('windows_sandbox', 'wslc', 'microvm', 'isolation_session', 'hyperlight') or the abstract 'vm' intent, refer to the current dev schema."
+    },
+
+    "lifecycle": {
+      "type": "object",
+      "description": "Container lifecycle settings shared across all backends.",
+      "properties": {
+        "destroyOnExit": {
+          "type": "boolean",
+          "default": true,
+          "description": "Destroy the container after execution completes."
+        },
+        "preservePolicy": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, retain filesystem and network policies after execution. If false (default), policies are cleaned up on exit."
+        }
+      }
+    },
+
+    "process": {
+      "type": "object",
+      "description": "Process execution settings.",
+      "required": ["commandLine"],
+      "properties": {
+        "commandLine": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Complete command line to execute (e.g., \"python3 app.py\")."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for the process."
+        },
+        "env": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Environment variables as KEY=VALUE strings.",
+          "examples": [["MY_VAR=value", "PATH=/usr/bin"]]
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Execution timeout in milliseconds. 0 = no timeout (infinite)."
+        }
+      }
+    },
+
+    "filesystem": {
+      "type": "object",
+      "description": "Filesystem access policy. Shared across all backends.",
+      "properties": {
+        "readwritePaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Paths the process can read and write."
+        },
+        "readonlyPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Paths the process can read but not write."
+        },
+        "deniedPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Paths the process cannot access at all."
+        }
+      }
+    },
+
+    "fallback": {
+      "type": "object",
+      "description": "Operator consent for host-impacting containment fallbacks. Each flag gates a specific fallback mechanism the runner may otherwise pick when the preferred primitive is unavailable. Defaults preserve the pre-fallback-section behavior (all permitted).",
+      "properties": {
+        "allowDaclMutation": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the BaseContainer API is absent and bfscfg.exe is unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). MODIFIES HOST FILESYSTEM SECURITY DESCRIPTORS — original DACLs are restored on exit. Set to false to refuse this fallback (the run will fail on machines that need Tier 3)."
+        }
+      }
+    },
+
+    "network": {
+      "type": "object",
+      "description": "Network access policy. Shared across all backends.",
+      "properties": {
+        "defaultPolicy": {
+          "type": "string",
+          "enum": ["allow", "block"],
+          "default": "block",
+          "description": "Default network posture. Deny-by-default since SDK 0.3.0 (#256) — wxc-exec is the trust boundary and treats absent or unrecognized values as 'block' regardless of declared schema version. Set explicitly to 'allow' to opt back into outbound-open posture."
+        },
+        "enforcementMode": {
+          "type": "string",
+          "enum": ["capabilities", "firewall", "both"],
+          "default": "capabilities",
+          "description": "How network policy is enforced."
+        },
+        "allowedHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Enforced by 'lxc', 'processcontainer', and 'bubblewrap' (and additional experimental backends; see the current dev schema)."
+        },
+        "blockedHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc', 'processcontainer', and 'bubblewrap' (and additional experimental backends; see the current dev schema)."
+        },
+        "allowLocalNetwork": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, the sandboxed process may bind() and listen() on local IPs and accept incoming connections. Independent of 'defaultPolicy' (which governs outbound traffic). Honored by the 'seatbelt' backend; other backends ignore this field today."
+        },
+        "proxy": {
+          "type": "object",
+          "description": "Proxy configuration. Supported with the 'processcontainer' (Windows) and 'bubblewrap' (Linux) backends.",
+          "oneOf": [
+            {
+              "properties": {
+                "localhost": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "description": "Port of an external already running proxy on localhost."
+                }
+              },
+              "required": ["localhost"],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "builtinTestServer": {
+                  "type": "boolean",
+                  "const": true,
+                  "description": "Use WXC's built-in test proxy server. Mutually exclusive with localhost."
+                }
+              },
+              "required": ["builtinTestServer"],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "description": "Full proxy URL including port (e.g., http://proxy.example.com:8080). Host and port are extracted from the URL."
+                }
+              },
+              "required": ["url"],
+              "additionalProperties": false
+            }
+          ]
+        }
+      }
+    },
+
+    "ui": {
+      "type": "object",
+      "description": "Cross-platform UI policy. Mapped from SandboxPolicy.ui by createConfigFromPolicy.",
+      "properties": {
+        "disable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether UI is disabled (no visible windows)."
+        },
+        "clipboard": {
+          "type": "string",
+          "enum": ["none", "read", "write", "all"],
+          "default": "none",
+          "description": "Clipboard access level."
+        },
+        "injection": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether input injection (keyboard/mouse) is allowed."
+        }
+      }
+    },
+
+    "processContainer": {
+      "type": "object",
+      "description": "ProcessContainer-specific settings. Used when containment is 'processcontainer'. The runner picks the legacy AppContainer implementation (which honors `capabilities` and `leastPrivilege`) or the newer BaseContainer implementation (which honors `ui`) at run time based on the host OS and the --experimental flag. Supersedes the 0.4.0-alpha / 0.5.0-alpha `appContainer` block — the parser still accepts `appContainer` as a serde alias, but new configs should use `processContainer`.",
+      "properties": {
+        "leastPrivilege": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enforce least privilege mode."
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "AppContainer capabilities (e.g., 'internetClient', 'registryRead')."
+        },
+        "ui": {
+          "type": "object",
+          "description": "BaseProcessContainer-specific UI settings (Windows only).",
+          "properties": {
+            "isolation": {
+              "type": "string",
+              "enum": ["desktop", "handles", "atoms", "container"],
+              "default": "container",
+              "description": "UI isolation level for the desktop."
+            },
+            "desktopSystemControl": {
+              "type": "boolean",
+              "default": false,
+              "description": "Whether desktop system control is allowed."
+            },
+            "systemSettings": {
+              "type": "string",
+              "default": "none",
+              "description": "System settings access level."
+            },
+            "ime": {
+              "type": "boolean",
+              "default": false,
+              "description": "Whether IME (Input Method Editor) is allowed."
+            }
+          }
+        }
+      }
+    },
+
+    "lxc": {
+      "type": "object",
+      "description": "LXC-specific settings. Used when containment is 'lxc'.",
+      "required": ["distribution", "release"],
+      "properties": {
+        "distribution": {
+          "type": "string",
+          "description": "Linux distribution for the container rootfs (e.g., 'alpine', 'ubuntu'). Required."
+        },
+        "release": {
+          "type": "string",
+          "description": "Distribution release version (e.g., '3.20', '24.04'). Required."
+        }
+      }
+    },
+
+    "seatbelt": {
+      "type": "object",
+      "description": "macOS Seatbelt sandbox backend configuration (top-level). Used when containment is 'seatbelt'.",
+      "properties": {
+        "profileOverride": {
+          "type": "string",
+          "description": "Optional override of the generated TinyScheme sandbox profile."
+        },
+        "guiAccess": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow the Mach IPC services that GUI applications need to draw windows, composite frames, resolve fonts, and register with the Dock. Without this, GUI apps are killed on launch."
+        },
+        "launchMethod": {
+          "type": "string",
+          "enum": ["exec", "open"],
+          "default": "exec",
+          "description": "How to launch the sandboxed process. 'exec' (default) uses sandbox_init + exec and works for third-party GUI apps (e.g. Alacritty). 'open' uses LaunchServices ('open -n -W -a Terminal') to satisfy Apple Launch Constraints, then applies the sandbox to the inner shell via sandbox-exec. Required for system apps like Terminal.app that enforce launch constraints."
+        },
+        "nestedPty": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the inner process to allocate its own pseudo-terminals via posix_openpt (needed by tests, git, gh, REPLs and other tools that spawn a shell). Adds (allow pseudo-tty) and read/write/ioctl on /dev/ptmx. Defaults to true; set to false for the tightest possible sandbox when the inner command does not need to allocate new ttys."
+        },
+        "keychainAccess": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow the inner process to use the macOS Keychain (e.g. via keytar or Security.framework) end-to-end. Adds Mach lookup for com.apple.SecurityServer, com.apple.securityd, com.apple.trustd, com.apple.ocspd, com.apple.cfprefsd.daemon, com.apple.xpcd and the com.apple.lsd.* family; read access to /private/var/db/mds and /private/var/protected/trustd; and read+write access to ~/Library/Keychains and /private/var/folders (XPC cache). System keychain stores under /Library and /System/Library are already covered by the baseline read-only allows. Defaults to false; opt in only when the inner workload genuinely needs Keychain access."
+        },
+        "extraMachLookups": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Caller-provided Mach service global-names the inner process may resolve. Each entry is emitted into the generated TinyScheme profile as `(allow mach-lookup (global-name \"...\"))`. Use this as a targeted escape hatch when a workload needs a Mach service the baseline profile does not already grant, without resorting to 'profileOverride' to replace the whole profile."
+        }
+      }
+    }
+  }
+}

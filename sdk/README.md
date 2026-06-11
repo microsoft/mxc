@@ -58,12 +58,13 @@ child.on('close', (code) => console.log('exit:', code));
 | `0.4.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.4.0-alpha.json) |
 | `0.5.0-alpha` | Stable (legacy — see strict sibling below) | [`schemas/stable/mxc-config.schema.0.5.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.5.0-alpha.json) |
 | `0.5.0-alpha` (strict) | Stable, non-experimental surface only | [`schemas/stable/mxc-config.schema.0.5.0-alpha-strict.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.5.0-alpha-strict.json) |
-| `0.6.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
-| `0.7.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.7.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.7.0-dev.json) |
+| `0.6.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
+| `0.7.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.7.0-alpha.json) |
+| `0.8.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.8.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.8.0-dev.json) |
 
-Pick `0.6.0-alpha` for new code on any supported platform.
+Pick `0.7.0-alpha` for new code on any supported platform.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.7.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.8.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 
@@ -73,7 +74,7 @@ Pick `0.6.0-alpha` for new code on any supported platform.
 | --- | --- | --- | --- |
 | Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc` | — |
-| macOS ARM64 (schema `0.6.0-alpha`+) | `seatbelt` | — | — |
+| macOS ARM64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
 
 The default `processcontainer`, `bubblewrap`, `lxc`, and `seatbelt` backends work out of the box. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
 
@@ -330,7 +331,7 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `Experimental_CreateProcessInSandbox failed: WIN32_ERROR(...)` | Native sandbox API returned an OS-level error, e.g. `448` = device feature not supported (Windows build / WIP feature not enabled). Note `120` (call not implemented / BaseContainer disabled) is now handled automatically — the default `process` backend falls back to AppContainer+DACL, so it no longer surfaces here. | Check the Windows build / WIP requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
-| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.4.0-alpha`, `0.5.0-alpha`, `0.6.0-alpha`, or `0.7.0-alpha`. See [Compatibility](#compatibility). |
+| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.4.0-alpha`, `0.5.0-alpha`, `0.6.0-alpha`, `0.7.0-alpha`, or `0.8.0-alpha`. See [Compatibility](#compatibility). |
 
 For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
 

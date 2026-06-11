@@ -11,7 +11,7 @@ import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.
 import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromCode } from './errors.js';
 
-const SUPPORTED_VERSION = '0.7.0-alpha';
+const SUPPORTED_VERSION = '0.8.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';
 
 /**

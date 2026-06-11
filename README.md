@@ -28,7 +28,7 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 | --- | --- | --- | --- |
 | Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | — |
-| macOS ARM64 / x64 (schema `0.6.0-alpha`+) | `seatbelt` | — | — |
+| macOS ARM64 / x64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
 
 
 The stable one-shot backends (`processcontainer`, `bubblewrap`, and `lxc`) do not require experimental mode; Linux hosts also need the matching runtime installed: bwrap (Bubblewrap) for the default backend, or the lxc toolset for the lxc backend. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `seatbelt`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI flag.
@@ -202,10 +202,11 @@ See the [SDK README](sdk/README.md) for full API documentation.
 | Version | Status | Schema File |
 |---------|--------|-------------|
 | `0.5.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.5.0-alpha.json`](schemas/stable/mxc-config.schema.0.5.0-alpha.json) |
-| `0.6.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
-| `0.7.0-dev` | Dev (experimental backends, state-aware lifecycle) | [`schemas/dev/mxc-config.schema.0.7.0-dev.json`](schemas/dev/mxc-config.schema.0.7.0-dev.json) |
+| `0.6.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
+| `0.7.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](schemas/stable/mxc-config.schema.0.7.0-alpha.json) |
+| `0.8.0-dev` | Dev (experimental backends, state-aware lifecycle) | [`schemas/dev/mxc-config.schema.0.8.0-dev.json`](schemas/dev/mxc-config.schema.0.8.0-dev.json) |
 
-Pick `0.6.0-alpha` for new code on any supported platform. See [docs/versioning.md](docs/versioning.md) for the full versioning design.
+Pick `0.7.0-alpha` for new code on any supported platform. See [docs/versioning.md](docs/versioning.md) for the full versioning design.
 
 ## Debugging
 
