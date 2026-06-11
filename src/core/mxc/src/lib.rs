@@ -42,7 +42,7 @@ pub use dispatch::{select_runner, spawn_runner, Selection};
 
 // Re-export the wire/model types callers need so they don't have to depend
 // on `wxc_common` directly.
-pub use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+pub use wxc_common::models::{ContainmentBackend, ExecutionRequest, FailurePhase, ScriptResponse};
 pub use wxc_common::mxc_error::{MxcError, MxcErrorCode};
 pub use wxc_common::sandbox_process::SandboxProcess;
 

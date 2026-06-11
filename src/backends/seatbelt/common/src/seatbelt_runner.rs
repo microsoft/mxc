@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome};
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, LaunchMethod, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, FailurePhase, LaunchMethod, ScriptResponse};
 use wxc_common::sandbox_process::{SandboxProcess, StreamingRunner};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::validate_common;
@@ -154,9 +154,13 @@ impl SeatbeltScriptRunner {
             }
         }
 
-        if !request.working_directory.is_empty() {
-            command.current_dir(&request.working_directory);
-        }
+        // Working directory. Also export `PWD` to match so the child's
+        // `getcwd()` uses its fast `$PWD` path (a single stat) instead of
+        // walking parent directories the sandbox may not let it read — which
+        // otherwise leaks "getcwd: ... Operation not permitted" to stderr.
+        let cwd = resolve_working_directory(request);
+        command.current_dir(&cwd);
+        command.env("PWD", &cwd);
 
         if gui_access {
             // GUI apps need inherited stdio for window interaction.
@@ -188,10 +192,9 @@ impl SeatbeltScriptRunner {
             };
 
             match wait_with_timeout(&mut child, timeout) {
-                Ok(status) => ScriptResponse {
-                    exit_code: status.code().unwrap_or(-1),
-                    ..Default::default()
-                },
+                Ok(status) => {
+                    exit_response(status.code().unwrap_or(-1), String::new(), String::new())
+                }
                 Err(WaitError::Timeout) => {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -226,10 +229,9 @@ impl SeatbeltScriptRunner {
             };
 
             match run_with_pty(command, options) {
-                Ok(PtyOutcome::Exited(status)) => ScriptResponse {
-                    exit_code: status.code().unwrap_or(-1),
-                    ..Default::default()
-                },
+                Ok(PtyOutcome::Exited(status)) => {
+                    exit_response(status.code().unwrap_or(-1), String::new(), String::new())
+                }
                 Ok(PtyOutcome::TimedOut) => {
                     let msg = format!(
                         "Seatbelt: script timed out after {}ms",
@@ -285,12 +287,11 @@ impl SeatbeltScriptRunner {
         };
 
         match wait_with_timeout(&mut child, timeout) {
-            Ok(status) => ScriptResponse {
-                exit_code: status.code().unwrap_or(-1),
-                standard_out: join_reader(stdout_handle),
-                standard_err: join_reader(stderr_handle),
-                ..Default::default()
-            },
+            Ok(status) => exit_response(
+                status.code().unwrap_or(-1),
+                join_reader(stdout_handle),
+                join_reader(stderr_handle),
+            ),
             Err(WaitError::Timeout) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -414,10 +415,7 @@ impl SeatbeltScriptRunner {
         };
 
         let result = match wait_with_timeout(&mut child, timeout) {
-            Ok(status) => ScriptResponse {
-                exit_code: status.code().unwrap_or(-1),
-                ..Default::default()
-            },
+            Ok(status) => exit_response(status.code().unwrap_or(-1), String::new(), String::new()),
             Err(WaitError::Timeout) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -488,9 +486,9 @@ impl StreamingRunner for SeatbeltScriptRunner {
                 }
             }
         }
-        if !request.working_directory.is_empty() {
-            command.current_dir(&request.working_directory);
-        }
+        let cwd = resolve_working_directory(request);
+        command.current_dir(&cwd);
+        command.env("PWD", &cwd);
 
         // Bidirectional stdio over ordinary pipes (no pty).
         command
@@ -614,12 +612,11 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             .map(|r| std::thread::spawn(move || read_to_string(r)));
 
         match wait_with_timeout(&mut self.child, self.timeout) {
-            Ok(status) => ScriptResponse {
-                exit_code: status.code().unwrap_or(-1),
-                standard_out: join_reader(stdout_handle),
-                standard_err: join_reader(stderr_handle),
-                ..Default::default()
-            },
+            Ok(status) => exit_response(
+                status.code().unwrap_or(-1),
+                join_reader(stdout_handle),
+                join_reader(stderr_handle),
+            ),
             Err(WaitError::Timeout) => {
                 let _ = self.child.kill();
                 let _ = self.child.wait();
@@ -695,6 +692,45 @@ fn error_response(message: String) -> ScriptResponse {
         error_message: message,
         ..Default::default()
     }
+}
+
+/// Build a `ScriptResponse` for a process that actually ran, tagging
+/// [`FailurePhase::ProcessExited`] on a non-zero exit (and
+/// [`FailurePhase::None`] on success) so callers can distinguish a launch
+/// failure from a process that ran and failed.
+fn exit_response(exit_code: i32, standard_out: String, standard_err: String) -> ScriptResponse {
+    ScriptResponse {
+        exit_code,
+        standard_out,
+        standard_err,
+        failure_phase: if exit_code == 0 {
+            FailurePhase::None
+        } else {
+            FailurePhase::ProcessExited
+        },
+        ..Default::default()
+    }
+}
+
+/// Resolve the working directory for the sandboxed child.
+///
+/// An explicit `working_directory` always wins. Otherwise — rather than
+/// inheriting the host process's cwd, which under the deny-by-default Seatbelt
+/// profile may be inaccessible and make `getcwd()` fail (leaking a
+/// "getcwd: ... Operation not permitted" line on the child's stderr) — we pick
+/// a directory the profile is guaranteed to allow: the first readwrite path,
+/// else the first readonly path, else `/` (always readable per the baseline).
+fn resolve_working_directory(request: &ExecutionRequest) -> String {
+    if !request.working_directory.is_empty() {
+        return request.working_directory.clone();
+    }
+    request
+        .policy
+        .readwrite_paths
+        .first()
+        .or_else(|| request.policy.readonly_paths.first())
+        .cloned()
+        .unwrap_or_else(|| "/".to_string())
 }
 
 /// Read a child pipe to a `String`, ignoring decode/IO errors (mirrors the

@@ -6,7 +6,7 @@
 //! Seatbelt-specific cases run only on macOS; the cross-platform cases
 //! (config errors, unsupported backends) run everywhere.
 
-use mxc::{spawn_sandbox_from_config, MxcErrorCode, SpawnOptions};
+use mxc::{spawn_sandbox_from_config, FailurePhase, MxcErrorCode, SpawnOptions};
 
 #[test]
 fn unsupported_backend_is_rejected() {
@@ -106,5 +106,76 @@ fn seatbelt_env_injection() {
         result.standard_out.contains("injected-value"),
         "env var should reach the sandboxed process, got: {:?}",
         result.standard_out
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_failure_phase_process_exited_on_nonzero() {
+    let config = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "seatbelt",
+        "process": { "commandLine": "exit 7", "timeout": 10000 },
+        "filesystem": { "readwritePaths": ["/tmp"] },
+        "seatbelt": { "mode": "exec" }
+    }"#;
+
+    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
+        .expect("seatbelt run should succeed");
+
+    assert_eq!(result.exit_code, 7);
+    assert_eq!(
+        result.failure_phase,
+        FailurePhase::ProcessExited,
+        "non-zero exit must report ProcessExited"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_failure_phase_none_on_success() {
+    let config = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "seatbelt",
+        "process": { "commandLine": "true", "timeout": 10000 },
+        "filesystem": { "readwritePaths": ["/tmp"] },
+        "seatbelt": { "mode": "exec" }
+    }"#;
+
+    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
+        .expect("seatbelt run should succeed");
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.failure_phase, FailurePhase::None);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_defaults_cwd_to_allowed_path_without_getcwd_leak() {
+    // No `cwd` set: the child must run in a sandbox-allowed directory (the
+    // first readwrite path) rather than inheriting a possibly-inaccessible
+    // host cwd, so getcwd() does not leak a permission error to stderr.
+    let config = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "seatbelt",
+        "process": { "commandLine": "/bin/pwd", "timeout": 10000 },
+        "filesystem": { "readwritePaths": ["/tmp"] },
+        "seatbelt": { "mode": "exec" }
+    }"#;
+
+    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
+        .expect("seatbelt run should succeed");
+
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
+    assert!(
+        result.standard_out.contains("tmp"),
+        "child cwd should default to the readwrite path, got: {:?}",
+        result.standard_out
+    );
+    assert!(
+        !result.standard_err.contains("getcwd")
+            && !result.standard_err.contains("Operation not permitted"),
+        "no getcwd leak expected, stderr: {:?}",
+        result.standard_err
     );
 }
