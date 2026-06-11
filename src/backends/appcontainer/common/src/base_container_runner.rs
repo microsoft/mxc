@@ -15,7 +15,7 @@ use std::io::IsTerminal;
 use std::ptr;
 
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_FAILED,
+    CloseHandle, GetLastError, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
     WAIT_TIMEOUT,
 };
 use windows::Win32::System::Console::{
@@ -48,7 +48,10 @@ use wxc_common::models::{
     ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress,
     ScriptResponse,
 };
-use wxc_common::process_util::{create_std_pipes, read_from_pipe, OwnedHandle, SendOwnedHandle};
+use wxc_common::process_util::{
+    create_std_pipes, read_from_pipe, OwnedHandle, PipeReader, PipeWriter, SendOwnedHandle,
+};
+use wxc_common::sandbox_process::{SandboxProcess, StreamingRunner};
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use wxc_common::string_util;
 
@@ -443,12 +446,27 @@ impl ScriptRunner for BaseContainerRunner {
     }
 
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        match self.spawn_base(request, logger, false) {
+            Ok(child) => child.run_to_completion(logger),
+            Err(resp) => resp,
+        }
+    }
+}
+
+impl BaseContainerRunner {
+    /// Set up and launch the BaseContainer child, returning a [`BaseChild`] the
+    /// caller runs to completion (blocking) or wraps in a streaming handle.
+    /// `stream` keeps the child's stdin write-end for the caller.
+    fn spawn_base(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stream: bool,
+    ) -> Result<BaseChild, ScriptResponse> {
         let _ = writeln!(
             logger,
             "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
         );
-
-        let run_start = std::time::Instant::now();
 
         // Launch builtin test proxy if requested (before building spec so we have the port).
         let mut request = request.clone();
@@ -459,9 +477,9 @@ impl ScriptRunner for BaseContainerRunner {
                     request.policy.network_proxy.address = Some(addr);
                 }
                 Err(e) => {
-                    return ScriptResponse::error(&format!(
+                    return Err(ScriptResponse::error(&format!(
                         "Failed to start builtin test proxy: {e}"
-                    ));
+                    )));
                 }
             }
         }
@@ -499,7 +517,7 @@ impl ScriptRunner for BaseContainerRunner {
         // 2. Dynamically load the API from processmodel.dll.
         let create_process_in_sandbox = match Self::load_api() {
             Ok(f) => f,
-            Err(e) => return ScriptResponse::error(&e),
+            Err(e) => return Err(ScriptResponse::error(&e)),
         };
         let _ = writeln!(
             logger,
@@ -618,20 +636,23 @@ impl ScriptRunner for BaseContainerRunner {
         // child-side ends kept alive until after process creation.
         let mut capture_reads: Option<(OwnedHandle, OwnedHandle)> = None;
         let mut capture_child_ends: Vec<OwnedHandle> = Vec::new();
+        // Parent's stdin write-end, retained only for streaming so the caller
+        // can write to the child; otherwise dropped to give the child EOF.
+        let mut captured_stdin_write: Option<OwnedHandle> = None;
 
         if pipe_mode {
             if capture {
-                let (stdin_read, _stdin_write) = match create_std_pipes(false) {
+                let (stdin_read, stdin_write) = match create_std_pipes(false) {
                     Ok(p) => p,
-                    Err(e) => return ScriptResponse::error(&format!("stdin pipe: {e}")),
+                    Err(e) => return Err(ScriptResponse::error(&format!("stdin pipe: {e}"))),
                 };
                 let (stdout_read, stdout_write) = match create_std_pipes(true) {
                     Ok(p) => p,
-                    Err(e) => return ScriptResponse::error(&format!("stdout pipe: {e}")),
+                    Err(e) => return Err(ScriptResponse::error(&format!("stdout pipe: {e}"))),
                 };
                 let (stderr_read, stderr_write) = match create_std_pipes(true) {
                     Ok(p) => p,
-                    Err(e) => return ScriptResponse::error(&format!("stderr pipe: {e}")),
+                    Err(e) => return Err(ScriptResponse::error(&format!("stderr pipe: {e}"))),
                 };
 
                 h_stdin = stdin_read.get();
@@ -641,36 +662,45 @@ impl ScriptRunner for BaseContainerRunner {
                 capture_child_ends.push(stdin_read);
                 capture_child_ends.push(stdout_write);
                 capture_child_ends.push(stderr_write);
-                // `_stdin_write` drops here: the child's stdin sees EOF.
+                if stream {
+                    captured_stdin_write = Some(stdin_write);
+                }
+                // When not streaming, `stdin_write` drops here: child sees EOF.
                 capture_reads = Some((stdout_read, stderr_read));
             } else {
                 h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
                     Ok(h) => h,
-                    Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDIN): {e}")),
+                    Err(e) => {
+                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDIN): {e}")))
+                    }
                 };
                 h_stdout = match unsafe { GetStdHandle(STD_OUTPUT_HANDLE) } {
                     Ok(h) => h,
-                    Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDOUT): {e}")),
+                    Err(e) => {
+                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDOUT): {e}")))
+                    }
                 };
                 h_stderr = match unsafe { GetStdHandle(STD_ERROR_HANDLE) } {
                     Ok(h) => h,
-                    Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")),
+                    Err(e) => {
+                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")))
+                    }
                 };
 
                 if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
-                    return ScriptResponse::error(
+                    return Err(ScriptResponse::error(
                         "GetStdHandle(STDIN) returned null/invalid handle",
-                    );
+                    ));
                 }
                 if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
-                    return ScriptResponse::error(
+                    return Err(ScriptResponse::error(
                         "GetStdHandle(STDOUT) returned null/invalid handle",
-                    );
+                    ));
                 }
                 if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
-                    return ScriptResponse::error(
+                    return Err(ScriptResponse::error(
                         "GetStdHandle(STDERR) returned null/invalid handle",
-                    );
+                    ));
                 }
 
                 // Ensure the handles are inheritable.
@@ -678,21 +708,23 @@ impl ScriptRunner for BaseContainerRunner {
                     if let Err(e) =
                         SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
                     {
-                        return ScriptResponse::error(&format!("SetHandleInformation(STDIN): {e}"));
+                        return Err(ScriptResponse::error(&format!(
+                            "SetHandleInformation(STDIN): {e}"
+                        )));
                     }
                     if let Err(e) =
                         SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
                     {
-                        return ScriptResponse::error(&format!(
+                        return Err(ScriptResponse::error(&format!(
                             "SetHandleInformation(STDOUT): {e}"
-                        ));
+                        )));
                     }
                     if let Err(e) =
                         SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
                     {
-                        return ScriptResponse::error(&format!(
+                        return Err(ScriptResponse::error(&format!(
                             "SetHandleInformation(STDERR): {e}"
-                        ));
+                        )));
                     }
                 }
             }
@@ -755,13 +787,13 @@ impl ScriptRunner for BaseContainerRunner {
                 "Error: Pre-launch diagnostic [{}]: {}",
                 diag.kind, diag.message
             );
-            return ScriptResponse {
+            return Err(ScriptResponse {
                 exit_code: -1,
                 error_message: diag.message.clone(),
                 standard_err: diag.message,
                 failure_phase: FailurePhase::LaunchFailed,
                 ..Default::default()
-            };
+            });
         }
 
         // 4. Call Experimental_CreateProcessInSandbox.
@@ -878,110 +910,114 @@ impl ScriptRunner for BaseContainerRunner {
                 diag.kind, diag.message
             );
 
-            return ScriptResponse {
+            return Err(ScriptResponse {
                 exit_code: -1,
                 error_message: diag.message.clone(),
                 standard_err: diag.message,
                 extended_error,
                 failure_phase: FailurePhase::LaunchFailed,
                 ..Default::default()
-            };
+            });
         }
 
         let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
 
-        // Capture mode: the child has inherited the pipe handles, so close the
-        // parent's child-side ends now and drain the read-ends on background
-        // threads to avoid the child blocking on a full pipe buffer.
-        let mut capture_threads: Option<(
-            std::thread::JoinHandle<String>,
-            std::thread::JoinHandle<String>,
-        )> = None;
-        if capture {
-            capture_child_ends.clear();
-            if let Some((mut stdout_read, mut stderr_read)) = capture_reads.take() {
-                let stdout_send = SendOwnedHandle::take(&mut stdout_read);
-                let stderr_send = SendOwnedHandle::take(&mut stderr_read);
-                let stdout_thread = std::thread::spawn(move || read_from_pipe(stdout_send.get()));
-                let stderr_thread = std::thread::spawn(move || read_from_pipe(stderr_send.get()));
-                capture_threads = Some((stdout_thread, stderr_thread));
-            }
-        }
+        // Child has inherited the pipe handles; close the parent's child-side
+        // ends so the read-ends observe EOF when the child exits.
+        capture_child_ends.clear();
 
-        let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Wait for exit");
-
-        // 5. Wait for the child process to exit.
-        let timeout_ms = get_timeout_milliseconds(request.script_timeout);
-        let mut exit_code: u32 = u32::MAX;
-
-        unsafe {
-            let wait_result = WaitForSingleObject(pi.hProcess, timeout_ms);
-            if wait_result == WAIT_FAILED {
-                let err = GetLastError();
-                let _ = CloseHandle(pi.hProcess);
-                let _ = CloseHandle(pi.hThread);
-                return ScriptResponse::error(&format!("WaitForSingleObject failed: {err:?}"));
-            } else if wait_result == WAIT_TIMEOUT {
-                let _ = writeln!(logger, "process timed out, terminating...");
-                let _ = TerminateProcess(pi.hProcess, u32::MAX);
-                let _ = WaitForSingleObject(pi.hProcess, 5000);
-            }
-
-            let _ = GetExitCodeProcess(pi.hProcess, &mut exit_code);
-
-            let _ = CloseHandle(pi.hProcess);
-            let _ = CloseHandle(pi.hThread);
-        }
-
-        let _ = writeln!(logger, "process exited with code {exit_code}");
-
-        // Capture mode: the child has exited (read-ends will hit EOF); join the
-        // drain threads to collect the captured output.
-        let (captured_out, captured_err) = match capture_threads {
-            Some((stdout_thread, stderr_thread)) => (
-                stdout_thread.join().unwrap_or_default(),
-                stderr_thread.join().unwrap_or_default(),
-            ),
-            None => (String::new(), String::new()),
+        let (stdout_read, stderr_read) = match capture_reads {
+            Some((out, err)) => (Some(out), Some(err)),
+            None => (None, None),
         };
 
-        // 6. Sandbox cleanup: delete AppContainer profile and tracking entry.
-        //    Deferred if a network proxy is configured (proxy state can't be cleaned up yet).
-        if request.lifecycle.destroy_on_exit {
-            run_sandbox_cleanup(
-                &identity,
-                &sid_string,
-                request.policy.network_proxy.is_enabled(),
-                logger,
-            );
-            // Unregister so a late Ctrl+C doesn't double-cleanup.
+        // The child runs immediately (no suspend); hand ownership to the
+        // caller via `BaseChild`, which performs sandbox/proxy teardown after
+        // the child exits.
+        Ok(BaseChild {
+            process: OwnedHandle::new(pi.hProcess),
+            thread: OwnedHandle::new(pi.hThread),
+            stdin_write: captured_stdin_write,
+            stdout_read,
+            stderr_read,
+            capture,
+            timeout_ms: get_timeout_milliseconds(request.script_timeout),
+            destroy_on_exit: request.lifecycle.destroy_on_exit,
+            proxy_enabled: request.policy.network_proxy.is_enabled(),
+            identity,
+            sid_string,
+            proxy_coordinator: std::mem::take(&mut self.proxy_coordinator),
+            script_code: request.script_code.clone(),
+            readonly_paths: request.policy.readonly_paths.clone(),
+            readwrite_paths: request.policy.readwrite_paths.clone(),
+        })
+    }
+}
+
+/// A BaseContainer child launched by [`BaseContainerRunner::spawn_base`]. The
+/// child runs immediately (no suspend); this owns the process handle, the
+/// parent-side pipe ends, and the per-run proxy/sandbox state it tears down
+/// once the child exits.
+struct BaseChild {
+    process: OwnedHandle,
+    thread: OwnedHandle,
+    stdin_write: Option<OwnedHandle>,
+    stdout_read: Option<OwnedHandle>,
+    stderr_read: Option<OwnedHandle>,
+    capture: bool,
+    timeout_ms: u32,
+    destroy_on_exit: bool,
+    proxy_enabled: bool,
+    identity: String,
+    sid_string: String,
+    proxy_coordinator: ProxyCoordinator,
+    script_code: String,
+    readonly_paths: Vec<String>,
+    readwrite_paths: Vec<String>,
+}
+
+impl BaseChild {
+    /// Wait for exit (terminating on timeout); return the exit code (`-1` on
+    /// wait/exit-code failure).
+    fn wait_exit(&self) -> i32 {
+        match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
+            WAIT_OBJECT_0 => {}
+            WAIT_TIMEOUT => unsafe {
+                let _ = TerminateProcess(self.process.get(), u32::MAX);
+                let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+            },
+            _ => return -1,
+        }
+        let mut code: u32 = u32::MAX;
+        let _ = unsafe { GetExitCodeProcess(self.process.get(), &mut code) };
+        code as i32
+    }
+
+    /// Sandbox + proxy teardown, mirroring [`BaseContainerRunner::execute`]'s
+    /// exit path.
+    fn cleanup(&mut self, logger: &mut Logger) {
+        if self.destroy_on_exit {
+            run_sandbox_cleanup(&self.identity, &self.sid_string, self.proxy_enabled, logger);
             sandbox_tracking::unregister_ctrl_c_cleanup();
         }
-
-        let _ = writeln!(
-            logger,
-            "{EMOJI_SECTION} SECTION: Done ({:.3}s)",
-            run_start.elapsed().as_secs_f64()
-        );
-
-        // Stop the builtin test proxy if it was started.
         self.proxy_coordinator.stop(logger);
+    }
 
-        //
-        // Diagnose the application failure (FailurePhase::ProcessExited).
-        //
+    /// Shape the final [`ScriptResponse`] (exit diagnostics + stderr merge),
+    /// mirroring `execute`'s tail.
+    fn collect(
+        &self,
+        exit_code: i32,
+        captured_out: String,
+        captured_err: String,
+    ) -> ScriptResponse {
         let (error_message, failure_phase) = if exit_code != 0 {
             if let Some(diag) = diagnose_process_exit(
-                &request.script_code,
-                &request.policy.readonly_paths,
-                &request.policy.readwrite_paths,
-                exit_code,
+                &self.script_code,
+                &self.readonly_paths,
+                &self.readwrite_paths,
+                exit_code as u32,
             ) {
-                let _ = writeln!(
-                    logger,
-                    "Error: Launch diagnostic [{}]: {}",
-                    diag.kind, diag.message
-                );
                 (diag.message, FailurePhase::ProcessExited)
             } else {
                 (String::new(), FailurePhase::ProcessExited)
@@ -989,33 +1025,256 @@ impl ScriptRunner for BaseContainerRunner {
         } else {
             (String::new(), FailurePhase::None)
         };
-
-        // Merge diagnostic error into stderr field if present.
-        // In passthrough mode, stdout/stderr already went directly to the SDK caller,
-        // so standard_out/standard_err in ScriptResponse will be empty. In capture
-        // mode we report the child's captured streams (appending any diagnostic
-        // message to stderr).
-        let final_stdout = if capture { captured_out } else { String::new() };
-        let final_stderr = if capture {
-            match (captured_err.is_empty(), error_message.is_empty()) {
-                (_, true) => captured_err,
-                (true, false) => error_message.clone(),
-                (false, false) => format!("{captured_err}{error_message}"),
-            }
-        } else if error_message.is_empty() {
-            String::new()
-        } else {
-            error_message.clone()
+        let final_stderr = match (captured_err.is_empty(), error_message.is_empty()) {
+            (_, true) => captured_err,
+            (true, false) => error_message.clone(),
+            (false, false) => format!("{captured_err}{error_message}"),
         };
-
         ScriptResponse {
-            exit_code: exit_code as i32,
-            standard_out: final_stdout,
+            exit_code,
+            standard_out: captured_out,
             standard_err: final_stderr,
             error_message,
             failure_phase,
             ..Default::default()
         }
+    }
+
+    /// Blocking run: drain captured output on threads, wait, tear down, and
+    /// collect.
+    fn run_to_completion(mut self, logger: &mut Logger) -> ScriptResponse {
+        let mut threads: Option<(
+            std::thread::JoinHandle<String>,
+            std::thread::JoinHandle<String>,
+        )> = None;
+        if self.capture {
+            if let (Some(mut out), Some(mut err)) =
+                (self.stdout_read.take(), self.stderr_read.take())
+            {
+                let out_send = SendOwnedHandle::take(&mut out);
+                let err_send = SendOwnedHandle::take(&mut err);
+                threads = Some((
+                    std::thread::spawn(move || read_from_pipe(out_send.get())),
+                    std::thread::spawn(move || read_from_pipe(err_send.get())),
+                ));
+            }
+        }
+        let exit_code = self.wait_exit();
+        let (out, err) = match threads {
+            Some((o, e)) => (o.join().unwrap_or_default(), e.join().unwrap_or_default()),
+            None => (String::new(), String::new()),
+        };
+        self.cleanup(logger);
+        self.collect(exit_code, out, err)
+    }
+}
+
+impl StreamingRunner for BaseContainerRunner {
+    fn spawn_streaming(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        use wxc_common::validator::validate_common;
+
+        validate_common(request)?;
+        self.validate_runner(request)?;
+
+        let mut streaming_request = request.clone();
+        streaming_request.capture_output = true;
+
+        let child = self.spawn_base(&streaming_request, logger, true)?;
+        Ok(Box::new(BaseContainerSandboxProcess::from_child(child)))
+    }
+}
+
+/// A running BaseContainer-sandboxed process exposed as a [`SandboxProcess`].
+/// Owns the process handle, the parent-side pipes, and the per-run proxy /
+/// sandbox state, which it tears down once the child exits.
+struct BaseContainerSandboxProcess {
+    process: SendOwnedHandle,
+    _thread: SendOwnedHandle,
+    stdin: Option<PipeWriter>,
+    stdout: Option<PipeReader>,
+    stderr: Option<PipeReader>,
+    timeout_ms: u32,
+    destroy_on_exit: bool,
+    proxy_enabled: bool,
+    identity: String,
+    sid_string: String,
+    proxy_coordinator: ProxyCoordinator,
+    script_code: String,
+    readonly_paths: Vec<String>,
+    readwrite_paths: Vec<String>,
+    teardown_done: bool,
+}
+
+// SAFETY: the fields are Windows HANDLEs / handle-owning managers and owned
+// strings. HANDLEs are process-global and safe to use from any single thread;
+// this handle is owned exclusively by the caller, so moving it across threads
+// is sound.
+unsafe impl Send for BaseContainerSandboxProcess {}
+
+impl BaseContainerSandboxProcess {
+    fn from_child(mut child: BaseChild) -> Self {
+        let process = SendOwnedHandle::take(&mut child.process);
+        let thread = SendOwnedHandle::take(&mut child.thread);
+        let stdin = child.stdin_write.take().map(PipeWriter::new);
+        let stdout = child.stdout_read.take().map(PipeReader::new);
+        let stderr = child.stderr_read.take().map(PipeReader::new);
+        Self {
+            process,
+            _thread: thread,
+            stdin,
+            stdout,
+            stderr,
+            timeout_ms: child.timeout_ms,
+            destroy_on_exit: child.destroy_on_exit,
+            proxy_enabled: child.proxy_enabled,
+            identity: std::mem::take(&mut child.identity),
+            sid_string: std::mem::take(&mut child.sid_string),
+            proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
+            script_code: std::mem::take(&mut child.script_code),
+            readonly_paths: std::mem::take(&mut child.readonly_paths),
+            readwrite_paths: std::mem::take(&mut child.readwrite_paths),
+            teardown_done: false,
+        }
+    }
+
+    fn run_teardown(&mut self) {
+        if self.teardown_done {
+            return;
+        }
+        self.teardown_done = true;
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        if self.destroy_on_exit {
+            run_sandbox_cleanup(
+                &self.identity,
+                &self.sid_string,
+                self.proxy_enabled,
+                &mut logger,
+            );
+            sandbox_tracking::unregister_ctrl_c_cleanup();
+        }
+        self.proxy_coordinator.stop(&mut logger);
+    }
+}
+
+impl SandboxProcess for BaseContainerSandboxProcess {
+    fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+        self.stdin
+            .take()
+            .map(|w| Box::new(w) as Box<dyn std::io::Write + Send>)
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.stdout
+            .take()
+            .map(|r| Box::new(r) as Box<dyn std::io::Read + Send>)
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.stderr
+            .take()
+            .map(|r| Box::new(r) as Box<dyn std::io::Read + Send>)
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        match unsafe { WaitForSingleObject(self.process.get(), 0) } {
+            WAIT_OBJECT_0 => {
+                let mut code: u32 = 0;
+                if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
+                    return Err(std::io::Error::other("GetExitCodeProcess failed"));
+                }
+                Ok(Some(code as i32))
+            }
+            WAIT_TIMEOUT => Ok(None),
+            _ => Err(std::io::Error::other("WaitForSingleObject failed")),
+        }
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        unsafe {
+            let _ = TerminateProcess(self.process.get(), u32::MAX);
+        }
+        Ok(())
+    }
+
+    fn wait(&mut self) -> ScriptResponse {
+        let stdout_thread = self.stdout.take().map(|mut r| {
+            std::thread::spawn(move || {
+                let mut s = String::new();
+                let _ = std::io::Read::read_to_string(&mut r, &mut s);
+                s
+            })
+        });
+        let stderr_thread = self.stderr.take().map(|mut r| {
+            std::thread::spawn(move || {
+                let mut s = String::new();
+                let _ = std::io::Read::read_to_string(&mut r, &mut s);
+                s
+            })
+        });
+
+        let exit_code = match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
+            WAIT_OBJECT_0 => {
+                let mut code: u32 = u32::MAX;
+                let _ = unsafe { GetExitCodeProcess(self.process.get(), &mut code) };
+                code as i32
+            }
+            WAIT_TIMEOUT => {
+                unsafe {
+                    let _ = TerminateProcess(self.process.get(), u32::MAX);
+                    let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+                }
+                -1
+            }
+            _ => -1,
+        };
+
+        let captured_out = stdout_thread
+            .map(|t| t.join().unwrap_or_default())
+            .unwrap_or_default();
+        let captured_err = stderr_thread
+            .map(|t| t.join().unwrap_or_default())
+            .unwrap_or_default();
+
+        self.run_teardown();
+
+        let (error_message, failure_phase) = if exit_code != 0 {
+            if let Some(diag) = diagnose_process_exit(
+                &self.script_code,
+                &self.readonly_paths,
+                &self.readwrite_paths,
+                exit_code as u32,
+            ) {
+                (diag.message, FailurePhase::ProcessExited)
+            } else {
+                (String::new(), FailurePhase::ProcessExited)
+            }
+        } else {
+            (String::new(), FailurePhase::None)
+        };
+        let final_stderr = match (captured_err.is_empty(), error_message.is_empty()) {
+            (_, true) => captured_err,
+            (true, false) => error_message.clone(),
+            (false, false) => format!("{captured_err}{error_message}"),
+        };
+
+        ScriptResponse {
+            exit_code,
+            standard_out: captured_out,
+            standard_err: final_stderr,
+            error_message,
+            failure_phase,
+            ..Default::default()
+        }
+    }
+}
+
+impl Drop for BaseContainerSandboxProcess {
+    fn drop(&mut self) {
+        self.run_teardown();
     }
 }
 

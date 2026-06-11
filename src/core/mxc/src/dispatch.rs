@@ -236,14 +236,15 @@ fn spawn_process_container(
     use wxc_common::config_parser::is_base_container_version;
     use wxc_common::sandbox_process::StreamingRunner;
 
-    // BaseContainer (the experimental/newer-schema fallback) streaming is not
-    // implemented yet; only the AppContainer fast path supports streaming.
+    // Mirror the run-to-completion selection: BaseContainer (the OS sandbox
+    // API) is used when experimental is enabled or the schema implies it;
+    // otherwise the AppContainer fast path. Both support streaming.
     let version_implies_base_container = is_base_container_version(&request.schema_version);
     if request.experimental_enabled || version_implies_base_container {
-        return Err(MxcError::unsupported_containment(
-            "streaming for the Windows BaseContainer backend is not implemented yet; \
-             use spawn_sandbox_from_config (run-to-completion) for this configuration",
-        ));
+        let mut runner = appcontainer_common::base_container_runner::BaseContainerRunner::new();
+        return runner
+            .spawn_streaming(request, logger)
+            .map_err(|resp| MxcError::backend_error(resp.error_message));
     }
 
     let mut runner = AppContainerScriptRunner::new();
