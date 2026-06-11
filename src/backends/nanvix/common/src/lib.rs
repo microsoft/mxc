@@ -288,7 +288,12 @@ pub fn copy_artifacts_to_target(src_dir: &Path, target_dir: &Path) {
                 name,
                 dst.display()
             );
-            let _ = fs::remove_file(&dst);
+            if let Err(e) = fs::remove_file(&dst) {
+                eprintln!(
+                    "nanvix: WARNING: failed to remove stale snapshots/{}: {}",
+                    name, e
+                );
+            }
         }
     }
 
