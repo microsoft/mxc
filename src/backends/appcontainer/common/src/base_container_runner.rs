@@ -15,8 +15,8 @@ use std::io::IsTerminal;
 use std::ptr;
 
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_FAILED,
-    WAIT_TIMEOUT,
+    CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
+    HANDLE_FLAG_INHERIT, WAIT_FAILED, WAIT_TIMEOUT,
 };
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -90,6 +90,21 @@ type PfnCreateProcessInSandbox = unsafe extern "system" fn(
     process_information: *mut PROCESS_INFORMATION,
 ) -> i32;
 
+/// Function pointer type matching `Experimental_QuerySandboxSupport`. Writes the
+/// `SANDBOX_CAP_*` bitmask to `*capabilities` and returns a non-zero BOOL on
+/// success. This export is newer than the create API, so its absence is
+/// ambiguous and must not be read as "sandbox unsupported".
+type PfnQuerySandboxSupport = unsafe extern "system" fn(capabilities: *mut u64) -> i32;
+
+/// `SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX`: when clear, Tier 1 is unusable.
+const SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX: u64 = 0x0000_0000_0000_0001;
+
+/// True when a Win32 error code signals the BaseContainer feature is not
+/// enabled on this build (symbol present, capability gated off).
+pub(crate) fn is_api_not_implemented(err: u32) -> bool {
+    err == ERROR_CALL_NOT_IMPLEMENTED.0 || err == E_NOTIMPL.0 as u32
+}
+
 /// Script runner that uses `Experimental_CreateProcessInSandbox` API
 /// to launch a sandboxed process.
 #[derive(Default)]
@@ -133,6 +148,115 @@ impl BaseContainerRunner {
     /// the feature is disabled (e.g., via internal feature-enablement mechanisms).
     pub fn is_base_container_api_present() -> Result<(), String> {
         Self::load_api().map(|_| ())
+    }
+
+    /// Is the BaseContainer (Tier 1) backend actually **usable** here, not just
+    /// symbol-present? Resolves enablement up front so tier selection
+    /// never picks a Tier 1 that cannot launch:
+    ///
+    /// 1. `Experimental_QuerySandboxSupport`, when present, is authoritative.
+    /// 2. Otherwise, probe the create API itself (older builds lack the query).
+    /// 3. If even the create symbol is absent, the OS is down-level.
+    pub fn is_base_container_usable() -> bool {
+        match Self::query_sandbox_create_capability() {
+            Some(enabled) => enabled,
+            None => Self::probe_create_process_feature_enabled(),
+        }
+    }
+
+    /// Query `Experimental_QuerySandboxSupport` for the create-process bit.
+    /// `None` means the answer is unknown (export absent, or the query call
+    /// itself failed), so the caller must probe another way rather than assume
+    /// "unusable".
+    fn query_sandbox_create_capability() -> Option<bool> {
+        let query = Self::load_query_sandbox_support()?;
+        let mut capabilities: u64 = 0;
+        // SAFETY: `query` is the resolved export; `capabilities` is a valid
+        // out-param.
+        let ok = unsafe { query(&mut capabilities) };
+        // A FALSE return means the query call failed, so the capability is
+        // unknown; return None to fall through to the create-API probe rather
+        // than treating it as "disabled".
+        if ok == 0 {
+            return None;
+        }
+        Some(Self::decode_create_capability(ok, capabilities))
+    }
+
+    /// Decode a `QuerySandboxSupport` result: the create-process capability is
+    /// present only when the call succeeded (`ok != 0`) and the bit is set.
+    fn decode_create_capability(ok: i32, capabilities: u64) -> bool {
+        ok != 0 && (capabilities & SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX) != 0
+    }
+
+    /// Resolve `Experimental_QuerySandboxSupport`; `None` if not present.
+    fn load_query_sandbox_support() -> Option<PfnQuerySandboxSupport> {
+        let dll_name = string_util::to_wide("processmodel.dll");
+        // SAFETY: same rationale as `load_api`.
+        unsafe {
+            let hmodule = LoadLibraryExW(
+                PCWSTR(dll_name.as_ptr()),
+                None,
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+            .ok()?;
+            let proc = GetProcAddress(
+                hmodule,
+                windows::core::PCSTR(c"Experimental_QuerySandboxSupport".as_ptr().cast()),
+            )?;
+            #[allow(clippy::missing_transmute_annotations)]
+            Some(std::mem::transmute(proc))
+        }
+    }
+
+    /// Fallback enablement probe for builds without
+    /// `Experimental_QuerySandboxSupport`: call the create API with invalid
+    /// arguments so nothing launches. `ERROR_CALL_NOT_IMPLEMENTED` means
+    /// disabled; any other result means enabled.
+    fn probe_create_process_feature_enabled() -> bool {
+        let api = match Self::load_api() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+
+        let mut pi = PROCESS_INFORMATION::default();
+        // SAFETY: `api` is the resolved export; all inputs are null and `pi` is
+        // a valid out-param. The call returns an error without launching.
+        let result = unsafe {
+            api(
+                ptr::null(),     // application_name
+                ptr::null_mut(), // command_line
+                ptr::null(),     // process_attributes
+                ptr::null(),     // thread_attributes
+                0,               // inherit_handles
+                0,               // creation_flags
+                ptr::null(),     // environment
+                ptr::null(),     // current_directory
+                ptr::null(),     // startup_info
+                ptr::null(),     // identity
+                ptr::null(),     // sandbox_specification
+                0,               // sandbox_specification_size
+                &mut pi,         // process_information
+            )
+        };
+        // Capture the error immediately, before any branching can clobber it.
+        let err = unsafe { GetLastError() };
+
+        if result != 0 {
+            // Unexpected success; close any handles and treat as enabled.
+            // SAFETY: handles are validated before being closed.
+            unsafe {
+                if !pi.hProcess.is_invalid() {
+                    let _ = CloseHandle(pi.hProcess);
+                }
+                if !pi.hThread.is_invalid() {
+                    let _ = CloseHandle(pi.hThread);
+                }
+            }
+            return true;
+        }
+
+        !is_api_not_implemented(err.0)
     }
 
     /// Build a FlatBuffer `SandboxSpec` from the container policy in the request.
@@ -437,7 +561,11 @@ impl ScriptRunner for BaseContainerRunner {
                      backend, or use an OS build with BaseContainer support."
                 )
             };
-            ScriptResponse::error(&hint)
+            ScriptResponse {
+                // Symbol absent: report BackendUnavailable, not a hard error.
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(&hint)
+            }
         })
     }
 
@@ -824,12 +952,20 @@ impl ScriptRunner for BaseContainerRunner {
                 diag.kind, diag.message
             );
 
+            // Classify a disabled-feature error as BackendUnavailable; any
+            // other launch error stays LaunchFailed.
+            let failure_phase = if is_api_not_implemented(err.0) {
+                FailurePhase::BackendUnavailable
+            } else {
+                FailurePhase::LaunchFailed
+            };
+
             return ScriptResponse {
                 exit_code: -1,
                 error_message: diag.message.clone(),
                 standard_err: diag.message,
                 extended_error,
-                failure_phase: FailurePhase::LaunchFailed,
+                failure_phase,
                 ..Default::default()
             };
         }
@@ -961,6 +1097,24 @@ mod tests {
 
     fn expected_mask(r: EffectiveUiRestrictions) -> u64 {
         to_job_object_uilimit_mask(&r) as u64
+    }
+
+    #[test]
+    fn is_api_not_implemented_classifies_disabled_feature() {
+        assert!(is_api_not_implemented(ERROR_CALL_NOT_IMPLEMENTED.0));
+        assert!(is_api_not_implemented(E_NOTIMPL.0 as u32));
+        // ERROR_INVALID_PARAMETER (87) and success are ordinary, not "disabled".
+        assert!(!is_api_not_implemented(87));
+        assert!(!is_api_not_implemented(0));
+    }
+
+    #[test]
+    fn decode_create_capability_table() {
+        let cap = SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX;
+        assert!(!BaseContainerRunner::decode_create_capability(0, cap)); // FALSE return
+        assert!(!BaseContainerRunner::decode_create_capability(1, 0)); // bit clear
+        assert!(BaseContainerRunner::decode_create_capability(1, cap)); // enabled
+        assert!(BaseContainerRunner::decode_create_capability(1, cap | 0x4)); // extra bits ok
     }
 
     #[test]

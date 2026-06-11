@@ -16,6 +16,7 @@
 //! will wire it into the dispatcher in `main.rs`.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use wxc_common::models::ContainerPolicy;
 
@@ -104,7 +105,9 @@ pub enum FallbackError {
 ///
 /// 1. If `MXC_FORCE_TIER` is set in a test build, honor it (test seam).
 /// 2. Try Tier 1 (BaseContainer) when `prefer_base_container` is true and the
-///    API surface is detected.
+///    backend is *usable*. See [`is_base_container_usable`], a capability check
+///    (not just symbol presence) so a disabled build degrades to a lower tier
+///    instead of failing at launch.
 /// 3. Otherwise try Tier 2 (AppContainer + BFS), but **only when this binary
 ///    was compiled with the `tier2_bfs` Cargo feature**. With the feature on,
 ///    Tier 2 is selected when there's no filesystem policy at all, or
@@ -160,7 +163,7 @@ pub fn detect(
     let mut warnings: Vec<String> = Vec::new();
 
     // Tier 1 — BaseContainer
-    if prefer_base_container && is_base_container_api_present() {
+    if prefer_base_container && is_base_container_usable() {
         if denied {
             ensure_dacl_augmentation_allowed(policy)?;
             verify_write_dac_all(&policy.denied_paths)?;
@@ -445,11 +448,21 @@ fn forced_decision(
 // Probes
 // ---------------------------------------------------------------------------
 
-/// Returns `true` when `processmodel.dll!Experimental_CreateProcessInSandbox`
-/// can be resolved — i.e. the BaseContainer (Tier 1) API is present on this
-/// machine.
-pub fn is_base_container_api_present() -> bool {
-    crate::base_container_runner::BaseContainerRunner::is_base_container_api_present().is_ok()
+/// Returns `true` when the BaseContainer (Tier 1) backend is **usable** here
+/// (feature enabled, not merely symbol-present). The signal [`detect`] uses to
+/// decide whether Tier 1 is eligible. The result is probed once and cached for
+/// the process lifetime.
+pub fn is_base_container_usable() -> bool {
+    // Test seam: force the capability so tier-selection tests can simulate
+    // "symbol present but feature disabled" (and the reverse) without real OS
+    // support. Checked before the cache so it always takes effect.
+    #[cfg(test)]
+    if let Ok(forced) = std::env::var("MXC_FORCE_BC_USABLE") {
+        return forced == "1";
+    }
+
+    static USABLE: OnceLock<bool> = OnceLock::new();
+    *USABLE.get_or_init(crate::base_container_runner::BaseContainerRunner::is_base_container_usable)
 }
 
 /// Returns `Ok(Some(path))` when `bfscfg.exe` is present, where `path`
@@ -634,7 +647,7 @@ mod tests {
     // honored uniformly across the dispatcher and fallback_detector
     // test modules. A per-module lock would let cross-module test
     // threads race on `MXC_FORCE_TIER` / `MXC_BFSCFG_PATH`.
-    use crate::test_env::{ForceTierGuard, ENV_LOCK};
+    use crate::test_env::{BcUsableGuard, ForceTierGuard, ENV_LOCK};
     // `BfscfgPathGuard` is only meaningful when the `tier2_bfs` feature
     // is compiled in; without it, `find_bfscfg_exe` ignores the env var.
     #[cfg(feature = "tier2_bfs")]
@@ -821,7 +834,31 @@ mod tests {
 
     #[test]
     fn base_container_api_probe_smoke() {
-        let _ = is_base_container_api_present();
+        let _ = crate::base_container_runner::BaseContainerRunner::is_base_container_api_present();
+    }
+
+    #[test]
+    fn base_container_usable_probe_smoke() {
+        // Must not panic and must be deterministic; concrete value is
+        // host-dependent.
+        let first = is_base_container_usable();
+        assert_eq!(first, is_base_container_usable());
+    }
+
+    #[test]
+    fn detect_skips_tier1_when_bc_unusable() {
+        // Symbol may be present, but capability disabled: detection must drop
+        // to Tier 3 rather than pick a BaseContainer that cannot launch.
+        let _g = BcUsableGuard::set(false);
+        let d = detect(&empty_policy(), true).expect("detect should succeed");
+        assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
+    }
+
+    #[test]
+    fn detect_selects_tier1_when_bc_usable() {
+        let _g = BcUsableGuard::set(true);
+        let d = detect(&empty_policy(), true).expect("detect should succeed");
+        assert!(matches!(d.tier, IsolationTier::BaseContainer));
     }
 
     #[test]
