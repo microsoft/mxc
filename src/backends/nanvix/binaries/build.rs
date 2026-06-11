@@ -81,7 +81,9 @@ fn main() {
     // pre-fetched binaries and skip all network downloads. This enables fully
     // offline builds where every dynamic build input has been pre-fetched.
     // Otherwise, download into a subdirectory of OUT_DIR as before.
-    let offline_bin_dir = std::env::var_os("NANVIX_BIN").map(PathBuf::from);
+    let offline_bin_dir = std::env::var_os("NANVIX_BIN")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
     let use_prefetched_binaries = offline_bin_dir.is_some();
     let bin_dir = match offline_bin_dir {
         Some(dir) => {
