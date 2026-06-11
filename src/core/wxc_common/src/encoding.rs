@@ -3,6 +3,11 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
+/// Base64 helpers used across MXC for transporting config payloads on the
+/// command line. All functions use the standard RFC 4648 alphabet with
+/// padding so that encoded output is portable across the SDK and the native
+/// executors.
+
 /// Decode a Base64-encoded string to raw bytes.
 ///
 /// Uses the standard Base64 alphabet (RFC 4648) with required padding.
