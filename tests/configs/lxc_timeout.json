@@ -2,7 +2,6 @@
   "version": "0.4.0-alpha",
   "containerId": "CLI-LXC-Timeout-Test",
   "containment": "lxc",
-  "platform": "linux",
   "process": {
     "commandLine": "echo 'Starting long task'; sleep 120; echo 'Should not reach here'",
     "timeout": 5000

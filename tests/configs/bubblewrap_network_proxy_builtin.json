@@ -2,7 +2,6 @@
   "version": "0.6.0-alpha",
   "containerId": "CLI-Bubblewrap-Network-Proxy-Builtin",
   "containment": "bubblewrap",
-  "platform": "linux",
   "process": {
     "commandLine": "curl -fsSL https://api.github.com/zen && echo PROXY_OK"
   },

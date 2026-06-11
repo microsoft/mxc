@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 
+use serde::de::IgnoredAny;
 use serde::Deserialize;
 
 use crate::encoding::base64_decode;
@@ -217,7 +218,6 @@ struct RawConfig {
     version: Option<String>,
     #[serde(rename = "containerId")]
     container_id: Option<String>,
-    platform: Option<String>,
     process: Option<RawProcess>,
     lifecycle: Option<RawLifecycle>,
     containment: Option<String>,
@@ -234,10 +234,12 @@ struct RawConfig {
     seatbelt: Option<RawSeatbelt>,
     // Captures any top-level key not matched above so unrecognised fields can
     // be rejected at the trust boundary instead of being silently dropped.
-    // Allowed annotation keys ($schema, _comment) are filtered out in
+    // `IgnoredAny` discards each value during deserialisation, so a large or
+    // complex unknown section costs nothing beyond its key. Allowed annotation
+    // keys ($schema, _comment) are filtered out in
     // `reject_unknown_top_level_fields`.
     #[serde(flatten)]
-    unknown: HashMap<String, serde_json::Value>,
+    unknown: HashMap<String, IgnoredAny>,
 }
 
 // State-aware request shape. `phase` is required (no `#[serde(default)]` on
@@ -250,6 +252,8 @@ struct RawConfig {
 struct RawStateAwareRequest {
     #[serde(default)]
     version: Option<String>,
+    #[serde(rename = "containerId", default)]
+    container_id: Option<String>,
     #[serde(default)]
     containment: Option<String>,
     phase: String,
@@ -270,7 +274,7 @@ struct RawStateAwareRequest {
     // See `RawConfig::unknown`. Mirrored here so unrecognised top-level keys are
     // rejected on the state-aware path too.
     #[serde(flatten)]
-    unknown: HashMap<String, serde_json::Value>,
+    unknown: HashMap<String, IgnoredAny>,
 }
 
 // Untagged enum: serde tries `StateAware` first (requires `phase`), falls
@@ -623,8 +627,8 @@ const ALLOWED_TOP_LEVEL_ANNOTATIONS: &[&str] = &["$schema", "_comment"];
 /// `filesystem`, or a stray `policy` block) now fail loudly with a precise
 /// error instead of being ignored, which previously meant the associated
 /// policy was never applied.
-fn reject_unknown_top_level_fields(
-    unknown: &HashMap<String, serde_json::Value>,
+fn reject_unknown_top_level_fields<V>(
+    unknown: &HashMap<String, V>,
     logger: &mut Logger,
 ) -> Result<(), WxcError> {
     let mut keys: Vec<&str> = unknown
@@ -799,7 +803,6 @@ fn convert_raw_config_inner(
     validate_schema_version(&schema_version, logger)?;
 
     let container_id = raw.container_id.unwrap_or_default();
-    let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
 
     // Process section: required for one-shot and for state-aware exec; absent
     // is allowed for state-aware non-exec phases (require_process == false)
@@ -1297,7 +1300,6 @@ fn convert_raw_config_inner(
     Ok(ExecutionRequest {
         schema_version,
         container_id,
-        platform,
         env,
         script_code,
         working_directory,
@@ -1339,8 +1341,7 @@ fn convert_raw_state_aware(
     // same conversion path one-shot uses for cross-cutting wire fields.
     let surrogate = RawConfig {
         version: raw.version,
-        container_id: None,
-        platform: None,
+        container_id: raw.container_id,
         process: raw.process,
         lifecycle: None,
         containment: raw.containment,
@@ -2483,7 +2484,6 @@ mod tests {
     fn proxy_accepted_with_bubblewrap() {
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {"proxy": {"builtinTestServer": true}}
@@ -2500,7 +2500,6 @@ mod tests {
     fn proxy_with_bubblewrap_and_firewall_enforcement_is_rejected() {
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2525,7 +2524,6 @@ mod tests {
     fn proxy_with_bubblewrap_and_both_enforcement_is_rejected() {
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2546,7 +2544,6 @@ mod tests {
         // proxy is fine and must NOT trigger the conflict guard.
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2570,7 +2567,6 @@ mod tests {
         // policy-weakening trap and must be rejected at parse time.
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2594,7 +2590,6 @@ mod tests {
     fn external_proxy_localhost_with_bubblewrap_and_blocked_hosts_is_rejected() {
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2616,7 +2611,6 @@ mod tests {
         // enforcement.
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2639,7 +2633,6 @@ mod tests {
         // into trusting the external proxy with full policy delegation.
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2661,7 +2654,6 @@ mod tests {
         // combining it with allowedHosts is fine.
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2685,7 +2677,6 @@ mod tests {
         // surface a warning (does not reject).
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2705,14 +2696,13 @@ mod tests {
 
     #[test]
     fn new_toplevel_fields_parsed() {
-        let json = r#"{"version": "0.4.0-alpha", "containerId": "abc-123", "platform": "linux", "containment": "lxc", "process": {"commandLine": "echo hi"}}"#;
+        let json = r#"{"version": "0.4.0-alpha", "containerId": "abc-123", "containment": "lxc", "process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "0.4.0-alpha");
         assert_eq!(req.container_id, "abc-123");
-        assert_eq!(req.platform, "linux");
     }
 
     #[test]
@@ -2724,7 +2714,6 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "");
         assert_eq!(req.container_id, "");
-        assert_eq!(req.platform, "windows");
     }
 
     #[test]
@@ -2866,6 +2855,24 @@ mod tests {
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => assert_eq!(p.phase, Phase::Provision),
+            _ => panic!("expected state-aware request"),
+        }
+    }
+
+    #[test]
+    fn state_aware_forwards_container_id() {
+        // `containerId` is a documented top-level field and must be preserved
+        // into the inner ExecutionRequest for state-aware requests, not dropped.
+        let json = r#"{
+            "phase": "provision",
+            "containerId": "sa-container-1",
+            "containment": "isolation_session"
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => {
+                assert_eq!(p.phase, Phase::Provision);
+                assert_eq!(p.request.container_id, "sa-container-1");
+            }
             _ => panic!("expected state-aware request"),
         }
     }

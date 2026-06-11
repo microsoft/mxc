@@ -20,10 +20,6 @@
     "_comment": {
       "description": "Optional human-readable annotation. Accepted but ignored by the parser."
     },
-    "platform": {
-      "type": "string",
-      "description": "Target platform hint (e.g. 'windows', 'linux'). Defaults to 'windows' when omitted."
-    },
     "appContainer": {
       "$ref": "#/properties/processContainer"
     },

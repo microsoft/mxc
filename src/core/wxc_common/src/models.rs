@@ -550,15 +550,13 @@ pub struct ExperimentalConfig {
     pub isolation_session: Option<IsolationSessionConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExecutionRequest {
     /// Schema version for the config format.
     pub schema_version: String,
     /// Externally assigned container identifier.
     pub container_id: String,
-    /// Target platform: "linux" or "windows". Default: "windows".
-    pub platform: String,
     /// Environment variables as "KEY=VALUE" strings (from process.env).
     pub env: Vec<String>,
     pub script_code: String,
@@ -581,28 +579,6 @@ pub struct ExecutionRequest {
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
-}
-
-impl Default for ExecutionRequest {
-    fn default() -> Self {
-        Self {
-            schema_version: String::new(),
-            container_id: String::new(),
-            platform: "windows".to_string(),
-            env: Vec::new(),
-            script_code: String::new(),
-            working_directory: String::new(),
-            script_timeout: 0,
-            containment: ContainmentBackend::default(),
-            lifecycle: LifecycleConfig::default(),
-            policy: ContainerPolicy::default(),
-            lxc_config: LxcConfig::default(),
-            seatbelt: None,
-            experimental_enabled: false,
-            experimental: ExperimentalConfig::default(),
-            dry_run: false,
-        }
-    }
 }
 
 /// Distinguishes whether an error occurred during process creation (launch)

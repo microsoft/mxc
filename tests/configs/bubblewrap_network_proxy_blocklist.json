@@ -2,7 +2,6 @@
   "version": "0.6.0-alpha",
   "containerId": "CLI-Bubblewrap-Network-Proxy-Blocklist",
   "containment": "bubblewrap",
-  "platform": "linux",
   "process": {
     "commandLine": "set -e; curl -fsSL https://api.github.com/zen > /dev/null && echo SENTINEL_OK; if curl -fsS --max-time 5 https://evil.example.com > /dev/null 2>&1; then echo SENTINEL_BAD_LEAK; exit 1; else echo BLOCKED_OK; fi"
   },
