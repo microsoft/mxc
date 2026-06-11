@@ -31,7 +31,7 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 | macOS ARM64 / x64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
 
 
-The stable one-shot backends (`processcontainer`, `bubblewrap`, and `lxc`) do not require experimental mode; Linux hosts also need the matching runtime installed: bwrap (Bubblewrap) for the default backend, or the lxc toolset for the lxc backend. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `seatbelt`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI flag.
+The stable one-shot backends (`processcontainer`, `bubblewrap`, `lxc`, and `seatbelt`) do not require experimental mode; Linux hosts also need the matching runtime installed: bwrap (Bubblewrap) for the default backend, or the lxc toolset for the lxc backend. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI flag.
 
 
 ### Requirements
