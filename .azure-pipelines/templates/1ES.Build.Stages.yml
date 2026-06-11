@@ -33,7 +33,7 @@ stages:
   displayName: 'Build Executables'
   jobs:
 
-    - template: templates/Rust.Build.Job.yml
+    - template: Rust.Build.Job.yml
       parameters:
         isOfficialBuild: ${{ parameters.isOfficialBuild }}
         matrix:
@@ -59,7 +59,7 @@ stages:
     # macOS uses a separate template because it runs on a different
     # pool (Microsoft-hosted). The produced artifact name follows the same
     # scheme (mxc-binaries-<triplet>) so Package_MXC_NPM_SDK can consume it.
-    - template: templates/Mac.Build.Job.yml
+    - template: Mac.Build.Job.yml
       parameters:
         isOfficialBuild: ${{ parameters.isOfficialBuild }}
         ESRPInfo: ${{ parameters.ESRPInfo }}
@@ -68,7 +68,7 @@ stages:
   displayName: 'Package MXC'
   dependsOn: Build_Binaries
   jobs:
-  - template: templates/Package.NpmSdk.Job.yml
+  - template: Package.NpmSdk.Job.yml
     parameters:
       targets:
         - artifact: wxc-binaries-x86_64-pc-windows-msvc
@@ -84,19 +84,19 @@ stages:
 
       ESRPInfo: ${{ parameters.ESRPInfo }}
 
-  - template: templates/Mxc.Binary.Packaging.Job.yml
+  - template: Mxc.Binary.Packaging.Job.yml
 
 - stage: Lint
   displayName: 'Lint'
   dependsOn: []
   jobs:
-  - template: templates/Lint.Job.yml
+  - template: Lint.Job.yml
 
 - stage: SDK_Unit_Tests
   displayName: 'SDK Unit Tests'
   dependsOn: []
   jobs:
-  - template: templates/SDK.Unit.Test.Job.yml
+  - template: SDK.Unit.Test.Job.yml
     parameters:
       debug: ${{ parameters.debug }}
 
@@ -104,6 +104,6 @@ stages:
   displayName: 'SDK Integration Tests'
   dependsOn: Package_MXC
   jobs:
-  - template: templates/SDK.Integration.Test.Job.yml
+  - template: SDK.Integration.Test.Job.yml
     parameters:
       debug: ${{ parameters.debug }}
