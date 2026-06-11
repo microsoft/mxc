@@ -893,6 +893,7 @@ impl AppContainerScriptRunner {
             process: process_handle,
             thread: thread_handle,
             job,
+            pid: pi.dwProcessId,
             stdin_write: captured_stdin_write,
             stdout_read,
             stderr_read,
@@ -944,6 +945,8 @@ struct SpawnedChild {
     process: OwnedHandle,
     thread: OwnedHandle,
     job: UiJobObject,
+    /// OS process id of the child.
+    pid: u32,
     /// Parent's stdin write-end (Some only when spawned for streaming).
     stdin_write: Option<OwnedHandle>,
     /// Parent's stdout/stderr read-ends (Some only in capture/stream mode).
@@ -1296,7 +1299,8 @@ impl StreamingRunner for AppContainerScriptRunner {
 struct AppContainerSandboxProcess {
     process: SendOwnedHandle,
     _thread: SendOwnedHandle,
-    _job: crate::job_object::UiJobObject,
+    job: crate::job_object::UiJobObject,
+    pid: u32,
     stdin: Option<PipeWriter>,
     stdout: Option<PipeReader>,
     stderr: Option<PipeReader>,
@@ -1332,7 +1336,8 @@ impl AppContainerSandboxProcess {
         Self {
             process,
             _thread: thread,
-            _job: child.job,
+            job: child.job,
+            pid: child.pid,
             stdin,
             stdout,
             stderr,
@@ -1398,11 +1403,14 @@ impl SandboxProcess for AppContainerSandboxProcess {
         }
     }
 
+    fn id(&self) -> u32 {
+        self.pid
+    }
+
     fn kill(&mut self) -> std::io::Result<()> {
-        // Terminate the whole job so any descendants die with the child.
-        unsafe {
-            let _ = TerminateProcess(self.process.get(), u32::MAX);
-        }
+        // Terminate the whole job: the child and every descendant assigned to
+        // it die together (tree-kill).
+        self.job.terminate(u32::MAX);
         Ok(())
     }
 

@@ -139,7 +139,8 @@ impl SeatbeltScriptRunner {
         gui_access: bool,
         logger: &mut Logger,
     ) -> ScriptResponse {
-        let mut command = match build_sandbox_command(profile, &request.script_code, logger) {
+        let mut command = match build_sandbox_command(profile, &request.script_code, false, logger)
+        {
             Ok(cmd) => cmd,
             Err(resp) => return resp,
         };
@@ -476,7 +477,7 @@ impl StreamingRunner for SeatbeltScriptRunner {
             Err(e) => return Err(error_response(e)),
         };
 
-        let mut command = build_sandbox_command(&profile, &request.script_code, logger)?;
+        let mut command = build_sandbox_command(&profile, &request.script_code, true, logger)?;
 
         if !request.env.is_empty() {
             command.env_clear();
@@ -569,15 +570,24 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             .map(|status| status.code().unwrap_or(-1)))
     }
 
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
     fn kill(&mut self) -> std::io::Result<()> {
         // Already exited? Nothing to do.
         if self.child.try_wait()?.is_some() {
             return Ok(());
         }
-        let pid = self.child.id() as libc::pid_t;
-        // Graceful SIGTERM, then escalate to SIGKILL after a short grace.
+        // The child was spawned with `setsid()`, so it leads its own process
+        // group whose id equals its pid. Signal the whole group (negative pid)
+        // to take descendants (pipelines, `&`, servers) down with it. Using a
+        // negative pid is safe even if `setsid` failed: it only targets the
+        // group led by this pid, never the host's group.
+        let pgid = self.child.id() as libc::pid_t;
+        // Graceful SIGTERM to the group, then escalate to SIGKILL after a grace.
         unsafe {
-            libc::kill(pid, libc::SIGTERM);
+            libc::kill(-pgid, libc::SIGTERM);
         }
         let deadline = Instant::now() + KILL_GRACE;
         loop {
@@ -590,7 +600,7 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             std::thread::sleep(Duration::from_millis(50));
         }
         unsafe {
-            libc::kill(pid, libc::SIGKILL);
+            libc::kill(-pgid, libc::SIGKILL);
         }
         Ok(())
     }
@@ -647,6 +657,7 @@ impl SandboxProcess for SeatbeltSandboxProcess {
 fn build_sandbox_command(
     profile: &str,
     script_code: &str,
+    new_session: bool,
     logger: &mut Logger,
 ) -> Result<Command, ScriptResponse> {
     let profile_cstr = CString::new(profile)
@@ -656,6 +667,24 @@ fn build_sandbox_command(
 
     let mut command = Command::new(DEFAULT_SHELL);
     command.arg("-c").arg(script_code);
+
+    // When requested (streaming path), put the child in its own session /
+    // process group via `setsid()` so a caller can tree-kill it with a single
+    // `killpg` without touching the host's process group. This runs before
+    // `sandbox_init` so the detach happens regardless of the profile.
+    //
+    // SAFETY: `setsid` is async-signal-safe and runs after fork(), before
+    // exec(); the child is not a process-group leader at this point, so it
+    // succeeds. Failure is non-fatal (the caller's negative-pid kill simply
+    // targets a group that does not exist).
+    if new_session {
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
 
     // SAFETY: The closure runs after fork(), before exec(). We only call
     // sandbox_init with a pre-allocated CString — no Rust allocations

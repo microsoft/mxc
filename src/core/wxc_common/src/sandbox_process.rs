@@ -53,10 +53,17 @@ pub trait SandboxProcess: Send {
     /// `Ok(None)` if it is still running.
     fn try_wait(&mut self) -> std::io::Result<Option<i32>>;
 
-    /// Request termination of the sandboxed process. On Unix this attempts a
-    /// graceful `SIGTERM` and escalates to `SIGKILL` if the child does not
-    /// exit within a short grace period; on Windows it terminates the job /
-    /// process. Reaping happens in [`wait`](SandboxProcess::wait).
+    /// The OS process id of the sandboxed child (its PID on Unix, process id
+    /// on Windows). Useful for external monitoring or a caller-driven process
+    /// tree kill. Remains valid until the handle is dropped.
+    fn id(&self) -> u32;
+
+    /// Request termination of the sandboxed process **and its descendants**
+    /// (a process-tree kill). On Unix the child leads its own process group
+    /// and this signals the whole group (graceful `SIGTERM`, escalating to
+    /// `SIGKILL` after a short grace period); on Windows it terminates the job
+    /// object the child is assigned to. Reaping happens in
+    /// [`wait`](SandboxProcess::wait).
     fn kill(&mut self) -> std::io::Result<()>;
 
     /// Block until the child exits (honouring the request's `scriptTimeout`,

@@ -30,6 +30,7 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
+use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::{
     diagnose_create_process_failure, diagnose_environment_not_supported, diagnose_process_exit,
     is_environment_not_supported,
@@ -931,12 +932,28 @@ impl BaseContainerRunner {
             None => (None, None),
         };
 
+        // Best-effort: assign the child to a job object so the streaming
+        // handle's `kill()` can tree-kill it (the child and every descendant
+        // it spawns after assignment). Unlike the AppContainer path we cannot
+        // create the child suspended, so a descendant spawned in the brief
+        // window before assignment could escape; in practice the child is a
+        // shell that has not yet run the user command. Failure is non-fatal —
+        // `kill()` then falls back to terminating the root process.
+        let job = (|| -> Option<UiJobObject> {
+            let job = UiJobObject::new().ok()?;
+            job.assign_process(OwnedHandle::new(pi.hProcess).get())
+                .ok()?;
+            Some(job)
+        })();
+
         // The child runs immediately (no suspend); hand ownership to the
         // caller via `BaseChild`, which performs sandbox/proxy teardown after
         // the child exits.
         Ok(BaseChild {
             process: OwnedHandle::new(pi.hProcess),
             thread: OwnedHandle::new(pi.hThread),
+            pid: pi.dwProcessId,
+            job,
             stdin_write: captured_stdin_write,
             stdout_read,
             stderr_read,
@@ -961,6 +978,9 @@ impl BaseContainerRunner {
 struct BaseChild {
     process: OwnedHandle,
     thread: OwnedHandle,
+    pid: u32,
+    /// Job object the child is assigned to (best-effort), used to tree-kill.
+    job: Option<UiJobObject>,
     stdin_write: Option<OwnedHandle>,
     stdout_read: Option<OwnedHandle>,
     stderr_read: Option<OwnedHandle>,
@@ -1094,6 +1114,8 @@ impl StreamingRunner for BaseContainerRunner {
 struct BaseContainerSandboxProcess {
     process: SendOwnedHandle,
     _thread: SendOwnedHandle,
+    job: Option<UiJobObject>,
+    pid: u32,
     stdin: Option<PipeWriter>,
     stdout: Option<PipeReader>,
     stderr: Option<PipeReader>,
@@ -1125,6 +1147,8 @@ impl BaseContainerSandboxProcess {
         Self {
             process,
             _thread: thread,
+            job: child.job.take(),
+            pid: child.pid,
             stdin,
             stdout,
             stderr,
@@ -1193,9 +1217,19 @@ impl SandboxProcess for BaseContainerSandboxProcess {
         }
     }
 
+    fn id(&self) -> u32 {
+        self.pid
+    }
+
     fn kill(&mut self) -> std::io::Result<()> {
-        unsafe {
-            let _ = TerminateProcess(self.process.get(), u32::MAX);
+        // Tree-kill via the job object when the child was successfully assigned
+        // to one; otherwise fall back to terminating the root process.
+        if let Some(job) = &self.job {
+            job.terminate(u32::MAX);
+        } else {
+            unsafe {
+                let _ = TerminateProcess(self.process.get(), u32::MAX);
+            }
         }
         Ok(())
     }

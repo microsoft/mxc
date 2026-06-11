@@ -95,3 +95,62 @@ fn streaming_kill_terminates_process() {
     let result = proc.wait();
     assert_ne!(result.exit_code, 0, "killed process should not exit 0");
 }
+
+#[cfg(target_os = "macos")]
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_kill_terminates_process_tree() {
+    use std::io::{BufRead, BufReader};
+
+    // The sandboxed shell backgrounds a `sleep` (a descendant), prints its
+    // pid, then blocks. `kill()` must take the whole process group down,
+    // including that descendant.
+    let mut proc = spawn_sandbox(
+        &seatbelt_config("sleep 300 & echo CHILD=$!; sleep 300"),
+        &SpawnOptions::default(),
+    )
+    .expect("spawn");
+
+    assert!(proc.id() > 0, "id() should expose the child pid");
+
+    let stdout = proc.take_stdout().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read descendant pid");
+    let descendant: u32 = line
+        .trim()
+        .strip_prefix("CHILD=")
+        .expect("CHILD= prefix")
+        .parse()
+        .expect("descendant pid");
+
+    assert!(
+        pid_alive(descendant),
+        "descendant {descendant} should be running before kill"
+    );
+
+    proc.kill().expect("kill");
+    let _ = proc.wait();
+
+    let mut gone = false;
+    for _ in 0..60 {
+        if !pid_alive(descendant) {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        gone,
+        "descendant {descendant} should be killed with the process tree"
+    );
+}

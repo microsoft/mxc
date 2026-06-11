@@ -19,10 +19,11 @@ use std::sync::OnceLock;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicUIRestrictions,
-    SetInformationJobObject, JOBOBJECT_BASIC_UI_RESTRICTIONS, JOB_OBJECT_UILIMIT,
-    JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
-    JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
-    JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_UI_RESTRICTIONS,
+    JOB_OBJECT_UILIMIT, JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
+    JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES,
+    JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
+    JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
 };
 use windows::Win32::System::SystemServices::JOB_OBJECT_UILIMIT_IME;
 use windows_core::PCWSTR;
@@ -272,6 +273,17 @@ impl UiJobObject {
         // this is the caller's responsibility for `process_handle`.
         unsafe { AssignProcessToJobObject(self.handle, process_handle) }
             .map_err(|e| WxcError::Process(format!("AssignProcessToJobObject: {e}")))
+    }
+
+    /// Terminate every process currently assigned to this job (the sandboxed
+    /// child and all of its descendants) with the given exit code. Used to
+    /// tree-kill a running sandbox. Best-effort: errors are ignored since the
+    /// processes may already have exited.
+    pub fn terminate(&self, exit_code: u32) {
+        // SAFETY: `self.handle` is a valid job handle owned by this struct.
+        unsafe {
+            let _ = TerminateJobObject(self.handle, exit_code);
+        }
     }
 }
 

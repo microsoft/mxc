@@ -72,9 +72,13 @@ The handle is modelled on [`std::process::Child`]:
 - `take_stdin()` → `Box<dyn Write + Send>`, `take_stdout()` / `take_stderr()`
   → `Box<dyn Read + Send>` (drive them yourself; you own draining any stream
   you take, to avoid the child blocking on a full pipe).
+- `id()` returns the child's OS process id, for external monitoring or a
+  caller-driven process-tree kill.
 - `try_wait()` for a non-blocking exit check.
-- `kill()` requests termination (Unix: graceful `SIGTERM`, escalating to
-  `SIGKILL` after a short grace period).
+- `kill()` terminates the sandboxed process **and its descendants** (a
+  process-tree kill): on Unix the child leads its own process group and the
+  whole group is signalled (graceful `SIGTERM`, escalating to `SIGKILL` after
+  a short grace period); on Windows the child's job object is terminated.
 - `wait()` blocks until exit (honouring `scriptTimeout`, where `0` waits
   forever), drains any **untaken** stdout/stderr, and returns the exit code
   plus captured output. With no streams taken, `spawn_sandbox(..).wait()`
