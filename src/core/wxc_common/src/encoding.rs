@@ -49,6 +49,12 @@ mod tests {
     }
 
     #[test]
+    fn base64_decode_rejects_bad_padding() {
+        // A single stray padding character is not valid Base64.
+        assert!(base64_decode("=").is_err());
+    }
+
+    #[test]
     fn base64_roundtrip() {
         let original = b"Hello World";
         let decoded = base64_decode(&base64_encode(original)).unwrap();
