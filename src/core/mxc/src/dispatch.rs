@@ -197,6 +197,7 @@ pub fn spawn_runner(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     match &request.containment {
         ContainmentBackend::Seatbelt => spawn_seatbelt(request, logger),
+        ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc library does not yet support streaming for the '{}' backend",
             other.wire_name()
@@ -223,5 +224,40 @@ fn spawn_seatbelt(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     Err(MxcError::unsupported_containment(
         "Seatbelt is only available on macOS",
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_process_container(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use appcontainer_common::appcontainer_runner::AppContainerScriptRunner;
+    use wxc_common::config_parser::is_base_container_version;
+    use wxc_common::sandbox_process::StreamingRunner;
+
+    // BaseContainer (the experimental/newer-schema fallback) streaming is not
+    // implemented yet; only the AppContainer fast path supports streaming.
+    let version_implies_base_container = is_base_container_version(&request.schema_version);
+    if request.experimental_enabled || version_implies_base_container {
+        return Err(MxcError::unsupported_containment(
+            "streaming for the Windows BaseContainer backend is not implemented yet; \
+             use spawn_sandbox_from_config (run-to-completion) for this configuration",
+        ));
+    }
+
+    let mut runner = AppContainerScriptRunner::new();
+    runner
+        .spawn_streaming(request, logger)
+        .map_err(|resp| MxcError::backend_error(resp.error_message))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_process_container(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    Err(MxcError::unsupported_containment(
+        "ProcessContainer (AppContainer / BaseContainer) is only available on Windows",
     ))
 }
