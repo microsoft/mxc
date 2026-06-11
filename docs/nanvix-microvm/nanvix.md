@@ -51,6 +51,14 @@ verified against `checksums.json`. The easiest way to produce such a directory
 is to run a normal `--with-microvm` build once and copy the staged
 `nanvix-binaries` directory out of `OUT_DIR`.
 
+> **Snapshots are not trusted in offline mode.** WHP warm-start snapshots
+> (`snapshots/kernel.vmem`, `snapshots/kernel.whp.cbor`) are *not* covered by
+> `checksums.json` — in a normal build they are generated locally, not
+> downloaded. Any `snapshots/` directory inside `NANVIX_BIN` is therefore
+> ignored (never copied next to the executable), and the runtime cold-boots on
+> first use to regenerate a verified snapshot. This prevents an unverified VM
+> memory image from being warm-booted against otherwise-verified binaries.
+
 ## Quick Start
 
 ```json

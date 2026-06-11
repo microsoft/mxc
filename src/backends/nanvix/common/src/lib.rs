@@ -8,7 +8,7 @@
 //! by `nanvix_binaries` (download) and `wxc` (copy to output dir).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -239,79 +239,114 @@ pub fn generate_snapshot(
     Ok(())
 }
 
+/// Category of a staged NanVix artifact.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArtifactKind {
+    /// Flat binary next to the executable (e.g. `nanvixd.exe`).
+    Binary,
+    /// File under the `bin/` subdirectory (e.g. `bin/kernel.elf`).
+    BinFile,
+    /// WHP warm-start snapshot under `snapshots/` (used by the Windows runner).
+    Snapshot,
+}
+
+/// Relative paths (from the nanvix binary directory) of every artifact the
+/// backend stages, paired with its [`ArtifactKind`].
+///
+/// This is the single source of truth that drives both copying
+/// ([`copy_artifacts_to_target`]) and `cargo:rerun-if-changed` emission
+/// ([`emit_rerun_for_copied_artifacts`]) so the two can never drift apart.
+pub fn artifact_rel_paths() -> Vec<(ArtifactKind, PathBuf)> {
+    let mut paths = Vec::new();
+    for name in REQUIRED_BINARIES {
+        paths.push((ArtifactKind::Binary, PathBuf::from(name)));
+    }
+    for name in BIN_SUBDIR_FILES {
+        paths.push((ArtifactKind::BinFile, Path::new(BIN_SUBDIR).join(name)));
+    }
+    for name in SNAPSHOT_FILES {
+        paths.push((
+            ArtifactKind::Snapshot,
+            Path::new(SNAPSHOTS_SUBDIR).join(name),
+        ));
+    }
+    paths
+}
+
 /// Copy NanVix artifacts from the build cache (`src_dir`) to the target
 /// directory next to the output executable.
 ///
-/// Copies flat binaries, `snapshots/` files, and `bin/` subdir files.
-/// Skips files that are already up-to-date (based on modification time).
-pub fn copy_artifacts_to_target(src_dir: &Path, target_dir: &Path) {
+/// Binaries and `bin/` files are copied whenever the source exists (the build
+/// script only re-runs when a tracked input changed, so this is not a
+/// per-build cost — and a modification-time comparison would silently skip a
+/// legitimate override or rollback to an older cache).
+///
+/// `trust_snapshots` governs WHP warm-start snapshots, which are **not**
+/// covered by `checksums.json` (they are normally host-generated, not pinned
+/// release artifacts):
+/// - `true` (normal online build, snapshots produced locally): snapshots are
+///   mirrored — present ones are copied and target snapshots absent from the
+///   source are purged, so a stale warm-start image is never used against
+///   mismatched binaries.
+/// - `false` (source is an externally supplied `NANVIX_BIN` prefetch dir):
+///   snapshots are never copied and any stale target snapshot is removed, so
+///   the runtime falls back to a verified cold boot instead of warm-booting an
+///   unverified VM memory image.
+pub fn copy_artifacts_to_target(src_dir: &Path, target_dir: &Path, trust_snapshots: bool) {
     use std::fs;
 
-    // Flat binaries (nanvixd.exe, nanvix_rootfs.img, python3.initrd).
-    for name in REQUIRED_BINARIES {
-        let src = src_dir.join(name);
-        let dst = target_dir.join(name);
-        if src.exists() && (!dst.exists() || is_newer(&src, &dst)) {
+    for (kind, rel) in artifact_rel_paths() {
+        let src = src_dir.join(&rel);
+        let dst = target_dir.join(&rel);
+
+        // Snapshots from an untrusted (prefetched) source are never copied; we
+        // must also guarantee no stale snapshot is left behind so the runtime
+        // does not warm-boot an unverified image.
+        if kind == ArtifactKind::Snapshot && !trust_snapshots {
+            remove_stale_snapshot(&dst);
+            continue;
+        }
+
+        if src.exists() {
+            if let Some(parent) = dst.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
             eprintln!("nanvix: copying {} -> {}", src.display(), dst.display());
             if let Err(e) = fs::copy(&src, &dst) {
+                // Never leave a partial/stale file behind.
+                if kind == ArtifactKind::Snapshot {
+                    remove_stale_snapshot(&dst);
+                    panic!("nanvix: failed to copy {}: {}", rel.display(), e);
+                }
                 let _ = fs::remove_file(&dst);
-                eprintln!("nanvix: WARNING: failed to copy {}: {}", name, e);
+                eprintln!("nanvix: WARNING: failed to copy {}: {}", rel.display(), e);
             }
+        } else if kind == ArtifactKind::Snapshot {
+            // Trusted source is missing this snapshot — purge any stale target
+            // copy so an incomplete set forces a clean cold boot.
+            remove_stale_snapshot(&dst);
         }
     }
+}
 
-    // Snapshot files (snapshots/kernel.vmem, snapshots/kernel.whp.cbor).
-    // Mirror source -> target: copy newer files, but also remove any target
-    // snapshot that is absent from the source. Otherwise a stale warm-start
-    // snapshot left over from a previous build (e.g. one produced for a
-    // different set of binaries, or an offline build whose prefetch dir ships
-    // no snapshots) could be picked up at runtime and used against mismatched
-    // binaries. In the normal online build the source always contains every
-    // snapshot, so nothing is removed and behavior is unchanged.
-    let snapshots_src = src_dir.join(SNAPSHOTS_SUBDIR);
-    let snapshots_dst = target_dir.join(SNAPSHOTS_SUBDIR);
-    for name in SNAPSHOT_FILES {
-        let src = snapshots_src.join(name);
-        let dst = snapshots_dst.join(name);
-        if src.exists() {
-            let _ = fs::create_dir_all(&snapshots_dst);
-            if !dst.exists() || is_newer(&src, &dst) {
-                eprintln!("nanvix: copying snapshots/{} -> {}", name, dst.display());
-                if let Err(e) = fs::copy(&src, &dst) {
-                    let _ = fs::remove_file(&dst);
-                    eprintln!("nanvix: WARNING: failed to copy snapshots/{}: {}", name, e);
-                }
-            }
-        } else if dst.exists() {
-            eprintln!(
-                "nanvix: removing stale snapshots/{} (absent in source) -> {}",
-                name,
-                dst.display()
+/// Remove a target snapshot file if present, failing the build if it cannot be
+/// removed. A leftover stale snapshot would be warm-booted by the runner
+/// (which trusts a complete exe-side snapshot set on presence alone) against
+/// mismatched binaries, so a failure here must not be swallowed.
+fn remove_stale_snapshot(dst: &Path) {
+    if dst.exists() {
+        eprintln!(
+            "nanvix: removing stale {} (absent or untrusted in source)",
+            dst.display()
+        );
+        if let Err(e) = std::fs::remove_file(dst) {
+            panic!(
+                "nanvix: failed to remove stale snapshot {}: {} — refusing to \
+                 leave an unverified warm-start image that would be booted \
+                 against mismatched binaries",
+                dst.display(),
+                e
             );
-            if let Err(e) = fs::remove_file(&dst) {
-                eprintln!(
-                    "nanvix: WARNING: failed to remove stale snapshots/{}: {}",
-                    name, e
-                );
-            }
-        }
-    }
-
-    // bin/ subdir files (kernel.elf) — nanvixd expects ./bin/kernel.elf.
-    let bin_src = src_dir.join(BIN_SUBDIR);
-    let bin_dst = target_dir.join(BIN_SUBDIR);
-    if bin_src.exists() {
-        let _ = fs::create_dir_all(&bin_dst);
-        for name in BIN_SUBDIR_FILES {
-            let src = bin_src.join(name);
-            let dst = bin_dst.join(name);
-            if src.exists() && (!dst.exists() || is_newer(&src, &dst)) {
-                eprintln!("nanvix: copying bin/{} -> {}", name, dst.display());
-                if let Err(e) = fs::copy(&src, &dst) {
-                    let _ = fs::remove_file(&dst);
-                    eprintln!("nanvix: WARNING: failed to copy bin/{}: {}", name, e);
-                }
-            }
         }
     }
 }
@@ -323,25 +358,8 @@ pub fn copy_artifacts_to_target(src_dir: &Path, target_dir: &Path) {
 /// directory is updated at the same path. Without it, the consumer only reruns
 /// when the source *path* changes, leaving stale artifacts next to the exe.
 pub fn emit_rerun_for_copied_artifacts(src_dir: &Path) {
-    for name in REQUIRED_BINARIES {
-        println!("cargo:rerun-if-changed={}", src_dir.join(name).display());
-    }
-    let bin_subdir = src_dir.join(BIN_SUBDIR);
-    for name in BIN_SUBDIR_FILES {
-        println!("cargo:rerun-if-changed={}", bin_subdir.join(name).display());
-    }
-    let snapshots = src_dir.join(SNAPSHOTS_SUBDIR);
-    for name in SNAPSHOT_FILES {
-        println!("cargo:rerun-if-changed={}", snapshots.join(name).display());
-    }
-}
-
-fn is_newer(src: &Path, dst: &Path) -> bool {
-    let src_time = src.metadata().and_then(|m| m.modified()).ok();
-    let dst_time = dst.metadata().and_then(|m| m.modified()).ok();
-    match (src_time, dst_time) {
-        (Some(s), Some(d)) => s > d,
-        _ => true,
+    for (_, rel) in artifact_rel_paths() {
+        println!("cargo:rerun-if-changed={}", src_dir.join(rel).display());
     }
 }
 
@@ -395,5 +413,119 @@ mod tests {
         let out = format_stderr_tail(&big, true);
         assert!(out.starts_with("...(truncated)"));
         assert_eq!(out.len(), "...(truncated)".len() + STDERR_TAIL_BYTES);
+    }
+
+    // -- copy_artifacts_to_target snapshot handling --------------------------
+
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Create a unique, empty scratch directory under the OS temp dir.
+    fn scratch(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "nanvix_copy_test_{}_{}_{}",
+            tag,
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_snapshot(root: &Path, name: &str, contents: &[u8]) {
+        let dir = root.join(SNAPSHOTS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(name), contents).unwrap();
+    }
+
+    fn snapshot_path(root: &Path, name: &str) -> PathBuf {
+        root.join(SNAPSHOTS_SUBDIR).join(name)
+    }
+
+    #[test]
+    fn trusted_source_lacking_snapshot_purges_stale_target() {
+        let src = scratch("purge_src");
+        let target = scratch("purge_tgt");
+        // Target has both snapshots; source has none.
+        write_snapshot(&target, SNAPSHOT_VMEM, b"stale-vmem");
+        write_snapshot(&target, SNAPSHOT_CBOR, b"stale-cbor");
+
+        copy_artifacts_to_target(&src, &target, /* trust_snapshots = */ true);
+
+        assert!(!snapshot_path(&target, SNAPSHOT_VMEM).exists());
+        assert!(!snapshot_path(&target, SNAPSHOT_CBOR).exists());
+
+        fs::remove_dir_all(&src).ok();
+        fs::remove_dir_all(&target).ok();
+    }
+
+    #[test]
+    fn trusted_source_with_snapshots_copies_into_target() {
+        let src = scratch("copy_src");
+        let target = scratch("copy_tgt");
+        write_snapshot(&src, SNAPSHOT_VMEM, b"new-vmem");
+        write_snapshot(&src, SNAPSHOT_CBOR, b"new-cbor");
+
+        copy_artifacts_to_target(&src, &target, true);
+
+        assert_eq!(
+            fs::read(snapshot_path(&target, SNAPSHOT_VMEM)).unwrap(),
+            b"new-vmem"
+        );
+        assert_eq!(
+            fs::read(snapshot_path(&target, SNAPSHOT_CBOR)).unwrap(),
+            b"new-cbor"
+        );
+
+        fs::remove_dir_all(&src).ok();
+        fs::remove_dir_all(&target).ok();
+    }
+
+    #[test]
+    fn trusted_partial_source_copies_present_and_purges_absent() {
+        let src = scratch("partial_src");
+        let target = scratch("partial_tgt");
+        // Source has only vmem; target starts with both.
+        write_snapshot(&src, SNAPSHOT_VMEM, b"fresh-vmem");
+        write_snapshot(&target, SNAPSHOT_VMEM, b"old-vmem");
+        write_snapshot(&target, SNAPSHOT_CBOR, b"old-cbor");
+
+        copy_artifacts_to_target(&src, &target, true);
+
+        // Present-in-source file is overwritten; absent-in-source file purged.
+        assert_eq!(
+            fs::read(snapshot_path(&target, SNAPSHOT_VMEM)).unwrap(),
+            b"fresh-vmem"
+        );
+        assert!(!snapshot_path(&target, SNAPSHOT_CBOR).exists());
+
+        fs::remove_dir_all(&src).ok();
+        fs::remove_dir_all(&target).ok();
+    }
+
+    #[test]
+    fn untrusted_source_never_copies_snapshots_and_purges_target() {
+        let src = scratch("untrusted_src");
+        let target = scratch("untrusted_tgt");
+        // Source ships snapshots, but they are untrusted (prefetched).
+        write_snapshot(&src, SNAPSHOT_VMEM, b"attacker-vmem");
+        write_snapshot(&src, SNAPSHOT_CBOR, b"attacker-cbor");
+        // Target has stale snapshots from a prior build.
+        write_snapshot(&target, SNAPSHOT_VMEM, b"stale-vmem");
+        write_snapshot(&target, SNAPSHOT_CBOR, b"stale-cbor");
+
+        copy_artifacts_to_target(&src, &target, /* trust_snapshots = */ false);
+
+        // Untrusted snapshots are neither copied nor left behind.
+        assert!(!snapshot_path(&target, SNAPSHOT_VMEM).exists());
+        assert!(!snapshot_path(&target, SNAPSHOT_CBOR).exists());
+
+        fs::remove_dir_all(&src).ok();
+        fs::remove_dir_all(&target).ok();
     }
 }

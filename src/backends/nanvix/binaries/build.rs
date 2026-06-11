@@ -95,15 +95,22 @@ fn main() {
                     dir.display()
                 );
             }
-            // Canonicalize to an absolute path. The directory is emitted as
-            // `cargo:BIN_DIR` and consumed by the `wxc`/`lxc` build scripts
-            // (via `DEP_NANVIX_BINARIES_BIN_DIR`) to copy artifacts next to the
-            // final executable. Those scripts run with a different working
-            // directory, so a relative `NANVIX_BIN` would otherwise resolve
-            // against the wrong directory and silently copy nothing.
-            let dir = fs::canonicalize(&dir).unwrap_or_else(|e| {
+            // Make the path absolute (without resolving symlinks) so the
+            // value emitted as `cargo:BIN_DIR` and tracked via
+            // `cargo:rerun-if-changed` is stable regardless of the build
+            // script's working directory. The `wxc`/`lxc` build scripts run
+            // with a different cwd, so a relative `NANVIX_BIN` would otherwise
+            // resolve against the wrong directory and silently copy nothing.
+            //
+            // `std::path::absolute` (not `fs::canonicalize`) is deliberate: it
+            // does not resolve symlinks, so a common offline-cache workflow of
+            // atomically swapping a symlink (`ln -sfn cache-v2 cache`) keeps the
+            // tracked paths pointing at the symlink — letting Cargo notice the
+            // swap — instead of pinning the resolved real directory.
+            let dir = std::path::absolute(&dir).unwrap_or_else(|e| {
                 panic!(
-                    "nanvix_binaries: failed to canonicalize NANVIX_BIN '{}': {}",
+                    "nanvix_binaries: failed to resolve NANVIX_BIN '{}' to an \
+                     absolute path: {}",
                     dir.display(),
                     e
                 )
@@ -159,7 +166,7 @@ fn main() {
         verify_bin_subdir_checksums_linux(&bin_dir, &checksums);
 
         if use_prefetched_binaries {
-            emit_rerun_for_offline_inputs(&bin_dir, &binaries);
+            nanvix_common::emit_rerun_for_copied_artifacts(&bin_dir);
         }
     } else {
         // Windows: original logic
@@ -192,7 +199,7 @@ fn main() {
         verify_bin_subdir_checksums(&bin_dir, &checksums);
 
         if use_prefetched_binaries {
-            emit_rerun_for_offline_inputs(&bin_dir, &all_binaries);
+            nanvix_common::emit_rerun_for_copied_artifacts(&bin_dir);
         }
 
         // Generate host-local WHP snapshots at build time so even the first
@@ -240,6 +247,14 @@ fn main() {
 
     println!("cargo:rustc-env=NANVIX_BIN_DIR={}", bin_dir.display());
     println!("cargo:BIN_DIR={}", bin_dir.display());
+    // Propagate whether these binaries came from an externally supplied
+    // (prefetched) directory. Consumers read this as
+    // `DEP_NANVIX_BINARIES_PREFETCHED` and must not trust prefetched WHP
+    // snapshots (they are not covered by checksums.json).
+    println!(
+        "cargo:PREFETCHED={}",
+        if use_prefetched_binaries { "1" } else { "0" }
+    );
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=versions.json");
     println!("cargo:rerun-if-changed=checksums.json");
@@ -249,31 +264,6 @@ fn main() {
 }
 
 // -- Download logic ----------------------------------------------------------
-
-/// Emit `cargo:rerun-if-changed` for every pre-fetched input file so that
-/// replacing binaries in place under the same `NANVIX_BIN` path re-triggers
-/// checksum verification (and the downstream `wxc`/`lxc` artifact copy). The
-/// `rerun-if-env-changed=NANVIX_BIN` trigger only fires when the path value
-/// changes, not when the directory's contents change.
-fn emit_rerun_for_offline_inputs(bin_dir: &Path, binaries: &[&str]) {
-    for name in binaries {
-        println!("cargo:rerun-if-changed={}", bin_dir.join(name).display());
-    }
-    let bin_subdir = bin_dir.join(nanvix_common::BIN_SUBDIR);
-    for name in nanvix_common::BIN_SUBDIR_FILES {
-        println!("cargo:rerun-if-changed={}", bin_subdir.join(name).display());
-    }
-    // Track snapshots too: adding/removing/updating them under the same
-    // NANVIX_BIN path must re-trigger the build (and the downstream copy/purge)
-    // so the runtime never uses a stale or mismatched warm-start snapshot.
-    let snapshots_subdir = bin_dir.join(nanvix_common::SNAPSHOTS_SUBDIR);
-    for name in nanvix_common::SNAPSHOT_FILES {
-        println!(
-            "cargo:rerun-if-changed={}",
-            snapshots_subdir.join(name).display()
-        );
-    }
-}
 
 fn needs_download(
     config: &RepoConfig,
