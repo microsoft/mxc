@@ -107,5 +107,5 @@ sandbox_spec = { path = "core/generated/base_container_specification" }
 widestring = "1"
 url = "2"
 winreg = "0.55"
-mxc_build_common = { path = "core/mxc_build_common" }
 tempfile = "3"
+mxc_build_common = { path = "core/mxc_build_common" }
