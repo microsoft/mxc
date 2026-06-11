@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import type * as pty from 'node-pty';
+import type { IPty } from './pty-types.js';
 import { resolveBinaryAndCommonArgs } from './helper.js';
 import { loadPty } from './lazyPty.js';
 import { SandboxSpawnOptions } from './sandbox.js';
@@ -85,7 +85,7 @@ export function execInSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options: SandboxSpawnOptions = {},
-): pty.IPty {
+): IPty {
   const backendKey = backendForSandboxId(sandboxId) as C;
   const envelope = buildStateAwareEnvelope({
     phase: 'exec',

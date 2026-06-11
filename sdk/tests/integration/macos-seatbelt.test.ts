@@ -227,7 +227,7 @@ describe('macOS Seatbelt Container', {
     config.containerId = 'seatbelt-profile-override';
 
     const result = await new Promise<{ exitCode: number; stdout: string }>((resolve, reject) => {
-      const ptyProcess = sdk.spawnSandboxFromConfig(config, seatbeltSpawnOptions);
+      const ptyProcess = sdk.spawnSandboxFromConfig(config, { ...seatbeltSpawnOptions, usePty: true });
       let stdout = '';
       const timer = setTimeout(() => reject(new Error('Test timed out waiting for onExit')), 25_000);
       ptyProcess.onData((data: string) => { stdout += data; });

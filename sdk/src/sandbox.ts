@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import type * as pty from 'node-pty';
+import type { IPty, IPtyForkOptions } from './pty-types.js';
 import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
@@ -432,9 +432,11 @@ export interface SandboxSpawnOptions {
   skipPlatformCheck?: boolean;
 
   /**
-   * PTY options to pass to node-pty (only used by spawnSandbox)
+   * PTY options to pass to node-pty. Only used by the PTY path
+   * (`spawnSandbox`, or `spawnSandboxFromConfig`/`spawnSandboxAsync` with
+   * `usePty: true`).
    */
-  ptyOptions?: pty.IPtyForkOptions;
+  ptyOptions?: IPtyForkOptions;
 
   /**
    * Dry run mode: parse and validate config without executing.
@@ -448,9 +450,13 @@ export interface SandboxSpawnOptions {
   logDir?: string;
 
   /**
-   * When false, uses child_process.spawn instead of node-pty.
-   * Provides reliable exit codes and separate stdout/stderr streams.
-   * Defaults to true (uses PTY).
+   * Opt into PTY mode for `spawnSandboxFromConfig` / `spawnSandboxAsync`.
+   *
+   * When true, the SDK spawns via `node-pty` (which must be installed — it is
+   * an optional peer dependency) for interactive terminal I/O. When false or
+   * unset, it uses `child_process.spawn`, which needs no native addon and
+   * provides reliable exit codes and separate stdout/stderr streams.
+   * Defaults to false. (`spawnSandbox` always uses PTY regardless.)
    */
   usePty?: boolean;
 
@@ -499,7 +505,7 @@ function spawnPtyWithConfig(
   options: SandboxSpawnOptions,
   workingDirectory?: string,
   env?: { [key: string]: string | undefined },
-): pty.IPty {
+): IPty {
   // Inject env vars into config.process.env so they are passed explicitly to
   // the sandboxed child via the JSON config (not via process inheritance).
   if (env) {
@@ -509,7 +515,7 @@ function spawnPtyWithConfig(
   const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
 
   try {
-    const ptyOpts: pty.IPtyForkOptions = {
+    const ptyOpts: IPtyForkOptions = {
       name: "xterm-color",
       cols: 120,
       rows: 80,
@@ -540,6 +546,11 @@ function spawnPtyWithConfig(
  * Spawn a sandboxed process using wxc-exec with a PTY (node-pty) for
  * interactive terminal I/O (colors, input forwarding).
  *
+ * Always uses PTY mode and therefore requires the optional `node-pty` peer
+ * dependency to be installed. For non-interactive use that doesn't need a PTY,
+ * prefer `spawnSandboxAsync` or `spawnSandboxFromConfig` (both default to pipe
+ * mode and need no native addon).
+ *
  * @param script The command line script to execute
  * @param policy The sandbox policy
  * @param options - Spawn options
@@ -547,7 +558,7 @@ function spawnPtyWithConfig(
  * @param containerName Optional container name; if not provided, a random name will be generated
  * @param env Optional environment variables
  * @returns IPty object for interacting with the sandboxed process
- * @throws Error if platform is not supported or wxc-exec is not found
+ * @throws Error if platform is not supported, wxc-exec is not found, or `node-pty` is not installed
  *
  * @example
  * ```typescript
@@ -566,9 +577,49 @@ export function spawnSandbox(
   workingDirectory?: string,
   containerName?: string,
   env?: { [key: string]: string | undefined },
-): pty.IPty {
+): IPty {
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
   return spawnPtyWithConfig(config, options, workingDirectory, env);
+}
+
+/**
+ * Internal helper: resolves the executor binary path and spawns a pipe
+ * (`child_process`) process. Used by the default, non-PTY spawn paths so they
+ * never touch the optional `node-pty` addon.
+ */
+function spawnChildWithConfig(
+  config: ContainerConfig,
+  options: SandboxSpawnOptions,
+  workingDirectory?: string,
+  env?: { [key: string]: string | undefined },
+): ChildProcess {
+  // Inject env vars into config.process.env so they are passed explicitly to
+  // the sandboxed child via the JSON config (not via process inheritance).
+  if (env) {
+    injectEnvIntoConfig(config, env);
+  }
+
+  const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
+  try {
+    const child = spawn(executablePath, args, {
+      cwd: workingDirectory || process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    child.on('close', (code) => {
+      logger?.log('info', 'mxc.spawn.exit', {
+        exitCode: code ?? -1,
+        durationMs: Date.now() - startTime,
+      });
+      logger?.close();
+    });
+    child.on('error', () => {
+      logger?.close();
+    });
+    return child;
+  } catch (err) {
+    logger?.close();
+    throw err;
+  }
 }
 
 /**
@@ -581,7 +632,7 @@ export function spawnSandbox(
  * @param config The container configuration (from createConfigFromPolicy)
  * @param options - Spawn options
  * @param workingDirectory Optional working directory path
- * @returns IPty when usePty is true or unset; ChildProcess when usePty is false
+ * @returns ChildProcess by default (pipe mode); IPty when `usePty: true`
  *
  * @example
  * ```typescript
@@ -589,69 +640,73 @@ export function spawnSandbox(
  * config.process!.commandLine = 'echo hello';
  * config.processContainer!.ui!.isolation = "atoms";
  *
- * // PTY mode (default) — returns IPty:
- * const ptyProcess = spawnSandboxFromConfig(config);
- *
- * // Non-PTY mode — returns ChildProcess with reliable exit codes:
- * const child = spawnSandboxFromConfig(config, { usePty: false });
+ * // Pipe mode (default) — returns ChildProcess with reliable exit codes:
+ * const child = spawnSandboxFromConfig(config);
  * child.stdout?.on('data', (data) => console.log(data.toString()));
+ *
+ * // PTY mode — returns IPty (requires the optional `node-pty` peer dependency):
+ * const ptyProcess = spawnSandboxFromConfig(config, { usePty: true });
+ * ptyProcess.onData((data) => console.log(data));
  * ```
  */
 export function spawnSandboxFromConfig(
   config: ContainerConfig,
-  options: SandboxSpawnOptions & { usePty: false },
+  options: SandboxSpawnOptions & { usePty: true },
   workingDirectory?: string,
   env?: { [key: string]: string | undefined }
-): ChildProcess;
+): IPty;
 export function spawnSandboxFromConfig(
   config: ContainerConfig,
   options?: SandboxSpawnOptions,
   workingDirectory?: string,
   env?: { [key: string]: string | undefined }
-): pty.IPty;
+): ChildProcess;
 export function spawnSandboxFromConfig(
   config: ContainerConfig,
   options: SandboxSpawnOptions = {},
   workingDirectory?: string,
   env?: { [key: string]: string | undefined }
-): pty.IPty | ChildProcess {
-  if (options.usePty === false) {
-    // Inject env vars into config.process.env so they are passed explicitly to
-    // the sandboxed child via the JSON config (not via process inheritance).
-    if (env) {
-      injectEnvIntoConfig(config, env);
-    }
-
-    const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
-    try {
-      const child = spawn(executablePath, args, {
-        cwd: workingDirectory || process.cwd(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      child.on('close', (code) => {
-        logger?.log('info', 'mxc.spawn.exit', {
-          exitCode: code ?? -1,
-          durationMs: Date.now() - startTime,
-        });
-        logger?.close();
-      });
-      child.on('error', () => {
-        logger?.close();
-      });
-      return child;
-    } catch (err) {
-      logger?.close();
-      throw err;
-    }
+): IPty | ChildProcess {
+  if (options.usePty === true) {
+    diagLogVersion();
+    return spawnPtyWithConfig(config, options, workingDirectory, env);
   }
 
-  diagLogVersion();
-  return spawnPtyWithConfig(config, options, workingDirectory, env);
+  return spawnChildWithConfig(config, options, workingDirectory, env);
 }
 
 /**
  * Spawn a sandboxed process and return a promise that resolves with output.
  * Convenience wrapper around spawnSandbox for non-interactive use cases.
+ *
+ * @param script The command line script to execute
+ * @param policy The sandbox policy
+ * @param options - Spawn options
+ * @param workingDirectory Optional working directory path
+ * @param containerName Optional container name; if not provided, a random name will be generated
+ *
+ * @returns Promise that resolves with stdout/stderr and exit code
+ *
+ * @example
+ * ```typescript
+ * const policy: SandboxPolicy = {
+ *   version: '0.4.0-alpha',
+ *   filesystem: { readwritePaths: ['/workspace'] },
+ * };
+ *
+ * const result = await spawnSandboxAsync('echo hello', policy);
+ * console.log('Output:', result.stdout);
+ * console.log('Exit code:', result.exitCode);
+ * ```
+ */
+/**
+ * Spawn a sandboxed process and return a promise that resolves with output.
+ * Convenience wrapper for non-interactive use cases.
+ *
+ * Defaults to pipe mode (`child_process`), which needs no native addon and
+ * yields separate `stdout`/`stderr`. Pass `usePty: true` to run under a PTY
+ * instead (requires the optional `node-pty` peer dependency); in PTY mode the
+ * combined terminal output is returned in `stdout` and `stderr` is empty.
  *
  * @param script The command line script to execute
  * @param policy The sandbox policy
@@ -680,37 +735,81 @@ export function spawnSandboxAsync(
   workingDirectory?: string,
   containerName?: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve, reject) => {
-    try {
-      const ptyProcess = spawnSandbox(script, policy, options, workingDirectory, containerName);
-      let output = '';
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
 
+  if (options.usePty === true) {
+    return new Promise((resolve, reject) => {
+      let ptyProcess: IPty;
+      try {
+        ptyProcess = spawnPtyWithConfig(config, options, workingDirectory);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+
+      let output = '';
       ptyProcess.onData((data: string) => {
         output += data;
       });
-
       ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
-        // Note: wxc-exec doesn't separate stdout/stderr when using PTY
-        // All output is combined
-        //
-        // Check for structured error envelopes from wxc-exec on failure.
-        if (event.exitCode !== 0) {
-          const mxcError = tryParseErrorEnvelopeFromLines(output);
-          if (mxcError) {
-            reject(mxcError);
-            return;
-          }
+        // wxc-exec runs under a single PTY, so the OS merges stdout/stderr;
+        // all output arrives on `output` and stderr is reported empty.
+        try {
+          resolve(settleSpawnResult(output, '', event.exitCode));
+        } catch (err) {
+          reject(err);
         }
-        resolve({
-          stdout: output,
-          stderr: '',
-          exitCode: event.exitCode
-        });
       });
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    let child: ChildProcess;
+    try {
+      child = spawnChildWithConfig(config, options, workingDirectory);
     } catch (error) {
       reject(error);
+      return;
     }
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (d: Buffer | string) => {
+      stdout += typeof d === 'string' ? d : d.toString('utf-8');
+    });
+    child.stderr?.on('data', (d: Buffer | string) => {
+      stderr += typeof d === 'string' ? d : d.toString('utf-8');
+    });
+
+    child.on('error', (err) => {
+      reject(err);
+    });
+    child.on('close', (code) => {
+      try {
+        resolve(settleSpawnResult(stdout, stderr, code ?? -1));
+      } catch (err) {
+        reject(err);
+      }
+    });
   });
+}
+
+/**
+ * Builds the buffered spawn result, or throws the `MxcError` carried by a
+ * structured error envelope when the executor reported a non-zero exit.
+ */
+function settleSpawnResult(
+  stdout: string,
+  stderr: string,
+  exitCode: number,
+): { stdout: string; stderr: string; exitCode: number } {
+  if (exitCode !== 0) {
+    const mxcError = tryParseErrorEnvelopeFromLines(stderr) ?? tryParseErrorEnvelopeFromLines(stdout);
+    if (mxcError) {
+      throw mxcError;
+    }
+  }
+  return { stdout, stderr, exitCode };
 }
 
 /**

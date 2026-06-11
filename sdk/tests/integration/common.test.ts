@@ -67,14 +67,14 @@ for (const schemaVersion of supportedVersions) {
       assertDryRunResult(result.stdout, result.exitCode, schemaVersion.raw);
     });
 
-    it('should dry-run via spawnSandboxFromConfig', async () => {
+    it('should dry-run via spawnSandboxFromConfig (PTY)', async () => {
       const config = sdk.createConfigFromPolicy(policy);
       config.process = config.process ?? { commandLine: '' };
       config.process.commandLine = 'cmd.exe /c echo test';
       config.containerId = `dryrun-fromcfg-${schemaVersion}`;
 
       const result = await new Promise<{ exitCode: number; stdout: string }>((resolve) => {
-        const ptyProcess = sdk.spawnSandboxFromConfig(config, { dryRun: true, ...debugSpawnOptions });
+        const ptyProcess = sdk.spawnSandboxFromConfig(config, { dryRun: true, usePty: true, ...debugSpawnOptions });
         let stdout = '';
         ptyProcess.onData((data: string) => { stdout += data; });
         ptyProcess.onExit((event: { exitCode: number }) => {
