@@ -38,12 +38,13 @@
 
 pub mod dispatch;
 
-pub use dispatch::{select_runner, Selection};
+pub use dispatch::{select_runner, spawn_runner, Selection};
 
 // Re-export the wire/model types callers need so they don't have to depend
 // on `wxc_common` directly.
 pub use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 pub use wxc_common::mxc_error::{MxcError, MxcErrorCode};
+pub use wxc_common::sandbox_process::SandboxProcess;
 
 use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
@@ -101,6 +102,38 @@ pub fn spawn_sandbox_from_config(
     config: &str,
     options: &SpawnOptions,
 ) -> Result<ScriptResponse, MxcError> {
+    let (request, mut logger) = load_and_prepare(config, options)?;
+    run_request(request, &mut logger)
+}
+
+/// Spawn a sandbox from a JSON config and return a handle to the running
+/// process for live bidirectional stdio and termination.
+///
+/// The streaming counterpart to [`spawn_sandbox_from_config`]: instead of
+/// running to completion, it returns a [`SandboxProcess`] the caller can
+/// write to (`take_stdin`), read from (`take_stdout` / `take_stderr`),
+/// [`wait`](SandboxProcess::wait) on, or [`kill`](SandboxProcess::kill). No
+/// pty is allocated. Any stdout/stderr stream the caller does not take is
+/// captured by `wait()`.
+///
+/// `config` and `options` are interpreted exactly as in
+/// [`spawn_sandbox_from_config`] (the `command`, `working_directory`, and
+/// `env` overrides apply; `dry_run` is ignored — there is nothing to run).
+pub fn spawn_sandbox(
+    config: &str,
+    options: &SpawnOptions,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    let (request, mut logger) = load_and_prepare(config, options)?;
+    spawn_runner(&request, &mut logger)
+}
+
+/// Parse a config string and apply [`SpawnOptions`], returning the prepared
+/// request and the diagnostic logger. Shared by the run-to-completion and
+/// streaming entrypoints.
+fn load_and_prepare(
+    config: &str,
+    options: &SpawnOptions,
+) -> Result<(ExecutionRequest, Logger), MxcError> {
     let mut logger = Logger::new(Mode::Buffer);
 
     // `load_request` interprets a non-base64 string as a *file path*; only
@@ -132,7 +165,7 @@ pub fn spawn_sandbox_from_config(
         ));
     }
 
-    run_request(request, &mut logger)
+    Ok((request, logger))
 }
 
 /// Run a fully-built [`ExecutionRequest`], capturing its output.

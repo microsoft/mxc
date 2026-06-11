@@ -1,0 +1,83 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Handle-based ("streaming") sandbox execution.
+//!
+//! [`ScriptRunner`](crate::script_runner::ScriptRunner) owns the whole
+//! lifecycle (spawn → wait → drain → return), which is fine for fire-and-
+//! forget runs but cannot expose the running child. This module adds the
+//! interface for the other model: spawn the sandboxed process and hand the
+//! caller a [`SandboxProcess`] handle they can write to, read from, wait on,
+//! and kill while it runs.
+//!
+//! As with [`ScriptRunner`](crate::script_runner::ScriptRunner), the traits
+//! live in `wxc_common` (the cross-platform foundation) while the
+//! implementations live in the per-backend crates — `wxc_common` must not
+//! depend on any `backends/*` crate.
+
+use std::io::{Read, Write};
+
+use crate::logger::Logger;
+use crate::models::{ExecutionRequest, ScriptResponse};
+
+/// A handle to a running sandboxed process.
+///
+/// Modelled on [`std::process::Child`]: the caller may `take_*` the std
+/// streams to drive them directly (and is then responsible for draining any
+/// stream they take, to avoid the child blocking on a full pipe), then
+/// [`wait`](SandboxProcess::wait) for exit or [`kill`](SandboxProcess::kill)
+/// it.
+///
+/// Any stdout/stderr stream the caller does **not** take is drained
+/// internally by [`wait`](SandboxProcess::wait) and returned in the
+/// [`ScriptResponse`]. With no streams taken, `spawn(..).wait()` is therefore
+/// equivalent to a run-to-completion capture.
+///
+/// No pty is ever allocated; the streams are ordinary pipes.
+pub trait SandboxProcess: Send {
+    /// Take ownership of the child's stdin so the caller can write to it.
+    /// Returns `None` if already taken. Drop the writer to send EOF.
+    fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>>;
+
+    /// Take ownership of the child's stdout for live reading. Returns `None`
+    /// if already taken. A taken stream is **not** captured by
+    /// [`wait`](SandboxProcess::wait).
+    fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>>;
+
+    /// Take ownership of the child's stderr for live reading. Returns `None`
+    /// if already taken. A taken stream is **not** captured by
+    /// [`wait`](SandboxProcess::wait).
+    fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>>;
+
+    /// Non-blocking exit check. `Ok(Some(code))` if the child has exited,
+    /// `Ok(None)` if it is still running.
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>>;
+
+    /// Request termination of the sandboxed process. On Unix this attempts a
+    /// graceful `SIGTERM` and escalates to `SIGKILL` if the child does not
+    /// exit within a short grace period; on Windows it terminates the job /
+    /// process. Reaping happens in [`wait`](SandboxProcess::wait).
+    fn kill(&mut self) -> std::io::Result<()>;
+
+    /// Block until the child exits (honouring the request's `scriptTimeout`,
+    /// where `0` means wait forever), draining any not-taken stdout/stderr,
+    /// and return its exit code plus captured output.
+    fn wait(&mut self) -> ScriptResponse;
+}
+
+/// A backend that can spawn a [`SandboxProcess`] handle.
+///
+/// The streaming analogue of [`ScriptRunner`](crate::script_runner::ScriptRunner).
+/// Implementors apply the same containment setup they would for a
+/// run-to-completion execution, but spawn with piped stdio and return the
+/// handle instead of waiting.
+pub trait StreamingRunner {
+    /// Spawn the sandboxed process and return a handle to it. On failure
+    /// (validation or spawn error) returns a [`ScriptResponse`] carrying the
+    /// error message, mirroring the `ScriptRunner` error convention.
+    fn spawn_streaming(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse>;
+}

@@ -23,6 +23,7 @@
 use wxc_common::logger::Logger;
 use wxc_common::models::{ContainmentBackend, ExecutionRequest};
 use wxc_common::mxc_error::MxcError;
+use wxc_common::sandbox_process::SandboxProcess;
 use wxc_common::script_runner::ScriptRunner;
 
 /// The result of selecting a backend runner for a request.
@@ -175,5 +176,52 @@ fn select_process_container(
 ) -> Result<Selection, MxcError> {
     Err(MxcError::unsupported_containment(
         "ProcessContainer (AppContainer / BaseContainer) is only available on Windows",
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Streaming (handle-based) spawn
+// ---------------------------------------------------------------------------
+
+/// Spawn a [`SandboxProcess`] handle for `request` on the current host.
+///
+/// The streaming analogue of [`select_runner`]: instead of returning a runner
+/// to drive to completion, it spawns the sandboxed process with piped stdio
+/// and returns a handle the caller can write to, read from, wait on, and
+/// kill. Backends without a streaming implementation yet return
+/// [`MxcError::unsupported_containment`].
+#[allow(unused_variables)]
+pub fn spawn_runner(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    match &request.containment {
+        ContainmentBackend::Seatbelt => spawn_seatbelt(request, logger),
+        other => Err(MxcError::unsupported_containment(format!(
+            "the mxc library does not yet support streaming for the '{}' backend",
+            other.wire_name()
+        ))),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_seatbelt(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use wxc_common::sandbox_process::StreamingRunner;
+    let mut runner = seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new();
+    runner
+        .spawn_streaming(request, logger)
+        .map_err(|resp| MxcError::backend_error(resp.error_message))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn spawn_seatbelt(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    Err(MxcError::unsupported_containment(
+        "Seatbelt is only available on macOS",
     ))
 }

@@ -28,7 +28,9 @@ use std::time::{Duration, Instant};
 use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, LaunchMethod, ScriptResponse};
+use wxc_common::sandbox_process::{SandboxProcess, StreamingRunner};
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::validator::validate_common;
 
 use crate::profile_builder::build_profile;
 
@@ -435,6 +437,202 @@ impl SeatbeltScriptRunner {
         cleanup_files(&[&profile_path, &helper_path, &command_path]);
 
         result
+    }
+}
+
+impl StreamingRunner for SeatbeltScriptRunner {
+    fn spawn_streaming(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        // Mirror the validation `ScriptRunner::run` performs before executing.
+        validate_common(request)?;
+        self.validate_runner(request)?;
+
+        // Streaming requires the standard exec path: the LaunchServices
+        // (`open`) and GUI-stdio modes do not expose the child's pipes.
+        let launch_method = request
+            .seatbelt
+            .as_ref()
+            .map(|s| s.launch_method.clone())
+            .unwrap_or_default();
+        if launch_method != LaunchMethod::Exec {
+            return Err(error_response(
+                "Seatbelt streaming requires launchMethod 'exec'".to_string(),
+            ));
+        }
+        if request
+            .seatbelt
+            .as_ref()
+            .map(|s| s.gui_access)
+            .unwrap_or(false)
+        {
+            return Err(error_response(
+                "Seatbelt streaming is not supported with guiAccess".to_string(),
+            ));
+        }
+
+        let profile = match build_profile(request) {
+            Ok(p) => p,
+            Err(e) => return Err(error_response(e)),
+        };
+
+        let mut command = build_sandbox_command(&profile, &request.script_code, logger)?;
+
+        if !request.env.is_empty() {
+            command.env_clear();
+            for kv in &request.env {
+                if let Some((key, value)) = kv.split_once('=') {
+                    command.env(key, value);
+                }
+            }
+        }
+        if !request.working_directory.is_empty() {
+            command.current_dir(&request.working_directory);
+        }
+
+        // Bidirectional stdio over ordinary pipes (no pty).
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = match command.spawn() {
+            Ok(process) => process,
+            Err(error) => {
+                let msg = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    format!(
+                        "failed to spawn sandboxed process (sandbox_init likely rejected \
+                         the profile — check stderr for details): {error}"
+                    )
+                } else {
+                    format!("failed to spawn sandboxed process: {error}")
+                };
+                return Err(error_response(msg));
+            }
+        };
+
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let timeout = if request.script_timeout == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(u64::from(request.script_timeout)))
+        };
+
+        Ok(Box::new(SeatbeltSandboxProcess {
+            child,
+            stdin,
+            stdout,
+            stderr,
+            timeout,
+        }))
+    }
+}
+
+/// Grace period between `SIGTERM` and `SIGKILL` in [`SandboxProcess::kill`].
+const KILL_GRACE: Duration = Duration::from_secs(2);
+
+/// A running Seatbelt-sandboxed process (exec mode), exposing its pipes,
+/// kill, and wait. See [`SandboxProcess`] for the streaming contract.
+struct SeatbeltSandboxProcess {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    stdout: Option<std::process::ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+    timeout: Option<Duration>,
+}
+
+impl SandboxProcess for SeatbeltSandboxProcess {
+    fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+        self.stdin
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Write + Send>)
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        Ok(self
+            .child
+            .try_wait()?
+            .map(|status| status.code().unwrap_or(-1)))
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        // Already exited? Nothing to do.
+        if self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        let pid = self.child.id() as libc::pid_t;
+        // Graceful SIGTERM, then escalate to SIGKILL after a short grace.
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + KILL_GRACE;
+        loop {
+            if self.child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        Ok(())
+    }
+
+    fn wait(&mut self) -> ScriptResponse {
+        // Close our copy of any not-taken stdin so the child sees EOF and is
+        // not blocked waiting for input the caller never intends to send.
+        self.stdin.take();
+
+        // Drain any not-taken stdout/stderr concurrently (taken streams are
+        // the caller's responsibility and are reported empty here).
+        let stdout_handle = self
+            .stdout
+            .take()
+            .map(|r| std::thread::spawn(move || read_to_string(r)));
+        let stderr_handle = self
+            .stderr
+            .take()
+            .map(|r| std::thread::spawn(move || read_to_string(r)));
+
+        match wait_with_timeout(&mut self.child, self.timeout) {
+            Ok(status) => ScriptResponse {
+                exit_code: status.code().unwrap_or(-1),
+                standard_out: join_reader(stdout_handle),
+                standard_err: join_reader(stderr_handle),
+                ..Default::default()
+            },
+            Err(WaitError::Timeout) => {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                ScriptResponse {
+                    exit_code: -1,
+                    standard_out: join_reader(stdout_handle),
+                    standard_err: join_reader(stderr_handle),
+                    error_message: "Seatbelt: process timed out".to_string(),
+                    ..Default::default()
+                }
+            }
+            Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
+        }
     }
 }
 
