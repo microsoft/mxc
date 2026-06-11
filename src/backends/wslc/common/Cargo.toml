@@ -14,7 +14,7 @@ tar = "0.4"
 libloading = "0.8"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 
 [build-dependencies]
 zip = "2"
