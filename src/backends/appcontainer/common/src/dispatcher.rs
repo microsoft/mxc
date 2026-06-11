@@ -369,7 +369,7 @@ mod tests {
     // a dispatcher test and a fallback-detector test running on
     // different threads could each mutate `MXC_FORCE_TIER` under
     // independent locks and race.
-    use crate::test_env::{ForceTierGuard, ENV_LOCK};
+    use crate::test_env::{BcUsableGuard, ForceTierGuard, ENV_LOCK};
 
     fn test_request(policy: ContainerPolicy) -> ExecutionRequest {
         ExecutionRequest {
@@ -568,20 +568,12 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_t1_naturally_selected_when_bc_present() {
-        // Natural T1 selection (no force). Skip on systems where the
-        // BaseContainer API isn't present. The test asserts only that
-        // the dispatcher resolves to T1 — it does not actually exec
-        // because spinning up BC requires kernel support and fights
-        // the test runner's stdio capture.
+    fn dispatch_t1_naturally_selected_when_bc_usable() {
+        // Natural T1 selection (no force). Skip when the backend isn't usable.
+        // Asserts only the resolved tier; it does not exec.
         //
-        // Acquire ENV_LOCK and clear MXC_FORCE_TIER for the duration of
-        // the test so a concurrent `ForceTierGuard`-using test (in this
-        // module or `fallback_detector::tests`) cannot leak a forced
-        // value into our natural-detection call. Without the lock the
-        // probe chain inside `detect` can observe a sibling test's
-        // `set_var("MXC_FORCE_TIER", ...)` and short-circuit to a
-        // non-T1 tier.
+        // Hold ENV_LOCK and clear MXC_FORCE_TIER so a concurrent
+        // `ForceTierGuard` test can't leak a forced value into `detect`.
         let _lock = {
             let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
             // SAFETY: env-var mutation in tests; serialized by ENV_LOCK.
@@ -590,12 +582,23 @@ mod tests {
             }
             lock
         };
-        if !crate::fallback_detector::is_base_container_api_present() {
-            eprintln!("skipping: BaseContainer API not present on this machine");
+        if !crate::fallback_detector::is_base_container_usable() {
+            eprintln!("skipping: BaseContainer backend not usable on this machine");
             return;
         }
         let req = test_request(empty_policy());
         let d = dispatch_with_fallback(&req).expect("dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
+    }
+
+    #[test]
+    fn dispatch_falls_back_to_t3_when_bc_unusable() {
+        // The core regression: a present-but-disabled BaseContainer must not be
+        // built. Forcing usable=false, dispatch resolves to Tier 3 directly so
+        // the doomed BaseContainerRunner is never constructed.
+        let _g = BcUsableGuard::set(false);
+        let req = test_request(empty_policy());
+        let d = dispatch_with_fallback(&req).expect("dispatch should succeed");
+        assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
     }
 }

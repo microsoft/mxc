@@ -5,7 +5,7 @@
 | Feature | Windows 24H2 (build 26100) | Windows 25H2+ (build 26600+) | Linux |
 |---------|---------------------------|------------------------------|-------|
 | AppContainer (v0.4.0) | ✅ Works | ✅ Works | N/A |
-| BaseContainer (v0.5.0) | ❌ No processmodel.dll | ✅ Works | N/A |
+| BaseContainer (v0.5.0) | ❌ No processmodel.dll | ✅ Works when the BaseContainer feature is enabled; otherwise falls back to AppContainer+DACL | N/A |
 | BFS filesystem brokering | ❌ Broker helper not available | ✅ Works | N/A |
 | Proxy (AppContainer) | ✅ Works (needs admin for shim) | ✅ Works | N/A |
 | Proxy (BaseContainer) | N/A | ⚠️ WinHTTP only, see below | N/A |

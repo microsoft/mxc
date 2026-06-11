@@ -109,7 +109,9 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
 /// summary. The detector is always asked to prefer BaseContainer (Tier 1).
 pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
     let probes = ProbeFacts {
-        base_container_api_present: fallback_detector::is_base_container_api_present(),
+        base_container_api_present:
+            crate::base_container_runner::BaseContainerRunner::is_base_container_api_present()
+                .is_ok(),
         bfscfg_present: fallback_detector::find_bfscfg_exe()
             .ok()
             .flatten()

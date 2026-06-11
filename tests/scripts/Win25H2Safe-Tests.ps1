@@ -408,12 +408,13 @@ function Invoke-Wxc {
 # Phase 1 — probes (read-only, never touches bfscfg)
 #
 # Expectations assume the `tier2_bfs` Cargo feature is OFF (Test-Preflight
-# enforces this). With the feature off, `find_bfscfg_exe` returns
-# `Ok(None)` unconditionally, so the detector drops to T3
-# (`appcontainer-dacl`) for any policy with rw/ro/denied paths. The
-# empty-policy probe still labels T2 because `detect()` short-circuits
-# to T2 when there is nothing to configure — the runtime behavior is
-# nonetheless the no-op T2 path, never spawning bfscfg.
+# enforces this) and that BaseContainer (Tier 1) is NOT usable on this
+# host: either the processmodel.dll export is absent, or it is present
+# but the OS feature is disabled. Both cases resolve identically, so the
+# detector drops to T3 (`appcontainer-dacl`) for every policy, including
+# the empty one. The harness keys off the selected tier (a
+# capability-derived signal) rather than raw symbol presence, so it runs
+# unchanged on both host variants.
 # -----------------------------------------------------------------------
 function Phase-Probes {
     Section 'Phase 1: --probe (read-only)'
@@ -423,11 +424,21 @@ function Phase-Probes {
 
     $probeEmpty = Invoke-Probe -Wxc $WxcRelease -Phase 'P1' -Name 'probe-no-config'
     if ($probeEmpty) {
-        Record-Result -Phase 'P1' -Name 'BC API absent on this host' -Pass (-not $probeEmpty.probes.baseContainerApiPresent) -Detail "baseContainerApiPresent=$($probeEmpty.probes.baseContainerApiPresent)"
+        # Drive everything off the selected tier. T1 is "usable" only when
+        # the empty-policy probe resolves to base-container; on both target
+        # hosts (symbol absent, or present-but-disabled) it resolves to
+        # appcontainer-dacl. `baseContainerApiPresent` is informational only.
+        $bcUsable = ($probeEmpty.tier -eq 'base-container')
+        $bcState = if ($bcUsable) { 'usable' }
+                   elseif ($probeEmpty.probes.baseContainerApiPresent) { 'present-but-disabled' }
+                   else { 'absent' }
+        Write-Host ("BaseContainer state on this host: {0} (apiPresent={1})" -f $bcState, $probeEmpty.probes.baseContainerApiPresent)
+
+        Record-Result -Phase 'P1' -Name 'BaseContainer not usable (T3 fallback active)' -Pass (-not $bcUsable) -Detail "tier=$($probeEmpty.tier); bcState=$bcState; apiPresent=$($probeEmpty.probes.baseContainerApiPresent)"
         Record-Result -Phase 'P1' -Name 'bfsCompiledIn=false (safety gate)' -Pass (-not $probeEmpty.probes.bfsCompiledIn) -Detail "bfsCompiledIn=$($probeEmpty.probes.bfsCompiledIn)"
         Record-Result -Phase 'P1' -Name 'bfscfgPresent=false when feature off' -Pass (-not $probeEmpty.probes.bfscfgPresent) -Detail "bfscfgPresent=$($probeEmpty.probes.bfscfgPresent)"
-        Record-Result -Phase 'P1' -Name 'empty policy probe -> tier=appcontainer-bfs (cosmetic: detect() short-circuits)' -Pass ($probeEmpty.tier -eq 'appcontainer-bfs') -Detail "tier=$($probeEmpty.tier)"
-        Record-Result -Phase 'P1' -Name 'empty policy probe -> needsDaclAugmentation=false' -Pass ($probeEmpty.needsDaclAugmentation -eq $false) -Detail "needsDaclAugmentation=$($probeEmpty.needsDaclAugmentation)"
+        Record-Result -Phase 'P1' -Name 'empty policy probe -> tier=appcontainer-dacl (T1 unusable, T2 gated out)' -Pass ($probeEmpty.tier -eq 'appcontainer-dacl') -Detail "tier=$($probeEmpty.tier)"
+        Record-Result -Phase 'P1' -Name 'empty policy probe -> needsDaclAugmentation=true' -Pass ($probeEmpty.needsDaclAugmentation -eq $true) -Detail "needsDaclAugmentation=$($probeEmpty.needsDaclAugmentation)"
     }
 
     $cfgRw = New-Config -Name 'probe-rw' -CommandLine 'cmd /c exit 0' -ReadWrite @($rw)
@@ -480,13 +491,13 @@ function Phase-EmptyRelease {
     $log = Join-Path $ScratchRoot 'logs\empty-release.log'
     $r = Invoke-Wxc -Wxc $WxcRelease -ConfigPath $cfg -LogPath $log
     $logContent = Read-Log $log
-    # Empty-policy run naturally selects T2; the assertion is that
-    # bfscfg.exe was NOT actually invoked (configure() short-circuits).
-    Assert-NoBfscfg -LogContent $logContent -Phase 'P2' -Name 'empty-release' -AllowBfsTierSelection
+    # With BaseContainer unusable and tier2_bfs off, the empty-policy run
+    # selects T3 (AppContainer + DACL). Assert bfscfg.exe was never invoked.
+    Assert-NoBfscfg -LogContent $logContent -Phase 'P2' -Name 'empty-release'
 
     Record-Result -Phase 'P2' -Name 'release exit=0' -Pass ($r.ExitCode -eq 0) -Detail "exit=$($r.ExitCode); stdout=$($r.Stdout.Trim())"
     Record-Result -Phase 'P2' -Name 'AppContainer ran the child (stdout round-trip)' -Pass ($r.Stdout -match 'P2-empty-release-ok')
-    Record-Result -Phase 'P2' -Name 'selected isolation tier: appcontainer-bfs (expected, no invocation)' -Pass ([bool]($logContent -match '(?im)selected isolation tier:.*?appcontainer-bfs'))
+    Record-Result -Phase 'P2' -Name 'selected isolation tier: appcontainer-dacl (T1 unusable, T2 gated out)' -Pass ([bool]($logContent -match '(?im)selected isolation tier:.*?appcontainer-dacl'))
     Record-Result -Phase 'P2' -Name 'no bfscfg invocation in log' -Pass (-not ($logContent -match '(?im)Output from bfscfg\.exe'))
     Record-Result -Phase 'P2' -Name 'UI Job Object assigned telemetry' -Pass ([bool]($logContent -match 'UI Job Object assigned'))
 }
@@ -725,26 +736,30 @@ function Phase-T3Forced {
 # targets a principal the child does not run as → silent no-op").
 #
 # Strategy:
-#   1. Skip the phase entirely if the BaseContainer API is not present on
-#      this host (most current 25H2 hosts). T1 force without the API
-#      backing it cannot exercise the deny.
+#   1. Skip the phase entirely unless BaseContainer is *usable* on this
+#      host (most current 25H2 hosts have either no API or a disabled
+#      one, where Tier 1 is never selected). Usability is read from the
+#      selected tier, not raw symbol presence: a present-but-disabled
+#      API still resolves to T3, so forcing T1 there cannot exercise the
+#      deny.
 #   2. Create a marker file under a denied directory. Force T1. Have the
 #      child try to `type` the marker. The child must exit non-zero AND
 #      not echo the marker contents.
 # -----------------------------------------------------------------------
 function Phase-T1DenyForced {
-    Section 'Phase 4c: T1 deny-ACE empirical test (skipped if BC API absent)'
+    Section 'Phase 4c: T1 deny-ACE empirical test (skipped if BC not usable)'
     Clear-StateFiles
 
-    # Use the release-build probe to discover BC API presence — same JSON
-    # surface as Phase 1.
+    # Use the release-build probe to discover BC usability (same JSON
+    # surface as Phase 1). T1 is usable only when the empty-policy probe
+    # resolves to base-container.
     $probe = Invoke-Probe -Wxc $WxcRelease -Phase 'P4c' -Name 'bc-presence-probe'
     if (-not $probe) {
         Record-Result -Phase 'P4c' -Name 'probe succeeded' -Pass $false -Detail 'probe returned null; cannot proceed'
         return
     }
-    if (-not $probe.probes.baseContainerApiPresent) {
-        Record-Result -Phase 'P4c' -Name 'BC API present (required for T1 test)' -Pass $true -Detail 'SKIPPED: baseContainerApiPresent=false on this host'
+    if ($probe.tier -ne 'base-container') {
+        Record-Result -Phase 'P4c' -Name 'BaseContainer usable (required for T1 deny test)' -Pass $true -Detail "SKIPPED: BaseContainer not usable on this host (tier=$($probe.tier), apiPresent=$($probe.probes.baseContainerApiPresent))"
         return
     }
 
