@@ -35,7 +35,10 @@ use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
-use wxc_common::process_util::{get_capability_sid_from_name, OwnedHandle, SidAndAttributes};
+use wxc_common::process_util::{
+    create_std_pipes, get_capability_sid_from_name, read_from_pipe, OwnedHandle, SendOwnedHandle,
+    SidAndAttributes,
+};
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use wxc_common::{string_util, ui_policy};
 
@@ -495,10 +498,20 @@ impl AppContainerScriptRunner {
         // we forward our own std handles to the child via STARTF_USESTDHANDLES so the
         // child's output streams directly to the SDK in real time. Otherwise we use
         // console sharing (the ConPTY path).
-        let pipe_mode = !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
+        //
+        // When `capture_output` is set (the `mxc` library path) we always take
+        // the pipe path — but instead of forwarding our own std handles we wire
+        // the child to capture pipes and read its output into the response.
+        let capture = request.capture_output;
+        let pipe_mode =
+            capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
 
         if pipe_mode {
-            logger.log_line("STDIO mode: passthrough (forwarding parent handles to child)");
+            if capture {
+                logger.log_line("STDIO mode: capture (piping child output into the response)");
+            } else {
+                logger.log_line("STDIO mode: passthrough (forwarding parent handles to child)");
+            }
         }
 
         // --- Allocate and initialize attribute list ---
@@ -609,48 +622,84 @@ impl AppContainerScriptRunner {
             logger.log_line("Win32k mitigation applied to child process");
         }
 
-        // --- Setup handle passthrough (pipe mode only) ---
-        // Forward wxc-exec's own stdin/stdout/stderr handles to the child so the
-        // child's output streams directly to the SDK caller in real time.
-        // Handle list for PROC_THREAD_ATTRIBUTE_HANDLE_LIST. Must outlive CreateProcessW.
+        // --- Setup handle passthrough / capture (pipe mode only) ---
+        // In passthrough mode we forward wxc-exec's own std handles to the
+        // child so its output streams to the caller. In capture mode we wire
+        // the child to fresh capture pipes and read its output into the
+        // response (the `mxc` library path). Handle list for
+        // PROC_THREAD_ATTRIBUTE_HANDLE_LIST. Must outlive CreateProcessW.
         let mut handle_list: Vec<HANDLE> = Vec::new();
 
         let h_stdin;
         let h_stdout;
         let h_stderr;
 
+        // Capture pipe read-ends (parent side): kept alive until after the
+        // wait, then drained. Child-side ends (stdin read, stdout/stderr
+        // write): kept alive until after CreateProcessW, then dropped so the
+        // read-ends observe EOF when the child exits.
+        let mut capture_reads: Option<(OwnedHandle, OwnedHandle)> = None;
+        let mut capture_child_ends: Vec<OwnedHandle> = Vec::new();
+
         if pipe_mode {
-            h_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
-                .map_err(|e| WxcError::Process(format!("GetStdHandle(STDIN): {e}")))?;
-            h_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
-                .map_err(|e| WxcError::Process(format!("GetStdHandle(STDOUT): {e}")))?;
-            h_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
-                .map_err(|e| WxcError::Process(format!("GetStdHandle(STDERR): {e}")))?;
+            if capture {
+                // create_std_pipes(false): read-end inheritable (child stdin),
+                // write-end non-inheritable (dropped immediately -> child EOF).
+                let (stdin_read, _stdin_write) = create_std_pipes(false)?;
+                // create_std_pipes(true): read-end non-inheritable (parent
+                // reads it), write-end inheritable (child writes to it).
+                let (stdout_read, stdout_write) = create_std_pipes(true)?;
+                let (stderr_read, stderr_write) = create_std_pipes(true)?;
 
-            if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
-                return Err(WxcError::Process(
-                    "GetStdHandle(STDIN) returned null/invalid handle".to_string(),
-                ));
-            }
-            if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
-                return Err(WxcError::Process(
-                    "GetStdHandle(STDOUT) returned null/invalid handle".to_string(),
-                ));
-            }
-            if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
-                return Err(WxcError::Process(
-                    "GetStdHandle(STDERR) returned null/invalid handle".to_string(),
-                ));
-            }
+                h_stdin = stdin_read.get();
+                h_stdout = stdout_write.get();
+                h_stderr = stderr_write.get();
 
-            // Ensure the handles are inheritable.
-            unsafe {
-                SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                    .map_err(|e| WxcError::Process(format!("SetHandleInformation(STDIN): {e}")))?;
-                SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                    .map_err(|e| WxcError::Process(format!("SetHandleInformation(STDOUT): {e}")))?;
-                SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                    .map_err(|e| WxcError::Process(format!("SetHandleInformation(STDERR): {e}")))?;
+                capture_child_ends.push(stdin_read);
+                capture_child_ends.push(stdout_write);
+                capture_child_ends.push(stderr_write);
+                // `_stdin_write` drops here: the child's stdin sees EOF since
+                // the library never forwards input.
+                capture_reads = Some((stdout_read, stderr_read));
+            } else {
+                h_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
+                    .map_err(|e| WxcError::Process(format!("GetStdHandle(STDIN): {e}")))?;
+                h_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
+                    .map_err(|e| WxcError::Process(format!("GetStdHandle(STDOUT): {e}")))?;
+                h_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
+                    .map_err(|e| WxcError::Process(format!("GetStdHandle(STDERR): {e}")))?;
+
+                if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
+                    return Err(WxcError::Process(
+                        "GetStdHandle(STDIN) returned null/invalid handle".to_string(),
+                    ));
+                }
+                if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
+                    return Err(WxcError::Process(
+                        "GetStdHandle(STDOUT) returned null/invalid handle".to_string(),
+                    ));
+                }
+                if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
+                    return Err(WxcError::Process(
+                        "GetStdHandle(STDERR) returned null/invalid handle".to_string(),
+                    ));
+                }
+
+                // Ensure the handles are inheritable.
+                unsafe {
+                    SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                        .map_err(|e| {
+                            WxcError::Process(format!("SetHandleInformation(STDIN): {e}"))
+                        })?;
+                    SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                        .map_err(|e| {
+                            WxcError::Process(format!("SetHandleInformation(STDOUT): {e}"))
+                        })?;
+                    SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                        .map_err(|e| {
+                            WxcError::Process(format!("SetHandleInformation(STDERR): {e}"))
+                        })?;
+                }
             }
 
             handle_list.push(h_stdin);
@@ -789,6 +838,25 @@ impl AppContainerScriptRunner {
             pi.dwProcessId
         ));
 
+        // Capture mode: the child has inherited the pipe handles, so close the
+        // parent's child-side ends now (otherwise the read-ends would never see
+        // EOF) and start draining the read-ends on background threads to avoid
+        // the child blocking on a full pipe buffer.
+        let mut capture_threads: Option<(
+            std::thread::JoinHandle<String>,
+            std::thread::JoinHandle<String>,
+        )> = None;
+        if capture {
+            capture_child_ends.clear();
+            if let Some((mut stdout_read, mut stderr_read)) = capture_reads.take() {
+                let stdout_send = SendOwnedHandle::take(&mut stdout_read);
+                let stderr_send = SendOwnedHandle::take(&mut stderr_read);
+                let stdout_thread = std::thread::spawn(move || read_from_pipe(stdout_send.get()));
+                let stderr_thread = std::thread::spawn(move || read_from_pipe(stderr_send.get()));
+                capture_threads = Some((stdout_thread, stderr_thread));
+            }
+        }
+
         let process_handle = OwnedHandle::new(pi.hProcess);
         let thread_handle = OwnedHandle::new(pi.hThread);
 
@@ -861,10 +929,20 @@ impl AppContainerScriptRunner {
                 .map_err(|_| WxcError::Process("GetExitCodeProcess failed".into()))?;
         }
 
+        // Capture mode: the child has exited, so the read-ends will hit EOF;
+        // join the drain threads to collect the captured output.
+        let (standard_out, standard_err) = match capture_threads {
+            Some((stdout_thread, stderr_thread)) => (
+                stdout_thread.join().unwrap_or_default(),
+                stderr_thread.join().unwrap_or_default(),
+            ),
+            None => (String::new(), String::new()),
+        };
+
         Ok(ScriptResponse {
             exit_code: exit_code as i32,
-            standard_out: String::new(),
-            standard_err: String::new(),
+            standard_out,
+            standard_err,
             error_message: String::new(),
             ..Default::default()
         })

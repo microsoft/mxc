@@ -204,6 +204,11 @@ impl SeatbeltScriptRunner {
                 }
                 Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
             }
+        } else if request.capture_output {
+            // Library / no-pty mode: capture stdout/stderr into the response
+            // instead of streaming through a pty. Mirrors the bubblewrap
+            // runner's piped-capture model. Used by the `mxc` library crate.
+            self.execute_captured(command, request)
         } else {
             // CLI mode: hand off to the shared PTY bridge so the inner shell
             // sees a real TTY and the host can stream output as it arrives.
@@ -233,6 +238,72 @@ impl SeatbeltScriptRunner {
                 }
                 Err(error) => error_response(format!("Seatbelt: {error}")),
             }
+        }
+    }
+
+    /// No-pty captured execution path. Spawns the sandboxed `/bin/sh -c`
+    /// with piped stdout/stderr, drains both on background threads to avoid
+    /// pipe-buffer deadlock, and returns the captured output in the
+    /// [`ScriptResponse`]. Used when `request.capture_output` is set (the
+    /// `mxc` library path); the interactive CLI path keeps the pty bridge.
+    fn execute_captured(&self, mut command: Command, request: &ExecutionRequest) -> ScriptResponse {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = match command.spawn() {
+            Ok(process) => process,
+            Err(error) => {
+                let msg = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    format!(
+                        "failed to spawn sandboxed process (sandbox_init likely rejected \
+                         the profile — check stderr for details): {error}"
+                    )
+                } else {
+                    format!("failed to spawn sandboxed process: {error}")
+                };
+                return error_response(msg);
+            }
+        };
+
+        let stdout_handle = child
+            .stdout
+            .take()
+            .map(|r| std::thread::spawn(move || read_to_string(r)));
+        let stderr_handle = child
+            .stderr
+            .take()
+            .map(|r| std::thread::spawn(move || read_to_string(r)));
+
+        let timeout = if request.script_timeout == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(u64::from(request.script_timeout)))
+        };
+
+        match wait_with_timeout(&mut child, timeout) {
+            Ok(status) => ScriptResponse {
+                exit_code: status.code().unwrap_or(-1),
+                standard_out: join_reader(stdout_handle),
+                standard_err: join_reader(stderr_handle),
+                ..Default::default()
+            },
+            Err(WaitError::Timeout) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                ScriptResponse {
+                    exit_code: -1,
+                    standard_out: join_reader(stdout_handle),
+                    standard_err: join_reader(stderr_handle),
+                    error_message: format!(
+                        "Seatbelt: script timed out after {}ms",
+                        request.script_timeout
+                    ),
+                    ..Default::default()
+                }
+            }
+            Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
         }
     }
 
@@ -425,6 +496,23 @@ fn error_response(message: String) -> ScriptResponse {
         exit_code: -1,
         error_message: message,
         ..Default::default()
+    }
+}
+
+/// Read a child pipe to a `String`, ignoring decode/IO errors (mirrors the
+/// bubblewrap runner's drain helper).
+fn read_to_string<R: std::io::Read>(mut reader: R) -> String {
+    let mut buffer = String::new();
+    let _ = reader.read_to_string(&mut buffer);
+    buffer
+}
+
+/// Join a drain thread, returning its captured output (empty on join failure
+/// or when no pipe was present).
+fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {
+    match handle {
+        Some(h) => h.join().unwrap_or_default(),
+        None => String::new(),
     }
 }
 

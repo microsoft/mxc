@@ -1259,6 +1259,7 @@ fn convert_raw_config_inner(
         experimental_enabled: false,
         experimental,
         dry_run: false,
+        capture_output: false,
     })
 }
 

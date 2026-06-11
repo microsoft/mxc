@@ -183,7 +183,7 @@ The workspace is organized into five top-level directories under `src/`:
 
 | Directory | Purpose | Examples |
 |-----------|---------|----------|
-| `core/` | Cross-platform foundation + per-platform aggregator binaries | `wxc_common/`, `wxc/`, `lxc/`, `mxc_darwin/`, `mxc_pty/`, `mxc_build_common/`, `generated/` |
+| `core/` | Cross-platform foundation + per-platform aggregator binaries | `wxc_common/`, `wxc/`, `lxc/`, `mxc_darwin/`, `mxc/`, `mxc_pty/`, `mxc_build_common/`, `generated/` |
 | `backends/` | Backend-specific code (one subfolder per containment backend) | `appcontainer/common`, `windows_sandbox/{daemon,guest,common}`, `isolation_session/{bindings,common}`, `hyperlight/common`, `nanvix/{common,binaries,runner}`, `lxc/common`, `bubblewrap/common`, `wslc/common`, `seatbelt/common` |
 | `host/` | Host-side utilities | `wxc_host_prep/`, `wxc_winhttp_proxy_shim/` |
 | `testing/` | Test infrastructure crates | `wxc_e2e_tests/`, `wxc_test_driver/`, `wxc_test_proxy/`, `linux_test_proxy/`, `wxc_ui_probe/`, `fuzz/` |
@@ -192,6 +192,7 @@ The workspace is organized into five top-level directories under `src/`:
 - `wxc_common` is the **cross-platform foundation**: config parsing, models, errors, logger, `ScriptRunner` / `StatefulSandboxBackend` traits, state-aware dispatch helpers, validators, ids, ui-policy, encoding. Plus a few thin Windows API helpers shared by host tools and backends (`process_util`, `string_util`, `filesystem_dacl`, `diagnostic`). It must not depend on any `backends/*` crate.
 - Each Windows containment backend lives in its own `backends/*/common` crate (e.g. `appcontainer_common`, `windows_sandbox_common`, `isolation_session_common`, `hyperlight_common`, `nanvix_runner`). Backend crates depend on `wxc_common`; there are no cross-edges between backend crates.
 - `wxc` and `lxc` are thin binary crates that wire up CLI args (`clap`) and dispatch to `wxc_common` and the per-backend crates
+- `mxc` is an **importable library** (the Rust analogue of the SDK's `spawnSandboxFromConfig` with `usePty: false`): `spawn_sandbox_from_config` parses a config, selects the host backend via `mxc::dispatch::select_runner`, runs it **without a pty**, and returns captured stdout/stderr. It depends on the backend crates (cfg-split: appcontainer on Windows, bubblewrap on Linux, seatbelt on macOS) — so, like the binaries, it can't live in `wxc_common`. The `wxc`/`lxc`/`mxc_darwin` binaries delegate their shared backend arms to `mxc::dispatch::select_runner`. Output capture is gated by `ExecutionRequest::capture_output` (default `false` = the binaries' streaming behaviour; the library forces it `true`).
 - `mxc_pty` is the shared pty bridge used by the unix-side backends (`lxc_common::lxc_bindings::attach_run` on Linux and `seatbelt_common::seatbelt_runner` on macOS) so the inner shell sees a real TTY and host stdio is streamed live
 - `mxc_build_common` is a build-time helper crate — all Windows binary crates use it in their `build.rs` to embed VersionInfo (ProductName, FileDescription, copyright, version+commit). When adding a new Windows binary crate, add `mxc_build_common` as a build-dependency and call `mxc_build_common::embed_version_info()` from `build.rs`
 - Platform-specific modules use `#[cfg(target_os = "windows")]` / `#[cfg(target_os = "linux")]`

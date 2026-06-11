@@ -1249,6 +1249,7 @@ dependencies = [
  "clap",
  "hyperlight_common",
  "lxc_common",
+ "mxc",
  "mxc_build_common",
  "nanvix_binaries",
  "nanvix_common",
@@ -1370,6 +1371,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxc"
+version = "0.6.1"
+dependencies = [
+ "appcontainer_common",
+ "bwrap_common",
+ "seatbelt_common",
+ "wxc_common",
+]
+
+[[package]]
 name = "mxc_build_common"
 version = "0.6.1"
 dependencies = [
@@ -1381,8 +1392,8 @@ name = "mxc_darwin"
 version = "0.6.1"
 dependencies = [
  "clap",
+ "mxc",
  "mxc_build_common",
- "seatbelt_common",
  "wxc_common",
 ]
 
@@ -2851,6 +2862,7 @@ dependencies = [
  "hyperlight_common",
  "isolation_session_bindings",
  "isolation_session_common",
+ "mxc",
  "mxc_build_common",
  "nanvix_binaries",
  "nanvix_common",

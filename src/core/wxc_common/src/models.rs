@@ -581,6 +581,16 @@ pub struct ExecutionRequest {
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
+    /// Capture the sandboxed process's stdout/stderr into
+    /// [`ScriptResponse::standard_out`]/[`ScriptResponse::standard_err`]
+    /// instead of streaming them to the host's stdio.
+    ///
+    /// Default `false` preserves the streaming behaviour the `wxc-exec` /
+    /// `lxc-exec` / `mxc-exec-mac` binaries rely on (Seatbelt/LXC use a pty;
+    /// AppContainer inherits the host fds). The `mxc` library sets this to
+    /// `true` so importers get the child's output as captured strings and no
+    /// pty is ever allocated. Bubblewrap always captures regardless.
+    pub capture_output: bool,
 }
 
 impl Default for ExecutionRequest {
@@ -601,6 +611,7 @@ impl Default for ExecutionRequest {
             experimental_enabled: false,
             experimental: ExperimentalConfig::default(),
             dry_run: false,
+            capture_output: false,
         }
     }
 }

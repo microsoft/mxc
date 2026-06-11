@@ -17,6 +17,7 @@ nanvix_common = { path = "../../backends/nanvix/common" }
 
 [dependencies]
 wxc_common = { workspace = true }
+mxc = { workspace = true }
 lxc_common = { workspace = true }
 bwrap_common = { workspace = true }
 anyhow = { workspace = true }

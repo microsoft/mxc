@@ -48,6 +48,7 @@ use wxc_common::models::{
     ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress,
     ScriptResponse,
 };
+use wxc_common::process_util::{create_std_pipes, read_from_pipe, OwnedHandle, SendOwnedHandle};
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use wxc_common::string_util;
 
@@ -586,60 +587,113 @@ impl ScriptRunner for BaseContainerRunner {
         // If wxc-exec's stdout or stderr is not a terminal (i.e., piped by the SDK),
         // we forward our own std handles to the child via STARTF_USESTDHANDLES so the
         // child's output streams directly to the SDK in real time.
-        let pipe_mode = !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
+        //
+        // When `capture_output` is set (the `mxc` library path) we always take
+        // the pipe path and wire the child to capture pipes whose output we read
+        // into the response.
+        let capture = request.capture_output;
+        let pipe_mode =
+            capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
 
         if pipe_mode {
-            let _ = writeln!(
-                logger,
-                "STDIO mode: passthrough (forwarding parent handles to child)"
-            );
+            if capture {
+                let _ = writeln!(
+                    logger,
+                    "STDIO mode: capture (piping child output into the response)"
+                );
+            } else {
+                let _ = writeln!(
+                    logger,
+                    "STDIO mode: passthrough (forwarding parent handles to child)"
+                );
+            }
         }
 
-        // --- Retrieve parent std handles for passthrough (pipe mode only) ---
+        // --- Retrieve / create std handles (pipe mode only) ---
         let mut h_stdin = HANDLE::default();
         let mut h_stdout = HANDLE::default();
         let mut h_stderr = HANDLE::default();
 
+        // Capture pipe read-ends (parent side) kept alive until after the wait;
+        // child-side ends kept alive until after process creation.
+        let mut capture_reads: Option<(OwnedHandle, OwnedHandle)> = None;
+        let mut capture_child_ends: Vec<OwnedHandle> = Vec::new();
+
         if pipe_mode {
-            h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
-                Ok(h) => h,
-                Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDIN): {e}")),
-            };
-            h_stdout = match unsafe { GetStdHandle(STD_OUTPUT_HANDLE) } {
-                Ok(h) => h,
-                Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDOUT): {e}")),
-            };
-            h_stderr = match unsafe { GetStdHandle(STD_ERROR_HANDLE) } {
-                Ok(h) => h,
-                Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")),
-            };
+            if capture {
+                let (stdin_read, _stdin_write) = match create_std_pipes(false) {
+                    Ok(p) => p,
+                    Err(e) => return ScriptResponse::error(&format!("stdin pipe: {e}")),
+                };
+                let (stdout_read, stdout_write) = match create_std_pipes(true) {
+                    Ok(p) => p,
+                    Err(e) => return ScriptResponse::error(&format!("stdout pipe: {e}")),
+                };
+                let (stderr_read, stderr_write) = match create_std_pipes(true) {
+                    Ok(p) => p,
+                    Err(e) => return ScriptResponse::error(&format!("stderr pipe: {e}")),
+                };
 
-            if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
-                return ScriptResponse::error("GetStdHandle(STDIN) returned null/invalid handle");
-            }
-            if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
-                return ScriptResponse::error("GetStdHandle(STDOUT) returned null/invalid handle");
-            }
-            if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
-                return ScriptResponse::error("GetStdHandle(STDERR) returned null/invalid handle");
-            }
+                h_stdin = stdin_read.get();
+                h_stdout = stdout_write.get();
+                h_stderr = stderr_write.get();
 
-            // Ensure the handles are inheritable.
-            unsafe {
-                if let Err(e) =
-                    SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                {
-                    return ScriptResponse::error(&format!("SetHandleInformation(STDIN): {e}"));
+                capture_child_ends.push(stdin_read);
+                capture_child_ends.push(stdout_write);
+                capture_child_ends.push(stderr_write);
+                // `_stdin_write` drops here: the child's stdin sees EOF.
+                capture_reads = Some((stdout_read, stderr_read));
+            } else {
+                h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
+                    Ok(h) => h,
+                    Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDIN): {e}")),
+                };
+                h_stdout = match unsafe { GetStdHandle(STD_OUTPUT_HANDLE) } {
+                    Ok(h) => h,
+                    Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDOUT): {e}")),
+                };
+                h_stderr = match unsafe { GetStdHandle(STD_ERROR_HANDLE) } {
+                    Ok(h) => h,
+                    Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")),
+                };
+
+                if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
+                    return ScriptResponse::error(
+                        "GetStdHandle(STDIN) returned null/invalid handle",
+                    );
                 }
-                if let Err(e) =
-                    SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                {
-                    return ScriptResponse::error(&format!("SetHandleInformation(STDOUT): {e}"));
+                if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
+                    return ScriptResponse::error(
+                        "GetStdHandle(STDOUT) returned null/invalid handle",
+                    );
                 }
-                if let Err(e) =
-                    SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                {
-                    return ScriptResponse::error(&format!("SetHandleInformation(STDERR): {e}"));
+                if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
+                    return ScriptResponse::error(
+                        "GetStdHandle(STDERR) returned null/invalid handle",
+                    );
+                }
+
+                // Ensure the handles are inheritable.
+                unsafe {
+                    if let Err(e) =
+                        SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                    {
+                        return ScriptResponse::error(&format!("SetHandleInformation(STDIN): {e}"));
+                    }
+                    if let Err(e) =
+                        SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                    {
+                        return ScriptResponse::error(&format!(
+                            "SetHandleInformation(STDOUT): {e}"
+                        ));
+                    }
+                    if let Err(e) =
+                        SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                    {
+                        return ScriptResponse::error(&format!(
+                            "SetHandleInformation(STDERR): {e}"
+                        ));
+                    }
                 }
             }
         }
@@ -836,6 +890,24 @@ impl ScriptRunner for BaseContainerRunner {
 
         let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
 
+        // Capture mode: the child has inherited the pipe handles, so close the
+        // parent's child-side ends now and drain the read-ends on background
+        // threads to avoid the child blocking on a full pipe buffer.
+        let mut capture_threads: Option<(
+            std::thread::JoinHandle<String>,
+            std::thread::JoinHandle<String>,
+        )> = None;
+        if capture {
+            capture_child_ends.clear();
+            if let Some((mut stdout_read, mut stderr_read)) = capture_reads.take() {
+                let stdout_send = SendOwnedHandle::take(&mut stdout_read);
+                let stderr_send = SendOwnedHandle::take(&mut stderr_read);
+                let stdout_thread = std::thread::spawn(move || read_from_pipe(stdout_send.get()));
+                let stderr_thread = std::thread::spawn(move || read_from_pipe(stderr_send.get()));
+                capture_threads = Some((stdout_thread, stderr_thread));
+            }
+        }
+
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Wait for exit");
 
         // 5. Wait for the child process to exit.
@@ -862,6 +934,16 @@ impl ScriptRunner for BaseContainerRunner {
         }
 
         let _ = writeln!(logger, "process exited with code {exit_code}");
+
+        // Capture mode: the child has exited (read-ends will hit EOF); join the
+        // drain threads to collect the captured output.
+        let (captured_out, captured_err) = match capture_threads {
+            Some((stdout_thread, stderr_thread)) => (
+                stdout_thread.join().unwrap_or_default(),
+                stderr_thread.join().unwrap_or_default(),
+            ),
+            None => (String::new(), String::new()),
+        };
 
         // 6. Sandbox cleanup: delete AppContainer profile and tracking entry.
         //    Deferred if a network proxy is configured (proxy state can't be cleaned up yet).
@@ -910,8 +992,17 @@ impl ScriptRunner for BaseContainerRunner {
 
         // Merge diagnostic error into stderr field if present.
         // In passthrough mode, stdout/stderr already went directly to the SDK caller,
-        // so standard_out/standard_err in ScriptResponse will be empty.
-        let final_stderr = if error_message.is_empty() {
+        // so standard_out/standard_err in ScriptResponse will be empty. In capture
+        // mode we report the child's captured streams (appending any diagnostic
+        // message to stderr).
+        let final_stdout = if capture { captured_out } else { String::new() };
+        let final_stderr = if capture {
+            match (captured_err.is_empty(), error_message.is_empty()) {
+                (_, true) => captured_err,
+                (true, false) => error_message.clone(),
+                (false, false) => format!("{captured_err}{error_message}"),
+            }
+        } else if error_message.is_empty() {
             String::new()
         } else {
             error_message.clone()
@@ -919,7 +1010,7 @@ impl ScriptRunner for BaseContainerRunner {
 
         ScriptResponse {
             exit_code: exit_code as i32,
-            standard_out: String::new(),
+            standard_out: final_stdout,
             standard_err: final_stderr,
             error_message,
             failure_phase,

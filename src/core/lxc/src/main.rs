@@ -11,8 +11,6 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
-#[cfg(target_os = "linux")]
-use bwrap_common::bwrap_runner::BubblewrapScriptRunner;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use hyperlight_common::HyperlightScriptRunner;
 use lxc_common::lxc_runner::LxcScriptRunner;
@@ -254,7 +252,23 @@ fn main() {
         ContainmentBackend::Bubblewrap => {
             #[cfg(target_os = "linux")]
             {
-                Box::new(BubblewrapScriptRunner::new())
+                // Bubblewrap backend selection is shared with the `mxc`
+                // library and the other executor binaries via
+                // `mxc::select_runner`. The binary keeps capture disabled
+                // (`request.capture_output == false`), matching the previous
+                // behaviour.
+                let mut selection = match mxc::select_runner(&request, &mut logger) {
+                    Ok(selection) => selection,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        eprint!("{}", logger.get_buffer());
+                        process::exit(1);
+                    }
+                };
+                for w in &selection.warnings {
+                    logger.log_line(w);
+                }
+                selection.runner
             }
             #[cfg(not(target_os = "linux"))]
             {
