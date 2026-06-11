@@ -26,6 +26,24 @@ use wxc_common::mxc_error::MxcError;
 use wxc_common::sandbox_process::SandboxProcess;
 use wxc_common::script_runner::ScriptRunner;
 
+/// `Err` when the host OS has no MXC sandbox backend. Checked before backend
+/// selection so an unsupported platform reports a clear message rather than a
+/// backend-specific one (the default/abstract intent resolves to
+/// ProcessContainer on non-Linux/macOS hosts).
+fn ensure_host_supported() -> Result<(), MxcError> {
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    {
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        Err(MxcError::unsupported_containment(
+            "the mxc library has no sandbox backend for this host OS \
+             (supported: Windows, Linux, macOS)",
+        ))
+    }
+}
+
 /// The result of selecting a backend runner for a request.
 ///
 /// Carries the boxed runner plus any resources whose lifetime must outlive
@@ -71,6 +89,7 @@ pub fn select_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Selection, MxcError> {
+    ensure_host_supported()?;
     match &request.containment {
         ContainmentBackend::Seatbelt => select_seatbelt(request),
         ContainmentBackend::Bubblewrap => select_bubblewrap(request),
@@ -195,6 +214,7 @@ pub fn spawn_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    ensure_host_supported()?;
     match &request.containment {
         ContainmentBackend::Seatbelt => spawn_seatbelt(request, logger),
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
