@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 # Shared build stages used by `1ES.Build.yml` (PR/CI) and
-# `1ES.official.Build.yml` (signed). `isOfficialBuild` gates signing steps;
+# `1ES.Build.Official.yml` (signed). `isOfficialBuild` gates signing steps;
 # `ESRPInfo` is populated by the official pipeline from the
 # MXC-ESRP-Signing variable group and left empty otherwise.
 
