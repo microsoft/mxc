@@ -101,7 +101,7 @@ The `fallback` section gates the runner's host-impacting fallbacks. Each flag is
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `allowDaclMutation` | boolean | `true` | When neither the in-process BaseContainer API nor the OS-side filesystem broker helper is available, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). **⚠️ This modifies host filesystem security descriptors**; original DACLs are restored on exit. Set to `false` to refuse this fallback — the run will then fail on machines that require Tier 3 (e.g., Windows 11 builds below 26300 without the BaseContainer API). |
+| `allowDaclMutation` | boolean | `true` | When the BaseContainer feature and the OS-side filesystem broker helper are both unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). **⚠️ This modifies host filesystem security descriptors**; original DACLs are restored on exit. Set to `false` to refuse this fallback; the run will then fail on machines that require Tier 3. |
 
 ### Containment Backends
 

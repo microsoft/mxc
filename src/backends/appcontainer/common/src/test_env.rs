@@ -65,6 +65,36 @@ impl Drop for ForceTierGuard {
     }
 }
 
+/// RAII guard for `MXC_FORCE_BC_USABLE`, mirroring [`ForceTierGuard`]. Forces
+/// `fallback_detector::is_base_container_usable()` to a fixed value so
+/// tier-selection tests can simulate "symbol present but feature disabled"
+/// (and the reverse) without real OS support. Also clears `MXC_FORCE_TIER` so
+/// the force-tier seam does not pre-empt the capability path under test.
+pub(crate) struct BcUsableGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl BcUsableGuard {
+    pub(crate) fn set(usable: bool) -> Self {
+        let guard = lock();
+        // SAFETY: env-var mutation is gated by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("MXC_FORCE_TIER");
+            std::env::set_var("MXC_FORCE_BC_USABLE", if usable { "1" } else { "0" });
+        }
+        BcUsableGuard { _lock: guard }
+    }
+}
+
+impl Drop for BcUsableGuard {
+    fn drop(&mut self) {
+        // SAFETY: serialized by ENV_LOCK still held in `_lock`.
+        unsafe {
+            std::env::remove_var("MXC_FORCE_BC_USABLE");
+        }
+    }
+}
+
 /// RAII guard for `MXC_BFSCFG_PATH`, mirroring [`ForceTierGuard`].
 ///
 /// Only compiled in under the `tier2_bfs` feature, because the

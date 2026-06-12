@@ -627,6 +627,11 @@ pub enum FailurePhase {
     LaunchFailed,
     /// The process was created but exited with a non-zero code.
     ProcessExited,
+    /// The selected containment backend is unavailable on this host: the API is
+    /// missing, or present but not usable (e.g. feature-disabled). Distinct from
+    /// [`LaunchFailed`] so callers can fall back to a lower tier rather than
+    /// hard-fail.
+    BackendUnavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -675,6 +680,20 @@ impl ScriptResponse {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn script_response_backend_unavailable_round_trips() {
+        let r = ScriptResponse {
+            failure_phase: FailurePhase::BackendUnavailable,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: ScriptResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.failure_phase, FailurePhase::BackendUnavailable);
+        // An omitted failure_phase still defaults to None.
+        let defaulted: ScriptResponse = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaulted.failure_phase, FailurePhase::None);
+    }
 
     #[test]
     fn isolation_session_user_serde_round_trips_camel_case() {
