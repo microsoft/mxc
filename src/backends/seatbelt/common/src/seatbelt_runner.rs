@@ -173,17 +173,7 @@ impl SeatbeltScriptRunner {
             // Spawn manually — run_with_pty is not appropriate for GUI mode.
             let mut child = match command.spawn() {
                 Ok(process) => process,
-                Err(error) => {
-                    let msg = if error.kind() == std::io::ErrorKind::PermissionDenied {
-                        format!(
-                            "failed to spawn sandboxed process (sandbox_init likely rejected \
-                             the profile — check stderr for details): {error}"
-                        )
-                    } else {
-                        format!("failed to spawn sandboxed process: {error}")
-                    };
-                    return error_response(msg);
-                }
+                Err(error) => return error_response(spawn_error(&error)),
             };
 
             let timeout = if request.script_timeout == 0 {
@@ -259,17 +249,7 @@ impl SeatbeltScriptRunner {
 
         let mut child = match command.spawn() {
             Ok(process) => process,
-            Err(error) => {
-                let msg = if error.kind() == std::io::ErrorKind::PermissionDenied {
-                    format!(
-                        "failed to spawn sandboxed process (sandbox_init likely rejected \
-                         the profile — check stderr for details): {error}"
-                    )
-                } else {
-                    format!("failed to spawn sandboxed process: {error}")
-                };
-                return error_response(msg);
-            }
+            Err(error) => return error_response(spawn_error(&error)),
         };
 
         let stdout_handle = child
@@ -499,17 +479,7 @@ impl StreamingRunner for SeatbeltScriptRunner {
 
         let mut child = match command.spawn() {
             Ok(process) => process,
-            Err(error) => {
-                let msg = if error.kind() == std::io::ErrorKind::PermissionDenied {
-                    format!(
-                        "failed to spawn sandboxed process (sandbox_init likely rejected \
-                         the profile — check stderr for details): {error}"
-                    )
-                } else {
-                    format!("failed to spawn sandboxed process: {error}")
-                };
-                return Err(error_response(msg));
-            }
+            Err(error) => return Err(error_response(spawn_error(&error))),
         };
 
         let stdin = child.stdin.take();
@@ -720,6 +690,20 @@ fn error_response(message: String) -> ScriptResponse {
         exit_code: -1,
         error_message: message,
         ..Default::default()
+    }
+}
+
+/// Message for a `Command::spawn` failure, calling out the likely cause
+/// (`sandbox_init` rejecting the profile) when the OS reports a permission
+/// error.
+fn spawn_error(error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        format!(
+            "failed to spawn sandboxed process (sandbox_init likely rejected \
+             the profile — check stderr for details): {error}"
+        )
+    } else {
+        format!("failed to spawn sandboxed process: {error}")
     }
 }
 
