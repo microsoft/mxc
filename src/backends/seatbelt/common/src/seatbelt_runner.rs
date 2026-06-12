@@ -157,6 +157,12 @@ impl SeatbeltScriptRunner {
         command.current_dir(&cwd);
         command.env("PWD", &cwd);
 
+        let timeout = if request.script_timeout == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(u64::from(request.script_timeout)))
+        };
+
         if gui_access {
             // GUI apps need inherited stdio for window interaction.
             command
@@ -168,12 +174,6 @@ impl SeatbeltScriptRunner {
             let mut child = match command.spawn() {
                 Ok(process) => process,
                 Err(error) => return error_response(spawn_error(&error)),
-            };
-
-            let timeout = if request.script_timeout == 0 {
-                None
-            } else {
-                Some(Duration::from_millis(u64::from(request.script_timeout)))
             };
 
             match wait_with_timeout(&mut child, timeout) {
@@ -193,12 +193,6 @@ impl SeatbeltScriptRunner {
         } else {
             // CLI mode: hand off to the shared PTY bridge so the inner shell
             // sees a real TTY and the host can stream output as it arrives.
-            let timeout = if request.script_timeout == 0 {
-                None
-            } else {
-                Some(Duration::from_millis(u64::from(request.script_timeout)))
-            };
-
             let options = PtyOptions {
                 timeout,
                 ..PtyOptions::default()
