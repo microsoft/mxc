@@ -29,6 +29,36 @@ via the Windows Hypervisor Platform (WHP) on Windows or KVM on Linux.
 > **Note:** On Linux, WHP snapshots are not used. Each invocation cold-boots
 > the VM via KVM. Snapshot-based warm-start is Windows-only.
 
+### Offline builds
+
+By default the `nanvix_binaries` build script downloads the NanVix release
+assets at compile time. For air-gapped or hermetic builds, pre-fetch the
+binaries and point the `NANVIX_BIN` environment variable at the directory
+containing them:
+
+```
+# Windows (PowerShell)
+$env:NANVIX_BIN = "C:\path\to\nanvix-binaries"
+
+# Linux / macOS
+export NANVIX_BIN=/path/to/nanvix-binaries
+```
+
+When `NANVIX_BIN` is set, the build performs no network downloads and uses the
+provided directory directly. The directory must contain the required binaries
+(the flat files plus the `bin/` subdirectory); their checksums are still
+verified against `checksums.json`. The easiest way to produce such a directory
+is to run a normal `--with-microvm` build once and copy the staged
+`nanvix-binaries` directory out of `OUT_DIR`.
+
+> **Snapshots are not trusted in offline mode.** WHP warm-start snapshots
+> (`snapshots/kernel.vmem`, `snapshots/kernel.whp.cbor`) are *not* covered by
+> `checksums.json` — in a normal build they are generated locally, not
+> downloaded. Any `snapshots/` directory inside `NANVIX_BIN` is therefore
+> ignored (never copied next to the executable), and the runtime cold-boots on
+> first use to regenerate a verified snapshot. This prevents an unverified VM
+> memory image from being warm-booted against otherwise-verified binaries.
+
 ## Quick Start
 
 ```json

@@ -79,23 +79,8 @@ fn copy_nanvix_binaries() {
         }
     };
 
-    // Cargo puts the output binary in OUT_DIR/../../.. (target/<profile>/)
-    let out_dir = std::env::var("OUT_DIR").unwrap();
-    let target_dir = Path::new(&out_dir)
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent());
-
-    let target_dir = match target_dir {
-        Some(d) => d,
-        None => {
-            eprintln!("wxc build.rs: could not determine target dir from OUT_DIR");
-            return;
-        }
-    };
-
-    nanvix_common::copy_artifacts_to_target(Path::new(&nanvix_bin_dir), target_dir);
-
-    // Re-run when source binaries change (detected via nanvix_binaries rebuild)
-    println!("cargo:rerun-if-env-changed=DEP_NANVIX_BINARIES_BIN_DIR");
+    // Stage the artifacts next to the executable and emit rerun triggers. All
+    // of the staging logic (target-dir derivation, snapshot trust, copy/purge,
+    // rerun emission) lives in the build-only `nanvix_build_common` crate.
+    nanvix_build_common::stage_artifacts_next_to_exe(Path::new(&nanvix_bin_dir));
 }

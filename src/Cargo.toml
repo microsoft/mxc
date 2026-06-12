@@ -16,6 +16,7 @@ members = [
     "backends/isolation_session/common",
     "backends/hyperlight/common",
     "backends/nanvix/common",
+    "backends/nanvix/build_common",
     "backends/nanvix/binaries",
     "backends/nanvix/runner",
     "backends/lxc/common",
@@ -45,7 +46,7 @@ split-debuginfo = "packed"
 strip = "debuginfo"
 
 [workspace.package]
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 

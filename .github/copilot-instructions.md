@@ -39,7 +39,7 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 ./build-mac.sh --rust-only # Only Rust binaries, skip SDK
 ```
 
-Requires Xcode Command Line Tools and Rust. Produces an unsigned `mxc-exec-mac` binary (codesigning + notarization happen at release time). Schema `0.7.0-dev` or later required for macOS/Seatbelt backend.
+Requires Xcode Command Line Tools and Rust. Produces an unsigned `mxc-exec-mac` binary (codesigning + notarization happen at release time). Schema `0.7.0-alpha` or later required for macOS/Seatbelt backend.
 
 ### Individual components
 
@@ -113,7 +113,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 | Hyperlight | `wxc-exec.exe` | Windows | `backends/hyperlight/common/src/lib.rs` — Hyperlight + Unikraft micro-VM backend |
 | IsolationSession | `wxc-exec.exe` | Windows | `backends/isolation_session/common/src/` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Supports both one-shot (single-invocation lifecycle, via `ScriptRunner`) and state-aware (multi-invocation provision/start/exec/stop/deprovision, via `StatefulSandboxBackend`) modes. Honors `readwritePaths` and `readonlyPaths` at provision via `ShareFolderBatchAsync` (rejects `deniedPaths` since the API has no Deny ACE primitive); filesystem policy is immutable post-provision and rejected at later phases. State-aware additionally accepts an optional `user` bundle (`upn`, `wamToken`) at provision and start to provision Entra cloud-agent sandboxes; one-shot rejects the bundle, and hosts that don't support Entra agents surface `backend_unavailable`. Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
 | LXC | `lxc-exec` | Linux | `core/lxc/src/main.rs` + `backends/lxc/common/` |
-| Seatbelt | `mxc-exec-mac` | macOS | `core/mxc_darwin/src/main.rs` + `backends/seatbelt/common/` — uses macOS App Sandbox (Seatbelt) profiles for process containment. Requires schema `0.7.0-dev`+. See `docs/macos-support/seatbelt-backend.md`. |
+| Seatbelt | `mxc-exec-mac` | macOS | `core/mxc_darwin/src/main.rs` + `backends/seatbelt/common/` — uses macOS App Sandbox (Seatbelt) profiles for process containment. Requires schema `0.7.0-alpha`+. See `docs/macos-support/seatbelt-backend.md`. |
 | Bubblewrap | `lxc-exec` | Linux | `backends/bubblewrap/common/src/bwrap_runner.rs` — unprivileged sandboxing via Linux user namespaces and `bwrap`. Experimental — requires `--experimental`. Uses shared filesystem/network policy fields; per-host network filtering via `NetworkIptablesManager` from `backends/lxc/common`. See `docs/bwrap-support/bubblewrap-backend.md`. |
 
 ### Config flow
@@ -130,10 +130,9 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 
 ### Schema system
 
-- **Stable schemas**: `schemas/stable/mxc-config.schema.0.4.0-alpha.json`, `0.5.0-alpha.json`, and `0.6.0-alpha.json` — immutable after release (plus a `0.5.0-alpha-strict` view)
-- **Dev schema**: `schemas/dev/mxc-config.schema.0.7.0-dev.json` (configs targeting it declare `version: 0.7.0-alpha`)
-- **Canonical schema-version source**: `schemas/schema-version.json` — the single source of truth for the schema-version constants (min/maxSupported/state-aware/stable/dev). `scripts/versioning/check-schema-versions.js` enforces that the Rust parser, SDK, and schema filenames all agree with it; do not hand-edit a schema-version constant without updating the canonical file.
-- Current schema version: `0.7.0-alpha` (latest stable: `0.6.0-alpha`)
+- **Stable schemas**: released, immutable schemas live in [`schemas/stable/`](../schemas/stable) (one file per released version, plus a `-strict` view) — never edit them after release.
+- **Dev schema**: the in-progress schema lives in [`schemas/dev/`](../schemas/dev).
+- **Canonical schema-version source**: `schemas/schema-version.json` — the single source of truth for the schema-version constants (min/maxSupported/state-aware/stable/dev). `scripts/versioning/check-schema-versions.js` enforces that the Rust parser, SDK, and schema filenames all agree with it; do not hand-edit a schema-version constant without updating the canonical file. See [`docs/versioning.md`](../docs/versioning.md) for the full design.
 - Config files can reference schemas via `"$schema"` for editor validation. `scripts/versioning/validate-configs.js` validates the `tests/examples` + `tests/configs` corpus against the dev schema in CI.
 
 ### Key documentation (`docs/`)
@@ -184,7 +183,7 @@ The workspace is organized into five top-level directories under `src/`:
 | Directory | Purpose | Examples |
 |-----------|---------|----------|
 | `core/` | Cross-platform foundation + per-platform aggregator binaries | `wxc_common/`, `wxc/`, `lxc/`, `mxc_darwin/`, `mxc/`, `mxc_pty/`, `mxc_build_common/`, `generated/` |
-| `backends/` | Backend-specific code (one subfolder per containment backend) | `appcontainer/common`, `windows_sandbox/{daemon,guest,common}`, `isolation_session/{bindings,common}`, `hyperlight/common`, `nanvix/{common,binaries,runner}`, `lxc/common`, `bubblewrap/common`, `wslc/common`, `seatbelt/common` |
+| `backends/` | Backend-specific code (one subfolder per containment backend) | `appcontainer/common`, `windows_sandbox/{daemon,guest,common}`, `isolation_session/{bindings,common}`, `hyperlight/common`, `nanvix/{common,build_common,binaries,runner}`, `lxc/common`, `bubblewrap/common`, `wslc/common`, `seatbelt/common` |
 | `host/` | Host-side utilities | `wxc_host_prep/`, `wxc_winhttp_proxy_shim/` |
 | `testing/` | Test infrastructure crates | `wxc_e2e_tests/`, `wxc_test_driver/`, `wxc_test_proxy/`, `linux_test_proxy/`, `wxc_ui_probe/`, `fuzz/` |
 | `tools/` | Developer/diagnostic tools | `mxc_diagnostic_console/` |
@@ -195,6 +194,7 @@ The workspace is organized into five top-level directories under `src/`:
 - `mxc` is an **importable library** for starting sandboxes in-process without a pty: `spawn_sandbox` parses a config, selects the host backend, and returns a `wxc_common::sandbox_process::SandboxProcess` handle for persistent bidirectional stdio (`take_stdin`/`take_stdout`/`take_stderr`), `kill()`, and `wait()` (which drains and discards any untaken stdout/stderr and returns the exit code as `io::Result<i32>`). `spawn_streaming_from_request` is the lower-level variant for a pre-built `ExecutionRequest`. It additionally ports the SDK's config-building surface so callers don't need the TypeScript module: `mxc::policy` (`SandboxPolicy` + `build_request` → `ExecutionRequest`, the port of `createConfigFromPolicy`; plus `available_tools_policy`/`user_profile_policy`/`temporary_files_policy` discovery helpers) and `mxc::platform_support` (port of `getPlatformSupport`, using the in-process probe on Windows). It depends on the backend crates (cfg-split: appcontainer on Windows, bubblewrap on Linux, seatbelt on macOS) — so it can't live in `wxc_common`. The public surface is deliberately minimal (streaming only): the `dispatch` and `platform` modules are private and only their used items are re-exported at the crate root (`platform_support`, `PlatformSupport`); `policy` is the one public submodule (callers name `mxc::policy::{SandboxPolicy sections}`). The streaming `SandboxProcess` / `StreamingRunner` traits live in `wxc_common::sandbox_process` (impls in the backend crates), implemented for every supported backend — Seatbelt (macOS), Bubblewrap (Linux), and Windows ProcessContainer (AppContainer + BaseContainer). The `wxc`/`lxc`/`mxc_darwin` executor binaries do **not** depend on `mxc`; they keep their own backend dispatch (sharing only the lower-level `appcontainer_common::dispatcher::dispatch_with_fallback`).
 - `mxc_pty` is the shared pty bridge used by the unix-side backends (`lxc_common::lxc_bindings::attach_run` on Linux and `seatbelt_common::seatbelt_runner` on macOS) so the inner shell sees a real TTY and host stdio is streamed live
 - `mxc_build_common` is a build-time helper crate — all Windows binary crates use it in their `build.rs` to embed VersionInfo (ProductName, FileDescription, copyright, version+commit). When adding a new Windows binary crate, add `mxc_build_common` as a build-dependency and call `mxc_build_common::embed_version_info()` from `build.rs`
+- `nanvix_build_common` is a **build-only** helper crate (never linked into the runtime): it stages NanVix binaries next to the executable and resolves the `NANVIX_BIN` prefetch directory. The `nanvix_binaries`, `wxc`, and `lxc` build scripts consume it as a `[build-dependencies]` entry. Runtime constants it needs (binary/snapshot filenames) stay in `nanvix_common`. Keep build-only file-staging logic here, not in `nanvix_common` (which is a runtime dependency of `nanvix_runner`).
 - Platform-specific modules use `#[cfg(target_os = "windows")]` / `#[cfg(target_os = "linux")]`
 - Workspace edition is 2021; shared dependencies are declared in the root `Cargo.toml` `[workspace.dependencies]`
 
@@ -233,7 +233,7 @@ When changing behavior covered by existing documentation, update the relevant do
 
 ### Policy versioning
 
-The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.4.0-alpha` minimum, `0.7.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. These bounds are mirrored from the canonical `schemas/schema-version.json` and enforced by `scripts/versioning/check-schema-versions.js`. See `docs/versioning.md` for the full design.
+The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.4.0-alpha` minimum, `0.8.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. These bounds are mirrored from the canonical `schemas/schema-version.json` and enforced by `scripts/versioning/check-schema-versions.js`. See `docs/versioning.md` for the full design.
 
 ## Creating Issues
 
