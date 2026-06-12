@@ -125,6 +125,22 @@ fn user_profile_policy_does_not_panic() {
 }
 
 #[test]
+fn build_request_rejects_empty_version() {
+    // Parity with the SDK, which throws "Policy version is required".
+    let policy = SandboxPolicy {
+        version: String::new(),
+        filesystem: None,
+        network: None,
+        ui: None,
+        timeout_ms: None,
+    };
+
+    let err = build_request(&policy, Containment::Process, None)
+        .expect_err("an empty policy version must be rejected");
+    assert_eq!(err.code, mxc::MxcErrorCode::MalformedRequest);
+}
+
+#[test]
 fn build_request_maps_filesystem_and_timeout() {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),

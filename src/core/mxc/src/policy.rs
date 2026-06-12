@@ -475,6 +475,11 @@ pub fn build_request(
     containment: Containment,
     container_name: Option<&str>,
 ) -> Result<ExecutionRequest, MxcError> {
+    // The shared parser tolerates an empty schema version (treats it as
+    // "unset"), but the SDK requires it; reject it here for parity.
+    if policy.version.is_empty() {
+        return Err(MxcError::malformed_request("Policy version is required"));
+    }
     let config = build_wire_config(policy, containment, container_name)?;
     let json = serde_json::to_string(&config)
         .map_err(|e| MxcError::malformed_request(format!("failed to serialise config: {e}")))?;
