@@ -2,6 +2,7 @@
 members = [
     "core/wxc",
     "core/wxc_common",
+    "core/denial_capture",
     "core/lxc",
     "core/mxc_darwin",
     "core/mxc_pty",
