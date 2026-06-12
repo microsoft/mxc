@@ -1,18 +1,17 @@
 # `mxc`
 
 An importable Rust library for starting [MXC](../../../README.md) sandboxes
-**in-process** — the Rust analogue of the SDK's `spawnSandboxFromConfig` with
-`usePty: false`.
+**in-process**, without ever allocating a pty.
 
 It takes the same JSON config the executor binaries (`wxc-exec`, `lxc-exec`,
 `mxc-exec-mac`) consume, selects the right containment backend for the host,
-runs the sandboxed process **without ever allocating a pty**, and returns the
-captured stdout/stderr and exit code.
+and spawns the sandboxed process — returning a handle for live bidirectional
+stdio and termination.
 
 ## Usage
 
 ```rust,no_run
-use mxc::{spawn_sandbox_from_config, SpawnOptions};
+use mxc::{spawn_sandbox, SpawnOptions};
 
 // `config` is the same JSON the SDK serialises from a SandboxPolicy
 // (a ContainerConfig). Pass `is_base64: true` to supply it base64-encoded.
@@ -23,7 +22,8 @@ let config = r#"{
     "filesystem": { "readwritePaths": ["/tmp"] }
 }"#;
 
-let result = spawn_sandbox_from_config(config, &SpawnOptions::default())?;
+let mut proc = spawn_sandbox(config, &SpawnOptions::default())?;
+let result = proc.wait(); // drains untaken stdout/stderr, returns the exit code
 assert_eq!(result.exit_code, 0);
 println!("{}", result.standard_out); // "hello\n"
 # Ok::<(), mxc::MxcError>(())
@@ -34,8 +34,7 @@ println!("{}", result.standard_out); // "hello\n"
 (override `process.commandLine`), and `env` (merged into `process.env`).
 
 For callers that already hold a parsed `ExecutionRequest`, use
-[`spawn_sandbox_from_request`] (run to completion) or
-[`spawn_streaming_from_request`] (streaming handle).
+[`spawn_streaming_from_request`].
 
 ## Building a config from a policy (no TypeScript SDK needed)
 
@@ -120,18 +119,17 @@ The handle is modelled on [`std::process::Child`]:
 - `wait()` blocks until exit (honouring `scriptTimeout`, where `0` waits
   forever), drains any **untaken** stdout/stderr, and returns the exit code
   plus captured output. With no streams taken, `spawn_sandbox(..).wait()`
-  behaves like a run-to-completion capture.
+  runs the child to completion and returns its captured output.
 
 Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**, and
 **Windows ProcessContainer (AppContainer + BaseContainer)** — i.e. every
 backend the library supports.
 
-> **Windows note:** unlike the run-to-completion path, streaming does not use
-> the AppContainer-BFS / AppContainer-DACL fallback. Experimental / newer-schema
-> configs that select BaseContainer require the native BaseContainer API; on a
-> host without it, `spawn_sandbox` fails closed with a clear error rather than
-> falling back to an AppContainer tier (which `spawn_sandbox_from_config` would
-> do).
+> **Windows note:** streaming does not use the AppContainer-BFS /
+> AppContainer-DACL fallback. Experimental / newer-schema configs that select
+> BaseContainer require the native BaseContainer API; on a host without it,
+> `spawn_sandbox` fails closed with a clear error rather than falling back to
+> an AppContainer tier.
 
 ## Supported backends
 
@@ -148,14 +146,12 @@ Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight,
 WSLC, LXC) returns [`MxcError::unsupported_containment`]; drive the standalone
 executor binaries for those.
 
-## Output capture (no pty)
+## No pty
 
-The library always sets `ExecutionRequest::capture_output`, so the child's
-stdout/stderr are captured into the returned `ScriptResponse` rather than
-streamed to the host's stdio, and **no pty is allocated** for any backend.
-This differs from the executor binaries, which stream live (Seatbelt/LXC via a
-pty, AppContainer by inheriting the host fds). The `capture_output` flag
-defaults to `false`, so the binaries' behaviour is unchanged.
+The child's stdio is always wired to ordinary pipes — the library never
+allocates a pty (the executor binaries, by contrast, stream live: Seatbelt/LXC
+via a pty, AppContainer by inheriting the host fds). Output the caller doesn't
+take is captured by `wait()` into the returned `ScriptResponse`.
 
 ## Relationship to the executor binaries
 

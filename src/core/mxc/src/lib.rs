@@ -3,20 +3,21 @@
 
 //! `mxc` — an importable library for starting MXC sandboxes in-process.
 //!
-//! This is the Rust analogue of the SDK's `spawnSandboxFromConfig` with
-//! `usePty: false`: it takes the same JSON config the executor binaries
-//! consume, selects the right containment backend for the host, runs the
-//! sandboxed process **without ever allocating a pty**, and returns the
-//! captured stdout/stderr and exit code in a [`ScriptResponse`].
+//! It takes the same JSON config the executor binaries consume, selects the
+//! right containment backend for the host, and spawns the sandboxed process
+//! **without ever allocating a pty**, returning a [`SandboxProcess`] handle for
+//! live bidirectional stdio and termination.
 //!
 //! ```no_run
-//! use mxc::{spawn_sandbox_from_config, SpawnOptions};
+//! use std::io::Read;
+//! use mxc::{spawn_sandbox, SpawnOptions};
 //!
 //! // `config` is the same JSON the SDK produces from a SandboxPolicy
 //! // (see `sdk/src` -> ContainerConfig). It can be a raw JSON string or a
 //! // base64-encoded blob (set `is_base64`).
 //! let config = r#"{ "version": "0.7.0-alpha", "process": { "commandLine": "echo hi" } }"#;
-//! let result = spawn_sandbox_from_config(config, &SpawnOptions::default())?;
+//! let mut proc = spawn_sandbox(config, &SpawnOptions::default())?;
+//! let result = proc.wait(); // drains untaken stdout/stderr and returns the exit code
 //! println!("exit={} out={}", result.exit_code, result.standard_out);
 //! # Ok::<(), mxc::MxcError>(())
 //! ```
@@ -29,12 +30,12 @@
 //! fallback — (Windows). Other backends return
 //! [`MxcError::unsupported_containment`].
 //!
-//! ## Output capture
+//! ## No pty
 //!
-//! The library always sets [`ExecutionRequest::capture_output`] so the
-//! child's stdout/stderr are captured into the returned [`ScriptResponse`]
-//! rather than streamed to the host's stdio. No pty is allocated for any
-//! backend.
+//! The child's stdio is always wired to ordinary pipes — the library never
+//! allocates a pty. Stream the handle's `take_stdout`/`take_stderr`, or let
+//! [`wait`](SandboxProcess::wait) drain any untaken stream into the returned
+//! [`ScriptResponse`].
 
 mod dispatch;
 mod platform;
@@ -94,42 +95,22 @@ pub struct SpawnOptions {
     pub env: Vec<(String, String)>,
 }
 
-/// Run a sandbox from a JSON config, capturing its output.
-///
-/// `config` is the same JSON the SDK serialises from a `SandboxPolicy`
-/// (a `ContainerConfig`); pass `options.is_base64 = true` to supply it
-/// base64-encoded. The function:
-///
-/// 1. Parses and validates the config (reusing the executor parser),
-/// 2. Applies the [`SpawnOptions`] overrides,
-/// 3. Forces output capture and selects the host backend, and
-/// 4. Runs the sandboxed process and returns its [`ScriptResponse`].
-///
-/// Diagnostic output from parsing/selection is buffered and surfaced on
-/// errors; it is not written to the process's stdio.
-pub fn spawn_sandbox_from_config(
-    config: &str,
-    options: &SpawnOptions,
-) -> Result<ScriptResponse, MxcError> {
-    let (request, mut logger) = load_and_prepare(config, options)?;
-    run_request(request, &mut logger)
-}
-
 /// Spawn a sandbox from a JSON config and return a handle to the running
 /// process for live bidirectional stdio and termination.
 ///
-/// The streaming counterpart to [`spawn_sandbox_from_config`]: instead of
-/// running to completion, it returns a [`SandboxProcess`] the caller can
-/// write to (`take_stdin`), read from (`take_stdout` / `take_stderr`),
-/// [`wait`](SandboxProcess::wait) on, or [`kill`](SandboxProcess::kill). No
-/// pty is allocated. Any stdout/stderr stream the caller does not take is
-/// captured by `wait()`.
+/// `config` is the same JSON the SDK serialises from a `SandboxPolicy`
+/// (a `ContainerConfig`); pass `options.is_base64 = true` to supply it
+/// base64-encoded. The returned [`SandboxProcess`] lets the caller write to
+/// (`take_stdin`), read from (`take_stdout` / `take_stderr`),
+/// [`wait`](SandboxProcess::wait) on, or [`kill`](SandboxProcess::kill) the
+/// child. No pty is allocated. Any stdout/stderr stream the caller does not
+/// take is captured by `wait()`.
 ///
-/// `config` and `options` are interpreted exactly as in
-/// [`spawn_sandbox_from_config`] (the `command`, `working_directory`, and
-/// `env` overrides apply). Setting `options.dry_run` is rejected with
-/// [`MxcErrorCode::MalformedRequest`]: there is no process to stream, so
-/// validate via [`spawn_sandbox_from_config`] instead.
+/// Setting `options.dry_run` is rejected with
+/// [`MxcErrorCode::MalformedRequest`]: there is no process to stream.
+///
+/// Diagnostic output from parsing/selection is buffered and surfaced on
+/// errors; it is not written to the process's stdio.
 pub fn spawn_sandbox(
     config: &str,
     options: &SpawnOptions,
@@ -139,8 +120,7 @@ pub fn spawn_sandbox(
 }
 
 /// Parse a config string and apply [`SpawnOptions`], returning the prepared
-/// request and the diagnostic logger. Shared by the run-to-completion and
-/// streaming entrypoints.
+/// request and the diagnostic logger.
 fn load_and_prepare(
     config: &str,
     options: &SpawnOptions,
@@ -175,27 +155,12 @@ fn load_and_prepare(
     Ok((request, logger))
 }
 
-/// Run a fully-built [`ExecutionRequest`], capturing its output.
-///
-/// Lower-level entrypoint for callers that already hold an
-/// [`ExecutionRequest`] (e.g. built by hand or obtained from
-/// [`wxc_common::config_parser`]). [`spawn_sandbox_from_config`] is the usual
-/// way in. `capture_output` is forced on regardless of the request's value.
-pub fn spawn_sandbox_from_request(
-    mut request: ExecutionRequest,
-) -> Result<ScriptResponse, MxcError> {
-    let mut logger = Logger::new(Mode::Buffer);
-    request.capture_output = true;
-    run_request(request, &mut logger)
-}
-
 /// Spawn a streaming handle for a fully-built [`ExecutionRequest`].
 ///
-/// The streaming counterpart to [`spawn_sandbox_from_request`]: returns a
-/// [`SandboxProcess`] for live stdio and termination. Usually the request
-/// comes from [`build_request`] with `script_code` (and working directory /
-/// env) filled in by the caller. (Streaming always pipes the child's stdio, so
-/// `ExecutionRequest::capture_output` does not apply.)
+/// Lower-level counterpart to [`spawn_sandbox`] for callers that already hold
+/// an [`ExecutionRequest`] — usually from [`build_request`] with `script_code`
+/// (and working directory / env) filled in. Returns a [`SandboxProcess`] for
+/// live stdio and termination; no pty is allocated.
 pub fn spawn_streaming_from_request(
     request: ExecutionRequest,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
@@ -220,29 +185,4 @@ fn apply_options(request: &mut ExecutionRequest, options: &SpawnOptions) {
         request.env.retain(|kv| !kv.starts_with(&prefix));
         request.env.push(format!("{key}={value}"));
     }
-}
-
-fn run_request(
-    mut request: ExecutionRequest,
-    logger: &mut Logger,
-) -> Result<ScriptResponse, MxcError> {
-    // Never stream to host stdio / allocate a pty: capture into the response.
-    request.capture_output = true;
-
-    // Keep the whole `Selection` alive across the run: on Windows it owns the
-    // DACL guard whose `Drop` restores host ACEs, and that restore must happen
-    // *after* the child is reaped — not when selection is unpacked.
-    let mut selection = select_runner(&request)?;
-
-    for w in &selection.warnings {
-        logger.log_line(w);
-    }
-
-    let response = selection.runner.run(&request, logger);
-
-    // Drop the selection (runner first, then the DACL guard) now that the
-    // child has exited, so ACE restore runs promptly.
-    drop(selection);
-
-    Ok(response)
 }

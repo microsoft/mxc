@@ -10,7 +10,7 @@ use mxc::{
 };
 
 #[cfg(target_os = "macos")]
-use mxc::spawn_sandbox_from_request;
+use mxc::spawn_streaming_from_request;
 
 fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
@@ -207,7 +207,8 @@ fn build_request_then_run_seatbelt() {
         build_request(&policy, Containment::Process, None).expect("build_request should succeed");
     request.script_code = "echo built-from-policy".to_string();
 
-    let result = spawn_sandbox_from_request(request).expect("run should succeed");
+    let mut proc = spawn_streaming_from_request(request).expect("spawn should succeed");
+    let result = proc.wait();
     assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
     assert!(
         result.standard_out.contains("built-from-policy"),

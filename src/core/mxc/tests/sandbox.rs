@@ -4,12 +4,21 @@
 //! End-to-end tests for the `mxc` library against the host backend.
 //!
 //! Seatbelt-specific cases run only on macOS; the cross-platform cases
-//! (config errors, unsupported backends) run everywhere.
+//! (config errors, unsupported backends) run everywhere. The library exposes
+//! only the streaming API, so "run to completion" here means spawn then
+//! [`SandboxProcess::wait`], which drains the untaken stdout/stderr into the
+//! returned [`mxc::ScriptResponse`].
 
-use mxc::{spawn_sandbox_from_config, MxcErrorCode, SpawnOptions};
+use mxc::{spawn_sandbox, MxcErrorCode, ScriptResponse, SpawnOptions};
 
 #[cfg(target_os = "macos")]
 use mxc::FailurePhase;
+
+/// Spawn a sandbox from a config and wait for it to exit, returning the
+/// captured response — the streaming-API equivalent of running to completion.
+fn spawn_and_wait(config: &str, options: &SpawnOptions) -> Result<ScriptResponse, mxc::MxcError> {
+    spawn_sandbox(config, options).map(|mut proc| proc.wait())
+}
 
 #[test]
 fn unsupported_backend_is_rejected() {
@@ -21,7 +30,7 @@ fn unsupported_backend_is_rejected() {
         "process": { "commandLine": "echo hi" }
     }"#;
 
-    let err = spawn_sandbox_from_config(config, &SpawnOptions::default())
+    let err = spawn_and_wait(config, &SpawnOptions::default())
         .expect_err("windows_sandbox must be unsupported by the mxc library");
     assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
 }
@@ -34,7 +43,7 @@ fn missing_command_is_rejected() {
         "process": { "commandLine": "" }
     }"#;
 
-    let err = spawn_sandbox_from_config(config, &SpawnOptions::default())
+    let err = spawn_and_wait(config, &SpawnOptions::default())
         .expect_err("empty command must be rejected");
     // Either the parser rejects the empty command, or our own guard does;
     // both map to malformed_request.
@@ -51,7 +60,7 @@ fn version_older_than_supported_is_rejected() {
         "process": { "commandLine": "echo hi" }
     }"#;
 
-    let err = spawn_sandbox_from_config(config, &SpawnOptions::default())
+    let err = spawn_and_wait(config, &SpawnOptions::default())
         .expect_err("an out-of-range schema version must be rejected");
     assert_eq!(err.code, MxcErrorCode::MalformedRequest);
 }
@@ -62,39 +71,9 @@ fn malformed_json_config_is_rejected() {
     // with malformed_request rather than panicking.
     let config = "{ this is not valid json";
 
-    let err = spawn_sandbox_from_config(config, &SpawnOptions::default())
+    let err = spawn_and_wait(config, &SpawnOptions::default())
         .expect_err("malformed JSON must be rejected");
     assert_eq!(err.code, MxcErrorCode::MalformedRequest);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn dry_run_validates_without_executing() {
-    // dry_run on the run-to-completion path must validate and return success
-    // *without* executing the command (so the `echo` produces no stdout).
-    let config = r#"{
-        "version": "0.7.0-alpha",
-        "containment": "seatbelt",
-        "process": { "commandLine": "echo should-not-run", "timeout": 10000 },
-        "filesystem": { "readwritePaths": ["/tmp"] },
-        "seatbelt": { "mode": "exec" }
-    }"#;
-
-    let options = SpawnOptions {
-        dry_run: true,
-        ..SpawnOptions::default()
-    };
-
-    let result = spawn_sandbox_from_config(config, &options).expect("dry run should succeed");
-    assert_eq!(
-        result.exit_code, 0,
-        "dry run should report validation success"
-    );
-    assert!(
-        !result.standard_out.contains("should-not-run"),
-        "dry run must not execute the command, got: {:?}",
-        result.standard_out
-    );
 }
 
 #[cfg(target_os = "macos")]
@@ -112,8 +91,8 @@ fn seatbelt_does_not_leak_host_environment() {
         "seatbelt": { "mode": "exec" }
     }"#;
 
-    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
-        .expect("seatbelt run should succeed");
+    let result =
+        spawn_and_wait(config, &SpawnOptions::default()).expect("seatbelt run should succeed");
     std::env::remove_var("MXC_HOST_SECRET");
 
     assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
@@ -143,8 +122,7 @@ fn is_base64_config_is_accepted() {
         ..SpawnOptions::default()
     };
 
-    let result =
-        spawn_sandbox_from_config(&encoded, &options).expect("a base64-encoded config should run");
+    let result = spawn_and_wait(&encoded, &options).expect("a base64-encoded config should run");
     assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
     assert!(
         result.standard_out.contains("from-base64"),
@@ -167,7 +145,7 @@ fn seatbelt_finite_timeout_fires() {
     }"#;
 
     let start = std::time::Instant::now();
-    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
+    let result = spawn_and_wait(config, &SpawnOptions::default())
         .expect("seatbelt run should return a response");
     assert_ne!(result.exit_code, 0, "a timed-out run must not exit 0");
     assert!(
@@ -204,7 +182,7 @@ fn seatbelt_working_directory_override() {
         ..SpawnOptions::default()
     };
 
-    let result = spawn_sandbox_from_config(config, &options).expect("seatbelt run should succeed");
+    let result = spawn_and_wait(config, &options).expect("seatbelt run should succeed");
     let _ = std::fs::remove_dir(&unique);
 
     assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
@@ -237,7 +215,7 @@ fn seatbelt_env_override_replaces_config_value() {
         ..SpawnOptions::default()
     };
 
-    let result = spawn_sandbox_from_config(config, &options).expect("seatbelt run should succeed");
+    let result = spawn_and_wait(config, &options).expect("seatbelt run should succeed");
     assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
     assert!(
         result.standard_out.contains("overridden"),
@@ -264,8 +242,8 @@ fn seatbelt_captures_stderr_only() {
         "seatbelt": { "mode": "exec" }
     }"#;
 
-    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
-        .expect("seatbelt run should succeed");
+    let result =
+        spawn_and_wait(config, &SpawnOptions::default()).expect("seatbelt run should succeed");
     assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
     assert!(
         result.standard_err.contains("only-stderr"),
@@ -304,8 +282,8 @@ fn base_container_captures_stdout() {
         "filesystem": { "readwritePaths": ["C:\\Windows\\Temp"] }
     }"#;
 
-    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
-        .expect("BaseContainer run should succeed");
+    let result =
+        spawn_and_wait(config, &SpawnOptions::default()).expect("BaseContainer run should succeed");
     assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
     assert!(
         result.standard_out.contains("hello-base-container"),
@@ -326,8 +304,8 @@ fn appcontainer_captures_stdout() {
         "filesystem": { "readwritePaths": ["C:\\Windows\\Temp"] }
     }"#;
 
-    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
-        .expect("AppContainer run should succeed");
+    let result =
+        spawn_and_wait(config, &SpawnOptions::default()).expect("AppContainer run should succeed");
     assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
     assert!(
         result.standard_out.contains("hello-appcontainer"),
@@ -355,7 +333,7 @@ fn appcontainer_finite_timeout_fires() {
     }"#;
 
     let start = std::time::Instant::now();
-    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
+    let result = spawn_and_wait(config, &SpawnOptions::default())
         .expect("AppContainer run should return a response");
     assert_ne!(result.exit_code, 0, "a timed-out run must not exit 0");
     assert!(
@@ -376,8 +354,8 @@ fn seatbelt_captures_stdout() {
         "seatbelt": { "mode": "exec" }
     }"#;
 
-    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
-        .expect("seatbelt run should succeed");
+    let result =
+        spawn_and_wait(config, &SpawnOptions::default()).expect("seatbelt run should succeed");
 
     assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
     assert!(
@@ -403,7 +381,7 @@ fn seatbelt_command_override_and_captured_exit_code() {
         ..SpawnOptions::default()
     };
 
-    let result = spawn_sandbox_from_config(config, &options).expect("seatbelt run should succeed");
+    let result = spawn_and_wait(config, &options).expect("seatbelt run should succeed");
 
     assert_eq!(result.exit_code, 3);
     assert!(result.standard_out.contains("override-out"));
@@ -425,7 +403,7 @@ fn seatbelt_env_injection() {
         ..SpawnOptions::default()
     };
 
-    let result = spawn_sandbox_from_config(config, &options).expect("seatbelt run should succeed");
+    let result = spawn_and_wait(config, &options).expect("seatbelt run should succeed");
 
     assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
     assert!(
@@ -446,8 +424,8 @@ fn seatbelt_failure_phase_process_exited_on_nonzero() {
         "seatbelt": { "mode": "exec" }
     }"#;
 
-    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
-        .expect("seatbelt run should succeed");
+    let result =
+        spawn_and_wait(config, &SpawnOptions::default()).expect("seatbelt run should succeed");
 
     assert_eq!(result.exit_code, 7);
     assert_eq!(
@@ -468,8 +446,8 @@ fn seatbelt_failure_phase_none_on_success() {
         "seatbelt": { "mode": "exec" }
     }"#;
 
-    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
-        .expect("seatbelt run should succeed");
+    let result =
+        spawn_and_wait(config, &SpawnOptions::default()).expect("seatbelt run should succeed");
 
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.failure_phase, FailurePhase::None);
@@ -489,8 +467,8 @@ fn seatbelt_defaults_cwd_to_allowed_path_without_getcwd_leak() {
         "seatbelt": { "mode": "exec" }
     }"#;
 
-    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
-        .expect("seatbelt run should succeed");
+    let result =
+        spawn_and_wait(config, &SpawnOptions::default()).expect("seatbelt run should succeed");
 
     assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
     assert!(
