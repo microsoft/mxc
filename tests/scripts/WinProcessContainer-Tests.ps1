@@ -121,8 +121,16 @@ namespace Mxc {
         private static extern bool PostThreadMessageW(uint idThread, uint Msg, IntPtr wParam, IntPtr lParam);
         [DllImport("kernel32.dll")]
         private static extern uint GetCurrentThreadId();
+        // Opt WM_GETTEXT through UIPI so a lower-integrity (sandboxed) sender
+        // can deliver it to this window. Without this the HANDLES probe's
+        // GetWindowTextW would be blocked by UIPI integrity isolation rather
+        // than by JOB_OBJECT_UILIMIT_HANDLES, confounding the test.
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool ChangeWindowMessageFilterEx(IntPtr hWnd, uint message, uint action, IntPtr pChangeFilterStruct);
 
         private const uint WM_QUIT = 0x0012;
+        private const uint WM_GETTEXT = 0x000D;
+        private const uint MSGFLT_ALLOW = 1;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
 
         private Thread _thread;
@@ -149,6 +157,13 @@ namespace Mxc {
             // WS_VISIBLE keeps the window hidden. Its caption is the sentinel
             // title that WM_GETTEXT (DefWindowProc) returns.
             _hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, "STATIC", _title, 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            if (_hwnd != IntPtr.Zero) {
+                // Allow sandboxed (lower-integrity) senders to deliver
+                // WM_GETTEXT so the HANDLES probe exercises UILIMIT_HANDLES,
+                // not UIPI. Best-effort: failure (incl. on hosts where the
+                // sender is still blocked) just leaves UIPI in place.
+                ChangeWindowMessageFilterEx(_hwnd, WM_GETTEXT, MSGFLT_ALLOW, IntPtr.Zero);
+            }
             _ready.Set();
             if (_hwnd == IntPtr.Zero) { return; }
             MSG msg;
