@@ -579,17 +579,6 @@ pub struct ExecutionRequest {
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
-    /// Capture the sandboxed process's stdout/stderr into
-    /// [`ScriptResponse::standard_out`]/[`ScriptResponse::standard_err`]
-    /// instead of streaming them to the host's stdio.
-    ///
-    /// Default `false` preserves the streaming behaviour the `wxc-exec` /
-    /// `lxc-exec` / `mxc-exec-mac` binaries rely on (Seatbelt/LXC use a pty;
-    /// AppContainer inherits the host fds). The Windows ProcessContainer
-    /// streaming spawn sets it `true` internally to wire the child's stdio to
-    /// pipes for the `SandboxProcess` handle. Bubblewrap always captures
-    /// regardless.
-    pub capture_output: bool,
 }
 
 /// Distinguishes whether an error occurred during process creation (launch)

@@ -736,10 +736,10 @@ impl BaseContainerRunner {
         // we forward our own std handles to the child via STARTF_USESTDHANDLES so the
         // child's output streams directly to the SDK in real time.
         //
-        // When `capture_output` is set (the streaming spawn sets it) we always
-        // take the pipe path and wire the child to capture pipes whose output
-        // we read into the response.
-        let capture = request.capture_output;
+        // When streaming (the `spawn_streaming` path) we always take the pipe
+        // path and wire the child to capture pipes whose output we read into
+        // the response.
+        let capture = stream;
         let pipe_mode =
             capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
 
@@ -1259,10 +1259,8 @@ impl StreamingRunner for BaseContainerRunner {
         validate_common(request)?;
         self.validate_runner(request)?;
 
-        let mut streaming_request = request.clone();
-        streaming_request.capture_output = true;
-
-        let child = self.spawn_base(&streaming_request, logger, true)?;
+        // `stream = true` forces capture pipes (no console/pty path).
+        let child = self.spawn_base(request, logger, true)?;
         Ok(Box::new(BaseContainerSandboxProcess::from_child(child)))
     }
 }

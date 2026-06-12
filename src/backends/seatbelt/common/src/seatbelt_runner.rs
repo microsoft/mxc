@@ -190,24 +190,6 @@ impl SeatbeltScriptRunner {
                 }
                 Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
             }
-        } else if request.capture_output {
-            // Library / no-pty mode: capture stdout/stderr into the response
-            // instead of streaming through a pty. Mirrors the bubblewrap
-            // runner's piped-capture model. Used by the `mxc` library crate.
-            //
-            // Rebuild as a session leader so a timeout can group-kill the whole
-            // tree: otherwise a surviving descendant holding the stdout/stderr
-            // pipe write-end would keep the capture drain from ever seeing EOF,
-            // hanging the call despite the timeout.
-            let mut command =
-                match build_sandbox_command(profile, &request.script_code, true, logger) {
-                    Ok(cmd) => cmd,
-                    Err(resp) => return resp,
-                };
-            apply_clean_environment(&mut command, request);
-            command.current_dir(&cwd);
-            command.env("PWD", &cwd);
-            self.execute_captured(command, request)
         } else {
             // CLI mode: hand off to the shared PTY bridge so the inner shell
             // sees a real TTY and the host can stream output as it arrives.
@@ -236,64 +218,6 @@ impl SeatbeltScriptRunner {
                 }
                 Err(error) => error_response(format!("Seatbelt: {error}")),
             }
-        }
-    }
-
-    /// No-pty captured execution path. Spawns the sandboxed `/bin/sh -c`
-    /// with piped stdout/stderr, drains both on background threads to avoid
-    /// pipe-buffer deadlock, and returns the captured output in the
-    /// [`ScriptResponse`]. Used when `request.capture_output` is set; the
-    /// interactive CLI path keeps the pty bridge.
-    fn execute_captured(&self, mut command: Command, request: &ExecutionRequest) -> ScriptResponse {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = match command.spawn() {
-            Ok(process) => process,
-            Err(error) => return error_response(spawn_error(&error)),
-        };
-
-        let stdout_handle = child
-            .stdout
-            .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
-        let stderr_handle = child
-            .stderr
-            .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
-
-        let timeout = if request.script_timeout == 0 {
-            None
-        } else {
-            Some(Duration::from_millis(u64::from(request.script_timeout)))
-        };
-
-        match wait_with_timeout(&mut child, timeout) {
-            Ok(status) => exit_response(
-                status.code().unwrap_or(-1),
-                join_reader(stdout_handle),
-                join_reader(stderr_handle),
-            ),
-            Err(WaitError::Timeout) => {
-                // Group-kill (the child is a session leader) so a surviving
-                // descendant can't hold the pipe open and block the drains.
-                let _ = group_kill_child(&mut child);
-                let _ = child.wait();
-                ScriptResponse {
-                    exit_code: -1,
-                    standard_out: join_reader(stdout_handle),
-                    standard_err: join_reader(stderr_handle),
-                    error_message: format!(
-                        "Seatbelt: script timed out after {}ms",
-                        request.script_timeout
-                    ),
-                    failure_phase: FailurePhase::Timeout,
-                    ..Default::default()
-                }
-            }
-            Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
         }
     }
 

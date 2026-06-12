@@ -254,9 +254,7 @@ fn main() {
             {
                 // Bubblewrap backend selection is shared with the `mxc`
                 // library and the other executor binaries via
-                // `mxc::select_runner`. The binary keeps capture disabled
-                // (`request.capture_output == false`), matching the previous
-                // behaviour.
+                // `mxc::select_runner`.
                 let mut selection = match mxc::select_runner(&request) {
                     Ok(selection) => selection,
                     Err(e) => {
