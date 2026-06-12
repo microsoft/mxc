@@ -2,6 +2,7 @@
 name = "wxc_winhttp_proxy_shim"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "winhttp-proxy-shim"
