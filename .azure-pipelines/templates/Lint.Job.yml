@@ -76,6 +76,11 @@ jobs:
         displayName: cargo fmt --check
         workingDirectory: $(workingDirectory)
 
-      - script: cargo clippy --target $(targetTriple) ${{ item.clippyArgs }} -- -D warnings
+      # Pre-fetch deps so clippy can run --offline.
+      - script: cargo fetch --locked --target $(targetTriple)
+        displayName: Fetch dependencies
+        workingDirectory: $(workingDirectory)
+
+      - script: cargo clippy --offline --target $(targetTriple) ${{ item.clippyArgs }} -- -D warnings
         displayName: cargo clippy
         workingDirectory: $(workingDirectory)
