@@ -446,9 +446,10 @@ fn main() {
         Ok(report) => {
             if report.files_processed > 0 || !report.errors.is_empty() {
                 eprintln!(
-                    "DACL recovery: {} file(s), {} ACE(s) restored, {} error(s)",
+                    "DACL recovery: {} file(s), {} ACE(s) restored, {} pruned (missing), {} error(s)",
                     report.files_processed,
                     report.aces_restored,
+                    report.aces_pruned_missing,
                     report.errors.len()
                 );
                 for e in &report.errors {
