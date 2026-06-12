@@ -4,6 +4,38 @@
 # Public rustup toolchain install (no 1ES tasks, no auth). Used by fork-PR
 # builds, the macOS build, and the Lint job. Single source of truth for the
 # public Rust version pin — keep in sync with src/rust-toolchain.toml.
+#
+# Supply-chain hardening (review finding E1):
+#
+# The previous version of this template fetched `rustup-init` from
+# `https://win.rustup.rs/x86_64` / `https://sh.rustup.rs`, which are
+# convenience redirectors that always return the latest rustup release. The
+# binary was then executed *without any integrity check* on every lint run
+# (and that lint run also rewires crates.io to an anonymous public mirror via
+# `.azure-pipelines/.cargo/config.public.toml`). A compromise of the redirect
+# or of the rustup origin would silently propagate into every trusted build.
+#
+# This version:
+#   1. Pins the rustup version explicitly (`rustupInitVersion`) and fetches
+#      from the immutable archive URL `static.rust-lang.org/rustup/archive/<ver>/<triple>/`.
+#      That URL is byte-stable for a given (version, triple) so the SHA-256
+#      check below is meaningful — an unpinned `latest` URL would defeat the
+#      check the first time rust-lang shipped a new release.
+#   2. Fetches the accompanying `.sha256` sidecar from the same origin and
+#      verifies the binary against it before executing. The sidecar is not
+#      cryptographically signed (defending against an origin compromise
+#      requires the upstream GPG release key), but matches what `rustup`
+#      itself does for self-update and catches in-flight corruption /
+#      truncation / TLS-MITM scenarios.
+#   3. Requires the verification step to succeed before invoking
+#      `rustup-init`; on mismatch the job fails loudly with both expected
+#      and actual hashes so an operator can audit before bumping.
+#
+# When upgrading `rustupInitVersion`: confirm the new version's
+# release notes / signed sources from https://github.com/rust-lang/rustup
+# before merging. The SHA-256 is fetched at job time from the same origin —
+# this is intentional (we follow rustup's own self-update model) but means
+# the protection is integrity-of-payload, not authenticity-of-origin.
 
 parameters:
 - name: targetTriple
@@ -11,19 +43,74 @@ parameters:
 - name: rustVersion
   type: string
   default: '1.93'
+- name: rustupInitVersion
+  type: string
+  default: '1.28.2'
 
 steps:
   - pwsh: |
       $ver = '${{ parameters.rustVersion }}'
       $triple = '${{ parameters.targetTriple }}'
+      $rustupVer = '${{ parameters.rustupInitVersion }}'
+
+      function Verify-Sha256 {
+        param([string]$Path, [string]$ExpectedHex)
+        $actual = (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLower()
+        $expected = $ExpectedHex.Trim().ToLower()
+        if ($actual -ne $expected) {
+          Write-Error "rustup-init SHA-256 mismatch for $Path. Expected $expected, got $actual. Refusing to execute the installer."
+          exit 1
+        }
+        Write-Host "rustup-init SHA-256 verified: $actual"
+      }
+
       if ($IsWindows) {
-        Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+        # Windows agents are always x64 (windows/arm64 builds also run on
+        # x64 agents and cross-compile via `--target $triple`), so the
+        # host triple for rustup-init is fixed. The TARGET toolchain is
+        # selected by the `--target $triple` flag below.
+        $base = "https://static.rust-lang.org/rustup/archive/$rustupVer/x86_64-pc-windows-msvc"
+        Invoke-WebRequest -Uri "$base/rustup-init.exe" -OutFile rustup-init.exe -UseBasicParsing
+        # Fetch the sidecar SHA-256 and verify. The sidecar's payload is
+        # `<hex>  rustup-init.exe\n`; we want only the hex prefix.
+        Invoke-WebRequest -Uri "$base/rustup-init.exe.sha256" -OutFile rustup-init.exe.sha256 -UseBasicParsing
+        $expected = ((Get-Content -Raw rustup-init.exe.sha256) -split '\s+', 2)[0]
+        Verify-Sha256 -Path rustup-init.exe -ExpectedHex $expected
+
         .\rustup-init.exe -y --default-toolchain $ver --target $triple --profile minimal --component clippy --component rustfmt --no-modify-path
         Write-Host "##vso[task.prependpath]$env:USERPROFILE\.cargo\bin"
       } else {
-        Invoke-WebRequest -Uri https://sh.rustup.rs -OutFile rustup-init.sh
-        chmod +x rustup-init.sh
-        ./rustup-init.sh -y --default-toolchain $ver --target $triple --profile minimal --component clippy --component rustfmt --no-modify-path
+        # On non-Windows the archive ships `rustup-init` (no extension).
+        # The downloaded binary must match the AGENT host architecture,
+        # NOT the build target — cross-compiles (e.g. linux/arm64 built
+        # on an x64 ubuntu agent, the only Linux pool flavour we use)
+        # would otherwise download an aarch64 `rustup-init` that cannot
+        # execute on the x64 host. Detect the host from `uname -m`; the
+        # target toolchain still installs via `--target $triple` below.
+        $hostArch = (& uname -m).Trim()
+        if ($IsMacOS) {
+          $hostTriple = switch ($hostArch) {
+            'arm64'  { 'aarch64-apple-darwin' }
+            'x86_64' { 'x86_64-apple-darwin' }
+            default  { throw "Unsupported macOS host arch '$hostArch' (expected arm64 or x86_64)" }
+          }
+        } else {
+          # Linux (the only other supported non-Windows agent OS).
+          $hostTriple = switch ($hostArch) {
+            'x86_64'  { 'x86_64-unknown-linux-gnu' }
+            'aarch64' { 'aarch64-unknown-linux-gnu' }
+            default   { throw "Unsupported Linux host arch '$hostArch' (expected x86_64 or aarch64)" }
+          }
+        }
+        Write-Host "rustup-init host triple: $hostTriple (uname -m=$hostArch); target triple: $triple"
+        $base = "https://static.rust-lang.org/rustup/archive/$rustupVer/$hostTriple"
+        Invoke-WebRequest -Uri "$base/rustup-init" -OutFile rustup-init -UseBasicParsing
+        Invoke-WebRequest -Uri "$base/rustup-init.sha256" -OutFile rustup-init.sha256 -UseBasicParsing
+        $expected = ((Get-Content -Raw rustup-init.sha256) -split '\s+', 2)[0]
+        Verify-Sha256 -Path rustup-init -ExpectedHex $expected
+
+        chmod +x rustup-init
+        ./rustup-init -y --default-toolchain $ver --target $triple --profile minimal --component clippy --component rustfmt --no-modify-path
         Write-Host "##vso[task.prependpath]$env:HOME/.cargo/bin"
       }
-    displayName: Install Rust toolchain (rustup)
+    displayName: Install Rust toolchain (verified rustup-init)
