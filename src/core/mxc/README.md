@@ -159,6 +159,6 @@ defaults to `false`, so the binaries' behaviour is unchanged.
 
 ## Relationship to the executor binaries
 
-Backend runner selection lives in [`dispatch::select_runner`] and is shared
-with the `wxc-exec`, `lxc-exec`, and `mxc-exec-mac` binaries, which delegate
-their backend arms here so the selection logic has a single home.
+Backend runner selection lives in [`select_runner`] and is shared with the
+`wxc-exec`, `lxc-exec`, and `mxc-exec-mac` binaries, which delegate their
+backend arms here so the selection logic has a single home.

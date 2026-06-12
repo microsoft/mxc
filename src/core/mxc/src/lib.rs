@@ -36,11 +36,12 @@
 //! rather than streamed to the host's stdio. No pty is allocated for any
 //! backend.
 
-pub mod dispatch;
-pub mod platform;
+mod dispatch;
+mod platform;
 pub mod policy;
 
-pub use dispatch::{select_runner, spawn_runner, Selection};
+use dispatch::spawn_runner;
+pub use dispatch::{select_runner, Selection};
 pub use platform::{platform_support, PlatformSupport};
 pub use policy::{
     available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
@@ -49,7 +50,7 @@ pub use policy::{
 
 // Re-export the wire/model types callers need so they don't have to depend
 // on `wxc_common` directly.
-pub use wxc_common::models::{ContainmentBackend, ExecutionRequest, FailurePhase, ScriptResponse};
+pub use wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
 pub use wxc_common::mxc_error::{MxcError, MxcErrorCode};
 pub use wxc_common::sandbox_process::SandboxProcess;
 
