@@ -15,12 +15,11 @@
 //!
 //! Only the backends the `mxc` library officially supports are handled here:
 //! ProcessContainer (Windows AppContainer / BaseContainer fallback),
-//! Bubblewrap (Linux), Seatbelt (macOS), and LXC (Linux, run-to-completion
-//! only — LXC has no streaming handle, so [`spawn_runner`] rejects it). Every
-//! other backend — including the experimental ones (Windows Sandbox,
-//! IsolationSession, MicroVM, Hyperlight, WSLC) — returns
-//! [`MxcError::unsupported_containment`]; callers that need those must drive
-//! the standalone executor binaries.
+//! Bubblewrap (Linux), and Seatbelt (macOS). Every other backend — including
+//! the experimental ones (Windows Sandbox, IsolationSession, MicroVM,
+//! Hyperlight, WSLC) and LXC (no captured/streaming path suitable for the
+//! library) — returns [`MxcError::unsupported_containment`]; callers that need
+//! those must drive the standalone executor binaries.
 
 use wxc_common::logger::Logger;
 use wxc_common::models::{ContainmentBackend, ExecutionRequest};
@@ -95,7 +94,6 @@ pub fn select_runner(
     match &request.containment {
         ContainmentBackend::Seatbelt => select_seatbelt(request),
         ContainmentBackend::Bubblewrap => select_bubblewrap(request),
-        ContainmentBackend::Lxc => select_lxc(request),
         ContainmentBackend::ProcessContainer => select_process_container(request, logger),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc library does not support the '{}' backend; use the wxc-exec / \
@@ -136,27 +134,6 @@ fn select_bubblewrap(_request: &ExecutionRequest) -> Result<Selection, MxcError>
 fn select_bubblewrap(_request: &ExecutionRequest) -> Result<Selection, MxcError> {
     Err(MxcError::unsupported_containment(
         "Bubblewrap is only available on Linux",
-    ))
-}
-
-// ---------------------------------------------------------------------------
-// Linux — LXC
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "linux")]
-fn select_lxc(request: &ExecutionRequest) -> Result<Selection, MxcError> {
-    use lxc_common::lxc_runner::LxcScriptRunner;
-    Ok(Selection::new(Box::new(LxcScriptRunner::new(
-        &request.lxc_config,
-        &request.container_id,
-        &request.lifecycle,
-    ))))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn select_lxc(_request: &ExecutionRequest) -> Result<Selection, MxcError> {
-    Err(MxcError::unsupported_containment(
-        "LXC is only available on Linux",
     ))
 }
 

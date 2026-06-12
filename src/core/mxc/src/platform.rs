@@ -84,22 +84,15 @@ pub fn platform_support() -> PlatformSupport {
 
     #[cfg(target_os = "linux")]
     {
-        let mut methods = Vec::new();
-        if command_succeeds("lxc-ls", &["--version"]) {
-            methods.push("lxc".to_string());
-        }
         if command_succeeds("bwrap", &["--version"]) {
-            methods.push("bubblewrap".to_string());
-        }
-        if methods.is_empty() {
             PlatformSupport {
-                reason: Some("Neither LXC nor Bubblewrap is available on this system".to_string()),
+                is_supported: true,
+                available_methods: vec!["bubblewrap".to_string()],
                 ..Default::default()
             }
         } else {
             PlatformSupport {
-                is_supported: true,
-                available_methods: methods,
+                reason: Some("Bubblewrap is not available on this system".to_string()),
                 ..Default::default()
             }
         }
@@ -126,7 +119,7 @@ pub fn platform_support() -> PlatformSupport {
 }
 
 /// Returns true when `program args...` exits successfully — used to probe for
-/// the presence of `lxc-ls` / `bwrap` on Linux.
+/// the presence of `bwrap` on Linux.
 #[cfg(target_os = "linux")]
 fn command_succeeds(program: &str, args: &[&str]) -> bool {
     use std::process::{Command, Stdio};

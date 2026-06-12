@@ -18,7 +18,6 @@ appcontainer_common = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bwrap_common = { workspace = true }
-lxc_common = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 seatbelt_common = { workspace = true }

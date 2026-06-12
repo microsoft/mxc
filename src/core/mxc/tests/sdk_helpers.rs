@@ -239,15 +239,12 @@ fn build_request_preserves_clipboard_policy() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn platform_support_linux_methods_are_lxc_or_bubblewrap() {
+fn platform_support_linux_methods_are_bubblewrap_only() {
     let support = platform_support();
-    // Whatever is detected, it must be a subset of the backends the library
-    // can actually dispatch on Linux.
+    // The crate dispatches only Bubblewrap on Linux (LXC has no captured /
+    // streaming path), so that is the only method it should ever report.
     for method in &support.available_methods {
-        assert!(
-            method == "lxc" || method == "bubblewrap",
-            "unexpected Linux method: {method}"
-        );
+        assert_eq!(method, "bubblewrap", "unexpected Linux method: {method}");
     }
 }
 
