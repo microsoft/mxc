@@ -30,7 +30,7 @@ isolation_session_bindings = { workspace = true, optional = true }
 mxc_build_common.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
-nanvix_common = { path = "../../backends/nanvix/common" }
+nanvix_build_common = { path = "../../backends/nanvix/build_common" }
 
 [features]
 default = []
