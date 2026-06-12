@@ -5,9 +5,12 @@
 //! the SandboxPolicy -> ExecutionRequest builder.
 
 use mxc::{
-    available_tools_policy, build_request, platform_support, spawn_sandbox_from_request,
-    temporary_files_policy, user_profile_policy, Containment, SandboxPolicy,
+    available_tools_policy, build_request, platform_support, temporary_files_policy,
+    user_profile_policy, Containment, SandboxPolicy,
 };
+
+#[cfg(target_os = "macos")]
+use mxc::spawn_sandbox_from_request;
 
 fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
@@ -232,6 +235,72 @@ fn build_request_preserves_clipboard_policy() {
             "clipboard {input:?} should map to {expected:?}"
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn platform_support_linux_methods_are_lxc_or_bubblewrap() {
+    let support = platform_support();
+    // Whatever is detected, it must be a subset of the backends the library
+    // can actually dispatch on Linux.
+    for method in &support.available_methods {
+        assert!(
+            method == "lxc" || method == "bubblewrap",
+            "unexpected Linux method: {method}"
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn platform_support_windows_is_processcontainer() {
+    let support = platform_support();
+    assert!(support.is_supported, "reason: {:?}", support.reason);
+    assert_eq!(
+        support.available_methods,
+        vec!["processcontainer".to_string()]
+    );
+}
+
+#[test]
+fn build_request_maps_network_hosts() {
+    let policy = SandboxPolicy {
+        version: "0.7.0-alpha".to_string(),
+        filesystem: None,
+        network: Some(mxc::policy::NetworkSection {
+            allow_outbound: true,
+            allow_local_network: true,
+            allowed_hosts: vec!["allowed.example".to_string()],
+            blocked_hosts: vec!["blocked.example".to_string()],
+            proxy: None,
+        }),
+        ui: None,
+        timeout_ms: None,
+    };
+
+    let request = build_request(&policy, Containment::Process, None)
+        .expect("build_request should accept host rules with allowOutbound");
+
+    assert!(
+        request
+            .policy
+            .allowed_hosts
+            .contains(&"allowed.example".to_string()),
+        "allowed hosts should map through: {:?}",
+        request.policy.allowed_hosts
+    );
+    assert!(
+        request
+            .policy
+            .blocked_hosts
+            .contains(&"blocked.example".to_string()),
+        "blocked hosts should map through: {:?}",
+        request.policy.blocked_hosts
+    );
+    assert!(
+        request.policy.allow_local_network,
+        "allow_local_network should map through"
+    );
 }
 
 #[test]

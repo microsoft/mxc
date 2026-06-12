@@ -6,6 +6,7 @@
 
 use mxc::{spawn_sandbox, MxcErrorCode, SpawnOptions};
 
+#[cfg(target_os = "macos")]
 const SEATBELT_PREFIX: &str = r#"{
     "version": "0.7.0-alpha",
     "containment": "seatbelt",
@@ -54,6 +55,90 @@ fn streaming_rejects_dry_run() {
         Err(e) => e,
     };
     assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_double_take_returns_none() {
+    let mut proc = spawn_sandbox(&seatbelt_config("cat"), &SpawnOptions::default()).expect("spawn");
+
+    assert!(
+        proc.take_stdin().is_some(),
+        "first take_stdin yields the pipe"
+    );
+    assert!(proc.take_stdin().is_none(), "second take_stdin yields None");
+    assert!(
+        proc.take_stdout().is_some(),
+        "first take_stdout yields the pipe"
+    );
+    assert!(
+        proc.take_stdout().is_none(),
+        "second take_stdout yields None"
+    );
+    assert!(
+        proc.take_stderr().is_some(),
+        "first take_stderr yields the pipe"
+    );
+    assert!(
+        proc.take_stderr().is_none(),
+        "second take_stderr yields None"
+    );
+
+    proc.kill().expect("kill");
+    let _ = proc.wait();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_try_wait_reports_exit_after_completion() {
+    let mut proc =
+        spawn_sandbox(&seatbelt_config("true"), &SpawnOptions::default()).expect("spawn");
+
+    // Poll try_wait until the quick command exits; it must then report Some.
+    let mut code = None;
+    for _ in 0..100 {
+        if let Some(c) = proc.try_wait().expect("try_wait") {
+            code = Some(c);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let code = code.expect("process should exit and try_wait report it");
+    assert_eq!(code, 0, "quick command should exit 0");
+}
+
+// ---------------------------------------------------------------------------
+// Windows ProcessContainer streaming — integration test. Requires an elevated,
+// host-prepped Windows host (see docs/host-prep.md), so it is `#[ignore]`d.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
+fn streaming_processcontainer_bidirectional_stdio() {
+    use std::io::{Read, Write};
+
+    // `cmd /c more` echoes stdin to stdout until EOF, then exits.
+    let config = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "processcontainer",
+        "process": { "commandLine": "cmd /c more", "timeout": 0 },
+        "filesystem": { "readwritePaths": ["C:\\Windows\\Temp"] }
+    }"#;
+    let mut proc = spawn_sandbox(config, &SpawnOptions::default()).expect("spawn");
+
+    let mut stdin = proc.take_stdin().expect("stdin available");
+    let mut stdout = proc.take_stdout().expect("stdout available");
+
+    stdin.write_all(b"ping-pong\r\n").expect("write stdin");
+    drop(stdin);
+
+    let mut out = String::new();
+    stdout.read_to_string(&mut out).expect("read stdout");
+    assert!(out.contains("ping-pong"), "got: {:?}", out);
+
+    let result = proc.wait();
+    assert_eq!(result.exit_code, 0);
 }
 
 #[cfg(target_os = "macos")]
