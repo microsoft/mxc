@@ -1251,7 +1251,7 @@ dependencies = [
  "lxc_common",
  "mxc_build_common",
  "nanvix_binaries",
- "nanvix_common",
+ "nanvix_build_common",
  "nanvix_runner",
  "wxc_common",
 ]
@@ -1409,6 +1409,14 @@ dependencies = [
 
 [[package]]
 name = "nanvix_binaries"
+version = "0.6.1"
+dependencies = [
+ "nanvix_build_common",
+ "nanvix_common",
+]
+
+[[package]]
+name = "nanvix_build_common"
 version = "0.6.1"
 dependencies = [
  "nanvix_common",
@@ -2853,7 +2861,7 @@ dependencies = [
  "isolation_session_common",
  "mxc_build_common",
  "nanvix_binaries",
- "nanvix_common",
+ "nanvix_build_common",
  "nanvix_runner",
  "serde_json",
  "windows",

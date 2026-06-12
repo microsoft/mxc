@@ -78,55 +78,10 @@ fn main() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
     // When `NANVIX_BIN` is set, use the caller-provided directory of
-    // pre-fetched binaries and skip all network downloads. This enables fully
-    // offline builds where every dynamic build input has been pre-fetched.
-    // Otherwise, download into a subdirectory of OUT_DIR as before.
-    let offline_bin_dir = std::env::var_os("NANVIX_BIN")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from);
-    let use_prefetched_binaries = offline_bin_dir.is_some();
-    let bin_dir = match offline_bin_dir {
-        Some(dir) => {
-            if !dir.is_dir() {
-                panic!(
-                    "nanvix_binaries: NANVIX_BIN is set to '{}', but that directory \
-                     does not exist. Point NANVIX_BIN at a directory containing the \
-                     pre-fetched NanVix binaries.",
-                    dir.display()
-                );
-            }
-            // Make the path absolute (without resolving symlinks) so the
-            // value emitted as `cargo:BIN_DIR` and tracked via
-            // `cargo:rerun-if-changed` is stable regardless of the build
-            // script's working directory. The `wxc`/`lxc` build scripts run
-            // with a different cwd, so a relative `NANVIX_BIN` would otherwise
-            // resolve against the wrong directory and silently copy nothing.
-            //
-            // `std::path::absolute` (not `fs::canonicalize`) is deliberate: it
-            // does not resolve symlinks, so a common offline-cache workflow of
-            // atomically swapping a symlink (`ln -sfn cache-v2 cache`) keeps the
-            // tracked paths pointing at the symlink — letting Cargo notice the
-            // swap — instead of pinning the resolved real directory.
-            let dir = std::path::absolute(&dir).unwrap_or_else(|e| {
-                panic!(
-                    "nanvix_binaries: failed to resolve NANVIX_BIN '{}' to an \
-                     absolute path: {}",
-                    dir.display(),
-                    e
-                )
-            });
-            eprintln!(
-                "nanvix_binaries: NANVIX_BIN set — using pre-fetched binaries from '{}' (offline)",
-                dir.display()
-            );
-            dir
-        }
-        None => {
-            let dir = out_dir.join("nanvix-binaries");
-            fs::create_dir_all(&dir).expect("failed to create nanvix-binaries dir");
-            dir
-        }
-    };
+    // pre-fetched binaries and skip all network downloads (offline builds);
+    // otherwise download into a subdirectory of OUT_DIR as before. The
+    // resolution lives in the build-only `nanvix_build_common` crate.
+    let (bin_dir, use_prefetched_binaries) = nanvix_build_common::resolve_bin_dir(&out_dir);
 
     let versions: ReleaseConfig = load_json("versions.json");
     let checksums: HashMap<String, String> = load_checksums("checksums.json", &target);
@@ -166,7 +121,7 @@ fn main() {
         verify_bin_subdir_checksums_linux(&bin_dir, &checksums);
 
         if use_prefetched_binaries {
-            nanvix_common::emit_rerun_for_copied_artifacts(&bin_dir);
+            nanvix_build_common::emit_rerun_for_copied_artifacts(&bin_dir);
         }
     } else {
         // Windows: original logic
@@ -199,7 +154,7 @@ fn main() {
         verify_bin_subdir_checksums(&bin_dir, &checksums);
 
         if use_prefetched_binaries {
-            nanvix_common::emit_rerun_for_copied_artifacts(&bin_dir);
+            nanvix_build_common::emit_rerun_for_copied_artifacts(&bin_dir);
         }
 
         // Generate host-local WHP snapshots at build time so even the first

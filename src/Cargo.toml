@@ -15,6 +15,7 @@ members = [
     "backends/isolation_session/common",
     "backends/hyperlight/common",
     "backends/nanvix/common",
+    "backends/nanvix/build_common",
     "backends/nanvix/binaries",
     "backends/nanvix/runner",
     "backends/lxc/common",

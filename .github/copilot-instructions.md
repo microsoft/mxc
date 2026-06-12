@@ -184,7 +184,7 @@ The workspace is organized into five top-level directories under `src/`:
 | Directory | Purpose | Examples |
 |-----------|---------|----------|
 | `core/` | Cross-platform foundation + per-platform aggregator binaries | `wxc_common/`, `wxc/`, `lxc/`, `mxc_darwin/`, `mxc_pty/`, `mxc_build_common/`, `generated/` |
-| `backends/` | Backend-specific code (one subfolder per containment backend) | `appcontainer/common`, `windows_sandbox/{daemon,guest,common}`, `isolation_session/{bindings,common}`, `hyperlight/common`, `nanvix/{common,binaries,runner}`, `lxc/common`, `bubblewrap/common`, `wslc/common`, `seatbelt/common` |
+| `backends/` | Backend-specific code (one subfolder per containment backend) | `appcontainer/common`, `windows_sandbox/{daemon,guest,common}`, `isolation_session/{bindings,common}`, `hyperlight/common`, `nanvix/{common,build_common,binaries,runner}`, `lxc/common`, `bubblewrap/common`, `wslc/common`, `seatbelt/common` |
 | `host/` | Host-side utilities | `wxc_host_prep/`, `wxc_winhttp_proxy_shim/` |
 | `testing/` | Test infrastructure crates | `wxc_e2e_tests/`, `wxc_test_driver/`, `wxc_test_proxy/`, `linux_test_proxy/`, `wxc_ui_probe/`, `fuzz/` |
 | `tools/` | Developer/diagnostic tools | `mxc_diagnostic_console/` |
@@ -194,6 +194,7 @@ The workspace is organized into five top-level directories under `src/`:
 - `wxc` and `lxc` are thin binary crates that wire up CLI args (`clap`) and dispatch to `wxc_common` and the per-backend crates
 - `mxc_pty` is the shared pty bridge used by the unix-side backends (`lxc_common::lxc_bindings::attach_run` on Linux and `seatbelt_common::seatbelt_runner` on macOS) so the inner shell sees a real TTY and host stdio is streamed live
 - `mxc_build_common` is a build-time helper crate — all Windows binary crates use it in their `build.rs` to embed VersionInfo (ProductName, FileDescription, copyright, version+commit). When adding a new Windows binary crate, add `mxc_build_common` as a build-dependency and call `mxc_build_common::embed_version_info()` from `build.rs`
+- `nanvix_build_common` is a **build-only** helper crate (never linked into the runtime): it stages NanVix binaries next to the executable and resolves the `NANVIX_BIN` prefetch directory. The `nanvix_binaries`, `wxc`, and `lxc` build scripts consume it as a `[build-dependencies]` entry. Runtime constants it needs (binary/snapshot filenames) stay in `nanvix_common`. Keep build-only file-staging logic here, not in `nanvix_common` (which is a runtime dependency of `nanvix_runner`).
 - Platform-specific modules use `#[cfg(target_os = "windows")]` / `#[cfg(target_os = "linux")]`
 - Workspace edition is 2021; shared dependencies are declared in the root `Cargo.toml` `[workspace.dependencies]`
 
