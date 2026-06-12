@@ -202,3 +202,34 @@ fn build_request_then_run_seatbelt() {
         result.standard_out
     );
 }
+
+#[test]
+fn build_request_preserves_clipboard_policy() {
+    use mxc::policy::ClipboardPolicy as P;
+    use wxc_common::models::ClipboardPolicy as Wire;
+
+    for (input, expected) in [
+        (P::None, Wire::None),
+        (P::Read, Wire::Read),
+        (P::Write, Wire::Write),
+        (P::All, Wire::All),
+    ] {
+        let policy = SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: Some(mxc::policy::UiSection {
+                allow_windows: true,
+                clipboard: input,
+                allow_input_injection: false,
+            }),
+            timeout_ms: None,
+        };
+        let request = build_request(&policy, Containment::Process, None)
+            .expect("build_request should succeed");
+        assert_eq!(
+            request.policy.ui.clipboard, expected,
+            "clipboard {input:?} should map to {expected:?}"
+        );
+    }
+}

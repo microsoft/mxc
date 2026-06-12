@@ -317,7 +317,8 @@ pub fn temporary_files_policy(env: Option<&[(String, String)]>) -> FilesystemPol
 // SandboxPolicy -> ExecutionRequest
 // ---------------------------------------------------------------------------
 
-/// Clipboard access level, mirroring the SDK `ClipboardPolicy`.
+/// Clipboard access level, mirroring the SDK `ClipboardPolicy`
+/// (`"none" | "read" | "write" | "all"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum ClipboardPolicy {
@@ -325,17 +326,21 @@ pub enum ClipboardPolicy {
     #[default]
     None,
     /// Read-only clipboard access.
-    ReadOnly,
-    /// Read-write clipboard access.
-    ReadWrite,
+    Read,
+    /// Write-only clipboard access.
+    Write,
+    /// Read and write clipboard access.
+    All,
 }
 
 impl ClipboardPolicy {
+    /// Wire-format value accepted by the config parser.
     fn wire(self) -> &'static str {
         match self {
             ClipboardPolicy::None => "none",
-            ClipboardPolicy::ReadOnly => "readOnly",
-            ClipboardPolicy::ReadWrite => "readWrite",
+            ClipboardPolicy::Read => "read",
+            ClipboardPolicy::Write => "write",
+            ClipboardPolicy::All => "all",
         }
     }
 }
