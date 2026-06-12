@@ -164,11 +164,21 @@ fn deduplicate_paths(paths: &[String]) -> Vec<String> {
 fn is_system_critical_path(dir: &str) -> bool {
     let normalized = resolve_path(dir);
     if is_windows() {
+        // A set-but-empty `WINDIR` must not disable the filter: treat empty as
+        // unset and fall back (mirrors `powershell_policy`'s `SystemDrive`).
         let win_dir = std::env::var("WINDIR")
-            .or_else(|_| std::env::var("windir"))
-            .unwrap_or_else(|_| "C:\\Windows".to_string())
+            .ok()
+            .or_else(|| std::env::var("windir").ok())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "C:\\Windows".to_string())
             .to_lowercase();
+        // Strip a verbatim (`\\?\`, `\\?\UNC\`) prefix so a path supplied in
+        // that form still matches the plain `C:\Windows` comparison.
         let n = normalized.to_lowercase();
+        let n = n
+            .strip_prefix(r"\\?\unc\")
+            .or_else(|| n.strip_prefix(r"\\?\"))
+            .unwrap_or(&n);
         return n == win_dir || n.starts_with(&format!("{win_dir}\\"));
     }
     const CRITICAL: &[&str] = &[
