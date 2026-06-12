@@ -1,13 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# Win25H2Safe-Tests.ps1
+# WinProcessContainer-Tests.ps1  (formerly Win25H2Safe-Tests.ps1)
 #
-# Exercises the process-container (AppContainer / BaseContainer) stack without
-# ever invoking bfscfg.exe (which hard-locks the bfs.sys minifilter on 25H2).
-# Despite the name, the harness is capability-driven and runs on any Windows
-# host: it derives the EXPECTED containment tier from the runtime --probe
-# signals rather than hardcoding it (see Get-HostCapabilities).
+# Exercises the Windows process-container (AppContainer / BaseContainer) stack
+# without ever invoking bfscfg.exe (which hard-locks the bfs.sys minifilter on
+# 25H2). The harness is capability-driven and runs on any Windows host: it
+# derives the EXPECTED containment tier from the runtime --probe signals rather
+# than hardcoding it (see Get-HostCapabilities).
 #
 # Safety model (`tier2_bfs` Cargo feature OFF, the default):
 #   * Test-Preflight refuses to run if either wxc-exec binary reports
@@ -43,15 +43,15 @@ param(
     [string]$WxcRelease     = (Join-Path $RepoRoot 'src\target\release\wxc-exec.exe'),
     [string]$UiProbeDebug   = (Join-Path $RepoRoot 'src\target\debug\wxc-ui-probe.exe'),
     [string]$UiProbeRelease = (Join-Path $RepoRoot 'src\target\release\wxc-ui-probe.exe'),
-    [string]$ScratchRoot    = (Join-Path $env:TEMP 'mxc-25h2-tests'),
+    [string]$ScratchRoot    = (Join-Path $env:TEMP 'mxc-wpc-tests'),
     # Default results/log files live in $env:TEMP but OUTSIDE $ScratchRoot
     # so `Initialize-Scratch`'s recursive nuke can't conflict with the
     # `Start-Transcript` file handle (the script starts the transcript
     # BEFORE wiping the scratch tree). The previous default landed them
     # under $ScratchRoot and tripped a "file in use" abort on every run.
-    [string]$ResultsFile    = (Join-Path $env:TEMP 'Win25H2Safe-Tests.results.txt'),
-    [string]$ResultsJson    = (Join-Path $env:TEMP 'Win25H2Safe-Tests.results.json'),
-    [string]$CargoLog       = (Join-Path $env:TEMP 'Win25H2Safe-Tests.cargo.log'),
+    [string]$ResultsFile    = (Join-Path $env:TEMP 'WinProcessContainer-Tests.results.txt'),
+    [string]$ResultsJson    = (Join-Path $env:TEMP 'WinProcessContainer-Tests.results.json'),
+    [string]$CargoLog       = (Join-Path $env:TEMP 'WinProcessContainer-Tests.cargo.log'),
     [switch]$SkipBuild,
     [switch]$SkipReleaseLane,
     [switch]$KeepArtifacts,
@@ -469,7 +469,7 @@ function New-Config {
     )
     $obj = [ordered]@{
         version     = '0.5.0-dev'
-        containerId = "MxcWin25H2-$Name"
+        containerId = "MxcWinPC-$Name"
         containment = 'appcontainer'
         process     = [ordered]@{
             commandLine = $CommandLine
@@ -1140,8 +1140,8 @@ function Invoke-GlobalAtomProbe {
     New-Item -ItemType Directory -Path $rw -Force | Out-Null
 
     $suffix      = [guid]::NewGuid().ToString('N')
-    $hostName    = "MxcWin25H2HostAtom_$suffix"
-    $guestName   = "MxcWin25H2GuestAtom_$suffix"
+    $hostName    = "MxcWinPCHostAtom_$suffix"
+    $guestName   = "MxcWinPCGuestAtom_$suffix"
     $readyFile   = Join-Path $rw "globalatom-ready-$suffix"
     $releaseFile = Join-Path $rw "globalatom-release-$suffix"
     Remove-Item -LiteralPath $readyFile, $releaseFile -ErrorAction SilentlyContinue
@@ -1402,7 +1402,7 @@ function Invoke-CargoTest {
 function Phase-UnitTests {
     Section 'Phase 7: cargo test'
     # Truncate the cargo log at the start of each run.
-    Set-Content -LiteralPath $CargoLog -Value "Win25H2Safe-Tests cargo log — $(Get-Date -Format 'o')`n" -Encoding utf8
+    Set-Content -LiteralPath $CargoLog -Value "WinProcessContainer-Tests cargo log — $(Get-Date -Format 'o')`n" -Encoding utf8
     Push-Location $CargoRoot
     try {
         $exit1 = Invoke-CargoTest -Arguments @('test', '-p', 'wxc_common', '--lib') -Label 'wxc_common --lib'

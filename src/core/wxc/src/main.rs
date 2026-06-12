@@ -440,7 +440,7 @@ fn main() {
     // Best-effort: reap any orphaned DACL state files left behind by
     // crashed prior MXC runs. Runs BEFORE the `--probe` arm because
     // `wxc-exec --probe` is the canonical recovery trigger consumers
-    // (Win25H2Safe-Tests Phase 6, SDK warm-start) rely on. Errors here
+    // (WinProcessContainer-Tests Phase 6, SDK warm-start) rely on. Errors here
     // are non-fatal and only surface via stderr. On a healthy host
     // with zero state files this is sub-millisecond.
     match wxc_common::filesystem_dacl::recover_orphaned_state() {
