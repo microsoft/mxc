@@ -126,6 +126,13 @@ Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**, and
 **Windows ProcessContainer (AppContainer + BaseContainer)** — i.e. every
 backend the library supports.
 
+> **Windows note:** unlike the run-to-completion path, streaming does not use
+> the AppContainer-BFS / AppContainer-DACL fallback. Experimental / newer-schema
+> configs that select BaseContainer require the native BaseContainer API; on a
+> host without it, `spawn_sandbox` fails closed with a clear error rather than
+> falling back to an AppContainer tier (which `spawn_sandbox_from_config` would
+> do).
+
 ## Supported backends
 
 The backend is chosen by the `containment` field in the config (or the host

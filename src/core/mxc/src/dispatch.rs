@@ -279,9 +279,23 @@ fn spawn_process_container(
     use wxc_common::config_parser::is_base_container_version;
     use wxc_common::sandbox_process::StreamingRunner;
 
-    // Mirror the run-to-completion selection: BaseContainer (the OS sandbox
-    // API) is used when experimental is enabled or the schema implies it;
-    // otherwise the AppContainer fast path. Both support streaming.
+    // Backend choice matches the run-to-completion path's first split — the
+    // AppContainer fast path vs the native BaseContainer (OS sandbox API) —
+    // but, unlike `select_runner` (run-to-completion), it does NOT route
+    // through `dispatch_with_fallback`: there is no AppContainer-BFS /
+    // AppContainer-DACL fallback for streaming.
+    //
+    // Why: `dispatch_with_fallback` yields a run-to-completion
+    // `Box<dyn ScriptRunner>` plus a `DaclManager` guard, neither of which
+    // fits the streaming handle (the DACL tier would require the returned
+    // `SandboxProcess` to own the guard so ACE restore outlives the child).
+    //
+    // Consequence (intentional, fail-closed): an experimental / newer-schema
+    // config on a host that lacks the native BaseContainer API fails here with
+    // a clear "BaseContainer API unavailable" error from
+    // `BaseContainerRunner`'s validation, whereas `spawn_sandbox_from_config`
+    // (run-to-completion) would fall back to an AppContainer tier. Streaming
+    // therefore requires the native BaseContainer API for those configs.
     let version_implies_base_container = is_base_container_version(&request.schema_version);
     if request.experimental_enabled || version_implies_base_container {
         let mut runner = appcontainer_common::base_container_runner::BaseContainerRunner::new();
