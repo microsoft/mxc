@@ -53,7 +53,7 @@ jobs:
           enableTargetCache: true
         setupOptions:
           setupPython: true
-          pythonArtifactFeeds: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/pypi/simple/
+          pythonArtifactFeeds: Dart/Mxc-Azure-Feed
 
   steps:
     - checkout: self
