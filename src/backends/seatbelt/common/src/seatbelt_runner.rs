@@ -199,6 +199,19 @@ impl SeatbeltScriptRunner {
             // Library / no-pty mode: capture stdout/stderr into the response
             // instead of streaming through a pty. Mirrors the bubblewrap
             // runner's piped-capture model. Used by the `mxc` library crate.
+            //
+            // Rebuild as a session leader so a timeout can group-kill the whole
+            // tree: otherwise a surviving descendant holding the stdout/stderr
+            // pipe write-end would keep the capture drain from ever seeing EOF,
+            // hanging the call despite the timeout.
+            let mut command =
+                match build_sandbox_command(profile, &request.script_code, true, logger) {
+                    Ok(cmd) => cmd,
+                    Err(resp) => return resp,
+                };
+            apply_clean_environment(&mut command, request);
+            command.current_dir(&cwd);
+            command.env("PWD", &cwd);
             self.execute_captured(command, request)
         } else {
             // CLI mode: hand off to the shared PTY bridge so the inner shell
@@ -269,7 +282,9 @@ impl SeatbeltScriptRunner {
                 join_reader(stderr_handle),
             ),
             Err(WaitError::Timeout) => {
-                let _ = child.kill();
+                // Group-kill (the child is a session leader) so a surviving
+                // descendant can't hold the pipe open and block the drains.
+                let _ = group_kill_child(&mut child);
                 let _ = child.wait();
                 ScriptResponse {
                     exit_code: -1,
@@ -494,6 +509,36 @@ impl StreamingRunner for SeatbeltScriptRunner {
 /// Grace period between `SIGTERM` and `SIGKILL` in [`SandboxProcess::kill`].
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
+/// Process-tree kill for a child spawned as a session leader (`setsid()`, so
+/// its pgid equals its pid): graceful `SIGTERM` to the whole process group,
+/// escalating to `SIGKILL` after [`KILL_GRACE`]. Signalling the negative pid
+/// targets only that group — never the host's — and is a no-op if the child
+/// has already exited. Shared by the streaming handle's `kill()` and the
+/// no-pty capture path's timeout branch.
+fn group_kill_child(child: &mut std::process::Child) -> std::io::Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    let pgid = child.id() as libc::pid_t;
+    unsafe {
+        libc::kill(-pgid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + KILL_GRACE;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+    Ok(())
+}
+
 /// A running Seatbelt-sandboxed process (exec mode), exposing its pipes,
 /// kill, and wait. See [`SandboxProcess`] for the streaming contract.
 struct SeatbeltSandboxProcess {
@@ -535,34 +580,7 @@ impl SandboxProcess for SeatbeltSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
-        // Already exited? Nothing to do.
-        if self.child.try_wait()?.is_some() {
-            return Ok(());
-        }
-        // The child was spawned with `setsid()`, so it leads its own process
-        // group whose id equals its pid. Signal the whole group (negative pid)
-        // to take descendants (pipelines, `&`, servers) down with it. Using a
-        // negative pid is safe even if `setsid` failed: it only targets the
-        // group led by this pid, never the host's group.
-        let pgid = self.child.id() as libc::pid_t;
-        // Graceful SIGTERM to the group, then escalate to SIGKILL after a grace.
-        unsafe {
-            libc::kill(-pgid, libc::SIGTERM);
-        }
-        let deadline = Instant::now() + KILL_GRACE;
-        loop {
-            if self.child.try_wait()?.is_some() {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        unsafe {
-            libc::kill(-pgid, libc::SIGKILL);
-        }
-        Ok(())
+        group_kill_child(&mut self.child)
     }
 
     fn wait(&mut self) -> ScriptResponse {
