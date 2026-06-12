@@ -237,7 +237,12 @@ impl SeatbeltScriptRunner {
                         request.script_timeout
                     );
                     let _ = writeln!(logger, "{msg}");
-                    error_response(msg)
+                    ScriptResponse {
+                        exit_code: -1,
+                        error_message: msg,
+                        failure_phase: FailurePhase::Timeout,
+                        ..Default::default()
+                    }
                 }
                 Err(error) => error_response(format!("Seatbelt: {error}")),
             }
