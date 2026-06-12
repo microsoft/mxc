@@ -1,0 +1,960 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MxcConfig",
+  "description": "MXC sandbox execution configuration (one-shot request).",
+  "type": "object",
+  "properties": {
+    "containerId": {
+      "description": "Externally assigned container identifier.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "containment": {
+      "description": "Containment backend to use for execution. Accepts abstract intents (`process`, `vm`) and concrete backends; the binary resolves intents to a concrete backend per host at run time.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Containment"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "experimental": {
+      "description": "Experimental features. Only honored when `--experimental` is passed.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Experimental"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "fallback": {
+      "description": "AppContainer DACL-mutation fallback policy (Windows).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Fallback"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "filesystem": {
+      "description": "Filesystem access policy. Shared across all backends.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Filesystem"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lifecycle": {
+      "description": "Container lifecycle settings.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Lifecycle"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lxc": {
+      "description": "LXC container settings (Linux). Used when containment is `lxc`.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Lxc"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "network": {
+      "description": "Network access policy. Shared across all backends.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Network"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "process": {
+      "description": "Process to execute and its environment.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Process"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "processContainer": {
+      "description": "ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ProcessContainer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "seatbelt": {
+      "description": "macOS Seatbelt backend configuration. Used when containment is `seatbelt`.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Seatbelt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ui": {
+      "description": "Cross-platform UI isolation policy.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Ui"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "version": {
+      "description": "MXC config schema version (semver), e.g. `\"0.8.0-alpha\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "BaseProcessUi": {
+      "description": "BaseProcessContainer UI isolation settings.",
+      "type": "object",
+      "properties": {
+        "desktopSystemControl": {
+          "description": "Whether desktop system control is allowed.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ime": {
+          "description": "Whether the IME (Input Method Editor) is allowed.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "isolation": {
+          "description": "UI isolation level.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UiIsolation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "systemSettings": {
+          "description": "System settings access level.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ClipboardPolicy": {
+      "description": "Clipboard access level.",
+      "type": "string",
+      "enum": [
+        "none",
+        "read",
+        "write",
+        "all"
+      ]
+    },
+    "Containment": {
+      "description": "Containment backend (abstract intent or concrete backend).",
+      "oneOf": [
+        {
+          "description": "OS-native process sandbox (resolved per host).",
+          "type": "string",
+          "enum": [
+            "process"
+          ]
+        },
+        {
+          "description": "Windows AppContainer / BaseContainer.",
+          "type": "string",
+          "enum": [
+            "processcontainer"
+          ]
+        },
+        {
+          "description": "VM-class isolation (resolved per host).",
+          "type": "string",
+          "enum": [
+            "vm"
+          ]
+        },
+        {
+          "description": "Windows Sandbox (experimental).",
+          "type": "string",
+          "enum": [
+            "windows_sandbox"
+          ]
+        },
+        {
+          "description": "Full Linux container.",
+          "type": "string",
+          "enum": [
+            "lxc"
+          ]
+        },
+        {
+          "description": "NanVix micro-VM (experimental).",
+          "type": "string",
+          "enum": [
+            "microvm"
+          ]
+        },
+        {
+          "description": "Hyperlight micro-VM (experimental).",
+          "type": "string",
+          "enum": [
+            "hyperlight"
+          ]
+        },
+        {
+          "description": "WSL container (experimental).",
+          "type": "string",
+          "enum": [
+            "wslc"
+          ]
+        },
+        {
+          "description": "macOS Seatbelt.",
+          "type": "string",
+          "enum": [
+            "seatbelt"
+          ]
+        },
+        {
+          "description": "Windows IsolationSession (experimental).",
+          "type": "string",
+          "enum": [
+            "isolation_session"
+          ]
+        },
+        {
+          "description": "Unprivileged Linux bubblewrap sandbox.",
+          "type": "string",
+          "enum": [
+            "bubblewrap"
+          ]
+        }
+      ]
+    },
+    "Experimental": {
+      "description": "Experimental features (only honored with `--experimental`).",
+      "type": "object",
+      "properties": {
+        "isolationSession": {
+          "description": "IsolationSession backend config (Windows).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IsolationSession"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seatbelt": {
+          "description": "Seatbelt backend config (pre-promotion alias).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Seatbelt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "test": {
+          "description": "Placeholder feature for testing experimental infrastructure.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TestFeature"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "windowsSandbox": {
+          "description": "Windows Sandbox backend config.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WindowsSandbox"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wslc": {
+          "description": "WSL container backend config.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Wslc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Fallback": {
+      "description": "AppContainer DACL-mutation fallback policy.",
+      "type": "object",
+      "properties": {
+        "allowDaclMutation": {
+          "description": "Allow the runner to mutate DACLs as a fallback.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Filesystem": {
+      "description": "Filesystem access policy.",
+      "type": "object",
+      "properties": {
+        "deniedPaths": {
+          "description": "Paths explicitly denied (override broader allow rules).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "readonlyPaths": {
+          "description": "Paths the process can read but not write.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "readwritePaths": {
+          "description": "Paths the process can read and write.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "IsolationConfigurationId": {
+      "description": "IsolationSession sizing profile.",
+      "type": "string",
+      "enum": [
+        "small",
+        "medium",
+        "large",
+        "composable"
+      ]
+    },
+    "IsolationSession": {
+      "description": "IsolationSession backend config.",
+      "type": "object",
+      "properties": {
+        "configurationId": {
+          "description": "Sizing profile.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IsolationConfigurationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "user": {
+          "description": "Optional Entra cloud-agent user bundle.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IsolationUser"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "IsolationUser": {
+      "description": "Entra cloud-agent user bundle.",
+      "type": "object",
+      "required": [
+        "upn",
+        "wamToken"
+      ],
+      "properties": {
+        "upn": {
+          "description": "User principal name.",
+          "type": "string"
+        },
+        "wamToken": {
+          "description": "Short-lived WAM bearer token (passed verbatim to the OS service).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LaunchMethod": {
+      "description": "Seatbelt inner-process launch method.",
+      "oneOf": [
+        {
+          "description": "Direct fork → sandbox_init() → exec.",
+          "type": "string",
+          "enum": [
+            "direct"
+          ]
+        },
+        {
+          "description": "Re-exec via sandbox-exec.",
+          "type": "string",
+          "enum": [
+            "sandboxexec"
+          ]
+        }
+      ]
+    },
+    "Lifecycle": {
+      "description": "Container lifecycle settings.",
+      "type": "object",
+      "properties": {
+        "destroyOnExit": {
+          "description": "Destroy the container when the process exits (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "preservePolicy": {
+          "description": "Preserve the applied policy after exit (default false).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Lxc": {
+      "description": "LXC container settings.",
+      "type": "object",
+      "properties": {
+        "distribution": {
+          "description": "Distribution image (e.g. `alpine`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "release": {
+          "description": "Distribution release (e.g. `3.23`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Network": {
+      "description": "Network access policy.",
+      "type": "object",
+      "properties": {
+        "allowLocalNetwork": {
+          "description": "Allow binding/listening on local IPs and accepting inbound connections.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowedHosts": {
+          "description": "Hosts explicitly allowed.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "blockedHosts": {
+          "description": "Hosts explicitly blocked.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "defaultPolicy": {
+          "description": "Default outbound policy when no host rule matches.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enforcementMode": {
+          "description": "How the policy is enforced.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkEnforcement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proxy": {
+          "description": "Proxy configuration (one of localhost / builtinTestServer / url).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Proxy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "NetworkEnforcement": {
+      "description": "Network enforcement mechanism.",
+      "type": "string",
+      "enum": [
+        "proxy",
+        "firewall"
+      ]
+    },
+    "NetworkPolicy": {
+      "description": "Default network policy.",
+      "type": "string",
+      "enum": [
+        "allow",
+        "block"
+      ]
+    },
+    "PortMapping": {
+      "description": "A single host → container port forward.",
+      "type": "object",
+      "required": [
+        "containerPort",
+        "windowsPort"
+      ],
+      "properties": {
+        "containerPort": {
+          "description": "Container port.",
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "protocol": {
+          "description": "Protocol (`tcp` or `udp`; default `tcp`).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TransportProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "windowsPort": {
+          "description": "Host (Windows) port.",
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Process": {
+      "description": "Process execution settings.",
+      "type": "object",
+      "properties": {
+        "commandLine": {
+          "description": "Command line (or script) to execute.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cwd": {
+          "description": "Working directory for the process.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "description": "Environment variables as `\"KEY=VALUE\"` strings.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "description": "Wall-clock timeout in milliseconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProcessContainer": {
+      "description": "ProcessContainer-specific settings.",
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "description": "AppContainer capabilities (e.g. `internetClient`, `registryRead`).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "learningMode": {
+          "description": "AppContainer permissive learning mode.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "leastPrivilege": {
+          "description": "Enforce least-privilege mode.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ui": {
+          "description": "BaseProcessContainer UI settings (Windows).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BaseProcessUi"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Proxy": {
+      "description": "Proxy configuration. Exactly one variant applies.",
+      "type": "object",
+      "properties": {
+        "builtinTestServer": {
+          "description": "Have wxc launch its own built-in test proxy.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "localhost": {
+          "description": "External localhost proxy port.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "url": {
+          "description": "Proxy URL (parsed into host:port).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Seatbelt": {
+      "description": "macOS Seatbelt backend configuration.",
+      "type": "object",
+      "properties": {
+        "extraMachLookups": {
+          "description": "Additional Mach service global-names the inner process may resolve.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "guiAccess": {
+          "description": "Allow GUI (WindowServer) access.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "keychainAccess": {
+          "description": "Allow Keychain access.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "launchMethod": {
+          "description": "Inner process launch method.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LaunchMethod"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nestedPty": {
+          "description": "Attach the inner process to a nested pty (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "profileOverride": {
+          "description": "Replace the generated profile entirely (advanced/testing escape hatch).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "TestFeature": {
+      "description": "Placeholder experimental feature.",
+      "type": "object",
+      "properties": {
+        "message": {
+          "description": "Message to log when the feature is applied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "TransportProtocol": {
+      "description": "Port-forward transport protocol.",
+      "type": "string",
+      "enum": [
+        "tcp",
+        "udp"
+      ]
+    },
+    "Ui": {
+      "description": "Cross-platform UI isolation policy.",
+      "type": "object",
+      "properties": {
+        "clipboard": {
+          "description": "Clipboard access level.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ClipboardPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "disable": {
+          "description": "Disable all UI access (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "injection": {
+          "description": "Allow UI injection.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "UiIsolation": {
+      "description": "Desktop UI isolation level.",
+      "type": "string",
+      "enum": [
+        "desktop",
+        "handles",
+        "atoms",
+        "container"
+      ]
+    },
+    "WindowsSandbox": {
+      "description": "Windows Sandbox backend config.",
+      "type": "object",
+      "properties": {
+        "daemonPipeName": {
+          "description": "Daemon named-pipe override.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idleTimeout": {
+          "description": "Idle timeout (legacy seconds field).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "idleTimeoutMs": {
+          "description": "Idle timeout before teardown (ms).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Wslc": {
+      "description": "WSL container backend config.",
+      "type": "object",
+      "properties": {
+        "cpuCount": {
+          "description": "vCPU count.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "gpu": {
+          "description": "Enable GPU passthrough.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "image": {
+          "description": "Container image reference.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "imageTarPath": {
+          "description": "Path to a local image tarball.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memoryMb": {
+          "description": "Memory limit (MB).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "portMappings": {
+          "description": "Host → container port forwards.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          }
+        },
+        "storagePath": {
+          "description": "Storage path override.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "targetOs": {
+          "description": "OS inside the WSL container.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

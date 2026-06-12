@@ -21,6 +21,12 @@ pub mod state_aware_request;
 pub mod ui_policy;
 pub mod validator;
 
+// Phase 2 option B2: dedicated well-typed wire model + schema generation.
+// Behind the `schema-gen` feature; in a full integration it becomes the
+// always-compiled parse target.
+#[cfg(feature = "schema-gen")]
+pub mod wire;
+
 // Thin Windows-only helpers that are not backend-specific. Backend
 // runners live in dedicated crates under `backends/`; only utilities
 // shared across host tools (e.g. wxc_host_prep, mxc_diagnostic_console)
