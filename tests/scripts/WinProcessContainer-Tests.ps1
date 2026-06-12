@@ -510,12 +510,15 @@ function New-Config {
             timeout     = $TimeoutMs
         }
     }
-    if ($Env.Count -gt 0) { $obj['process']['env'] = @($Env) }
-    if ($ReadWrite.Count -gt 0 -or $ReadOnly.Count -gt 0 -or $Denied.Count -gt 0) {
+    if ($null -ne $Env -and $Env.Count -gt 0) { $obj['process']['env'] = @($Env) }
+    $hasRw     = ($null -ne $ReadWrite -and $ReadWrite.Count -gt 0)
+    $hasRo     = ($null -ne $ReadOnly  -and $ReadOnly.Count  -gt 0)
+    $hasDenied = ($null -ne $Denied    -and $Denied.Count    -gt 0)
+    if ($hasRw -or $hasRo -or $hasDenied) {
         $fs = [ordered]@{}
-        if ($ReadWrite.Count -gt 0) { $fs['readwritePaths'] = @($ReadWrite) }
-        if ($ReadOnly.Count -gt 0)  { $fs['readonlyPaths']  = @($ReadOnly) }
-        if ($Denied.Count -gt 0)    { $fs['deniedPaths']    = @($Denied) }
+        if ($hasRw)     { $fs['readwritePaths'] = @($ReadWrite) }
+        if ($hasRo)     { $fs['readonlyPaths']  = @($ReadOnly) }
+        if ($hasDenied) { $fs['deniedPaths']    = @($Denied) }
         $obj['filesystem'] = $fs
     }
     if ($null -ne $AllowDaclMutation) {
@@ -772,8 +775,11 @@ function Phase-T3Forced {
     $cmd = "cmd /c echo hello-from-t3 > `"$rw\probe.txt`" && type `"$rw\probe.txt`""
     # deniedPaths is only included where the tier can enforce it; on a
     # BaseContainer host without deny support the runner would reject the whole
-    # request. rw/ro still exercise the grant path either way.
-    $deniedPolicy = if ($Script:Caps.SupportsDeniedPaths) { @($denied) } else { @() }
+    # request. rw/ro still exercise the grant path either way. Assign in two
+    # steps: `if/else { @() }` as an expression collapses an empty array to
+    # $null, which then trips New-Config's `.Count` under StrictMode.
+    $deniedPolicy = @()
+    if ($Script:Caps.SupportsDeniedPaths) { $deniedPolicy = @($denied) }
     $cfg = New-Config -Name 't3-forced' -CommandLine $cmd -ReadWrite @($rw) -ReadOnly @($ro) -Denied $deniedPolicy
     $log = Join-Path $ScratchRoot 'logs\t3-forced.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log
@@ -912,7 +918,8 @@ function Phase-T3Forced {
     }
     $matrixCmd = 'cmd /c ' + ($clauses -join ' & ')
 
-    $matrixDenied = if ($Script:Caps.SupportsDeniedPaths) { @($denied) } else { @() }
+    $matrixDenied = @()
+    if ($Script:Caps.SupportsDeniedPaths) { $matrixDenied = @($denied) }
     $cfgMatrix = New-Config -Name 't3-access-matrix' -CommandLine $matrixCmd -ReadWrite @($rw) -ReadOnly @($ro) -Denied $matrixDenied
     $logMatrix = Join-Path $ScratchRoot 'logs\t3-access-matrix.log'
     $rMatrix = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgMatrix -LogPath $logMatrix
