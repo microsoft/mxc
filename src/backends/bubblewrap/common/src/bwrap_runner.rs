@@ -200,13 +200,12 @@ impl BubblewrapScriptRunner {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if stream {
-            // Put bwrap in its own process group so the streaming handle can
-            // tree-kill it with a single `killpg` (bwrap is PID 1 of the new
-            // pid namespace via `--unshare-pid`, so this takes the whole
-            // sandbox down) without touching the host's process group.
-            command.process_group(0);
-        }
+        // Put bwrap in its own process group so a timeout / streaming `kill()`
+        // can tree-kill it with a single `killpg` (bwrap is PID 1 of the new
+        // pid namespace via `--unshare-pid`, so this takes the whole sandbox
+        // down) without touching the host's process group. Needed on both the
+        // run-to-completion and streaming paths.
+        command.process_group(0);
 
         let mut child = match command.spawn() {
             Ok(process) => process,
@@ -277,7 +276,10 @@ impl BwrapChild {
         let exit_status = match wait_with_timeout(&mut self.child, self.timeout) {
             Ok(status) => status,
             Err(WaitError::Timeout) => {
-                let _ = self.child.kill();
+                // Group-kill so descendants die too (bwrap is a process-group
+                // leader and PID 1 of the namespace); a single-process kill
+                // would orphan them.
+                let _ = group_kill_child(&mut self.child);
                 let _ = self.child.wait();
                 self.cleanup(logger);
                 return ScriptResponse {
@@ -392,30 +394,7 @@ impl SandboxProcess for BubblewrapSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
-        use nix::sys::signal::{killpg, Signal};
-        use nix::unistd::Pid;
-
-        if self.child.try_wait()?.is_some() {
-            return Ok(());
-        }
-        // The child (bwrap) leads its own process group (`process_group(0)`),
-        // and is PID 1 of the sandbox's pid namespace, so signalling the group
-        // tears the whole sandbox down. Safe even if the group is gone — it
-        // only targets this pgid, never the host's group.
-        let pgid = Pid::from_raw(self.child.id() as i32);
-        let _ = killpg(pgid, Signal::SIGTERM);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if self.child.try_wait()?.is_some() {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let _ = killpg(pgid, Signal::SIGKILL);
-        Ok(())
+        group_kill_child(&mut self.child)
     }
 
     fn wait(&mut self) -> ScriptResponse {
@@ -519,6 +498,36 @@ fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {
         Some(h) => h.join().unwrap_or_default(),
         None => String::new(),
     }
+}
+
+/// Process-tree kill for a bwrap child spawned as a process-group leader
+/// (`process_group(0)`): graceful `SIGTERM` to the whole group, escalating to
+/// `SIGKILL` after a 2s grace. bwrap is PID 1 of the `--unshare-pid` namespace,
+/// so this takes the whole sandbox down; signalling the negative pgid targets
+/// only that group, never the host's, and is a no-op once the child has
+/// exited. Shared by the streaming handle's `kill()` and the run-to-completion
+/// timeout branch.
+fn group_kill_child(child: &mut std::process::Child) -> std::io::Result<()> {
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    let pgid = Pid::from_raw(child.id() as i32);
+    let _ = killpg(pgid, Signal::SIGTERM);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = killpg(pgid, Signal::SIGKILL);
+    Ok(())
 }
 
 enum WaitError {
