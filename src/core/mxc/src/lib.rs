@@ -231,7 +231,7 @@ fn run_request(
     // Keep the whole `Selection` alive across the run: on Windows it owns the
     // DACL guard whose `Drop` restores host ACEs, and that restore must happen
     // *after* the child is reaped — not when selection is unpacked.
-    let mut selection = select_runner(&request, logger)?;
+    let mut selection = select_runner(&request)?;
 
     for w in &selection.warnings {
         logger.log_line(w);

@@ -257,7 +257,7 @@ fn main() {
                 // `mxc::select_runner`. The binary keeps capture disabled
                 // (`request.capture_output == false`), matching the previous
                 // behaviour.
-                let mut selection = match mxc::select_runner(&request, &mut logger) {
+                let mut selection = match mxc::select_runner(&request) {
                     Ok(selection) => selection,
                     Err(e) => {
                         eprintln!("error: {e}");

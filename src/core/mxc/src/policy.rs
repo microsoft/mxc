@@ -124,9 +124,17 @@ fn normalize_lexically(path: &Path) -> PathBuf {
             Component::Prefix(..) => unreachable!("prefix only appears first"),
             Component::RootDir => out.push(component.as_os_str()),
             Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
+            Component::ParentDir => match out.components().next_back() {
+                // Pop a real directory name.
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // At a root/prefix: `..` can't go above it — ignore the segment
+                // (so `/a/../../b` stays `/b`, and `C:\..` stays `C:\`).
+                Some(Component::RootDir | Component::Prefix(..)) => {}
+                // Relative path (empty or already leading with `..`): preserve.
+                _ => out.push(component.as_os_str()),
+            },
             Component::Normal(c) => out.push(c),
         }
     }

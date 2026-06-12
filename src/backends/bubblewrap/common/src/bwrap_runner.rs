@@ -438,7 +438,11 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                 ..Default::default()
             },
             Err(WaitError::Timeout) => {
-                let _ = self.child.kill();
+                // Tree-kill (process group) so descendants die too and release
+                // any stdout/stderr pipe write-ends, matching `kill()`'s
+                // contract; terminating only the root could leave the drain
+                // threads blocked. bwrap is PID 1 of the pid namespace.
+                let _ = self.kill();
                 let _ = self.child.wait();
                 ScriptResponse {
                     exit_code: -1,

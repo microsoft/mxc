@@ -808,7 +808,7 @@ fn main() {
             // with the `mxc` library via `mxc::select_runner`. We park the
             // returned guard so the Ctrl-C handler and normal-exit path can
             // drop it to restore ACEs.
-            let mut selection = match mxc::select_runner(&request, &mut logger) {
+            let mut selection = match mxc::select_runner(&request) {
                 Ok(selection) => selection,
                 Err(e) => {
                     eprintln!("error: {e}");

@@ -1423,6 +1423,11 @@ impl SandboxProcess for AppContainerSandboxProcess {
         use crate::launch_diagnostics::diagnose_process_exit;
         use wxc_common::models::FailurePhase;
 
+        // Close our copy of any not-taken stdin so the child sees EOF and can
+        // exit reliably (an interactive command would otherwise block waiting
+        // for input).
+        self.stdin.take();
+
         // Drain any not-taken streams concurrently to avoid the child blocking
         // on a full pipe buffer.
         let stdout_thread = self.stdout.take().map(|mut r| {

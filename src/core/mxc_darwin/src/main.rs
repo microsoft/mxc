@@ -129,7 +129,7 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     // streaming (pty) behaviour: `request.capture_output` is left at its
     // default `false`, so Seatbelt uses the pty bridge rather than capturing.
     let run_start = Instant::now();
-    let mut selection = match mxc::select_runner(request, logger) {
+    let mut selection = match mxc::select_runner(request) {
         Ok(selection) => selection,
         Err(e) => {
             logger.log_line(&format!("Error: {e}"));

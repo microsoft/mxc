@@ -1142,10 +1142,21 @@ impl BaseChild {
     fn wait_exit(&self) -> i32 {
         match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
             WAIT_OBJECT_0 => {}
-            WAIT_TIMEOUT => unsafe {
-                let _ = TerminateProcess(self.process.get(), u32::MAX);
-                let _ = WaitForSingleObject(self.process.get(), u32::MAX);
-            },
+            WAIT_TIMEOUT => {
+                // Tree-kill via the job so descendants die too and release the
+                // captured stdout/stderr pipe write-ends; terminating only the
+                // root would leave the capture reader threads blocked forever.
+                if let Some(job) = &self.job {
+                    job.terminate(u32::MAX);
+                } else {
+                    unsafe {
+                        let _ = TerminateProcess(self.process.get(), u32::MAX);
+                    }
+                }
+                unsafe {
+                    let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+                }
+            }
             _ => return -1,
         }
         let mut code: u32 = u32::MAX;
@@ -1375,6 +1386,11 @@ impl SandboxProcess for BaseContainerSandboxProcess {
     }
 
     fn wait(&mut self) -> ScriptResponse {
+        // Close our copy of any not-taken stdin so the child sees EOF and can
+        // exit reliably (an interactive command would otherwise block waiting
+        // for input).
+        self.stdin.take();
+
         let stdout_thread = self.stdout.take().map(|mut r| {
             std::thread::spawn(move || {
                 let mut s = String::new();
@@ -1397,8 +1413,11 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 code as i32
             }
             WAIT_TIMEOUT => {
+                // Tree-kill via the job so descendants die too and release the
+                // captured pipe write-ends; terminating only the root would
+                // leave the drain threads above blocked forever.
+                let _ = self.kill();
                 unsafe {
-                    let _ = TerminateProcess(self.process.get(), u32::MAX);
                     let _ = WaitForSingleObject(self.process.get(), u32::MAX);
                 }
                 -1

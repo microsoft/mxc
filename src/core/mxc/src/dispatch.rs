@@ -85,16 +85,16 @@ impl Selection {
 /// [`MxcError::unsupported_containment`] for unsupported backends and
 /// [`MxcError::backend_error`] when backend construction itself fails (only
 /// the Windows fallback dispatcher can fail this way).
-#[allow(unused_variables)]
-pub fn select_runner(
-    request: &ExecutionRequest,
-    logger: &mut Logger,
-) -> Result<Selection, MxcError> {
+///
+/// Any backend-selection diagnostics (e.g. the BaseContainer-fallback notice
+/// and the selected isolation tier) are returned in [`Selection::warnings`];
+/// callers decide how and where to surface them.
+pub fn select_runner(request: &ExecutionRequest) -> Result<Selection, MxcError> {
     ensure_host_supported()?;
     match &request.containment {
         ContainmentBackend::Seatbelt => select_seatbelt(request),
         ContainmentBackend::Bubblewrap => select_bubblewrap(request),
-        ContainmentBackend::ProcessContainer => select_process_container(request, logger),
+        ContainmentBackend::ProcessContainer => select_process_container(request),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc library does not support the '{}' backend; use the wxc-exec / \
              lxc-exec / mxc-exec-mac executor binary instead",
@@ -142,13 +142,9 @@ fn select_bubblewrap(_request: &ExecutionRequest) -> Result<Selection, MxcError>
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-fn select_process_container(
-    request: &ExecutionRequest,
-    logger: &mut Logger,
-) -> Result<Selection, MxcError> {
+fn select_process_container(request: &ExecutionRequest) -> Result<Selection, MxcError> {
     use appcontainer_common::appcontainer_runner::AppContainerScriptRunner;
     use appcontainer_common::dispatcher::dispatch_with_fallback;
-    use std::fmt::Write as _;
     use wxc_common::config_parser::is_base_container_version;
 
     // BaseContainer (OS sandbox API) is used when experimental is enabled or
@@ -160,32 +156,32 @@ fn select_process_container(
         return Ok(Selection::new(Box::new(AppContainerScriptRunner::new())));
     }
 
-    // Diagnostic parity with wxc-exec: record which trigger selected the
-    // BaseContainer-fallback dispatcher. Logged to the (buffered) logger, so
-    // it is surfaced by the binaries on error and harmlessly discarded by
-    // library callers.
+    // Diagnostic parity with wxc-exec, returned via `Selection::warnings` so the
+    // caller (binary or library) decides how to surface them, rather than
+    // burying them in a logger that the library would drop.
     let reason = if version_implies_base_container {
         format!("schema version {}", request.schema_version)
     } else {
         "--experimental".to_string()
     };
-    let _ = writeln!(logger, "Using BaseContainer-fallback dispatcher ({reason})");
+    let mut warnings = vec![format!(
+        "Using BaseContainer-fallback dispatcher ({reason})"
+    )];
 
     match dispatch_with_fallback(request) {
         Ok(dispatched) => {
             for w in &dispatched.warnings {
-                let _ = writeln!(logger, "warning: {w}");
+                warnings.push(format!("warning: {w}"));
             }
-            let _ = writeln!(
-                logger,
+            warnings.push(format!(
                 "selected isolation tier: {}",
                 dispatched.tier.as_str()
-            );
+            ));
             let (runner, dacl_guard) = dispatched.into_runner_and_guard();
             Ok(Selection {
                 runner,
                 dacl_guard,
-                warnings: Vec::new(),
+                warnings,
             })
         }
         Err(e) => {
@@ -204,10 +200,7 @@ fn select_process_container(
 }
 
 #[cfg(not(target_os = "windows"))]
-fn select_process_container(
-    _request: &ExecutionRequest,
-    _logger: &mut Logger,
-) -> Result<Selection, MxcError> {
+fn select_process_container(_request: &ExecutionRequest) -> Result<Selection, MxcError> {
     Err(MxcError::unsupported_containment(
         "ProcessContainer (AppContainer / BaseContainer) is only available on Windows",
     ))
