@@ -396,9 +396,9 @@ pub struct FilesystemSection {
     pub clear_policy_on_exit: Option<bool>,
 }
 
-/// Network proxy configuration, mirroring the SDK union type.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Network proxy configuration, mirroring the SDK union type
+/// `{ builtinTestServer: true } | { localhost: number } | { url: string }`.
+#[derive(Debug, Clone)]
 pub enum ProxySpec {
     /// Route through the built-in test proxy server.
     BuiltinTestServer,
@@ -406,6 +406,38 @@ pub enum ProxySpec {
     Localhost(u16),
     /// Route through an explicit proxy URL.
     Url(String),
+}
+
+// Custom `Deserialize` matching the SDK's object union. serde's default
+// externally-tagged derive would only accept the bare string
+// `"builtinTestServer"` for the unit variant, never the SDK's
+// `{ "builtinTestServer": true }`, so we map through an untagged intermediate.
+impl<'de> serde::Deserialize<'de> for ProxySpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Builtin {
+                #[serde(rename = "builtinTestServer")]
+                #[allow(dead_code)]
+                builtin_test_server: bool,
+            },
+            Localhost {
+                localhost: u16,
+            },
+            Url {
+                url: String,
+            },
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Builtin { .. } => ProxySpec::BuiltinTestServer,
+            Repr::Localhost { localhost } => ProxySpec::Localhost(localhost),
+            Repr::Url { url } => ProxySpec::Url(url),
+        })
+    }
 }
 
 /// Network section of a [`SandboxPolicy`]. All flags default to deny.
