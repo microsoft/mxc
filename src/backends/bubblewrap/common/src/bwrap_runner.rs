@@ -501,12 +501,17 @@ fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {
 }
 
 /// Process-tree kill for a bwrap child spawned as a process-group leader
-/// (`process_group(0)`): graceful `SIGTERM` to the whole group, escalating to
-/// `SIGKILL` after a 2s grace. bwrap is PID 1 of the `--unshare-pid` namespace,
-/// so this takes the whole sandbox down; signalling the negative pgid targets
-/// only that group, never the host's, and is a no-op once the child has
-/// exited. Shared by the streaming handle's `kill()` and the run-to-completion
-/// timeout branch.
+/// (`process_group(0)`): graceful `SIGTERM` to the whole group, then a
+/// `SIGKILL` sweep after a 2s grace. bwrap is PID 1 of the `--unshare-pid`
+/// namespace, so this takes the whole sandbox down; signalling the negative
+/// pgid targets only that group, never the host's, and is a no-op once the
+/// child has exited. Shared by the streaming handle's `kill()` and the
+/// run-to-completion timeout branch.
+///
+/// The final `SIGKILL` is sent unconditionally so a descendant forked around
+/// the `SIGTERM` can't survive; while such a descendant exists it keeps the
+/// group alive (pgid still valid), and if none remains the sweep is a harmless
+/// `ESRCH`.
 fn group_kill_child(child: &mut std::process::Child) -> std::io::Result<()> {
     use nix::sys::signal::{killpg, Signal};
     use nix::unistd::Pid;
@@ -518,10 +523,7 @@ fn group_kill_child(child: &mut std::process::Child) -> std::io::Result<()> {
     let _ = killpg(pgid, Signal::SIGTERM);
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if child.try_wait()?.is_some() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
+        if child.try_wait()?.is_some() || Instant::now() >= deadline {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));

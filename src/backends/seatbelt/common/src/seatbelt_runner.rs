@@ -511,10 +511,17 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Process-tree kill for a child spawned as a session leader (`setsid()`, so
 /// its pgid equals its pid): graceful `SIGTERM` to the whole process group,
-/// escalating to `SIGKILL` after [`KILL_GRACE`]. Signalling the negative pid
-/// targets only that group — never the host's — and is a no-op if the child
-/// has already exited. Shared by the streaming handle's `kill()` and the
-/// no-pty capture path's timeout branch.
+/// then a `SIGKILL` sweep of the group after [`KILL_GRACE`]. Signalling the
+/// negative pid targets only that group — never the host's — and is a no-op if
+/// the child has already exited. Shared by the streaming handle's `kill()` and
+/// the no-pty capture path's timeout branch.
+///
+/// The final `SIGKILL` is sent unconditionally, even once the leader has
+/// exited: it sweeps any descendant that was forked around the `SIGTERM` (so it
+/// never received it) and would otherwise survive — leaving a later `wait()` to
+/// block for that descendant's full runtime. While such a descendant exists it
+/// keeps the group alive, so the pgid is still valid and unambiguous; if none
+/// remains the sweep is a harmless `ESRCH`.
 fn group_kill_child(child: &mut std::process::Child) -> std::io::Result<()> {
     if child.try_wait()?.is_some() {
         return Ok(());
@@ -525,10 +532,7 @@ fn group_kill_child(child: &mut std::process::Child) -> std::io::Result<()> {
     }
     let deadline = Instant::now() + KILL_GRACE;
     loop {
-        if child.try_wait()?.is_some() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
+        if child.try_wait()?.is_some() || Instant::now() >= deadline {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));

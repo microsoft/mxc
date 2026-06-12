@@ -200,6 +200,32 @@ fn streaming_kill_terminates_process() {
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn streaming_kill_terminates_forked_descendant_quickly() {
+    // Regression for the early-kill race: when the shell *forks* the inner
+    // command (`echo` then `sleep`), an early `kill()` could SIGTERM the shell
+    // (which dies) before the just-forked `sleep` joined the group — leaving
+    // `sleep` alive and the follow-up `wait()` blocking for its full runtime.
+    // The whole tree must die promptly regardless.
+    let mut proc = spawn_sandbox(
+        &seatbelt_config("echo hi; sleep 30"),
+        &SpawnOptions::default(),
+    )
+    .expect("spawn");
+
+    proc.kill().expect("kill should succeed");
+
+    let start = std::time::Instant::now();
+    let _ = proc.wait();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "wait() must return promptly after kill(), not wait out the child's \
+         30s runtime (elapsed: {:?})",
+        start.elapsed()
+    );
+}
+
+#[cfg(target_os = "macos")]
 fn pid_alive(pid: u32) -> bool {
     // Signal 0 probes existence without delivering a signal — no PID-reuse
     // race from spawning `ps`, and no false "dead" if the probe itself fails.
