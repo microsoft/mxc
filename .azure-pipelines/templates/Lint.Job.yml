@@ -77,7 +77,7 @@ jobs:
         workingDirectory: $(workingDirectory)
 
       # Pre-fetch deps so clippy can run --offline.
-      - script: cargo fetch --target $(targetTriple)
+      - script: cargo fetch --all-features --target $(targetTriple)
         displayName: Fetch dependencies
         workingDirectory: $(workingDirectory)
 
