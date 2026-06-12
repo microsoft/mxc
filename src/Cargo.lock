@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "mxc"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "appcontainer_common",
  "bwrap_common",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "nanvix_build_common"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "nanvix_common",
 ]
