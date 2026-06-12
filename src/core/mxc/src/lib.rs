@@ -37,8 +37,15 @@
 //! backend.
 
 pub mod dispatch;
+pub mod platform;
+pub mod policy;
 
 pub use dispatch::{select_runner, spawn_runner, Selection};
+pub use platform::{platform_support, PlatformSupport};
+pub use policy::{
+    available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
+    Containment, FilesystemPolicyResult, SandboxPolicy,
+};
 
 // Re-export the wire/model types callers need so they don't have to depend
 // on `wxc_common` directly.
@@ -180,6 +187,20 @@ pub fn spawn_sandbox_from_request(
     let mut logger = Logger::new(Mode::Buffer);
     request.capture_output = true;
     run_request(request, &mut logger)
+}
+
+/// Spawn a streaming handle for a fully-built [`ExecutionRequest`].
+///
+/// The streaming counterpart to [`spawn_sandbox_from_request`]: returns a
+/// [`SandboxProcess`] for live stdio and termination. Usually the request
+/// comes from [`build_request`] with `script_code` (and working directory /
+/// env) filled in by the caller.
+pub fn spawn_streaming_from_request(
+    mut request: ExecutionRequest,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    let mut logger = Logger::new(Mode::Buffer);
+    request.capture_output = true;
+    spawn_runner(&request, &mut logger)
 }
 
 fn apply_options(request: &mut ExecutionRequest, options: &SpawnOptions) {

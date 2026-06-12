@@ -1377,6 +1377,8 @@ dependencies = [
  "appcontainer_common",
  "bwrap_common",
  "seatbelt_common",
+ "serde",
+ "serde_json",
  "wxc_common",
 ]
 

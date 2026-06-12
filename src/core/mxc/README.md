@@ -34,7 +34,45 @@ println!("{}", result.standard_out); // "hello\n"
 (override `process.commandLine`), and `env` (merged into `process.env`).
 
 For callers that already hold a parsed `ExecutionRequest`, use
-[`spawn_sandbox_from_request`].
+[`spawn_sandbox_from_request`] (run to completion) or
+[`spawn_streaming_from_request`] (streaming handle).
+
+## Building a config from a policy (no TypeScript SDK needed)
+
+Instead of constructing the wire config in the `@microsoft/mxc-sdk` TypeScript
+module, build it in Rust from a [`SandboxPolicy`]:
+
+```rust
+use mxc::{build_request, spawn_streaming_from_request, Containment, SandboxPolicy};
+
+let policy = SandboxPolicy {
+    version: "0.7.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: None,
+    timeout_ms: Some(10_000),
+};
+
+let mut request = build_request(&policy, Containment::Process, None)?;
+request.script_code = "echo hi".to_string();
+let mut proc = spawn_streaming_from_request(request)?;
+# Ok::<(), mxc::MxcError>(())
+```
+
+[`build_request`] is the Rust port of the SDK's `createConfigFromPolicy`,
+restricted to the backends the crate runs (`Containment::Process` resolves to
+Seatbelt on macOS, Bubblewrap on Linux, ProcessContainer on Windows;
+`Containment::Bubblewrap` forces Bubblewrap). It mirrors the SDK's field
+mapping and network validation, building the same wire config internally and
+running it through the shared parser.
+
+Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
+available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
+dirs), [`user_profile_policy`], and [`temporary_files_policy`].
+
+[`platform_support`] is the Rust port of `getPlatformSupport` — host support,
+available backends, and (on Windows) isolation tier / UI capabilities from the
+in-process probe.
 
 ## Live stdio + kill (streaming)
 
