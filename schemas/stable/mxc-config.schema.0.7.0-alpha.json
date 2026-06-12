@@ -13,6 +13,16 @@
       "description": "MXC config schema version (semver). Current: '0.7.0-alpha'.",
       "examples": ["0.7.0-alpha"]
     },
+    "$schema": {
+      "type": "string",
+      "description": "Optional JSON Schema reference for editor validation. Accepted but ignored by the parser."
+    },
+    "_comment": {
+      "description": "Optional human-readable annotation. Accepted but ignored by the parser."
+    },
+    "appContainer": {
+      "$ref": "#/properties/processContainer"
+    },
     "containerId": {
       "type": "string",
       "description": "Externally assigned container identifier."
@@ -301,5 +311,7 @@
         }
       }
     }
-  }
+  },
+
+  "additionalProperties": false
 }
