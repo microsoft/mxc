@@ -581,8 +581,18 @@ fn run_probe(tag: &str, user32: Option<Hmodule>, probe_args: &ProbeArgs) {
             Some(h) if destructive_probe_allowed() => probe_win32k(h),
             Some(_) => refuse_destructive("WIN32K"),
             None => {
-                emit_diag("WIN32K", "user32.dll not loadable");
-                emit_fail("WIN32K");
+                // user32 failed to load. Under the Win32k syscall-disable
+                // mitigation (ui.disable=true) this is expected: user32's
+                // initialization makes win32k syscalls the mitigation blocks,
+                // so the GUI subsystem is unavailable. That is a
+                // mitigation-honored outcome, NOT a failure — emit a DIAG only
+                // and deliberately do not emit PASS or FAIL (the harness keys
+                // off the ABSENCE of WIN32K=FAIL/PASS, same as the
+                // killed-on-syscall path).
+                emit_diag(
+                    "WIN32K",
+                    "user32.dll not loadable (GUI subsystem blocked by Win32k mitigation)",
+                );
             }
         },
         other => {

@@ -1002,14 +1002,23 @@ function Phase-UiMitigationMatrix {
     }
 
     # ---------------- Scenario B: ui.disable=true (Win32k mitigation) ----
-    # WIN32K probe makes a Win32k syscall (GetMessageW). With the
-    # mitigation in place the kernel terminates the process. If the
-    # mitigation is NOT honored the probe prints WIN32K=FAIL and exits 0.
+    # WIN32K probe makes a Win32k syscall (GetMessageW). The mitigation is
+    # honored in either of two ways depending on the host:
+    #   * user32.dll loads, the GetMessageW syscall is reached, and the kernel
+    #     terminates the process — the probe prints nothing; or
+    #   * user32.dll fails to load at all (its init makes blocked win32k
+    #     syscalls) — the probe prints a WIN32K=DIAG line and nothing else.
+    # Either way the child must print neither WIN32K=FAIL nor WIN32K=PASS. If
+    # the mitigation is NOT honored, user32 loads and GetMessageW returns, so
+    # the probe prints WIN32K=FAIL. WIN32K is destructive-gated, so the
+    # MXC_PROBE_DESTRUCTIVE_OK override must reach the child (via the full env
+    # block) for the GetMessageW path to be attempted.
     $cmdB = "`"$UiProbeDebug`" WIN32K"
     $cfgB = New-Config -Name 'ui-matrix-B-win32k' `
         -CommandLine $cmdB `
         -ReadWrite @($rw) `
-        -UiDisable $true
+        -UiDisable $true `
+        -Env (Get-ProbeEnvWithDestructive)
     $logB = Join-Path $ScratchRoot 'logs\ui-matrix-B.log'
     $rB = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgB -LogPath $logB
     $logContentB = Read-Log $logB
