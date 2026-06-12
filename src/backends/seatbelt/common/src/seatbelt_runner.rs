@@ -598,7 +598,10 @@ impl SandboxProcess for SeatbeltSandboxProcess {
                 join_reader(stderr_handle),
             ),
             Err(WaitError::Timeout) => {
-                let _ = self.child.kill();
+                // Group-kill (SIGTERM→SIGKILL) so sandboxed descendants are
+                // reaped too — `self.child.kill()` would orphan them; then
+                // wait to clear the zombie.
+                let _ = self.kill();
                 let _ = self.child.wait();
                 ScriptResponse {
                     exit_code: -1,
