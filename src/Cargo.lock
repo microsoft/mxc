@@ -1417,7 +1417,7 @@ dependencies = [
 
 [[package]]
 name = "nanvix_build_common"
-version = "0.7.0"
+version = "0.6.1"
 dependencies = [
  "nanvix_common",
 ]
