@@ -28,6 +28,9 @@ privilege-requiring setup work lives in `wxc-host-prep.exe` instead.
 | `prepare-null-device` | Apply MXC's managed security descriptor to `\Device\Null`. |
 | `verify-null-device` | Check `\Device\Null` SD against the target without modifying it. |
 | `dump-null-device` | Print the current `\Device\Null` SD as SDDL. |
+| `install-denial-shim` | Register `mxc-denial-shim.exe` as a Manual-start `LocalSystem` service so unelevated callers can request scoped ETW sessions for per-PID denial capture. |
+| `uninstall-denial-shim` | Stop and deregister the `MxcDenialShim` service. Idempotent. |
+| `dump-denial-shim` | Report whether the `MxcDenialShim` service is installed, its current state, and the registered binary path. |
 
 All subcommands require elevation. The binary aborts with exit code
 `65` and a clear message if launched without an elevated token (e.g.
@@ -210,6 +213,58 @@ Use for triage after `verify-null-device` reports drift.
 `verify-null-device --json` is the right place to look for the
 drift label; `dump-null-device` deliberately only reports the
 current SD.
+
+### `install-denial-shim`
+
+```
+wxc-host-prep install-denial-shim [--shim-path <path>]
+```
+
+Registers `mxc-denial-shim.exe` as a Windows service named
+`MxcDenialShim`:
+
+- **Account**: `LocalSystem` (needs `SeSystemProfilePrivilege`
+  to call `StartTraceW`).
+- **Start type**: `Demand` / Manual. SCM idle-shutdown stops it
+  after a short period of inactivity; the next inbound pipe
+  request restarts it.
+- **Display name**: `MXC Denial Capture Shim`.
+- **Default binary path**: same directory as `wxc-host-prep.exe`.
+  Override with `--shim-path <path>`.
+
+Idempotent when an existing service has the same binary path.
+Differing binary paths are an explicit conflict — run
+`uninstall-denial-shim` first.
+
+The shim itself loans ETW-session-creation privilege to
+unelevated callers (e.g. `wxc-exec --capture-denials …`). It
+does not consume events; the caller drives `OpenTrace` /
+`ProcessTrace` against the session name returned by the shim.
+See the per-PID denial-capture prototype plan for design notes.
+
+### `uninstall-denial-shim`
+
+```
+wxc-host-prep uninstall-denial-shim
+```
+
+Stops the `MxcDenialShim` service if running, then
+`DeleteService`s it. Idempotent — exits 0 with a "no change"
+message when the service is already absent. Failures during the
+best-effort stop are non-fatal; the delete still proceeds and
+the OS reaps the service on its next service restart.
+
+### `dump-denial-shim`
+
+```
+wxc-host-prep dump-denial-shim [--json]
+```
+
+Reports whether `MxcDenialShim` is installed, its current state
+(`Running` / `Stopped` / etc.), and the registered binary path.
+Exit code 0 when installed, 1 when not installed. With `--json`
+emits a single-line JSON object for machine consumption; without
+`--json` emits a short human-readable block on stdout.
 
 ## Logs
 
