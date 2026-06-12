@@ -30,13 +30,12 @@ type FarProc = *const c_void;
 type LpcWstr = *const u16;
 type LpVoid = *mut c_void;
 
-/// Optional `--key=value` parameters for the GLOBALATOMS probe handshake.
-///
-/// These are supplied by the test harness on the command line. When absent
-/// (e.g. a developer running the probe by hand) the GLOBALATOMS probe emits
-/// diagnostics instead of attempting the host/guest isolation checks.
+/// Optional `--key=value` parameters supplied by the test harness on the
+/// command line for probes that require host coordination (GLOBALATOMS,
+/// HANDLES). When absent (e.g. a developer running the probe by hand) those
+/// probes emit diagnostics instead of attempting the isolation checks.
 #[derive(Debug, Default, Clone)]
-struct GlobalAtomArgs {
+struct ProbeArgs {
     /// Name of an atom the host planted in its session-global atom table.
     /// The contained probe must NOT be able to find it.
     host_name: Option<String>,
@@ -49,6 +48,14 @@ struct GlobalAtomArgs {
     /// File the host creates once it has finished checking, releasing the
     /// probe to delete its atom and exit.
     release_file: Option<String>,
+    /// HWND (as an integer) of a window owned by the host process — i.e. a
+    /// USER handle owned by a process *outside* the job. Under
+    /// `JOB_OBJECT_UILIMIT_HANDLES` the contained probe must NOT be able to
+    /// use it (e.g. read its text).
+    handle_hwnd: Option<usize>,
+    /// The window title the host set on `handle_hwnd`. If the probe manages to
+    /// read this back, the handle restriction failed.
+    handle_title: Option<String>,
 }
 
 #[repr(C)]
@@ -188,7 +195,7 @@ fn wait_for_file(path: &str, timeout: Duration) -> bool {
 ///   then blocks until the host creates `--atom-release-file`. While the atom
 ///   is held alive the host checks its own global table and records the
 ///   result; this function only performs the create / hold / cleanup half.
-fn probe_globalatoms(args: &GlobalAtomArgs) {
+fn probe_globalatoms(args: &ProbeArgs) {
     // Direction 1: host -> guest. We must not see the host's global atom.
     match args.host_name.as_deref() {
         Some(name) => {
@@ -451,25 +458,51 @@ fn probe_exitwindows(user32: Hmodule) {
     }
 }
 
-fn probe_handles(user32: Hmodule) {
-    type FindWindowWFn = unsafe extern "system" fn(LpcWstr, LpcWstr) -> Hwnd;
-    let find = match get_proc(user32, "FindWindowW") {
-        Some(p) => unsafe { std::mem::transmute::<FarProc, FindWindowWFn>(p) },
+/// Probe the HANDLES UI restriction (`JOB_OBJECT_UILIMIT_HANDLES`).
+///
+/// This limit does NOT stop `FindWindow` from returning HWNDs — it blocks
+/// *using* USER handles owned by processes outside the job. So isolation is
+/// verified by attempting to read the title of a window the host created
+/// (a USER handle owned by a process outside the job): `GetWindowTextW`
+/// reaches an external window via `WM_GETTEXT`, which the limit rejects at
+/// the sender. PASS means we could NOT read it (empty / blocked); FAIL means
+/// we read back the host's sentinel title.
+fn probe_handles(user32: Hmodule, args: &ProbeArgs) {
+    let hwnd_val = match args.handle_hwnd {
+        Some(h) => h,
         None => {
-            emit_diag("HANDLES", "FindWindowW not resolvable");
+            emit_diag("HANDLES", "no --handle-hwnd provided (run via the harness)");
+            return;
+        }
+    };
+    type GetWindowTextWFn = unsafe extern "system" fn(Hwnd, *mut u16, i32) -> i32;
+    let get_text = match get_proc(user32, "GetWindowTextW") {
+        Some(p) => unsafe { std::mem::transmute::<FarProc, GetWindowTextWFn>(p) },
+        None => {
+            emit_diag("HANDLES", "GetWindowTextW not resolvable");
             emit_fail("HANDLES");
             return;
         }
     };
-    // FindWindowW(NULL, NULL) returns the top-level desktop window when
-    // the process can enumerate global window handles. With UILIMIT_HANDLES
-    // set, the call sees only handles created inside the job (none here)
-    // and returns NULL.
-    let hwnd = unsafe { find(std::ptr::null(), std::ptr::null()) };
-    if hwnd.is_null() {
+
+    let hwnd = hwnd_val as Hwnd;
+    let mut buf = [0u16; 256];
+    let len = unsafe { get_text(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    if len <= 0 {
+        // Could not read the external window's text -> the cross-job
+        // WM_GETTEXT was blocked.
         emit_pass("HANDLES");
-    } else {
-        emit_fail("HANDLES");
+        return;
+    }
+
+    let text = String::from_utf16_lossy(&buf[..len as usize]);
+    match args.handle_title.as_deref() {
+        Some(expected) if text == expected => emit_fail("HANDLES"),
+        Some(_) => {
+            emit_diag("HANDLES", "read unexpected window text");
+            emit_fail("HANDLES");
+        }
+        None => emit_fail("HANDLES"),
     }
 }
 
@@ -491,9 +524,9 @@ fn probe_win32k(user32: Hmodule) {
     emit_fail("WIN32K");
 }
 
-fn run_probe(tag: &str, user32: Option<Hmodule>, atom_args: &GlobalAtomArgs) {
+fn run_probe(tag: &str, user32: Option<Hmodule>, probe_args: &ProbeArgs) {
     match tag {
-        "GLOBALATOMS" => probe_globalatoms(atom_args),
+        "GLOBALATOMS" => probe_globalatoms(probe_args),
         "READCLIPBOARD" => match user32 {
             Some(h) => probe_readclipboard(h),
             None => {
@@ -538,7 +571,7 @@ fn run_probe(tag: &str, user32: Option<Hmodule>, atom_args: &GlobalAtomArgs) {
             }
         },
         "HANDLES" => match user32 {
-            Some(h) => probe_handles(h),
+            Some(h) => probe_handles(h, probe_args),
             None => {
                 emit_diag("HANDLES", "user32.dll not loadable");
                 emit_fail("HANDLES");
@@ -579,34 +612,38 @@ fn collect_raw_args() -> Vec<String> {
 }
 
 /// Split raw arguments into positional probe tags and the optional
-/// `--key=value` flags that parameterize the GLOBALATOMS handshake. Unknown
-/// flags are ignored so the probe stays forward-compatible with the harness.
-fn parse_args(raw: Vec<String>) -> (Vec<String>, GlobalAtomArgs) {
+/// `--key=value` flags that parameterize the host-coordinated probes
+/// (GLOBALATOMS handshake, HANDLES external-window access). Unknown flags are
+/// ignored so the probe stays forward-compatible with the harness.
+fn parse_args(raw: Vec<String>) -> (Vec<String>, ProbeArgs) {
     let mut tags = Vec::new();
-    let mut atom = GlobalAtomArgs::default();
+    let mut args = ProbeArgs::default();
     for arg in raw {
         match arg.strip_prefix("--").and_then(|rest| rest.split_once('=')) {
-            Some(("atom-host-name", value)) => atom.host_name = Some(value.to_string()),
-            Some(("atom-guest-name", value)) => atom.guest_name = Some(value.to_string()),
-            Some(("atom-ready-file", value)) => atom.ready_file = Some(value.to_string()),
-            Some(("atom-release-file", value)) => atom.release_file = Some(value.to_string()),
+            Some(("atom-host-name", value)) => args.host_name = Some(value.to_string()),
+            Some(("atom-guest-name", value)) => args.guest_name = Some(value.to_string()),
+            Some(("atom-ready-file", value)) => args.ready_file = Some(value.to_string()),
+            Some(("atom-release-file", value)) => args.release_file = Some(value.to_string()),
+            Some(("handle-hwnd", value)) => args.handle_hwnd = value.parse::<usize>().ok(),
+            Some(("handle-title", value)) => args.handle_title = Some(value.to_string()),
             Some(_) => {} // unknown flag: ignore
             None => tags.push(arg),
         }
     }
-    (tags, atom)
+    (tags, args)
 }
 
 fn main() {
-    let (tags, atom_args) = parse_args(collect_raw_args());
+    let (tags, probe_args) = parse_args(collect_raw_args());
     if tags.is_empty() {
         eprintln!(
             "usage: wxc-ui-probe <TAG>... (or MXC_UI_PROBE_TAGS=TAG,TAG); \
              valid tags: GLOBALATOMS READCLIPBOARD WRITECLIPBOARD SYSTEMPARAMETERS \
              DISPLAYSETTINGS DESKTOP EXITWINDOWS HANDLES WIN32K. \
-             GLOBALATOMS also accepts --atom-host-name=, --atom-guest-name=, \
+             GLOBALATOMS accepts --atom-host-name=, --atom-guest-name=, \
              --atom-ready-file=, --atom-release-file= for the host/guest \
-             isolation handshake."
+             isolation handshake; HANDLES accepts --handle-hwnd=, --handle-title= \
+             for the external-window access check."
         );
         std::process::exit(2);
     }
@@ -621,9 +658,9 @@ fn main() {
     // every other probe gets a chance to report.
     let (win32k, rest): (Vec<_>, Vec<_>) = tags.into_iter().partition(|t| t == "WIN32K");
     for tag in rest {
-        run_probe(&tag, user32, &atom_args);
+        run_probe(&tag, user32, &probe_args);
     }
     for tag in win32k {
-        run_probe(&tag, user32, &atom_args);
+        run_probe(&tag, user32, &probe_args);
     }
 }
