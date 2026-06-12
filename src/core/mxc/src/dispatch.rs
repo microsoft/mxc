@@ -22,7 +22,7 @@
 //! those must drive the standalone executor binaries.
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{ContainmentBackend, ExecutionRequest};
+use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::sandbox_process::SandboxProcess;
 use wxc_common::script_runner::ScriptRunner;
@@ -243,6 +243,27 @@ pub fn spawn_runner(
     }
 }
 
+/// Map a backend's `spawn_streaming` failure `ScriptResponse` to an
+/// [`MxcError`], preserving the `BackendUnavailable` phase (so callers can fall
+/// back to a lower tier) and folding any `extended_error` detail into the
+/// message — rather than flattening everything to a generic `BackendError`.
+fn map_spawn_error(resp: ScriptResponse) -> MxcError {
+    use wxc_common::models::FailurePhase;
+
+    let mut message = resp.error_message;
+    if !resp.extended_error.is_empty() {
+        if message.is_empty() {
+            message = resp.extended_error;
+        } else {
+            message = format!("{message} ({})", resp.extended_error);
+        }
+    }
+    match resp.failure_phase {
+        FailurePhase::BackendUnavailable => MxcError::backend_unavailable(message),
+        _ => MxcError::backend_error(message),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn spawn_bubblewrap(
     request: &ExecutionRequest,
@@ -252,7 +273,7 @@ fn spawn_bubblewrap(
     let mut runner = bwrap_common::bwrap_runner::BubblewrapScriptRunner::new();
     runner
         .spawn_streaming(request, logger)
-        .map_err(|resp| MxcError::backend_error(resp.error_message))
+        .map_err(map_spawn_error)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -274,7 +295,7 @@ fn spawn_seatbelt(
     let mut runner = seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new();
     runner
         .spawn_streaming(request, logger)
-        .map_err(|resp| MxcError::backend_error(resp.error_message))
+        .map_err(map_spawn_error)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -318,13 +339,13 @@ fn spawn_process_container(
         let mut runner = appcontainer_common::base_container_runner::BaseContainerRunner::new();
         return runner
             .spawn_streaming(request, logger)
-            .map_err(|resp| MxcError::backend_error(resp.error_message));
+            .map_err(map_spawn_error);
     }
 
     let mut runner = AppContainerScriptRunner::new();
     runner
         .spawn_streaming(request, logger)
-        .map_err(|resp| MxcError::backend_error(resp.error_message))
+        .map_err(map_spawn_error)
 }
 
 #[cfg(not(target_os = "windows"))]
