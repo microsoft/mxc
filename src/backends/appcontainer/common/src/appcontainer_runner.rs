@@ -36,8 +36,8 @@ use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
 use wxc_common::process_util::{
-    create_std_pipes, get_capability_sid_from_name, read_from_pipe, OwnedHandle, PipeReader,
-    PipeWriter, SendOwnedHandle, SidAndAttributes,
+    create_std_pipes, get_capability_sid_from_name, join_drain, read_from_pipe, spawn_drain,
+    OwnedHandle, PipeReader, PipeWriter, SendOwnedHandle, SidAndAttributes,
 };
 use wxc_common::sandbox_process::{SandboxProcess, StreamingRunner};
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
@@ -1439,20 +1439,8 @@ impl SandboxProcess for AppContainerSandboxProcess {
 
         // Drain any not-taken streams concurrently to avoid the child blocking
         // on a full pipe buffer.
-        let stdout_thread = self.stdout.take().map(|mut r| {
-            std::thread::spawn(move || {
-                let mut s = String::new();
-                let _ = std::io::Read::read_to_string(&mut r, &mut s);
-                s
-            })
-        });
-        let stderr_thread = self.stderr.take().map(|mut r| {
-            std::thread::spawn(move || {
-                let mut s = String::new();
-                let _ = std::io::Read::read_to_string(&mut r, &mut s);
-                s
-            })
-        });
+        let stdout_thread = spawn_drain(self.stdout.take());
+        let stderr_thread = spawn_drain(self.stderr.take());
 
         let mut timed_out = false;
         let exit_code = match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
@@ -1478,12 +1466,8 @@ impl SandboxProcess for AppContainerSandboxProcess {
             _ => -1,
         };
 
-        let standard_out = stdout_thread
-            .map(|t| t.join().unwrap_or_default())
-            .unwrap_or_default();
-        let mut standard_err = stderr_thread
-            .map(|t| t.join().unwrap_or_default())
-            .unwrap_or_default();
+        let standard_out = join_drain(stdout_thread);
+        let mut standard_err = join_drain(stderr_thread);
 
         self.run_teardown();
 

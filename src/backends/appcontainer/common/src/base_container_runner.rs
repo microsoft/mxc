@@ -50,7 +50,8 @@ use wxc_common::models::{
     ScriptResponse,
 };
 use wxc_common::process_util::{
-    create_std_pipes, read_from_pipe, OwnedHandle, PipeReader, PipeWriter, SendOwnedHandle,
+    create_std_pipes, join_drain, read_from_pipe, spawn_drain, OwnedHandle, PipeReader, PipeWriter,
+    SendOwnedHandle,
 };
 use wxc_common::sandbox_process::{SandboxProcess, StreamingRunner};
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
@@ -1398,20 +1399,8 @@ impl SandboxProcess for BaseContainerSandboxProcess {
         // for input).
         self.stdin.take();
 
-        let stdout_thread = self.stdout.take().map(|mut r| {
-            std::thread::spawn(move || {
-                let mut s = String::new();
-                let _ = std::io::Read::read_to_string(&mut r, &mut s);
-                s
-            })
-        });
-        let stderr_thread = self.stderr.take().map(|mut r| {
-            std::thread::spawn(move || {
-                let mut s = String::new();
-                let _ = std::io::Read::read_to_string(&mut r, &mut s);
-                s
-            })
-        });
+        let stdout_thread = spawn_drain(self.stdout.take());
+        let stderr_thread = spawn_drain(self.stderr.take());
 
         let mut timed_out = false;
         let exit_code = match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
@@ -1434,12 +1423,8 @@ impl SandboxProcess for BaseContainerSandboxProcess {
             _ => -1,
         };
 
-        let captured_out = stdout_thread
-            .map(|t| t.join().unwrap_or_default())
-            .unwrap_or_default();
-        let captured_err = stderr_thread
-            .map(|t| t.join().unwrap_or_default())
-            .unwrap_or_default();
+        let captured_out = join_drain(stdout_thread);
+        let captured_err = join_drain(stderr_thread);
 
         self.run_teardown();
 

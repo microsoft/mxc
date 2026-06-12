@@ -45,6 +45,27 @@ impl std::io::Read for PipeReader {
     }
 }
 
+/// Spawn a background thread that drains `reader` (when present) to a `String`,
+/// so a caller can read stdout and stderr concurrently without the child
+/// blocking on a full pipe. Returns `None` when there is nothing to drain.
+pub fn spawn_drain(reader: Option<PipeReader>) -> Option<std::thread::JoinHandle<String>> {
+    reader.map(|mut r| {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = std::io::Read::read_to_string(&mut r, &mut s);
+            s
+        })
+    })
+}
+
+/// Join a [`spawn_drain`] thread, returning its captured output (empty when the
+/// handle is absent or the thread panicked).
+pub fn join_drain(handle: Option<std::thread::JoinHandle<String>>) -> String {
+    handle
+        .map(|t| t.join().unwrap_or_default())
+        .unwrap_or_default()
+}
+
 /// A writable end of an anonymous pipe (e.g. the child's stdin), owning the
 /// handle and closing it on drop (which sends EOF to the child). Implements
 /// [`std::io::Write`] via `WriteFile`. `Send`.
