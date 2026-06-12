@@ -976,10 +976,15 @@ impl SpawnedChild {
     fn wait_exit(&self) -> i32 {
         match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
             WAIT_OBJECT_0 => {}
-            WAIT_TIMEOUT => unsafe {
-                let _ = TerminateProcess(self.process.get(), u32::MAX);
-                let _ = WaitForSingleObject(self.process.get(), u32::MAX);
-            },
+            WAIT_TIMEOUT => {
+                // Tree-kill via the job so descendants die too; otherwise they
+                // keep the inherited pipe write-ends open and the capture
+                // reader threads block forever (timeout never enforced).
+                self.job.terminate(u32::MAX);
+                unsafe {
+                    let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+                }
+            }
             _ => return -1,
         }
         let mut exit_code: u32 = 0;
@@ -1445,8 +1450,11 @@ impl SandboxProcess for AppContainerSandboxProcess {
                 }
             }
             WAIT_TIMEOUT => {
+                // Tree-kill via the job so descendants die too and release the
+                // captured pipe write-ends; terminating only the root would
+                // leave the drain threads below blocked forever.
+                self.job.terminate(u32::MAX);
                 unsafe {
-                    let _ = TerminateProcess(self.process.get(), u32::MAX);
                     let _ = WaitForSingleObject(self.process.get(), u32::MAX);
                 }
                 -1
