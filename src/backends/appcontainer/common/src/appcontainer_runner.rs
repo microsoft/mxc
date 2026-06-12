@@ -1501,8 +1501,13 @@ impl SandboxProcess for AppContainerSandboxProcess {
 
 impl Drop for AppContainerSandboxProcess {
     fn drop(&mut self) {
-        // Ensure firewall/filesystem policy is torn down even if the caller
-        // never called `wait()`.
+        // Kill the tree and reap before tearing down firewall/filesystem
+        // policy, so an abandoned-but-running sandbox cannot outlive its
+        // enforcement (or leak as an orphan). `kill()` terminates the job.
+        let _ = self.kill();
+        unsafe {
+            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        }
         self.run_teardown();
     }
 }

@@ -1312,6 +1312,13 @@ impl SandboxProcess for BaseContainerSandboxProcess {
 
 impl Drop for BaseContainerSandboxProcess {
     fn drop(&mut self) {
+        // Kill and reap before tearing down proxy / sandbox state, so an
+        // abandoned-but-running sandbox cannot outlive its enforcement (or
+        // leak as an orphan).
+        let _ = self.kill();
+        unsafe {
+            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        }
         self.run_teardown();
     }
 }

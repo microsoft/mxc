@@ -460,6 +460,13 @@ impl SandboxProcess for BubblewrapSandboxProcess {
 
 impl Drop for BubblewrapSandboxProcess {
     fn drop(&mut self) {
+        // Kill and reap the child *before* removing network enforcement —
+        // otherwise an abandoned-but-running sandbox would keep egressing after
+        // its iptables/proxy rules were torn down, and the child would leak as
+        // a zombie. `kill()` group-kills (bwrap is PID 1 of the pid namespace),
+        // then we reap.
+        let _ = self.kill();
+        let _ = self.child.wait();
         self.run_teardown();
     }
 }
