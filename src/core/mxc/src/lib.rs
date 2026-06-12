@@ -40,7 +40,6 @@ mod platform;
 pub mod policy;
 
 use dispatch::spawn_runner;
-pub use dispatch::{select_runner, Selection};
 pub use platform::{platform_support, PlatformSupport};
 pub use policy::{
     available_tools_policy, build_request, temporary_files_policy, user_profile_policy,

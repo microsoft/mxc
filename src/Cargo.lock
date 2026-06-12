@@ -1245,10 +1245,10 @@ name = "lxc"
 version = "0.6.1"
 dependencies = [
  "anyhow",
+ "bwrap_common",
  "clap",
  "hyperlight_common",
  "lxc_common",
- "mxc",
  "mxc_build_common",
  "nanvix_binaries",
  "nanvix_common",
@@ -1394,8 +1394,8 @@ name = "mxc_darwin"
 version = "0.6.1"
 dependencies = [
  "clap",
- "mxc",
  "mxc_build_common",
+ "seatbelt_common",
  "wxc_common",
 ]
 
@@ -2864,7 +2864,6 @@ dependencies = [
  "hyperlight_common",
  "isolation_session_bindings",
  "isolation_session_common",
- "mxc",
  "mxc_build_common",
  "nanvix_binaries",
  "nanvix_common",

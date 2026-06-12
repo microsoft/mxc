@@ -158,6 +158,7 @@ take is drained and discarded by `wait()`.
 
 ## Relationship to the executor binaries
 
-Backend runner selection lives in [`select_runner`] and is shared with the
-`wxc-exec`, `lxc-exec`, and `mxc-exec-mac` binaries, which delegate their
-backend arms here so the selection logic has a single home.
+This crate is purely additive: the `wxc-exec`, `lxc-exec`, and `mxc-exec-mac`
+binaries do not depend on it. It reuses the same backend crates they do (and,
+on Windows, the shared `appcontainer_common::dispatcher::dispatch_with_fallback`
+primitive), but spawns its own streaming handles.

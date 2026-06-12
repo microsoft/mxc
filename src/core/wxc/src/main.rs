@@ -7,7 +7,9 @@ use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use appcontainer_common::appcontainer_runner::delete_app_container_profile;
+use appcontainer_common::appcontainer_runner::{
+    delete_app_container_profile, AppContainerScriptRunner,
+};
 use clap::Parser;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use hyperlight_common::HyperlightScriptRunner;
@@ -18,7 +20,7 @@ use nanvix_runner::NanVixScriptRunner;
 use windows_sandbox_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{
-    load_mxc_request_with_options, load_request, LoadOptions, ParseError,
+    is_base_container_version, load_mxc_request_with_options, load_request, LoadOptions, ParseError,
 };
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
@@ -802,26 +804,56 @@ fn main() {
     // Sandbox and MicroVM require --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::ProcessContainer => {
-            // Backend selection (AppContainer fast path vs BaseContainer
-            // fallback, including the host-ACE DaclManager guard) is shared
-            // with the `mxc` library via `mxc::select_runner`. We park the
-            // returned guard so the Ctrl-C handler and normal-exit path can
-            // drop it to restore ACEs.
-            let mut selection = match mxc::select_runner(&request) {
-                Ok(selection) => selection,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    eprint!("{}", logger.get_buffer());
-                    process::exit(1);
+            // Compute fallback eligibility on the ProcessContainer arm
+            // only — every other `ContainmentBackend` variant is
+            // unaffected by `use_base_container` and does not need to
+            // pay the (trivial) semver parse cost.
+            let version_implies_base_container = is_base_container_version(&request.schema_version);
+            let use_base_container = request.experimental_enabled || version_implies_base_container;
+
+            if use_base_container {
+                let reason = if version_implies_base_container {
+                    format!("schema version {}", request.schema_version)
+                } else {
+                    "--experimental".to_string()
+                };
+                let _ = writeln!(logger, "Using BaseContainer-fallback dispatcher ({reason})");
+
+                match appcontainer_common::dispatcher::dispatch_with_fallback(&request) {
+                    Ok(dispatched) => {
+                        for w in &dispatched.warnings {
+                            let _ = writeln!(logger, "warning: {w}");
+                        }
+                        let _ = writeln!(
+                            logger,
+                            "selected isolation tier: {}",
+                            dispatched.tier.as_str()
+                        );
+
+                        let (dispatched_runner, dacl_manager) = dispatched.into_runner_and_guard();
+                        if let Some(mgr) = dacl_manager {
+                            park_dacl_for_cleanup(mgr);
+                        }
+                        dispatched_runner
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        if let appcontainer_common::dispatcher::DispatchError::Dacl {
+                            warnings,
+                            ..
+                        } = &e
+                        {
+                            for w in warnings {
+                                eprintln!("  dacl warning: {w}");
+                            }
+                        }
+                        eprint!("{}", logger.get_buffer());
+                        process::exit(1);
+                    }
                 }
-            };
-            for w in &selection.warnings {
-                let _ = writeln!(logger, "{w}");
+            } else {
+                Box::new(AppContainerScriptRunner::new())
             }
-            if let Some(mgr) = selection.dacl_guard.take() {
-                park_dacl_for_cleanup(mgr);
-            }
-            selection.runner
         }
         ContainmentBackend::Wslc => {
             #[cfg(feature = "wslc")]

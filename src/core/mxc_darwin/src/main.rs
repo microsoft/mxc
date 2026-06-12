@@ -23,7 +23,7 @@ use std::time::Instant;
 use wxc_common::models::ScriptResponse;
 
 #[cfg(target_os = "macos")]
-use wxc_common::script_runner::handle_dry_run_exit;
+use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
 #[derive(Parser)]
 #[command(name = "mxc-exec-mac", about = "macOS sandbox executor for MXC")]
@@ -124,22 +124,11 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
-    // Backend selection is shared with the `mxc` library and the other
-    // executor binaries via `mxc::select_runner`. Seatbelt streams the
-    // child's output live through the pty bridge.
+    use seatbelt_common::seatbelt_runner::SeatbeltScriptRunner;
+
+    let mut runner = SeatbeltScriptRunner::new();
     let run_start = Instant::now();
-    let mut selection = match mxc::select_runner(request) {
-        Ok(selection) => selection,
-        Err(e) => {
-            logger.log_line(&format!("Error: {e}"));
-            print!("{}", logger.get_buffer());
-            process::exit(1);
-        }
-    };
-    for warning in &selection.warnings {
-        logger.log_line(warning);
-    }
-    let response = selection.runner.run(request, logger);
+    let response = runner.run(request, logger);
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
 
