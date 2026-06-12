@@ -141,9 +141,9 @@ fn handle_connection(pipe: HANDLE) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Phase 2.1 stub: parses the request and returns `notImplemented`. Phase
-/// 2.2 will replace this with the real `StartTraceW` + `DuplicateHandle`
-/// path.
+/// Handles a parsed request: opens an ETW session via the privileged
+/// `etw_session` module and returns its name. On any failure tears
+/// down the partially-created session so we don't leak ETW slots.
 fn handle_request(bytes: &[u8]) -> OpenDenialSessionResponse {
     let req: OpenDenialSessionRequest = match serde_json::from_slice(bytes) {
         Ok(r) => r,
@@ -165,12 +165,26 @@ fn handle_request(bytes: &[u8]) -> OpenDenialSessionResponse {
         };
     }
 
-    OpenDenialSessionResponse::Error {
-        code: error_code::NOT_IMPLEMENTED.to_string(),
-        message: format!(
-            "OpenDenialSession not yet implemented (would scope to PID {} package_sid={:?})",
-            req.target_pid, req.package_sid
-        ),
+    match crate::etw_session::create_denial_session(req.target_pid, req.package_sid.as_deref()) {
+        Ok(session) => {
+            let name = session.name.clone();
+            // Phase 2.2: shim hands ownership of the session lifecycle
+            // to the caller. By dropping `session` here without calling
+            // `.stop()` we leave the ETW session active in the kernel —
+            // intentional. The caller's `wxc-exec` invocation owns
+            // `ControlTraceW(STOP)` at workload exit. If the caller
+            // crashes the session leaks until the next reboot; tracked
+            // as an open issue in the prototype plan.
+            std::mem::forget(session);
+            OpenDenialSessionResponse::Ok { session_name: name }
+        }
+        Err(e) => OpenDenialSessionResponse::Error {
+            code: error_code::WIN32_FAILURE.to_string(),
+            message: format!(
+                "failed to create denial session for PID {}: {}",
+                req.target_pid, e
+            ),
+        },
     }
 }
 
@@ -246,22 +260,6 @@ fn create_pipe_instance(first: bool) -> Result<HANDLE, Box<dyn Error>> {
 mod tests {
     use super::*;
     use denial_capture::wire::{OpenDenialSessionRequest, PROTOCOL_VERSION};
-
-    #[test]
-    fn handle_request_returns_not_implemented_for_valid_request() {
-        let req = OpenDenialSessionRequest {
-            protocol_version: PROTOCOL_VERSION,
-            target_pid: 9999,
-            package_sid: None,
-        };
-        let bytes = serde_json::to_vec(&req).unwrap();
-        match handle_request(&bytes) {
-            OpenDenialSessionResponse::Error { code, .. } => {
-                assert_eq!(code, error_code::NOT_IMPLEMENTED);
-            }
-            _ => panic!("expected Error variant"),
-        }
-    }
 
     #[test]
     fn handle_request_rejects_bad_json() {

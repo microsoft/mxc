@@ -38,14 +38,18 @@ pub struct OpenDenialSessionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum OpenDenialSessionResponse {
-    /// The session was opened. `trace_handle_value` carries the
-    /// duplicated `TRACEHANDLE` (a 64-bit value) in the caller's process.
-    /// `session_name` is the symbolic name (used by the caller to wire up
-    /// `OpenTraceW` / `ProcessTrace`).
+    /// The privileged ETW session was created. The caller can now call
+    /// `OpenTraceW(session_name)` to start consuming events. The caller
+    /// is also responsible for stopping the session via `ControlTraceW(STOP)`
+    /// when its workload exits — the shim grants the caller's user SID
+    /// session-control rights via `EventAccessControl` at create time.
+    ///
+    /// (Earlier iterations of this protocol returned a duplicated
+    /// `TRACEHANDLE`. ETW handles are not kernel handles and cannot be
+    /// duplicated across processes; the cross-process contract is the
+    /// session name + ACL grant, which is what this variant carries.)
     #[serde(rename_all = "camelCase")]
     Ok {
-        /// Duplicated TRACEHANDLE valid in the caller's process.
-        trace_handle_value: u64,
         /// Symbolic session name used by `OpenTraceW`.
         session_name: String,
     },
@@ -99,7 +103,6 @@ mod tests {
     #[test]
     fn response_ok_serializes_with_status_tag() {
         let resp = OpenDenialSessionResponse::Ok {
-            trace_handle_value: 0xCAFE_BABE_DEAD_BEEF,
             session_name: "mxc-denials-1234".to_string(),
         };
         let json = serde_json::to_string(&resp).unwrap();
