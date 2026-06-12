@@ -51,19 +51,27 @@ param(
     [string]$CargoLog       = (Join-Path $env:TEMP 'Win25H2Safe-Tests.cargo.log'),
     [switch]$SkipBuild,
     [switch]$SkipReleaseLane,
-    [switch]$KeepArtifacts
+    [switch]$KeepArtifacts,
+    # Restrict execution to a subset of phases (build + preflight + scratch
+    # init always run). Accepts the phase keys listed in $AllPhases below, e.g.
+    # -Phases UiMitigationMatrix runs only Phase 4b. Empty = run all phases.
+    [string[]]$Phases = @()
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# The UI-mitigation probe binary refuses EXITWINDOWS / WIN32K by
-# default — running those operations outside a sandbox can log out
-# the interactive user. Set the explicit override here so the AC
-# child wxc_ui_probe inherits it via wxc-exec's env-passthrough.
-# Without this, Phase 4b's EXITWINDOWS / WIN32K assertions fail with
-# "DIAG: refused".
-$env:MXC_PROBE_DESTRUCTIVE_OK = '1'
+# The UI-mitigation probe binary refuses EXITWINDOWS / WIN32K by default —
+# running those operations outside a sandbox can log out the interactive
+# user. The contained child must see MXC_PROBE_DESTRUCTIVE_OK=1 to attempt
+# them. NOTE: the AppContainer (T3) runner REPLACES the child environment with
+# the config's `process.env` whenever it is non-empty (it only falls back to
+# CreateEnvironmentBlock when env is empty), so a process-level `$env:` here
+# would NOT reach the child. The override is therefore delivered per-run via
+# New-Config -Env (see Get-ProbeEnvWithDestructive). That env block must be
+# COMPLETE — CreateProcessW requires at least %SystemRoot% and fails with
+# ERROR_ENVVAR_NOT_FOUND (0x800700CB) on a one-var block — so we pass the full
+# current environment plus the override, not just the override alone.
 
 # kernel32 atom-table P/Invoke used by Phase-GlobalAtomIsolation to plant a
 # host-side global atom (direction 1) and to probe its own session-global
@@ -293,6 +301,25 @@ function Assert-NoBfscfg {
 # -----------------------------------------------------------------------
 # Config generation
 # -----------------------------------------------------------------------
+# Build a COMPLETE environment block (current process env + the destructive
+# override) for delivery to the contained probe via New-Config -Env. The T3
+# runner replaces the child env with process.env when it is non-empty, and
+# CreateProcessW requires a full block (notably %SystemRoot%), so passing only
+# the override would fail with ERROR_ENVVAR_NOT_FOUND (0x800700CB).
+function Get-ProbeEnvWithDestructive {
+    $list = New-Object System.Collections.Generic.List[string]
+    foreach ($e in [System.Environment]::GetEnvironmentVariables().GetEnumerator()) {
+        $k = [string]$e.Key
+        # Skip the hidden per-drive "=C:" cwd vars and any empty key; skip the
+        # override (re-added below) and the test-only tier knob.
+        if ([string]::IsNullOrEmpty($k) -or $k.StartsWith('=')) { continue }
+        if ($k -ieq 'MXC_PROBE_DESTRUCTIVE_OK' -or $k -ieq 'MXC_FORCE_TIER') { continue }
+        [void]$list.Add("$k=$($e.Value)")
+    }
+    [void]$list.Add('MXC_PROBE_DESTRUCTIVE_OK=1')
+    return $list.ToArray()
+}
+
 function New-Config {
     param(
         [Parameter(Mandatory)] [string]$Name,
@@ -308,7 +335,8 @@ function New-Config {
         [string]$BpUiSystemSettings         = $null,
         [Nullable[bool]]$BpUiIme            = $null,
         [string]$Clipboard                  = $null,
-        [Nullable[bool]]$Injection          = $null
+        [Nullable[bool]]$Injection          = $null,
+        [string[]]$Env                      = @()
     )
     $obj = [ordered]@{
         version     = '0.5.0-dev'
@@ -319,6 +347,7 @@ function New-Config {
             timeout     = $TimeoutMs
         }
     }
+    if ($Env.Count -gt 0) { $obj['process']['env'] = @($Env) }
     if ($ReadWrite.Count -gt 0 -or $ReadOnly.Count -gt 0 -or $Denied.Count -gt 0) {
         $fs = [ordered]@{}
         if ($ReadWrite.Count -gt 0) { $fs['readwritePaths'] = @($ReadWrite) }
@@ -850,7 +879,8 @@ function Phase-UiMitigationMatrix {
         -BpUiIsolation 'container' `
         -BpUiDesktopControl $false `
         -BpUiSystemSettings 'none' `
-        -BpUiIme $false
+        -BpUiIme $false `
+        -Env (Get-ProbeEnvWithDestructive)
     $logA = Join-Path $ScratchRoot 'logs\ui-matrix-A.log'
     $rA = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgA -LogPath $logA
     $logContentA = Read-Log $logA
@@ -1182,16 +1212,30 @@ try {
     Test-Preflight
     Initialize-Scratch
 
-    Phase-UnitTests
-    Phase-Probes
-    Phase-EmptyRelease
-    Phase-DeniedRelease
-    Phase-T3Forced
-    Phase-T1DenyForced
-    Phase-UiMitigationMatrix
-    Phase-GlobalAtomIsolation
-    Phase-DaclDisabled
-    Phase-CrashRecovery
+    # Phase registry. Build + preflight + scratch init above always run; this
+    # table is filtered by the -Phases parameter (empty = run all). Phase 4b is
+    # 'UiMitigationMatrix'; Phase 4c is 'GlobalAtomIsolation'.
+    $AllPhases = [ordered]@{
+        'UnitTests'           = { Phase-UnitTests }
+        'Probes'              = { Phase-Probes }
+        'EmptyRelease'        = { Phase-EmptyRelease }
+        'DeniedRelease'       = { Phase-DeniedRelease }
+        'T3Forced'            = { Phase-T3Forced }
+        'T1DenyForced'        = { Phase-T1DenyForced }
+        'UiMitigationMatrix'  = { Phase-UiMitigationMatrix }
+        'GlobalAtomIsolation' = { Phase-GlobalAtomIsolation }
+        'DaclDisabled'        = { Phase-DaclDisabled }
+        'CrashRecovery'       = { Phase-CrashRecovery }
+    }
+    if ($Phases.Count -gt 0) {
+        $unknown = $Phases | Where-Object { $_ -notin $AllPhases.Keys }
+        if ($unknown) { throw "Unknown -Phases value(s): $($unknown -join ', '). Valid: $($AllPhases.Keys -join ', ')" }
+    }
+    foreach ($key in $AllPhases.Keys) {
+        if ($Phases.Count -eq 0 -or $Phases -contains $key) {
+            & $AllPhases[$key]
+        }
+    }
 }
 catch {
     Write-Host ''
