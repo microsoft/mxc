@@ -39,6 +39,7 @@ pub enum ParseError {
 // ---------- Intermediate serde structs matching the JSON schema ----------
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawProcessContainer {
     #[serde(rename = "leastPrivilege")]
@@ -50,6 +51,7 @@ struct RawProcessContainer {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawBaseProcessUi {
     isolation: Option<String>,
@@ -61,6 +63,7 @@ struct RawBaseProcessUi {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawFilesystem {
     #[serde(rename = "readwritePaths")]
@@ -72,6 +75,7 @@ struct RawFilesystem {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawFallback {
     #[serde(rename = "allowDaclMutation")]
@@ -79,6 +83,7 @@ struct RawFallback {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawNetwork {
     #[serde(rename = "defaultPolicy")]
@@ -95,6 +100,7 @@ struct RawNetwork {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawSandbox {
     #[serde(rename = "idleTimeout")]
@@ -106,6 +112,7 @@ struct RawSandbox {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 struct RawPortMapping {
     #[serde(rename = "windowsPort")]
     windows_port: u16,
@@ -116,6 +123,7 @@ struct RawPortMapping {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawContainerConfig {
     #[serde(rename = "targetOs")]
@@ -135,6 +143,7 @@ struct RawContainerConfig {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawLxc {
     distribution: Option<String>,
@@ -142,6 +151,7 @@ struct RawLxc {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawProcess {
     #[serde(rename = "commandLine")]
@@ -152,6 +162,7 @@ struct RawProcess {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawLifecycle {
     #[serde(rename = "destroyOnExit")]
@@ -161,12 +172,14 @@ struct RawLifecycle {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawTestFeature {
     message: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawIsolationSession {
     #[serde(rename = "configurationId")]
@@ -175,6 +188,7 @@ struct RawIsolationSession {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawSeatbelt {
     #[serde(rename = "profileOverride")]
@@ -192,6 +206,7 @@ struct RawSeatbelt {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawExperimental {
     test: Option<RawTestFeature>,
@@ -205,6 +220,7 @@ struct RawExperimental {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawUi {
     disable: Option<bool>,
@@ -213,6 +229,7 @@ struct RawUi {
 }
 
 #[derive(Deserialize, Default)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(default)]
 struct RawConfig {
     version: Option<String>,
@@ -239,6 +256,7 @@ struct RawConfig {
     // keys ($schema, _comment) are filtered out in
     // `reject_unknown_top_level_fields`.
     #[serde(flatten)]
+    #[cfg_attr(feature = "schema-gen", schemars(skip))]
     unknown: HashMap<String, IgnoredAny>,
 }
 
@@ -286,6 +304,19 @@ struct RawStateAwareRequest {
 enum RawMxcRequest {
     StateAware(Box<RawStateAwareRequest>),
     OneShot(Box<RawConfig>),
+}
+
+/// Generate the JSON Schema for the one-shot wire config from the existing
+/// permissive `Raw*` deserialization structs (Phase 2 **option B1**:
+/// decorate-in-place). The schema is a by-product of the same types the parser
+/// deserializes into, so it can never describe a shape the parser doesn't
+/// accept. Trade-off: because the `Raw*` types are intentionally permissive
+/// (`Option` everywhere, `containment: Option<String>` rather than an enum, no
+/// `deny_unknown_fields`), the generated schema is correspondingly loose.
+#[cfg(feature = "schema-gen")]
+pub fn generate_config_schema_json() -> String {
+    let schema = schemars::schema_for!(RawConfig);
+    serde_json::to_string_pretty(&schema).expect("schema serialises to JSON")
 }
 
 // ---------- Public API ----------

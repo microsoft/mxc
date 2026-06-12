@@ -1,0 +1,703 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RawConfig",
+  "type": "object",
+  "properties": {
+    "containerId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "containment": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "experimental": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawExperimental"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "fallback": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawFallback"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "filesystem": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawFilesystem"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lifecycle": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawLifecycle"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lxc": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawLxc"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "network": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawNetwork"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "process": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawProcess"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "processContainer": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawProcessContainer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "seatbelt": {
+      "description": "Top-level seatbelt config.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawSeatbelt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ui": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawUi"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "version": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "IsolationSessionUser": {
+      "description": "Entra cloud-agent credentials. Both fields are required when the bundle is supplied. `wam_token` is a short-lived bearer token passed verbatim to the OS-side service; MXC stores nothing.",
+      "type": "object",
+      "required": [
+        "upn",
+        "wamToken"
+      ],
+      "properties": {
+        "upn": {
+          "type": "string"
+        },
+        "wamToken": {
+          "type": "string"
+        }
+      }
+    },
+    "LaunchMethod": {
+      "description": "How to launch the sandboxed process in the Seatbelt backend.",
+      "oneOf": [
+        {
+          "description": "Direct fork → sandbox_init() → exec (default).",
+          "type": "string",
+          "enum": [
+            "exec"
+          ]
+        },
+        {
+          "description": "Launch via macOS LaunchServices (`open`). The sandbox is applied to the command running inside the launched terminal app via sandbox-exec.",
+          "type": "string",
+          "enum": [
+            "open"
+          ]
+        }
+      ]
+    },
+    "RawBaseProcessUi": {
+      "type": "object",
+      "properties": {
+        "desktopSystemControl": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ime": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "isolation": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "systemSettings": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "RawContainerConfig": {
+      "type": "object",
+      "properties": {
+        "cpuCount": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "gpu": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "image": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "imageTarPath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memoryMb": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "portMappings": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/RawPortMapping"
+          }
+        },
+        "storagePath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "targetOs": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "RawExperimental": {
+      "type": "object",
+      "properties": {
+        "isolation_session": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RawIsolationSession"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seatbelt": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RawSeatbelt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "test": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RawTestFeature"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "windows_sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RawSandbox"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wslc": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RawContainerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "RawFallback": {
+      "type": "object",
+      "properties": {
+        "allowDaclMutation": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "RawFilesystem": {
+      "type": "object",
+      "properties": {
+        "deniedPaths": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "readonlyPaths": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "readwritePaths": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "RawIsolationSession": {
+      "type": "object",
+      "properties": {
+        "configurationId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IsolationSessionUser"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "RawLifecycle": {
+      "type": "object",
+      "properties": {
+        "destroyOnExit": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "preservePolicy": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "RawLxc": {
+      "type": "object",
+      "properties": {
+        "distribution": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "release": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "RawNetwork": {
+      "type": "object",
+      "properties": {
+        "allowLocalNetwork": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowedHosts": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "blockedHosts": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "defaultPolicy": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enforcementMode": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proxy": {
+          "default": null
+        }
+      }
+    },
+    "RawPortMapping": {
+      "type": "object",
+      "required": [
+        "containerPort",
+        "windowsPort"
+      ],
+      "properties": {
+        "containerPort": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "protocol": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "windowsPort": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      }
+    },
+    "RawProcess": {
+      "type": "object",
+      "properties": {
+        "commandLine": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cwd": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "RawProcessContainer": {
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "learningMode": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "leastPrivilege": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ui": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RawBaseProcessUi"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "RawSandbox": {
+      "type": "object",
+      "properties": {
+        "daemonPipeName": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idleTimeout": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "idleTimeoutMs": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "RawSeatbelt": {
+      "type": "object",
+      "properties": {
+        "extraMachLookups": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "guiAccess": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "keychainAccess": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "launchMethod": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LaunchMethod"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nestedPty": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "profileOverride": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "RawTestFeature": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "RawUi": {
+      "type": "object",
+      "properties": {
+        "clipboard": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disable": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "injection": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

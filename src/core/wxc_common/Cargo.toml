@@ -5,6 +5,10 @@ edition.workspace = true
 
 [features]
 microvm = ["dep:nanvix_common", "dep:uuid"]
+# Enables JSON Schema generation from the wire types (Phase 2 option B1:
+# decorate the existing permissive Raw* structs). Off by default so normal
+# builds and the production parse path don't carry schemars.
+schema-gen = ["dep:schemars"]
 
 [dependencies]
 serde = { workspace = true }
@@ -14,6 +18,7 @@ base64 = { workspace = true }
 url = { workspace = true }
 getrandom = { workspace = true }
 semver = "1"
+schemars = { version = "0.8", optional = true }
 nanvix_common = { path = "../../backends/nanvix/common", optional = true }
 uuid = { workspace = true, optional = true }
 

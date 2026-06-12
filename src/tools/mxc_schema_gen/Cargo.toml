@@ -1,0 +1,10 @@
+[package]
+name = "mxc_schema_gen"
+version.workspace = true
+edition.workspace = true
+
+# Phase 2 codegen tool: emits the MXC config JSON Schema from the Rust wire
+# types (single source of truth). Run with:
+#   cargo run -p mxc_schema_gen -- <out-path>
+[dependencies]
+wxc_common = { path = "../../core/wxc_common", features = ["schema-gen"] }

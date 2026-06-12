@@ -163,6 +163,7 @@ impl Default for SeatbeltConfig {
 
 /// How to launch the sandboxed process in the Seatbelt backend.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum LaunchMethod {
     /// Direct fork → sandbox_init() → exec (default).
@@ -228,6 +229,7 @@ pub struct IsolationSessionConfig {
 /// is supplied. `wam_token` is a short-lived bearer token passed verbatim to
 /// the OS-side service; MXC stores nothing.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSessionUser {
     pub upn: String,
