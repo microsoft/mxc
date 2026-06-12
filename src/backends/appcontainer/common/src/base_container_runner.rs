@@ -941,8 +941,12 @@ impl BaseContainerRunner {
         // `kill()` then falls back to terminating the root process.
         let job = (|| -> Option<UiJobObject> {
             let job = UiJobObject::new().ok()?;
-            job.assign_process(OwnedHandle::new(pi.hProcess).get())
-                .ok()?;
+            // Pass the raw handle — `assign_process` borrows it and does not
+            // take ownership. Wrapping it in a temporary `OwnedHandle` here
+            // would close `pi.hProcess` when the temporary dropped, leaving the
+            // owned handle on the `BaseChild` below pointing at a closed (and
+            // possibly reused) handle. Sole ownership stays with that field.
+            job.assign_process(pi.hProcess).ok()?;
             Some(job)
         })();
 
