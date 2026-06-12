@@ -183,15 +183,10 @@ impl SeatbeltScriptRunner {
                 Err(WaitError::Timeout) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    ScriptResponse {
-                        exit_code: -1,
-                        error_message: format!(
-                            "Seatbelt: process timed out after {}ms",
-                            request.script_timeout
-                        ),
-                        failure_phase: FailurePhase::Timeout,
-                        ..Default::default()
-                    }
+                    timeout_response(format!(
+                        "Seatbelt: process timed out after {}ms",
+                        request.script_timeout
+                    ))
                 }
                 Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
             }
@@ -237,12 +232,7 @@ impl SeatbeltScriptRunner {
                         request.script_timeout
                     );
                     let _ = writeln!(logger, "{msg}");
-                    ScriptResponse {
-                        exit_code: -1,
-                        error_message: msg,
-                        failure_phase: FailurePhase::Timeout,
-                        ..Default::default()
-                    }
+                    timeout_response(msg)
                 }
                 Err(error) => error_response(format!("Seatbelt: {error}")),
             }
@@ -416,15 +406,10 @@ impl SeatbeltScriptRunner {
             Err(WaitError::Timeout) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                ScriptResponse {
-                    exit_code: -1,
-                    error_message: format!(
-                        "Seatbelt: terminal timed out after {}ms",
-                        request.script_timeout
-                    ),
-                    failure_phase: FailurePhase::Timeout,
-                    ..Default::default()
-                }
+                timeout_response(format!(
+                    "Seatbelt: terminal timed out after {}ms",
+                    request.script_timeout
+                ))
             }
             Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
         };
@@ -729,6 +714,18 @@ fn error_response(message: String) -> ScriptResponse {
     ScriptResponse {
         exit_code: -1,
         error_message: message,
+        ..Default::default()
+    }
+}
+
+/// A `ScriptResponse` for a timed-out run with no captured output (the GUI,
+/// CLI/pty, and LaunchServices paths). Paths that capture stdout/stderr build
+/// the response inline so they can attach it.
+fn timeout_response(message: String) -> ScriptResponse {
+    ScriptResponse {
+        exit_code: -1,
+        error_message: message,
+        failure_phase: FailurePhase::Timeout,
         ..Default::default()
     }
 }
