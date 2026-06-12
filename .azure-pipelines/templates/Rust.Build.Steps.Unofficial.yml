@@ -33,17 +33,21 @@ steps:
   # blocks crates.io).
   - template: Cargo.Setup.Public.yml@self
 
+  # Pre-fetch git + crates.io deps via system git (libgit2 has been fast-failing
+  # on the picolibc-bsd shallow submodule from the 1ES pool). Subsequent build
+  # steps reuse the local git cache and only do incremental crates.io HTTP for
+  # feature-gated deps `cargo fetch` can't enumerate.
+  - script: cargo fetch --locked --target ${{ parameters.targetTriple }}
+    displayName: Fetch dependencies
+    workingDirectory: ${{ parameters.workingDirectory }}
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+
   - script: cargo build --locked --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
     displayName: Build
     workingDirectory: ${{ parameters.workingDirectory }}
-    env:
-      # System git for git-source fetches (libgit2 has been fast-failing on the
-      # picolibc-bsd shallow submodule from the 1ES pool).
-      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
 
   - script: cargo test --locked --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
     displayName: Test
     workingDirectory: ${{ parameters.workingDirectory }}
     condition: eq('${{ parameters.enableTest }}', 'true')
-    env:
-      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
