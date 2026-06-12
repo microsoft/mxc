@@ -39,12 +39,8 @@ steps:
   - script: cargo build --locked --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
     displayName: Build
     workingDirectory: ${{ parameters.workingDirectory }}
-    env:
-      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
 
   - script: cargo test --locked --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
     displayName: Test
     workingDirectory: ${{ parameters.workingDirectory }}
     condition: eq('${{ parameters.enableTest }}', 'true')
-    env:
-      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
