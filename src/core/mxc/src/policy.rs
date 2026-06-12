@@ -87,21 +87,50 @@ fn directory_exists(dir: &str) -> bool {
     std::fs::metadata(dir).map(|m| m.is_dir()).unwrap_or(false)
 }
 
-/// Resolve a path to absolute form for deduplication, mirroring the SDK's
-/// `path.resolve`. Falls back to lexical joining with the cwd when the path
-/// does not exist (so dedup keys stay stable for absent dirs).
+/// Resolve a path to absolute, lexically-normalized form — the equivalent of
+/// the SDK's `path.resolve`. Purely lexical (no filesystem access, no symlink
+/// resolution): a relative path is joined with the cwd, then `.`/`..` segments
+/// are collapsed. Crucially it does *not* canonicalize, so on Windows it keeps
+/// the plain `C:\...` form (no `\\?\` verbatim prefix) — otherwise
+/// [`is_system_critical_path`]'s `C:\Windows` prefix check would never match.
 fn resolve_path(p: &str) -> String {
     let path = Path::new(p);
-    if let Ok(canon) = path.canonicalize() {
-        return canon.to_string_lossy().into_owned();
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
+        }
+    };
+    normalize_lexically(&absolute)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Collapse `.`/`..` segments without touching the filesystem, preserving the
+/// path prefix/root (the well-known lexical-normalize pattern).
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut components = path.components().peekable();
+    let mut out = if let Some(c @ Component::Prefix(..)) = components.peek().copied() {
+        components.next();
+        PathBuf::from(c.as_os_str())
+    } else {
+        PathBuf::new()
+    };
+    for component in components {
+        match component {
+            Component::Prefix(..) => unreachable!("prefix only appears first"),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(c) => out.push(c),
+        }
     }
-    if path.is_absolute() {
-        return path.to_string_lossy().into_owned();
-    }
-    match std::env::current_dir() {
-        Ok(cwd) => cwd.join(path).to_string_lossy().into_owned(),
-        Err(_) => p.to_string(),
-    }
+    out
 }
 
 /// Deduplicate resolved paths, case-insensitively on Windows.

@@ -233,3 +233,30 @@ fn build_request_preserves_clipboard_policy() {
         );
     }
 }
+
+#[test]
+fn available_tools_policy_filters_system_critical() {
+    // A system-critical, existing directory on PATH must be filtered out so it
+    // never lands in readonly_paths.
+    let critical = if cfg!(target_os = "windows") {
+        format!(
+            "{}\\System32",
+            std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string())
+        )
+    } else {
+        "/usr/bin".to_string()
+    };
+    if !std::path::Path::new(&critical).is_dir() {
+        return; // skip if the critical dir doesn't exist on this host
+    }
+    let env = env_pairs(&[("PATH", &critical)]);
+    let result = available_tools_policy(Some(&env));
+    assert!(
+        !result
+            .readonly_paths
+            .iter()
+            .any(|p| p.to_lowercase().contains("system32") || p == "/usr/bin"),
+        "system-critical dir must be filtered: {:?}",
+        result.readonly_paths
+    );
+}
