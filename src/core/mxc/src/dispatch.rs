@@ -49,7 +49,6 @@ fn ensure_host_supported() -> Result<(), MxcError> {
 /// Spawns the sandboxed process with piped stdio and returns a handle the
 /// caller can write to, read from, wait on, and kill. Backends without a
 /// streaming implementation return [`MxcError::unsupported_containment`].
-#[allow(unused_variables)]
 pub fn spawn_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
