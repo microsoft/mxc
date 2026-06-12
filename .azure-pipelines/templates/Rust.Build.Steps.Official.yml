@@ -29,13 +29,11 @@ steps:
     displayName: Setup Cargo Config (Mxc-Azure-Feed)
 
   - task: 1ES.Build.Rust.Setup@1
-    displayName: Setup Rust Build Environment
 
   - task: 1ES.Build.Rust.Restore@1
-    displayName: Restore Rust Dependencies
 
   - task: 1ES.Build.Rust.Run@1
-    displayName: Build + Test (1ES)
+    displayName: Build
     inputs:
       command: build
       profile: release
