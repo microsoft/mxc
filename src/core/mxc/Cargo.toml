@@ -21,3 +21,6 @@ bwrap_common = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 seatbelt_common = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+libc = { workspace = true }

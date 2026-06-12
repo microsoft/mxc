@@ -52,14 +52,8 @@ fn available_tools_policy_filters_nonexistent_and_dedups() {
     let result = available_tools_policy(Some(&env));
 
     assert!(
-        result.readonly_paths.iter().any(|p| p.contains(
-            std::path::Path::new(&cwd)
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-        )),
-        "cwd should be discovered: {:?}",
+        result.readonly_paths.iter().any(|p| p.contains(&cwd)),
+        "the full resolved cwd should be discovered: cwd={cwd:?} paths={:?}",
         result.readonly_paths
     );
     assert!(

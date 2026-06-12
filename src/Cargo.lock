@@ -1375,6 +1375,7 @@ version = "0.6.1"
 dependencies = [
  "appcontainer_common",
  "bwrap_common",
+ "libc",
  "seatbelt_common",
  "serde",
  "serde_json",

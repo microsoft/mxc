@@ -201,12 +201,15 @@ fn streaming_kill_terminates_process() {
 
 #[cfg(target_os = "macos")]
 fn pid_alive(pid: u32) -> bool {
-    std::process::Command::new("ps")
-        .arg("-p")
-        .arg(pid.to_string())
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    // Signal 0 probes existence without delivering a signal — no PID-reuse
+    // race from spawning `ps`, and no false "dead" if the probe itself fails.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    // ESRCH => no such process (dead). Any other errno (e.g. EPERM: the pid
+    // exists but we may not signal it) means it is still alive.
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 #[cfg(target_os = "macos")]
