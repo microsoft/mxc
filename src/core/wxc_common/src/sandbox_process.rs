@@ -34,6 +34,23 @@ use crate::models::{ExecutionRequest, ScriptResponse};
 /// equivalent to a run-to-completion capture.
 ///
 /// No pty is ever allocated; the streams are ordinary pipes.
+///
+/// # Pipe-deadlock contract (read both ends concurrently)
+///
+/// stdout and stderr are independent OS pipes with bounded kernel buffers. If
+/// one is left undrained while the child keeps writing to it, the child blocks
+/// on the full pipe — and if the reader is meanwhile blocked waiting on the
+/// *other* stream (or on the child to exit), the two deadlock. So both ends
+/// must be consumed **concurrently**, never one fully then the other:
+///
+/// - **Implementors** of [`wait`](SandboxProcess::wait) must drain the
+///   not-taken stdout and stderr on separate threads (or non-blocking I/O)
+///   before/while waiting on the child — not sequentially. The in-tree
+///   backends spawn one reader thread per stream.
+/// - **Callers** that `take_stdout()` *and* `take_stderr()` and read them to
+///   EOF must likewise read them on separate threads; reading one to EOF
+///   before touching the other can hang on output-heavy children. Taking only
+///   one stream (leaving the other for `wait()` to drain) is always safe.
 pub trait SandboxProcess: Send {
     /// Take ownership of the child's stdin so the caller can write to it.
     /// Returns `None` if already taken. Drop the writer to send EOF.
@@ -69,6 +86,9 @@ pub trait SandboxProcess: Send {
     /// Block until the child exits (honouring the request's `scriptTimeout`,
     /// where `0` means wait forever), draining any not-taken stdout/stderr,
     /// and return its exit code plus captured output.
+    ///
+    /// Implementors must drain the not-taken stdout and stderr **concurrently**
+    /// (not one then the other) — see the type-level pipe-deadlock contract.
     fn wait(&mut self) -> ScriptResponse;
 }
 
