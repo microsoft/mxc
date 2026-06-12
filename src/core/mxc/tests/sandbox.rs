@@ -99,6 +99,33 @@ fn dry_run_validates_without_executing() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn seatbelt_does_not_leak_host_environment() {
+    // A host env var the caller did NOT pass via SpawnOptions::env must not be
+    // visible to the sandboxed child (the environment is cleared by default).
+    std::env::set_var("MXC_HOST_SECRET", "leaked-value");
+
+    let config = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "seatbelt",
+        "process": { "commandLine": "echo [$MXC_HOST_SECRET]", "timeout": 10000 },
+        "filesystem": { "readwritePaths": ["/tmp"] },
+        "seatbelt": { "mode": "exec" }
+    }"#;
+
+    let result = spawn_sandbox_from_config(config, &SpawnOptions::default())
+        .expect("seatbelt run should succeed");
+    std::env::remove_var("MXC_HOST_SECRET");
+
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
+    assert!(
+        !result.standard_out.contains("leaked-value"),
+        "host env must not leak into the sandbox, got: {:?}",
+        result.standard_out
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn is_base64_config_is_accepted() {
     // A caller already holding a base64 ContainerConfig sets `is_base64` and we
     // parse it straight through (no double-encoding).

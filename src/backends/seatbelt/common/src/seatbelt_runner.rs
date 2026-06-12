@@ -145,15 +145,9 @@ impl SeatbeltScriptRunner {
             Err(resp) => return resp,
         };
 
-        // Environment setup.
-        if !request.env.is_empty() {
-            command.env_clear();
-            for kv in &request.env {
-                if let Some((key, value)) = kv.split_once('=') {
-                    command.env(key, value);
-                }
-            }
-        }
+        // Environment setup. Always start from a cleared environment so
+        // untrusted sandboxed code never inherits the host's env.
+        apply_clean_environment(&mut command, request);
 
         // Working directory. Also export `PWD` to match so the child's
         // `getcwd()` uses its fast `$PWD` path (a single stat) instead of
@@ -459,14 +453,7 @@ impl StreamingRunner for SeatbeltScriptRunner {
 
         let mut command = build_sandbox_command(&profile, &request.script_code, true, logger)?;
 
-        if !request.env.is_empty() {
-            command.env_clear();
-            for kv in &request.env {
-                if let Some((key, value)) = kv.split_once('=') {
-                    command.env(key, value);
-                }
-            }
-        }
+        apply_clean_environment(&mut command, request);
         let cwd = resolve_working_directory(request);
         command.current_dir(&cwd);
         command.env("PWD", &cwd);
@@ -754,6 +741,26 @@ fn resolve_working_directory(request: &ExecutionRequest) -> String {
 /// invalid UTF-8 rather than discarding the stream.
 fn read_to_string<R: std::io::Read>(reader: R) -> String {
     wxc_common::capture_io::read_capped_lossy(reader)
+}
+
+/// Baseline `PATH` for the sandboxed child. We always start from a cleared
+/// environment (so the host process's env — cloud creds, API tokens — never
+/// leaks into untrusted sandboxed code), which means we must supply a default
+/// `PATH` for the `/bin/sh` wrapper and common tools to resolve.
+const DEFAULT_SANDBOX_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// Populate `command`'s environment from a cleared baseline: never inherit the
+/// host environment (matching the bubblewrap `--clearenv` and AppContainer
+/// clean-block behaviour). Sets a default `PATH`, then the request's vars
+/// (which may override `PATH`). `PWD` is set separately alongside the cwd.
+fn apply_clean_environment(command: &mut Command, request: &ExecutionRequest) {
+    command.env_clear();
+    command.env("PATH", DEFAULT_SANDBOX_PATH);
+    for kv in &request.env {
+        if let Some((key, value)) = kv.split_once('=') {
+            command.env(key, value);
+        }
+    }
 }
 
 /// Join a drain thread, returning its captured output (empty on join failure
