@@ -598,7 +598,15 @@ impl SandboxProcess for SeatbeltSandboxProcess {
                     ..Default::default()
                 }
             }
-            Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
+            Err(WaitError::Io(error)) => {
+                // The child may still be running: kill+reap it (don't orphan
+                // the sandbox) and join the drains before returning.
+                let _ = self.kill();
+                let _ = self.child.wait();
+                let _ = join_reader(stdout_handle);
+                let _ = join_reader(stderr_handle);
+                error_response(format!("wait failed: {error}"))
+            }
         }
     }
 }

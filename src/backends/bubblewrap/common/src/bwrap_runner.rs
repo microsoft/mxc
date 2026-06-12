@@ -453,6 +453,13 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                 }
             }
             Err(WaitError::Io(error)) => {
+                // The child may still be alive; kill+reap it before
+                // `run_teardown()` removes the iptables/proxy enforcement out
+                // from under it, and join the drains so they don't leak.
+                let _ = self.kill();
+                let _ = self.child.wait();
+                let _ = join_reader(stdout_handle);
+                let _ = join_reader(stderr_handle);
                 ScriptResponse::error(&format!("Bubblewrap: wait failed: {}", error))
             }
         };
