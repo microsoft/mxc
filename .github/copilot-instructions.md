@@ -130,10 +130,9 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 
 ### Schema system
 
-- **Stable schemas**: `schemas/stable/mxc-config.schema.0.4.0-alpha.json`, `0.5.0-alpha.json`, `0.6.0-alpha.json`, and `0.7.0-alpha.json` — immutable after release (plus a `0.5.0-alpha-strict` view)
-- **Dev schema**: `schemas/dev/mxc-config.schema.0.8.0-dev.json` (configs targeting it declare `version: 0.8.0-alpha`)
-- **Canonical schema-version source**: `schemas/schema-version.json` — the single source of truth for the schema-version constants (min/maxSupported/state-aware/stable/dev). `scripts/versioning/check-schema-versions.js` enforces that the Rust parser, SDK, and schema filenames all agree with it; do not hand-edit a schema-version constant without updating the canonical file.
-- Current schema version: `0.8.0-alpha` (latest stable: `0.7.0-alpha`)
+- **Stable schemas**: released, immutable schemas live in [`schemas/stable/`](../schemas/stable) (one file per released version, plus a `-strict` view) — never edit them after release.
+- **Dev schema**: the in-progress schema lives in [`schemas/dev/`](../schemas/dev).
+- **Canonical schema-version source**: `schemas/schema-version.json` — the single source of truth for the schema-version constants (min/maxSupported/state-aware/stable/dev). `scripts/versioning/check-schema-versions.js` enforces that the Rust parser, SDK, and schema filenames all agree with it; do not hand-edit a schema-version constant without updating the canonical file. See [`docs/versioning.md`](../docs/versioning.md) for the full design.
 - Config files can reference schemas via `"$schema"` for editor validation. `scripts/versioning/validate-configs.js` validates the `tests/examples` + `tests/configs` corpus against the dev schema in CI.
 
 ### Key documentation (`docs/`)

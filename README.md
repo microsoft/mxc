@@ -199,14 +199,9 @@ See the [SDK README](sdk/README.md) for full API documentation.
 
 ## Schema Versions
 
-| Version | Status | Schema File |
-|---------|--------|-------------|
-| `0.5.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.5.0-alpha.json`](schemas/stable/mxc-config.schema.0.5.0-alpha.json) |
-| `0.6.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
-| `0.7.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](schemas/stable/mxc-config.schema.0.7.0-alpha.json) |
-| `0.8.0-dev` | Dev (experimental backends, state-aware lifecycle) | [`schemas/dev/mxc-config.schema.0.8.0-dev.json`](schemas/dev/mxc-config.schema.0.8.0-dev.json) |
+Released, immutable stable schemas live in [`schemas/stable/`](schemas/stable); the in-progress dev schema (experimental backends, state-aware lifecycle) lives in [`schemas/dev/`](schemas/dev). The current stable and dev versions are tracked canonically in [`schemas/schema-version.json`](schemas/schema-version.json).
 
-Pick `0.7.0-alpha` for new code on any supported platform. See [docs/versioning.md](docs/versioning.md) for the full versioning design.
+Pick the latest stable schema for new code on any supported platform. See [docs/versioning.md](docs/versioning.md) for the full versioning design.
 
 ## Debugging
 

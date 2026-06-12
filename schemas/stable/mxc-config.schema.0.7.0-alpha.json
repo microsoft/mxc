@@ -313,5 +313,62 @@
     }
   },
 
-  "additionalProperties": false
+  "additionalProperties": false,
+
+  "allOf": [
+    {
+      "$comment": "Enforce single backend section: each per-backend section requires the matching `containment` value (concrete backend or matching abstract intent). Requiring `containment` to be present when a backend section is provided also rules out the ambiguous case where two backend sections appear with no `containment` set. (The dev schema guards each clause with `not: {required: [phase]}`; the stable schema has no `phase` field and rejects it via `additionalProperties: false`, so the guard is omitted here.)",
+      "if": {
+        "required": ["processContainer"]
+      },
+      "then": {
+        "required": ["containment"],
+        "properties": {
+          "containment": {
+            "enum": ["processcontainer", "process"]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "`appContainer` is the deprecated alias for `processContainer`; same containment values are valid.",
+      "if": {
+        "required": ["appContainer"]
+      },
+      "then": {
+        "required": ["containment"],
+        "properties": {
+          "containment": {
+            "enum": ["processcontainer", "process"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["lxc"]
+      },
+      "then": {
+        "required": ["containment"],
+        "properties": {
+          "containment": {
+            "enum": ["lxc"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["seatbelt"]
+      },
+      "then": {
+        "required": ["containment"],
+        "properties": {
+          "containment": {
+            "enum": ["seatbelt", "process"]
+          }
+        }
+      }
+    }
+  ]
 }
