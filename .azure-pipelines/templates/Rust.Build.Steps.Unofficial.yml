@@ -33,11 +33,18 @@ steps:
   # blocks crates.io).
   - template: Cargo.Setup.Public.yml@self
 
+  # Force cargo to use system `git` for git-source fetches instead of libgit2.
+  # libgit2 fast-fails (~16s) on the picolibc-bsd shallow submodule fetch from
+  # the 1ES pool; system git (same one the checkout step uses) succeeds.
   - script: cargo build --locked --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
     displayName: Build
     workingDirectory: ${{ parameters.workingDirectory }}
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
 
   - script: cargo test --locked --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
     displayName: Test
     workingDirectory: ${{ parameters.workingDirectory }}
     condition: eq('${{ parameters.enableTest }}', 'true')
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
