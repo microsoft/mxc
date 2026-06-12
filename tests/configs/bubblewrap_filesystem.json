@@ -2,7 +2,6 @@
   "version": "0.6.0-alpha",
   "containerId": "CLI-Bubblewrap-Filesystem-Test",
   "containment": "bubblewrap",
-  "platform": "linux",
   "process": {
     "commandLine": "cat /mnt/readonly/test.txt && echo 'write test' > /mnt/readwrite/output.txt && ls /mnt/denied 2>&1 || echo 'denied path correctly masked'"
   },

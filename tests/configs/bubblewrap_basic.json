@@ -2,7 +2,6 @@
   "version": "0.6.0-alpha",
   "containerId": "CLI-Bubblewrap-Hello-World",
   "containment": "bubblewrap",
-  "platform": "linux",
   "process": {
     "commandLine": "echo 'Hello from Bubblewrap' && id && cat /etc/os-release | head -2"
   }

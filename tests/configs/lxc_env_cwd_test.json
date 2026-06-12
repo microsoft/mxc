@@ -2,7 +2,6 @@
   "version": "0.6.0-alpha",
   "containerId": "CLI-LXC-Env-Cwd-Test",
   "containment": "lxc",
-  "platform": "linux",
   "process": {
     "commandLine": "set -e; ACTUAL_PWD=$(pwd); [ \"$ACTUAL_PWD\" = \"/etc\" ] || { echo \"FAIL cwd: got '$ACTUAL_PWD', want '/etc'\" >&2; exit 11; }; [ \"${MXC_TEST_FOO:-}\" = \"bar baz\" ] || { echo \"FAIL env MXC_TEST_FOO: got '${MXC_TEST_FOO:-<unset>}', want 'bar baz'\" >&2; exit 12; }; [ \"${MXC_TEST_EQ:-}\" = \"a=b=c\" ] || { echo \"FAIL env MXC_TEST_EQ: got '${MXC_TEST_EQ:-<unset>}', want 'a=b=c'\" >&2; exit 13; }; echo \"OK cwd=$ACTUAL_PWD MXC_TEST_FOO=$MXC_TEST_FOO MXC_TEST_EQ=$MXC_TEST_EQ\"",
     "cwd": "/etc",

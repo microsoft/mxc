@@ -6,7 +6,7 @@
     "commandLine": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\mxc_concurrent_log\\A.ps1",
     "timeout": 60000
   },
-  "policy": {
+  "filesystem": {
     "readwritePaths": ["C:\\mxc_concurrent_log"]
   }
 }
