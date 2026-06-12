@@ -421,12 +421,21 @@ function Get-HostCapabilities {
         throw 'Get-HostCapabilities: empty-policy --probe failed; cannot determine host tier.'
     }
     $tier = [string]$p.tier
+    # Defensive: older binaries may not expose baseContainerSupportsDenyPaths.
+    $denyBit = if ($p.probes.PSObject.Properties['baseContainerSupportsDenyPaths']) {
+        [bool]$p.probes.baseContainerSupportsDenyPaths
+    } else { $false }
     return [pscustomobject]@{
-        BaselineTier            = $tier
-        BaseContainerUsable     = ($tier -eq 'base-container')
-        BaseContainerApiPresent = [bool]$p.probes.baseContainerApiPresent
-        BfsCompiledIn           = [bool]$p.probes.bfsCompiledIn
-        BfscfgPresent           = [bool]$p.probes.bfscfgPresent
+        BaselineTier                   = $tier
+        BaseContainerUsable            = ($tier -eq 'base-container')
+        BaseContainerApiPresent        = [bool]$p.probes.baseContainerApiPresent
+        BfsCompiledIn                  = [bool]$p.probes.bfsCompiledIn
+        BfscfgPresent                  = [bool]$p.probes.bfscfgPresent
+        BaseContainerSupportsDenyPaths = $denyBit
+        # deniedPaths is enforced on T3 via DENY ACEs, and on BaseContainer only
+        # when the SANDBOX_CAP_DENY_PATHS bit is set (lights up when the feature
+        # ships). Detected at runtime so denied tests auto-enable then.
+        SupportsDeniedPaths            = (($tier -eq 'appcontainer-dacl') -or $denyBit)
     }
 }
 
@@ -447,6 +456,31 @@ function Test-SelectedTier {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$LogContent)
     $pattern = '(?im)selected isolation tier:.*?' + [regex]::Escape($Script:ExpectedTier)
     return [bool]($LogContent -match $pattern)
+}
+
+# Pass when the log shows that UI restrictions were applied, using the tier's
+# telemetry. T3 (AppContainer + DACL) creates the job object on the OUTSIDE and
+# logs "UI Job Object assigned". BaseContainer applies the job/UI limits INSIDE
+# via Experimental_CreateProcessInSandbox and instead logs a
+# "[ui subsystem] ... uilimits blocked" line.
+function Test-UiRestrictionsApplied {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$LogContent)
+    if ($Script:ExpectedTier -eq 'appcontainer-dacl') {
+        return [bool]($LogContent -match 'UI Job Object assigned')
+    }
+    return [bool]($LogContent -match '(?im)uilimits blocked')
+}
+
+# Pass when the log shows the Win32k mitigation (win32k syscalls blocked) was
+# applied. T3 logs "Win32k mitigation applied"; BaseContainer logs a
+# "win32k_system_calls: ... blocked" line in its [ui subsystem] section (vs.
+# "... allowed" when ui.disable=false).
+function Test-Win32kMitigationApplied {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$LogContent)
+    if ($Script:ExpectedTier -eq 'appcontainer-dacl') {
+        return [bool]($LogContent -match 'Win32k mitigation applied')
+    }
+    return [bool]($LogContent -match '(?im)win32k_system_calls:.*?blocked')
 }
 
 function New-Config {
@@ -675,7 +709,7 @@ function Phase-EmptyRelease {
     Record-Result -Phase 'P2' -Name 'AppContainer ran the child (stdout round-trip)' -Pass ($r.Stdout -match 'P2-empty-release-ok')
     Record-Result -Phase 'P2' -Name "selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent) -Detail "expected=$($Script:ExpectedTier)"
     Record-Result -Phase 'P2' -Name 'no bfscfg invocation in log' -Pass (-not ($logContent -match '(?im)Output from bfscfg\.exe'))
-    Record-Result -Phase 'P2' -Name 'UI Job Object assigned telemetry' -Pass ([bool]($logContent -match 'UI Job Object assigned'))
+    Record-Result -Phase 'P2' -Name 'UI restrictions applied telemetry' -Pass (Test-UiRestrictionsApplied -LogContent $logContent)
 }
 
 # -----------------------------------------------------------------------
@@ -688,6 +722,15 @@ function Phase-DeniedRelease {
     }
     Section 'Phase 3: release build, deniedPaths only (safe lane)'
     Clear-StateFiles
+
+    # deniedPaths is enforced on T3 (DENY ACEs) and on BaseContainer only once
+    # the SANDBOX_CAP_DENY_PATHS bit lights up. Where unsupported, the runner
+    # rejects deniedPaths at launch, so skip rather than assert a transient
+    # limitation (the phase auto-enables when the capability appears).
+    if (-not $Script:Caps.SupportsDeniedPaths) {
+        Record-Result -Phase 'P3' -Name 'deniedPaths run' -Pass $true -Detail "SKIPPED: deniedPaths not supported on tier=$($Script:ExpectedTier) (no SANDBOX_CAP_DENY_PATHS)"
+        return
+    }
 
     $denied = Join-Path $ScratchRoot 'denied'
     $aclBefore = Get-Acl-Snapshot $denied
@@ -727,7 +770,11 @@ function Phase-T3Forced {
     $aclDeniedBefore = Get-Acl-Snapshot $denied
 
     $cmd = "cmd /c echo hello-from-t3 > `"$rw\probe.txt`" && type `"$rw\probe.txt`""
-    $cfg = New-Config -Name 't3-forced' -CommandLine $cmd -ReadWrite @($rw) -ReadOnly @($ro) -Denied @($denied)
+    # deniedPaths is only included where the tier can enforce it; on a
+    # BaseContainer host without deny support the runner would reject the whole
+    # request. rw/ro still exercise the grant path either way.
+    $deniedPolicy = if ($Script:Caps.SupportsDeniedPaths) { @($denied) } else { @() }
+    $cfg = New-Config -Name 't3-forced' -CommandLine $cmd -ReadWrite @($rw) -ReadOnly @($ro) -Denied $deniedPolicy
     $log = Join-Path $ScratchRoot 'logs\t3-forced.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log
     $logContent = Read-Log $log
@@ -740,8 +787,8 @@ function Phase-T3Forced {
 
     Record-Result -Phase 'P4' -Name 'child exit=0' -Pass ($r.ExitCode -eq 0) -Detail "exit=$($r.ExitCode)"
     Record-Result -Phase 'P4' -Name "selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent) -Detail "expected=$($Script:ExpectedTier)"
-    Record-Result -Phase 'P4' -Name 'UI Job Object assigned telemetry' -Pass ([bool]($logContent -match 'UI Job Object assigned'))
-    Record-Result -Phase 'P4' -Name 'Win32k mitigation applied telemetry (ui.disable=false -> not expected)' -Pass (-not ($logContent -match 'Win32k mitigation applied')) -Detail 'this config has ui.disable=false'
+    Record-Result -Phase 'P4' -Name 'UI restrictions applied telemetry' -Pass (Test-UiRestrictionsApplied -LogContent $logContent)
+    Record-Result -Phase 'P4' -Name 'Win32k mitigation NOT applied (ui.disable=false)' -Pass (-not (Test-Win32kMitigationApplied -LogContent $logContent)) -Detail 'this config has ui.disable=false'
     Record-Result -Phase 'P4' -Name 'rw ACL restored after run'     -Pass ($aclRwBefore -eq $aclRwAfter)
     Record-Result -Phase 'P4' -Name 'ro ACL restored after run'     -Pass ($aclRoBefore -eq $aclRoAfter)
     Record-Result -Phase 'P4' -Name 'denied ACL restored after run' -Pass ($aclDeniedBefore -eq $aclDeniedAfter)
@@ -762,7 +809,7 @@ function Phase-T3Forced {
     $logContent2 = Read-Log $log2
     Assert-NoBfscfg -LogContent $logContent2 -Phase 'P4' -Name 't3-ui-disable'
 
-    Record-Result -Phase 'P4' -Name 'ui.disable=true emits Win32k mitigation applied' -Pass ([bool]($logContent2 -match 'Win32k mitigation applied')) -Detail "child exit=$($r2.ExitCode) (expected to fail; cmd.exe needs Win32k)"
+    Record-Result -Phase 'P4' -Name 'ui.disable=true emits Win32k mitigation applied' -Pass (Test-Win32kMitigationApplied -LogContent $logContent2) -Detail "child exit=$($r2.ExitCode) (expected to fail; cmd.exe needs Win32k)"
     Record-Result -Phase 'P4' -Name "ui.disable=true emits selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent2) -Detail "expected=$($Script:ExpectedTier)"
     # Even though child crashed, ACEs must still be cleaned up.
     $aclRwAfterUi = Get-Acl-Snapshot $rw
@@ -853,15 +900,20 @@ function Phase-T3Forced {
         # propagation of the ALLOW ACE to existing children).
         Probe-Read  'RO_READ'        $ro      'readme.txt'
         Probe-Write 'RO_WRITE'       $ro      'rw_marker.tmp'
-        # Denied + control: must fail both ways.
-        Probe-Read  'DENIED_READ'    $denied  'readme.txt'
-        Probe-Write 'DENIED_WRITE'   $denied  'denied_attempt.tmp'
+        # Control: a path in NO policy must fail both ways (proves the
+        # AppContainer is sandboxed at all, not just that explicit ACEs work).
         Probe-Read  'CONTROL_READ'   $control 'readme.txt'
         Probe-Write 'CONTROL_WRITE'  $control 'control_attempt.tmp'
     )
+    # Denied rows only when the tier can enforce deniedPaths (see capability).
+    if ($Script:Caps.SupportsDeniedPaths) {
+        $clauses += Probe-Read  'DENIED_READ'  $denied 'readme.txt'
+        $clauses += Probe-Write 'DENIED_WRITE' $denied 'denied_attempt.tmp'
+    }
     $matrixCmd = 'cmd /c ' + ($clauses -join ' & ')
 
-    $cfgMatrix = New-Config -Name 't3-access-matrix' -CommandLine $matrixCmd -ReadWrite @($rw) -ReadOnly @($ro) -Denied @($denied)
+    $matrixDenied = if ($Script:Caps.SupportsDeniedPaths) { @($denied) } else { @() }
+    $cfgMatrix = New-Config -Name 't3-access-matrix' -CommandLine $matrixCmd -ReadWrite @($rw) -ReadOnly @($ro) -Denied $matrixDenied
     $logMatrix = Join-Path $ScratchRoot 'logs\t3-access-matrix.log'
     $rMatrix = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgMatrix -LogPath $logMatrix
     $logContentMatrix = Read-Log $logMatrix
@@ -887,8 +939,12 @@ function Phase-T3Forced {
     Assert-Matrix 'RW_READ'        'PASS' 'rw grant must allow child to read its own file'
     Assert-Matrix 'RO_READ'        'PASS' 'ro grant must allow reads (tests ACE inheritance to existing children)'
     Assert-Matrix 'RO_WRITE'       'FAIL' 'ro grant must NOT allow writes'
-    Assert-Matrix 'DENIED_READ'    'FAIL' 'denied path must block reads'
-    Assert-Matrix 'DENIED_WRITE'   'FAIL' 'denied path must block writes'
+    if ($Script:Caps.SupportsDeniedPaths) {
+        Assert-Matrix 'DENIED_READ'    'FAIL' 'denied path must block reads'
+        Assert-Matrix 'DENIED_WRITE'   'FAIL' 'denied path must block writes'
+    } else {
+        Record-Result -Phase 'P4' -Name 'matrix DENIED_READ/DENIED_WRITE' -Pass $true -Detail "SKIPPED: deniedPaths not supported on tier=$($Script:ExpectedTier)"
+    }
     Assert-Matrix 'CONTROL_READ'   'FAIL' 'control path (no policy) must be sandboxed'
     Assert-Matrix 'CONTROL_WRITE'  'FAIL' 'control path (no policy) must be sandboxed'
 
@@ -936,6 +992,15 @@ function Phase-T1DenyForced {
     }
     if ($probe.tier -ne 'base-container') {
         Record-Result -Phase 'P4c' -Name 'BaseContainer usable (required for T1 deny test)' -Pass $true -Detail "SKIPPED: BaseContainer not usable on this host (tier=$($probe.tier), apiPresent=$($probe.probes.baseContainerApiPresent))"
+        return
+    }
+    # The deny test is only meaningful once BaseContainer can enforce
+    # deniedPaths. Before SANDBOX_CAP_DENY_PATHS lights up the runner rejects
+    # deniedPaths outright, which would otherwise make this phase "pass"
+    # vacuously (the run aborts, so the child never echoes the secret). Skip
+    # until the capability is present; it then asserts real deny enforcement.
+    if (-not $Script:Caps.SupportsDeniedPaths) {
+        Record-Result -Phase 'P4c' -Name 'BaseContainer deny-ACE enforcement' -Pass $true -Detail 'SKIPPED: BaseContainer does not yet support deniedPaths (no SANDBOX_CAP_DENY_PATHS)'
         return
     }
 
@@ -1040,10 +1105,10 @@ function Phase-UiMitigationMatrix {
         }
         $summaryA = ($matrixA.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '
 
-        Record-Result -Phase 'P4b' -Name 'scenarioA: UI Job Object assigned telemetry' -Pass ([bool]($logContentA -match 'UI Job Object assigned'))
+        Record-Result -Phase 'P4b' -Name 'scenarioA: UI restrictions applied telemetry' -Pass (Test-UiRestrictionsApplied -LogContent $logContentA)
         Record-Result -Phase 'P4b' -Name "scenarioA: selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContentA) -Detail "expected=$($Script:ExpectedTier)"
         # ui.disable=false on this run: Win32k mitigation applied must NOT appear.
-        Record-Result -Phase 'P4b' -Name 'scenarioA: no Win32k mitigation applied (ui.disable=false)' -Pass (-not ($logContentA -match 'Win32k mitigation applied'))
+        Record-Result -Phase 'P4b' -Name 'scenarioA: Win32k mitigation NOT applied (ui.disable=false)' -Pass (-not (Test-Win32kMitigationApplied -LogContent $logContentA))
 
         foreach ($tag in @('READCLIPBOARD','WRITECLIPBOARD','SYSTEMPARAMETERS','DISPLAYSETTINGS','DESKTOP','EXITWINDOWS','HANDLES')) {
             $got = if ($matrixA.ContainsKey($tag)) { $matrixA[$tag] } else { '<missing>' }
@@ -1098,7 +1163,7 @@ function Phase-UiMitigationMatrix {
     $printedFail = ($rB.Stdout -match '(?m)^WIN32K=FAIL\s*$')
     $printedPass = ($rB.Stdout -match '(?m)^WIN32K=PASS\s*$')
 
-    Record-Result -Phase 'P4b' -Name 'scenarioB: Win32k mitigation applied telemetry' -Pass ([bool]($logContentB -match 'Win32k mitigation applied'))
+    Record-Result -Phase 'P4b' -Name 'scenarioB: Win32k mitigation applied telemetry' -Pass (Test-Win32kMitigationApplied -LogContent $logContentB)
     Record-Result -Phase 'P4b' -Name "scenarioB: selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContentB) -Detail "expected=$($Script:ExpectedTier)"
     # Mitigation worked iff the child never reported WIN32K=FAIL. Child
     # exit code is incidental — under the mitigation the process is killed
@@ -1238,7 +1303,7 @@ function Phase-GlobalAtomIsolation {
 
     # ---- Positive: isolation=container sets UILIMIT_GLOBALATOMS -> isolated.
     $pos = Invoke-GlobalAtomProbe -Isolation 'container' -Name 'ui-globalatoms'
-    Record-Result -Phase 'P4c' -Name 'selected isolation tier: appcontainer-dacl' -Pass $pos.TierMatch
+    Record-Result -Phase 'P4c' -Name "selected isolation tier: $($Script:ExpectedTier)" -Pass $pos.TierMatch
     Record-Result -Phase 'P4c' -Name 'host atom NOT visible to contained process (host->guest)' -Pass ($pos.HostToGuest -eq 'PASS') -Detail "got=$($pos.HostToGuest); $($pos.Detail)"
     if ($null -eq $pos.GuestFound) {
         Record-Result -Phase 'P4c' -Name 'contained atom NOT visible to host (guest->host)' -Pass $false -Detail 'probe never signalled ready; no guest-atom check performed'
@@ -1429,8 +1494,8 @@ try {
     Test-Preflight
     $Script:Caps = Get-HostCapabilities
     $Script:ExpectedTier = $Script:Caps.BaselineTier
-    Write-Host ("Host capabilities: expectedTier={0} baseContainerUsable={1} apiPresent={2} bfscfgPresent={3} bfsCompiledIn={4}" -f `
-        $Script:Caps.BaselineTier, $Script:Caps.BaseContainerUsable, $Script:Caps.BaseContainerApiPresent, $Script:Caps.BfscfgPresent, $Script:Caps.BfsCompiledIn) -ForegroundColor Cyan
+    Write-Host ("Host capabilities: expectedTier={0} baseContainerUsable={1} apiPresent={2} bfscfgPresent={3} bfsCompiledIn={4} supportsDeniedPaths={5}" -f `
+        $Script:Caps.BaselineTier, $Script:Caps.BaseContainerUsable, $Script:Caps.BaseContainerApiPresent, $Script:Caps.BfscfgPresent, $Script:Caps.BfsCompiledIn, $Script:Caps.SupportsDeniedPaths) -ForegroundColor Cyan
     Initialize-Scratch
 
     # Phase registry. Build + preflight + scratch init above always run; this
