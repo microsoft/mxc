@@ -603,6 +603,17 @@ impl SandboxProcess for SeatbeltSandboxProcess {
     }
 }
 
+impl Drop for SeatbeltSandboxProcess {
+    fn drop(&mut self) {
+        // Don't leak a running sandboxed process (and its group) or a zombie if
+        // the handle is dropped without `wait()`. `kill()` is idempotent (its
+        // `try_wait` guard no-ops once the child has exited), and the group
+        // signal reaps descendants too.
+        let _ = self.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// Build a `Command` that applies the sandbox via `sandbox_init()` in
 /// `pre_exec`, then execs `/bin/sh -c <script>`. The child inherits the
 /// parent's Mach bootstrap namespace, so both CLI and GUI applications
