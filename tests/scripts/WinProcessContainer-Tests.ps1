@@ -121,16 +121,8 @@ namespace Mxc {
         private static extern bool PostThreadMessageW(uint idThread, uint Msg, IntPtr wParam, IntPtr lParam);
         [DllImport("kernel32.dll")]
         private static extern uint GetCurrentThreadId();
-        // Opt WM_GETTEXT through UIPI so a lower-integrity (sandboxed) sender
-        // can deliver it to this window. Without this the HANDLES probe's
-        // GetWindowTextW would be blocked by UIPI integrity isolation rather
-        // than by JOB_OBJECT_UILIMIT_HANDLES, confounding the test.
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern bool ChangeWindowMessageFilterEx(IntPtr hWnd, uint message, uint action, IntPtr pChangeFilterStruct);
 
         private const uint WM_QUIT = 0x0012;
-        private const uint WM_GETTEXT = 0x000D;
-        private const uint MSGFLT_ALLOW = 1;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
 
         private Thread _thread;
@@ -154,20 +146,16 @@ namespace Mxc {
         private void Run() {
             _threadId = GetCurrentThreadId();
             // The system "STATIC" class needs no registration; omitting
-            // WS_VISIBLE keeps the window hidden. Its caption is the sentinel
-            // title that WM_GETTEXT (DefWindowProc) returns.
+            // WS_VISIBLE keeps the window hidden. The window just needs to be a
+            // valid HWND owned by this (out-of-job) process for the HANDLES
+            // probe's GetWindowThreadProcessId to resolve.
             _hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, "STATIC", _title, 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-            if (_hwnd != IntPtr.Zero) {
-                // Allow sandboxed (lower-integrity) senders to deliver
-                // WM_GETTEXT so the HANDLES probe exercises UILIMIT_HANDLES,
-                // not UIPI. Best-effort: failure (incl. on hosts where the
-                // sender is still blocked) just leaves UIPI in place.
-                ChangeWindowMessageFilterEx(_hwnd, WM_GETTEXT, MSGFLT_ALLOW, IntPtr.Zero);
-            }
             _ready.Set();
             if (_hwnd == IntPtr.Zero) { return; }
             MSG msg;
-            // GetMessageW returns 0 on WM_QUIT and -1 on error; exit on both.
+            // Pump the queue to keep this thread (and thus the window) alive
+            // until Stop() posts WM_QUIT. GetMessageW returns 0 on WM_QUIT and
+            // -1 on error; exit on both.
             while (GetMessageW(out msg, IntPtr.Zero, 0, 0) > 0) {
                 TranslateMessage(ref msg);
                 DispatchMessageW(ref msg);
@@ -1087,22 +1075,21 @@ function Phase-UiMitigationMatrix {
     # does not fail the atom APIs — it gives the job a private atom table —
     # so it cannot be verified with the simple "API failed -> PASS" matrix.
     # Phase-GlobalAtomIsolation covers it with a bidirectional isolation test.
-    # Create a hidden, message-pumping window owned by THIS (out-of-job)
-    # process. Its USER handle is what the HANDLES probe must NOT be able to
-    # reach: JOB_OBJECT_UILIMIT_HANDLES does not stop FindWindow from returning
-    # HWNDs — it blocks USING handles owned by processes outside the job — so
-    # the probe reads the window's title via GetWindowTextW (a cross-job
-    # WM_GETTEXT). PASS = it could not read the sentinel; FAIL = it read it.
-    # The window pumps messages on its own thread so the broken case returns
-    # the title promptly instead of hanging; the working case never delivers
-    # the message (rejected at the sender), so no pump dependency there.
+    # Create a hidden window owned by THIS (out-of-job) process. Its USER handle
+    # is what the HANDLES probe must NOT be able to use: JOB_OBJECT_UILIMIT_HANDLES
+    # does not stop FindWindow from returning HWNDs — it blocks USING handles
+    # owned by processes outside the job — so the probe calls
+    # GetWindowThreadProcessId on the HWND. That reads window-manager state
+    # directly (no WM_GETTEXT / SendMessage), so it is not confounded by UIPI or
+    # the target pumping messages. PASS = it could not resolve the owner (limit
+    # blocked the handle use); FAIL = it read back our process id.
     $handleTitle = "MxcHandleProbe_$([guid]::NewGuid().ToString('N'))"
     $winHost = New-Object Mxc.WindowHost
     $winHost.Start($handleTitle)
     try {
         $hwndVal = $winHost.Hwnd.ToInt64()
         $probeArgsA = 'READCLIPBOARD WRITECLIPBOARD SYSTEMPARAMETERS DISPLAYSETTINGS DESKTOP EXITWINDOWS HANDLES'
-        $cmdA = "`"$UiProbeDebug`" $probeArgsA --handle-hwnd=$hwndVal --handle-title=`"$handleTitle`""
+        $cmdA = "`"$UiProbeDebug`" $probeArgsA --handle-hwnd=$hwndVal --handle-pid=$PID"
         $cfgA = New-Config -Name 'ui-matrix-A-allbits' `
             -CommandLine $cmdA `
             -ReadWrite @($rw) `
@@ -1139,10 +1126,10 @@ function Phase-UiMitigationMatrix {
 
         # Negative control for HANDLES: same probe + host window, but
         # isolation=desktop sets NO UILIMIT_HANDLES. The probe MUST be able to
-        # read the external window's title -> HANDLES=FAIL, proving the
+        # resolve the external window's owner -> HANDLES=FAIL, proving the
         # HANDLES=PASS above is a real isolation result and not vacuous (e.g.
-        # GetWindowTextW returning empty for an unrelated reason).
-        $cmdAneg = "`"$UiProbeDebug`" HANDLES --handle-hwnd=$hwndVal --handle-title=`"$handleTitle`""
+        # GetWindowThreadProcessId failing for an unrelated reason).
+        $cmdAneg = "`"$UiProbeDebug`" HANDLES --handle-hwnd=$hwndVal --handle-pid=$PID"
         $cfgAneg = New-Config -Name 'ui-matrix-A-handles-neg' `
             -CommandLine $cmdAneg `
             -ReadWrite @($rw) `

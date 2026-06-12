@@ -51,11 +51,12 @@ struct ProbeArgs {
     /// HWND (as an integer) of a window owned by the host process — i.e. a
     /// USER handle owned by a process *outside* the job. Under
     /// `JOB_OBJECT_UILIMIT_HANDLES` the contained probe must NOT be able to
-    /// use it (e.g. read its text).
+    /// use it (e.g. query its owning thread/process).
     handle_hwnd: Option<usize>,
-    /// The window title the host set on `handle_hwnd`. If the probe manages to
-    /// read this back, the handle restriction failed.
-    handle_title: Option<String>,
+    /// The process id that owns `handle_hwnd` (the host process). If the probe
+    /// can read the owner back via `GetWindowThreadProcessId` and it matches,
+    /// the handle restriction failed.
+    handle_pid: Option<u32>,
 }
 
 #[repr(C)]
@@ -461,12 +462,13 @@ fn probe_exitwindows(user32: Hmodule) {
 /// Probe the HANDLES UI restriction (`JOB_OBJECT_UILIMIT_HANDLES`).
 ///
 /// This limit does NOT stop `FindWindow` from returning HWNDs — it blocks
-/// *using* USER handles owned by processes outside the job. So isolation is
-/// verified by attempting to read the title of a window the host created
-/// (a USER handle owned by a process outside the job): `GetWindowTextW`
-/// reaches an external window via `WM_GETTEXT`, which the limit rejects at
-/// the sender. PASS means we could NOT read it (empty / blocked); FAIL means
-/// we read back the host's sentinel title.
+/// *using* USER handles owned by processes outside the job. Isolation is
+/// verified by calling `GetWindowThreadProcessId` on a window the host created
+/// (a USER handle owned by a process outside the job). Unlike `GetWindowTextW`
+/// it does not send `WM_GETTEXT`, so it is not confounded by UIPI / message
+/// filtering / the target pumping messages — it reads window-manager state
+/// directly. PASS means we could NOT resolve the owner (the limit blocked the
+/// handle use); FAIL means we read back the host's owning process id.
 fn probe_handles(user32: Hmodule, args: &ProbeArgs) {
     let hwnd_val = match args.handle_hwnd {
         Some(h) => h,
@@ -475,31 +477,32 @@ fn probe_handles(user32: Hmodule, args: &ProbeArgs) {
             return;
         }
     };
-    type GetWindowTextWFn = unsafe extern "system" fn(Hwnd, *mut u16, i32) -> i32;
-    let get_text = match get_proc(user32, "GetWindowTextW") {
-        Some(p) => unsafe { std::mem::transmute::<FarProc, GetWindowTextWFn>(p) },
+    type GetWindowThreadProcessIdFn = unsafe extern "system" fn(Hwnd, *mut Dword) -> Dword;
+    let get_wtpid = match get_proc(user32, "GetWindowThreadProcessId") {
+        Some(p) => unsafe { std::mem::transmute::<FarProc, GetWindowThreadProcessIdFn>(p) },
         None => {
-            emit_diag("HANDLES", "GetWindowTextW not resolvable");
+            emit_diag("HANDLES", "GetWindowThreadProcessId not resolvable");
             emit_fail("HANDLES");
             return;
         }
     };
 
     let hwnd = hwnd_val as Hwnd;
-    let mut buf = [0u16; 256];
-    let len = unsafe { get_text(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
-    if len <= 0 {
-        // Could not read the external window's text -> the cross-job
-        // WM_GETTEXT was blocked.
+    let mut pid: Dword = 0;
+    let tid = unsafe { get_wtpid(hwnd, &mut pid as *mut Dword) };
+    if tid == 0 {
+        // Could not access the external window handle -> the limit blocked it.
         emit_pass("HANDLES");
         return;
     }
 
-    let text = String::from_utf16_lossy(&buf[..len as usize]);
-    match args.handle_title.as_deref() {
-        Some(expected) if text == expected => emit_fail("HANDLES"),
-        Some(_) => {
-            emit_diag("HANDLES", "read unexpected window text");
+    match args.handle_pid {
+        Some(expected) if pid == expected => emit_fail("HANDLES"),
+        Some(expected) => {
+            emit_diag(
+                "HANDLES",
+                &format!("resolved owner pid {pid} != expected {expected}"),
+            );
             emit_fail("HANDLES");
         }
         None => emit_fail("HANDLES"),
@@ -635,7 +638,7 @@ fn parse_args(raw: Vec<String>) -> (Vec<String>, ProbeArgs) {
             Some(("atom-ready-file", value)) => args.ready_file = Some(value.to_string()),
             Some(("atom-release-file", value)) => args.release_file = Some(value.to_string()),
             Some(("handle-hwnd", value)) => args.handle_hwnd = value.parse::<usize>().ok(),
-            Some(("handle-title", value)) => args.handle_title = Some(value.to_string()),
+            Some(("handle-pid", value)) => args.handle_pid = value.parse::<u32>().ok(),
             Some(_) => {} // unknown flag: ignore
             None => tags.push(arg),
         }
@@ -652,7 +655,7 @@ fn main() {
              DISPLAYSETTINGS DESKTOP EXITWINDOWS HANDLES WIN32K. \
              GLOBALATOMS accepts --atom-host-name=, --atom-guest-name=, \
              --atom-ready-file=, --atom-release-file= for the host/guest \
-             isolation handshake; HANDLES accepts --handle-hwnd=, --handle-title= \
+             isolation handshake; HANDLES accepts --handle-hwnd=, --handle-pid= \
              for the external-window access check."
         );
         std::process::exit(2);
