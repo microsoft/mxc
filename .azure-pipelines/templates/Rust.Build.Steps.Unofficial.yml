@@ -34,7 +34,7 @@ steps:
   - template: Cargo.Setup.Public.yml@self
 
   # Pre-fetch deps so the build/test steps can run --offline.
-  - script: cargo fetch --locked --target ${{ parameters.targetTriple }}
+  - script: cargo fetch --target ${{ parameters.targetTriple }}
     displayName: Fetch dependencies
     workingDirectory: ${{ parameters.workingDirectory }}
 
