@@ -3,31 +3,34 @@
 #
 # Win25H2Safe-Tests.ps1
 #
-# Exercises the BaseContainer-fallback work (downlevel-phase5 branch) on a
-# Windows 11 25H2 host without ever invoking bfscfg.exe (which would
-# hard-lock the bfs.sys minifilter on 25H2).
+# Exercises the process-container (AppContainer / BaseContainer) stack without
+# ever invoking bfscfg.exe (which hard-locks the bfs.sys minifilter on 25H2).
+# Despite the name, the harness is capability-driven and runs on any Windows
+# host: it derives the EXPECTED containment tier from the runtime --probe
+# signals rather than hardcoding it (see Get-HostCapabilities).
 #
 # Safety model (`tier2_bfs` Cargo feature OFF, the default):
 #   * Test-Preflight refuses to run if either wxc-exec binary reports
 #     `bfsCompiledIn=true` in --probe output. This is the load-bearing
-#     gate; everything else is belt-and-suspenders.
-#   * With `tier2_bfs` off, `fallback_detector::find_bfscfg_exe`
-#     returns `Ok(None)` unconditionally and the spawn site itself is
-#     gated. The dispatcher's natural T2→T3 fallback fires for any
-#     policy with rw/ro/denied paths.
-#   * Empty-policy runs still label the selected tier "appcontainer-bfs"
-#     because `detect()` short-circuits to T2 when there is nothing to
-#     configure. At runtime that path is a no-op — `configure()`
-#     short-circuits before any bfscfg invocation.
-#   * Every run is post-checked: if the captured log contains the
-#     substring "bfscfg" (proof of an actual spawn), the run is
-#     reported as failed and the harness aborts before the next test.
+#     gate; everything else is belt-and-suspenders. It applies on every
+#     build — bfscfg is never invoked regardless of OS version, so no
+#     OS-version branching is needed for safety. (bfscfg.exe only ships on
+#     Germanium+ / 24H2+25H2 anyway; 22H2/23H2 lack it entirely.)
+#   * With `tier2_bfs` off, `fallback_detector::find_bfscfg_exe` returns
+#     `Ok(None)` unconditionally, `appcontainer-bfs` is never selected, and
+#     the dispatcher falls back to BaseContainer (T1, when usable) or
+#     AppContainer + DACL (T3).
+#   * Every run is post-checked: if the captured log contains the spawn
+#     marker "Output from bfscfg.exe" the run fails and the harness aborts.
 #   * The harness relies on **natural** tier selection — there is no
 #     `-ForceTier` parameter and no `MXC_FORCE_TIER` env-var manipulation
 #     (the env var is `#[cfg(test)]`-gated and has no effect on the
-#     production wxc-exec binary). With `tier2_bfs` off, the detector
-#     drops to T3 for any policy with rw/ro/denied paths, which is
-#     exactly what the assertions below expect.
+#     production wxc-exec binary).
+#
+# Tier expectations (with tier2_bfs OFF) are identical for every policy shape:
+#   * BaseContainer usable -> `base-container`
+#   * otherwise            -> `appcontainer-dacl`
+# $Script:ExpectedTier (derived once at startup) drives every tier assertion.
 
 [CmdletBinding()]
 param(
@@ -210,10 +213,11 @@ function Test-Preflight {
 
     $bfsPath = Join-Path $env:SystemRoot 'System32\bfscfg.exe'
     $bfsPresent = Test-Path $bfsPath
-    Write-Host ("bfscfg.exe present in System32: {0}" -f $bfsPresent)
-    if (-not $bfsPresent) {
-        Write-Warning 'bfscfg.exe was not found in System32. The harness assumes 25H2-shaped hosts.'
-    }
+    # bfscfg.exe ships only on Germanium+ builds (24H2/25H2); 22H2/23H2 lack it
+    # entirely. Its presence is informational only — this harness never invokes
+    # it on any build (the bfsCompiledIn=false gate below is what enforces
+    # safety), so absence is not a problem.
+    Write-Host ("bfscfg.exe present in System32: {0} (Germanium+ ships it; pre-Ge builds do not)" -f $bfsPresent)
 
     if (-not $SkipBuild) {
         if (-not (Test-Path (Join-Path $CargoRoot 'Cargo.toml'))) {
@@ -399,6 +403,52 @@ function Get-ProbeEnvWithDestructive {
     return $list.ToArray()
 }
 
+# -----------------------------------------------------------------------
+# Capability model — derive the expected containment tier from runtime
+# --probe signals rather than hardcoding it, so the harness runs unchanged on
+# both T3 hosts (BaseContainer unusable) and T1 hosts (BaseContainer usable,
+# e.g. pre-Germanium builds that lack bfscfg.exe entirely).
+#
+# `tier2_bfs` is always OFF here (Test-Preflight enforces bfsCompiledIn=false),
+# so `appcontainer-bfs` is never selected and the selected tier is identical
+# for every policy shape: `base-container` when BaseContainer is usable, else
+# `appcontainer-dacl`. BaseContainer usability is detected by the empty-policy
+# probe resolving to `base-container`.
+# -----------------------------------------------------------------------
+function Get-HostCapabilities {
+    $p = Invoke-Probe -Wxc $WxcRelease -Phase 'P0' -Name 'host-capabilities'
+    if (-not $p) {
+        throw 'Get-HostCapabilities: empty-policy --probe failed; cannot determine host tier.'
+    }
+    $tier = [string]$p.tier
+    return [pscustomobject]@{
+        BaselineTier            = $tier
+        BaseContainerUsable     = ($tier -eq 'base-container')
+        BaseContainerApiPresent = [bool]$p.probes.baseContainerApiPresent
+        BfsCompiledIn           = [bool]$p.probes.bfsCompiledIn
+        BfscfgPresent           = [bool]$p.probes.bfscfgPresent
+    }
+}
+
+# Expected needsDaclAugmentation for a policy shape: DACL tier always augments;
+# BaseContainer augments only when the policy carries denied paths.
+function Get-ExpectedDaclAug {
+    param([bool]$HasDenied)
+    switch ($Script:Caps.BaselineTier) {
+        'appcontainer-dacl' { return $true }
+        'base-container'    { return [bool]$HasDenied }
+        default             { return $true }
+    }
+}
+
+# Pass when the log shows the host's expected isolation tier. The logger
+# interleaves a `[ts] ` token between write fragments, so bridge with `.*?`.
+function Test-SelectedTier {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$LogContent)
+    $pattern = '(?im)selected isolation tier:.*?' + [regex]::Escape($Script:ExpectedTier)
+    return [bool]($LogContent -match $pattern)
+}
+
 function New-Config {
     param(
         [Parameter(Mandatory)] [string]$Name,
@@ -531,13 +581,13 @@ function Invoke-Wxc {
 # Phase 1 — probes (read-only, never touches bfscfg)
 #
 # Expectations assume the `tier2_bfs` Cargo feature is OFF (Test-Preflight
-# enforces this) and that BaseContainer (Tier 1) is NOT usable on this
-# host: either the processmodel.dll export is absent, or it is present
-# but the OS feature is disabled. Both cases resolve identically, so the
-# detector drops to T3 (`appcontainer-dacl`) for every policy, including
-# the empty one. The harness keys off the selected tier (a
-# capability-derived signal) rather than raw symbol presence, so it runs
-# unchanged on both host variants.
+# enforces this), so the selected tier is the same for every policy shape:
+# `base-container` when BaseContainer is usable, else `appcontainer-dacl`.
+# The phase keys off $Script:ExpectedTier (derived from the empty-policy
+# probe) rather than any OS-version assumption, so it runs unchanged on both
+# T1-capable and T3-only hosts. needsDaclAugmentation is asserted via
+# Get-ExpectedDaclAug (DACL tier always augments; BaseContainer augments only
+# for denied paths).
 # -----------------------------------------------------------------------
 function Phase-Probes {
     Section 'Phase 1: --probe (read-only)'
@@ -547,51 +597,54 @@ function Phase-Probes {
 
     $probeEmpty = Invoke-Probe -Wxc $WxcRelease -Phase 'P1' -Name 'probe-no-config'
     if ($probeEmpty) {
-        # Drive everything off the selected tier. T1 is "usable" only when
-        # the empty-policy probe resolves to base-container; on both target
-        # hosts (symbol absent, or present-but-disabled) it resolves to
-        # appcontainer-dacl. `baseContainerApiPresent` is informational only.
-        $bcUsable = ($probeEmpty.tier -eq 'base-container')
-        $bcState = if ($bcUsable) { 'usable' }
+        $bcState = if ($Script:Caps.BaseContainerUsable) { 'usable' }
                    elseif ($probeEmpty.probes.baseContainerApiPresent) { 'present-but-disabled' }
                    else { 'absent' }
-        Write-Host ("BaseContainer state on this host: {0} (apiPresent={1})" -f $bcState, $probeEmpty.probes.baseContainerApiPresent)
+        Write-Host ("BaseContainer state on this host: {0} (apiPresent={1}); expected tier={2}" -f $bcState, $probeEmpty.probes.baseContainerApiPresent, $Script:ExpectedTier)
 
-        Record-Result -Phase 'P1' -Name 'BaseContainer not usable (T3 fallback active)' -Pass (-not $bcUsable) -Detail "tier=$($probeEmpty.tier); bcState=$bcState; apiPresent=$($probeEmpty.probes.baseContainerApiPresent)"
+        Record-Result -Phase 'P1' -Name 'expected tier is a recognized value' -Pass ($Script:ExpectedTier -in @('base-container', 'appcontainer-dacl')) -Detail "expectedTier=$($Script:ExpectedTier)"
         Record-Result -Phase 'P1' -Name 'bfsCompiledIn=false (safety gate)' -Pass (-not $probeEmpty.probes.bfsCompiledIn) -Detail "bfsCompiledIn=$($probeEmpty.probes.bfsCompiledIn)"
         Record-Result -Phase 'P1' -Name 'bfscfgPresent=false when feature off' -Pass (-not $probeEmpty.probes.bfscfgPresent) -Detail "bfscfgPresent=$($probeEmpty.probes.bfscfgPresent)"
-        Record-Result -Phase 'P1' -Name 'empty policy probe -> tier=appcontainer-dacl (T1 unusable, T2 gated out)' -Pass ($probeEmpty.tier -eq 'appcontainer-dacl') -Detail "tier=$($probeEmpty.tier)"
-        Record-Result -Phase 'P1' -Name 'empty policy probe -> needsDaclAugmentation=true' -Pass ($probeEmpty.needsDaclAugmentation -eq $true) -Detail "needsDaclAugmentation=$($probeEmpty.needsDaclAugmentation)"
+        Record-Result -Phase 'P1' -Name "empty policy probe -> tier=$($Script:ExpectedTier)" -Pass ($probeEmpty.tier -eq $Script:ExpectedTier) -Detail "tier=$($probeEmpty.tier)"
+        $expAugEmpty = Get-ExpectedDaclAug -HasDenied:$false
+        Record-Result -Phase 'P1' -Name "empty policy probe -> needsDaclAugmentation=$expAugEmpty" -Pass ($probeEmpty.needsDaclAugmentation -eq $expAugEmpty) -Detail "needsDaclAugmentation=$($probeEmpty.needsDaclAugmentation)"
     }
 
     $cfgRw = New-Config -Name 'probe-rw' -CommandLine 'cmd /c exit 0' -ReadWrite @($rw)
     $probeRw = Invoke-Probe -Wxc $WxcRelease -ConfigPath $cfgRw -Phase 'P1' -Name 'probe-rw-config'
     if ($probeRw) {
-        Record-Result -Phase 'P1' -Name 'rw-paths probe -> tier=appcontainer-dacl (T2 gated out)' -Pass ($probeRw.tier -eq 'appcontainer-dacl') -Detail "tier=$($probeRw.tier)"
-        Record-Result -Phase 'P1' -Name 'rw-paths probe -> needsDaclAugmentation=true' -Pass ($probeRw.needsDaclAugmentation -eq $true) -Detail "needsDaclAugmentation=$($probeRw.needsDaclAugmentation)"
+        Record-Result -Phase 'P1' -Name "rw-paths probe -> tier=$($Script:ExpectedTier)" -Pass ($probeRw.tier -eq $Script:ExpectedTier) -Detail "tier=$($probeRw.tier)"
+        $expAugRw = Get-ExpectedDaclAug -HasDenied:$false
+        Record-Result -Phase 'P1' -Name "rw-paths probe -> needsDaclAugmentation=$expAugRw" -Pass ($probeRw.needsDaclAugmentation -eq $expAugRw) -Detail "needsDaclAugmentation=$($probeRw.needsDaclAugmentation)"
     }
 
     $cfgDenied = New-Config -Name 'probe-denied' -CommandLine 'cmd /c exit 0' -Denied @($denied)
     $probeDenied = Invoke-Probe -Wxc $WxcRelease -ConfigPath $cfgDenied -Phase 'P1' -Name 'probe-denied-config'
     if ($probeDenied) {
-        Record-Result -Phase 'P1' -Name 'denied probe -> tier=appcontainer-dacl (T2 gated out)' -Pass ($probeDenied.tier -eq 'appcontainer-dacl') -Detail "tier=$($probeDenied.tier)"
-        Record-Result -Phase 'P1' -Name 'denied probe -> needsDaclAugmentation=true' -Pass ($probeDenied.needsDaclAugmentation -eq $true) -Detail "needsDaclAugmentation=$($probeDenied.needsDaclAugmentation)"
+        Record-Result -Phase 'P1' -Name "denied probe -> tier=$($Script:ExpectedTier)" -Pass ($probeDenied.tier -eq $Script:ExpectedTier) -Detail "tier=$($probeDenied.tier)"
+        $expAugDenied = Get-ExpectedDaclAug -HasDenied:$true
+        Record-Result -Phase 'P1' -Name "denied probe -> needsDaclAugmentation=$expAugDenied" -Pass ($probeDenied.needsDaclAugmentation -eq $expAugDenied) -Detail "needsDaclAugmentation=$($probeDenied.needsDaclAugmentation)"
     }
 
     $cfgRefuse = New-Config -Name 'probe-refuse' -CommandLine 'cmd /c exit 0' -ReadWrite @($rw) -AllowDaclMutation $false
     $probeRefuse = Invoke-Probe -Wxc $WxcRelease -ConfigPath $cfgRefuse -Phase 'P1' -Name 'probe-allow-dacl-false'
     if ($probeRefuse) {
-        # With T2 gated out, rw-paths probe falls through to T3, which
-        # requires DACL augmentation. allowDaclMutation=false therefore
-        # trips DaclFallbackDisabled and the detector returns an error
-        # (tier omitted).
-        #
-        # Under Set-StrictMode -Version Latest, accessing an absent
-        # property throws; check existence via PSObject.Properties
-        # instead of `$null -eq $obj.foo`.
+        # Under Set-StrictMode -Version Latest, accessing an absent property
+        # throws; check existence via PSObject.Properties instead of
+        # `$null -eq $obj.foo`.
         $tierMissing = -not [bool]$probeRefuse.PSObject.Properties['tier']
         $errorStr    = if ($probeRefuse.PSObject.Properties['error']) { [string]$probeRefuse.error } else { '' }
-        Record-Result -Phase 'P1' -Name 'allowDaclMutation=false + rw-paths probe -> error (T3 needs DACL)' -Pass ($tierMissing -and ($errorStr -match 'DACL fallback')) -Detail "tierMissing=$tierMissing; error=$errorStr"
+        if (Get-ExpectedDaclAug -HasDenied:$false) {
+            # The expected tier needs DACL augmentation for rw paths, so
+            # allowDaclMutation=false trips DaclFallbackDisabled and the
+            # detector returns an error (tier omitted).
+            Record-Result -Phase 'P1' -Name 'allowDaclMutation=false + rw-paths probe -> error (DACL augmentation refused)' -Pass ($tierMissing -and ($errorStr -match 'DACL fallback')) -Detail "tierMissing=$tierMissing; error=$errorStr"
+        } else {
+            # BaseContainer host: rw paths need no DACL augmentation, so
+            # allowDaclMutation=false is a no-op and the probe still resolves.
+            $tierVal = if ($probeRefuse.PSObject.Properties['tier']) { [string]$probeRefuse.tier } else { '<missing>' }
+            Record-Result -Phase 'P1' -Name 'allowDaclMutation=false + rw-paths probe -> still resolves (no DACL augmentation needed)' -Pass ((-not $tierMissing) -and ($tierVal -eq $Script:ExpectedTier)) -Detail "tier=$tierVal; error=$errorStr"
+        }
     }
 }
 
@@ -620,7 +673,7 @@ function Phase-EmptyRelease {
 
     Record-Result -Phase 'P2' -Name 'release exit=0' -Pass ($r.ExitCode -eq 0) -Detail "exit=$($r.ExitCode); stdout=$($r.Stdout.Trim())"
     Record-Result -Phase 'P2' -Name 'AppContainer ran the child (stdout round-trip)' -Pass ($r.Stdout -match 'P2-empty-release-ok')
-    Record-Result -Phase 'P2' -Name 'selected isolation tier: appcontainer-dacl (T1 unusable, T2 gated out)' -Pass ([bool]($logContent -match '(?im)selected isolation tier:.*?appcontainer-dacl'))
+    Record-Result -Phase 'P2' -Name "selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent) -Detail "expected=$($Script:ExpectedTier)"
     Record-Result -Phase 'P2' -Name 'no bfscfg invocation in log' -Pass (-not ($logContent -match '(?im)Output from bfscfg\.exe'))
     Record-Result -Phase 'P2' -Name 'UI Job Object assigned telemetry' -Pass ([bool]($logContent -match 'UI Job Object assigned'))
 }
@@ -652,7 +705,7 @@ function Phase-DeniedRelease {
     $aclAfter = Get-Acl-Snapshot $denied
 
     Record-Result -Phase 'P3' -Name 'release exit=0' -Pass ($r.ExitCode -eq 0) -Detail "exit=$($r.ExitCode)"
-    Record-Result -Phase 'P3' -Name 'selected isolation tier: appcontainer-dacl (T2 gated out)' -Pass ([bool]($logContent -match '(?im)selected isolation tier:.*?appcontainer-dacl'))
+    Record-Result -Phase 'P3' -Name "selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent) -Detail "expected=$($Script:ExpectedTier)"
     Record-Result -Phase 'P3' -Name 'no bfscfg invocation in log' -Pass (-not ($logContent -match '(?im)Output from bfscfg\.exe'))
     Record-Result -Phase 'P3' -Name 'denied-path ACL restored after run' -Pass ($aclBefore -eq $aclAfter)
     Record-Result -Phase 'P3' -Name 'no orphan state files' -Pass (@(Get-StateFiles).Count -eq 0)
@@ -686,7 +739,7 @@ function Phase-T3Forced {
     $stateAfter     = @(Get-StateFiles)
 
     Record-Result -Phase 'P4' -Name 'child exit=0' -Pass ($r.ExitCode -eq 0) -Detail "exit=$($r.ExitCode)"
-    Record-Result -Phase 'P4' -Name 'selected isolation tier: appcontainer-dacl' -Pass ([bool]($logContent -match '(?im)selected isolation tier:.*?appcontainer-dacl'))
+    Record-Result -Phase 'P4' -Name "selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent) -Detail "expected=$($Script:ExpectedTier)"
     Record-Result -Phase 'P4' -Name 'UI Job Object assigned telemetry' -Pass ([bool]($logContent -match 'UI Job Object assigned'))
     Record-Result -Phase 'P4' -Name 'Win32k mitigation applied telemetry (ui.disable=false -> not expected)' -Pass (-not ($logContent -match 'Win32k mitigation applied')) -Detail 'this config has ui.disable=false'
     Record-Result -Phase 'P4' -Name 'rw ACL restored after run'     -Pass ($aclRwBefore -eq $aclRwAfter)
@@ -710,7 +763,7 @@ function Phase-T3Forced {
     Assert-NoBfscfg -LogContent $logContent2 -Phase 'P4' -Name 't3-ui-disable'
 
     Record-Result -Phase 'P4' -Name 'ui.disable=true emits Win32k mitigation applied' -Pass ([bool]($logContent2 -match 'Win32k mitigation applied')) -Detail "child exit=$($r2.ExitCode) (expected to fail; cmd.exe needs Win32k)"
-    Record-Result -Phase 'P4' -Name 'ui.disable=true emits selected isolation tier: appcontainer-dacl' -Pass ([bool]($logContent2 -match '(?im)selected isolation tier:.*?appcontainer-dacl'))
+    Record-Result -Phase 'P4' -Name "ui.disable=true emits selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent2) -Detail "expected=$($Script:ExpectedTier)"
     # Even though child crashed, ACEs must still be cleaned up.
     $aclRwAfterUi = Get-Acl-Snapshot $rw
     Record-Result -Phase 'P4' -Name 'ui.disable=true rw ACL still cleaned up' -Pass ($aclRwBefore -eq $aclRwAfterUi)
@@ -749,7 +802,7 @@ function Phase-T3Forced {
     # load-bearing assertions.
     $accessSignal = $combinedPing -match '(?im)access\s*is\s*denied|access\s*denied|socket|10013|ICMP|general\s*failure|unable\s*to\s*contact'
     Record-Result -Phase 'P4' -Name 'sandbox blocks ping (failure looks socket-related)' -Pass ([bool]$accessSignal) -Detail 'best-effort string match'
-    Record-Result -Phase 'P4' -Name 'sandbox blocks ping: selected isolation tier: appcontainer-dacl' -Pass ([bool]($logContentPing -match '(?im)selected isolation tier:.*?appcontainer-dacl'))
+    Record-Result -Phase 'P4' -Name "sandbox blocks ping: selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContentPing) -Detail "expected=$($Script:ExpectedTier)"
     Record-Result -Phase 'P4' -Name 'sandbox blocks ping: rw ACL still cleaned up' -Pass ($aclRwBefore -eq $aclRwAfterPing)
     Record-Result -Phase 'P4' -Name 'sandbox blocks ping: no orphan state files' -Pass (@(Get-StateFiles).Count -eq 0)
 
@@ -988,7 +1041,7 @@ function Phase-UiMitigationMatrix {
         $summaryA = ($matrixA.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '
 
         Record-Result -Phase 'P4b' -Name 'scenarioA: UI Job Object assigned telemetry' -Pass ([bool]($logContentA -match 'UI Job Object assigned'))
-        Record-Result -Phase 'P4b' -Name 'scenarioA: selected isolation tier: appcontainer-dacl' -Pass ([bool]($logContentA -match '(?im)selected isolation tier:.*?appcontainer-dacl'))
+        Record-Result -Phase 'P4b' -Name "scenarioA: selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContentA) -Detail "expected=$($Script:ExpectedTier)"
         # ui.disable=false on this run: Win32k mitigation applied must NOT appear.
         Record-Result -Phase 'P4b' -Name 'scenarioA: no Win32k mitigation applied (ui.disable=false)' -Pass (-not ($logContentA -match 'Win32k mitigation applied'))
 
@@ -1046,7 +1099,7 @@ function Phase-UiMitigationMatrix {
     $printedPass = ($rB.Stdout -match '(?m)^WIN32K=PASS\s*$')
 
     Record-Result -Phase 'P4b' -Name 'scenarioB: Win32k mitigation applied telemetry' -Pass ([bool]($logContentB -match 'Win32k mitigation applied'))
-    Record-Result -Phase 'P4b' -Name 'scenarioB: selected isolation tier: appcontainer-dacl' -Pass ([bool]($logContentB -match '(?im)selected isolation tier:.*?appcontainer-dacl'))
+    Record-Result -Phase 'P4b' -Name "scenarioB: selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContentB) -Detail "expected=$($Script:ExpectedTier)"
     # Mitigation worked iff the child never reported WIN32K=FAIL. Child
     # exit code is incidental — under the mitigation the process is killed
     # by the kernel; without it the probe completes and exits 0.
@@ -1175,7 +1228,7 @@ function Invoke-GlobalAtomProbe {
     $stdout = $sbOut.ToString()
     $logContent = Read-Log $log
     Assert-NoBfscfg -LogContent $logContent -Phase 'P4c' -Name $Name
-    $tierMatch = [bool]($logContent -match '(?im)selected isolation tier:.*?appcontainer-dacl')
+    $tierMatch = Test-SelectedTier -LogContent $logContent
     $h2g = if ($stdout -match '(?m)^GLOBALATOMS_HOST_TO_GUEST=(?<v>PASS|FAIL)\s*$') { $matches['v'] } else { '<missing>' }
     return [pscustomobject]@{ HostToGuest = $h2g; GuestFound = $guestFound; TierMatch = $tierMatch; Detail = "stdout=$($stdout.Trim())" }
 }
@@ -1210,8 +1263,18 @@ function Phase-GlobalAtomIsolation {
 # Phase 5 — allowDaclMutation=false rejection under forced T3
 # -----------------------------------------------------------------------
 function Phase-DaclDisabled {
-    Section 'Phase 5: debug build, T3 forced, allowDaclMutation=false'
+    Section 'Phase 5: debug build, allowDaclMutation=false (DACL-augmentation refusal)'
     Clear-StateFiles
+
+    # This phase exercises the DACL-augmentation refusal path, which only
+    # engages when the host's expected tier augments DACLs for an rw policy
+    # (i.e. appcontainer-dacl). On a BaseContainer host, rw paths use the
+    # BaseContainer mechanism and need no DACL augmentation, so
+    # allowDaclMutation=false is a no-op and there is nothing to refuse.
+    if (-not (Get-ExpectedDaclAug -HasDenied:$false)) {
+        Record-Result -Phase 'P5' -Name 'DACL-augmentation refusal' -Pass $true -Detail "SKIPPED: rw policy needs no DACL augmentation on tier=$($Script:ExpectedTier)"
+        return
+    }
 
     $rw = Join-Path $ScratchRoot 'rw'
     $aclBefore = Get-Acl-Snapshot $rw
@@ -1236,8 +1299,17 @@ function Phase-DaclDisabled {
 # Phase 6 — crash-recovery
 # -----------------------------------------------------------------------
 function Phase-CrashRecovery {
-    Section 'Phase 6: debug build, T3 forced, taskkill mid-run (crash recovery)'
+    Section 'Phase 6: debug build, taskkill mid-run (DACL state crash recovery)'
     Clear-StateFiles
+
+    # Crash recovery is about reaping orphaned DACL-augmentation state, so it
+    # only applies when an rw policy actually augments DACLs (appcontainer-dacl
+    # tier). On a BaseContainer host no ACEs/state files are written for rw
+    # paths, so there is nothing to orphan or reap.
+    if (-not (Get-ExpectedDaclAug -HasDenied:$false)) {
+        Record-Result -Phase 'P6' -Name 'DACL state crash recovery' -Pass $true -Detail "SKIPPED: rw policy writes no DACL state on tier=$($Script:ExpectedTier)"
+        return
+    }
 
     $rw = Join-Path $ScratchRoot 'rw'
     $aclBefore = Get-Acl-Snapshot $rw
@@ -1355,6 +1427,10 @@ $null = Start-Transcript -Path $ResultsFile -Force -IncludeInvocationHeader
 
 try {
     Test-Preflight
+    $Script:Caps = Get-HostCapabilities
+    $Script:ExpectedTier = $Script:Caps.BaselineTier
+    Write-Host ("Host capabilities: expectedTier={0} baseContainerUsable={1} apiPresent={2} bfscfgPresent={3} bfsCompiledIn={4}" -f `
+        $Script:Caps.BaselineTier, $Script:Caps.BaseContainerUsable, $Script:Caps.BaseContainerApiPresent, $Script:Caps.BfscfgPresent, $Script:Caps.BfsCompiledIn) -ForegroundColor Cyan
     Initialize-Scratch
 
     # Phase registry. Build + preflight + scratch init above always run; this
