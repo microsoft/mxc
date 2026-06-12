@@ -996,6 +996,24 @@ function Phase-UiMitigationMatrix {
             $got = if ($matrixA.ContainsKey($tag)) { $matrixA[$tag] } else { '<missing>' }
             Record-Result -Phase 'P4b' -Name "scenarioA: $tag blocked (probe -> PASS)" -Pass ($got -eq 'PASS') -Detail "got=$got; full=$summaryA"
         }
+
+        # Negative control for HANDLES: same probe + host window, but
+        # isolation=desktop sets NO UILIMIT_HANDLES. The probe MUST be able to
+        # read the external window's title -> HANDLES=FAIL, proving the
+        # HANDLES=PASS above is a real isolation result and not vacuous (e.g.
+        # GetWindowTextW returning empty for an unrelated reason).
+        $cmdAneg = "`"$UiProbeDebug`" HANDLES --handle-hwnd=$hwndVal --handle-title=`"$handleTitle`""
+        $cfgAneg = New-Config -Name 'ui-matrix-A-handles-neg' `
+            -CommandLine $cmdAneg `
+            -ReadWrite @($rw) `
+            -UiDisable $false `
+            -BpUiIsolation 'desktop' `
+            -Env (Get-ProbeEnvWithDestructive)
+        $logAneg = Join-Path $ScratchRoot 'logs\ui-matrix-A-handles-neg.log'
+        $rAneg = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgAneg -LogPath $logAneg
+        Assert-NoBfscfg -LogContent (Read-Log $logAneg) -Phase 'P4b' -Name 'ui-matrix-A-handles-neg'
+        $negHandles = if ($rAneg.Stdout -match '(?m)^HANDLES=(?<v>PASS|FAIL)\s*$') { $matches['v'] } else { '<missing>' }
+        Record-Result -Phase 'P4b' -Name 'negative control: HANDLES visible without UILIMIT_HANDLES (probe -> FAIL)' -Pass ($negHandles -eq 'FAIL') -Detail "got=$negHandles; stdout=$($rAneg.Stdout.Trim())"
     }
     finally {
         $winHost.Stop()
@@ -1055,9 +1073,16 @@ function Phase-UiMitigationMatrix {
 #     exits, so the check MUST happen while the probe is still alive — hence
 #     the handshake).
 # -----------------------------------------------------------------------
-function Phase-GlobalAtomIsolation {
-    Section 'Phase 4c: GLOBALATOMS bidirectional isolation (T3 forced)'
-
+function Invoke-GlobalAtomProbe {
+    # Runs the GLOBALATOMS bidirectional handshake once with the given
+    # isolation mode and returns the observed results so the caller can assert
+    # either the isolated (container) or non-isolated (desktop) expectation.
+    # Returns: HostToGuest (PASS|FAIL|<missing>), GuestFound (UInt16 atom, or
+    # $null if the probe never signalled ready), TierMatch (bool), Detail.
+    param(
+        [Parameter(Mandatory)] [string]$Isolation,
+        [Parameter(Mandatory)] [string]$Name
+    )
     $rw = Join-Path $ScratchRoot 'rw'
     New-Item -ItemType Directory -Path $rw -Force | Out-Null
 
@@ -1073,19 +1098,18 @@ function Phase-GlobalAtomIsolation {
     # the whole contained run.
     $hostAtom = [Mxc.AtomNative]::GlobalAddAtomW($hostName)
     if ($hostAtom -eq 0) {
-        Record-Result -Phase 'P4c' -Name 'host atom planted' -Pass $false -Detail 'GlobalAddAtomW returned 0'
-        return
+        return [pscustomobject]@{ HostToGuest = '<missing>'; GuestFound = $null; TierMatch = $false; Detail = 'host GlobalAddAtomW returned 0' }
     }
 
     $cmd = "`"$UiProbeDebug`" GLOBALATOMS " +
         "--atom-host-name=$hostName --atom-guest-name=$guestName " +
         "--atom-ready-file=`"$readyFile`" --atom-release-file=`"$releaseFile`""
-    $cfg = New-Config -Name 'ui-globalatoms' `
+    $cfg = New-Config -Name $Name `
         -CommandLine $cmd `
         -ReadWrite @($rw) `
         -UiDisable $false `
-        -BpUiIsolation 'container'
-    $log = Join-Path $ScratchRoot 'logs\ui-globalatoms.log'
+        -BpUiIsolation $Isolation
+    $log = Join-Path $ScratchRoot "logs\$Name.log"
 
     # Match Invoke-Wxc's defensive scrub of the test-only tier override.
     Remove-Item Env:\MXC_FORCE_TIER -ErrorAction SilentlyContinue
@@ -1129,7 +1153,7 @@ function Phase-GlobalAtomIsolation {
         }
 
         if ($ready) {
-            # Direction 2: the host must NOT find the contained process's atom.
+            # Direction 2: does the host find the contained process's atom?
             $guestFound = [Mxc.AtomNative]::GlobalFindAtomW($guestName)
         }
 
@@ -1150,20 +1174,35 @@ function Phase-GlobalAtomIsolation {
 
     $stdout = $sbOut.ToString()
     $logContent = Read-Log $log
-    Assert-NoBfscfg -LogContent $logContent -Phase 'P4c' -Name 'ui-globalatoms'
-    Record-Result -Phase 'P4c' -Name 'selected isolation tier: appcontainer-dacl' -Pass ([bool]($logContent -match '(?im)selected isolation tier:.*?appcontainer-dacl'))
-
-    # Direction 1: host -> guest. PASS means the contained probe could not see
-    # the host's global atom.
+    Assert-NoBfscfg -LogContent $logContent -Phase 'P4c' -Name $Name
+    $tierMatch = [bool]($logContent -match '(?im)selected isolation tier:.*?appcontainer-dacl')
     $h2g = if ($stdout -match '(?m)^GLOBALATOMS_HOST_TO_GUEST=(?<v>PASS|FAIL)\s*$') { $matches['v'] } else { '<missing>' }
-    Record-Result -Phase 'P4c' -Name 'host atom NOT visible to contained process (host->guest)' -Pass ($h2g -eq 'PASS') -Detail "got=$h2g; stdout=$($stdout.Trim())"
+    return [pscustomobject]@{ HostToGuest = $h2g; GuestFound = $guestFound; TierMatch = $tierMatch; Detail = "stdout=$($stdout.Trim())" }
+}
 
-    # Direction 2: guest -> host. PASS means the host could not see the
-    # contained process's atom (GlobalFindAtomW returned 0).
-    if ($null -eq $guestFound) {
+function Phase-GlobalAtomIsolation {
+    Section 'Phase 4c: GLOBALATOMS bidirectional isolation (T3 forced)'
+
+    # ---- Positive: isolation=container sets UILIMIT_GLOBALATOMS -> isolated.
+    $pos = Invoke-GlobalAtomProbe -Isolation 'container' -Name 'ui-globalatoms'
+    Record-Result -Phase 'P4c' -Name 'selected isolation tier: appcontainer-dacl' -Pass $pos.TierMatch
+    Record-Result -Phase 'P4c' -Name 'host atom NOT visible to contained process (host->guest)' -Pass ($pos.HostToGuest -eq 'PASS') -Detail "got=$($pos.HostToGuest); $($pos.Detail)"
+    if ($null -eq $pos.GuestFound) {
         Record-Result -Phase 'P4c' -Name 'contained atom NOT visible to host (guest->host)' -Pass $false -Detail 'probe never signalled ready; no guest-atom check performed'
     } else {
-        Record-Result -Phase 'P4c' -Name 'contained atom NOT visible to host (guest->host)' -Pass ($guestFound -eq 0) -Detail "GlobalFindAtomW=$guestFound (0 = not found = isolated)"
+        Record-Result -Phase 'P4c' -Name 'contained atom NOT visible to host (guest->host)' -Pass ($pos.GuestFound -eq 0) -Detail "GlobalFindAtomW=$($pos.GuestFound) (0 = not found = isolated)"
+    }
+
+    # ---- Negative control: isolation=desktop sets NO UILIMIT_GLOBALATOMS, so
+    # the global atom table is shared. The probe MUST see the host atom and the
+    # host MUST see the guest atom — proving the positive results above are not
+    # vacuous (e.g. an atom API silently failing would otherwise read as PASS).
+    $neg = Invoke-GlobalAtomProbe -Isolation 'desktop' -Name 'ui-globalatoms-neg'
+    Record-Result -Phase 'P4c' -Name 'negative control: host atom VISIBLE without UILIMIT_GLOBALATOMS (host->guest -> FAIL)' -Pass ($neg.HostToGuest -eq 'FAIL') -Detail "got=$($neg.HostToGuest); $($neg.Detail)"
+    if ($null -eq $neg.GuestFound) {
+        Record-Result -Phase 'P4c' -Name 'negative control: contained atom VISIBLE to host without UILIMIT_GLOBALATOMS' -Pass $false -Detail 'probe never signalled ready; no guest-atom check performed'
+    } else {
+        Record-Result -Phase 'P4c' -Name 'negative control: contained atom VISIBLE to host without UILIMIT_GLOBALATOMS' -Pass ($neg.GuestFound -ne 0) -Detail "GlobalFindAtomW=$($neg.GuestFound) (nonzero = found = NOT isolated)"
     }
 }
 
