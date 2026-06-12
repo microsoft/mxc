@@ -75,7 +75,6 @@ impl std::io::Write for PipeWriter {
 }
 
 const BUFFER_SIZE: u32 = 4096;
-const MAX_OUTPUT_CHARS: usize = 1024 * 1024;
 
 /// Thread-safe owned handle wrapper that transfers HANDLE ownership across thread boundaries.
 /// After construction the source `OwnedHandle` is invalidated, and this wrapper is
@@ -141,10 +140,16 @@ impl Drop for OwnedHandle {
     }
 }
 
-/// Read all data from a pipe as UTF-8 text, capped at 1MB of characters.
+/// Read all data from a pipe as UTF-8 (lossy) text, retaining at most
+/// [`crate::capture_io::MAX_CAPTURED_BYTES`].
+///
+/// Reading continues to EOF even after the cap (the overflow is discarded) so
+/// the child never blocks on a full pipe, and the bytes are decoded once at the
+/// end so multibyte UTF-8 sequences split across reads are not corrupted.
 pub fn read_from_pipe(pipe: HANDLE) -> String {
-    let mut result = String::with_capacity(BUFFER_SIZE as usize);
-    let mut char_count: usize = 0;
+    use crate::capture_io::MAX_CAPTURED_BYTES;
+
+    let mut bytes: Vec<u8> = Vec::with_capacity(BUFFER_SIZE as usize);
     let mut buffer = [0u8; BUFFER_SIZE as usize];
     loop {
         let mut bytes_read = 0u32;
@@ -152,22 +157,14 @@ pub fn read_from_pipe(pipe: HANDLE) -> String {
         if ok.is_err() || bytes_read == 0 {
             break;
         }
-        let chunk = String::from_utf8_lossy(&buffer[..bytes_read as usize]);
-        let remaining = MAX_OUTPUT_CHARS.saturating_sub(char_count);
-        if remaining == 0 {
-            break;
+        if bytes.len() < MAX_CAPTURED_BYTES {
+            let take = (bytes_read as usize).min(MAX_CAPTURED_BYTES - bytes.len());
+            bytes.extend_from_slice(&buffer[..take]);
         }
-        let chunk_char_count = chunk.chars().count();
-        if chunk_char_count > remaining {
-            // Take only up to `remaining` chars
-            let truncated: String = chunk.chars().take(remaining).collect();
-            result.push_str(&truncated);
-            break;
-        }
-        result.push_str(&chunk);
-        char_count += chunk_char_count;
+        // Past the cap: keep reading and discarding so the child's pipe never
+        // fills and it can run to completion.
     }
-    result
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Create a pair of pipe handles (read, write) with appropriate inheritance.

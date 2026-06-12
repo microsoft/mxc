@@ -3,6 +3,7 @@
 
 // Platform-agnostic modules (shared by wxc-exec, lxc-exec, mxc-exec-mac
 // and every backend crate).
+pub mod capture_io;
 pub mod cmdline;
 pub mod config_parser;
 pub mod encoding;

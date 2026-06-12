@@ -501,10 +501,8 @@ fn cleanup_iptables(manager: &mut Option<NetworkIptablesManager>, logger: &mut L
 
 // -- I/O helpers (mirrors seatbelt_runner) --------------------------------
 
-fn read_to_string<R: std::io::Read>(mut reader: R) -> String {
-    let mut buffer = String::new();
-    let _ = reader.read_to_string(&mut buffer);
-    buffer
+fn read_to_string<R: std::io::Read>(reader: R) -> String {
+    wxc_common::capture_io::read_capped_lossy(reader)
 }
 
 fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {

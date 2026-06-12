@@ -749,12 +749,11 @@ fn resolve_working_directory(request: &ExecutionRequest) -> String {
         .unwrap_or_else(|| "/".to_string())
 }
 
-/// Read a child pipe to a `String`, ignoring decode/IO errors (mirrors the
-/// bubblewrap runner's drain helper).
-fn read_to_string<R: std::io::Read>(mut reader: R) -> String {
-    let mut buffer = String::new();
-    let _ = reader.read_to_string(&mut buffer);
-    buffer
+/// Read a child pipe to a `String`, capped and UTF-8-lossy (shared bounded
+/// drain). Keeps reading past the cap so the child never blocks, and replaces
+/// invalid UTF-8 rather than discarding the stream.
+fn read_to_string<R: std::io::Read>(reader: R) -> String {
+    wxc_common::capture_io::read_capped_lossy(reader)
 }
 
 /// Join a drain thread, returning its captured output (empty on join failure
