@@ -516,12 +516,12 @@ pub fn decode_request_input(
 // ---------- Cross-field validation ----------
 
 /// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: &str = ">=0.4, <=0.7";
+const SUPPORTED_VERSION: &str = ">=0.4, <=0.8";
 
 /// Canonical "latest" schema version string used in samples and tests. Bump
 /// alongside `SUPPORTED_VERSION`'s upper bound when a new dev schema lands.
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: &str = "0.7.0-alpha";
+const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
 
 /// The minimum schema version that implies BaseContainer backend usage.
 const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
@@ -2773,7 +2773,7 @@ mod tests {
 
     #[test]
     fn schema_version_too_new_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.8.0"}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.9.0"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 

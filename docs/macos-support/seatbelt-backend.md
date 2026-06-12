@@ -136,7 +136,7 @@ settings live under a top-level `seatbelt` key:
 
 ```json
 {
-    "$schema": "./schemas/dev/mxc-config.schema.0.7.0-dev.json",
+    "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
     "containment": "seatbelt",
     "process": {
         "commandLine": "echo hi from seatbelt",

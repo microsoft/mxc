@@ -50,9 +50,10 @@ mxc/schemas/
 ├── stable/
 │   ├── mxc-config.schema.0.4.0-alpha.json
 │   ├── mxc-config.schema.0.5.0-alpha.json
-│   └── mxc-config.schema.0.6.0-alpha.json  (shipped — current stable)
+│   ├── mxc-config.schema.0.6.0-alpha.json
+│   └── mxc-config.schema.0.7.0-alpha.json  (shipped — current stable)
 └── dev/
-    └── mxc-config.schema.0.7.0-dev.json    (current — work in progress)
+    └── mxc-config.schema.0.8.0-dev.json    (current — work in progress)
 ```
 
 The dev schema file (`mxc-config.schema.X.Y.Z-dev.json`) must define the `experimental`

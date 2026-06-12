@@ -39,7 +39,7 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 ./build-mac.sh --rust-only # Only Rust binaries, skip SDK
 ```
 
-Requires Xcode Command Line Tools and Rust. Produces an unsigned `mxc-exec-mac` binary (codesigning + notarization happen at release time). Schema `0.7.0-dev` or later required for macOS/Seatbelt backend.
+Requires Xcode Command Line Tools and Rust. Produces an unsigned `mxc-exec-mac` binary (codesigning + notarization happen at release time). Schema `0.7.0-alpha` or later required for macOS/Seatbelt backend.
 
 ### Individual components
 
@@ -113,7 +113,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 | Hyperlight | `wxc-exec.exe` | Windows | `backends/hyperlight/common/src/lib.rs` — Hyperlight + Unikraft micro-VM backend |
 | IsolationSession | `wxc-exec.exe` | Windows | `backends/isolation_session/common/src/` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Supports both one-shot (single-invocation lifecycle, via `ScriptRunner`) and state-aware (multi-invocation provision/start/exec/stop/deprovision, via `StatefulSandboxBackend`) modes. Honors `readwritePaths` and `readonlyPaths` at provision via `ShareFolderBatchAsync` (rejects `deniedPaths` since the API has no Deny ACE primitive); filesystem policy is immutable post-provision and rejected at later phases. State-aware additionally accepts an optional `user` bundle (`upn`, `wamToken`) at provision and start to provision Entra cloud-agent sandboxes; one-shot rejects the bundle, and hosts that don't support Entra agents surface `backend_unavailable`. Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
 | LXC | `lxc-exec` | Linux | `core/lxc/src/main.rs` + `backends/lxc/common/` |
-| Seatbelt | `mxc-exec-mac` | macOS | `core/mxc_darwin/src/main.rs` + `backends/seatbelt/common/` — uses macOS App Sandbox (Seatbelt) profiles for process containment. Requires schema `0.7.0-dev`+. See `docs/macos-support/seatbelt-backend.md`. |
+| Seatbelt | `mxc-exec-mac` | macOS | `core/mxc_darwin/src/main.rs` + `backends/seatbelt/common/` — uses macOS App Sandbox (Seatbelt) profiles for process containment. Requires schema `0.7.0-alpha`+. See `docs/macos-support/seatbelt-backend.md`. |
 | Bubblewrap | `lxc-exec` | Linux | `backends/bubblewrap/common/src/bwrap_runner.rs` — unprivileged sandboxing via Linux user namespaces and `bwrap`. Experimental — requires `--experimental`. Uses shared filesystem/network policy fields; per-host network filtering via `NetworkIptablesManager` from `backends/lxc/common`. See `docs/bwrap-support/bubblewrap-backend.md`. |
 
 ### Config flow
@@ -130,10 +130,9 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 
 ### Schema system
 
-- **Stable schemas**: `schemas/stable/mxc-config.schema.0.4.0-alpha.json`, `0.5.0-alpha.json`, and `0.6.0-alpha.json` — immutable after release (plus a `0.5.0-alpha-strict` view)
-- **Dev schema**: `schemas/dev/mxc-config.schema.0.7.0-dev.json` (configs targeting it declare `version: 0.7.0-alpha`)
-- **Canonical schema-version source**: `schemas/schema-version.json` — the single source of truth for the schema-version constants (min/maxSupported/state-aware/stable/dev). `scripts/versioning/check-schema-versions.js` enforces that the Rust parser, SDK, and schema filenames all agree with it; do not hand-edit a schema-version constant without updating the canonical file.
-- Current schema version: `0.7.0-alpha` (latest stable: `0.6.0-alpha`)
+- **Stable schemas**: released, immutable schemas live in [`schemas/stable/`](../schemas/stable) (one file per released version, plus a `-strict` view) — never edit them after release.
+- **Dev schema**: the in-progress schema lives in [`schemas/dev/`](../schemas/dev).
+- **Canonical schema-version source**: `schemas/schema-version.json` — the single source of truth for the schema-version constants (min/maxSupported/state-aware/stable/dev). `scripts/versioning/check-schema-versions.js` enforces that the Rust parser, SDK, and schema filenames all agree with it; do not hand-edit a schema-version constant without updating the canonical file. See [`docs/versioning.md`](../docs/versioning.md) for the full design.
 - Config files can reference schemas via `"$schema"` for editor validation. `scripts/versioning/validate-configs.js` validates the `tests/examples` + `tests/configs` corpus against the dev schema in CI.
 
 ### Key documentation (`docs/`)
@@ -232,7 +231,7 @@ When changing behavior covered by existing documentation, update the relevant do
 
 ### Policy versioning
 
-The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.4.0-alpha` minimum, `0.7.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. These bounds are mirrored from the canonical `schemas/schema-version.json` and enforced by `scripts/versioning/check-schema-versions.js`. See `docs/versioning.md` for the full design.
+The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.4.0-alpha` minimum, `0.8.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. These bounds are mirrored from the canonical `schemas/schema-version.json` and enforced by `scripts/versioning/check-schema-versions.js`. See `docs/versioning.md` for the full design.
 
 ## Creating Issues
 
