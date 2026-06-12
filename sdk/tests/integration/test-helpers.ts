@@ -242,30 +242,60 @@ export function createTempDir(prefix: string = 'mxc-test'): string {
 // specific backend build the config directly.
 //
 // Notes (kept in lockstep with spawnSandboxAsync):
-//  - stdout/stderr are merged: wxc-exec runs under node-pty (a single PTY),
-//    so the OS combines both streams. stderr: '' is structural padding.
+//  - Defaults to pipe mode (child_process): stdout/stderr are returned
+//    separately and no node-pty native addon is required. Pass `usePty: true`
+//    to run under a PTY instead, in which case the OS merges both streams into
+//    stdout and stderr is '' (structural padding).
 //  - No per-call timeout: node:test enforces test-level timeouts and the
 //    config's process.timeout is enforced by the native runner.
-//  - IPty has no onError event. Synchronous spawn failures are caught below;
-//    post-spawn failures surface as a non-zero exitCode via onExit.
+//  - Synchronous spawn failures are caught below; post-spawn failures surface
+//    as a non-zero exitCode.
 export function spawnFromConfigAsync(
   config: sdkNamespace.ContainerConfig,
   options: sdkNamespace.SandboxSpawnOptions = {},
   workingDirectory?: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  if (options.usePty === true) {
+    return new Promise((resolve, reject) => {
+      try {
+        const ptyProcess = sdkNamespace.spawnSandboxFromConfig(
+          config,
+          { ...options, usePty: true as const },
+          workingDirectory,
+        );
+        let output = '';
+        ptyProcess.onData((data: string) => {
+          output += data;
+        });
+        ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
+          resolve({ stdout: output, stderr: '', exitCode: event.exitCode });
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
   return new Promise((resolve, reject) => {
+    let child: import('child_process').ChildProcess;
     try {
-      const ptyProcess = sdkNamespace.spawnSandboxFromConfig(config, options, workingDirectory);
-      let output = '';
-      ptyProcess.onData((data: string) => {
-        output += data;
-      });
-      ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
-        resolve({ stdout: output, stderr: '', exitCode: event.exitCode });
-      });
+      child = sdkNamespace.spawnSandboxFromConfig(config, options, workingDirectory);
     } catch (err) {
       reject(err);
+      return;
     }
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (d: Buffer) => {
+      stdout += d.toString();
+    });
+    child.stderr?.on('data', (d: Buffer) => {
+      stderr += d.toString();
+    });
+    child.on('error', reject);
+    child.on('close', (code: number | null) => {
+      resolve({ stdout, stderr, exitCode: code ?? -1 });
+    });
   });
 }
 

@@ -8,7 +8,7 @@
  *
  * @example
  * ```typescript
- * import { spawnSandbox, spawnSandboxWithPty, SandboxPolicy, getPlatformSupport } from '@microsoft/mxc-sdk';
+ * import { spawnSandbox, SandboxPolicy, getPlatformSupport } from '@microsoft/mxc-sdk';
  *
  * if (getPlatformSupport().isSupported) {
  *   const policy: SandboxPolicy = {
@@ -16,7 +16,7 @@
  *     network: { allowOutbound: true },
  *   };
  *
- *   const ptyProcess = spawnSandboxWithPty('python -c "print(\'Hello from sandbox\')"', policy);
+ *   const ptyProcess = spawnSandbox('python -c "print(\'Hello from sandbox\')"', policy);
  *   ptyProcess.onData((data) => console.log(data));
  *   ptyProcess.onExit((event) => console.log('Exit code:', event.exitCode));
  * }
@@ -53,6 +53,17 @@ export {
   buildSandboxPayload,
   SandboxSpawnOptions,
 } from './sandbox.js';
+
+// Export vendored node-pty type surface (so PTY-mode consumers can name these
+// types without depending on the optional `node-pty` peer dependency).
+export type {
+  IPty,
+  IPtyForkOptions,
+  IWindowsPtyForkOptions,
+  IBasePtyForkOptions,
+  IDisposable,
+  IEvent,
+} from './pty-types.js';
 
 // Export policy discovery functions
 export {

@@ -1,8 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import pty from 'node-pty';
+import type { IPty } from './pty-types.js';
 import { resolveBinaryAndCommonArgs } from './helper.js';
+import { loadPty } from './lazyPty.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { mxcErrorFromCode } from './errors.js';
 import { diagLog } from './diagnostic.js';
@@ -84,7 +85,7 @@ export function execInSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options: SandboxSpawnOptions = {},
-): pty.IPty {
+): IPty {
   const backendKey = backendForSandboxId(sandboxId) as C;
   const envelope = buildStateAwareEnvelope({
     phase: 'exec',
@@ -94,7 +95,7 @@ export function execInSandbox<C extends StateAwareContainmentBackend>(
   });
   const { executablePath, args } = resolveBinaryAndCommonArgs(JSON.stringify(envelope), options);
   diagLog(`state-aware: spawning exec via PTY`);
-  const ptyProcess = pty.spawn(executablePath, args, {
+  const ptyProcess = loadPty().spawn(executablePath, args, {
     name: 'xterm-color',
     cols: 120,
     rows: 80,

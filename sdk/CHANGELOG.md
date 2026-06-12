@@ -12,6 +12,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `getPlatformSupport()` now reports `uiCapabilities` on Windows when the
   native probe can determine which UI restrictions the host can enforce.
 
+## [0.7.0]
+
+### ⚠️ Breaking changes
+
+- **`usePty` now defaults to `false`.** `spawnSandboxFromConfig` and
+  `spawnSandboxAsync` spawn via `child_process` (pipe mode) unless called with
+  `usePty: true`, so the default path no longer requires the optional `node-pty`
+  peer dependency. `spawnSandboxFromConfig` therefore returns a `ChildProcess` by
+  default (and `IPty` only when `usePty: true`); `spawnSandboxAsync` now returns
+  real, separated `stdout`/`stderr` on the default path. `spawnSandbox` and
+  `execInSandbox` are unchanged — they always use PTY and require `node-pty`.
+- **`node-pty` moved from `dependencies` to an optional `peerDependency`.**
+  Pipe-only consumers no longer pull it in transitively; consumers that use PTY
+  mode must install `node-pty` themselves. `loadPty()` surfaces an actionable
+  error when PTY mode is requested but the peer dependency is missing.
+
+### Changed
+
+- `node-pty` is loaded lazily, only when a PTY is actually spawned. Importing the
+  SDK and spawning in pipe mode never evaluates `node-pty` or loads its native
+  addon.
+- The SDK's public PTY types (`IPty`, `IPtyForkOptions`, etc.) are now vendored
+  and exported from the package itself. Consumers no longer need `node-pty`
+  installed to type-check against the SDK (previously this failed with
+  `TS2307: Cannot find module 'node-pty'`).
+
 ## [0.3.0]
 
 ### ⚠️ Breaking changes
