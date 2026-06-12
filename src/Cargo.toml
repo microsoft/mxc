@@ -24,6 +24,7 @@ members = [
     "backends/seatbelt/common",
     "host/wxc_host_prep",
     "host/wxc_winhttp_proxy_shim",
+    "host/mxc_denial_shim",
     "testing/wxc_e2e_tests",
     "testing/wxc_test_driver",
     "testing/wxc_test_proxy",
@@ -95,6 +96,7 @@ hyperlight_common = { path = "backends/hyperlight/common" }
 nanvix_runner = { path = "backends/nanvix/runner" }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
+windows-service = "0.7"
 getrandom = "0.2"
 libc = "0.2"
 nix = { version = "0.29", features = ["fs", "mount", "sched", "signal", "net", "process", "user", "term"] }

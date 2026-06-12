@@ -20,6 +20,7 @@
 
 pub mod extractors;
 pub mod model;
+pub mod wire;
 
 #[cfg(target_os = "windows")]
 pub mod path_norm;
