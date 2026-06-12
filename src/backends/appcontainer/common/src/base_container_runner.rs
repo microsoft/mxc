@@ -1138,8 +1138,8 @@ struct BaseChild {
 
 impl BaseChild {
     /// Wait for exit (terminating on timeout); return the exit code (`-1` on
-    /// wait/exit-code failure).
-    fn wait_exit(&self) -> i32 {
+    /// wait/exit-code failure) and whether the wait timed out.
+    fn wait_exit(&self) -> (i32, bool) {
         match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
             WAIT_OBJECT_0 => {}
             WAIT_TIMEOUT => {
@@ -1156,12 +1156,13 @@ impl BaseChild {
                 unsafe {
                     let _ = WaitForSingleObject(self.process.get(), u32::MAX);
                 }
+                return (-1, true);
             }
-            _ => return -1,
+            _ => return (-1, false),
         }
         let mut code: u32 = u32::MAX;
         let _ = unsafe { GetExitCodeProcess(self.process.get(), &mut code) };
-        code as i32
+        (code as i32, false)
     }
 
     /// Sandbox + proxy teardown, mirroring [`BaseContainerRunner::execute`]'s
@@ -1179,10 +1180,16 @@ impl BaseChild {
     fn collect(
         &self,
         exit_code: i32,
+        timed_out: bool,
         captured_out: String,
         captured_err: String,
     ) -> ScriptResponse {
-        let (error_message, failure_phase) = if exit_code != 0 {
+        let (error_message, failure_phase) = if timed_out {
+            (
+                format!("script timed out after {}ms", self.timeout_ms),
+                FailurePhase::Timeout,
+            )
+        } else if exit_code != 0 {
             if let Some(diag) = diagnose_process_exit(
                 &self.script_code,
                 &self.readonly_paths,
@@ -1230,13 +1237,13 @@ impl BaseChild {
                 ));
             }
         }
-        let exit_code = self.wait_exit();
+        let (exit_code, timed_out) = self.wait_exit();
         let (out, err) = match threads {
             Some((o, e)) => (o.join().unwrap_or_default(), e.join().unwrap_or_default()),
             None => (String::new(), String::new()),
         };
         self.cleanup(logger);
-        self.collect(exit_code, out, err)
+        self.collect(exit_code, timed_out, out, err)
     }
 }
 
@@ -1406,6 +1413,7 @@ impl SandboxProcess for BaseContainerSandboxProcess {
             })
         });
 
+        let mut timed_out = false;
         let exit_code = match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
             WAIT_OBJECT_0 => {
                 let mut code: u32 = u32::MAX;
@@ -1420,6 +1428,7 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 unsafe {
                     let _ = WaitForSingleObject(self.process.get(), u32::MAX);
                 }
+                timed_out = true;
                 -1
             }
             _ => -1,
@@ -1434,7 +1443,12 @@ impl SandboxProcess for BaseContainerSandboxProcess {
 
         self.run_teardown();
 
-        let (error_message, failure_phase) = if exit_code != 0 {
+        let (error_message, failure_phase) = if timed_out {
+            (
+                format!("script timed out after {}ms", self.timeout_ms),
+                FailurePhase::Timeout,
+            )
+        } else if exit_code != 0 {
             if let Some(diag) = diagnose_process_exit(
                 &self.script_code,
                 &self.readonly_paths,

@@ -971,9 +971,9 @@ impl SpawnedChild {
     }
 
     /// Wait for the child to exit (honouring `timeout_ms`, where `u32::MAX`
-    /// means infinite), terminating it on timeout. Returns the exit code, or
-    /// `-1` on wait/exit-code failure.
-    fn wait_exit(&self) -> i32 {
+    /// means infinite), terminating it on timeout. Returns the exit code (or
+    /// `-1` on wait/exit-code failure) and whether the wait timed out.
+    fn wait_exit(&self) -> (i32, bool) {
         match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
             WAIT_OBJECT_0 => {}
             WAIT_TIMEOUT => {
@@ -984,20 +984,23 @@ impl SpawnedChild {
                 unsafe {
                     let _ = WaitForSingleObject(self.process.get(), u32::MAX);
                 }
+                return (-1, true);
             }
-            _ => return -1,
+            _ => return (-1, false),
         }
         let mut exit_code: u32 = 0;
         if unsafe { GetExitCodeProcess(self.process.get(), &mut exit_code) }.is_err() {
-            return -1;
+            return (-1, false);
         }
-        exit_code as i32
+        (exit_code as i32, false)
     }
 
     /// Blocking run: drain captured output on background threads, resume, wait,
     /// and collect into a [`ScriptResponse`]. `failure_phase` is set by the
     /// caller (`execute`) which also adds exit diagnostics.
     fn run_to_completion(mut self) -> ScriptResponse {
+        use wxc_common::models::FailurePhase;
+
         let mut threads: Option<(
             std::thread::JoinHandle<String>,
             std::thread::JoinHandle<String>,
@@ -1017,7 +1020,7 @@ impl SpawnedChild {
         if let Err(e) = self.resume() {
             return ScriptResponse::error(&e.to_string());
         }
-        let exit_code = self.wait_exit();
+        let (exit_code, timed_out) = self.wait_exit();
         let (standard_out, standard_err) = match threads {
             Some((out, err)) => (
                 out.join().unwrap_or_default(),
@@ -1025,12 +1028,17 @@ impl SpawnedChild {
             ),
             None => (String::new(), String::new()),
         };
-        ScriptResponse {
+        let mut response = ScriptResponse {
             exit_code,
             standard_out,
             standard_err,
             ..Default::default()
+        };
+        if timed_out {
+            response.failure_phase = FailurePhase::Timeout;
+            response.error_message = format!("script timed out after {}ms", self.timeout_ms);
         }
+        response
     }
 }
 
@@ -1072,8 +1080,9 @@ impl ScriptRunner for AppContainerScriptRunner {
         };
 
         // Post-failure diagnostics: if the child failed, check for known
-        // environment issues and enrich the error message.
-        if response.exit_code != 0 {
+        // environment issues and enrich the error message. A timeout is already
+        // classified by `run_to_completion`; don't relabel it as ProcessExited.
+        if response.exit_code != 0 && response.failure_phase != FailurePhase::Timeout {
             response.failure_phase = FailurePhase::ProcessExited;
             if let Some(diag) = diagnose_process_exit(
                 &request.script_code,
@@ -1445,6 +1454,7 @@ impl SandboxProcess for AppContainerSandboxProcess {
             })
         });
 
+        let mut timed_out = false;
         let exit_code = match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
             WAIT_OBJECT_0 => {
                 let mut code: u32 = 0;
@@ -1462,6 +1472,7 @@ impl SandboxProcess for AppContainerSandboxProcess {
                 unsafe {
                     let _ = WaitForSingleObject(self.process.get(), u32::MAX);
                 }
+                timed_out = true;
                 -1
             }
             _ => -1,
@@ -1478,7 +1489,10 @@ impl SandboxProcess for AppContainerSandboxProcess {
 
         let mut error_message = String::new();
         let extended_error = String::new();
-        let failure_phase = if exit_code != 0 {
+        let failure_phase = if timed_out {
+            error_message = format!("script timed out after {}ms", self.timeout_ms);
+            FailurePhase::Timeout
+        } else if exit_code != 0 {
             if let Some(diag) = diagnose_process_exit(
                 &self.script_code,
                 &self.readonly_paths,

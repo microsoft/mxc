@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use lxc_common::network_iptables::NetworkIptablesManager;
 use wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator;
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, FailurePhase, NetworkEnforcementMode, ScriptResponse};
 use wxc_common::sandbox_process::{SandboxProcess, StreamingRunner};
 use wxc_common::script_runner::ScriptRunner;
 
@@ -285,6 +285,7 @@ impl BwrapChild {
                     standard_out: join_reader(stdout_handle),
                     standard_err: join_reader(stderr_handle),
                     error_message: "Bubblewrap: script timed out".to_string(),
+                    failure_phase: FailurePhase::Timeout,
                     ..Default::default()
                 };
             }
@@ -449,6 +450,7 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                     standard_out: join_reader(stdout_handle),
                     standard_err: join_reader(stderr_handle),
                     error_message: "Bubblewrap: script timed out".to_string(),
+                    failure_phase: FailurePhase::Timeout,
                     ..Default::default()
                 }
             }

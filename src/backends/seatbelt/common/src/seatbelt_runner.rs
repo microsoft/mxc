@@ -189,6 +189,7 @@ impl SeatbeltScriptRunner {
                             "Seatbelt: process timed out after {}ms",
                             request.script_timeout
                         ),
+                        failure_phase: FailurePhase::Timeout,
                         ..Default::default()
                     }
                 }
@@ -278,6 +279,7 @@ impl SeatbeltScriptRunner {
                         "Seatbelt: script timed out after {}ms",
                         request.script_timeout
                     ),
+                    failure_phase: FailurePhase::Timeout,
                     ..Default::default()
                 }
             }
@@ -400,6 +402,7 @@ impl SeatbeltScriptRunner {
                         "Seatbelt: terminal timed out after {}ms",
                         request.script_timeout
                     ),
+                    failure_phase: FailurePhase::Timeout,
                     ..Default::default()
                 }
             }
@@ -595,6 +598,7 @@ impl SandboxProcess for SeatbeltSandboxProcess {
                     standard_out: join_reader(stdout_handle),
                     standard_err: join_reader(stderr_handle),
                     error_message: "Seatbelt: process timed out".to_string(),
+                    failure_phase: FailurePhase::Timeout,
                     ..Default::default()
                 }
             }
