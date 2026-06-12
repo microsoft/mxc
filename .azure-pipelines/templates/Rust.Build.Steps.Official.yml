@@ -1,10 +1,10 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 #
-# Official-build Rust toolchain + build/test. Uses the internal
-# Mxc-Azure-Feed (requires System.AccessToken) and the 1ES.Build.Rust.Run
-# virtual task, which emits the SBOM into RustBuildEvidence_<triplet>_release.
-# Use Rust.Build.Steps.Unofficial.yml for fork/PR builds.
+# Official-build Rust steps. Toolchain feed, registry auth, and target-dir
+# cache are supplied by the job-level `templateContext.rust` in
+# Rust.Build.Job.yml. Requires System.AccessToken — use
+# Rust.Build.Steps.Unofficial.yml for fork/PR builds.
 
 parameters:
 - name: targetTriple
@@ -20,30 +20,19 @@ parameters:
 - name: enableTest
   type: string
   default: 'true'
-- name: rustVersion
-  type: string
-  default: 'ms-prod-1.93'
 
 steps:
-  # Append pipeline-specific Cargo settings (centralized registry) to the
-  # workspace config so crates are pulled from the Azure Artifacts feed
-  # (supply-chain security).
+  # Must run before 1ES.Build.Rust.Setup@1 so the merged config.toml
+  # exists at templateContext.rust.{authenticate,install}Options.configFile.
   - pwsh: |
       Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
     displayName: Setup Cargo Config (Mxc-Azure-Feed)
 
-  - task: RustInstaller@1
-    displayName: Install Rust toolchain (Mxc-Azure-Feed)
-    inputs:
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
-      rustVersion: ${{ parameters.rustVersion }}
-      additionalTargets: ${{ parameters.targetTriple }}
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/Cargo/index/
+  - task: 1ES.Build.Rust.Setup@1
+    displayName: Setup Rust Build Environment
 
-  - task: CargoAuthenticate@0
-    displayName: Cargo Authenticate
-    inputs:
-      configFile: '$(Build.SourcesDirectory)/.cargo/config.toml'
+  - task: 1ES.Build.Rust.Restore@1
+    displayName: Restore Rust Dependencies
 
   - task: 1ES.Build.Rust.Run@1
     displayName: Build + Test (1ES)
@@ -52,7 +41,7 @@ steps:
       profile: release
       target: ${{ parameters.targetTriple }}
       enableTest: ${{ parameters.enableTest }}
-      testCondition: ${{ parameters.enableTest }}
+      testCondition: "eq('${{ parameters.enableTest }}', 'true')"
       publishTestResults: false
       enableClippy: false
       enableCodeStyleCheck: false
@@ -60,7 +49,8 @@ steps:
       useNextest: false
       testAllTargets: false
       buildAllTargets: false
+      # Do NOT default to --all-features: `tier2_bfs` must not ship on
+      # Win 11 25H2 (bfscfg.exe risks OS hang). See T3-Workloads.ps1.
       allFeatures: false
       activatedFeatures: ${{ parameters.cargoFeatures }}
       packages: ${{ parameters.cargoPackages }}
-      workingDirectory: ${{ parameters.workingDirectory }}
