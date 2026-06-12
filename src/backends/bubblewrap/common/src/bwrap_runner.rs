@@ -34,7 +34,7 @@ use lxc_common::network_iptables::NetworkIptablesManager;
 use wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, FailurePhase, NetworkEnforcementMode, ScriptResponse};
-use wxc_common::sandbox_process::{SandboxProcess, StreamingRunner};
+use wxc_common::sandbox_process::{join_discard, spawn_discard, SandboxProcess, StreamingRunner};
 use wxc_common::script_runner::ScriptRunner;
 
 use crate::bwrap_command;
@@ -397,26 +397,18 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         group_kill_child(&mut self.child)
     }
 
-    fn wait(&mut self) -> ScriptResponse {
+    fn wait(&mut self) -> std::io::Result<i32> {
         // Close our copy of any not-taken stdin so the child sees EOF.
         self.stdin.take();
 
-        let stdout_handle = self
-            .stdout
-            .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
-        let stderr_handle = self
-            .stderr
-            .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
+        // Drain (and discard) any not-taken stdout/stderr concurrently so the
+        // child can't block on a full pipe (taken streams are the caller's
+        // responsibility).
+        let stdout_thread = spawn_discard(self.stdout.take());
+        let stderr_thread = spawn_discard(self.stderr.take());
 
         let result = match wait_with_timeout(&mut self.child, self.timeout) {
-            Ok(status) => ScriptResponse {
-                exit_code: status.code().unwrap_or(-1),
-                standard_out: join_reader(stdout_handle),
-                standard_err: join_reader(stderr_handle),
-                ..Default::default()
-            },
+            Ok(status) => Ok(status.code().unwrap_or(-1)),
             Err(WaitError::Timeout) => {
                 // Tree-kill (process group) so descendants die too and release
                 // any stdout/stderr pipe write-ends, matching `kill()`'s
@@ -424,27 +416,25 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                 // threads blocked. bwrap is PID 1 of the pid namespace.
                 let _ = self.kill();
                 let _ = self.child.wait();
-                ScriptResponse {
-                    exit_code: -1,
-                    standard_out: join_reader(stdout_handle),
-                    standard_err: join_reader(stderr_handle),
-                    error_message: "Bubblewrap: script timed out".to_string(),
-                    failure_phase: FailurePhase::Timeout,
-                    ..Default::default()
-                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Bubblewrap: script timed out",
+                ))
             }
             Err(WaitError::Io(error)) => {
                 // The child may still be alive; kill+reap it before
                 // `run_teardown()` removes the iptables/proxy enforcement out
-                // from under it, and join the drains so they don't leak.
+                // from under it.
                 let _ = self.kill();
                 let _ = self.child.wait();
-                let _ = join_reader(stdout_handle);
-                let _ = join_reader(stderr_handle);
-                ScriptResponse::error(&format!("Bubblewrap: wait failed: {}", error))
+                Err(std::io::Error::other(format!(
+                    "Bubblewrap: wait failed: {error}"
+                )))
             }
         };
 
+        join_discard(stdout_thread);
+        join_discard(stderr_thread);
         self.run_teardown();
         result
     }
@@ -487,10 +477,33 @@ fn cleanup_iptables(manager: &mut Option<NetworkIptablesManager>, logger: &mut L
     }
 }
 
-// -- I/O helpers (mirrors seatbelt_runner) --------------------------------
+// -- I/O helpers --------------------------------------------------------------
 
-fn read_to_string<R: std::io::Read>(reader: R) -> String {
-    wxc_common::capture_io::read_capped_lossy(reader)
+/// Maximum bytes retained from a captured stream (~1 MiB). Output beyond this
+/// is read and discarded so the child never blocks on a full pipe.
+const MAX_CAPTURED_BYTES: usize = 1024 * 1024;
+
+/// Drain `reader` to a UTF-8 (lossy) `String`, retaining at most
+/// [`MAX_CAPTURED_BYTES`]. Reading continues to EOF past the cap (the overflow
+/// is discarded) so the child can never block, and the bytes are decoded once
+/// at the end so multibyte sequences split across reads are not corrupted.
+fn read_to_string<R: std::io::Read>(mut reader: R) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                if buf.len() < MAX_CAPTURED_BYTES {
+                    let take = n.min(MAX_CAPTURED_BYTES - buf.len());
+                    buf.extend_from_slice(&chunk[..take]);
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {

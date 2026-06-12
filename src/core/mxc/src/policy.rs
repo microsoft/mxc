@@ -504,8 +504,8 @@ pub enum Containment {
 /// containment backend — the Rust port of the SDK's `createConfigFromPolicy`.
 ///
 /// The returned request has an empty command line; callers set `script_code`
-/// (and `working_directory` / `env`) before running it via
-/// [`crate::spawn_sandbox_from_request`] or streaming it via
+/// (and `working_directory` / `env`) before selecting a runner with
+/// [`crate::select_runner`] or streaming it via
 /// [`crate::spawn_streaming_from_request`].
 ///
 /// Mirrors the SDK field mapping and validation (network proxy/host-filtering

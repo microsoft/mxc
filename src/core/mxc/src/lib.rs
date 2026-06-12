@@ -9,7 +9,6 @@
 //! live bidirectional stdio and termination.
 //!
 //! ```no_run
-//! use std::io::Read;
 //! use mxc::{spawn_sandbox, SpawnOptions};
 //!
 //! // `config` is the same JSON the SDK produces from a SandboxPolicy
@@ -17,8 +16,8 @@
 //! // base64-encoded blob (set `is_base64`).
 //! let config = r#"{ "version": "0.7.0-alpha", "process": { "commandLine": "echo hi" } }"#;
 //! let mut proc = spawn_sandbox(config, &SpawnOptions::default())?;
-//! let result = proc.wait(); // drains untaken stdout/stderr and returns the exit code
-//! println!("exit={} out={}", result.exit_code, result.standard_out);
+//! let exit_code = proc.wait().expect("wait for the sandboxed child");
+//! println!("exit={exit_code}");
 //! # Ok::<(), mxc::MxcError>(())
 //! ```
 //!
@@ -34,8 +33,7 @@
 //!
 //! The child's stdio is always wired to ordinary pipes — the library never
 //! allocates a pty. Stream the handle's `take_stdout`/`take_stderr`, or let
-//! [`wait`](SandboxProcess::wait) drain any untaken stream into the returned
-//! [`ScriptResponse`].
+//! [`wait`](SandboxProcess::wait) drain and discard any untaken stream.
 
 mod dispatch;
 mod platform;
@@ -51,7 +49,7 @@ pub use policy::{
 
 // Re-export the wire/model types callers need so they don't have to depend
 // on `wxc_common` directly.
-pub use wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
+pub use wxc_common::models::ExecutionRequest;
 pub use wxc_common::mxc_error::{MxcError, MxcErrorCode};
 pub use wxc_common::sandbox_process::SandboxProcess;
 

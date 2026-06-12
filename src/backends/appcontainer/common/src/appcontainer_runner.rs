@@ -36,10 +36,10 @@ use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
 use wxc_common::process_util::{
-    create_std_pipes, get_capability_sid_from_name, join_drain, read_from_pipe, spawn_drain,
-    OwnedHandle, PipeReader, PipeWriter, SendOwnedHandle, SidAndAttributes,
+    create_std_pipes, get_capability_sid_from_name, OwnedHandle, PipeReader, PipeWriter,
+    SendOwnedHandle, SidAndAttributes,
 };
-use wxc_common::sandbox_process::{SandboxProcess, StreamingRunner};
+use wxc_common::sandbox_process::{join_discard, spawn_discard, SandboxProcess, StreamingRunner};
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use wxc_common::{string_util, ui_policy};
 
@@ -507,7 +507,7 @@ impl AppContainerScriptRunner {
         //
         // When streaming (the `spawn_streaming` path) we always take the pipe
         // path — but instead of forwarding our own std handles we wire the
-        // child to capture pipes and read its output into the response.
+        // child to capture pipes that the streaming handle reads from.
         let capture = stream;
         let pipe_mode =
             capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
@@ -631,8 +631,8 @@ impl AppContainerScriptRunner {
         // --- Setup handle passthrough / capture (pipe mode only) ---
         // In passthrough mode we forward wxc-exec's own std handles to the
         // child so its output streams to the caller. In capture mode we wire
-        // the child to fresh capture pipes and read its output into the
-        // response (the `mxc` library path). Handle list for
+        // the child to fresh capture pipes that the streaming handle reads from
+        // (the `mxc` library path). Handle list for
         // PROC_THREAD_ATTRIBUTE_HANDLE_LIST. Must outlive CreateProcessW.
         let mut handle_list: Vec<HANDLE> = Vec::new();
 
@@ -898,7 +898,6 @@ impl AppContainerScriptRunner {
             stdin_write: captured_stdin_write,
             stdout_read,
             stderr_read,
-            capture,
             timeout_ms: get_timeout_milliseconds(request.script_timeout),
         })
     }
@@ -950,10 +949,9 @@ struct SpawnedChild {
     pid: u32,
     /// Parent's stdin write-end (Some only when spawned for streaming).
     stdin_write: Option<OwnedHandle>,
-    /// Parent's stdout/stderr read-ends (Some only in capture/stream mode).
+    /// Parent's stdout/stderr read-ends (Some only in streaming mode).
     stdout_read: Option<OwnedHandle>,
     stderr_read: Option<OwnedHandle>,
-    capture: bool,
     timeout_ms: u32,
 }
 
@@ -996,43 +994,19 @@ impl SpawnedChild {
         (exit_code as i32, false)
     }
 
-    /// Blocking run: drain captured output on background threads, resume, wait,
-    /// and collect into a [`ScriptResponse`]. `failure_phase` is set by the
-    /// caller (`execute`) which also adds exit diagnostics.
-    fn run_to_completion(mut self) -> ScriptResponse {
+    /// Blocking run: resume, wait, and collect the exit code into a
+    /// [`ScriptResponse`]. stdout/stderr stream live to the inherited handles
+    /// (this path never captures), so they are left empty. `failure_phase` is
+    /// set by the caller (`execute`), which also adds exit diagnostics.
+    fn run_to_completion(self) -> ScriptResponse {
         use wxc_common::models::FailurePhase;
 
-        let mut threads: Option<(
-            std::thread::JoinHandle<String>,
-            std::thread::JoinHandle<String>,
-        )> = None;
-        if self.capture {
-            if let (Some(mut out), Some(mut err)) =
-                (self.stdout_read.take(), self.stderr_read.take())
-            {
-                let out_send = SendOwnedHandle::take(&mut out);
-                let err_send = SendOwnedHandle::take(&mut err);
-                threads = Some((
-                    std::thread::spawn(move || read_from_pipe(out_send.get())),
-                    std::thread::spawn(move || read_from_pipe(err_send.get())),
-                ));
-            }
-        }
         if let Err(e) = self.resume() {
             return ScriptResponse::error(&e.to_string());
         }
         let (exit_code, timed_out) = self.wait_exit();
-        let (standard_out, standard_err) = match threads {
-            Some((out, err)) => (
-                out.join().unwrap_or_default(),
-                err.join().unwrap_or_default(),
-            ),
-            None => (String::new(), String::new()),
-        };
         let mut response = ScriptResponse {
             exit_code,
-            standard_out,
-            standard_err,
             ..Default::default()
         };
         if timed_out {
@@ -1320,10 +1294,6 @@ struct AppContainerSandboxProcess {
     filesystem_mode: FilesystemMode,
     preserve_policy: bool,
     timeout_ms: u32,
-    // Inputs for exit diagnostics, mirroring `execute`'s post-processing.
-    script_code: String,
-    readonly_paths: Vec<String>,
-    readwrite_paths: Vec<String>,
     teardown_done: bool,
 }
 
@@ -1357,9 +1327,6 @@ impl AppContainerSandboxProcess {
             filesystem_mode,
             preserve_policy: request.lifecycle.preserve_policy,
             timeout_ms: child.timeout_ms,
-            script_code: request.script_code.clone(),
-            readonly_paths: request.policy.readonly_paths.clone(),
-            readwrite_paths: request.policy.readwrite_paths.clone(),
             teardown_done: false,
         }
     }
@@ -1426,77 +1393,46 @@ impl SandboxProcess for AppContainerSandboxProcess {
         Ok(())
     }
 
-    fn wait(&mut self) -> ScriptResponse {
-        use crate::launch_diagnostics::diagnose_process_exit;
-        use wxc_common::models::FailurePhase;
-
+    fn wait(&mut self) -> std::io::Result<i32> {
         // Close our copy of any not-taken stdin so the child sees EOF and can
         // exit reliably (an interactive command would otherwise block waiting
         // for input).
         self.stdin.take();
 
-        // Drain any not-taken streams concurrently to avoid the child blocking
-        // on a full pipe buffer.
-        let stdout_thread = spawn_drain(self.stdout.take());
-        let stderr_thread = spawn_drain(self.stderr.take());
+        // Drain (and discard) any not-taken streams concurrently to avoid the
+        // child blocking on a full pipe buffer.
+        let stdout_thread = spawn_discard(self.stdout.take());
+        let stderr_thread = spawn_discard(self.stderr.take());
 
-        let mut timed_out = false;
-        let exit_code = match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
+        let result = match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
             WAIT_OBJECT_0 => {
                 let mut code: u32 = 0;
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
-                    -1
+                    Ok(-1)
                 } else {
-                    code as i32
+                    Ok(code as i32)
                 }
             }
             WAIT_TIMEOUT => {
                 // Tree-kill via the job so descendants die too and release the
-                // captured pipe write-ends; terminating only the root would
-                // leave the drain threads below blocked forever.
+                // pipe write-ends; terminating only the root would leave the
+                // drain threads below blocked forever.
                 self.job.terminate(u32::MAX);
                 unsafe {
                     let _ = WaitForSingleObject(self.process.get(), u32::MAX);
                 }
-                timed_out = true;
-                -1
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("script timed out after {}ms", self.timeout_ms),
+                ))
             }
-            _ => -1,
+            _ => Ok(-1),
         };
 
-        let standard_out = join_drain(stdout_thread);
-        let mut standard_err = join_drain(stderr_thread);
-
+        join_discard(stdout_thread);
+        join_discard(stderr_thread);
         self.run_teardown();
-
-        let mut error_message = String::new();
-        let extended_error = String::new();
-        let failure_phase = if timed_out {
-            error_message = format!("script timed out after {}ms", self.timeout_ms);
-            FailurePhase::Timeout
-        } else if exit_code != 0 {
-            if let Some(diag) = diagnose_process_exit(
-                &self.script_code,
-                &self.readonly_paths,
-                &self.readwrite_paths,
-                exit_code as u32,
-            ) {
-                error_message = diag.message.clone();
-                standard_err.push_str(&diag.message);
-            }
-            FailurePhase::ProcessExited
-        } else {
-            FailurePhase::None
-        };
-
-        ScriptResponse {
-            exit_code,
-            standard_out,
-            standard_err,
-            error_message,
-            extended_error,
-            failure_phase,
-        }
+        result
     }
 }
 

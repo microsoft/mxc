@@ -208,13 +208,13 @@ fn build_request_then_run_seatbelt() {
     request.script_code = "echo built-from-policy".to_string();
 
     let mut proc = spawn_streaming_from_request(request).expect("spawn should succeed");
-    let result = proc.wait();
-    assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
-    assert!(
-        result.standard_out.contains("built-from-policy"),
-        "got: {:?}",
-        result.standard_out
-    );
+    let mut out = String::new();
+    if let Some(mut stdout) = proc.take_stdout() {
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut out);
+    }
+    let code = proc.wait().expect("wait should succeed");
+    assert_eq!(code, 0);
+    assert!(out.contains("built-from-policy"), "got: {out:?}");
 }
 
 #[test]

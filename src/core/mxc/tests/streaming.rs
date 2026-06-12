@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Streaming (handle-based) API tests: live stdio, kill, and wait-capture.
+//! Streaming (handle-based) API tests: live stdio, kill, and wait.
 //! Seatbelt-specific cases run only on macOS.
 
 use mxc::{spawn_sandbox, MxcErrorCode, SpawnOptions};
@@ -137,26 +137,22 @@ fn streaming_processcontainer_bidirectional_stdio() {
     stdout.read_to_string(&mut out).expect("read stdout");
     assert!(out.contains("ping-pong"), "got: {:?}", out);
 
-    let result = proc.wait();
-    assert_eq!(result.exit_code, 0);
+    let code = proc.wait().expect("wait");
+    assert_eq!(code, 0);
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn streaming_wait_captures_untaken_streams() {
+fn streaming_wait_discards_untaken_streams() {
     let mut proc = spawn_sandbox(
         &seatbelt_config("echo streamed-out"),
         &SpawnOptions::default(),
     )
     .expect("spawn should succeed");
-    // Take nothing -> wait() drains and captures, like a run-to-completion.
-    let result = proc.wait();
-    assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
-    assert!(
-        result.standard_out.contains("streamed-out"),
-        "got: {:?}",
-        result.standard_out
-    );
+    // Take nothing -> wait() drains and discards the output, returning only
+    // the exit code.
+    let code = proc.wait().expect("wait should succeed");
+    assert_eq!(code, 0);
 }
 
 #[cfg(target_os = "macos")]
@@ -177,10 +173,8 @@ fn streaming_bidirectional_stdio() {
     stdout.read_to_string(&mut out).expect("read stdout");
     assert!(out.contains("ping-pong"), "got: {:?}", out);
 
-    let result = proc.wait();
-    assert_eq!(result.exit_code, 0);
-    // stdout was taken by the caller, so wait() reports it empty.
-    assert!(result.standard_out.is_empty());
+    let code = proc.wait().expect("wait");
+    assert_eq!(code, 0);
 }
 
 #[cfg(target_os = "macos")]
@@ -195,8 +189,8 @@ fn streaming_kill_terminates_process() {
     proc.kill().expect("kill should succeed");
 
     // After kill, the process must be reapable and not report success.
-    let result = proc.wait();
-    assert_ne!(result.exit_code, 0, "killed process should not exit 0");
+    let code = proc.wait().expect("wait after kill");
+    assert_ne!(code, 0, "killed process should not exit 0");
 }
 
 #[cfg(target_os = "macos")]
@@ -311,8 +305,10 @@ fn streaming_timeout_kills_process_tree() {
         .parse()
         .expect("descendant pid");
 
-    let result = proc.wait();
-    assert_ne!(result.exit_code, 0, "timed-out process should not exit 0");
+    let err = proc
+        .wait()
+        .expect_err("timed-out process should report a timeout");
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
 
     let mut gone = false;
     for _ in 0..60 {

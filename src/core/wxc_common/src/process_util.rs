@@ -45,27 +45,6 @@ impl std::io::Read for PipeReader {
     }
 }
 
-/// Spawn a background thread that drains `reader` (when present) to a `String`,
-/// so a caller can read stdout and stderr concurrently without the child
-/// blocking on a full pipe. Returns `None` when there is nothing to drain.
-pub fn spawn_drain(reader: Option<PipeReader>) -> Option<std::thread::JoinHandle<String>> {
-    reader.map(|mut r| {
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = std::io::Read::read_to_string(&mut r, &mut s);
-            s
-        })
-    })
-}
-
-/// Join a [`spawn_drain`] thread, returning its captured output (empty when the
-/// handle is absent or the thread panicked).
-pub fn join_drain(handle: Option<std::thread::JoinHandle<String>>) -> String {
-    handle
-        .map(|t| t.join().unwrap_or_default())
-        .unwrap_or_default()
-}
-
 /// A writable end of an anonymous pipe (e.g. the child's stdin), owning the
 /// handle and closing it on drop (which sends EOF to the child). Implements
 /// [`std::io::Write`] via `WriteFile`. `Send`.
@@ -161,15 +140,17 @@ impl Drop for OwnedHandle {
     }
 }
 
+/// Maximum bytes retained from a captured pipe (~1 MiB). Output beyond this is
+/// read and discarded so the child never blocks on a full pipe.
+const MAX_CAPTURED_BYTES: usize = 1024 * 1024;
+
 /// Read all data from a pipe as UTF-8 (lossy) text, retaining at most
-/// [`crate::capture_io::MAX_CAPTURED_BYTES`].
+/// [`MAX_CAPTURED_BYTES`].
 ///
 /// Reading continues to EOF even after the cap (the overflow is discarded) so
 /// the child never blocks on a full pipe, and the bytes are decoded once at the
 /// end so multibyte UTF-8 sequences split across reads are not corrupted.
 pub fn read_from_pipe(pipe: HANDLE) -> String {
-    use crate::capture_io::MAX_CAPTURED_BYTES;
-
     let mut bytes: Vec<u8> = Vec::with_capacity(BUFFER_SIZE as usize);
     let mut buffer = [0u8; BUFFER_SIZE as usize];
     loop {

@@ -11,6 +11,7 @@ stdio and termination.
 ## Usage
 
 ```rust,no_run
+use std::io::Read;
 use mxc::{spawn_sandbox, SpawnOptions};
 
 // `config` is the same JSON the SDK serialises from a SandboxPolicy
@@ -23,10 +24,12 @@ let config = r#"{
 }"#;
 
 let mut proc = spawn_sandbox(config, &SpawnOptions::default())?;
-let result = proc.wait(); // drains untaken stdout/stderr, returns the exit code
-assert_eq!(result.exit_code, 0);
-println!("{}", result.standard_out); // "hello\n"
-# Ok::<(), mxc::MxcError>(())
+let mut stdout = proc.take_stdout().unwrap();
+let mut out = String::new();
+stdout.read_to_string(&mut out)?; // "hello\n"
+let exit_code = proc.wait()?;     // drains/discards any untaken stream, returns exit code
+assert_eq!(exit_code, 0);
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 `SpawnOptions` mirrors the executor CLI knobs (minus anything pty-related):
@@ -100,7 +103,7 @@ drop(stdin);                      // close -> child sees EOF
 let mut out = String::new();
 stdout.read_to_string(&mut out)?; // "hello\n"
 
-let result = proc.wait();         // exit code (+ any untaken streams)
+let exit_code = proc.wait()?;     // any untaken stream is drained and discarded
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -117,9 +120,9 @@ The handle is modelled on [`std::process::Child`]:
   whole group is signalled (graceful `SIGTERM`, escalating to `SIGKILL` after
   a short grace period); on Windows the child's job object is terminated.
 - `wait()` blocks until exit (honouring `scriptTimeout`, where `0` waits
-  forever), drains any **untaken** stdout/stderr, and returns the exit code
-  plus captured output. With no streams taken, `spawn_sandbox(..).wait()`
-  runs the child to completion and returns its captured output.
+  forever), drains and discards any **untaken** stdout/stderr so the child
+  can't block on a full pipe, and returns the exit code (`ErrorKind::TimedOut`
+  if the timeout elapses).
 
 Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**, and
 **Windows ProcessContainer (AppContainer + BaseContainer)** — i.e. every
@@ -151,7 +154,7 @@ executor binaries for those.
 The child's stdio is always wired to ordinary pipes — the library never
 allocates a pty (the executor binaries, by contrast, stream live: Seatbelt/LXC
 via a pty, AppContainer by inheriting the host fds). Output the caller doesn't
-take is captured by `wait()` into the returned `ScriptResponse`.
+take is drained and discarded by `wait()`.
 
 ## Relationship to the executor binaries
 

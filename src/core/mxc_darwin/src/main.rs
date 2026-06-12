@@ -125,9 +125,8 @@ fn main() {
 #[cfg(target_os = "macos")]
 fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     // Backend selection is shared with the `mxc` library and the other
-    // executor binaries via `mxc::select_runner`. The binary keeps the
-    // streaming (pty) behaviour: Seatbelt uses the pty bridge rather than
-    // capturing output into the response.
+    // executor binaries via `mxc::select_runner`. Seatbelt streams the
+    // child's output live through the pty bridge.
     let run_start = Instant::now();
     let mut selection = match mxc::select_runner(request) {
         Ok(selection) => selection,

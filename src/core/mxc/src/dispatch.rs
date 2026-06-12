@@ -224,12 +224,12 @@ pub fn spawn_runner(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     ensure_host_supported()?;
     // `dry_run` means "validate, don't execute" — there is no process to
-    // stream, so reject it rather than silently ignoring it (the
-    // run-to-completion path honours it via `ScriptRunner::run`).
+    // stream, so reject it rather than silently ignoring it (`select_runner`
+    // honours it via `ScriptRunner::run`).
     if request.dry_run {
         return Err(MxcError::malformed_request(
             "dry_run is not supported for streaming spawns; use \
-             spawn_sandbox_from_config / spawn_sandbox_from_request to validate",
+             select_runner to validate",
         ));
     }
     match &request.containment {
@@ -331,7 +331,7 @@ fn spawn_process_container(
     // Consequence (intentional, fail-closed): an experimental / newer-schema
     // config on a host that lacks the native BaseContainer API fails here with
     // a clear "BaseContainer API unavailable" error from
-    // `BaseContainerRunner`'s validation, whereas `spawn_sandbox_from_config`
+    // `BaseContainerRunner`'s validation, whereas `select_runner`
     // (run-to-completion) would fall back to an AppContainer tier. Streaming
     // therefore requires the native BaseContainer API for those configs.
     let version_implies_base_container = is_base_container_version(&request.schema_version);

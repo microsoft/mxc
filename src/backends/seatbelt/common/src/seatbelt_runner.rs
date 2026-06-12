@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, FailurePhase, LaunchMethod, ScriptResponse};
-use wxc_common::sandbox_process::{SandboxProcess, StreamingRunner};
+use wxc_common::sandbox_process::{join_discard, spawn_discard, SandboxProcess, StreamingRunner};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::validate_common;
 
@@ -495,53 +495,42 @@ impl SandboxProcess for SeatbeltSandboxProcess {
         group_kill_child(&mut self.child)
     }
 
-    fn wait(&mut self) -> ScriptResponse {
+    fn wait(&mut self) -> std::io::Result<i32> {
         // Close our copy of any not-taken stdin so the child sees EOF and is
         // not blocked waiting for input the caller never intends to send.
         self.stdin.take();
 
-        // Drain any not-taken stdout/stderr concurrently (taken streams are
-        // the caller's responsibility and are reported empty here).
-        let stdout_handle = self
-            .stdout
-            .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
-        let stderr_handle = self
-            .stderr
-            .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
+        // Drain (and discard) any not-taken stdout/stderr concurrently so the
+        // child can't block on a full pipe (taken streams are the caller's
+        // responsibility).
+        let stdout_thread = spawn_discard(self.stdout.take());
+        let stderr_thread = spawn_discard(self.stderr.take());
 
-        match wait_with_timeout(&mut self.child, self.timeout) {
-            Ok(status) => exit_response(
-                status.code().unwrap_or(-1),
-                join_reader(stdout_handle),
-                join_reader(stderr_handle),
-            ),
+        let result = match wait_with_timeout(&mut self.child, self.timeout) {
+            Ok(status) => Ok(status.code().unwrap_or(-1)),
             Err(WaitError::Timeout) => {
                 // Group-kill (SIGTERM→SIGKILL) so sandboxed descendants are
                 // reaped too — `self.child.kill()` would orphan them; then
                 // wait to clear the zombie.
                 let _ = self.kill();
                 let _ = self.child.wait();
-                ScriptResponse {
-                    exit_code: -1,
-                    standard_out: join_reader(stdout_handle),
-                    standard_err: join_reader(stderr_handle),
-                    error_message: "Seatbelt: process timed out".to_string(),
-                    failure_phase: FailurePhase::Timeout,
-                    ..Default::default()
-                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Seatbelt: process timed out",
+                ))
             }
             Err(WaitError::Io(error)) => {
                 // The child may still be running: kill+reap it (don't orphan
-                // the sandbox) and join the drains before returning.
+                // the sandbox) before returning.
                 let _ = self.kill();
                 let _ = self.child.wait();
-                let _ = join_reader(stdout_handle);
-                let _ = join_reader(stderr_handle);
-                error_response(format!("wait failed: {error}"))
+                Err(std::io::Error::other(format!("wait failed: {error}")))
             }
-        }
+        };
+
+        join_discard(stdout_thread);
+        join_discard(stderr_thread);
+        result
     }
 }
 
@@ -701,13 +690,6 @@ fn resolve_working_directory(request: &ExecutionRequest) -> String {
         .unwrap_or_else(|| "/".to_string())
 }
 
-/// Read a child pipe to a `String`, capped and UTF-8-lossy (shared bounded
-/// drain). Keeps reading past the cap so the child never blocks, and replaces
-/// invalid UTF-8 rather than discarding the stream.
-fn read_to_string<R: std::io::Read>(reader: R) -> String {
-    wxc_common::capture_io::read_capped_lossy(reader)
-}
-
 /// Baseline `PATH` for the sandboxed child. We always start from a cleared
 /// environment (so the host process's env — cloud creds, API tokens — never
 /// leaks into untrusted sandboxed code), which means we must supply a default
@@ -725,15 +707,6 @@ fn apply_clean_environment(command: &mut Command, request: &ExecutionRequest) {
         if let Some((key, value)) = kv.split_once('=') {
             command.env(key, value);
         }
-    }
-}
-
-/// Join a drain thread, returning its captured output (empty on join failure
-/// or when no pipe was present).
-fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {
-    match handle {
-        Some(h) => h.join().unwrap_or_default(),
-        None => String::new(),
     }
 }
 

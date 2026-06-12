@@ -28,10 +28,9 @@ use crate::models::{ExecutionRequest, ScriptResponse};
 /// [`wait`](SandboxProcess::wait) for exit or [`kill`](SandboxProcess::kill)
 /// it.
 ///
-/// Any stdout/stderr stream the caller does **not** take is drained
-/// internally by [`wait`](SandboxProcess::wait) and returned in the
-/// [`ScriptResponse`]. With no streams taken, `spawn(..).wait()` is therefore
-/// equivalent to a run-to-completion capture.
+/// Any stdout/stderr stream the caller does **not** take is drained and
+/// discarded internally by [`wait`](SandboxProcess::wait) so the child can
+/// never block on a full pipe.
 ///
 /// No pty is ever allocated; the streams are ordinary pipes.
 ///
@@ -88,12 +87,36 @@ pub trait SandboxProcess: Send {
     fn kill(&mut self) -> std::io::Result<()>;
 
     /// Block until the child exits (honouring the request's `scriptTimeout`,
-    /// where `0` means wait forever), draining any not-taken stdout/stderr,
-    /// and return its exit code plus captured output.
+    /// where `0` means wait forever) and return its exit code.
+    ///
+    /// Any stdout/stderr the caller did not `take_*` is drained and discarded
+    /// while waiting so the child can never block on a full pipe. If the
+    /// timeout elapses, the child and its tree are killed and
+    /// [`ErrorKind::TimedOut`](std::io::ErrorKind::TimedOut) is returned.
     ///
     /// Implementors must drain the not-taken stdout and stderr **concurrently**
     /// (not one then the other) — see the type-level pipe-deadlock contract.
-    fn wait(&mut self) -> ScriptResponse;
+    fn wait(&mut self) -> std::io::Result<i32>;
+}
+
+/// Spawn a thread that reads `reader` to EOF and discards it, so a stream the
+/// caller did not take can't block the child on a full pipe. Returns `None`
+/// when there is nothing to drain.
+pub fn spawn_discard<R: Read + Send + 'static>(
+    reader: Option<R>,
+) -> Option<std::thread::JoinHandle<()>> {
+    reader.map(|mut r| {
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut r, &mut std::io::sink());
+        })
+    })
+}
+
+/// Join a [`spawn_discard`] thread (no-op when absent).
+pub fn join_discard(handle: Option<std::thread::JoinHandle<()>>) {
+    if let Some(t) = handle {
+        let _ = t.join();
+    }
 }
 
 /// A backend that can spawn a [`SandboxProcess`] handle.

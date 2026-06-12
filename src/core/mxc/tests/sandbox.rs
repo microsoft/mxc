@@ -5,19 +5,64 @@
 //!
 //! Seatbelt-specific cases run only on macOS; the cross-platform cases
 //! (config errors, unsupported backends) run everywhere. The library exposes
-//! only the streaming API, so "run to completion" here means spawn then
-//! [`SandboxProcess::wait`], which drains the untaken stdout/stderr into the
-//! returned [`mxc::ScriptResponse`].
+//! only the streaming API, so "run to completion" here means spawn, read the
+//! (untaken) stdout/stderr, then [`SandboxProcess::wait`] for the exit code.
 
-use mxc::{spawn_sandbox, MxcErrorCode, ScriptResponse, SpawnOptions};
+use mxc::{spawn_sandbox, MxcErrorCode, SpawnOptions};
 
-#[cfg(target_os = "macos")]
-use mxc::FailurePhase;
+/// Spawn a sandbox expecting the config to be rejected before it runs.
+fn spawn_only(config: &str, options: &SpawnOptions) -> Result<(), mxc::MxcError> {
+    spawn_sandbox(config, options).map(|_| ())
+}
 
-/// Spawn a sandbox from a config and wait for it to exit, returning the
-/// captured response — the streaming-API equivalent of running to completion.
-fn spawn_and_wait(config: &str, options: &SpawnOptions) -> Result<ScriptResponse, mxc::MxcError> {
-    spawn_sandbox(config, options).map(|mut proc| proc.wait())
+/// Outcome of running a sandbox to completion via the streaming API.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[derive(Debug)]
+struct RunOutcome {
+    exit_code: i32,
+    timed_out: bool,
+    standard_out: String,
+    standard_err: String,
+}
+
+/// Spawn a sandbox, read its stdout/stderr concurrently, and wait for exit —
+/// the streaming-API equivalent of running to completion.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn spawn_and_wait(config: &str, options: &SpawnOptions) -> Result<RunOutcome, mxc::MxcError> {
+    use std::io::Read;
+
+    fn read_thread(
+        reader: Option<Box<dyn Read + Send>>,
+    ) -> Option<std::thread::JoinHandle<String>> {
+        reader.map(|mut r| {
+            std::thread::spawn(move || {
+                let mut s = String::new();
+                let _ = r.read_to_string(&mut s);
+                s
+            })
+        })
+    }
+
+    let mut proc = spawn_sandbox(config, options)?;
+    let out_thread = read_thread(proc.take_stdout());
+    let err_thread = read_thread(proc.take_stderr());
+    let (exit_code, timed_out) = match proc.wait() {
+        Ok(code) => (code, false),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => (-1, true),
+        Err(e) => panic!("wait failed: {e}"),
+    };
+    let standard_out = out_thread
+        .map(|t| t.join().unwrap_or_default())
+        .unwrap_or_default();
+    let standard_err = err_thread
+        .map(|t| t.join().unwrap_or_default())
+        .unwrap_or_default();
+    Ok(RunOutcome {
+        exit_code,
+        timed_out,
+        standard_out,
+        standard_err,
+    })
 }
 
 #[test]
@@ -30,7 +75,7 @@ fn unsupported_backend_is_rejected() {
         "process": { "commandLine": "echo hi" }
     }"#;
 
-    let err = spawn_and_wait(config, &SpawnOptions::default())
+    let err = spawn_only(config, &SpawnOptions::default())
         .expect_err("windows_sandbox must be unsupported by the mxc library");
     assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
 }
@@ -43,8 +88,8 @@ fn missing_command_is_rejected() {
         "process": { "commandLine": "" }
     }"#;
 
-    let err = spawn_and_wait(config, &SpawnOptions::default())
-        .expect_err("empty command must be rejected");
+    let err =
+        spawn_only(config, &SpawnOptions::default()).expect_err("empty command must be rejected");
     // Either the parser rejects the empty command, or our own guard does;
     // both map to malformed_request.
     assert_eq!(err.code, MxcErrorCode::MalformedRequest);
@@ -60,7 +105,7 @@ fn version_older_than_supported_is_rejected() {
         "process": { "commandLine": "echo hi" }
     }"#;
 
-    let err = spawn_and_wait(config, &SpawnOptions::default())
+    let err = spawn_only(config, &SpawnOptions::default())
         .expect_err("an out-of-range schema version must be rejected");
     assert_eq!(err.code, MxcErrorCode::MalformedRequest);
 }
@@ -71,8 +116,8 @@ fn malformed_json_config_is_rejected() {
     // with malformed_request rather than panicking.
     let config = "{ this is not valid json";
 
-    let err = spawn_and_wait(config, &SpawnOptions::default())
-        .expect_err("malformed JSON must be rejected");
+    let err =
+        spawn_only(config, &SpawnOptions::default()).expect_err("malformed JSON must be rejected");
     assert_eq!(err.code, MxcErrorCode::MalformedRequest);
 }
 
@@ -147,14 +192,7 @@ fn seatbelt_finite_timeout_fires() {
     let start = std::time::Instant::now();
     let result = spawn_and_wait(config, &SpawnOptions::default())
         .expect("seatbelt run should return a response");
-    assert_ne!(result.exit_code, 0, "a timed-out run must not exit 0");
-    assert!(
-        result.error_message.to_lowercase().contains("timed out")
-            || result.standard_err.to_lowercase().contains("timed out"),
-        "timeout should be reported, msg: {:?} stderr: {:?}",
-        result.error_message,
-        result.standard_err
-    );
+    assert!(result.timed_out, "a timed-out run must report a timeout");
     assert!(
         start.elapsed() < std::time::Duration::from_secs(20),
         "timeout must fire well before the command's own 30s runtime"
@@ -335,7 +373,7 @@ fn appcontainer_finite_timeout_fires() {
     let start = std::time::Instant::now();
     let result = spawn_and_wait(config, &SpawnOptions::default())
         .expect("AppContainer run should return a response");
-    assert_ne!(result.exit_code, 0, "a timed-out run must not exit 0");
+    assert!(result.timed_out, "a timed-out run must report a timeout");
     assert!(
         start.elapsed() < std::time::Duration::from_secs(30),
         "timeout must fire (and tree-kill descendants) well before the 60s pings finish"
@@ -415,7 +453,7 @@ fn seatbelt_env_injection() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn seatbelt_failure_phase_process_exited_on_nonzero() {
+fn seatbelt_reports_nonzero_exit_code() {
     let config = r#"{
         "version": "0.7.0-alpha",
         "containment": "seatbelt",
@@ -428,16 +466,15 @@ fn seatbelt_failure_phase_process_exited_on_nonzero() {
         spawn_and_wait(config, &SpawnOptions::default()).expect("seatbelt run should succeed");
 
     assert_eq!(result.exit_code, 7);
-    assert_eq!(
-        result.failure_phase,
-        FailurePhase::ProcessExited,
-        "non-zero exit must report ProcessExited"
+    assert!(
+        !result.timed_out,
+        "a clean non-zero exit must not be reported as a timeout"
     );
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn seatbelt_failure_phase_none_on_success() {
+fn seatbelt_reports_zero_exit_code() {
     let config = r#"{
         "version": "0.7.0-alpha",
         "containment": "seatbelt",
@@ -450,7 +487,7 @@ fn seatbelt_failure_phase_none_on_success() {
         spawn_and_wait(config, &SpawnOptions::default()).expect("seatbelt run should succeed");
 
     assert_eq!(result.exit_code, 0);
-    assert_eq!(result.failure_phase, FailurePhase::None);
+    assert!(!result.timed_out);
 }
 
 #[cfg(target_os = "macos")]

@@ -50,10 +50,9 @@ use wxc_common::models::{
     ScriptResponse,
 };
 use wxc_common::process_util::{
-    create_std_pipes, join_drain, read_from_pipe, spawn_drain, OwnedHandle, PipeReader, PipeWriter,
-    SendOwnedHandle,
+    create_std_pipes, OwnedHandle, PipeReader, PipeWriter, SendOwnedHandle,
 };
-use wxc_common::sandbox_process::{SandboxProcess, StreamingRunner};
+use wxc_common::sandbox_process::{join_discard, spawn_discard, SandboxProcess, StreamingRunner};
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use wxc_common::string_util;
 
@@ -737,8 +736,8 @@ impl BaseContainerRunner {
         // child's output streams directly to the SDK in real time.
         //
         // When streaming (the `spawn_streaming` path) we always take the pipe
-        // path and wire the child to capture pipes whose output we read into
-        // the response.
+        // path and wire the child to capture pipes that the streaming handle
+        // reads from.
         let capture = stream;
         let pipe_mode =
             capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
@@ -1098,7 +1097,6 @@ impl BaseContainerRunner {
             stdin_write: captured_stdin_write,
             stdout_read,
             stderr_read,
-            capture,
             timeout_ms: get_timeout_milliseconds(request.script_timeout),
             destroy_on_exit: request.lifecycle.destroy_on_exit,
             proxy_enabled: request.policy.network_proxy.is_enabled(),
@@ -1125,7 +1123,6 @@ struct BaseChild {
     stdin_write: Option<OwnedHandle>,
     stdout_read: Option<OwnedHandle>,
     stderr_read: Option<OwnedHandle>,
-    capture: bool,
     timeout_ms: u32,
     destroy_on_exit: bool,
     proxy_enabled: bool,
@@ -1219,32 +1216,13 @@ impl BaseChild {
         }
     }
 
-    /// Blocking run: drain captured output on threads, wait, tear down, and
-    /// collect.
+    /// Blocking run: wait for the child, tear down, and collect the result.
+    /// stdout/stderr stream live to the inherited handles (this path never
+    /// captures), so they are reported empty.
     fn run_to_completion(mut self, logger: &mut Logger) -> ScriptResponse {
-        let mut threads: Option<(
-            std::thread::JoinHandle<String>,
-            std::thread::JoinHandle<String>,
-        )> = None;
-        if self.capture {
-            if let (Some(mut out), Some(mut err)) =
-                (self.stdout_read.take(), self.stderr_read.take())
-            {
-                let out_send = SendOwnedHandle::take(&mut out);
-                let err_send = SendOwnedHandle::take(&mut err);
-                threads = Some((
-                    std::thread::spawn(move || read_from_pipe(out_send.get())),
-                    std::thread::spawn(move || read_from_pipe(err_send.get())),
-                ));
-            }
-        }
         let (exit_code, timed_out) = self.wait_exit();
-        let (out, err) = match threads {
-            Some((o, e)) => (o.join().unwrap_or_default(), e.join().unwrap_or_default()),
-            None => (String::new(), String::new()),
-        };
         self.cleanup(logger);
-        self.collect(exit_code, timed_out, out, err)
+        self.collect(exit_code, timed_out, String::new(), String::new())
     }
 }
 
@@ -1282,9 +1260,6 @@ struct BaseContainerSandboxProcess {
     identity: String,
     sid_string: String,
     proxy_coordinator: ProxyCoordinator,
-    script_code: String,
-    readonly_paths: Vec<String>,
-    readwrite_paths: Vec<String>,
     teardown_done: bool,
 }
 
@@ -1315,9 +1290,6 @@ impl BaseContainerSandboxProcess {
             identity: std::mem::take(&mut child.identity),
             sid_string: std::mem::take(&mut child.sid_string),
             proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
-            script_code: std::mem::take(&mut child.script_code),
-            readonly_paths: std::mem::take(&mut child.readonly_paths),
-            readwrite_paths: std::mem::take(&mut child.readwrite_paths),
             teardown_done: false,
         }
     }
@@ -1391,74 +1363,43 @@ impl SandboxProcess for BaseContainerSandboxProcess {
         Ok(())
     }
 
-    fn wait(&mut self) -> ScriptResponse {
+    fn wait(&mut self) -> std::io::Result<i32> {
         // Close our copy of any not-taken stdin so the child sees EOF and can
         // exit reliably (an interactive command would otherwise block waiting
         // for input).
         self.stdin.take();
 
-        let stdout_thread = spawn_drain(self.stdout.take());
-        let stderr_thread = spawn_drain(self.stderr.take());
+        // Drain (and discard) any not-taken streams concurrently to avoid the
+        // child blocking on a full pipe buffer.
+        let stdout_thread = spawn_discard(self.stdout.take());
+        let stderr_thread = spawn_discard(self.stderr.take());
 
-        let mut timed_out = false;
-        let exit_code = match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
+        let result = match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
             WAIT_OBJECT_0 => {
                 let mut code: u32 = u32::MAX;
                 let _ = unsafe { GetExitCodeProcess(self.process.get(), &mut code) };
-                code as i32
+                Ok(code as i32)
             }
             WAIT_TIMEOUT => {
                 // Tree-kill via the job so descendants die too and release the
-                // captured pipe write-ends; terminating only the root would
-                // leave the drain threads above blocked forever.
+                // pipe write-ends; terminating only the root would leave the
+                // drain threads above blocked forever.
                 let _ = self.kill();
                 unsafe {
                     let _ = WaitForSingleObject(self.process.get(), u32::MAX);
                 }
-                timed_out = true;
-                -1
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("script timed out after {}ms", self.timeout_ms),
+                ))
             }
-            _ => -1,
+            _ => Ok(-1),
         };
 
-        let captured_out = join_drain(stdout_thread);
-        let captured_err = join_drain(stderr_thread);
-
+        join_discard(stdout_thread);
+        join_discard(stderr_thread);
         self.run_teardown();
-
-        let (error_message, failure_phase) = if timed_out {
-            (
-                format!("script timed out after {}ms", self.timeout_ms),
-                FailurePhase::Timeout,
-            )
-        } else if exit_code != 0 {
-            if let Some(diag) = diagnose_process_exit(
-                &self.script_code,
-                &self.readonly_paths,
-                &self.readwrite_paths,
-                exit_code as u32,
-            ) {
-                (diag.message, FailurePhase::ProcessExited)
-            } else {
-                (String::new(), FailurePhase::ProcessExited)
-            }
-        } else {
-            (String::new(), FailurePhase::None)
-        };
-        let final_stderr = match (captured_err.is_empty(), error_message.is_empty()) {
-            (_, true) => captured_err,
-            (true, false) => error_message.clone(),
-            (false, false) => format!("{captured_err}{error_message}"),
-        };
-
-        ScriptResponse {
-            exit_code,
-            standard_out: captured_out,
-            standard_err: final_stderr,
-            error_message,
-            failure_phase,
-            ..Default::default()
-        }
+        result
     }
 }
 
