@@ -76,11 +76,10 @@ jobs:
         displayName: cargo fmt --check
         workingDirectory: $(workingDirectory)
 
-      # Pre-fetch deps so clippy can run --offline.
-      - script: cargo fetch --all-features --target $(targetTriple)
-        displayName: Fetch dependencies
-        workingDirectory: $(workingDirectory)
-
-      - script: cargo clippy --offline --target $(targetTriple) ${{ item.clippyArgs }} -- -D warnings
+      - script: cargo clippy --target $(targetTriple) ${{ item.clippyArgs }} -- -D warnings
         displayName: cargo clippy
         workingDirectory: $(workingDirectory)
+        env:
+          # System git for git-source fetches (libgit2 has been fast-failing on
+          # the picolibc-bsd shallow submodule from the 1ES pool).
+          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
