@@ -468,6 +468,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac6b926516df9c60bfa16e107b21086399f8285a44ca9711344b9e553c5146e2"
 
 [[package]]
+name = "denial_capture"
+version = "0.6.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "windows",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1384,6 +1394,19 @@ dependencies = [
  "mxc_build_common",
  "seatbelt_common",
  "wxc_common",
+]
+
+[[package]]
+name = "mxc_denial_shim"
+version = "0.6.1"
+dependencies = [
+ "denial_capture",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+ "windows",
+ "windows-service",
 ]
 
 [[package]]
@@ -2590,6 +2613,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-service"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d24d6bcc7f734a4091ecf8d7a64c5f7d7066f45585c1861eba06449909609c8a"
+dependencies = [
+ "bitflags 2.11.1",
+ "widestring",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "windows-strings"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2905,6 +2939,7 @@ dependencies = [
  "thiserror",
  "windows",
  "windows-core",
+ "windows-service",
  "wxc_common",
 ]
 

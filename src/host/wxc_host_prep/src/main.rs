@@ -23,6 +23,8 @@
 #[cfg(target_os = "windows")]
 mod cli;
 #[cfg(target_os = "windows")]
+mod denial_shim;
+#[cfg(target_os = "windows")]
 mod elevation_check;
 #[cfg(target_os = "windows")]
 mod log;

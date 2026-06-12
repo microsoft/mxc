@@ -57,6 +57,20 @@ enum Command {
     /// Print the current `\Device\Null` security descriptor in SDDL
     /// form (and optionally as JSON).
     DumpNullDevice(DumpNullDeviceArgs),
+
+    /// Register `mxc-denial-shim.exe` as a Manual-start Windows service
+    /// so unelevated callers (e.g. `wxc-exec`) can request scoped ETW
+    /// sessions for per-PID denial capture. Idempotent when the
+    /// binary path matches.
+    InstallDenialShim(InstallDenialShimArgs),
+
+    /// Stop and deregister the `MxcDenialShim` service. Idempotent
+    /// when the service is already absent.
+    UninstallDenialShim,
+
+    /// Report whether `MxcDenialShim` is installed, its current state,
+    /// and the registered binary path.
+    DumpDenialShim(DumpDenialShimArgs),
 }
 
 #[derive(clap::Args)]
@@ -104,6 +118,21 @@ struct DumpNullDeviceArgs {
     json: bool,
 }
 
+#[derive(clap::Args)]
+struct InstallDenialShimArgs {
+    /// Override the path to `mxc-denial-shim.exe`. Defaults to the
+    /// same directory as `wxc-host-prep.exe`.
+    #[arg(long = "shim-path")]
+    shim_path: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct DumpDenialShimArgs {
+    /// Emit machine-readable JSON results on stdout.
+    #[arg(long)]
+    json: bool,
+}
+
 pub fn run() -> i32 {
     let cli = Cli::parse();
 
@@ -124,5 +153,10 @@ pub fn run() -> i32 {
         }
         Command::VerifyNullDevice(args) => crate::null_device::run_verify(args.json),
         Command::DumpNullDevice(args) => crate::null_device::run_dump(args.json),
+        Command::InstallDenialShim(args) => {
+            crate::denial_shim::run_install(args.shim_path.as_deref())
+        }
+        Command::UninstallDenialShim => crate::denial_shim::run_uninstall(),
+        Command::DumpDenialShim(args) => crate::denial_shim::run_dump(args.json),
     }
 }
