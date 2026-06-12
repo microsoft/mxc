@@ -736,9 +736,9 @@ impl BaseContainerRunner {
         // we forward our own std handles to the child via STARTF_USESTDHANDLES so the
         // child's output streams directly to the SDK in real time.
         //
-        // When `capture_output` is set (the `mxc` library path) we always take
-        // the pipe path and wire the child to capture pipes whose output we read
-        // into the response.
+        // When `capture_output` is set (the streaming spawn sets it) we always
+        // take the pipe path and wire the child to capture pipes whose output
+        // we read into the response.
         let capture = request.capture_output;
         let pipe_mode =
             capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();

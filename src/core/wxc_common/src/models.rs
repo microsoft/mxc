@@ -585,9 +585,10 @@ pub struct ExecutionRequest {
     ///
     /// Default `false` preserves the streaming behaviour the `wxc-exec` /
     /// `lxc-exec` / `mxc-exec-mac` binaries rely on (Seatbelt/LXC use a pty;
-    /// AppContainer inherits the host fds). The `mxc` library sets this to
-    /// `true` so importers get the child's output as captured strings and no
-    /// pty is ever allocated. Bubblewrap always captures regardless.
+    /// AppContainer inherits the host fds). The Windows ProcessContainer
+    /// streaming spawn sets it `true` internally to wire the child's stdio to
+    /// pipes for the `SandboxProcess` handle. Bubblewrap always captures
+    /// regardless.
     pub capture_output: bool,
 }
 

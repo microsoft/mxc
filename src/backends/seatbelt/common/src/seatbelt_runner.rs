@@ -242,8 +242,8 @@ impl SeatbeltScriptRunner {
     /// No-pty captured execution path. Spawns the sandboxed `/bin/sh -c`
     /// with piped stdout/stderr, drains both on background threads to avoid
     /// pipe-buffer deadlock, and returns the captured output in the
-    /// [`ScriptResponse`]. Used when `request.capture_output` is set (the
-    /// `mxc` library path); the interactive CLI path keeps the pty bridge.
+    /// [`ScriptResponse`]. Used when `request.capture_output` is set; the
+    /// interactive CLI path keeps the pty bridge.
     fn execute_captured(&self, mut command: Command, request: &ExecutionRequest) -> ScriptResponse {
         command
             .stdin(Stdio::null())

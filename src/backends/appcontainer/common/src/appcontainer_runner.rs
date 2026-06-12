@@ -505,9 +505,9 @@ impl AppContainerScriptRunner {
         // child's output streams directly to the SDK in real time. Otherwise we use
         // console sharing (the ConPTY path).
         //
-        // When `capture_output` is set (the `mxc` library path) we always take
-        // the pipe path — but instead of forwarding our own std handles we wire
-        // the child to capture pipes and read its output into the response.
+        // When `capture_output` is set (the streaming spawn sets it) we always
+        // take the pipe path — but instead of forwarding our own std handles we
+        // wire the child to capture pipes and read its output into the response.
         let capture = request.capture_output;
         let pipe_mode =
             capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
