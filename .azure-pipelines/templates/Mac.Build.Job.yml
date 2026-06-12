@@ -38,14 +38,34 @@ jobs:
   steps:
     - checkout: self
 
+    # macOS pool can't use 1ES.Build.Rust.* tasks. Official path uses
+    # RustInstaller@1 + CargoAuthenticate@0 against Mxc-Azure-Feed for
+    # supply-chain compliance; unofficial uses the public rustup template.
     - ${{ if eq(parameters.isOfficialBuild, true) }}:
-      - template: Rust.Build.Steps.Official.yml@self
-        parameters:
-          targetTriple: $(targetTriple)
-          workingDirectory: $(workingDirectory)
-          # macOS-only crate set; the rest of the workspace has Windows-only
-          # crates that do not compile on macOS.
-          cargoPackages: mxc_darwin,seatbelt_common,wxc_common
+      - script: |
+          echo "" >> "$(Build.SourcesDirectory)/.cargo/config.toml"
+          cat "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml" >> "$(Build.SourcesDirectory)/.cargo/config.toml"
+        displayName: Setup Cargo Config
+
+      - task: RustInstaller@1
+        displayName: Install Rust toolchain
+        inputs:
+          toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+          rustVersion: 'ms-prod-1.93'
+          additionalTargets: $(targetTriple)
+          cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/Cargo/index/
+
+      - task: CargoAuthenticate@0
+        inputs:
+          configFile: '$(Build.SourcesDirectory)/.cargo/config.toml'
+
+      - script: cargo build --locked --release --target $(targetTriple) -p mxc_darwin -p seatbelt_common -p wxc_common
+        displayName: Build
+        workingDirectory: $(workingDirectory)
+
+      - script: cargo test --locked --release --target $(targetTriple) -p mxc_darwin -p seatbelt_common -p wxc_common
+        displayName: Test
+        workingDirectory: $(workingDirectory)
 
     - ${{ else }}:
       - template: Rust.Build.Steps.Unofficial.yml@self
