@@ -442,8 +442,9 @@ impl AppContainerScriptRunner {
                 }
                 #[cfg(not(debug_assertions))]
                 {
-                    return Ok(ScriptResponse::error(
-                        "SECURITY: permissiveLearningMode not allowed in release builds",
+                    return Err(WxcError::Validation(
+                        "SECURITY: permissiveLearningMode not allowed in release builds"
+                            .to_string(),
                     ));
                 }
             }
