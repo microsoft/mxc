@@ -36,11 +36,20 @@ steps:
   # Force cargo to use system `git` for git-source fetches instead of libgit2.
   # libgit2 fast-fails (~16s) on the picolibc-bsd shallow submodule fetch from
   # the 1ES pool; system git (same one the checkout step uses) succeeds.
-  - script: cargo build --locked --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
+  # Pre-fetch all crate + git deps in one explicit step (with system git for
+  # libgit2-flaky git fetches). Build/test then run --offline against the local
+  # cache, so transient pool network blips can't poison the actual build.
+  - script: cargo fetch --locked --target ${{ parameters.targetTriple }}
+    displayName: Fetch dependencies
+    workingDirectory: ${{ parameters.workingDirectory }}
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+
+  - script: cargo build --locked --offline --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
     displayName: Build
     workingDirectory: ${{ parameters.workingDirectory }}
 
-  - script: cargo test --locked --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
+  - script: cargo test --locked --offline --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
     displayName: Test
     workingDirectory: ${{ parameters.workingDirectory }}
     condition: eq('${{ parameters.enableTest }}', 'true')
