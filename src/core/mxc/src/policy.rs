@@ -196,10 +196,13 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
         return FilesystemPolicyResult::default();
     }
 
-    let system_drive = env_get(env, "SystemDrive")
+    // `SystemDrive` is read from the process environment (matching the SDK,
+    // which uses `process.env["SystemDrive"]` here even though USERPROFILE
+    // comes from the passed-in `env`).
+    let system_drive = std::env::var("SystemDrive")
+        .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or("C:")
-        .to_string();
+        .unwrap_or_else(|| "C:".to_string());
     let mut result = FilesystemPolicyResult {
         readonly_paths: vec![format!("{system_drive}\\")],
         readwrite_paths: Vec::new(),
@@ -476,12 +479,8 @@ pub fn build_request(
         is_base64: true,
         allow_missing_command: true,
     };
-    load_request_with_options(&encoded, &mut logger, opts).map_err(|e| {
-        MxcError::malformed_request(format!(
-            "failed to build request: {e}\n{}",
-            logger.get_buffer()
-        ))
-    })
+    load_request_with_options(&encoded, &mut logger, opts)
+        .map_err(|e| MxcError::malformed_request(format!("failed to build request: {e}")))
 }
 
 /// Construct the wire-format `ContainerConfig` JSON value for the supported

@@ -34,6 +34,8 @@ impl std::io::Read for PipeReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         use windows::Win32::Foundation::ERROR_BROKEN_PIPE;
         let mut read: u32 = 0;
+        // SAFETY: `self.0` owns a valid pipe handle for the lifetime of this
+        // `PipeReader`; `buf`/`read` are valid local out-params for the call.
         match unsafe { ReadFile(self.0.get(), Some(buf), Some(&mut read), None) } {
             Ok(()) => Ok(read as usize),
             // Write ends all closed: normal end-of-stream, report EOF.
@@ -58,6 +60,8 @@ impl PipeWriter {
 impl std::io::Write for PipeWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut written: u32 = 0;
+        // SAFETY: `self.0` owns a valid pipe handle for the lifetime of this
+        // `PipeWriter`; `buf`/`written` are valid local params for the call.
         match unsafe { WriteFile(self.0.get(), Some(buf), Some(&mut written), None) } {
             Ok(()) => Ok(written as usize),
             Err(e) => Err(std::io::Error::other(e)),

@@ -38,6 +38,24 @@ fn streaming_unsupported_backend_is_rejected() {
     assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
 }
 
+#[test]
+fn streaming_rejects_dry_run() {
+    let config = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "seatbelt",
+        "process": { "commandLine": "echo hi" }
+    }"#;
+    let options = SpawnOptions {
+        dry_run: true,
+        ..SpawnOptions::default()
+    };
+    let err = match spawn_sandbox(config, &options) {
+        Ok(_) => panic!("dry_run streaming must be rejected"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn streaming_wait_captures_untaken_streams() {

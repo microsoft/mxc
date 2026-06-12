@@ -72,7 +72,11 @@ pub trait SandboxProcess: Send {
 
     /// The OS process id of the sandboxed child (its PID on Unix, process id
     /// on Windows). Useful for external monitoring or a caller-driven process
-    /// tree kill. Remains valid until the handle is dropped.
+    /// tree kill.
+    ///
+    /// Only meaningful while the child is alive. On Unix the PID may be reused
+    /// by an unrelated process once the child has been reaped (by
+    /// [`wait`](SandboxProcess::wait)), so do not act on it after waiting.
     fn id(&self) -> u32;
 
     /// Request termination of the sandboxed process **and its descendants**

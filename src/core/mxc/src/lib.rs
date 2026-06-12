@@ -86,9 +86,10 @@ pub struct SpawnOptions {
     pub command: Option<String>,
 
     /// Additional environment variables to expose to the sandboxed process,
-    /// as `(key, value)` pairs. These are merged into the config's
-    /// `process.env` (a matching key already present is replaced), mirroring
-    /// the SDK's `injectEnvIntoConfig` behaviour on the `usePty: false` path.
+    /// as `(key, value)` pairs. Each is merged into the config's `process.env`,
+    /// **replacing** any existing entry with the same key (note: this differs
+    /// from the SDK's `injectEnvIntoConfig`, which appends, leaving the native
+    /// parser to resolve duplicate `KEY=` entries).
     pub env: Vec<(String, String)>,
 }
 
@@ -125,7 +126,9 @@ pub fn spawn_sandbox_from_config(
 ///
 /// `config` and `options` are interpreted exactly as in
 /// [`spawn_sandbox_from_config`] (the `command`, `working_directory`, and
-/// `env` overrides apply; `dry_run` is ignored — there is nothing to run).
+/// `env` overrides apply). Setting `options.dry_run` is rejected with
+/// [`MxcErrorCode::MalformedRequest`]: there is no process to stream, so
+/// validate via [`spawn_sandbox_from_config`] instead.
 pub fn spawn_sandbox(
     config: &str,
     options: &SpawnOptions,
@@ -156,12 +159,8 @@ fn load_and_prepare(
         &encoded
     };
 
-    let mut request = load_request(input, &mut logger, true).map_err(|e| {
-        MxcError::malformed_request(format!(
-            "failed to load config: {e}\n{}",
-            logger.get_buffer()
-        ))
-    })?;
+    let mut request = load_request(input, &mut logger, true)
+        .map_err(|e| MxcError::malformed_request(format!("failed to load config: {e}")))?;
 
     apply_options(&mut request, options);
 
@@ -194,12 +193,12 @@ pub fn spawn_sandbox_from_request(
 /// The streaming counterpart to [`spawn_sandbox_from_request`]: returns a
 /// [`SandboxProcess`] for live stdio and termination. Usually the request
 /// comes from [`build_request`] with `script_code` (and working directory /
-/// env) filled in by the caller.
+/// env) filled in by the caller. (Streaming always pipes the child's stdio, so
+/// `ExecutionRequest::capture_output` does not apply.)
 pub fn spawn_streaming_from_request(
-    mut request: ExecutionRequest,
+    request: ExecutionRequest,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     let mut logger = Logger::new(Mode::Buffer);
-    request.capture_output = true;
     spawn_runner(&request, &mut logger)
 }
 

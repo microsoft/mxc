@@ -11,7 +11,7 @@ captured stdout/stderr and exit code.
 
 ## Usage
 
-```rust
+```rust,no_run
 use mxc::{spawn_sandbox_from_config, SpawnOptions};
 
 // `config` is the same JSON the SDK serialises from a SandboxPolicy
@@ -42,7 +42,7 @@ For callers that already hold a parsed `ExecutionRequest`, use
 Instead of constructing the wire config in the `@microsoft/mxc-sdk` TypeScript
 module, build it in Rust from a [`SandboxPolicy`]:
 
-```rust
+```rust,no_run
 use mxc::{build_request, spawn_streaming_from_request, Containment, SandboxPolicy};
 
 let policy = SandboxPolicy {
@@ -81,7 +81,7 @@ completion it returns a [`SandboxProcess`] you can drive while it runs —
 persistent bidirectional stdio plus termination. No pty is allocated; the
 streams are ordinary pipes.
 
-```rust
+```rust,no_run
 use std::io::{Read, Write};
 use mxc::{spawn_sandbox, SpawnOptions};
 
@@ -101,7 +101,7 @@ drop(stdin);                      // close -> child sees EOF
 let mut out = String::new();
 stdout.read_to_string(&mut out)?; // "hello\n"
 
-let result = proc.wait()?;        // exit code (+ any untaken streams)
+let result = proc.wait();         // exit code (+ any untaken streams)
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 

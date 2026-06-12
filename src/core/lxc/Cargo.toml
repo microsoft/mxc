@@ -19,7 +19,6 @@ nanvix_common = { path = "../../backends/nanvix/common" }
 wxc_common = { workspace = true }
 mxc = { workspace = true }
 lxc_common = { workspace = true }
-bwrap_common = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }

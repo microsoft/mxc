@@ -15,10 +15,12 @@
 //!
 //! Only the backends the `mxc` library officially supports are handled here:
 //! ProcessContainer (Windows AppContainer / BaseContainer fallback),
-//! Bubblewrap (Linux), and Seatbelt (macOS). Every other backend — including
-//! the experimental ones (Windows Sandbox, IsolationSession, MicroVM,
-//! Hyperlight, WSLC, LXC) — returns [`MxcError::unsupported_containment`];
-//! callers that need those must drive the standalone executor binaries.
+//! Bubblewrap (Linux), Seatbelt (macOS), and LXC (Linux, run-to-completion
+//! only — LXC has no streaming handle, so [`spawn_runner`] rejects it). Every
+//! other backend — including the experimental ones (Windows Sandbox,
+//! IsolationSession, MicroVM, Hyperlight, WSLC) — returns
+//! [`MxcError::unsupported_containment`]; callers that need those must drive
+//! the standalone executor binaries.
 
 use wxc_common::logger::Logger;
 use wxc_common::models::{ContainmentBackend, ExecutionRequest};
@@ -93,6 +95,7 @@ pub fn select_runner(
     match &request.containment {
         ContainmentBackend::Seatbelt => select_seatbelt(request),
         ContainmentBackend::Bubblewrap => select_bubblewrap(request),
+        ContainmentBackend::Lxc => select_lxc(request),
         ContainmentBackend::ProcessContainer => select_process_container(request, logger),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc library does not support the '{}' backend; use the wxc-exec / \
@@ -137,6 +140,27 @@ fn select_bubblewrap(_request: &ExecutionRequest) -> Result<Selection, MxcError>
 }
 
 // ---------------------------------------------------------------------------
+// Linux — LXC
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+fn select_lxc(request: &ExecutionRequest) -> Result<Selection, MxcError> {
+    use lxc_common::lxc_runner::LxcScriptRunner;
+    Ok(Selection::new(Box::new(LxcScriptRunner::new(
+        &request.lxc_config,
+        &request.container_id,
+        &request.lifecycle,
+    ))))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn select_lxc(_request: &ExecutionRequest) -> Result<Selection, MxcError> {
+    Err(MxcError::unsupported_containment(
+        "LXC is only available on Linux",
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Windows — ProcessContainer (AppContainer + BaseContainer fallback)
 // ---------------------------------------------------------------------------
 
@@ -147,6 +171,7 @@ fn select_process_container(
 ) -> Result<Selection, MxcError> {
     use appcontainer_common::appcontainer_runner::AppContainerScriptRunner;
     use appcontainer_common::dispatcher::dispatch_with_fallback;
+    use std::fmt::Write as _;
     use wxc_common::config_parser::is_base_container_version;
 
     // BaseContainer (OS sandbox API) is used when experimental is enabled or
@@ -158,22 +183,35 @@ fn select_process_container(
         return Ok(Selection::new(Box::new(AppContainerScriptRunner::new())));
     }
 
+    // Diagnostic parity with wxc-exec: record which trigger selected the
+    // BaseContainer-fallback dispatcher. Logged to the (buffered) logger, so
+    // it is surfaced by the binaries on error and harmlessly discarded by
+    // library callers.
+    let reason = if version_implies_base_container {
+        format!("schema version {}", request.schema_version)
+    } else {
+        "--experimental".to_string()
+    };
+    let _ = writeln!(logger, "Using BaseContainer-fallback dispatcher ({reason})");
+
     match dispatch_with_fallback(request) {
         Ok(dispatched) => {
-            let mut warnings = dispatched.warnings.clone();
-            warnings.push(format!(
+            for w in &dispatched.warnings {
+                let _ = writeln!(logger, "warning: {w}");
+            }
+            let _ = writeln!(
+                logger,
                 "selected isolation tier: {}",
                 dispatched.tier.as_str()
-            ));
+            );
             let (runner, dacl_guard) = dispatched.into_runner_and_guard();
             Ok(Selection {
                 runner,
                 dacl_guard,
-                warnings,
+                warnings: Vec::new(),
             })
         }
         Err(e) => {
-            let _ = logger;
             // Preserve the per-entry DACL retained-entry warnings the
             // dispatcher drains on a failed apply (parity with wxc-exec's
             // diagnostic output).
@@ -215,6 +253,15 @@ pub fn spawn_runner(
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     ensure_host_supported()?;
+    // `dry_run` means "validate, don't execute" — there is no process to
+    // stream, so reject it rather than silently ignoring it (the
+    // run-to-completion path honours it via `ScriptRunner::run`).
+    if request.dry_run {
+        return Err(MxcError::malformed_request(
+            "dry_run is not supported for streaming spawns; use \
+             spawn_sandbox_from_config / spawn_sandbox_from_request to validate",
+        ));
+    }
     match &request.containment {
         ContainmentBackend::Seatbelt => spawn_seatbelt(request, logger),
         ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
