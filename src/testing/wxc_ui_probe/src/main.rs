@@ -15,6 +15,9 @@
 use std::env;
 use std::ffi::c_void;
 use std::iter;
+use std::path::Path;
+use std::thread;
+use std::time::{Duration, Instant};
 
 type Bool = i32;
 type Dword = u32;
@@ -26,6 +29,27 @@ type Atom = u16;
 type FarProc = *const c_void;
 type LpcWstr = *const u16;
 type LpVoid = *mut c_void;
+
+/// Optional `--key=value` parameters for the GLOBALATOMS probe handshake.
+///
+/// These are supplied by the test harness on the command line. When absent
+/// (e.g. a developer running the probe by hand) the GLOBALATOMS probe emits
+/// diagnostics instead of attempting the host/guest isolation checks.
+#[derive(Debug, Default, Clone)]
+struct GlobalAtomArgs {
+    /// Name of an atom the host planted in its session-global atom table.
+    /// The contained probe must NOT be able to find it.
+    host_name: Option<String>,
+    /// Name of an atom the contained probe creates in its (private) atom
+    /// table. The host must NOT be able to find it.
+    guest_name: Option<String>,
+    /// File the probe creates once `guest_name` has been added, signalling the
+    /// host that it may check its own atom table.
+    ready_file: Option<String>,
+    /// File the host creates once it has finished checking, releasing the
+    /// probe to delete its atom and exit.
+    release_file: Option<String>,
+}
 
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
@@ -66,6 +90,7 @@ extern "system" {
     fn LoadLibraryW(name: LpcWstr) -> Hmodule;
     fn GetProcAddress(module: Hmodule, name: *const u8) -> FarProc;
     fn GlobalAddAtomW(name: LpcWstr) -> Atom;
+    fn GlobalFindAtomW(name: LpcWstr) -> Atom;
     fn GlobalDeleteAtom(atom: Atom) -> Atom;
     fn GetLastError() -> Dword;
 }
@@ -132,17 +157,91 @@ fn emit_diag(tag: &str, reason: &str) {
     println!("{}=DIAG {}", tag, reason);
 }
 
-fn probe_globalatoms() {
-    let wide = to_wide("MxcUiProbeAtom");
+/// Block until `path` exists or `timeout` elapses. Returns whether the file
+/// exists at the end. Used for the GLOBALATOMS guest->host handshake so the
+/// probe never hangs indefinitely if the host fails to release it.
+fn wait_for_file(path: &str, timeout: Duration) -> bool {
+    let p = Path::new(path);
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if p.exists() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    p.exists()
+}
+
+/// Probe the GLOBALATOMS UI restriction (`JOB_OBJECT_UILIMIT_GLOBALATOMS`).
+///
+/// Unlike most UI limits this does NOT make the atom APIs fail: the documented
+/// behavior is that each job gets its own private atom table, so
+/// `GlobalAddAtomW` still succeeds inside the container. The restriction is
+/// therefore verified as *isolation* between the host's session-global atom
+/// table and the contained job's private table, in both directions:
+///
+/// * `GLOBALATOMS_HOST_TO_GUEST` — the host plants an atom in its global table
+///   and passes the name via `--atom-host-name`. PASS means this contained
+///   process CANNOT find it (`GlobalFindAtomW` -> 0). Decided here.
+/// * `GLOBALATOMS_GUEST_TO_HOST` — this process adds an atom named by
+///   `--atom-guest-name`, signals readiness by creating `--atom-ready-file`,
+///   then blocks until the host creates `--atom-release-file`. While the atom
+///   is held alive the host checks its own global table and records the
+///   result; this function only performs the create / hold / cleanup half.
+fn probe_globalatoms(args: &GlobalAtomArgs) {
+    // Direction 1: host -> guest. We must not see the host's global atom.
+    match args.host_name.as_deref() {
+        Some(name) => {
+            let wide = to_wide(name);
+            let found = unsafe { GlobalFindAtomW(wide.as_ptr()) };
+            if found == 0 {
+                emit_pass("GLOBALATOMS_HOST_TO_GUEST");
+            } else {
+                emit_fail("GLOBALATOMS_HOST_TO_GUEST");
+            }
+        }
+        None => emit_diag(
+            "GLOBALATOMS_HOST_TO_GUEST",
+            "no --atom-host-name provided (run via the harness)",
+        ),
+    }
+
+    // Direction 2: guest -> host. The host must not see our atom. The PASS/FAIL
+    // verdict is recorded host-side; here we create the atom and hold it alive
+    // across the handshake.
+    let guest = match args.guest_name.as_deref() {
+        Some(g) => g,
+        None => {
+            emit_diag(
+                "GLOBALATOMS_GUEST_TO_HOST",
+                "no --atom-guest-name provided (run via the harness)",
+            );
+            return;
+        }
+    };
+    let wide = to_wide(guest);
     let atom = unsafe { GlobalAddAtomW(wide.as_ptr()) };
     if atom == 0 {
-        emit_pass("GLOBALATOMS");
+        emit_diag(
+            "GLOBALATOMS_GUEST_TO_HOST",
+            "GlobalAddAtomW failed unexpectedly",
+        );
         return;
     }
+
+    // Signal the host that the atom now exists, then hold it until released.
+    if let Some(ready) = args.ready_file.as_deref() {
+        if std::fs::write(ready, b"ready").is_err() {
+            emit_diag("GLOBALATOMS_GUEST_TO_HOST", "failed to write ready file");
+        }
+    }
+    if let Some(release) = args.release_file.as_deref() {
+        let _ = wait_for_file(release, Duration::from_secs(15));
+    }
+
     unsafe {
         let _ = GlobalDeleteAtom(atom);
     }
-    emit_fail("GLOBALATOMS");
 }
 
 fn probe_readclipboard(user32: Hmodule) {
@@ -392,9 +491,9 @@ fn probe_win32k(user32: Hmodule) {
     emit_fail("WIN32K");
 }
 
-fn run_probe(tag: &str, user32: Option<Hmodule>) {
+fn run_probe(tag: &str, user32: Option<Hmodule>, atom_args: &GlobalAtomArgs) {
     match tag {
-        "GLOBALATOMS" => probe_globalatoms(),
+        "GLOBALATOMS" => probe_globalatoms(atom_args),
         "READCLIPBOARD" => match user32 {
             Some(h) => probe_readclipboard(h),
             None => {
@@ -462,27 +561,52 @@ fn run_probe(tag: &str, user32: Option<Hmodule>) {
     let _ = std::io::stdout().flush();
 }
 
-fn collect_tags() -> Vec<String> {
-    let mut tags: Vec<String> = env::args().skip(1).collect();
-    if tags.is_empty() {
+/// Collect raw arguments, falling back to `MXC_UI_PROBE_TAGS` when no
+/// positional arguments are supplied. Returned values include both probe tags
+/// and any `--key=value` flags; `parse_args` separates them.
+fn collect_raw_args() -> Vec<String> {
+    let mut raw: Vec<String> = env::args().skip(1).collect();
+    if raw.is_empty() {
         if let Ok(v) = env::var("MXC_UI_PROBE_TAGS") {
-            tags = v
+            raw = v
                 .split(|c: char| c == ',' || c.is_whitespace())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .collect();
         }
     }
-    tags
+    raw
+}
+
+/// Split raw arguments into positional probe tags and the optional
+/// `--key=value` flags that parameterize the GLOBALATOMS handshake. Unknown
+/// flags are ignored so the probe stays forward-compatible with the harness.
+fn parse_args(raw: Vec<String>) -> (Vec<String>, GlobalAtomArgs) {
+    let mut tags = Vec::new();
+    let mut atom = GlobalAtomArgs::default();
+    for arg in raw {
+        match arg.strip_prefix("--").and_then(|rest| rest.split_once('=')) {
+            Some(("atom-host-name", value)) => atom.host_name = Some(value.to_string()),
+            Some(("atom-guest-name", value)) => atom.guest_name = Some(value.to_string()),
+            Some(("atom-ready-file", value)) => atom.ready_file = Some(value.to_string()),
+            Some(("atom-release-file", value)) => atom.release_file = Some(value.to_string()),
+            Some(_) => {} // unknown flag: ignore
+            None => tags.push(arg),
+        }
+    }
+    (tags, atom)
 }
 
 fn main() {
-    let tags = collect_tags();
+    let (tags, atom_args) = parse_args(collect_raw_args());
     if tags.is_empty() {
         eprintln!(
             "usage: wxc-ui-probe <TAG>... (or MXC_UI_PROBE_TAGS=TAG,TAG); \
              valid tags: GLOBALATOMS READCLIPBOARD WRITECLIPBOARD SYSTEMPARAMETERS \
-             DISPLAYSETTINGS DESKTOP EXITWINDOWS HANDLES WIN32K"
+             DISPLAYSETTINGS DESKTOP EXITWINDOWS HANDLES WIN32K. \
+             GLOBALATOMS also accepts --atom-host-name=, --atom-guest-name=, \
+             --atom-ready-file=, --atom-release-file= for the host/guest \
+             isolation handshake."
         );
         std::process::exit(2);
     }
@@ -497,9 +621,9 @@ fn main() {
     // every other probe gets a chance to report.
     let (win32k, rest): (Vec<_>, Vec<_>) = tags.into_iter().partition(|t| t == "WIN32K");
     for tag in rest {
-        run_probe(&tag, user32);
+        run_probe(&tag, user32, &atom_args);
     }
     for tag in win32k {
-        run_probe(&tag, user32);
+        run_probe(&tag, user32, &atom_args);
     }
 }

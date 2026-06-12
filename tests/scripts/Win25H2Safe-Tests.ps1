@@ -65,6 +65,21 @@ Set-StrictMode -Version Latest
 # "DIAG: refused".
 $env:MXC_PROBE_DESTRUCTIVE_OK = '1'
 
+# kernel32 atom-table P/Invoke used by Phase-GlobalAtomIsolation to plant a
+# host-side global atom (direction 1) and to probe its own session-global
+# table for the contained process's atom (direction 2). Guarded so a re-run
+# in the same PowerShell session doesn't throw "type already exists".
+if (-not ([System.Management.Automation.PSTypeName]'Mxc.AtomNative').Type) {
+    Add-Type -Namespace 'Mxc' -Name 'AtomNative' -MemberDefinition @'
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern ushort GlobalAddAtomW(string lpString);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern ushort GlobalFindAtomW(string lpString);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern ushort GlobalDeleteAtom(ushort nAtom);
+'@ | Out-Null
+}
+
 # -----------------------------------------------------------------------
 # Result accumulator
 # -----------------------------------------------------------------------
@@ -820,7 +835,11 @@ function Phase-UiMitigationMatrix {
     # injection=false. base_process_ui: isolation=container (HANDLES +
     # GLOBALATOMS), desktopSystemControl=false (DESKTOP + EXITWINDOWS),
     # systemSettings=none (SYSTEMPARAMETERS + DISPLAYSETTINGS), ime=false.
-    $probeArgsA = 'GLOBALATOMS READCLIPBOARD WRITECLIPBOARD SYSTEMPARAMETERS DISPLAYSETTINGS DESKTOP EXITWINDOWS HANDLES'
+    # NOTE: GLOBALATOMS is NOT probed here. JOB_OBJECT_UILIMIT_GLOBALATOMS
+    # does not fail the atom APIs — it gives the job a private atom table —
+    # so it cannot be verified with the simple "API failed -> PASS" matrix.
+    # Phase-GlobalAtomIsolation covers it with a bidirectional isolation test.
+    $probeArgsA = 'READCLIPBOARD WRITECLIPBOARD SYSTEMPARAMETERS DISPLAYSETTINGS DESKTOP EXITWINDOWS HANDLES'
     $cmdA = "`"$UiProbeDebug`" $probeArgsA"
     $cfgA = New-Config -Name 'ui-matrix-A-allbits' `
         -CommandLine $cmdA `
@@ -839,7 +858,7 @@ function Phase-UiMitigationMatrix {
 
     $matrixA = @{}
     foreach ($line in ($rA.Stdout -split "`r?`n")) {
-        if ($line -match '^(?<k>GLOBALATOMS|READCLIPBOARD|WRITECLIPBOARD|SYSTEMPARAMETERS|DISPLAYSETTINGS|DESKTOP|EXITWINDOWS|HANDLES|WIN32K)=(?<v>PASS|FAIL)\s*$') {
+        if ($line -match '^(?<k>READCLIPBOARD|WRITECLIPBOARD|SYSTEMPARAMETERS|DISPLAYSETTINGS|DESKTOP|EXITWINDOWS|HANDLES|WIN32K)=(?<v>PASS|FAIL)\s*$') {
             $matrixA[$matches['k']] = $matches['v']
         }
     }
@@ -850,7 +869,7 @@ function Phase-UiMitigationMatrix {
     # ui.disable=false on this run: Win32k mitigation applied must NOT appear.
     Record-Result -Phase 'P4b' -Name 'scenarioA: no Win32k mitigation applied (ui.disable=false)' -Pass (-not ($logContentA -match 'Win32k mitigation applied'))
 
-    foreach ($tag in @('GLOBALATOMS','READCLIPBOARD','WRITECLIPBOARD','SYSTEMPARAMETERS','DISPLAYSETTINGS','DESKTOP','EXITWINDOWS','HANDLES')) {
+    foreach ($tag in @('READCLIPBOARD','WRITECLIPBOARD','SYSTEMPARAMETERS','DISPLAYSETTINGS','DESKTOP','EXITWINDOWS','HANDLES')) {
         $got = if ($matrixA.ContainsKey($tag)) { $matrixA[$tag] } else { '<missing>' }
         Record-Result -Phase 'P4b' -Name "scenarioA: $tag blocked (probe -> PASS)" -Pass ($got -eq 'PASS') -Detail "got=$got; full=$summaryA"
     }
@@ -879,6 +898,137 @@ function Phase-UiMitigationMatrix {
     # by the kernel; without it the probe completes and exits 0.
     Record-Result -Phase 'P4b' -Name 'scenarioB: child did NOT report WIN32K=FAIL (mitigation honored)' -Pass (-not $printedFail) -Detail "exit=$($rB.ExitCode); stdout=$($rB.Stdout.Trim())"
     Record-Result -Phase 'P4b' -Name 'scenarioB: child did NOT report WIN32K=PASS' -Pass (-not $printedPass) -Detail 'probe never returns PASS for WIN32K (process is killed before printing)'
+}
+
+# -----------------------------------------------------------------------
+# Phase 4c — GLOBALATOMS bidirectional isolation (T3 forced)
+#
+# JOB_OBJECT_UILIMIT_GLOBALATOMS does NOT make the atom APIs fail — the
+# documented behavior is that each job gets its own private atom table, so
+# GlobalAddAtomW still succeeds inside the container. The restriction is
+# therefore verified as *isolation* between the host's session-global atom
+# table and the contained job's private table, in BOTH directions:
+#
+#   * host -> guest: the host plants a global atom and passes its name to the
+#     probe. The probe must NOT be able to find it. Decided by the probe and
+#     printed as GLOBALATOMS_HOST_TO_GUEST=PASS|FAIL.
+#   * guest -> host: the probe adds its own atom, creates the ready file, and
+#     blocks until the host creates the release file. While the probe holds
+#     the atom alive the host checks its own global table and must NOT find
+#     it. Decided here (the job-private table is torn down when the container
+#     exits, so the check MUST happen while the probe is still alive — hence
+#     the handshake).
+# -----------------------------------------------------------------------
+function Phase-GlobalAtomIsolation {
+    Section 'Phase 4c: GLOBALATOMS bidirectional isolation (T3 forced)'
+
+    $rw = Join-Path $ScratchRoot 'rw'
+    New-Item -ItemType Directory -Path $rw -Force | Out-Null
+
+    $suffix      = [guid]::NewGuid().ToString('N')
+    $hostName    = "MxcWin25H2HostAtom_$suffix"
+    $guestName   = "MxcWin25H2GuestAtom_$suffix"
+    $readyFile   = Join-Path $rw "globalatom-ready-$suffix"
+    $releaseFile = Join-Path $rw "globalatom-release-$suffix"
+    Remove-Item -LiteralPath $readyFile, $releaseFile -ErrorAction SilentlyContinue
+
+    # Plant the host-side global atom (the direction-1 reference). Held alive
+    # until the finally block — PowerShell stays running, so it persists for
+    # the whole contained run.
+    $hostAtom = [Mxc.AtomNative]::GlobalAddAtomW($hostName)
+    if ($hostAtom -eq 0) {
+        Record-Result -Phase 'P4c' -Name 'host atom planted' -Pass $false -Detail 'GlobalAddAtomW returned 0'
+        return
+    }
+
+    $cmd = "`"$UiProbeDebug`" GLOBALATOMS " +
+        "--atom-host-name=$hostName --atom-guest-name=$guestName " +
+        "--atom-ready-file=`"$readyFile`" --atom-release-file=`"$releaseFile`""
+    $cfg = New-Config -Name 'ui-globalatoms' `
+        -CommandLine $cmd `
+        -ReadWrite @($rw) `
+        -UiDisable $false `
+        -BpUiIsolation 'container'
+    $log = Join-Path $ScratchRoot 'logs\ui-globalatoms.log'
+
+    # Match Invoke-Wxc's defensive scrub of the test-only tier override.
+    Remove-Item Env:\MXC_FORCE_TIER -ErrorAction SilentlyContinue
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $WxcDebug
+    $psi.Arguments = "--config `"$cfg`" --experimental --log-file `"$log`""
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow  = $true
+
+    # The probe blocks mid-run waiting on the release file, so we cannot use
+    # the synchronous Invoke-Wxc (which reads stdout only after exit). Drain
+    # both streams asynchronously to avoid a pipe-buffer deadlock while the
+    # child is parked.
+    $sbOut = New-Object System.Text.StringBuilder
+    $sbErr = New-Object System.Text.StringBuilder
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo = $psi
+    $outEvt = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -MessageData $sbOut -Action {
+        if ($null -ne $EventArgs.Data) { [void]$Event.MessageData.AppendLine($EventArgs.Data) }
+    }
+    $errEvt = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -MessageData $sbErr -Action {
+        if ($null -ne $EventArgs.Data) { [void]$Event.MessageData.AppendLine($EventArgs.Data) }
+    }
+
+    $guestFound = $null
+    try {
+        [void]$p.Start()
+        $p.BeginOutputReadLine()
+        $p.BeginErrorReadLine()
+
+        # Wait for the probe to signal that its atom now exists.
+        $deadline = (Get-Date).AddSeconds(30)
+        $ready = $false
+        while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $readyFile) { $ready = $true; break }
+            if ($p.HasExited) { break }
+            Start-Sleep -Milliseconds 100
+        }
+
+        if ($ready) {
+            # Direction 2: the host must NOT find the contained process's atom.
+            $guestFound = [Mxc.AtomNative]::GlobalFindAtomW($guestName)
+        }
+
+        # Release the probe so it deletes its atom and exits.
+        Set-Content -LiteralPath $releaseFile -Value 'go' -ErrorAction SilentlyContinue
+
+        if (-not $p.WaitForExit(30000)) {
+            try { $p.Kill() } catch {}
+        }
+        $p.WaitForExit()   # ensure async stdout/stderr handlers flush
+    }
+    finally {
+        # Remove the host-planted atom regardless of outcome.
+        [void][Mxc.AtomNative]::GlobalDeleteAtom($hostAtom)
+        if ($outEvt) { Unregister-Event -SourceIdentifier $outEvt.Name -ErrorAction SilentlyContinue }
+        if ($errEvt) { Unregister-Event -SourceIdentifier $errEvt.Name -ErrorAction SilentlyContinue }
+    }
+
+    $stdout = $sbOut.ToString()
+    $logContent = Read-Log $log
+    Assert-NoBfscfg -LogContent $logContent -Phase 'P4c' -Name 'ui-globalatoms'
+    Record-Result -Phase 'P4c' -Name 'selected isolation tier: appcontainer-dacl' -Pass ([bool]($logContent -match '(?im)selected isolation tier:.*?appcontainer-dacl'))
+
+    # Direction 1: host -> guest. PASS means the contained probe could not see
+    # the host's global atom.
+    $h2g = if ($stdout -match '(?m)^GLOBALATOMS_HOST_TO_GUEST=(?<v>PASS|FAIL)\s*$') { $matches['v'] } else { '<missing>' }
+    Record-Result -Phase 'P4c' -Name 'host atom NOT visible to contained process (host->guest)' -Pass ($h2g -eq 'PASS') -Detail "got=$h2g; stdout=$($stdout.Trim())"
+
+    # Direction 2: guest -> host. PASS means the host could not see the
+    # contained process's atom (GlobalFindAtomW returned 0).
+    if ($null -eq $guestFound) {
+        Record-Result -Phase 'P4c' -Name 'contained atom NOT visible to host (guest->host)' -Pass $false -Detail 'probe never signalled ready; no guest-atom check performed'
+    } else {
+        Record-Result -Phase 'P4c' -Name 'contained atom NOT visible to host (guest->host)' -Pass ($guestFound -eq 0) -Detail "GlobalFindAtomW=$guestFound (0 = not found = isolated)"
+    }
 }
 
 # -----------------------------------------------------------------------
@@ -1039,6 +1189,7 @@ try {
     Phase-T3Forced
     Phase-T1DenyForced
     Phase-UiMitigationMatrix
+    Phase-GlobalAtomIsolation
     Phase-DaclDisabled
     Phase-CrashRecovery
 }
