@@ -27,8 +27,10 @@ use std::time::{Duration, Instant};
 
 use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome};
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, LaunchMethod, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, FailurePhase, LaunchMethod, ScriptResponse};
+use wxc_common::sandbox_process::{join_discard, spawn_discard, SandboxProcess, StreamingRunner};
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::validator::validate_common;
 
 use crate::profile_builder::build_profile;
 
@@ -137,24 +139,29 @@ impl SeatbeltScriptRunner {
         gui_access: bool,
         logger: &mut Logger,
     ) -> ScriptResponse {
-        let mut command = match build_sandbox_command(profile, &request.script_code, logger) {
+        let mut command = match build_sandbox_command(profile, &request.script_code, false, logger)
+        {
             Ok(cmd) => cmd,
             Err(resp) => return resp,
         };
 
-        // Environment setup.
-        if !request.env.is_empty() {
-            command.env_clear();
-            for kv in &request.env {
-                if let Some((key, value)) = kv.split_once('=') {
-                    command.env(key, value);
-                }
-            }
-        }
+        // Environment setup. Always start from a cleared environment so
+        // untrusted sandboxed code never inherits the host's env.
+        apply_clean_environment(&mut command, request);
 
-        if !request.working_directory.is_empty() {
-            command.current_dir(&request.working_directory);
-        }
+        // Working directory. Also export `PWD` to match so the child's
+        // `getcwd()` uses its fast `$PWD` path (a single stat) instead of
+        // walking parent directories the sandbox may not let it read — which
+        // otherwise leaks "getcwd: ... Operation not permitted" to stderr.
+        let cwd = resolve_working_directory(request);
+        command.current_dir(&cwd);
+        command.env("PWD", &cwd);
+
+        let timeout = if request.script_timeout == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(u64::from(request.script_timeout)))
+        };
 
         if gui_access {
             // GUI apps need inherited stdio for window interaction.
@@ -166,70 +173,42 @@ impl SeatbeltScriptRunner {
             // Spawn manually — run_with_pty is not appropriate for GUI mode.
             let mut child = match command.spawn() {
                 Ok(process) => process,
-                Err(error) => {
-                    let msg = if error.kind() == std::io::ErrorKind::PermissionDenied {
-                        format!(
-                            "failed to spawn sandboxed process (sandbox_init likely rejected \
-                             the profile — check stderr for details): {error}"
-                        )
-                    } else {
-                        format!("failed to spawn sandboxed process: {error}")
-                    };
-                    return error_response(msg);
-                }
-            };
-
-            let timeout = if request.script_timeout == 0 {
-                None
-            } else {
-                Some(Duration::from_millis(u64::from(request.script_timeout)))
+                Err(error) => return error_response(spawn_error(&error)),
             };
 
             match wait_with_timeout(&mut child, timeout) {
-                Ok(status) => ScriptResponse {
-                    exit_code: status.code().unwrap_or(-1),
-                    ..Default::default()
-                },
+                Ok(status) => {
+                    exit_response(status.code().unwrap_or(-1), String::new(), String::new())
+                }
                 Err(WaitError::Timeout) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    ScriptResponse {
-                        exit_code: -1,
-                        error_message: format!(
-                            "Seatbelt: process timed out after {}ms",
-                            request.script_timeout
-                        ),
-                        ..Default::default()
-                    }
+                    timeout_response(format!(
+                        "Seatbelt: process timed out after {}ms",
+                        request.script_timeout
+                    ))
                 }
                 Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
             }
         } else {
             // CLI mode: hand off to the shared PTY bridge so the inner shell
             // sees a real TTY and the host can stream output as it arrives.
-            let timeout = if request.script_timeout == 0 {
-                None
-            } else {
-                Some(Duration::from_millis(u64::from(request.script_timeout)))
-            };
-
             let options = PtyOptions {
                 timeout,
                 ..PtyOptions::default()
             };
 
             match run_with_pty(command, options) {
-                Ok(PtyOutcome::Exited(status)) => ScriptResponse {
-                    exit_code: status.code().unwrap_or(-1),
-                    ..Default::default()
-                },
+                Ok(PtyOutcome::Exited(status)) => {
+                    exit_response(status.code().unwrap_or(-1), String::new(), String::new())
+                }
                 Ok(PtyOutcome::TimedOut) => {
                     let msg = format!(
                         "Seatbelt: script timed out after {}ms",
                         request.script_timeout
                     );
                     let _ = writeln!(logger, "{msg}");
-                    error_response(msg)
+                    timeout_response(msg)
                 }
                 Err(error) => error_response(format!("Seatbelt: {error}")),
             }
@@ -341,21 +320,14 @@ impl SeatbeltScriptRunner {
         };
 
         let result = match wait_with_timeout(&mut child, timeout) {
-            Ok(status) => ScriptResponse {
-                exit_code: status.code().unwrap_or(-1),
-                ..Default::default()
-            },
+            Ok(status) => exit_response(status.code().unwrap_or(-1), String::new(), String::new()),
             Err(WaitError::Timeout) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                ScriptResponse {
-                    exit_code: -1,
-                    error_message: format!(
-                        "Seatbelt: terminal timed out after {}ms",
-                        request.script_timeout
-                    ),
-                    ..Default::default()
-                }
+                timeout_response(format!(
+                    "Seatbelt: terminal timed out after {}ms",
+                    request.script_timeout
+                ))
             }
             Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
         };
@@ -364,6 +336,212 @@ impl SeatbeltScriptRunner {
         cleanup_files(&[&profile_path, &helper_path, &command_path]);
 
         result
+    }
+}
+
+impl StreamingRunner for SeatbeltScriptRunner {
+    fn spawn_streaming(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        // Mirror the validation `ScriptRunner::run` performs before executing.
+        validate_common(request)?;
+        self.validate_runner(request)?;
+
+        // Streaming requires the standard exec path: the LaunchServices
+        // (`open`) and GUI-stdio modes do not expose the child's pipes.
+        let launch_method = request
+            .seatbelt
+            .as_ref()
+            .map(|s| s.launch_method.clone())
+            .unwrap_or_default();
+        if launch_method != LaunchMethod::Exec {
+            return Err(error_response(
+                "Seatbelt streaming requires launchMethod 'exec'".to_string(),
+            ));
+        }
+        if request
+            .seatbelt
+            .as_ref()
+            .map(|s| s.gui_access)
+            .unwrap_or(false)
+        {
+            return Err(error_response(
+                "Seatbelt streaming is not supported with guiAccess".to_string(),
+            ));
+        }
+
+        let profile = match build_profile(request) {
+            Ok(p) => p,
+            Err(e) => return Err(error_response(e)),
+        };
+
+        let mut command = build_sandbox_command(&profile, &request.script_code, true, logger)?;
+
+        apply_clean_environment(&mut command, request);
+        let cwd = resolve_working_directory(request);
+        command.current_dir(&cwd);
+        command.env("PWD", &cwd);
+
+        // Bidirectional stdio over ordinary pipes (no pty).
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = match command.spawn() {
+            Ok(process) => process,
+            Err(error) => return Err(error_response(spawn_error(&error))),
+        };
+
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let timeout = if request.script_timeout == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(u64::from(request.script_timeout)))
+        };
+
+        Ok(Box::new(SeatbeltSandboxProcess {
+            child,
+            stdin,
+            stdout,
+            stderr,
+            timeout,
+        }))
+    }
+}
+
+/// Grace period between `SIGTERM` and `SIGKILL` in [`SandboxProcess::kill`].
+const KILL_GRACE: Duration = Duration::from_secs(2);
+
+/// Process-tree kill for a child spawned as a session leader (`setsid()`, so
+/// its pgid equals its pid): graceful `SIGTERM` to the whole process group,
+/// then a `SIGKILL` sweep of the group after [`KILL_GRACE`]. Signalling the
+/// negative pid targets only that group — never the host's — and is a no-op if
+/// the child has already exited. Shared by the streaming handle's `kill()` and
+/// the no-pty capture path's timeout branch.
+///
+/// The final `SIGKILL` is sent unconditionally, even once the leader has
+/// exited: it sweeps any descendant that was forked around the `SIGTERM` (so it
+/// never received it) and would otherwise survive — leaving a later `wait()` to
+/// block for that descendant's full runtime. While such a descendant exists it
+/// keeps the group alive, so the pgid is still valid and unambiguous; if none
+/// remains the sweep is a harmless `ESRCH`.
+fn group_kill_child(child: &mut std::process::Child) -> std::io::Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    let pgid = child.id() as libc::pid_t;
+    unsafe {
+        libc::kill(-pgid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + KILL_GRACE;
+    loop {
+        if child.try_wait()?.is_some() || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+    Ok(())
+}
+
+/// A running Seatbelt-sandboxed process (exec mode), exposing its pipes,
+/// kill, and wait. See [`SandboxProcess`] for the streaming contract.
+struct SeatbeltSandboxProcess {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    stdout: Option<std::process::ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+    timeout: Option<Duration>,
+}
+
+impl SandboxProcess for SeatbeltSandboxProcess {
+    fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+        self.stdin
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Write + Send>)
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        Ok(self
+            .child
+            .try_wait()?
+            .map(|status| status.code().unwrap_or(-1)))
+    }
+
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        group_kill_child(&mut self.child)
+    }
+
+    fn wait(&mut self) -> std::io::Result<i32> {
+        // Close our copy of any not-taken stdin so the child sees EOF and is
+        // not blocked waiting for input the caller never intends to send.
+        self.stdin.take();
+
+        // Drain (and discard) any not-taken stdout/stderr concurrently so the
+        // child can't block on a full pipe (taken streams are the caller's
+        // responsibility).
+        let stdout_thread = spawn_discard(self.stdout.take());
+        let stderr_thread = spawn_discard(self.stderr.take());
+
+        let result = match wait_with_timeout(&mut self.child, self.timeout) {
+            Ok(status) => Ok(status.code().unwrap_or(-1)),
+            Err(WaitError::Timeout) => {
+                // Group-kill (SIGTERM→SIGKILL) so sandboxed descendants are
+                // reaped too — `self.child.kill()` would orphan them; then
+                // wait to clear the zombie.
+                let _ = self.kill();
+                let _ = self.child.wait();
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Seatbelt: process timed out",
+                ))
+            }
+            Err(WaitError::Io(error)) => {
+                // The child may still be running: kill+reap it (don't orphan
+                // the sandbox) before returning.
+                let _ = self.kill();
+                let _ = self.child.wait();
+                Err(std::io::Error::other(format!("wait failed: {error}")))
+            }
+        };
+
+        join_discard(stdout_thread);
+        join_discard(stderr_thread);
+        result
+    }
+}
+
+impl Drop for SeatbeltSandboxProcess {
+    fn drop(&mut self) {
+        // Don't leak a running sandboxed process (and its group) or a zombie if
+        // the handle is dropped without `wait()`. `kill()` is idempotent (its
+        // `try_wait` guard no-ops once the child has exited), and the group
+        // signal reaps descendants too.
+        let _ = self.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -381,6 +559,7 @@ impl SeatbeltScriptRunner {
 fn build_sandbox_command(
     profile: &str,
     script_code: &str,
+    new_session: bool,
     logger: &mut Logger,
 ) -> Result<Command, ScriptResponse> {
     let profile_cstr = CString::new(profile)
@@ -390,6 +569,24 @@ fn build_sandbox_command(
 
     let mut command = Command::new(DEFAULT_SHELL);
     command.arg("-c").arg(script_code);
+
+    // When requested (streaming path), put the child in its own session /
+    // process group via `setsid()` so a caller can tree-kill it with a single
+    // `killpg` without touching the host's process group. This runs before
+    // `sandbox_init` so the detach happens regardless of the profile.
+    //
+    // SAFETY: `setsid` is async-signal-safe and runs after fork(), before
+    // exec(); the child is not a process-group leader at this point, so it
+    // succeeds. Failure is non-fatal (the caller's negative-pid kill simply
+    // targets a group that does not exist).
+    if new_session {
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
 
     // SAFETY: The closure runs after fork(), before exec(). We only call
     // sandbox_init with a pre-allocated CString — no Rust allocations
@@ -425,6 +622,91 @@ fn error_response(message: String) -> ScriptResponse {
         exit_code: -1,
         error_message: message,
         ..Default::default()
+    }
+}
+
+/// A `ScriptResponse` for a timed-out run with no captured output (the GUI,
+/// CLI/pty, and LaunchServices paths). Paths that capture stdout/stderr build
+/// the response inline so they can attach it.
+fn timeout_response(message: String) -> ScriptResponse {
+    ScriptResponse {
+        exit_code: -1,
+        error_message: message,
+        failure_phase: FailurePhase::Timeout,
+        ..Default::default()
+    }
+}
+
+/// Message for a `Command::spawn` failure, calling out the likely cause
+/// (`sandbox_init` rejecting the profile) when the OS reports a permission
+/// error.
+fn spawn_error(error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        format!(
+            "failed to spawn sandboxed process (sandbox_init likely rejected \
+             the profile — check stderr for details): {error}"
+        )
+    } else {
+        format!("failed to spawn sandboxed process: {error}")
+    }
+}
+
+/// Build a `ScriptResponse` for a process that actually ran, tagging
+/// [`FailurePhase::ProcessExited`] on a non-zero exit (and
+/// [`FailurePhase::None`] on success) so callers can distinguish a launch
+/// failure from a process that ran and failed.
+fn exit_response(exit_code: i32, standard_out: String, standard_err: String) -> ScriptResponse {
+    ScriptResponse {
+        exit_code,
+        standard_out,
+        standard_err,
+        failure_phase: if exit_code == 0 {
+            FailurePhase::None
+        } else {
+            FailurePhase::ProcessExited
+        },
+        ..Default::default()
+    }
+}
+
+/// Resolve the working directory for the sandboxed child.
+///
+/// An explicit `working_directory` always wins. Otherwise — rather than
+/// inheriting the host process's cwd, which under the deny-by-default Seatbelt
+/// profile may be inaccessible and make `getcwd()` fail (leaking a
+/// "getcwd: ... Operation not permitted" line on the child's stderr) — we pick
+/// a directory the profile is guaranteed to allow: the first readwrite path,
+/// else the first readonly path, else `/` (always readable per the baseline).
+fn resolve_working_directory(request: &ExecutionRequest) -> String {
+    if !request.working_directory.is_empty() {
+        return request.working_directory.clone();
+    }
+    request
+        .policy
+        .readwrite_paths
+        .first()
+        .or_else(|| request.policy.readonly_paths.first())
+        .cloned()
+        .unwrap_or_else(|| "/".to_string())
+}
+
+/// Baseline `PATH` for the sandboxed child. We always start from a cleared
+/// environment (so the host process's env — cloud creds, API tokens — never
+/// leaks into untrusted sandboxed code), which means we must supply a default
+/// `PATH` for the `/bin/sh` wrapper and common tools to resolve.
+const DEFAULT_SANDBOX_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// Populate `command`'s environment from a cleared baseline: never inherit the
+/// host environment (matching the bubblewrap `--clearenv` and AppContainer
+/// clean-block behaviour). Sets a default `PATH`, then the request's vars
+/// (which may override `PATH`). `PWD` is set separately alongside the cwd.
+fn apply_clean_environment(command: &mut Command, request: &ExecutionRequest) {
+    command.env_clear();
+    command.env("PATH", DEFAULT_SANDBOX_PATH);
+    for kv in &request.env {
+        if let Some((key, value)) = kv.split_once('=') {
+            command.env(key, value);
+        }
     }
 }
 

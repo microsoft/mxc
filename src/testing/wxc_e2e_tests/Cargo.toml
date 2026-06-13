@@ -2,6 +2,7 @@
 name = "wxc_e2e_tests"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 description = "End-to-end integration tests for MXC"
 

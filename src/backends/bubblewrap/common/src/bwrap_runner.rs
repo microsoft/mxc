@@ -26,13 +26,15 @@
 //! without root.
 
 use std::fmt::Write as FmtWrite;
-use std::process::{Command, Stdio};
+use std::os::unix::process::CommandExt;
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use lxc_common::network_iptables::NetworkIptablesManager;
 use wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator;
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, FailurePhase, NetworkEnforcementMode, ScriptResponse};
+use wxc_common::sandbox_process::{join_discard, spawn_discard, SandboxProcess, StreamingRunner};
 use wxc_common::script_runner::ScriptRunner;
 
 use crate::bwrap_command;
@@ -104,15 +106,27 @@ impl ScriptRunner for BubblewrapScriptRunner {
     }
 
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        match self.spawn_bwrap(request, logger, false) {
+            Ok(child) => child.run_to_completion(logger),
+            Err(resp) => resp,
+        }
+    }
+}
+
+impl BubblewrapScriptRunner {
+    /// Set up networking and spawn `bwrap`, returning a [`BwrapChild`] the
+    /// caller runs to completion (blocking) or wraps in a streaming handle.
+    /// When `stream` is set, stdin is piped (so the caller can write to it) and
+    /// the child is placed in its own process group so it can be tree-killed.
+    fn spawn_bwrap(
+        &self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stream: bool,
+    ) -> Result<BwrapChild, ScriptResponse> {
         // 1. Start the network proxy if configured. Must happen before
         //    arg-building so the proxy's loopback address can be injected as
         //    HTTP_PROXY / HTTPS_PROXY into the sandbox environment.
-        //
-        //    Pass the request's `default_network_policy` through so that a
-        //    config of `{ defaultPolicy: "block", proxy: {...}, allowedHosts:
-        //    [] }` actually denies-by-default at the proxy layer (otherwise
-        //    the empty allow list + no iptables + no --unshare-net would let
-        //    everything through).
         let mut proxy = LinuxProxyCoordinator::new();
         if request.policy.network_proxy.is_enabled() {
             if let Err(err) = proxy.start(
@@ -123,10 +137,10 @@ impl ScriptRunner for BubblewrapScriptRunner {
                 request.policy.default_network_policy.clone(),
                 logger,
             ) {
-                return ScriptResponse::error(&format!(
+                return Err(ScriptResponse::error(&format!(
                     "Bubblewrap: failed to start network proxy: {}",
                     err
-                ));
+                )));
             }
         }
 
@@ -148,7 +162,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
             request.container_id.clone()
         };
 
-        let mut fw_manager = if needs_iptables {
+        let fw_manager = if needs_iptables {
             let _ = writeln!(
                 logger,
                 "Bubblewrap: applying iptables rules for host-level network filtering"
@@ -158,16 +172,16 @@ impl ScriptRunner for BubblewrapScriptRunner {
                 Ok(true) => {}
                 Ok(false) => {
                     proxy.stop(logger);
-                    return ScriptResponse::error(
+                    return Err(ScriptResponse::error(
                         "Bubblewrap: failed to apply iptables firewall rules.",
-                    );
+                    ));
                 }
                 Err(e) => {
                     proxy.stop(logger);
-                    return ScriptResponse::error(&format!(
+                    return Err(ScriptResponse::error(&format!(
                         "Bubblewrap: network policy error: {}",
                         e
-                    ));
+                    )));
                 }
             }
             Some(mgr)
@@ -179,68 +193,111 @@ impl ScriptRunner for BubblewrapScriptRunner {
         let mut command = Command::new("bwrap");
         command.args(&args);
         command
-            .stdin(Stdio::null())
+            .stdin(if stream {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Put bwrap in its own process group so a timeout / streaming `kill()`
+        // can tree-kill it with a single `killpg` (bwrap is PID 1 of the new
+        // pid namespace via `--unshare-pid`, so this takes the whole sandbox
+        // down) without touching the host's process group. Needed on both the
+        // run-to-completion and streaming paths.
+        command.process_group(0);
 
         let mut child = match command.spawn() {
             Ok(process) => process,
             Err(error) => {
+                let mut fw_manager = fw_manager;
                 cleanup_iptables(&mut fw_manager, logger);
                 proxy.stop(logger);
-                return ScriptResponse::error(&format!(
+                return Err(ScriptResponse::error(&format!(
                     "Bubblewrap: failed to spawn bwrap: {}",
                     error
-                ));
+                )));
             }
         };
 
-        // 5. Drain stdout/stderr in background threads to avoid pipe-buffer
-        //    deadlock.
-        let stdout_handle = child
-            .stdout
-            .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
-        let stderr_handle = child
-            .stderr
-            .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
-
-        // 6. Wait with optional timeout.
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
         let timeout = if request.script_timeout == 0 {
             None
         } else {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
 
-        let exit_status = match wait_with_timeout(&mut child, timeout) {
+        Ok(BwrapChild {
+            child,
+            stdin,
+            stdout,
+            stderr,
+            proxy,
+            fw_manager,
+            timeout,
+        })
+    }
+}
+
+/// A spawned `bwrap` sandbox: the child process, its parent-side pipe ends,
+/// and the per-run network proxy / iptables state torn down once it exits.
+struct BwrapChild {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    proxy: LinuxProxyCoordinator,
+    fw_manager: Option<NetworkIptablesManager>,
+    timeout: Option<Duration>,
+}
+
+impl BwrapChild {
+    /// Tear down per-run network state (iptables rules + proxy). Idempotent at
+    /// the manager level.
+    fn cleanup(&mut self, logger: &mut Logger) {
+        cleanup_iptables(&mut self.fw_manager, logger);
+        self.proxy.stop(logger);
+    }
+
+    /// Blocking run: drain captured output on threads, wait, tear down, and
+    /// collect into a [`ScriptResponse`] (mirrors the original `execute`).
+    fn run_to_completion(mut self, logger: &mut Logger) -> ScriptResponse {
+        let stdout_handle = self
+            .stdout
+            .take()
+            .map(|r| std::thread::spawn(move || read_to_string(r)));
+        let stderr_handle = self
+            .stderr
+            .take()
+            .map(|r| std::thread::spawn(move || read_to_string(r)));
+
+        let exit_status = match wait_with_timeout(&mut self.child, self.timeout) {
             Ok(status) => status,
             Err(WaitError::Timeout) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                cleanup_iptables(&mut fw_manager, logger);
-                proxy.stop(logger);
+                // Group-kill so descendants die too (bwrap is a process-group
+                // leader and PID 1 of the namespace); a single-process kill
+                // would orphan them.
+                let _ = group_kill_child(&mut self.child);
+                let _ = self.child.wait();
+                self.cleanup(logger);
                 return ScriptResponse {
                     exit_code: -1,
                     standard_out: join_reader(stdout_handle),
                     standard_err: join_reader(stderr_handle),
-                    error_message: format!(
-                        "Bubblewrap: script timed out after {}ms",
-                        request.script_timeout
-                    ),
+                    error_message: "Bubblewrap: script timed out".to_string(),
+                    failure_phase: FailurePhase::Timeout,
                     ..Default::default()
                 };
             }
             Err(WaitError::Io(error)) => {
-                cleanup_iptables(&mut fw_manager, logger);
-                proxy.stop(logger);
+                self.cleanup(logger);
                 return ScriptResponse::error(&format!("Bubblewrap: wait failed: {}", error));
             }
         };
 
-        // 7. Collect output and clean up.
-        cleanup_iptables(&mut fw_manager, logger);
-        proxy.stop(logger);
+        self.cleanup(logger);
 
         ScriptResponse {
             exit_code: exit_status.code().unwrap_or(-1),
@@ -249,6 +306,150 @@ impl ScriptRunner for BubblewrapScriptRunner {
             error_message: String::new(),
             ..Default::default()
         }
+    }
+}
+
+impl StreamingRunner for BubblewrapScriptRunner {
+    fn spawn_streaming(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        use wxc_common::validator::validate_common;
+
+        validate_common(request)?;
+        self.validate_runner(request)?;
+
+        let child = self.spawn_bwrap(request, logger, true)?;
+        Ok(Box::new(BubblewrapSandboxProcess::new(child)))
+    }
+}
+
+/// A running `bwrap` sandbox exposed as a [`SandboxProcess`]. Owns the child,
+/// its pipes, and the per-run network state, torn down once the child exits.
+struct BubblewrapSandboxProcess {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    proxy: LinuxProxyCoordinator,
+    fw_manager: Option<NetworkIptablesManager>,
+    timeout: Option<Duration>,
+    teardown_done: bool,
+}
+
+impl BubblewrapSandboxProcess {
+    fn new(mut child: BwrapChild) -> Self {
+        Self {
+            stdin: child.stdin.take(),
+            stdout: child.stdout.take(),
+            stderr: child.stderr.take(),
+            proxy: std::mem::take(&mut child.proxy),
+            fw_manager: child.fw_manager.take(),
+            timeout: child.timeout,
+            child: child.child,
+            teardown_done: false,
+        }
+    }
+
+    fn run_teardown(&mut self) {
+        if self.teardown_done {
+            return;
+        }
+        self.teardown_done = true;
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        cleanup_iptables(&mut self.fw_manager, &mut logger);
+        self.proxy.stop(&mut logger);
+    }
+}
+
+impl SandboxProcess for BubblewrapSandboxProcess {
+    fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+        self.stdin
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Write + Send>)
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        Ok(self
+            .child
+            .try_wait()?
+            .map(|status| status.code().unwrap_or(-1)))
+    }
+
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        group_kill_child(&mut self.child)
+    }
+
+    fn wait(&mut self) -> std::io::Result<i32> {
+        // Close our copy of any not-taken stdin so the child sees EOF.
+        self.stdin.take();
+
+        // Drain (and discard) any not-taken stdout/stderr concurrently so the
+        // child can't block on a full pipe (taken streams are the caller's
+        // responsibility).
+        let stdout_thread = spawn_discard(self.stdout.take());
+        let stderr_thread = spawn_discard(self.stderr.take());
+
+        let result = match wait_with_timeout(&mut self.child, self.timeout) {
+            Ok(status) => Ok(status.code().unwrap_or(-1)),
+            Err(WaitError::Timeout) => {
+                // Tree-kill (process group) so descendants die too and release
+                // any stdout/stderr pipe write-ends, matching `kill()`'s
+                // contract; terminating only the root could leave the drain
+                // threads blocked. bwrap is PID 1 of the pid namespace.
+                let _ = self.kill();
+                let _ = self.child.wait();
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Bubblewrap: script timed out",
+                ))
+            }
+            Err(WaitError::Io(error)) => {
+                // The child may still be alive; kill+reap it before
+                // `run_teardown()` removes the iptables/proxy enforcement out
+                // from under it.
+                let _ = self.kill();
+                let _ = self.child.wait();
+                Err(std::io::Error::other(format!(
+                    "Bubblewrap: wait failed: {error}"
+                )))
+            }
+        };
+
+        join_discard(stdout_thread);
+        join_discard(stderr_thread);
+        self.run_teardown();
+        result
+    }
+}
+
+impl Drop for BubblewrapSandboxProcess {
+    fn drop(&mut self) {
+        // Kill and reap the child *before* removing network enforcement —
+        // otherwise an abandoned-but-running sandbox would keep egressing after
+        // its iptables/proxy rules were torn down, and the child would leak as
+        // a zombie. `kill()` group-kills (bwrap is PID 1 of the pid namespace),
+        // then we reap.
+        let _ = self.kill();
+        let _ = self.child.wait();
+        self.run_teardown();
     }
 }
 
@@ -276,12 +477,33 @@ fn cleanup_iptables(manager: &mut Option<NetworkIptablesManager>, logger: &mut L
     }
 }
 
-// -- I/O helpers (mirrors seatbelt_runner) --------------------------------
+// -- I/O helpers --------------------------------------------------------------
 
+/// Maximum bytes retained from a captured stream (~1 MiB). Output beyond this
+/// is read and discarded so the child never blocks on a full pipe.
+const MAX_CAPTURED_BYTES: usize = 1024 * 1024;
+
+/// Drain `reader` to a UTF-8 (lossy) `String`, retaining at most
+/// [`MAX_CAPTURED_BYTES`]. Reading continues to EOF past the cap (the overflow
+/// is discarded) so the child can never block, and the bytes are decoded once
+/// at the end so multibyte sequences split across reads are not corrupted.
 fn read_to_string<R: std::io::Read>(mut reader: R) -> String {
-    let mut buffer = String::new();
-    let _ = reader.read_to_string(&mut buffer);
-    buffer
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                if buf.len() < MAX_CAPTURED_BYTES {
+                    let take = n.min(MAX_CAPTURED_BYTES - buf.len());
+                    buf.extend_from_slice(&chunk[..take]);
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {
@@ -289,6 +511,38 @@ fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {
         Some(h) => h.join().unwrap_or_default(),
         None => String::new(),
     }
+}
+
+/// Process-tree kill for a bwrap child spawned as a process-group leader
+/// (`process_group(0)`): graceful `SIGTERM` to the whole group, then a
+/// `SIGKILL` sweep after a 2s grace. bwrap is PID 1 of the `--unshare-pid`
+/// namespace, so this takes the whole sandbox down; signalling the negative
+/// pgid targets only that group, never the host's, and is a no-op once the
+/// child has exited. Shared by the streaming handle's `kill()` and the
+/// run-to-completion timeout branch.
+///
+/// The final `SIGKILL` is sent unconditionally so a descendant forked around
+/// the `SIGTERM` can't survive; while such a descendant exists it keeps the
+/// group alive (pgid still valid), and if none remains the sweep is a harmless
+/// `ESRCH`.
+fn group_kill_child(child: &mut std::process::Child) -> std::io::Result<()> {
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    let pgid = Pid::from_raw(child.id() as i32);
+    let _ = killpg(pgid, Signal::SIGTERM);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if child.try_wait()?.is_some() || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = killpg(pgid, Signal::SIGKILL);
+    Ok(())
 }
 
 enum WaitError {

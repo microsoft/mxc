@@ -63,7 +63,7 @@ pub struct ProbeFacts {
 }
 
 /// Host support for enforcing sandbox UI restrictions.
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct UiCapabilitySupport {
     /// Whether the host can block reads from the clipboard.

@@ -11,11 +11,68 @@ use windows::Win32::Foundation::{
     HLOCAL, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::{DeriveCapabilitySidsFromName, PSID, SECURITY_ATTRIBUTES};
-use windows::Win32::Storage::FileSystem::ReadFile;
+use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows_core::BOOL;
 use windows_core::PCWSTR;
+
+/// A readable end of an anonymous pipe (e.g. the child's stdout/stderr),
+/// owning the handle and closing it on drop. Implements [`std::io::Read`]
+/// via `ReadFile`; a broken pipe (all write ends closed) reads as EOF.
+/// `Send` so it can be handed to a reader thread.
+pub struct PipeReader(SendOwnedHandle);
+
+impl PipeReader {
+    /// Take ownership of `handle` (invalidating the source `OwnedHandle`).
+    pub fn new(mut handle: OwnedHandle) -> Self {
+        Self(SendOwnedHandle::take(&mut handle))
+    }
+}
+
+impl std::io::Read for PipeReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use windows::Win32::Foundation::ERROR_BROKEN_PIPE;
+        let mut read: u32 = 0;
+        // SAFETY: `self.0` owns a valid pipe handle for the lifetime of this
+        // `PipeReader`; `buf`/`read` are valid local out-params for the call.
+        match unsafe { ReadFile(self.0.get(), Some(buf), Some(&mut read), None) } {
+            Ok(()) => Ok(read as usize),
+            // Write ends all closed: normal end-of-stream, report EOF.
+            Err(e) if e.code() == ERROR_BROKEN_PIPE.to_hresult() => Ok(0),
+            Err(e) => Err(std::io::Error::other(e)),
+        }
+    }
+}
+
+/// A writable end of an anonymous pipe (e.g. the child's stdin), owning the
+/// handle and closing it on drop (which sends EOF to the child). Implements
+/// [`std::io::Write`] via `WriteFile`. `Send`.
+pub struct PipeWriter(SendOwnedHandle);
+
+impl PipeWriter {
+    /// Take ownership of `handle` (invalidating the source `OwnedHandle`).
+    pub fn new(mut handle: OwnedHandle) -> Self {
+        Self(SendOwnedHandle::take(&mut handle))
+    }
+}
+
+impl std::io::Write for PipeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut written: u32 = 0;
+        // SAFETY: `self.0` owns a valid pipe handle for the lifetime of this
+        // `PipeWriter`; `buf`/`written` are valid local params for the call.
+        match unsafe { WriteFile(self.0.get(), Some(buf), Some(&mut written), None) } {
+            Ok(()) => Ok(written as usize),
+            Err(e) => Err(std::io::Error::other(e)),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // Anonymous pipes are not buffered on the writer side.
+        Ok(())
+    }
+}
 
 const BUFFER_SIZE: u32 = 4096;
 const MAX_OUTPUT_CHARS: usize = 1024 * 1024;

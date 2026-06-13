@@ -592,6 +592,11 @@ pub enum FailurePhase {
     LaunchFailed,
     /// The process was created but exited with a non-zero code.
     ProcessExited,
+    /// The process was force-terminated because it exceeded `scriptTimeout`.
+    /// Distinct from [`ProcessExited`] (it did not exit on its own) so callers
+    /// can detect a timeout uniformly across backends rather than inferring it
+    /// from `exit_code == -1` (which collides with other failures).
+    Timeout,
     /// The selected containment backend is unavailable on this host: the API is
     /// missing, or present but not usable (e.g. feature-disabled). Distinct from
     /// [`LaunchFailed`] so callers can fall back to a lower tier rather than

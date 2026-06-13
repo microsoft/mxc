@@ -1,0 +1,322 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Streaming (handle-based) API tests: live stdio, kill, and wait.
+//! Seatbelt-specific cases run only on macOS.
+
+use mxc::{spawn_sandbox, MxcErrorCode, SpawnOptions};
+
+#[cfg(target_os = "macos")]
+const SEATBELT_PREFIX: &str = r#"{
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "filesystem": { "readwritePaths": ["/tmp"] },
+    "seatbelt": { "mode": "exec" },
+    "process": "#;
+
+/// Build a seatbelt streaming config with the given commandLine and no timeout
+/// (timeout 0 == run until exit; required for interactive/long-running cases).
+#[cfg(target_os = "macos")]
+fn seatbelt_config(command_line: &str) -> String {
+    let escaped = command_line.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "{SEATBELT_PREFIX}{{ \"commandLine\": \"{escaped}\", \"timeout\": 0 }} }}",
+        escaped = escaped
+    )
+}
+
+#[test]
+fn streaming_unsupported_backend_is_rejected() {
+    let config = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "windows_sandbox",
+        "process": { "commandLine": "echo hi" }
+    }"#;
+    let err = match spawn_sandbox(config, &SpawnOptions::default()) {
+        Ok(_) => panic!("windows_sandbox streaming must be unsupported"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
+}
+
+#[test]
+fn streaming_rejects_dry_run() {
+    let config = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "seatbelt",
+        "process": { "commandLine": "echo hi" }
+    }"#;
+    let options = SpawnOptions {
+        dry_run: true,
+        ..SpawnOptions::default()
+    };
+    let err = match spawn_sandbox(config, &options) {
+        Ok(_) => panic!("dry_run streaming must be rejected"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_double_take_returns_none() {
+    let mut proc = spawn_sandbox(&seatbelt_config("cat"), &SpawnOptions::default()).expect("spawn");
+
+    assert!(
+        proc.take_stdin().is_some(),
+        "first take_stdin yields the pipe"
+    );
+    assert!(proc.take_stdin().is_none(), "second take_stdin yields None");
+    assert!(
+        proc.take_stdout().is_some(),
+        "first take_stdout yields the pipe"
+    );
+    assert!(
+        proc.take_stdout().is_none(),
+        "second take_stdout yields None"
+    );
+    assert!(
+        proc.take_stderr().is_some(),
+        "first take_stderr yields the pipe"
+    );
+    assert!(
+        proc.take_stderr().is_none(),
+        "second take_stderr yields None"
+    );
+
+    proc.kill().expect("kill");
+    let _ = proc.wait();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_try_wait_reports_exit_after_completion() {
+    let mut proc =
+        spawn_sandbox(&seatbelt_config("true"), &SpawnOptions::default()).expect("spawn");
+
+    // Poll try_wait until the quick command exits; it must then report Some.
+    let mut code = None;
+    for _ in 0..100 {
+        if let Some(c) = proc.try_wait().expect("try_wait") {
+            code = Some(c);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let code = code.expect("process should exit and try_wait report it");
+    assert_eq!(code, 0, "quick command should exit 0");
+}
+
+// ---------------------------------------------------------------------------
+// Windows ProcessContainer streaming — integration test. Requires an elevated,
+// host-prepped Windows host (see docs/host-prep.md), so it is `#[ignore]`d.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
+fn streaming_processcontainer_bidirectional_stdio() {
+    use std::io::{Read, Write};
+
+    // `cmd /c more` echoes stdin to stdout until EOF, then exits.
+    let config = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "processcontainer",
+        "process": { "commandLine": "cmd /c more", "timeout": 0 },
+        "filesystem": { "readwritePaths": ["C:\\Windows\\Temp"] }
+    }"#;
+    let mut proc = spawn_sandbox(config, &SpawnOptions::default()).expect("spawn");
+
+    let mut stdin = proc.take_stdin().expect("stdin available");
+    let mut stdout = proc.take_stdout().expect("stdout available");
+
+    stdin.write_all(b"ping-pong\r\n").expect("write stdin");
+    drop(stdin);
+
+    let mut out = String::new();
+    stdout.read_to_string(&mut out).expect("read stdout");
+    assert!(out.contains("ping-pong"), "got: {:?}", out);
+
+    let code = proc.wait().expect("wait");
+    assert_eq!(code, 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_wait_discards_untaken_streams() {
+    let mut proc = spawn_sandbox(
+        &seatbelt_config("echo streamed-out"),
+        &SpawnOptions::default(),
+    )
+    .expect("spawn should succeed");
+    // Take nothing -> wait() drains and discards the output, returning only
+    // the exit code.
+    let code = proc.wait().expect("wait should succeed");
+    assert_eq!(code, 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_bidirectional_stdio() {
+    use std::io::{Read, Write};
+
+    // `cat` echoes stdin to stdout until EOF, then exits.
+    let mut proc = spawn_sandbox(&seatbelt_config("cat"), &SpawnOptions::default()).expect("spawn");
+
+    let mut stdin = proc.take_stdin().expect("stdin available");
+    let mut stdout = proc.take_stdout().expect("stdout available");
+
+    stdin.write_all(b"ping-pong\n").expect("write stdin");
+    drop(stdin); // close -> cat sees EOF and exits
+
+    let mut out = String::new();
+    stdout.read_to_string(&mut out).expect("read stdout");
+    assert!(out.contains("ping-pong"), "got: {:?}", out);
+
+    let code = proc.wait().expect("wait");
+    assert_eq!(code, 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_kill_terminates_process() {
+    let mut proc =
+        spawn_sandbox(&seatbelt_config("sleep 30"), &SpawnOptions::default()).expect("spawn");
+
+    // Still running shortly after spawn.
+    assert!(proc.try_wait().expect("try_wait").is_none());
+
+    proc.kill().expect("kill should succeed");
+
+    // After kill, the process must be reapable and not report success.
+    let code = proc.wait().expect("wait after kill");
+    assert_ne!(code, 0, "killed process should not exit 0");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_kill_terminates_forked_descendant_quickly() {
+    // Regression for the early-kill race: when the shell *forks* the inner
+    // command (`echo` then `sleep`), an early `kill()` could SIGTERM the shell
+    // (which dies) before the just-forked `sleep` joined the group — leaving
+    // `sleep` alive and the follow-up `wait()` blocking for its full runtime.
+    // The whole tree must die promptly regardless.
+    let mut proc = spawn_sandbox(
+        &seatbelt_config("echo hi; sleep 30"),
+        &SpawnOptions::default(),
+    )
+    .expect("spawn");
+
+    proc.kill().expect("kill should succeed");
+
+    let start = std::time::Instant::now();
+    let _ = proc.wait();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "wait() must return promptly after kill(), not wait out the child's \
+         30s runtime (elapsed: {:?})",
+        start.elapsed()
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn pid_alive(pid: u32) -> bool {
+    // Signal 0 probes existence without delivering a signal — no PID-reuse
+    // race from spawning `ps`, and no false "dead" if the probe itself fails.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    // ESRCH => no such process (dead). Any other errno (e.g. EPERM: the pid
+    // exists but we may not signal it) means it is still alive.
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_kill_terminates_process_tree() {
+    use std::io::{BufRead, BufReader};
+
+    // The sandboxed shell backgrounds a `sleep` (a descendant), prints its
+    // pid, then blocks. `kill()` must take the whole process group down,
+    // including that descendant.
+    let mut proc = spawn_sandbox(
+        &seatbelt_config("sleep 300 & echo CHILD=$!; sleep 300"),
+        &SpawnOptions::default(),
+    )
+    .expect("spawn");
+
+    assert!(proc.id() > 0, "id() should expose the child pid");
+
+    let stdout = proc.take_stdout().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read descendant pid");
+    let descendant: u32 = line
+        .trim()
+        .strip_prefix("CHILD=")
+        .expect("CHILD= prefix")
+        .parse()
+        .expect("descendant pid");
+
+    assert!(
+        pid_alive(descendant),
+        "descendant {descendant} should be running before kill"
+    );
+
+    proc.kill().expect("kill");
+    let _ = proc.wait();
+
+    let mut gone = false;
+    for _ in 0..60 {
+        if !pid_alive(descendant) {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        gone,
+        "descendant {descendant} should be killed with the process tree"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_timeout_kills_process_tree() {
+    use std::io::{BufRead, BufReader};
+
+    // 1s timeout; the shell backgrounds a long sleep (descendant), prints its
+    // pid, then blocks past the timeout. wait()'s timeout branch must group-
+    // kill, taking the descendant down too.
+    let config = format!(
+        "{SEATBELT_PREFIX}{{ \"commandLine\": \"sleep 300 & echo CHILD=$!; sleep 300\", \"timeout\": 1000 }} }}"
+    );
+    let mut proc = spawn_sandbox(&config, &SpawnOptions::default()).expect("spawn");
+
+    let stdout = proc.take_stdout().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read descendant pid");
+    let descendant: u32 = line
+        .trim()
+        .strip_prefix("CHILD=")
+        .expect("CHILD= prefix")
+        .parse()
+        .expect("descendant pid");
+
+    let err = proc
+        .wait()
+        .expect_err("timed-out process should report a timeout");
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+
+    let mut gone = false;
+    for _ in 0..60 {
+        if !pid_alive(descendant) {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(gone, "descendant {descendant} should be killed on timeout");
+}

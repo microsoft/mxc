@@ -2,6 +2,7 @@
 name = "mxc_pty"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # Unix-only at runtime: mxc_pty wraps `openpty` + `pre_exec` (TIOCSCTTY,
 # setsid) + sigwait-style helpers, none of which have a sensible Windows

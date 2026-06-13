@@ -2,6 +2,7 @@
 name = "windows_sandbox_common"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 wxc_common = { workspace = true }

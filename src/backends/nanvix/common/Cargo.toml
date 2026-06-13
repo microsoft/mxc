@@ -2,6 +2,7 @@
 name = "nanvix_common"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Shared constants and configuration types for NanVix micro-VM binaries"
 
 [dependencies]
