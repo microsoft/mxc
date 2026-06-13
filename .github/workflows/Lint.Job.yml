@@ -1,0 +1,72 @@
+name: Lint
+
+on:
+  workflow_call:
+
+jobs:
+  lint:
+    name: Lint (${{ matrix.component }} ${{ matrix.os_label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_label: windows
+            component: WXC
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            working-directory: src
+            clippy-args: --locked --all-targets --all-features --release
+          - os_label: linux
+            component: LXC
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            working-directory: src/core/lxc
+            clippy-args: --locked --all-targets --all-features --release
+          - os_label: macos
+            component: MAC
+            runner: macos-14
+            target: aarch64-apple-darwin
+            working-directory: src
+            # Workspace has Windows-only crates, so --all-features won't build on macOS.
+            clippy-args: --locked --release -p mxc_darwin -p seatbelt_common
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # actions-rust-lang/setup-rust-toolchain auto-reads rust-toolchain.toml
+      # from the repo root only. Surface src/rust-toolchain.toml there so the
+      # 1.93 pin is honored without duplicating the version in this workflow.
+      - name: Surface toolchain file at repo root
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          components: rustfmt, clippy
+          override: false
+          rustflags: ''
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.working-directory }} -> target
+          key: lint-${{ matrix.target }}-v2
+          cache-on-failure: false
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # See Build.Windows.Job.yml — force hyperlight-host's build script to
+      # re-run so its hls/ output is regenerated before clippy expands the
+      # RustEmbed proc-macro.
+      - name: Force hyperlight-host rebuild (cache workaround)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: cargo clean --release --target ${{ matrix.target }} -p hyperlight-host
+
+      - name: cargo clippy
+        run: cargo clippy --target ${{ matrix.target }} ${{ matrix.clippy-args }} -- -D warnings

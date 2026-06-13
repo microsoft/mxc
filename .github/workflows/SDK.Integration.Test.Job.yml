@@ -1,0 +1,79 @@
+name: SDK Integration Tests
+
+on:
+  workflow_call:
+
+jobs:
+  sdk-integration-tests:
+    name: SDK Integration Tests (${{ matrix.os_label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_label: windows
+            runner: windows-latest
+          - os_label: linux
+            runner: ubuntu-latest
+          - os_label: macos
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: sdk/tests/integration
+    env:
+      MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
+      MXC_SKIP_LXC_NETWORK_TESTS: '1'
+      # Classic LXC is unreliable on the GHA ubuntu-latest (24.04) runner; full
+      # LXC coverage runs in the ADO pipeline on merge to main and nightly.
+      MXC_SKIP_LXC_TESTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: sdk/tests/integration/package-lock.json
+
+      - name: Download SDK package
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-packages
+          path: sdk-pkg
+
+      - name: Install dependencies + SDK from artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          SDK_TGZ=$(ls ../../../sdk-pkg/*.tgz | head -n1)
+          npm install "$SDK_TGZ"
+
+      - name: npm run build
+        run: npm run build
+
+      - name: Install bubblewrap (Linux only, cached)
+        if: matrix.os_label == 'linux'
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: bubblewrap
+          version: 1.2
+
+      - name: Restore execute permission on mxc-exec-mac
+        if: matrix.os_label == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
+          if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found" && exit 1; fi
+
+      # Linux needs root for Bubblewrap unprivileged-userns paths; `sudo -E`
+      # preserves the env vars above.
+      - name: npm test
+        shell: bash
+        run: |
+          if [ "${{ matrix.os_label }}" = "linux" ]; then
+            sudo -E npm test
+          else
+            npm test
+          fi
