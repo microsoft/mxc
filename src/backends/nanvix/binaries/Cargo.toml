@@ -21,3 +21,4 @@ nanvix_common = { path = "../common" }
 
 [build-dependencies]
 nanvix_common = { path = "../common" }
+nanvix_build_common = { path = "../build_common" }

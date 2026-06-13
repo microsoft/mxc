@@ -1,0 +1,8 @@
+[package]
+name = "nanvix_build_common"
+version.workspace = true
+edition.workspace = true
+description = "Build-time helpers for staging NanVix micro-VM binaries (build-only; never linked into runtime)"
+
+[dependencies]
+nanvix_common = { path = "../common" }
