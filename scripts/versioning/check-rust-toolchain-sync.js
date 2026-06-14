@@ -27,7 +27,7 @@ const channel = read("src/rust-toolchain.toml").match(/^\s*channel\s*=\s*"([^"]+
 if (!channel) errors.push("Missing `channel = \"...\"` in src/rust-toolchain.toml");
 
 const adoPins = adoTemplates.map((path) => {
-  const version = read(path).match(/version:\s*'ms-prod-(\d+\.\d+(?:\.\d+)?)'/)?.[1];
+  const version = read(path).match(/^\s*version:\s*['"]?ms-prod-(\d+\.\d+(?:\.\d+)?)['"]?\s*$/m)?.[1];
   if (!version) errors.push(`Missing \`version: 'ms-prod-<version>'\` in ${path}`);
   return { path, version };
 });
