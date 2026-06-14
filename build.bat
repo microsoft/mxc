@@ -104,6 +104,10 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             copy /Y "!BIN_DIR!\wxc-test-proxy.exe" "sdk\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-test-proxy.exe
         )
+        if exist "!BIN_DIR!\mxc-diagnostic-console.exe" (
+            copy /Y "!BIN_DIR!\mxc-diagnostic-console.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            echo   Copied !SDK_ARCH!\mxc-diagnostic-console.exe
+        )
         if exist "!BIN_DIR!\wxc-host-prep.exe" (
             copy /Y "!BIN_DIR!\wxc-host-prep.exe" "sdk\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-host-prep.exe

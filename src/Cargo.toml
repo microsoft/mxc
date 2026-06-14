@@ -108,4 +108,5 @@ sandbox_spec = { path = "core/generated/base_container_specification" }
 widestring = "1"
 url = "2"
 winreg = "0.55"
+windows-service = "0.7"
 mxc_build_common = { path = "core/mxc_build_common" }

@@ -11,9 +11,13 @@
 //! Starts a trace session, enables the providers, and delivers decoded events
 //! to the diagnostic console's display channel. Requires administrator privileges.
 
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 use windows::core::GUID;
 use windows::Win32::Foundation::WIN32_ERROR;
@@ -25,6 +29,7 @@ use windows::Win32::System::Diagnostics::Etw::{
     TRACE_EVENT_INFO, TRACE_LEVEL_VERBOSE, WNODE_FLAG_TRACED_GUID,
 };
 
+use super::denial_event::{AccessType, DenialEvent, ResourceType};
 use super::{collect_mode, display_mode, DisplayEvent, DisplayMode};
 
 // ---------------------------------------------------------------------------
@@ -54,6 +59,10 @@ const SESSION_NAME: &str = "MXC-Diagnostics-ETW";
 /// Global trace session handle so we can stop the session from any thread.
 static SESSION_HANDLE: AtomicU64 = AtomicU64::new(0);
 
+/// Handle for the ETW consumer thread so `stop_etw_listener` can join it,
+/// ensuring the `CallbackContext` remains valid until `ProcessTrace` exits.
+static ETW_THREAD_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
 // TDH InType constants for property decoding.
 const TDH_INTYPE_UNICODESTRING: u16 = 1;
 const TDH_INTYPE_ANSISTRING: u16 = 2;
@@ -74,9 +83,16 @@ const TDH_INTYPE_FILETIME: u16 = 17;
 const TDH_INTYPE_HEXINT32: u16 = 20;
 const TDH_INTYPE_HEXINT64: u16 = 21;
 
+/// Context passed through the ETW callback's `UserContext` pointer.
+/// Both senders live for the entire `ProcessTrace` duration.
+struct CallbackContext {
+    display_tx: mpsc::Sender<DisplayEvent>,
+    denial_tx: Option<mpsc::Sender<DenialEvent>>,
+}
+
 /// Wrapper to send a raw pointer across thread boundaries.
-/// SAFETY: the pointed-to Sender lives for the entire ProcessTrace duration.
-struct SendPtr(*mut mpsc::Sender<DisplayEvent>);
+/// SAFETY: the pointed-to `CallbackContext` lives for the entire ProcessTrace duration.
+struct SendPtr(*mut CallbackContext);
 unsafe impl Send for SendPtr {}
 
 // ---------------------------------------------------------------------------
@@ -89,7 +105,14 @@ unsafe impl Send for SendPtr {}
 /// (all events for learning-mode diagnostics).
 /// Spawns a background thread that calls `ProcessTrace` (blocking). Returns
 /// immediately on success. Events are delivered via `tx`.
-pub fn start_etw_listener(tx: mpsc::Sender<DisplayEvent>) -> Result<(), String> {
+///
+/// If `denial_tx` is provided, structured [`DenialEvent`]s are extracted from
+/// AccessCheckLog events (ObjectType="File" or "Key") and LearningModeViolation
+/// events (Event ID 27) and sent to the denial pipe module.
+pub fn start_etw_listener(
+    tx: mpsc::Sender<DisplayEvent>,
+    denial_tx: Option<mpsc::Sender<DenialEvent>>,
+) -> Result<(), String> {
     cleanup_stale_session();
 
     let handle = start_trace_session()?;
@@ -97,24 +120,38 @@ pub fn start_etw_listener(tx: mpsc::Sender<DisplayEvent>) -> Result<(), String> 
 
     enable_provider(handle)?;
 
-    let tx_box = Box::new(tx);
-    let send_ptr = SendPtr(Box::into_raw(tx_box));
+    let ctx = Box::new(CallbackContext {
+        display_tx: tx,
+        denial_tx,
+    });
+    let send_ptr = SendPtr(Box::into_raw(ctx));
 
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name("etw-consumer".into())
         .spawn(move || {
             process_trace_loop(send_ptr);
         })
         .map_err(|e| format!("Failed to spawn ETW consumer thread: {e}"))?;
 
+    *ETW_THREAD_HANDLE.lock().unwrap() = Some(handle);
+
     Ok(())
 }
 
 /// Stop the trace session. Safe to call from a Ctrl+C handler.
+///
+/// Stops the ETW session and then joins the consumer thread to ensure the
+/// `CallbackContext` is not freed while `ProcessTrace` callbacks may still
+/// be executing.
 pub fn stop_etw_listener() {
     let handle = SESSION_HANDLE.swap(0, Ordering::SeqCst);
     if handle != 0 {
         stop_session(handle);
+    }
+    // Wait for the ProcessTrace thread to exit before returning.
+    // This guarantees the CallbackContext outlives all ETW callbacks.
+    if let Some(jh) = ETW_THREAD_HANDLE.lock().unwrap().take() {
+        let _ = jh.join();
     }
 }
 
@@ -256,9 +293,24 @@ fn cleanup_stale_session() {
 // ProcessTrace loop (runs on a dedicated thread)
 // ---------------------------------------------------------------------------
 
+/// RAII guard that frees the boxed `CallbackContext` on drop, preventing leaks
+/// if `process_trace_loop` returns early (e.g., `OpenTraceW` failure).
+struct CtxGuard(*mut CallbackContext);
+
+impl Drop for CtxGuard {
+    fn drop(&mut self) {
+        // SAFETY: The pointer was created via `Box::into_raw` and is only freed once here.
+        unsafe {
+            drop(Box::from_raw(self.0));
+        }
+    }
+}
+
 #[allow(clippy::field_reassign_with_default)]
 fn process_trace_loop(send_ptr: SendPtr) {
-    let tx_ptr = send_ptr.0;
+    let ctx_ptr = send_ptr.0;
+    // Guard ensures the CallbackContext is freed on all exit paths.
+    let _guard = CtxGuard(ctx_ptr);
     let mut name = session_name_wide();
 
     let mut logfile = EVENT_TRACE_LOGFILEW::default();
@@ -267,7 +319,7 @@ fn process_trace_loop(send_ptr: SendPtr) {
     logfile.Anonymous1.ProcessTraceMode =
         PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
     logfile.Anonymous2.EventRecordCallback = Some(event_record_callback);
-    logfile.Context = tx_ptr.cast::<c_void>();
+    logfile.Context = ctx_ptr.cast::<c_void>();
 
     let trace_handle = unsafe { OpenTraceW(&mut logfile) };
 
@@ -283,8 +335,6 @@ fn process_trace_loop(send_ptr: SendPtr) {
 
     unsafe {
         let _ = CloseTrace(trace_handle);
-        // Clean up the boxed Sender.
-        drop(Box::from_raw(tx_ptr));
     }
 }
 
@@ -305,12 +355,18 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
         return;
     }
 
-    let tx = unsafe { &*(event.UserContext as *const mpsc::Sender<DisplayEvent>) };
+    let ctx = unsafe { &*(event.UserContext as *const CallbackContext) };
+    let tx = &ctx.display_tx;
     let pid = event.EventHeader.ProcessId;
     let collecting = collect_mode();
     let current_mode = display_mode();
 
     if let Some(parts) = decode_event_parts(event_record) {
+        // Extract DenialEvent for AccessCheckLog (File/Key) and LearningModeViolation events.
+        if provider == KERNEL_GENERAL_PROVIDER {
+            try_send_denial_event(ctx, &parts, pid);
+        }
+
         let console_text = format_event_output(&parts, current_mode);
 
         let (verbose_text, minified_text) = if collecting {
@@ -364,6 +420,13 @@ struct DecodedEventParts {
 /// Decode the raw event record via TDH into reusable parts.
 /// Returns `None` only when TDH decoding fails entirely.
 fn decode_event_parts(event_record: *mut EVENT_RECORD) -> Option<DecodedEventParts> {
+    // Reuse a per-thread scratch buffer for the TDH event information instead
+    // of allocating a fresh `Vec` for every event. The buffer is resized
+    // (growing only as needed) so the underlying allocation is retained.
+    thread_local! {
+        static TDH_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4096));
+    }
+
     let mut buf_size: u32 = 0;
     let status = unsafe { TdhGetEventInformation(event_record, None, None, &mut buf_size) };
 
@@ -372,53 +435,241 @@ fn decode_event_parts(event_record: *mut EVENT_RECORD) -> Option<DecodedEventPar
         return None;
     }
 
-    let mut buffer = vec![0u8; buf_size as usize];
-    let info_ptr = buffer.as_mut_ptr().cast::<TRACE_EVENT_INFO>();
-    let status =
-        unsafe { TdhGetEventInformation(event_record, None, Some(info_ptr), &mut buf_size) };
+    TDH_BUFFER.with(|cell| {
+        let mut buffer = cell.borrow_mut();
+        buffer.resize(buf_size as usize, 0);
 
-    if status != 0 {
-        return None;
-    }
+        let info_ptr = buffer.as_mut_ptr().cast::<TRACE_EVENT_INFO>();
+        let status =
+            unsafe { TdhGetEventInformation(event_record, None, Some(info_ptr), &mut buf_size) };
 
-    let info = unsafe { &*info_ptr };
+        if status != 0 {
+            return None;
+        }
 
-    let event_name_offset = unsafe { info.Anonymous1.EventNameOffset };
-    let event_name = wide_str_at(&buffer, event_name_offset)
-        .or_else(|| wide_str_at(&buffer, info.TaskNameOffset))
-        .unwrap_or_default();
+        let info = unsafe { &*info_ptr };
 
-    let event_name = if event_name.is_empty() {
-        None
-    } else {
-        Some(event_name)
-    };
+        let event_name_offset = unsafe { info.Anonymous1.EventNameOffset };
+        let event_name = wide_str_at(&buffer, event_name_offset)
+            .or_else(|| wide_str_at(&buffer, info.TaskNameOffset))
+            .unwrap_or_default();
 
-    let level = unsafe { (*event_record).EventHeader.EventDescriptor.Level };
-    let event_id = unsafe { (*event_record).EventHeader.EventDescriptor.Id };
-    let provider = unsafe { (*event_record).EventHeader.ProviderId };
-    let level_tag = match level {
-        1 => "\x1b[91mCRIT\x1b[0m",
-        2 => "\x1b[91mERR\x1b[0m",
-        3 => "\x1b[33mWARN\x1b[0m",
-        4 => "INFO",
-        5 => "VERB",
-        _ => "",
-    };
+        let event_name = if event_name.is_empty() {
+            None
+        } else {
+            Some(event_name)
+        };
 
-    let props = decode_properties(&buffer, info, event_record);
+        let level = unsafe { (*event_record).EventHeader.EventDescriptor.Level };
+        let event_id = unsafe { (*event_record).EventHeader.EventDescriptor.Id };
+        let provider = unsafe { (*event_record).EventHeader.ProviderId };
+        let level_tag = match level {
+            1 => "\x1b[91mCRIT\x1b[0m",
+            2 => "\x1b[91mERR\x1b[0m",
+            3 => "\x1b[33mWARN\x1b[0m",
+            4 => "INFO",
+            5 => "VERB",
+            _ => "",
+        };
 
-    Some(DecodedEventParts {
-        event_name,
-        event_id,
-        provider,
-        level_tag,
-        props,
+        let props = decode_properties(&buffer, info, event_record);
+
+        Some(DecodedEventParts {
+            event_name,
+            event_id,
+            provider,
+            level_tag,
+            props,
+        })
     })
 }
 
 /// Learning mode violation event ID from Kernel-General.
 const LEARNING_MODE_VIOLATION_EVENT_ID: u16 = 27;
+
+/// Attempt to extract and send a [`DenialEvent`] from the decoded event.
+///
+/// Only **AccessCheckLog** events with `ObjectType="File"` are forwarded — these
+/// are the actionable denials SDK consumers can act on. Registry (`Key`),
+/// network, and other denials map to [`ResourceType::Other`], which the SDK
+/// discards, so they are not emitted. LearningModeViolation events (Event ID 27)
+/// are likewise not forwarded to the denial pipe (see M2); they remain visible
+/// only on the console/collect display path.
+///
+/// Does nothing if `denial_tx` is `None` or the event is not an actionable
+/// File denial.
+fn try_send_denial_event(ctx: &CallbackContext, parts: &DecodedEventParts, pid: u32) {
+    let denial_tx = match ctx.denial_tx.as_ref() {
+        Some(tx) => tx,
+        None => return,
+    };
+
+    // Learning-mode violations are not actionable denials for SDK consumers.
+    if parts.event_id == LEARNING_MODE_VIOLATION_EVENT_ID {
+        return;
+    }
+
+    if let Some(event) = build_denial_from_access_check(parts, pid) {
+        let _ = denial_tx.send(event);
+    }
+}
+
+/// Build a [`DenialEvent`] from an AccessCheckLog event with `ObjectType="File"`.
+///
+/// `pid` is the process id of the denied process taken from the ETW event
+/// header — this is the reliable correlation key and the contract's primary
+/// match field. The AppContainer profile name is **not** resolvable from the
+/// raw event (only a numeric `LowBoxNumber` is present, which consumers cannot
+/// use), so `container_name` is left empty; PID matching is the contract.
+fn build_denial_from_access_check(parts: &DecodedEventParts, pid: u32) -> Option<DenialEvent> {
+    let object_type = find_prop(&parts.props, "ObjectType")?;
+    let object_type_str = object_type.trim_matches('"');
+
+    // Only File denials are actionable. Key (registry), network, and other
+    // denials map to ResourceType::Other, which the SDK discards, so we do not
+    // emit them.
+    let resource_type = ResourceType::from_object_type(object_type_str);
+    if resource_type != ResourceType::File {
+        return None;
+    }
+
+    let object_name = find_prop(&parts.props, "ObjectName")
+        .map(|v| v.trim_matches('"').to_string())
+        .unwrap_or_default();
+
+    // PID is the contract's match key; the profile name is not resolvable here.
+    let container_name = String::new();
+    let access_requested = access_type_from_props(&parts.props);
+
+    Some(DenialEvent::new(
+        container_name,
+        pid,
+        resource_type,
+        object_name,
+        access_requested,
+        iso8601_now(),
+        parts.event_id,
+    ))
+}
+
+/// ETW property names that may carry the requested/granted access mask for an
+/// AccessCheckLog event, in priority order.
+const ACCESS_MASK_PROPS: &[&str] = &["DesiredAccess", "AccessMask", "GrantedAccess"];
+
+/// Determine the [`AccessType`] from any available access-mask property.
+///
+/// Returns [`AccessType::Unknown`] when no recognizable mask property is present.
+fn access_type_from_props(props: &[(String, String)]) -> AccessType {
+    for name in ACCESS_MASK_PROPS {
+        if let Some(value) = find_prop(props, name) {
+            if let Some(mask) = parse_access_mask(value) {
+                return access_type_from_mask(mask);
+            }
+        }
+    }
+    AccessType::Unknown
+}
+
+/// Parse an access mask rendered either as `0x...` hex (the common TDH hex-int
+/// form) or as a decimal integer. Surrounding quotes/whitespace are tolerated.
+fn parse_access_mask(value: &str) -> Option<u32> {
+    let trimmed = value.trim().trim_matches('"').trim();
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        trimmed.parse::<u32>().ok()
+    }
+}
+
+/// Classify an access mask into a coarse [`AccessType`].
+///
+/// Write is the most actionable signal, so it takes precedence over execute,
+/// then read. Bit values follow the Win32 file access-rights constants.
+fn access_type_from_mask(mask: u32) -> AccessType {
+    // Write-implying rights: FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_WRITE_EA,
+    // FILE_WRITE_ATTRIBUTES, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_WRITE.
+    const WRITE_BITS: u32 =
+        0x0002 | 0x0004 | 0x0010 | 0x0100 | 0x0001_0000 | 0x0004_0000 | 0x0008_0000 | 0x4000_0000;
+    // Execute rights: FILE_EXECUTE, GENERIC_EXECUTE.
+    const EXEC_BITS: u32 = 0x0020 | 0x2000_0000;
+    // Read rights: FILE_READ_DATA, FILE_READ_EA, FILE_READ_ATTRIBUTES, GENERIC_READ.
+    const READ_BITS: u32 = 0x0001 | 0x0008 | 0x0080 | 0x8000_0000;
+
+    if mask & WRITE_BITS != 0 {
+        AccessType::Write
+    } else if mask & EXEC_BITS != 0 {
+        AccessType::Execute
+    } else if mask & READ_BITS != 0 {
+        AccessType::Read
+    } else {
+        AccessType::Unknown
+    }
+}
+
+/// Find a property value by name in the decoded property list.
+fn find_prop<'a>(props: &'a [(String, String)], name: &str) -> Option<&'a String> {
+    props.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+}
+
+/// Return the current time as an ISO 8601 formatted string.
+///
+/// The formatted string is cached per thread and only recomputed when the
+/// wall-clock second changes, avoiding redundant formatting work when many
+/// denial events arrive within the same second.
+fn iso8601_now() -> String {
+    thread_local! {
+        static CACHED_TIMESTAMP: RefCell<(u64, String)> = const { RefCell::new((0, String::new())) };
+    }
+
+    let now = SystemTime::now();
+    let duration = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+
+    CACHED_TIMESTAMP.with(|cache| {
+        let mut c = cache.borrow_mut();
+        if c.0 == secs && !c.1.is_empty() {
+            return c.1.clone();
+        }
+
+        // Simple ISO 8601 without external dependency.
+        // Format: YYYY-MM-DDTHH:MM:SSZ
+        let days = secs / 86400;
+        let time_of_day = secs % 86400;
+        let hours = time_of_day / 3600;
+        let minutes = (time_of_day % 3600) / 60;
+        let seconds = time_of_day % 60;
+
+        // Compute year/month/day from days since epoch (1970-01-01).
+        let (year, month, day) = days_to_ymd(days);
+
+        let formatted =
+            format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z");
+        c.0 = secs;
+        c.1 = formatted;
+        c.1.clone()
+    })
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Civil days algorithm (from Howard Hinnant).
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146097) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
 
 /// Human-readable names for learning mode violation categories.
 fn learning_mode_category_name(category: &str) -> &str {
@@ -458,7 +709,7 @@ fn format_event_output(parts: &DecodedEventParts, mode: DisplayMode) -> Option<S
         return Some(format_learning_mode_violation(&parts.props, mode));
     }
 
-    let props = minify_kernel_general_props(parts.props.clone(), mode)?;
+    let props = minify_kernel_general_props(&parts.props, mode)?;
 
     let props_str = if props.is_empty() {
         String::new()
@@ -626,7 +877,16 @@ fn decode_properties(
             format_property_value(in_type, prop_length, data_ptr, remaining);
 
         offset += consumed;
+        // The property value above was decoded safely from the bounded
+        // `remaining` slice, so record it before any further bounds check.
         results.push((prop_name, value_str));
+        // Guard against malformed ETW events whose property lengths would
+        // advance the cursor past the end of the user-data buffer; reading
+        // beyond it via `user_data.add(offset)` on the next iteration would be
+        // undefined behavior.
+        if offset > user_data_len {
+            break;
+        }
     }
 
     results
@@ -638,14 +898,18 @@ const MINIFIED_FILE_FIELDS: &[&str] = &["LowBoxNumber", "ProcessName", "ObjectNa
 
 /// In minified mode, reduce Kernel-General events to a useful subset of properties.
 /// For AccessCheckLog File/Key events: strip to LowBoxNumber, ProcessName, ObjectName.
-/// For other events: pass all properties through unmodified.
+/// For other events: pass all properties through unmodified (borrowed, no clone).
 /// Returns `None` to suppress the event entirely (e.g. empty ObjectType in AccessCheckLog).
-fn minify_kernel_general_props(
-    props: Vec<(String, String)>,
+///
+/// The input is borrowed; an owned `Vec` is only allocated when the props are
+/// actually filtered/rewritten (minified File/Key events). Non-minified and
+/// non-minifiable events return a borrow of the caller's slice.
+fn minify_kernel_general_props<'a>(
+    props: &'a [(String, String)],
     mode: DisplayMode,
-) -> Option<Vec<(String, String)>> {
+) -> Option<Cow<'a, [(String, String)]>> {
     if mode != DisplayMode::Minified {
-        return Some(props);
+        return Some(Cow::Borrowed(props));
     }
 
     // Suppress events with ObjectType="" (empty).
@@ -662,21 +926,21 @@ fn minify_kernel_general_props(
     // Only minify File and Key events; pass others through unmodified.
     let is_minifiable = matches!(object_type.as_deref(), Some("File") | Some("Key"));
     if !is_minifiable {
-        return Some(props);
+        return Some(Cow::Borrowed(props));
     }
 
     // Collect matching props, then sort by the order defined in MINIFIED_FILE_FIELDS.
     let mut filtered: Vec<(String, String)> = props
-        .into_iter()
+        .iter()
         .filter(|(k, _)| MINIFIED_FILE_FIELDS.contains(&k.as_str()))
         .map(|(k, v)| {
             if k == "ProcessName" {
-                let stripped = v.trim_matches('"').rsplit('\\').next().unwrap_or(&v);
-                (k, format!("\"{stripped}\""))
+                let stripped = v.trim_matches('"').rsplit('\\').next().unwrap_or(v);
+                (k.clone(), format!("\"{stripped}\""))
             } else if k == "LowBoxNumber" {
-                ("LBN".to_string(), v)
+                ("LBN".to_string(), v.clone())
             } else {
-                (k, v)
+                (k.clone(), v.clone())
             }
         })
         .collect();
@@ -693,7 +957,7 @@ fn minify_kernel_general_props(
             .unwrap_or(usize::MAX)
     });
 
-    Some(filtered)
+    Some(Cow::Owned(filtered))
 }
 
 fn format_property_value(
@@ -845,4 +1109,82 @@ fn wide_str_at(buf: &[u8], offset: u32) -> Option<String> {
     }
 
     Some(String::from_utf16_lossy(&wchars[..len]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parts_with(props: Vec<(String, String)>) -> DecodedEventParts {
+        DecodedEventParts {
+            event_name: Some("AccessCheckLog".to_string()),
+            event_id: 4907,
+            provider: KERNEL_GENERAL_PROVIDER,
+            level_tag: "",
+            props,
+        }
+    }
+
+    #[test]
+    fn parse_access_mask_hex_and_decimal() {
+        assert_eq!(parse_access_mask("0x80000000"), Some(0x8000_0000));
+        assert_eq!(parse_access_mask("\"0X00000002\""), Some(2));
+        assert_eq!(parse_access_mask(" 32 "), Some(32));
+        assert_eq!(parse_access_mask("not-a-number"), None);
+    }
+
+    #[test]
+    fn access_type_from_mask_priority() {
+        // Write takes precedence over read when both bits are present.
+        assert_eq!(
+            access_type_from_mask(0x8000_0000 | 0x4000_0000),
+            AccessType::Write
+        );
+        // GENERIC_EXECUTE.
+        assert_eq!(access_type_from_mask(0x2000_0000), AccessType::Execute);
+        // GENERIC_READ.
+        assert_eq!(access_type_from_mask(0x8000_0000), AccessType::Read);
+        // No recognized bits.
+        assert_eq!(access_type_from_mask(0), AccessType::Unknown);
+    }
+
+    #[test]
+    fn access_type_from_props_reads_first_known_property() {
+        let props = vec![
+            ("ObjectType".to_string(), "\"File\"".to_string()),
+            ("DesiredAccess".to_string(), "0x00000002".to_string()),
+        ];
+        assert_eq!(access_type_from_props(&props), AccessType::Write);
+
+        // No mask property → Unknown.
+        let props = vec![("ObjectType".to_string(), "\"File\"".to_string())];
+        assert_eq!(access_type_from_props(&props), AccessType::Unknown);
+    }
+
+    #[test]
+    fn build_denial_only_emits_file_with_empty_container_name() {
+        // File denial → emitted; container name is empty (PID is the key).
+        let parts = parts_with(vec![
+            ("ObjectType".to_string(), "\"File\"".to_string()),
+            ("ObjectName".to_string(), "\"C:\\\\f.txt\"".to_string()),
+            ("LowBoxNumber".to_string(), "\"7\"".to_string()),
+            ("DesiredAccess".to_string(), "0x80000000".to_string()),
+        ]);
+        let event = build_denial_from_access_check(&parts, 4567).expect("file denial");
+        assert_eq!(event.pid, 4567);
+        assert_eq!(event.resource_type, ResourceType::File);
+        assert_eq!(event.container_name, "");
+        assert_eq!(event.access_requested, AccessType::Read);
+
+        // Key (registry) denial → not emitted (maps to Other, discarded by SDK).
+        let parts = parts_with(vec![
+            ("ObjectType".to_string(), "\"Key\"".to_string()),
+            ("ObjectName".to_string(), "\"HKLM\\\\X\"".to_string()),
+        ]);
+        assert!(build_denial_from_access_check(&parts, 1).is_none());
+
+        // Empty/network object type → not emitted.
+        let parts = parts_with(vec![("ObjectType".to_string(), "\"\"".to_string())]);
+        assert!(build_denial_from_access_check(&parts, 1).is_none());
+    }
 }

@@ -12,34 +12,37 @@
 //! Then run `wxc-exec.exe` with `MXC_DIAG_CONSOLE=1` (or registry key).
 
 mod etw;
+mod pipe_utils;
+pub mod denial_event;
+pub mod denial_pipe;
+mod service;
 
+use std::collections::HashMap;
 use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows::Win32::Security::{
-    InitializeSecurityDescriptor, SetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
-    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, TOKEN_ELEVATION, TOKEN_QUERY,
-};
-use windows::Win32::Storage::FileSystem::FILE_FLAG_FIRST_PIPE_INSTANCE;
-use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
-};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Security::{TOKEN_ELEVATION, TOKEN_QUERY};
+use windows::Win32::System::Pipes::DisconnectNamedPipe;
 use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
 use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows_core::PCWSTR;
 
 /// Maximum message size in bytes (256 KB -- enough for large redacted JSON).
 const BUFFER_SIZE: u32 = 256 * 1024;
+
+/// Maximum number of concurrent diagnostic-pipe client handler threads.
+const MAX_CLIENTS: usize = 64;
+
+/// Active diagnostic-pipe client handler thread count, used to enforce [`MAX_CLIENTS`].
+static ACTIVE_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
 /// Colors for per-PID display. Cycles through these ANSI color codes.
 const PID_COLORS: &[&str] = &[
@@ -147,10 +150,52 @@ struct Cli {
     /// timestamped folder in %TEMP%, then zips the folder on exit (Ctrl+C).
     #[arg(long)]
     collect: bool,
+
+    /// Run as a Windows service (invoked by the SCM, not for manual use).
+    #[arg(long)]
+    service: bool,
+
+    /// Install the diagnostic console as a Windows service.
+    #[arg(long)]
+    install: bool,
+
+    /// Uninstall the Windows service registration.
+    #[arg(long)]
+    uninstall: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
+
+    // Handle service-related subcommands first (they don't use the interactive console).
+    if cli.install {
+        if let Err(e) = service::install_service() {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if cli.uninstall {
+        if let Err(e) = service::uninstall_service() {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if cli.service {
+        // Running as a Windows service -- hand off to the service dispatcher.
+        if let Err(e) = service::run_as_service() {
+            // Cannot print in service mode, but if we get here the dispatcher
+            // failed to start (e.g. not actually launched by the SCM).
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // --- Interactive (console) mode ---
 
     if cli.verbose {
         DISPLAY_MODE.store(DisplayMode::Full as u8, Ordering::Relaxed);
@@ -264,8 +309,21 @@ fn main() {
     // Channel for reader threads to send display events.
     let (tx, rx) = mpsc::channel::<DisplayEvent>();
 
+    // Start the Tier-1 denial pipe server. This is the *primary* supported
+    // deployment for the denial-capture feature: the interactive console runs
+    // as the logged-in (interactive) user, so the per-user denial pipe
+    // (`mxc-denials-{SID}`) is created under that user's SID and is directly
+    // reachable by the SDK running in the same user session.
+    //
+    // The returned sender is handed to the ETW listener so denial events
+    // decoded from ETW are forwarded to the denial pipe. `_denial_handle` is
+    // held for the lifetime of the process; dropping it would only detach the
+    // server thread, but binding it (rather than `_`) keeps the intent explicit
+    // and avoids prematurely dropping the join handle.
+    let (denial_tx, _denial_handle) = denial_pipe::start_denial_pipe_server();
+
     // Start ETW listener (best-effort; warns on failure).
-    match etw::start_etw_listener(tx.clone()) {
+    match etw::start_etw_listener(tx.clone(), Some(denial_tx)) {
         Ok(()) => {
             println!("\x1b[93m[ETW]\x1b[0m Listening for providers:");
             println!(
@@ -292,144 +350,62 @@ fn main() {
         display_loop(rx, collect_dir);
     });
 
-    // Accept loop: create pipe instances and wait for clients.
-    let mut is_first = true;
-    loop {
-        let pipe = match create_pipe_instance(&pipe_name, is_first) {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("[error] Failed to create pipe instance: {e}");
-                if is_first {
-                    // If we can't even create the first instance, exit.
-                    std::process::exit(1);
-                }
-                // For subsequent instances, wait and retry.
-                thread::sleep(std::time::Duration::from_secs(1));
-                continue;
-            }
-        };
-        is_first = false;
-
-        // Block until a client connects.
-        // SAFETY: `pipe` is a valid handle returned by create_pipe_instance.
-        let connected = unsafe { ConnectNamedPipe(pipe, None) };
-        if connected.is_err() {
-            let err = std::io::Error::last_os_error();
-            // ERROR_PIPE_CONNECTED (535) means client connected between Create and Connect.
-            if err.raw_os_error() != Some(535) {
-                eprintln!("[error] ConnectNamedPipe failed: {err}");
-                // SAFETY: `pipe` is a valid handle from create_pipe_instance.
-                unsafe {
-                    let _ = CloseHandle(pipe);
-                }
-                continue;
-            }
-        }
-
-        // Get client PID server-side (don't trust client).
-        let pid = match get_client_pid(pipe) {
-            Some(p) => p,
-            None => {
-                eprintln!("[warn] Could not determine client PID");
-                // SAFETY: `pipe` is a valid handle from create_pipe_instance.
-                unsafe {
-                    let _ = DisconnectNamedPipe(pipe);
-                    let _ = CloseHandle(pipe);
-                }
-                continue;
-            }
-        };
-
-        let tx = tx.clone();
-        let _ = tx.send(DisplayEvent::Connected { pid });
-
-        // Convert HANDLE to raw pointer for thread transfer (HANDLE is !Send).
-        let raw_handle = pipe.0 as usize;
-        thread::spawn(move || {
-            let pipe = HANDLE(raw_handle as *mut std::ffi::c_void);
+    // Accept loop: create pipe instances and dispatch connected clients. The
+    // create-pipe -> ConnectNamedPipe -> read-PID -> MAX_CLIENTS-check ->
+    // spawn-handler pattern is shared with the service path via
+    // [`pipe_utils::run_accept_loop`].
+    let accept_tx = tx.clone();
+    pipe_utils::run_accept_loop(
+        |first| create_pipe_instance(&pipe_name, first),
+        move |pipe, pid| {
+            let tx = accept_tx.clone();
+            let _ = tx.send(DisplayEvent::Connected { pid });
             client_reader(pipe, pid, tx);
-        });
-    }
+        },
+        MAX_CLIENTS,
+        &ACTIVE_CLIENTS,
+        &SHUTDOWN,
+        true, // verbose: interactive mode prints errors to stderr
+    );
 
-    // The display thread runs until the process exits.
-    #[allow(unreachable_code)]
+    // Once the accept loop exits (shutdown signalled), wait for the display
+    // thread to finish draining and finalizing.
     let _ = _display_handle.join();
 }
 
 /// Create a named pipe instance for the server.
-fn create_pipe_instance(pipe_name: &str, first: bool) -> Result<HANDLE, String> {
-    let name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
-    use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+///
+/// Uses a dynamic, per-user SDDL security descriptor (see
+/// [`pipe_utils::build_pipe_sddl`]) that grants the current user Generic Read +
+/// Write, denies AppContainer processes (`ALL_APP_PACKAGES`, `S-1-15-2-1`), and
+/// grants SYSTEM and Built-in Administrators full access. This prevents other
+/// machine users from connecting and injecting log messages.
+///
+/// Returns an error if the current user's SID cannot be resolved; in that case the
+/// pipe is not created and we never fall back to a weaker, machine-wide ACL.
+pub(crate) fn create_pipe_instance(pipe_name: &str, first: bool) -> Result<HANDLE, String> {
+    let sddl = pipe_utils::build_pipe_sddl().ok_or_else(|| {
+        "failed to resolve current user SID; refusing to create diagnostic pipe with weaker ACLs"
+            .to_string()
+    })?;
 
-    // Create a security descriptor with a NULL DACL (allows all access).
-    // This is required so that medium/low integrity clients (e.g. sandboxed processes)
-    // can connect to the pipe when the server is running elevated.
-    let mut sd = SECURITY_DESCRIPTOR::default();
-    let psd = PSECURITY_DESCRIPTOR(std::ptr::addr_of_mut!(sd).cast());
-    // SAFETY: `psd` points to a valid stack-allocated SECURITY_DESCRIPTOR;
-    // revision 1 is the only valid value. SetSecurityDescriptorDacl with None
-    // sets a NULL DACL (allow all).
-    unsafe {
-        InitializeSecurityDescriptor(psd, 1)
-            .map_err(|e| format!("InitializeSecurityDescriptor: {e}"))?;
-        SetSecurityDescriptorDacl(psd, true, None, false)
-            .map_err(|e| format!("SetSecurityDescriptorDacl: {e}"))?;
-    }
-
-    let sa = SECURITY_ATTRIBUTES {
-        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: psd.0,
-        bInheritHandle: false.into(),
-    };
-
-    // PIPE_ACCESS_INBOUND (0x1) -- server reads, clients write.
-    let mut open_mode = FILE_FLAGS_AND_ATTRIBUTES(0x0000_0001);
-    if first {
-        open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
-    }
-
-    // SAFETY: `name_wide` is a valid null-terminated UTF-16 string that outlives the call.
-    // `sa` references a valid security descriptor on the stack. All parameters are valid.
-    let handle = unsafe {
-        CreateNamedPipeW(
-            PCWSTR(name_wide.as_ptr()),
-            open_mode,
-            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-            PIPE_UNLIMITED_INSTANCES,
-            0,           // out buffer (server reads only)
-            BUFFER_SIZE, // in buffer
-            0,           // default timeout
-            Some(&sa),
-        )
-    };
-
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(format!(
-            "CreateNamedPipeW failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    Ok(handle)
-}
-
-/// Get the client process ID from a connected pipe handle.
-fn get_client_pid(pipe: HANDLE) -> Option<u32> {
-    let mut pid: u32 = 0;
-    // SAFETY: `pipe` is a valid connected pipe handle; `pid` is a valid out pointer.
-    let ok = unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) };
-    if ok.is_ok() && pid != 0 {
-        Some(pid)
-    } else {
-        None
-    }
+    // PIPE_ACCESS_INBOUND (0x1): server reads, clients write.
+    pipe_utils::create_pipe_with_sddl(
+        pipe_name,
+        &sddl,
+        0x0000_0001, // PIPE_ACCESS_INBOUND
+        BUFFER_SIZE, // in buffer
+        0,           // out buffer (server reads only)
+        first,
+    )
+    .map_err(|e| format!("CreateNamedPipeW failed: {e}"))
 }
 
 /// Read messages from a connected client pipe until disconnect.
 ///
 /// Handles both message-mode pipe clients (Rust wxc-exec, one JSON per read)
 /// and stream-mode clients (Node SDK, newline-delimited JSON that may coalesce).
-fn client_reader(pipe: HANDLE, pid: u32, tx: mpsc::Sender<DisplayEvent>) {
+pub(crate) fn client_reader(pipe: HANDLE, pid: u32, tx: mpsc::Sender<DisplayEvent>) {
     // Wrap the pipe handle in a File for Read trait.
     // SAFETY: we own the handle and will close it at the end.
     use std::os::windows::io::FromRawHandle;
@@ -500,7 +476,6 @@ fn parse_log_message(json: &str) -> Option<String> {
 
 /// Tracks display metadata for a connected client process.
 struct PidInfo {
-    pid: u32,
     color_idx: usize,
     exe_name: String,
 }
@@ -508,7 +483,7 @@ struct PidInfo {
 /// Display loop: reads events from the channel and prints them.
 /// When `collect_dir` is `Some`, also writes ANSI-stripped output to log files.
 fn display_loop(rx: mpsc::Receiver<DisplayEvent>, collect_dir: Option<PathBuf>) {
-    let mut pid_info_map: Vec<PidInfo> = Vec::new();
+    let mut pid_info_map: HashMap<u32, PidInfo> = HashMap::new();
     let mut next_color: usize = 0;
 
     // Open log files if collecting.
@@ -586,7 +561,7 @@ fn display_loop(rx: mpsc::Receiver<DisplayEvent>, collect_dir: Option<PathBuf>) 
 /// Process a single display event: print to console and optionally write to log files.
 fn process_display_event(
     event: DisplayEvent,
-    pid_info_map: &mut Vec<PidInfo>,
+    pid_info_map: &mut HashMap<u32, PidInfo>,
     next_color: &mut usize,
     log_writers: &mut Option<(BufWriter<std::fs::File>, BufWriter<std::fs::File>)>,
 ) {
@@ -595,11 +570,13 @@ fn process_display_event(
         DisplayEvent::Connected { pid } => {
             let color_idx = *next_color % PID_COLORS.len();
             let exe = process_exe_name(pid);
-            pid_info_map.push(PidInfo {
+            pid_info_map.insert(
                 pid,
-                color_idx,
-                exe_name: exe.clone(),
-            });
+                PidInfo {
+                    color_idx,
+                    exe_name: exe.clone(),
+                },
+            );
             *next_color += 1;
             let color = PID_COLORS[color_idx];
             let line =
@@ -637,16 +614,24 @@ fn process_display_event(
             }
         }
         DisplayEvent::Disconnected { pid } => {
-            let (color, exe) = get_pid_info(pid_info_map, pid);
-            let line = format!(
-                "{DIM}[{ts}]{RESET} {color}<<<{RESET} {color}{exe}:{pid}{RESET} disconnected"
-            );
+            let line = {
+                let (color, exe) = get_pid_info(pid_info_map, pid);
+                let l = format!(
+                    "{DIM}[{ts}]{RESET} {color}<<<{RESET} {color}{exe}:{pid}{RESET} disconnected"
+                );
+                if let Some((ref mut v, ref mut m)) = log_writers {
+                    let plain = format!("[{ts}] <<< {exe}:{pid} disconnected\n");
+                    let _ = v.write_all(plain.as_bytes());
+                    let _ = m.write_all(plain.as_bytes());
+                }
+                l
+            };
             println!("{line}");
-            if let Some((ref mut v, ref mut m)) = log_writers {
-                let plain = format!("[{ts}] <<< {exe}:{pid} disconnected\n");
-                let _ = v.write_all(plain.as_bytes());
-                let _ = m.write_all(plain.as_bytes());
-            }
+            // The client's reader thread has finished its cleanup
+            // (DisconnectNamedPipe/CloseHandle) and will not be seen again, so
+            // drop its display metadata to prevent unbounded map growth across
+            // many short-lived connections.
+            pid_info_map.remove(&pid);
         }
         DisplayEvent::EtwEvent {
             pid,
@@ -680,9 +665,8 @@ fn process_display_event(
 }
 
 /// Get the ANSI color code and exe name for a PID.
-fn get_pid_info(map: &[PidInfo], pid: u32) -> (&'static str, &str) {
-    map.iter()
-        .find(|info| info.pid == pid)
+fn get_pid_info(map: &HashMap<u32, PidInfo>, pid: u32) -> (&'static str, &str) {
+    map.get(&pid)
         .map(|info| (PID_COLORS[info.color_idx], info.exe_name.as_str()))
         .unwrap_or((PID_COLORS[0], "?"))
 }
@@ -774,7 +758,7 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let z = days + 719468;
     let era = z / 146097;
     let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146097) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;

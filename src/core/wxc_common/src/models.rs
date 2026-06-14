@@ -641,6 +641,21 @@ impl ScriptResponse {
     }
 }
 
+/// Describes a resource that was denied access during or after sandbox execution.
+/// Used to surface structured denial information back to the SDK consumer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeniedResource {
+    /// Filesystem path or registry key that was denied access.
+    pub path: String,
+    /// Type of resource: "file", "directory", "registry".
+    pub resource_type: String,
+    /// Access that would be denied: "read", "write", "execute", "read_write".
+    pub access_denied: String,
+    /// Whether this denial was confirmed via AccessCheck (`true`) or
+    /// heuristic/output parsing (`false`).
+    pub confirmed: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -722,13 +722,15 @@ fn main() {
         process::exit(1);
     }
 
-    // Inject learningModeLogging capability when diagnostic console is enabled.
-    let learning_mode_injected = if DiagnosticConfig::force_learning_mode()
-        && !request
-            .policy
-            .capabilities
-            .iter()
-            .any(|c| c == "learningModeLogging")
+    // Always inject learningModeLogging capability — enables kernel ETW
+    // event emission for access denials without disabling sandbox enforcement.
+    // This allows the diagnostic service (if running) to capture precise
+    // denial data.
+    let learning_mode_injected = if !request
+        .policy
+        .capabilities
+        .iter()
+        .any(|c| c == "learningModeLogging")
     {
         request
             .policy
@@ -762,7 +764,7 @@ fn main() {
         if learning_mode_injected {
             let _ = writeln!(
                 logger,
-                "WARNING: injected 'learningModeLogging' capability via ForceLearningMode registry key"
+                "learningModeLogging capability injected (enables kernel denial event capture)"
             );
         }
 
