@@ -3,9 +3,10 @@
 // Licensed under the MIT License.
 
 // Validates that the Rust toolchain pin in src/rust-toolchain.toml matches
-// the `rustVersion` default in .azure-pipelines/templates/Rust.Build.Steps.Official.yml.
-// The ADO official build installs `ms-prod-1.<N>` from the Mxc-Azure-Feed;
-// the rustup file pins `channel = "1.<N>"`. They must move together.
+// the `ms-prod-1.<N>` version pinned in each ADO job that drives the 1ES
+// Rust virtual tasks (Rust.Build.Job.yml and Mac.Build.Job.yml). The rustup
+// file pins `channel = "1.<N>"`; the ADO templates pin the matching
+// internal toolchain from Mxc-Azure-Feed. All three must move together.
 //
 //   node scripts/versioning/check-rust-toolchain-sync.js
 
@@ -26,19 +27,32 @@ if (!channelMatch) {
 }
 const rustupChannel = channelMatch ? channelMatch[1] : null;
 
-const adoTemplate = read(".azure-pipelines", "templates", "Rust.Build.Steps.Official.yml");
-const adoMatch = adoTemplate.match(/default:\s*'ms-prod-(\d+\.\d+(?:\.\d+)?)'/);
-if (!adoMatch) {
-  errors.push("Could not find `default: 'ms-prod-<version>'` in .azure-pipelines/templates/Rust.Build.Steps.Official.yml");
-}
-const adoVersion = adoMatch ? adoMatch[1] : null;
+const adoTemplates = [
+  [".azure-pipelines", "templates", "Rust.Build.Job.yml"],
+  [".azure-pipelines", "templates", "Mac.Build.Job.yml"],
+];
 
-if (rustupChannel && adoVersion && rustupChannel !== adoVersion) {
-  errors.push(
-    `Rust toolchain drift: src/rust-toolchain.toml channel="${rustupChannel}" ` +
-    `but .azure-pipelines/templates/Rust.Build.Steps.Official.yml pins "ms-prod-${adoVersion}". ` +
-    `Bump both in the same commit.`
-  );
+const adoPins = [];
+for (const parts of adoTemplates) {
+  const relPath = parts.join("/");
+  const content = read(...parts);
+  const match = content.match(/version:\s*'ms-prod-(\d+\.\d+(?:\.\d+)?)'/);
+  if (!match) {
+    errors.push(`Could not find \`version: 'ms-prod-<version>'\` in ${relPath}`);
+    continue;
+  }
+  adoPins.push({ relPath, version: match[1] });
+}
+
+if (rustupChannel) {
+  for (const { relPath, version } of adoPins) {
+    if (version !== rustupChannel) {
+      errors.push(
+        `Rust toolchain drift: src/rust-toolchain.toml channel="${rustupChannel}" ` +
+        `but ${relPath} pins "ms-prod-${version}". Bump both in the same commit.`
+      );
+    }
+  }
 }
 
 if (errors.length > 0) {
@@ -47,4 +61,5 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log(`Rust toolchain sync OK (${rustupChannel} == ms-prod-${adoVersion})`);
+const summary = adoPins.map(p => `${p.relPath}=ms-prod-${p.version}`).join(", ");
+console.log(`Rust toolchain sync OK (rustup channel ${rustupChannel}; ${summary})`);
