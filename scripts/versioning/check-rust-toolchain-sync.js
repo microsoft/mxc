@@ -4,6 +4,10 @@
 
 // Validates that src/rust-toolchain.toml (`channel = "1.<N>"`) matches the
 // `ms-prod-1.<N>` pin in every ADO job template that uses templateContext.rust.
+// The ADO official build installs Microsoft's internal Rust toolchain from
+// Mxc-Azure-Feed; keeping it in sync with the public rustup channel used by
+// the repo (and all other CI) prevents the official build from compiling
+// against a different Rust version than dev / GitHub Actions.
 //
 //   node scripts/versioning/check-rust-toolchain-sync.js
 
