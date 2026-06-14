@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 700" width="1000" height="700" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#444"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="700" fill="#f8f9fa" rx="8"/>
+
+  <!-- Title -->
+  <text x="500" y="35" text-anchor="middle" font-size="18" font-weight="bold" fill="#1a1a1a">ETW Service Threading Model</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- ETW Consumer Thread (blue) -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <rect x="350" y="60" width="300" height="90" rx="10" fill="#2563eb"/>
+  <text x="500" y="88" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">ETW Consumer Thread</text>
+  <text x="500" y="110" text-anchor="middle" font-size="11" fill="#dbeafe">ProcessTrace() (blocking)</text>
+  <text x="500" y="128" text-anchor="middle" font-size="11" fill="#dbeafe">Delivers events via CallbackContext</text>
+
+  <!-- Arrow: ETW Consumer → Event Receiver -->
+  <line x1="500" y1="150" x2="500" y2="210" stroke="#444" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <rect x="395" y="165" width="210" height="20" rx="3" fill="#fff" stroke="#ddd" stroke-width="0.5"/>
+  <text x="500" y="179" text-anchor="middle" font-size="10" fill="#333">events (mpsc channel)</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- Event Receiver Thread (green) -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <rect x="300" y="215" width="400" height="110" rx="10" fill="#16a34a"/>
+  <text x="500" y="245" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">Event Receiver Thread</text>
+  <text x="500" y="270" text-anchor="middle" font-size="11" fill="#dcfce7">HashMap&lt;BufferKey, Vec&lt;DenialEvent&gt;&gt;</text>
+  <text x="500" y="290" text-anchor="middle" font-size="11" fill="#dcfce7">Max 1024 events per (container, PID) key</text>
+  <text x="500" y="310" text-anchor="middle" font-size="11" fill="#dcfce7">Ring-buffer eviction</text>
+
+  <!-- Arrow: Event Receiver → Pipe Accept -->
+  <line x1="500" y1="325" x2="500" y2="390" stroke="#444" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <rect x="395" y="343" width="210" height="20" rx="3" fill="#fff" stroke="#ddd" stroke-width="0.5"/>
+  <text x="500" y="357" text-anchor="middle" font-size="10" fill="#333">queries/subscriptions</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- Pipe Accept Thread (purple) -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <rect x="325" y="395" width="350" height="90" rx="10" fill="#7c3aed"/>
+  <text x="500" y="425" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">Pipe Accept Thread</text>
+  <text x="500" y="447" text-anchor="middle" font-size="11" fill="#ede9fe">Creates named pipe instances</text>
+  <text x="500" y="465" text-anchor="middle" font-size="11" fill="#ede9fe">Spawns per-client handlers</text>
+
+  <!-- Arrows: Pipe Accept → Client Handlers -->
+  <!-- Left arrow to Client 1 -->
+  <path d="M 420 485 L 220 540" stroke="#444" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+  <!-- Center arrow to Client 2 -->
+  <line x1="500" y1="485" x2="500" y2="540" stroke="#444" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <!-- Right arrow to Client N -->
+  <path d="M 580 485 L 780 540" stroke="#444" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- Per-Client Handler Threads (gray) -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- Client 1 -->
+  <rect x="120" y="545" width="200" height="70" rx="10" fill="#6b7280"/>
+  <text x="220" y="575" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">Client 1</text>
+  <text x="220" y="597" text-anchor="middle" font-size="10" fill="#e5e7eb">Per-Client Handler Thread</text>
+
+  <!-- Client 2 -->
+  <rect x="400" y="545" width="200" height="70" rx="10" fill="#6b7280"/>
+  <text x="500" y="575" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">Client 2</text>
+  <text x="500" y="597" text-anchor="middle" font-size="10" fill="#e5e7eb">Per-Client Handler Thread</text>
+
+  <!-- Client N -->
+  <rect x="680" y="545" width="200" height="70" rx="10" fill="#6b7280"/>
+  <text x="780" y="575" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">Client N</text>
+  <text x="780" y="597" text-anchor="middle" font-size="10" fill="#e5e7eb">Per-Client Handler Thread</text>
+
+  <!-- Ellipsis between Client 2 and Client N -->
+  <text x="640" y="585" text-anchor="middle" font-size="18" fill="#6b7280">···</text>
+
+  <!-- Legend -->
+  <rect x="30" y="645" width="940" height="40" rx="5" fill="none" stroke="#ddd" stroke-width="1"/>
+  <rect x="50" y="657" width="14" height="14" rx="3" fill="#2563eb"/>
+  <text x="70" y="668" font-size="10" fill="#333">ETW Consumer</text>
+  <rect x="180" y="657" width="14" height="14" rx="3" fill="#16a34a"/>
+  <text x="200" y="668" font-size="10" fill="#333">Event Receiver</text>
+  <rect x="320" y="657" width="14" height="14" rx="3" fill="#7c3aed"/>
+  <text x="340" y="668" font-size="10" fill="#333">Pipe Accept</text>
+  <rect x="450" y="657" width="14" height="14" rx="3" fill="#6b7280"/>
+  <text x="470" y="668" font-size="10" fill="#333">Client Handlers</text>
+  <line x1="590" y1="664" x2="620" y2="664" stroke="#444" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <text x="635" y="668" font-size="10" fill="#333">Data flow</text>
+</svg>

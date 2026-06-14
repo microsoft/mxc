@@ -1,0 +1,181 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 800" width="1000" height="800" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrowRight" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#333"/>
+    </marker>
+    <marker id="arrowLeft" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+      <polygon points="10 0, 0 3.5, 10 7" fill="#333"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="800" fill="#fafafa" rx="4"/>
+
+  <!-- Title -->
+  <text x="500" y="28" text-anchor="middle" font-size="16" font-weight="bold" fill="#1a1a1a">MXC Denial Diagnostics — Named Pipe Wire Protocol</text>
+
+  <!-- ===== TOP SECTION: Connection ===== -->
+  <rect x="20" y="42" width="960" height="72" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.2"/>
+  <text x="40" y="60" font-size="11" font-weight="bold" fill="#1967d2">CONNECTION</text>
+
+  <!-- SDK Client box -->
+  <rect x="50" y="68" width="150" height="36" rx="4" fill="#fff" stroke="#4285f4" stroke-width="1"/>
+  <text x="125" y="90" text-anchor="middle" font-size="11" fill="#333">SDK Client (TypeScript)</text>
+
+  <!-- Pipe label -->
+  <line x1="200" y1="86" x2="540" y2="86" stroke="#333" stroke-width="1.5" marker-end="url(#arrowRight)" marker-start="url(#arrowLeft)"/>
+  <rect x="245" y="72" width="250" height="20" rx="3" fill="#fff3e0" stroke="#e65100" stroke-width="0.8"/>
+  <text x="370" y="86" text-anchor="middle" font-size="9.5" font-family="Consolas, monospace" fill="#e65100">\\.\pipe\mxc-denials-{SID}</text>
+
+  <!-- Diagnostic Service box -->
+  <rect x="550" y="68" width="170" height="36" rx="4" fill="#fff" stroke="#4285f4" stroke-width="1"/>
+  <text x="635" y="90" text-anchor="middle" font-size="11" fill="#333">Diagnostic Service (Rust)</text>
+
+  <!-- Notes -->
+  <text x="760" y="78" font-size="9" fill="#555">• SDDL-restricted — denies AppContainer access</text>
+  <text x="760" y="92" font-size="9" fill="#555">• Per-user pipe (SID from whoami /user)</text>
+
+  <!-- ===== MIDDLE SECTION ===== -->
+  <!-- Mode 1: Snapshot -->
+  <rect x="20" y="124" width="475" height="410" rx="6" fill="#f1f8e9" stroke="#558b2f" stroke-width="1.2"/>
+  <text x="40" y="142" font-size="11" font-weight="bold" fill="#33691e">MODE 1: SNAPSHOT (Query / Response)</text>
+
+  <!-- Request arrow -->
+  <text x="40" y="162" font-size="9" fill="#555">Client → Server: DenialQuery</text>
+  <line x1="40" y1="166" x2="260" y2="166" stroke="#558b2f" stroke-width="1" marker-end="url(#arrowRight)"/>
+
+  <!-- Request JSON box -->
+  <rect x="40" y="172" width="440" height="52" rx="3" fill="#263238" stroke="#455a64"/>
+  <text x="52" y="188" font-size="9.5" font-family="Consolas, monospace" fill="#80cbc4">{</text>
+  <text x="62" y="202" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"containerName"</text><text x="172" y="202" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: </text><text x="182" y="202" font-size="9.5" font-family="Consolas, monospace" fill="#a5d6a7">"mxc-abc123"</text><text x="262" y="202" font-size="9.5" font-family="Consolas, monospace" fill="#fff">,</text>
+  <text x="62" y="216" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"pid"</text><text x="98" y="216" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: </text><text x="108" y="216" font-size="9.5" font-family="Consolas, monospace" fill="#ffcc80">4567</text>
+  <text x="52" y="228" font-size="9.5" font-family="Consolas, monospace" fill="#80cbc4">}</text>
+
+  <!-- Response arrow -->
+  <text x="40" y="246" font-size="9" fill="#555">Server → Client: DenialResponse (then disconnect)</text>
+  <line x1="260" y1="250" x2="40" y2="250" stroke="#558b2f" stroke-width="1" marker-end="url(#arrowLeft)"/>
+
+  <!-- Response JSON box -->
+  <rect x="40" y="256" width="440" height="268" rx="3" fill="#263238" stroke="#455a64"/>
+  <text x="52" y="272" font-size="9.5" font-family="Consolas, monospace" fill="#80cbc4">{</text>
+  <text x="62" y="288" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"events"</text><text x="122" y="288" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: [</text>
+  <text x="72" y="304" font-size="9.5" font-family="Consolas, monospace" fill="#80cbc4">  {</text>
+  <text x="92" y="320" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"containerName"</text><text x="202" y="320" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: </text><text x="212" y="320" font-size="9.5" font-family="Consolas, monospace" fill="#a5d6a7">"mxc-abc123"</text><text x="292" y="320" font-size="9.5" font-family="Consolas, monospace" fill="#fff">,</text>
+  <text x="92" y="336" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"pid"</text><text x="128" y="336" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: </text><text x="138" y="336" font-size="9.5" font-family="Consolas, monospace" fill="#ffcc80">4567</text><text x="162" y="336" font-size="9.5" font-family="Consolas, monospace" fill="#fff">,</text>
+  <text x="92" y="352" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"resourceType"</text><text x="196" y="352" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: </text><text x="206" y="352" font-size="9.5" font-family="Consolas, monospace" fill="#a5d6a7">"file"</text><text x="242" y="352" font-size="9.5" font-family="Consolas, monospace" fill="#fff">,</text>
+  <text x="92" y="368" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"objectName"</text><text x="178" y="368" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: </text><text x="188" y="368" font-size="9.5" font-family="Consolas, monospace" fill="#a5d6a7">"C:\\Users\\test\\secret.txt"</text><text x="370" y="368" font-size="9.5" font-family="Consolas, monospace" fill="#fff">,</text>
+  <text x="92" y="384" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"accessRequested"</text><text x="220" y="384" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: </text><text x="230" y="384" font-size="9.5" font-family="Consolas, monospace" fill="#a5d6a7">"write"</text><text x="272" y="384" font-size="9.5" font-family="Consolas, monospace" fill="#fff">,</text>
+  <text x="92" y="400" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"timestamp"</text><text x="172" y="400" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: </text><text x="182" y="400" font-size="9.5" font-family="Consolas, monospace" fill="#a5d6a7">"2026-01-15T10:30:00Z"</text><text x="340" y="400" font-size="9.5" font-family="Consolas, monospace" fill="#fff">,</text>
+  <text x="92" y="416" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"eventId"</text><text x="158" y="416" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: </text><text x="168" y="416" font-size="9.5" font-family="Consolas, monospace" fill="#ffcc80">4907</text>
+  <text x="72" y="432" font-size="9.5" font-family="Consolas, monospace" fill="#80cbc4">  }</text>
+  <text x="62" y="448" font-size="9.5" font-family="Consolas, monospace" fill="#fff">],</text>
+  <text x="62" y="464" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"serviceVersion"</text><text x="186" y="464" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: </text><text x="196" y="464" font-size="9.5" font-family="Consolas, monospace" fill="#a5d6a7">"0.1.0"</text>
+  <text x="52" y="480" font-size="9.5" font-family="Consolas, monospace" fill="#80cbc4">}</text>
+
+  <!-- ===== Mode 2: Subscribe ===== -->
+  <rect x="505" y="124" width="475" height="410" rx="6" fill="#fce4ec" stroke="#c62828" stroke-width="1.2"/>
+  <text x="525" y="142" font-size="11" font-weight="bold" fill="#b71c1c">MODE 2: SUBSCRIBE (Streaming)</text>
+
+  <!-- Subscribe request arrow -->
+  <text x="525" y="162" font-size="9" fill="#555">Client → Server: SubscribeRequest</text>
+  <line x1="525" y1="166" x2="745" y2="166" stroke="#c62828" stroke-width="1" marker-end="url(#arrowRight)"/>
+
+  <!-- Subscribe request JSON -->
+  <rect x="525" y="172" width="440" height="52" rx="3" fill="#263238" stroke="#455a64"/>
+  <text x="537" y="188" font-size="9.5" font-family="Consolas, monospace" fill="#80cbc4">{</text>
+  <text x="547" y="202" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"containerName"</text><text x="657" y="202" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: </text><text x="667" y="202" font-size="9.5" font-family="Consolas, monospace" fill="#a5d6a7">"mxc-abc123"</text><text x="747" y="202" font-size="9.5" font-family="Consolas, monospace" fill="#fff">,</text>
+  <text x="547" y="216" font-size="9.5" font-family="Consolas, monospace" fill="#ce93d8">"subscribe"</text><text x="627" y="216" font-size="9.5" font-family="Consolas, monospace" fill="#fff">: </text><text x="637" y="216" font-size="9.5" font-family="Consolas, monospace" fill="#ffcc80">true</text>
+  <text x="537" y="228" font-size="9.5" font-family="Consolas, monospace" fill="#80cbc4">}</text>
+
+  <!-- Stream response arrow -->
+  <text x="525" y="246" font-size="9" fill="#555">Server → Client: Newline-delimited JSON (continuous stream)</text>
+  <line x1="745" y1="250" x2="525" y2="250" stroke="#c62828" stroke-width="1" marker-end="url(#arrowLeft)" stroke-dasharray="4,2"/>
+
+  <!-- Stream response JSON -->
+  <rect x="525" y="256" width="440" height="110" rx="3" fill="#263238" stroke="#455a64"/>
+  <text x="537" y="276" font-size="9" font-family="Consolas, monospace" fill="#a5d6a7">{"containerName":"mxc-abc123","pid":4567,</text>
+  <text x="547" y="292" font-size="9" font-family="Consolas, monospace" fill="#a5d6a7"> "resourceType":"file",</text>
+  <text x="547" y="308" font-size="9" font-family="Consolas, monospace" fill="#a5d6a7"> "objectName":"C:\\Users\\test\\secret.txt",...}</text><text x="900" y="308" font-size="9" font-family="Consolas, monospace" fill="#ffcc80">\n</text>
+  <text x="537" y="330" font-size="9" font-family="Consolas, monospace" fill="#a5d6a7">{"containerName":"mxc-abc123","pid":4567,</text>
+  <text x="547" y="346" font-size="9" font-family="Consolas, monospace" fill="#a5d6a7"> "resourceType":"registry",...}</text><text x="802" y="346" font-size="9" font-family="Consolas, monospace" fill="#ffcc80">\n</text>
+  <text x="537" y="362" font-size="9" font-family="Consolas, monospace" fill="#666">...</text>
+
+  <!-- Stream notes -->
+  <rect x="525" y="380" width="440" height="68" rx="3" fill="#fff" stroke="#c62828" stroke-width="0.6"/>
+  <text x="537" y="398" font-size="9.5" fill="#333" font-weight="bold">Streaming behavior:</text>
+  <text x="537" y="414" font-size="9" fill="#555">• Connection stays open until client disconnects</text>
+  <text x="537" y="428" font-size="9" fill="#555">• Each event is a complete JSON object on one line</text>
+  <text x="537" y="442" font-size="9" fill="#555">• Events pushed as they occur (real-time)</text>
+
+  <!-- Protocol note -->
+  <rect x="525" y="460" width="440" height="64" rx="3" fill="#fff" stroke="#c62828" stroke-width="0.6"/>
+  <text x="537" y="478" font-size="9.5" fill="#333" font-weight="bold">Framing:</text>
+  <text x="537" y="494" font-size="9" fill="#555">• Each message is length-prefixed (4-byte LE u32)</text>
+  <text x="537" y="508" font-size="9" fill="#555">• Followed by UTF-8 JSON payload</text>
+  <text x="537" y="522" font-size="9" fill="#555">• Stream mode: newline (\n) separates events after initial handshake</text>
+
+  <!-- ===== BOTTOM SECTION: Data Types ===== -->
+  <rect x="20" y="544" width="960" height="246" rx="6" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1.2"/>
+  <text x="40" y="564" font-size="11" font-weight="bold" fill="#4a148c">DATA TYPE REFERENCE</text>
+
+  <!-- ResourceType enum -->
+  <rect x="40" y="574" width="280" height="60" rx="3" fill="#fff" stroke="#7b1fa2" stroke-width="0.8"/>
+  <text x="52" y="592" font-size="10" font-weight="bold" fill="#4a148c">ResourceType</text>
+  <text x="52" y="610" font-size="9.5" font-family="Consolas, monospace" fill="#333">file</text>
+  <text x="82" y="610" font-size="9.5" fill="#999">|</text>
+  <text x="92" y="610" font-size="9.5" font-family="Consolas, monospace" fill="#333">registry</text>
+  <text x="148" y="610" font-size="9.5" fill="#999">|</text>
+  <text x="158" y="610" font-size="9.5" font-family="Consolas, monospace" fill="#333">network</text>
+  <text x="210" y="610" font-size="9.5" fill="#999">|</text>
+  <text x="220" y="610" font-size="9.5" font-family="Consolas, monospace" fill="#333">com</text>
+  <text x="244" y="610" font-size="9.5" fill="#999">|</text>
+  <text x="254" y="610" font-size="9.5" font-family="Consolas, monospace" fill="#333">other</text>
+  <text x="52" y="628" font-size="8.5" fill="#666">Windows resource categories for denial events</text>
+
+  <!-- AccessType enum -->
+  <rect x="340" y="574" width="280" height="60" rx="3" fill="#fff" stroke="#7b1fa2" stroke-width="0.8"/>
+  <text x="352" y="592" font-size="10" font-weight="bold" fill="#4a148c">AccessType</text>
+  <text x="352" y="610" font-size="9.5" font-family="Consolas, monospace" fill="#333">read</text>
+  <text x="382" y="610" font-size="9.5" fill="#999">|</text>
+  <text x="392" y="610" font-size="9.5" font-family="Consolas, monospace" fill="#333">write</text>
+  <text x="426" y="610" font-size="9.5" fill="#999">|</text>
+  <text x="436" y="610" font-size="9.5" font-family="Consolas, monospace" fill="#333">execute</text>
+  <text x="482" y="610" font-size="9.5" fill="#999">|</text>
+  <text x="492" y="610" font-size="9.5" font-family="Consolas, monospace" fill="#333">unknown</text>
+  <text x="352" y="628" font-size="8.5" fill="#666">Requested access that was denied</text>
+
+  <!-- Rust ↔ TypeScript Mapping -->
+  <rect x="40" y="648" width="920" height="132" rx="3" fill="#fff" stroke="#7b1fa2" stroke-width="0.8"/>
+  <text x="52" y="668" font-size="10" font-weight="bold" fill="#4a148c">Rust ↔ TypeScript Field Mapping</text>
+
+  <!-- Table header -->
+  <text x="72" y="692" font-size="9.5" font-weight="bold" fill="#333">Rust (wire format)</text>
+  <text x="360" y="692" font-size="9.5" fill="#999">→</text>
+  <text x="400" y="692" font-size="9.5" font-weight="bold" fill="#333">TypeScript (SDK surface)</text>
+  <text x="700" y="692" font-size="9.5" font-weight="bold" fill="#333">Notes</text>
+  <line x1="60" y1="698" x2="940" y2="698" stroke="#e0e0e0" stroke-width="0.5"/>
+
+  <!-- Row 1 -->
+  <rect x="60" y="702" width="290" height="22" rx="2" fill="#eceff1"/>
+  <text x="72" y="718" font-size="9.5" font-family="Consolas, monospace" fill="#333">DenialEvent.object_name</text>
+  <text x="360" y="718" font-size="9.5" fill="#999">→</text>
+  <rect x="388" y="702" width="290" height="22" rx="2" fill="#e3f2fd"/>
+  <text x="400" y="718" font-size="9.5" font-family="Consolas, monospace" fill="#333">DenialEvent.path</text>
+  <text x="700" y="718" font-size="8.5" fill="#666">Renamed for SDK ergonomics</text>
+
+  <!-- Row 2 -->
+  <rect x="60" y="728" width="290" height="22" rx="2" fill="#eceff1"/>
+  <text x="72" y="744" font-size="9.5" font-family="Consolas, monospace" fill="#333">DenialEvent.resource_type</text>
+  <text x="360" y="744" font-size="9.5" fill="#999">→</text>
+  <rect x="388" y="728" width="290" height="22" rx="2" fill="#e3f2fd"/>
+  <text x="400" y="744" font-size="9.5" font-family="Consolas, monospace" fill="#333">DenialEvent.resourceType</text>
+  <text x="700" y="744" font-size="8.5" fill="#666">snake_case → camelCase</text>
+
+  <!-- Row 3 -->
+  <rect x="60" y="754" width="290" height="22" rx="2" fill="#eceff1"/>
+  <text x="72" y="770" font-size="9.5" font-family="Consolas, monospace" fill="#333">DenialEvent.access_requested</text>
+  <text x="360" y="770" font-size="9.5" fill="#999">→</text>
+  <rect x="388" y="754" width="290" height="22" rx="2" fill="#e3f2fd"/>
+  <text x="400" y="770" font-size="9.5" font-family="Consolas, monospace" fill="#333">DenialEvent.accessType</text>
+  <text x="700" y="770" font-size="8.5" fill="#666">Simplified name in TS layer</text>
+</svg>

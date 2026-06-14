@@ -1,0 +1,198 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 1100" width="900" height="1100">
+  <defs>
+    <style>
+      .title { font: bold 20px 'Segoe UI', sans-serif; fill: #1a1a2e; }
+      .step-label { font: bold 13px 'Segoe UI', sans-serif; fill: #ffffff; }
+      .box-title { font: bold 12px 'Segoe UI', sans-serif; fill: #1a1a2e; }
+      .box-text { font: 11px 'Segoe UI', sans-serif; fill: #333; }
+      .diamond-text { font: bold 10px 'Segoe UI', sans-serif; fill: #1a1a2e; }
+      .arrow { stroke: #4a4a6a; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .connector { stroke: #4a4a6a; stroke-width: 1.5; fill: none; stroke-dasharray: 4,3; }
+      .band-label { font: bold 11px 'Segoe UI', sans-serif; fill: #666; text-anchor: end; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#4a4a6a"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="1100" fill="#fafbfc" rx="8"/>
+
+  <!-- Title -->
+  <text x="450" y="35" text-anchor="middle" class="title">Interactive Approval Flow — User Perspective</text>
+
+  <!-- Step 1 Band -->
+  <rect x="0" y="50" width="900" height="155" fill="#e8f4fd" opacity="0.6"/>
+  <rect x="20" y="55" width="120" height="22" rx="11" fill="#2196F3"/>
+  <text x="80" y="70" text-anchor="middle" class="step-label">Step 1: Run</text>
+
+  <!-- Step 1 boxes -->
+  <rect x="160" y="65" width="220" height="60" rx="6" fill="#ffffff" stroke="#2196F3" stroke-width="1.5"/>
+  <text x="270" y="83" text-anchor="middle" class="box-title">SDK Builds Restrictive Policy</text>
+  <text x="270" y="98" text-anchor="middle" class="box-text">• No network access</text>
+  <text x="270" y="112" text-anchor="middle" class="box-text">• Minimal filesystem paths</text>
+
+  <line x1="380" y1="95" x2="420" y2="95" class="arrow"/>
+
+  <rect x="420" y="65" width="200" height="60" rx="6" fill="#ffffff" stroke="#2196F3" stroke-width="1.5"/>
+  <text x="520" y="83" text-anchor="middle" class="box-title">Spawn wxc-exec.exe</text>
+  <text x="520" y="98" text-anchor="middle" class="box-text">• Base64 config passed</text>
+  <text x="520" y="112" text-anchor="middle" class="box-text">• Process runs in sandbox</text>
+
+  <line x1="620" y1="95" x2="660" y2="95" class="arrow"/>
+
+  <rect x="660" y="65" width="200" height="60" rx="6" fill="#fff3e0" stroke="#ff9800" stroke-width="1.5"/>
+  <text x="760" y="83" text-anchor="middle" class="box-title">Access Denials Hit</text>
+  <text x="760" y="98" text-anchor="middle" class="box-text">• Process blocked on resources</text>
+  <text x="760" y="112" text-anchor="middle" class="box-text">• Exits (partial/fail)</text>
+
+  <!-- Vertical connector Step 1 → Step 2 -->
+  <line x1="450" y1="130" x2="450" y2="215" class="arrow"/>
+
+  <!-- Step 2 Band -->
+  <rect x="0" y="205" width="900" height="165" fill="#f3e5f5" opacity="0.5"/>
+  <rect x="20" y="210" width="150" height="22" rx="11" fill="#9C27B0"/>
+  <text x="95" y="225" text-anchor="middle" class="step-label">Step 2: Detection</text>
+
+  <!-- Step 2 content -->
+  <rect x="180" y="225" width="540" height="130" rx="6" fill="#ffffff" stroke="#9C27B0" stroke-width="1.5"/>
+  <text x="450" y="245" text-anchor="middle" class="box-title">getDeniedResources() — Tiered Query</text>
+
+  <!-- Tier boxes inside -->
+  <rect x="200" y="255" width="155" height="55" rx="4" fill="#f3e5f5" stroke="#ce93d8" stroke-width="1"/>
+  <text x="277" y="272" text-anchor="middle" class="box-title">Tier 1: ETW Service</text>
+  <text x="277" y="287" text-anchor="middle" class="box-text">Kernel-accurate denials</text>
+  <text x="277" y="300" text-anchor="middle" class="box-text">⭐ Highest priority</text>
+
+  <rect x="370" y="255" width="155" height="55" rx="4" fill="#f3e5f5" stroke="#ce93d8" stroke-width="1"/>
+  <text x="447" y="272" text-anchor="middle" class="box-title">Tier 2: Output Parse</text>
+  <text x="447" y="287" text-anchor="middle" class="box-text">Regex on stdout/stderr</text>
+  <text x="447" y="300" text-anchor="middle" class="box-text">Medium priority</text>
+
+
+
+  <text x="450" y="340" text-anchor="middle" class="box-text">Deduplication: ETW > Output Parsing priority merge</text>
+
+  <!-- Vertical connector Step 2 → Step 3 -->
+  <line x1="450" y1="358" x2="450" y2="380" class="arrow"/>
+
+  <!-- Step 3 Band -->
+  <rect x="0" y="370" width="900" height="175" fill="#e8f5e9" opacity="0.5"/>
+  <rect x="20" y="375" width="180" height="22" rx="11" fill="#4CAF50"/>
+  <text x="110" y="390" text-anchor="middle" class="step-label">Step 3: Classification</text>
+
+  <!-- Decision diamond -->
+  <polygon points="450,395 530,430 450,465 370,430" fill="#ffffff" stroke="#4CAF50" stroke-width="2"/>
+  <text x="450" y="427" text-anchor="middle" class="diamond-text">Classify</text>
+  <text x="450" y="440" text-anchor="middle" class="diamond-text">Denial Type</text>
+
+  <!-- Classification branches -->
+  <!-- Left: Resolvable -->
+  <line x1="370" y1="430" x2="200" y2="430" class="arrow"/>
+  <rect x="100" y="470" width="200" height="65" rx="6" fill="#ffffff" stroke="#4CAF50" stroke-width="1.5"/>
+  <text x="200" y="488" text-anchor="middle" class="box-title">✅ Resolvable</text>
+  <text x="200" y="503" text-anchor="middle" class="box-text">File paths → readwrite/readonlyPaths</text>
+  <text x="200" y="518" text-anchor="middle" class="box-text">Network → allowOutbound</text>
+  <line x1="200" y1="450" x2="200" y2="470" stroke="#4a4a6a" stroke-width="1.5" fill="none"/>
+
+  <!-- Center: Not Supported -->
+  <line x1="450" y1="465" x2="450" y2="470" class="arrow"/>
+  <rect x="350" y="470" width="200" height="65" rx="6" fill="#ffffff" stroke="#ff9800" stroke-width="1.5"/>
+  <text x="450" y="488" text-anchor="middle" class="box-title">⚠️ Not Supported</text>
+  <text x="450" y="503" text-anchor="middle" class="box-text">Registry access</text>
+  <text x="450" y="518" text-anchor="middle" class="box-text">COM object activation</text>
+
+  <!-- Right: Rejected -->
+  <line x1="530" y1="430" x2="700" y2="430" class="arrow"/>
+  <rect x="600" y="470" width="200" height="65" rx="6" fill="#ffffff" stroke="#f44336" stroke-width="1.5"/>
+  <text x="700" y="488" text-anchor="middle" class="box-title">🔒 Rejected</text>
+  <text x="700" y="503" text-anchor="middle" class="box-text">System-critical paths (SAM)</text>
+  <text x="700" y="518" text-anchor="middle" class="box-text">Windows directory — blocked</text>
+  <line x1="700" y1="450" x2="700" y2="470" stroke="#4a4a6a" stroke-width="1.5" fill="none"/>
+
+  <!-- Vertical connector Step 3 → Step 4 -->
+  <line x1="200" y1="535" x2="200" y2="555" class="arrow"/>
+
+  <!-- Step 4 Band -->
+  <rect x="0" y="545" width="900" height="155" fill="#fff8e1" opacity="0.5"/>
+  <rect x="20" y="550" width="180" height="22" rx="11" fill="#FF9800"/>
+  <text x="110" y="565" text-anchor="middle" class="step-label">Step 4: User Approval</text>
+
+  <!-- Approval loop -->
+  <rect x="160" y="585" width="250" height="75" rx="6" fill="#ffffff" stroke="#FF9800" stroke-width="1.5"/>
+  <text x="285" y="603" text-anchor="middle" class="box-title">Interactive Prompt (per resource)</text>
+  <text x="285" y="620" text-anchor="middle" class="box-text">📁 C:\Users\app\data\cache</text>
+  <text x="285" y="635" text-anchor="middle" class="box-text">  [Allow RW] [Allow RO] [Deny] [Skip]</text>
+  <text x="285" y="650" text-anchor="middle" class="box-text">🌐 Network outbound → [Allow] [Deny]</text>
+
+  <!-- Decision diamond for user choice -->
+  <polygon points="560,610 620,635 560,660 500,635" fill="#ffffff" stroke="#FF9800" stroke-width="2"/>
+  <text x="560" y="632" text-anchor="middle" class="diamond-text">User</text>
+  <text x="560" y="645" text-anchor="middle" class="diamond-text">Choice</text>
+
+  <line x1="410" y1="622" x2="500" y2="635" class="arrow"/>
+
+  <!-- Choice outputs -->
+  <line x1="620" y1="625" x2="700" y2="610" stroke="#4a4a6a" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)"/>
+  <text x="740" y="610" class="box-text" font-size="10">Allow → add to policy</text>
+
+  <line x1="620" y1="645" x2="700" y2="645" stroke="#4a4a6a" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)"/>
+  <text x="740" y="648" class="box-text" font-size="10">Deny → block permanently</text>
+
+  <line x1="620" y1="655" x2="700" y2="675" stroke="#4a4a6a" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)"/>
+  <text x="740" y="678" class="box-text" font-size="10">Skip → ignore this run</text>
+
+  <!-- Vertical connector Step 4 → Step 5 -->
+  <line x1="450" y1="680" x2="450" y2="710" class="arrow"/>
+
+  <!-- Step 5 Band -->
+  <rect x="0" y="700" width="900" height="155" fill="#e3f2fd" opacity="0.5"/>
+  <rect x="20" y="705" width="200" height="22" rx="11" fill="#1976D2"/>
+  <text x="120" y="720" text-anchor="middle" class="step-label">Step 5: Policy Regeneration</text>
+
+  <!-- Step 5 content -->
+  <rect x="200" y="740" width="500" height="100" rx="6" fill="#ffffff" stroke="#1976D2" stroke-width="1.5"/>
+  <text x="450" y="760" text-anchor="middle" class="box-title">generateUpdatedPolicyFromDetection()</text>
+
+  <text x="230" y="782" class="box-text">Approved file paths</text>
+  <text x="500" y="782" class="box-text">→ filesystem.readwritePaths / readonlyPaths</text>
+
+  <text x="230" y="800" class="box-text">Approved network</text>
+  <text x="500" y="800" class="box-text">→ network.allowOutbound = true</text>
+
+  <text x="230" y="818" class="box-text">Registry/COM approvals</text>
+  <text x="500" y="818" class="box-text">→ ❌ Rejected with explanation</text>
+
+  <!-- Vertical connector Step 5 → Step 6 -->
+  <line x1="450" y1="845" x2="450" y2="870" class="arrow"/>
+
+  <!-- Step 6 Band -->
+  <rect x="0" y="855" width="900" height="155" fill="#fce4ec" opacity="0.5"/>
+  <rect x="20" y="860" width="150" height="22" rx="11" fill="#E91E63"/>
+  <text x="95" y="875" text-anchor="middle" class="step-label">Step 6: Re-run</text>
+
+  <!-- Step 6 content -->
+  <rect x="250" y="890" width="200" height="45" rx="6" fill="#ffffff" stroke="#E91E63" stroke-width="1.5"/>
+  <text x="350" y="912" text-anchor="middle" class="box-title">Re-run with Updated Policy</text>
+  <text x="350" y="927" text-anchor="middle" class="box-text">Sandbox spawned again</text>
+
+  <line x1="450" y1="912" x2="530" y2="912" class="arrow"/>
+
+  <!-- Final scoreboard -->
+  <rect x="530" y="885" width="300" height="110" rx="6" fill="#ffffff" stroke="#E91E63" stroke-width="1.5"/>
+  <text x="680" y="908" text-anchor="middle" class="box-title">Final Scoreboard</text>
+
+  <rect x="550" y="918" width="80" height="30" rx="4" fill="#c8e6c9"/>
+  <text x="590" y="937" text-anchor="middle" class="box-text">✅ Fixed (N)</text>
+
+  <rect x="640" y="918" width="90" height="30" rx="4" fill="#ffecb3"/>
+  <text x="685" y="937" text-anchor="middle" class="box-text">🚫 Blocked (N)</text>
+
+  <rect x="740" y="918" width="70" height="30" rx="4" fill="#ffcdd2"/>
+  <text x="775" y="937" text-anchor="middle" class="box-text">⚠️ N/S (N)</text>
+
+  <text x="680" y="978" text-anchor="middle" class="box-text">Remaining denials reported to user</text>
+
+  <!-- Footer -->
+  <text x="450" y="1060" text-anchor="middle" font-size="10" fill="#999" font-family="Segoe UI, sans-serif">MXC Interactive Approval Flow • SDK-driven iterative sandboxing</text>
+</svg>

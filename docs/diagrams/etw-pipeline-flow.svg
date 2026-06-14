@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 900" width="1000" height="900" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#444"/>
+    </marker>
+    <marker id="arrowhead-white" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fff"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="900" fill="#f8f9fa" rx="8"/>
+
+  <!-- Title -->
+  <text x="500" y="30" text-anchor="middle" font-size="18" font-weight="bold" fill="#1a1a1a">ETW Event Pipeline — Data Flow</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- LAYER 1: Windows Kernel (green) -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <rect x="20" y="45" width="960" height="185" rx="6" fill="#e8f5e9" stroke="#43a047" stroke-width="1.5"/>
+  <text x="40" y="67" font-size="13" font-weight="bold" fill="#2e7d32">Layer 1 — Windows Kernel</text>
+
+  <!-- Tessera Provider -->
+  <rect x="60" y="80" width="420" height="70" rx="5" fill="#fff" stroke="#66bb6a" stroke-width="1.2"/>
+  <text x="270" y="100" text-anchor="middle" font-size="12" font-weight="bold" fill="#2e7d32">Tessera TraceLogging Provider</text>
+  <text x="270" y="117" text-anchor="middle" font-size="10" fill="#555">{f6ec123e-314e-400b-9e0a-151365e23083}</text>
+  <text x="270" y="134" text-anchor="middle" font-size="10" fill="#666">Sandbox lifecycle events</text>
+
+  <!-- Kernel-General Provider -->
+  <rect x="520" y="80" width="420" height="70" rx="5" fill="#fff" stroke="#66bb6a" stroke-width="1.2"/>
+  <text x="730" y="100" text-anchor="middle" font-size="12" font-weight="bold" fill="#2e7d32">Microsoft-Windows-Kernel-General</text>
+  <text x="730" y="117" text-anchor="middle" font-size="10" fill="#555">{a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}</text>
+  <text x="730" y="134" text-anchor="middle" font-size="10" fill="#666">AccessCheckLog (ID 4907) · Learning-mode violations (ID 27)</text>
+
+  <!-- learningModeLogging note -->
+  <rect x="200" y="165" width="600" height="52" rx="4" fill="#c8e6c9" stroke="#43a047" stroke-width="1" stroke-dasharray="4,2"/>
+  <text x="500" y="185" text-anchor="middle" font-size="11" font-weight="bold" fill="#1b5e20">learningModeLogging: always injected into sandbox config</text>
+  <text x="500" y="202" text-anchor="middle" font-size="10" fill="#2e7d32">Enables ETW events WITHOUT disabling enforcement (audit-only logging)</text>
+
+  <!-- Arrow: Layer 1 → Layer 2 -->
+  <line x1="270" y1="150" x2="270" y2="248" stroke="#444" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <line x1="730" y1="150" x2="730" y2="248" stroke="#444" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="180" y="240" font-size="9" fill="#666">ETW events</text>
+  <text x="645" y="240" font-size="9" fill="#666">ETW events</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- LAYER 2: ETW Consumer (orange) -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <rect x="20" y="250" width="960" height="210" rx="6" fill="#fff3e0" stroke="#fb8c00" stroke-width="1.5"/>
+  <text x="40" y="272" font-size="13" font-weight="bold" fill="#e65100">Layer 2 — ETW Consumer</text>
+
+  <!-- ETW Session box -->
+  <rect x="300" y="280" width="400" height="40" rx="5" fill="#fff" stroke="#ff9800" stroke-width="1.2"/>
+  <text x="500" y="296" text-anchor="middle" font-size="11" font-weight="bold" fill="#e65100">ETW Session: "MXC-Diagnostics-ETW"</text>
+  <text x="500" y="311" text-anchor="middle" font-size="9" fill="#888">Requires Administrator privileges</text>
+
+  <!-- ProcessTrace callback -->
+  <rect x="370" y="330" width="260" height="28" rx="4" fill="#ffe0b2" stroke="#fb8c00" stroke-width="1"/>
+  <text x="500" y="349" text-anchor="middle" font-size="10" fill="#bf360c">ProcessTrace callback → CallbackContext</text>
+
+  <!-- Extraction functions -->
+  <rect x="60" y="370" width="420" height="42" rx="4" fill="#fff" stroke="#ff9800" stroke-width="1"/>
+  <text x="270" y="387" text-anchor="middle" font-size="10" font-weight="bold" fill="#e65100">build_denial_from_access_check()</text>
+  <text x="270" y="402" text-anchor="middle" font-size="9" fill="#666">Event ID 4907 → maps ObjectType: File / Key / empty→Network / Other</text>
+
+  <rect x="520" y="370" width="420" height="42" rx="4" fill="#fff" stroke="#ff9800" stroke-width="1"/>
+  <text x="730" y="387" text-anchor="middle" font-size="10" font-weight="bold" fill="#e65100">build_denial_from_learning_mode()</text>
+  <text x="730" y="402" text-anchor="middle" font-size="9" fill="#666">Event ID 27 → learning-mode violation extraction</text>
+
+  <!-- DenialEvent output -->
+  <rect x="200" y="425" width="600" height="28" rx="4" fill="#fff8e1" stroke="#f57c00" stroke-width="1.2"/>
+  <text x="500" y="444" text-anchor="middle" font-size="10" font-weight="bold" fill="#e65100">DenialEvent { containerName, pid, resourceType, objectName, accessRequested, timestamp, eventId }</text>
+
+  <!-- Arrows within layer 2 -->
+  <line x1="500" y1="320" x2="500" y2="330" stroke="#444" stroke-width="1" marker-end="url(#arrowhead)"/>
+  <line x1="400" y1="358" x2="270" y2="370" stroke="#444" stroke-width="1" marker-end="url(#arrowhead)"/>
+  <line x1="600" y1="358" x2="730" y2="370" stroke="#444" stroke-width="1" marker-end="url(#arrowhead)"/>
+  <line x1="270" y1="412" x2="400" y2="425" stroke="#444" stroke-width="1" marker-end="url(#arrowhead)"/>
+  <line x1="730" y1="412" x2="600" y2="425" stroke="#444" stroke-width="1" marker-end="url(#arrowhead)"/>
+
+  <!-- Arrow: Layer 2 → Layer 3 -->
+  <line x1="500" y1="453" x2="500" y2="485" stroke="#444" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="510" y="475" font-size="9" fill="#666">mpsc::Sender&lt;DenialEvent&gt;</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- LAYER 3: Pipe Server (orange) -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <rect x="20" y="487" width="960" height="200" rx="6" fill="#fff3e0" stroke="#fb8c00" stroke-width="1.5"/>
+  <text x="40" y="509" font-size="13" font-weight="bold" fill="#e65100">Layer 3 — Pipe Server</text>
+
+  <!-- Channel -->
+  <rect x="60" y="520" width="380" height="35" rx="4" fill="#fff" stroke="#ff9800" stroke-width="1"/>
+  <text x="250" y="535" text-anchor="middle" font-size="10" font-weight="bold" fill="#e65100">mpsc::Sender&lt;DenialEvent&gt; channel</text>
+  <text x="250" y="548" text-anchor="middle" font-size="9" fill="#666">ETW Consumer → Denial Pipe Server thread</text>
+
+  <!-- Event buffer -->
+  <rect x="60" y="565" width="380" height="50" rx="4" fill="#fff" stroke="#ff9800" stroke-width="1"/>
+  <text x="250" y="582" text-anchor="middle" font-size="10" font-weight="bold" fill="#e65100">Event Receiver Loop</text>
+  <text x="250" y="596" text-anchor="middle" font-size="9" fill="#666">Buffer: HashMap&lt;BufferKey, Vec&lt;DenialEvent&gt;&gt;</text>
+  <text x="250" y="608" text-anchor="middle" font-size="9" fill="#888">Max 1024 events/key · Ring buffer eviction</text>
+
+  <!-- Fan-out -->
+  <rect x="60" y="625" width="380" height="28" rx="4" fill="#ffe0b2" stroke="#fb8c00" stroke-width="1"/>
+  <text x="250" y="644" text-anchor="middle" font-size="10" fill="#bf360c">Fan-out to active subscribers</text>
+
+  <!-- Named pipe -->
+  <rect x="520" y="540" width="420" height="60" rx="5" fill="#fff" stroke="#f57c00" stroke-width="1.5"/>
+  <text x="730" y="560" text-anchor="middle" font-size="11" font-weight="bold" fill="#e65100">Named Pipe Endpoint</text>
+  <text x="730" y="578" text-anchor="middle" font-size="10" fill="#555">\\.\pipe\mxc-denials-{SID}</text>
+  <text x="730" y="593" text-anchor="middle" font-size="9" fill="#888">SDDL-restricted (denies AppContainers)</text>
+
+  <!-- Arrows within layer 3 -->
+  <line x1="250" y1="555" x2="250" y2="565" stroke="#444" stroke-width="1" marker-end="url(#arrowhead)"/>
+  <line x1="250" y1="615" x2="250" y2="625" stroke="#444" stroke-width="1" marker-end="url(#arrowhead)"/>
+  <line x1="440" y1="639" x2="520" y2="580" stroke="#444" stroke-width="1.2" marker-end="url(#arrowhead)"/>
+  <text x="460" y="600" font-size="9" fill="#666">write</text>
+
+  <!-- Arrow: Layer 3 → Layer 4 -->
+  <line x1="730" y1="600" x2="730" y2="710" stroke="#444" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="740" y="660" font-size="9" fill="#666">Named pipe I/O</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- LAYER 4: SDK Client (blue) -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <rect x="20" y="710" width="960" height="175" rx="6" fill="#e3f2fd" stroke="#1976d2" stroke-width="1.5"/>
+  <text x="40" y="732" font-size="13" font-weight="bold" fill="#0d47a1">Layer 4 — SDK Client (TypeScript)</text>
+
+  <!-- denial-service.ts -->
+  <rect x="200" y="745" width="280" height="35" rx="5" fill="#fff" stroke="#42a5f5" stroke-width="1.2"/>
+  <text x="340" y="762" text-anchor="middle" font-size="11" font-weight="bold" fill="#1565c0">denial-service.ts</text>
+  <text x="340" y="775" text-anchor="middle" font-size="9" fill="#666">Connects to named pipe</text>
+
+  <!-- Two modes -->
+  <rect x="100" y="800" width="220" height="55" rx="4" fill="#bbdefb" stroke="#1976d2" stroke-width="1"/>
+  <text x="210" y="818" text-anchor="middle" font-size="10" font-weight="bold" fill="#0d47a1">Snapshot Mode</text>
+  <text x="210" y="833" text-anchor="middle" font-size="9" fill="#555">Query → Response → Disconnect</text>
+  <text x="210" y="847" text-anchor="middle" font-size="9" fill="#888">One-shot retrieval</text>
+
+  <rect x="380" y="800" width="220" height="55" rx="4" fill="#bbdefb" stroke="#1976d2" stroke-width="1"/>
+  <text x="490" y="818" text-anchor="middle" font-size="10" font-weight="bold" fill="#0d47a1">Stream Mode</text>
+  <text x="490" y="833" text-anchor="middle" font-size="9" fill="#555">Subscribe → Continuous NDJSON</text>
+  <text x="490" y="847" text-anchor="middle" font-size="9" fill="#888">Real-time event feed</text>
+
+  <!-- Output mapping -->
+  <rect x="650" y="800" width="290" height="55" rx="4" fill="#fff" stroke="#1976d2" stroke-width="1.2"/>
+  <text x="795" y="818" text-anchor="middle" font-size="10" font-weight="bold" fill="#1565c0">Output Mapping</text>
+  <text x="795" y="835" text-anchor="middle" font-size="9" fill="#555">DenialEvent → DeniedResourceInfo</text>
+  <text x="795" y="850" text-anchor="middle" font-size="9" fill="#888">source = 'etw_service'</text>
+
+  <!-- Arrows within layer 4 -->
+  <line x1="280" y1="780" x2="210" y2="800" stroke="#444" stroke-width="1" marker-end="url(#arrowhead)"/>
+  <line x1="400" y1="780" x2="490" y2="800" stroke="#444" stroke-width="1" marker-end="url(#arrowhead)"/>
+  <line x1="480" y1="780" x2="730" y2="800" stroke="#444" stroke-width="1" marker-end="url(#arrowhead)"/>
+
+  <!-- Legend -->
+  <rect x="750" y="50" width="210" height="70" rx="4" fill="#fff" stroke="#ccc" stroke-width="1"/>
+  <text x="855" y="67" text-anchor="middle" font-size="10" font-weight="bold" fill="#333">Legend</text>
+  <rect x="760" y="75" width="12" height="12" fill="#e8f5e9" stroke="#43a047" stroke-width="1"/>
+  <text x="778" y="85" font-size="9" fill="#444">Windows Kernel</text>
+  <rect x="760" y="92" width="12" height="12" fill="#fff3e0" stroke="#fb8c00" stroke-width="1"/>
+  <text x="778" y="102" font-size="9" fill="#444">ETW Consumer / Pipe Server (Rust)</text>
+  <rect x="760" y="109" width="12" height="12" fill="#e3f2fd" stroke="#1976d2" stroke-width="1"/>
+  <text x="778" y="119" font-size="9" fill="#444">SDK Client (TypeScript)</text>
+</svg>
