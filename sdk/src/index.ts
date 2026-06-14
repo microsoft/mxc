@@ -109,3 +109,38 @@ export {
   stopSandbox,
   deprovisionSandbox,
 } from './state-aware.js';
+
+// Export denied-resource detection
+export {
+  parseDeniedResources,
+  DeniedResourceInfo,
+} from './denied-resources.js';
+
+// Export denial service client (ETW pipe reader)
+export {
+  isDenialServiceRunning,
+  readDeniedResources,
+  subscribeToDenials,
+  mapEventToResourceInfo,
+  validateDenialEvent,
+  DenialEvent,
+  DenialFilter,
+  DenialRequest,
+  getServiceBinaryPath,
+} from './denial-service.js';
+
+// Export policy regeneration utilities
+export {
+  generateUpdatedPolicy,
+  ApprovedPath,
+  PolicyGenerationOptions,
+  PolicyGenerationResult,
+} from './policy-regen.js';
+
+// Export tiered detection
+export {
+  getDeniedResources,
+  generateUpdatedPolicyFromDetection,
+  DetectionOptions,
+  DetectionResult,
+} from './tiered-detection.js';

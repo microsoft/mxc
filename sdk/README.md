@@ -390,6 +390,72 @@ Full TypeScript definitions ship with the package (`dist/index.d.ts`). All expor
 
 ---
 
+## Denied Resource Detection
+
+MXC can detect resources that a sandboxed process was denied access to, enabling interactive approval workflows.
+
+### Detection API
+
+```typescript
+import {
+  getDeniedResources,
+  generateUpdatedPolicyFromDetection,
+  getServiceBinaryPath,
+  isDenialServiceRunning,
+  DetectionResult,
+  ApprovedPath,
+} from '@microsoft/mxc-sdk';
+
+// Detect denied resources from sandbox output
+const detection: DetectionResult = await getDeniedResources({
+  containerName: 'my-sandbox',
+  output: sandboxStdout + sandboxStderr,
+});
+
+if (detection.serviceInstallHint) {
+  console.warn(detection.serviceInstallHint);
+}
+
+// Let user approve paths, then regenerate policy
+const approved: ApprovedPath[] = [
+  { path: 'C:\\Users\\me\\project', accessLevel: 'readwrite' },
+];
+const result = generateUpdatedPolicyFromDetection(originalPolicy, detection, approved);
+// result.policy is the updated SandboxPolicy ready for re-run
+```
+
+### Diagnostic Service
+
+The diagnostic service provides kernel-accurate denial detection via Windows ETW. Without it, detection falls back to output parsing (~70% accuracy).
+
+| Source | Accuracy | Requirement |
+|--------|----------|-------------|
+| ETW Service | Kernel-accurate | Service installed + running |
+| Output Parsing | ~70% (regex) | None (always available) |
+
+**Install** (requires elevation):
+```
+mxc-diagnostic-console --install
+net start MxcDiagnosticService
+```
+
+**Uninstall**:
+```
+net stop MxcDiagnosticService
+mxc-diagnostic-console --uninstall
+```
+
+Helper scripts: `scripts/Install-MxcDiagnosticService.ps1` and `scripts/Uninstall-MxcDiagnosticService.ps1`
+
+### Supported Resource Types
+
+| Type | Detectable | Resolvable via Policy |
+|------|-----------|---------------------|
+| File | ✅ | ✅ via `readwritePaths` / `readonlyPaths` |
+| Network | ✅ | ✅ via `network.allowedHosts` |
+
+---
+
 ## License
 
 [MIT](https://github.com/microsoft/mxc/blob/main/sdk/LICENSE.md). Contributions welcome — see the main [MXC repository](https://github.com/microsoft/mxc).
