@@ -1,0 +1,22 @@
+{
+  "name": "@microsoft/mxc-example-denied-resource-approval",
+  "version": "1.0.0",
+  "description": "End-to-end demo: spawn → fail → parse denials → prompt user → regenerate policy → re-run success",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test:all-resources": "node dist/test_all_resources.js"
+  },
+  "dependencies": {
+    "@microsoft/mxc-sdk": "file:../../sdk"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
