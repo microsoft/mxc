@@ -9,6 +9,7 @@ use clap::Parser;
 use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+use wxc_common::sandbox_process::RtcRunner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
 #[cfg(target_os = "linux")]
@@ -254,7 +255,7 @@ fn main() {
         ContainmentBackend::Bubblewrap => {
             #[cfg(target_os = "linux")]
             {
-                Box::new(BubblewrapScriptRunner::new())
+                Box::new(RtcRunner::new(BubblewrapScriptRunner::new()))
             }
             #[cfg(not(target_os = "linux"))]
             {

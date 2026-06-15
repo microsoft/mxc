@@ -98,10 +98,10 @@ fn spawn_bubblewrap(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use wxc_common::sandbox_process::StreamingRunner;
+    use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
     let mut runner = bwrap_common::bwrap_runner::BubblewrapScriptRunner::new();
     runner
-        .spawn_streaming(request, logger)
+        .spawn(request, logger, StdioMode::Pipes)
         .map_err(map_spawn_error)
 }
 
@@ -120,10 +120,10 @@ fn spawn_seatbelt(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use wxc_common::sandbox_process::StreamingRunner;
+    use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
     let mut runner = seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new();
     runner
-        .spawn_streaming(request, logger)
+        .spawn(request, logger, StdioMode::Pipes)
         .map_err(map_spawn_error)
 }
 

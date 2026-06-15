@@ -18,7 +18,8 @@
 use std::io::{Read, Write};
 
 use crate::logger::Logger;
-use crate::models::{ExecutionRequest, ScriptResponse};
+use crate::models::{ExecutionRequest, FailurePhase, ScriptResponse};
+use crate::script_runner::ScriptRunner;
 
 /// A handle to a running sandboxed process.
 ///
@@ -192,4 +193,97 @@ pub trait StreamingRunner {
         request: &ExecutionRequest,
         logger: &mut Logger,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse>;
+}
+
+/// How a [`SandboxBackend`] wires the sandboxed child's standard streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdioMode {
+    /// stdin/stdout/stderr are fresh pipes the caller drives via the handle's
+    /// `take_*` accessors (the `mxc` library / streaming path). The child sees
+    /// no TTY and leads its own process group so it can be tree-terminated.
+    Pipes,
+    /// The child inherits the current process's stdin/stdout/stderr (the CLI
+    /// executor path): its output goes straight to the binary's own stdio, so
+    /// the child sees a TTY exactly when the binary does. The returned handle's
+    /// `take_*` all return `None`; [`wait`](SandboxProcess::wait) just waits.
+    Inherit,
+}
+
+/// A containment backend that spawns a sandboxed process and hands back a
+/// [`SandboxProcess`] handle — the single entry point for starting a sandbox.
+///
+/// The caller picks how the child's stdio is wired ([`StdioMode`]) and then
+/// drives the handle: stream it ([`StdioMode::Pipes`]) or just
+/// [`wait`](SandboxProcess::wait) ([`StdioMode::Inherit`]). The `mxc` library
+/// calls this directly with [`StdioMode::Pipes`]; the CLI executor binaries
+/// reach it through the [`RtcRunner`] bridge.
+pub trait SandboxBackend {
+    /// Backend-specific validation, run before [`spawn`](SandboxBackend::spawn)
+    /// and on dry-run. Override to reject unsupported policies; default accepts.
+    fn validate(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        Ok(())
+    }
+
+    /// Apply this backend's containment and spawn the sandboxed process with
+    /// stdio wired per `stdio`, returning a handle. On a validation or spawn
+    /// failure returns a [`ScriptResponse`] carrying the error.
+    fn spawn(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse>;
+}
+
+/// The single run-to-completion bridge: adapts any [`SandboxBackend`] to the
+/// [`ScriptRunner`] contract the executor binaries (`wxc-exec` / `lxc-exec` /
+/// `mxc-exec-mac`) dispatch over.
+///
+/// It spawns the child with [`StdioMode::Inherit`] — so the sandboxed process
+/// reads/writes the binary's own stdio directly (a TTY when the binary has
+/// one) — and [`wait`](SandboxProcess::wait)s for exit, mapping the outcome to
+/// a [`ScriptResponse`]. Because the child streams straight to the binary's
+/// stdio, `standard_out`/`standard_err` stay empty (the binaries already print
+/// those, which is then a no-op).
+///
+/// This is the *only* run-to-completion logic for these backends; the backends
+/// themselves expose just [`SandboxBackend::spawn`].
+pub struct RtcRunner<B>(pub B);
+
+impl<B> RtcRunner<B> {
+    /// Wrap a [`SandboxBackend`] so it can be dispatched as a [`ScriptRunner`].
+    pub fn new(backend: B) -> Self {
+        Self(backend)
+    }
+}
+
+impl<B: SandboxBackend> ScriptRunner for RtcRunner<B> {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        self.0.validate(request)
+    }
+
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        let mut child = match self.0.spawn(request, logger, StdioMode::Inherit) {
+            Ok(child) => child,
+            Err(response) => return response,
+        };
+        match child.wait() {
+            Ok(exit_code) => ScriptResponse {
+                exit_code,
+                failure_phase: if exit_code == 0 {
+                    FailurePhase::None
+                } else {
+                    FailurePhase::ProcessExited
+                },
+                ..Default::default()
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => ScriptResponse {
+                exit_code: -1,
+                error_message: format!("script timed out after {}ms", request.script_timeout),
+                failure_phase: FailurePhase::Timeout,
+                ..Default::default()
+            },
+            Err(e) => ScriptResponse::error(&format!("wait failed: {e}")),
+        }
+    }
 }

@@ -33,12 +33,12 @@ use std::time::{Duration, Instant};
 use lxc_common::network_iptables::NetworkIptablesManager;
 use wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator;
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, FailurePhase, NetworkEnforcementMode, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
 use wxc_common::sandbox_process::{
-    group_kill, join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxProcess,
-    StreamingRunner,
+    group_kill, join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxBackend,
+    SandboxProcess, StdioMode,
 };
-use wxc_common::script_runner::ScriptRunner;
+use wxc_common::validator::validate_common;
 
 use crate::bwrap_command;
 
@@ -67,8 +67,8 @@ impl BubblewrapScriptRunner {
     }
 }
 
-impl ScriptRunner for BubblewrapScriptRunner {
-    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+impl SandboxBackend for BubblewrapScriptRunner {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // User-input validation runs before the environmental `bwrap`
         // probe so config errors are reported deterministically even on
         // hosts without bwrap installed.
@@ -108,24 +108,30 @@ impl ScriptRunner for BubblewrapScriptRunner {
         Ok(())
     }
 
-    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        match self.spawn_bwrap(request, logger, false) {
-            Ok(child) => child.run_to_completion(logger),
-            Err(resp) => resp,
-        }
+    fn spawn(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        validate_common(request)?;
+        self.validate(request)?;
+        let child = self.spawn_bwrap(request, logger, stdio)?;
+        Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
 }
 
 impl BubblewrapScriptRunner {
-    /// Set up networking and spawn `bwrap`, returning a [`BwrapChild`] the
-    /// caller runs to completion (blocking) or wraps in a streaming handle.
-    /// When `stream` is set, stdin is piped (so the caller can write to it) and
-    /// the child is placed in its own process group so it can be tree-killed.
+    /// Set up networking and spawn `bwrap`, returning a [`BwrapChild`] wrapped
+    /// by the [`SandboxProcess`] handle. With [`StdioMode::Pipes`] the child's
+    /// stdio is piped (the caller drives it); with [`StdioMode::Inherit`] it
+    /// inherits the binary's stdio (a TTY when the binary has one). bwrap is
+    /// always placed in its own process group so it can be tree-terminated.
     fn spawn_bwrap(
         &self,
         request: &ExecutionRequest,
         logger: &mut Logger,
-        stream: bool,
+        stdio: StdioMode,
     ) -> Result<BwrapChild, ScriptResponse> {
         // 1. Start the network proxy if configured. Must happen before
         //    arg-building so the proxy's loopback address can be injected as
@@ -195,19 +201,26 @@ impl BubblewrapScriptRunner {
         // 4. Spawn `bwrap`.
         let mut command = Command::new("bwrap");
         command.args(&args);
-        command
-            .stdin(if stream {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // Put bwrap in its own process group so a timeout / streaming `kill()`
-        // can tree-kill it with a single `killpg` (bwrap is PID 1 of the new
-        // pid namespace via `--unshare-pid`, so this takes the whole sandbox
-        // down) without touching the host's process group. Needed on both the
-        // run-to-completion and streaming paths.
+        match stdio {
+            StdioMode::Pipes => {
+                command
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+            }
+            StdioMode::Inherit => {
+                // The child (bwrap, PID 1 of the sandbox) inherits the binary's
+                // stdio directly — a TTY when the binary has one.
+                command
+                    .stdin(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit());
+            }
+        }
+        // Put bwrap in its own process group so a timeout / `kill()` can
+        // tree-kill it with a single `killpg` (bwrap is PID 1 of the new pid
+        // namespace via `--unshare-pid`, so this takes the whole sandbox down)
+        // without touching the host's process group.
         command.process_group(0);
 
         let mut child = match command.spawn() {
@@ -223,9 +236,10 @@ impl BubblewrapScriptRunner {
             }
         };
 
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        let (stdin, stdout, stderr) = match stdio {
+            StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
+            StdioMode::Inherit => (None, None, None),
+        };
         let timeout = if request.script_timeout == 0 {
             None
         } else {
@@ -262,69 +276,6 @@ impl BwrapChild {
     fn cleanup(&mut self, logger: &mut Logger) {
         cleanup_iptables(&mut self.fw_manager, logger);
         self.proxy.stop(logger);
-    }
-
-    /// Blocking run: drain captured output on threads, wait, tear down, and
-    /// collect into a [`ScriptResponse`] (mirrors the original `execute`).
-    fn run_to_completion(mut self, logger: &mut Logger) -> ScriptResponse {
-        let stdout_handle = self
-            .stdout
-            .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
-        let stderr_handle = self
-            .stderr
-            .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
-
-        let exit_status = match wait_with_timeout(&mut self.child, self.timeout) {
-            Ok(status) => status,
-            Err(WaitError::Timeout) => {
-                // Group-kill so descendants die too (bwrap is a process-group
-                // leader and PID 1 of the namespace); a single-process kill
-                // would orphan them.
-                let _ = group_kill(&mut self.child, Duration::from_secs(2));
-                let _ = self.child.wait();
-                self.cleanup(logger);
-                return ScriptResponse {
-                    exit_code: -1,
-                    standard_out: join_reader(stdout_handle),
-                    standard_err: join_reader(stderr_handle),
-                    error_message: "Bubblewrap: script timed out".to_string(),
-                    failure_phase: FailurePhase::Timeout,
-                    ..Default::default()
-                };
-            }
-            Err(WaitError::Io(error)) => {
-                self.cleanup(logger);
-                return ScriptResponse::error(&format!("Bubblewrap: wait failed: {}", error));
-            }
-        };
-
-        self.cleanup(logger);
-
-        ScriptResponse {
-            exit_code: exit_status.code().unwrap_or(-1),
-            standard_out: join_reader(stdout_handle),
-            standard_err: join_reader(stderr_handle),
-            error_message: String::new(),
-            ..Default::default()
-        }
-    }
-}
-
-impl StreamingRunner for BubblewrapScriptRunner {
-    fn spawn_streaming(
-        &mut self,
-        request: &ExecutionRequest,
-        logger: &mut Logger,
-    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-        use wxc_common::validator::validate_common;
-
-        validate_common(request)?;
-        self.validate_runner(request)?;
-
-        let child = self.spawn_bwrap(request, logger, true)?;
-        Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
 }
 
@@ -463,21 +414,6 @@ fn cleanup_iptables(manager: &mut Option<NetworkIptablesManager>, logger: &mut L
     }
 }
 
-// -- I/O helpers --------------------------------------------------------------
-
-fn read_to_string<R: std::io::Read>(mut reader: R) -> String {
-    let mut buffer = String::new();
-    let _ = reader.read_to_string(&mut buffer);
-    buffer
-}
-
-fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {
-    match handle {
-        Some(h) => h.join().unwrap_or_default(),
-        None => String::new(),
-    }
-}
-
 enum WaitError {
     Timeout,
     Io(std::io::Error),
@@ -527,7 +463,7 @@ mod tests {
         req.experimental_enabled = false;
 
         let runner = BubblewrapScriptRunner::new();
-        let err = runner.validate_runner(&req).unwrap_err();
+        let err = runner.validate(&req).unwrap_err();
         assert!(
             err.error_message.contains("builtinTestServer")
                 && err.error_message.contains("--experimental"),
@@ -544,7 +480,7 @@ mod tests {
         req.script_code = String::new();
 
         let runner = BubblewrapScriptRunner::new();
-        let err = runner.validate_runner(&req).unwrap_err();
+        let err = runner.validate(&req).unwrap_err();
         assert!(err.error_message.contains("script_code is empty"));
     }
 }
