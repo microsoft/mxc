@@ -59,6 +59,30 @@ fn streaming_rejects_dry_run() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn streaming_rejects_gui_access() {
+    // A windowed (guiAccess) app needs inherited stdio, so it cannot be streamed
+    // over pipes; the library path must reject it rather than silently drop the
+    // GUI capability.
+    let config = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "seatbelt",
+        "filesystem": { "readwritePaths": ["/tmp"] },
+        "seatbelt": { "mode": "exec", "guiAccess": true },
+        "process": { "commandLine": "echo hi", "timeout": 0 }
+    }"#;
+    let err = match spawn_sandbox(config, &SpawnOptions::default()) {
+        Ok(_) => panic!("guiAccess streaming must be rejected"),
+        Err(e) => e,
+    };
+    assert!(
+        err.message.contains("guiAccess"),
+        "expected a guiAccess rejection, got: {}",
+        err.message
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn streaming_double_take_returns_none() {
     let mut proc = spawn_sandbox(&seatbelt_config("cat"), &SpawnOptions::default()).expect("spawn");
 
