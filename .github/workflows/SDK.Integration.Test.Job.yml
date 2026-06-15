@@ -22,10 +22,16 @@ jobs:
         working-directory: sdk/tests/integration
     env:
       MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
+      # Skip network-dependent LXC tests on GHA. Capability probe
+      # 27576588204 confirmed lxc-net.service + lxcbr0 + dnsmasq come up
+      # cleanly on every supported runner, but the alpine download
+      # template's eth0 stays IPv4-less inside the test window (only an
+      # IPv6 link-local address is configured), so DHCP-dependent DNS
+      # lookups fail. The non-network LXC paths (create/start/attach/
+      # mount/exit-code/multi-command) all pass and ship LXC backend
+      # coverage on GHA. ADO sets the same env var in
+      # `.azure-pipelines/templates/SDK.Integration.Test.Job.yml`.
       MXC_SKIP_LXC_NETWORK_TESTS: '1'
-      # Classic LXC is unreliable on the GHA ubuntu-latest (24.04) runner; full
-      # LXC coverage runs in the ADO pipeline on merge to main and nightly.
-      MXC_SKIP_LXC_TESTS: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -52,12 +58,41 @@ jobs:
       - name: npm run build
         run: npm run build
 
-      - name: Install bubblewrap (Linux only, cached)
+      - name: Install bubblewrap + LXC stack (Linux only, cached)
         if: matrix.os_label == 'linux'
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: bubblewrap
-          version: 1.2
+          # Installs the LXC + Bubblewrap substrate the SDK integration
+          # tests need. Capability probe 27576588204 confirmed these
+          # packages install cleanly on ubuntu-latest, ubuntu-22.04, and
+          # ubuntu-24.04-arm and that lxc-net.service brings up the
+          # lxcbr0 bridge with dnsmasq serving DHCP on 10.0.3.0/24, so
+          # the long-standing "classic LXC is unreliable on GHA
+          # ubuntu-latest" assumption no longer holds for the non-network
+          # LXC paths (create/start/attach/mount/exit-code).
+          # The network-dependent LXC tests stay gated by
+          # MXC_SKIP_LXC_NETWORK_TESTS=1 (see the job-level env block)
+          # because the alpine download template's eth0 doesn't pick up
+          # a DHCP lease within the test window on these runners.
+          # The ADO equivalent
+          # (.azure-pipelines/templates/SDK.Integration.Test.Job.yml)
+          # installs a similar but narrower set and sets the same skip
+          # env var for the same reason (compounded by 1ES Hosted Pool
+          # egress filtering).
+          packages: bubblewrap lxc lxc-utils dnsmasq-base iptables bridge-utils
+          version: 1.3
+
+      - name: Start LXC services (cache restore skips postinst hooks)
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          # cache-apt-pkgs-action restores package files but does not
+          # re-run postinst hooks on cache hit, so AppArmor profiles
+          # (lxc-container-default) and the lxc-net bridge service may
+          # not be active. Load/start them explicitly so lxc-start
+          # doesn't abort with an AppArmor denial.
+          sudo apparmor_parser -rT /etc/apparmor.d/lxc* 2>/dev/null || true
+          sudo systemctl start lxc-net 2>/dev/null || true
 
       - name: Restore execute permission on mxc-exec-mac
         if: matrix.os_label == 'macos'
