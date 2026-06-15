@@ -13,14 +13,14 @@ use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 
 #[cfg(target_os = "linux")]
 use bwrap_common::bwrap_runner::BubblewrapScriptRunner;
-#[cfg(target_os = "linux")]
-use wxc_common::sandbox_process::Runner;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use hyperlight_common::HyperlightScriptRunner;
 use lxc_common::lxc_runner::LxcScriptRunner;
 use lxc_common::signal_cleanup;
 #[cfg(feature = "microvm")]
 use nanvix_runner::NanVixScriptRunner;
+#[cfg(target_os = "linux")]
+use wxc_common::sandbox_process::Runner;
 
 #[derive(Parser)]
 #[command(name = "lxc-exec", about = "Linux Container Executor")]
