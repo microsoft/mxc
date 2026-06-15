@@ -418,7 +418,8 @@
             },
             "portMappings": {
               "type": "array",
-              "description": "Host-to-container port forwards. Each entry maps a Windows host port to a container port for a given protocol.",
+              "description": "Host-to-container port forwards. Each entry maps a Windows host port to a container port for a given protocol. Only TCP is currently supported by the vendored WSLC SDK runtime (Microsoft.WSL.Containers 2.8.1); the parser hard-rejects 'udp' because the shipped runtime returns E_NOTIMPL even though the SDK header declares it.",
+              "default": [],
               "items": {
                 "type": "object",
                 "properties": {
@@ -437,11 +438,10 @@
                   "protocol": {
                     "type": "string",
                     "enum": [
-                      "tcp",
-                      "udp"
+                      "tcp"
                     ],
                     "default": "tcp",
-                    "description": "Transport protocol for the mapping."
+                    "description": "Transport protocol for the mapping. Only 'tcp' is currently supported (see description above)."
                   }
                 },
                 "required": [

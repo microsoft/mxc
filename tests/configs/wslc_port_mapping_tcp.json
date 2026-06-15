@@ -1,0 +1,19 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "wslc-port-mapping-tcp",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "python3 -c 'import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind((\"0.0.0.0\",8080)); s.close(); print(\"PORT_MAPPING_TCP_OK\")'"
+  },
+  "network": {
+    "defaultPolicy": "allow"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "python:3.12-alpine",
+      "portMappings": [
+        { "windowsPort": 18080, "containerPort": 8080, "protocol": "tcp" }
+      ]
+    }
+  }
+}
