@@ -33,12 +33,21 @@
 //!
 //! `nanvixd` propagates the guest process exit code directly.
 //!
+//! ## Networking
+//!
+//! Host networking is **off by default** and is enabled per-run by passing
+//! `-allow-host-networking` to `nanvixd`. The runner adds that flag when the
+//! request sets `network.defaultPolicy = "allow"`. NanVix host networking is
+//! all-or-nothing: per-host filtering (`allowedHosts` / `blockedHosts`) and
+//! proxies are not supported and are rejected at validation time.
+//!
 //! Auto-discovery
 //!
 //! All required binaries (`nanvixd.exe`, `python3.initrd`, `nanvix_rootfs.img`)
 //! are discovered next to the running executable. No configuration is needed.
 
 use std::fmt::Write;
+use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -89,10 +98,16 @@ const ERR_DENIED_PATHS: &str = concat!(
     "-- the guest has no host filesystem visibility. ",
     "Only readwrite_paths and readonly_paths are supported",
 );
-const ERR_NETWORK_POLICY: &str =
-    "network policy is not supported by the NanVix backend -- NanVix has no network stack";
-const ERR_PROXY_POLICY: &str =
-    "network proxy is not supported by the NanVix backend -- NanVix has no network stack";
+const ERR_NETWORK_HOSTS: &str = concat!(
+    "allowedHosts and blockedHosts are mutually exclusive for the NanVix backend -- ",
+    "the guest egress filter is allow-XOR-block. Specify an allowlist (allowedHosts) ",
+    "or a blocklist (blockedHosts), not both",
+);
+const ERR_HOSTS_UNRESOLVED: &str = concat!(
+    "none of the specified allowedHosts/blockedHosts resolved to an IPv4 address -- ",
+    "the NanVix guest filter is IPv4-only; use IPv4 literals/CIDR or hosts with A records",
+);
+const ERR_PROXY_POLICY: &str = "network proxy is not supported by the NanVix backend";
 const ERR_WORKDIR: &str = "workingDirectory is not supported by the NanVix backend -- guest has its own filesystem namespace";
 
 /// Maps a finished child's [`ExitStatus`] to a host-visible exit code.
@@ -483,16 +498,100 @@ impl NanVixScriptRunner {
         }
     }
 
+    /// Returns whether the request opts in to host networking.
+    ///
+    /// Host networking is enabled when `network.defaultPolicy = "allow"` OR when
+    /// a per-host allow/block list is present (a list always implies networking,
+    /// regardless of `defaultPolicy`). When enabled, the runner passes
+    /// `-allow-host-networking` to nanvixd; per-host lists are additionally
+    /// forwarded as `-allow-host`/`-block-host` (see [`Self::spawn_nanvixd`]).
+    fn host_networking_enabled(request: &ExecutionRequest) -> bool {
+        request.policy.default_network_policy == NetworkPolicy::Allow
+            || !request.policy.allowed_hosts.is_empty()
+            || !request.policy.blocked_hosts.is_empty()
+    }
+
+    /// Resolves a host entry list into IPv4/CIDR literals for nanvixd's
+    /// `-allow-host`/`-block-host` flags.
+    ///
+    /// - `a.b.c.d` and `a.b.c.d/n` literals pass through unchanged.
+    /// - Hostnames resolve to their IPv4 (A-record) addresses; AAAA results are
+    ///   dropped because the guest filter is IPv4-only.
+    /// - Entries that fail to parse or resolve contribute nothing.
+    ///
+    /// Mirrors `lxc::network_iptables::resolve_host` so the two backends agree
+    /// on resolution semantics.
+    fn resolve_hosts(hosts: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for host in hosts {
+            let entry = host.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            // CIDR literal: pass through only when the address is IPv4 and the
+            // prefix is in range. nanvixd parses CIDR directly.
+            if let Some((addr, prefix)) = entry.split_once('/') {
+                let addr_ok = addr.trim().parse::<std::net::Ipv4Addr>().is_ok();
+                let prefix_ok = prefix
+                    .trim()
+                    .parse::<u8>()
+                    .map(|p| p <= 32)
+                    .unwrap_or(false);
+                if addr_ok && prefix_ok {
+                    out.push(entry.to_string());
+                }
+                continue;
+            }
+            // Bare IP literal: keep IPv4, drop IPv6.
+            if let Ok(addr) = entry.parse::<std::net::IpAddr>() {
+                if addr.is_ipv4() {
+                    out.push(entry.to_string());
+                }
+                continue;
+            }
+            // Hostname: resolve to IPv4 A records.
+            if let Ok(addrs) = format!("{}:0", entry).to_socket_addrs() {
+                for ip in addrs.map(|a| a.ip()).filter(|ip| ip.is_ipv4()) {
+                    out.push(ip.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// Resolves the request's allow/block host lists, failing closed.
+    ///
+    /// Returns `(resolved_allow, resolved_block)`. At most one list is non-empty
+    /// (the mutual-exclusion check in [`Self::validate_policies`] runs first). If
+    /// a user-supplied list resolves to nothing — e.g. an allowlist of names
+    /// that have no A records — this returns an error rather than silently
+    /// emitting `-allow-host-networking` with no filter (which nanvixd would
+    /// treat as allow-all), so an allowlist never fails open.
+    fn resolve_host_lists(
+        request: &ExecutionRequest,
+    ) -> Result<(Vec<String>, Vec<String>), NanVixError> {
+        let allow = Self::resolve_hosts(&request.policy.allowed_hosts);
+        if !request.policy.allowed_hosts.is_empty() && allow.is_empty() {
+            return Err(NanVixError::Preflight(ERR_HOSTS_UNRESOLVED.to_string()));
+        }
+        let block = Self::resolve_hosts(&request.policy.blocked_hosts);
+        if !request.policy.blocked_hosts.is_empty() && block.is_empty() {
+            return Err(NanVixError::Preflight(ERR_HOSTS_UNRESOLVED.to_string()));
+        }
+        Ok((allow, block))
+    }
+
     fn validate_policies(request: &ExecutionRequest) -> Result<(), NanVixError> {
         // denied_paths is explicitly rejected — microvm has no host visibility.
         if !request.policy.denied_paths.is_empty() {
             return Err(NanVixError::Preflight(ERR_DENIED_PATHS.to_string()));
         }
-        if !request.policy.allowed_hosts.is_empty()
-            || !request.policy.blocked_hosts.is_empty()
-            || request.policy.default_network_policy != NetworkPolicy::Block
-        {
-            return Err(NanVixError::Preflight(ERR_NETWORK_POLICY.to_string()));
+        // Per-host filtering is supported (forwarded to nanvixd as
+        // -allow-host/-block-host). The guest egress filter is allow-XOR-block,
+        // so the two lists are mutually exclusive; defaultPolicy is ignored when
+        // either list is present.
+        if !request.policy.allowed_hosts.is_empty() && !request.policy.blocked_hosts.is_empty() {
+            return Err(NanVixError::Preflight(ERR_NETWORK_HOSTS.to_string()));
         }
         if request.policy.network_proxy.is_enabled() {
             return Err(NanVixError::Preflight(ERR_PROXY_POLICY.to_string()));
@@ -507,6 +606,9 @@ impl NanVixScriptRunner {
     fn spawn_nanvixd(
         paths: &ResolvedPaths,
         staging_dir: &Path,
+        host_networking: bool,
+        allow_hosts: &[String],
+        block_hosts: &[String],
     ) -> Result<std::process::Child, NanVixError> {
         let trace = nanvix_trace_enabled();
         // Default: silence nanvixd and inherit stderr so kernel traces (if
@@ -521,11 +623,33 @@ impl NanVixScriptRunner {
 
         let mut cmd = Command::new(&paths.nanvixd);
 
+        // Host networking is opt-in. When enabled, attach the host network
+        // backend; nanvixd parses this flag regardless of argument order, so
+        // it is added up front for both the Windows (snapshot) and Linux
+        // (cold-boot) invocations below. Verified to work on warm-start
+        // snapshot restore as well as cold boot.
+        if host_networking {
+            cmd.arg("-allow-host-networking");
+        }
+
+        // Per-host egress filtering. The two lists are mutually exclusive
+        // (validated upstream), so at most one of these loops emits flags.
+        // nanvixd requires `-allow-host-networking` for these to take effect,
+        // which is guaranteed because a non-empty list forces host_networking
+        // on (see `host_networking_enabled`). The guest daemon auto-exempts the
+        // DNS port in allowlist mode, so no resolver IPs are added here.
+        for host in allow_hosts {
+            cmd.arg("-allow-host").arg(host);
+        }
+        for host in block_hosts {
+            cmd.arg("-block-host").arg(host);
+        }
+
         #[cfg(target_os = "windows")]
         {
             // nanvixd loads kernel.vmem from <cwd>/snapshots/ so cwd must be
             // the snapshot home. All other paths are passed as absolute.
-            //   nanvixd.exe -snapshot snapshots/kernel.whp.cbor
+            //   nanvixd.exe [-allow-host-networking] -snapshot snapshots/kernel.whp.cbor
             //              -bin-dir <exe>/bin -ramfs <img> -mount <staging> -- python3.initrd
             let snapshot_rel = Path::new(SNAPSHOTS_DIR).join(SNAPSHOT_CBOR);
             cmd.current_dir(&paths.snapshot_home)
@@ -544,7 +668,7 @@ impl NanVixScriptRunner {
         #[cfg(target_os = "linux")]
         {
             // Linux invocation (cold boot via KVM):
-            //   nanvixd.elf -ramfs <rootfs.img> -mount <staging_dir> -- python3.initrd
+            //   nanvixd.elf [-allow-host-networking] -ramfs <rootfs.img> -mount <staging_dir> -- python3.initrd
             cmd.current_dir(&paths.exe_dir)
                 .arg("-ramfs")
                 .arg(&paths.ramfs)
@@ -791,7 +915,30 @@ impl ScriptRunner for NanVixScriptRunner {
         Self::log_resolved_paths(logger, &paths);
         let _ = writeln!(logger, "NanVix: staging_dir={:?}", staging.path());
 
-        let mut child = match Self::spawn_nanvixd(&paths, staging.path()) {
+        let host_networking = Self::host_networking_enabled(request);
+        if host_networking {
+            let _ = writeln!(logger, "NanVix: host networking enabled");
+        }
+        let (allow_hosts, block_hosts) = match Self::resolve_host_lists(request) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = writeln!(logger, "{}", e);
+                return e.to_response();
+            }
+        };
+        if !allow_hosts.is_empty() {
+            let _ = writeln!(logger, "NanVix: egress allowlist={:?}", allow_hosts);
+        }
+        if !block_hosts.is_empty() {
+            let _ = writeln!(logger, "NanVix: egress blocklist={:?}", block_hosts);
+        }
+        let mut child = match Self::spawn_nanvixd(
+            &paths,
+            staging.path(),
+            host_networking,
+            &allow_hosts,
+            &block_hosts,
+        ) {
             Ok(c) => c,
             Err(e) => {
                 let _ = writeln!(logger, "{}", e);
@@ -913,42 +1060,136 @@ mod tests {
     }
 
     #[test]
-    fn policy_rejects_network_hosts() {
-        let mut runner = NanVixScriptRunner::new();
+    fn policy_accepts_allowlist_only() {
+        // A bare allowlist is now supported (forwarded as -allow-host).
         let request = ExecutionRequest {
             script_code: "echo test".to_string(),
             policy: ContainerPolicy {
-                allowed_hosts: vec!["example.com".to_string()],
+                allowed_hosts: vec!["93.184.216.34".to_string()],
                 ..Default::default()
             },
             ..Default::default()
         };
-        let mut logger = Logger::new(Mode::Buffer);
-        let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_NETWORK_POLICY));
+        assert!(
+            NanVixScriptRunner::validate_policies(&request).is_ok(),
+            "a bare allowlist should pass validation"
+        );
+        // A list implies host networking regardless of defaultPolicy (Block).
+        assert!(NanVixScriptRunner::host_networking_enabled(&request));
     }
 
     #[test]
-    fn policy_rejects_blocked_network_hosts() {
-        let mut runner = NanVixScriptRunner::new();
+    fn policy_accepts_blocklist_only() {
+        // A bare blocklist is now supported (forwarded as -block-host).
         let request = ExecutionRequest {
             script_code: "echo test".to_string(),
             policy: ContainerPolicy {
-                blocked_hosts: vec!["evil.com".to_string()],
+                blocked_hosts: vec!["93.184.216.34".to_string()],
                 ..Default::default()
             },
             ..Default::default()
         };
-        let mut logger = Logger::new(Mode::Buffer);
-        let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_NETWORK_POLICY));
+        assert!(
+            NanVixScriptRunner::validate_policies(&request).is_ok(),
+            "a bare blocklist should pass validation"
+        );
+        assert!(NanVixScriptRunner::host_networking_enabled(&request));
     }
 
     #[test]
-    fn policy_rejects_network_allow_policy() {
-        let mut runner = NanVixScriptRunner::new();
+    fn policy_rejects_both_host_lists() {
+        // allow + block are mutually exclusive (the guest filter is allow-XOR-block).
+        let request = ExecutionRequest {
+            script_code: "echo test".to_string(),
+            policy: ContainerPolicy {
+                allowed_hosts: vec!["10.0.0.1".to_string()],
+                blocked_hosts: vec!["10.0.0.2".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = NanVixScriptRunner::validate_policies(&request).unwrap_err();
+        assert!(
+            err.to_string().contains(ERR_NETWORK_HOSTS),
+            "both lists should be rejected, got: {}",
+            err
+        );
+    }
+
+    // -- Host resolution / decision-matrix tests --------------------------------
+
+    #[test]
+    fn resolve_hosts_passes_ipv4_and_cidr_literals() {
+        let hosts = vec![
+            "1.2.3.4".to_string(),
+            "10.0.0.0/8".to_string(),
+            "192.168.1.1/32".to_string(),
+        ];
+        let resolved = NanVixScriptRunner::resolve_hosts(&hosts);
+        assert_eq!(resolved, vec!["1.2.3.4", "10.0.0.0/8", "192.168.1.1/32"]);
+    }
+
+    #[test]
+    fn resolve_hosts_drops_ipv6_and_bad_entries() {
+        let hosts = vec![
+            "::1".to_string(),           // IPv6 literal -> dropped
+            "2001:db8::/32".to_string(), // IPv6 CIDR -> dropped (addr not IPv4)
+            "1.2.3.4/33".to_string(),    // out-of-range prefix -> dropped
+            "  ".to_string(),            // blank -> skipped
+            "5.6.7.8".to_string(),       // valid -> kept
+        ];
+        let resolved = NanVixScriptRunner::resolve_hosts(&hosts);
+        assert_eq!(resolved, vec!["5.6.7.8"]);
+    }
+
+    #[test]
+    fn resolve_host_lists_returns_resolved_allow() {
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                allowed_hosts: vec!["1.1.1.1".to_string(), "8.8.8.8/32".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (allow, block) = NanVixScriptRunner::resolve_host_lists(&request).unwrap();
+        assert_eq!(allow, vec!["1.1.1.1", "8.8.8.8/32"]);
+        assert!(block.is_empty());
+    }
+
+    #[test]
+    fn resolve_host_lists_fails_closed_when_allowlist_unresolvable() {
+        // A non-empty allowlist that resolves to nothing must error rather than
+        // silently fall through to allow-all.
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                // IPv6-only literal resolves to no IPv4 entry.
+                allowed_hosts: vec!["::1".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = NanVixScriptRunner::resolve_host_lists(&request).unwrap_err();
+        assert!(
+            err.to_string().contains(ERR_HOSTS_UNRESOLVED),
+            "unresolvable allowlist should fail closed, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn default_block_no_lists_disables_host_networking() {
+        // The default posture (block, no lists) keeps networking off.
+        let request = ExecutionRequest::default();
+        assert!(!NanVixScriptRunner::host_networking_enabled(&request));
+        let (allow, block) = NanVixScriptRunner::resolve_host_lists(&request).unwrap();
+        assert!(allow.is_empty() && block.is_empty());
+    }
+
+    #[test]
+    fn allow_policy_enables_host_networking() {
+        // `network.defaultPolicy = "allow"` maps to host networking and must
+        // pass validation (the run later fails on missing nanvixd binaries,
+        // not on policy). Per-host filtering is absent, so it is accepted.
         let request = ExecutionRequest {
             script_code: "echo test".to_string(),
             policy: ContainerPolicy {
@@ -957,10 +1198,21 @@ mod tests {
             },
             ..Default::default()
         };
+        assert!(NanVixScriptRunner::host_networking_enabled(&request));
+        assert!(
+            NanVixScriptRunner::validate_policies(&request).is_ok(),
+            "allow posture without per-host filtering should pass validation"
+        );
+
+        let mut runner = NanVixScriptRunner::new();
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains(ERR_NETWORK_POLICY));
+        assert!(
+            !resp.error_message.contains(ERR_NETWORK_HOSTS),
+            "allow posture must not trigger a network policy rejection, got: {}",
+            resp.error_message
+        );
     }
 
     #[test]
@@ -979,19 +1231,20 @@ mod tests {
 
     #[test]
     fn policy_allows_defaults() {
-        // NanVix accepts a default (deny-by-default) policy because it has
-        // no network stack -- Block is naturally enforced. The run then
-        // fails later on missing nanvixd binaries, not on policy.
+        // NanVix accepts a default (deny-by-default) policy. With no host
+        // networking requested, the run later fails on missing nanvixd
+        // binaries, not on policy.
         let mut runner = NanVixScriptRunner::new();
         let request = ExecutionRequest {
             script_code: "echo test".to_string(),
             ..Default::default()
         };
+        assert!(!NanVixScriptRunner::host_networking_enabled(&request));
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(
-            !resp.error_message.contains(ERR_NETWORK_POLICY),
+            !resp.error_message.contains(ERR_NETWORK_HOSTS),
             "default request should not trigger network policy rejection"
         );
         assert!(

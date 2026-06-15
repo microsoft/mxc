@@ -128,6 +128,28 @@ fn microvm_basic() {
     assert_wxc_success("microvm_hello.json", &["--debug", "--experimental"]);
 }
 
+fn microvm_network() {
+    // Drives the `-allow-host-networking` path: the guest opens a loopback TCP
+    // socket, completes a ping/pong round-trip, and prints NET_OK. Without host
+    // networking enabled the guest's socket() call fails (errno 134) and the
+    // process exits non-zero, so a clean exit + marker proves the flag wiring.
+    let result = run_wxc_config("microvm_network.json", &["--debug", "--experimental"]);
+    assert_eq!(
+        result.code,
+        Some(0),
+        "expected exit 0, got {:?}\nstdout: {}\nstderr: {}",
+        result.code,
+        result.stdout,
+        result.stderr
+    );
+    let combined = result.combined_output_with_decoded_base64();
+    assert!(
+        combined.contains("NET_OK"),
+        "guest network round-trip marker missing\ncombined: {}",
+        combined
+    );
+}
+
 fn processcontainer_proxy() {
     let config = test_configs_dir().join("proxy_builtin_test.json");
     if !config.exists() {
@@ -230,6 +252,17 @@ fn test_microvm_basic() {
         return;
     }
     with_test_lock(microvm_basic);
+}
+
+#[test]
+fn test_microvm_network() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+    if !cached_has_nanvix_binaries() {
+        return;
+    }
+    with_test_lock(microvm_network);
 }
 
 #[test]

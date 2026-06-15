@@ -1,0 +1,10 @@
+{
+    "process": {
+        "commandLine": "import _socket\nsrv = _socket.socket(2, 1, 0)\nsrv.bind(('127.0.0.1', 8080))\nsrv.listen(1)\ncli = _socket.socket(2, 1, 0)\ncli.connect(('127.0.0.1', 8080))\nfd, addr = srv._accept()\nconn = _socket.socket(2, 1, 0, fd)\ncli.send(b'ping')\nassert conn.recv(64) == b'ping'\nconn.send(b'pong')\nassert cli.recv(64) == b'pong'\nprint('NET_OK loopback roundtrip', flush=True)",
+        "timeout": 30000
+    },
+    "containment": "microvm",
+    "network": {
+        "defaultPolicy": "allow"
+    }
+}

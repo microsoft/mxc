@@ -1,6 +1,6 @@
 {
     "nanvix_python": {
-        "tag": "3.12.3-nanvix-0.15.4-ac76d40",
+        "tag": "3.12.3-nanvix-0.16.65-fce3620",
         "asset": "microvm-standalone-256mb.zip",
         "asset_linux": "microvm-standalone-256mb.tar.gz",
         "binaries": [
