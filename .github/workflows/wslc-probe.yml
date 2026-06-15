@@ -1,0 +1,212 @@
+name: WSLC Capability Probe
+
+# Diagnostic-only workflow. Runs on-demand via `gh workflow run` to determine
+# whether GitHub-hosted Windows runners can host WSL2 + (eventually) WSLC
+# containers. Does NOT load wslcsdk.dll or call any WSLC API yet — that part
+# is gated on the public Microsoft.WSL.Containers NuGet shipping. Today this
+# probe answers only the WSL2 + nested-virt half of Ext-Dep E4 in the Linux
+# backend roadmap (`docs/wsl/wsl-container-support-plan.md` references).
+#
+# Every step uses `continue-on-error: true` so a single failure doesn't hide
+# the rest of the diagnostic output. The job itself reports success even when
+# probes fail — the value is in the artifacts + summary, not the pass/fail
+# bit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      install_distro:
+        description: 'Attempt `wsl --install -d Ubuntu --no-launch` (slower, but more comprehensive)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  # Runs on every push to this branch — workaround for the GitHub Actions
+  # rule that workflow_dispatch only works once the file is on the default
+  # branch. Scoped to this branch only so it can never run elsewhere.
+  push:
+    branches: ['user/sodas/wslc-probe']
+    paths: ['.github/workflows/wslc-probe.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+          - runner: windows-2025
+          - runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+
+    steps:
+      - name: Runner identity
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          "## Runner identity" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "Runner: ${{ matrix.runner }}" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          Get-ComputerInfo -Property `
+            CsName, OsName, OsVersion, OsBuildNumber, OsArchitecture, `
+            CsManufacturer, CsModel, CsNumberOfLogicalProcessors, CsTotalPhysicalMemory `
+            | Format-List | Out-String | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+      - name: Hypervisor / nested-virt status
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          "## Hypervisor / nested virtualization" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+          "### systeminfo Hyper-V Requirements" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          systeminfo | Select-String -Pattern 'Hyper-V|Virtualization' | Out-String `
+            | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+          "### Get-ComputerInfo HyperV*" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          Get-ComputerInfo -Property 'HyperV*' | Format-List | Out-String `
+            | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+          "### Windows features (Hyper-V, WSL, VMP)" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          $features = @(
+            'Microsoft-Hyper-V-All',
+            'Microsoft-Hyper-V',
+            'Microsoft-Hyper-V-Hypervisor',
+            'HypervisorPlatform',
+            'VirtualMachinePlatform',
+            'Microsoft-Windows-Subsystem-Linux'
+          )
+          foreach ($f in $features) {
+            try {
+              $state = (Get-WindowsOptionalFeature -Online -FeatureName $f -ErrorAction Stop).State
+              "  $f : $state" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+            } catch {
+              "  $f : (not present)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+            }
+          }
+
+      - name: WSL preinstall state
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          "## WSL preinstall state" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+          $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+          if (-not $wsl) {
+            "wsl.exe NOT found on PATH" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+            return
+          }
+          "wsl.exe path : $($wsl.Source)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          "" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+          "### wsl --version" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          (& wsl.exe --version 2>&1 | Out-String) | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+          "### wsl --status" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          (& wsl.exe --status 2>&1 | Out-String) | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+          "### wsl --list --verbose (already installed)" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          (& wsl.exe --list --verbose 2>&1 | Out-String) | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+      - name: WSL update + online distro list
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          "## WSL update + online distro feed" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+          "### wsl --update" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          $out = & wsl.exe --update 2>&1 | Out-String
+          "exit code: $LASTEXITCODE" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          $out | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+          "### wsl --list --online" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          $out = & wsl.exe --list --online 2>&1 | Out-String
+          "exit code: $LASTEXITCODE" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          $out | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+      - name: Optional — install Ubuntu distro
+        if: inputs.install_distro == 'true'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          "## wsl --install -d Ubuntu --no-launch" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          $start = Get-Date
+          $out = & wsl.exe --install -d Ubuntu --no-launch 2>&1 | Out-String
+          $elapsed = (Get-Date) - $start
+          "exit code     : $LASTEXITCODE" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          "elapsed       : $($elapsed.TotalSeconds) s" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          $out | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+          "" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "### post-install: wsl --list --verbose" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          (& wsl.exe --list --verbose 2>&1 | Out-String) | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+      - name: Optional — boot Ubuntu and run uname
+        if: inputs.install_distro == 'true'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          "## Boot Ubuntu and run a command" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          $start = Get-Date
+          $out = & wsl.exe -d Ubuntu -- uname -a 2>&1 | Out-String
+          $elapsed = (Get-Date) - $start
+          "exit code     : $LASTEXITCODE" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          "elapsed       : $($elapsed.TotalSeconds) s" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          $out | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+          "" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "### cat /etc/os-release" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          (& wsl.exe -d Ubuntu -- cat /etc/os-release 2>&1 | Out-String) `
+            | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+      - name: WSLC-adjacent AppX packages
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          "## WSLC-adjacent AppX packages (any preinstalled?)" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+          "### Get-AppxPackage *WSL*" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          Get-AppxPackage -AllUsers -Name '*WSL*' -ErrorAction SilentlyContinue `
+            | Select-Object Name, Version, PackageFullName `
+            | Format-List | Out-String | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+          "### Get-AppxPackage *Container*" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          Get-AppxPackage -AllUsers -Name '*Container*' -ErrorAction SilentlyContinue `
+            | Select-Object Name, Version, PackageFullName `
+            | Format-List | Out-String | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+          "### Microsoft.WSL.Containers (NuGet — not expected yet)" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          try {
+            $resp = Invoke-WebRequest `
+              -Uri 'https://api.nuget.org/v3-flatcontainer/microsoft.wsl.containers/index.json' `
+              -UseBasicParsing -ErrorAction Stop
+            "  HTTP $($resp.StatusCode) — package exists on nuget.org" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+            $resp.Content | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          } catch {
+            "  Not (yet) on nuget.org: $($_.Exception.Message)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Verdict
+        shell: pwsh
+        if: always()
+        run: |
+          "## Verdict for ${{ matrix.runner }}" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          $wslPresent = $null -ne (Get-Command wsl.exe -ErrorAction SilentlyContinue)
+          $hvFeature = (Get-WindowsOptionalFeature -Online -FeatureName 'HypervisorPlatform' -ErrorAction SilentlyContinue).State
+          $vmpFeature = (Get-WindowsOptionalFeature -Online -FeatureName 'VirtualMachinePlatform' -ErrorAction SilentlyContinue).State
+          "- wsl.exe on PATH         : $wslPresent" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          "- HypervisorPlatform      : $hvFeature" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          "- VirtualMachinePlatform  : $vmpFeature" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          "" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "See step outputs above for full diagnostic detail." | Out-File -Append $env:GITHUB_STEP_SUMMARY
