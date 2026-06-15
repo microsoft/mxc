@@ -28,7 +28,10 @@ use std::time::{Duration, Instant};
 use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, FailurePhase, LaunchMethod, ScriptResponse};
-use wxc_common::sandbox_process::{join_discard, spawn_discard, SandboxProcess, StreamingRunner};
+use wxc_common::sandbox_process::{
+    group_kill, join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxProcess,
+    StreamingRunner,
+};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::validate_common;
 
@@ -177,9 +180,7 @@ impl SeatbeltScriptRunner {
             };
 
             match wait_with_timeout(&mut child, timeout) {
-                Ok(status) => {
-                    exit_response(status.code().unwrap_or(-1), String::new(), String::new())
-                }
+                Ok(status) => exit_response(status.code().unwrap_or(-1)),
                 Err(WaitError::Timeout) => {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -199,9 +200,7 @@ impl SeatbeltScriptRunner {
             };
 
             match run_with_pty(command, options) {
-                Ok(PtyOutcome::Exited(status)) => {
-                    exit_response(status.code().unwrap_or(-1), String::new(), String::new())
-                }
+                Ok(PtyOutcome::Exited(status)) => exit_response(status.code().unwrap_or(-1)),
                 Ok(PtyOutcome::TimedOut) => {
                     let msg = format!(
                         "Seatbelt: script timed out after {}ms",
@@ -320,7 +319,7 @@ impl SeatbeltScriptRunner {
         };
 
         let result = match wait_with_timeout(&mut child, timeout) {
-            Ok(status) => exit_response(status.code().unwrap_or(-1), String::new(), String::new()),
+            Ok(status) => exit_response(status.code().unwrap_or(-1)),
             Err(WaitError::Timeout) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -414,43 +413,6 @@ impl StreamingRunner for SeatbeltScriptRunner {
     }
 }
 
-/// Grace period between `SIGTERM` and `SIGKILL` in [`SandboxProcess::kill`].
-const KILL_GRACE: Duration = Duration::from_secs(2);
-
-/// Process-tree kill for a child spawned as a session leader (`setsid()`, so
-/// its pgid equals its pid): graceful `SIGTERM` to the whole process group,
-/// then a `SIGKILL` sweep of the group after [`KILL_GRACE`]. Signalling the
-/// negative pid targets only that group — never the host's — and is a no-op if
-/// the child has already exited. Shared by the streaming handle's `kill()` and
-/// the no-pty capture path's timeout branch.
-///
-/// The final `SIGKILL` is sent unconditionally, even once the leader has
-/// exited: it sweeps any descendant that was forked around the `SIGTERM` (so it
-/// never received it) and would otherwise survive — leaving a later `wait()` to
-/// block for that descendant's full runtime. While such a descendant exists it
-/// keeps the group alive, so the pgid is still valid and unambiguous; if none
-/// remains the sweep is a harmless `ESRCH`.
-fn group_kill_child(child: &mut std::process::Child) -> std::io::Result<()> {
-    if child.try_wait()?.is_some() {
-        return Ok(());
-    }
-    let pgid = child.id() as libc::pid_t;
-    unsafe {
-        libc::kill(-pgid, libc::SIGTERM);
-    }
-    let deadline = Instant::now() + KILL_GRACE;
-    loop {
-        if child.try_wait()?.is_some() || Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    unsafe {
-        libc::kill(-pgid, libc::SIGKILL);
-    }
-    Ok(())
-}
-
 /// A running Seatbelt-sandboxed process (exec mode), exposing its pipes,
 /// kill, and wait. See [`SandboxProcess`] for the streaming contract.
 struct SeatbeltSandboxProcess {
@@ -463,21 +425,15 @@ struct SeatbeltSandboxProcess {
 
 impl SandboxProcess for SeatbeltSandboxProcess {
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
-        self.stdin
-            .take()
-            .map(|s| Box::new(s) as Box<dyn std::io::Write + Send>)
+        take_boxed_write(&mut self.stdin)
     }
 
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
-        self.stdout
-            .take()
-            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)
+        take_boxed_read(&mut self.stdout)
     }
 
     fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
-        self.stderr
-            .take()
-            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)
+        take_boxed_read(&mut self.stderr)
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
@@ -492,7 +448,7 @@ impl SandboxProcess for SeatbeltSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
-        group_kill_child(&mut self.child)
+        group_kill(&mut self.child, Duration::from_secs(2))
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -625,9 +581,8 @@ fn error_response(message: String) -> ScriptResponse {
     }
 }
 
-/// A `ScriptResponse` for a timed-out run with no captured output (the GUI,
-/// CLI/pty, and LaunchServices paths). Paths that capture stdout/stderr build
-/// the response inline so they can attach it.
+/// A `ScriptResponse` for a timed-out run, tagged [`FailurePhase::Timeout`] so
+/// callers can distinguish a timeout from a process that exited on its own.
 fn timeout_response(message: String) -> ScriptResponse {
     ScriptResponse {
         exit_code: -1,
@@ -655,11 +610,9 @@ fn spawn_error(error: &std::io::Error) -> String {
 /// [`FailurePhase::ProcessExited`] on a non-zero exit (and
 /// [`FailurePhase::None`] on success) so callers can distinguish a launch
 /// failure from a process that ran and failed.
-fn exit_response(exit_code: i32, standard_out: String, standard_err: String) -> ScriptResponse {
+fn exit_response(exit_code: i32) -> ScriptResponse {
     ScriptResponse {
         exit_code,
-        standard_out,
-        standard_err,
         failure_phase: if exit_code == 0 {
             FailurePhase::None
         } else {

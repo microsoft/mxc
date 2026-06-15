@@ -119,6 +119,64 @@ pub fn join_discard(handle: Option<std::thread::JoinHandle<()>>) {
     }
 }
 
+/// Take a readable stream out of an `Option` and box it as a trait object, for
+/// the [`SandboxProcess::take_stdout`] / [`SandboxProcess::take_stderr`]
+/// accessors. Returns `None` if already taken.
+pub fn take_boxed_read<R: Read + Send + 'static>(
+    slot: &mut Option<R>,
+) -> Option<Box<dyn Read + Send>> {
+    slot.take().map(|r| Box::new(r) as Box<dyn Read + Send>)
+}
+
+/// Take a writable stream out of an `Option` and box it as a trait object, for
+/// the [`SandboxProcess::take_stdin`] accessor. Returns `None` if already taken.
+pub fn take_boxed_write<W: Write + Send + 'static>(
+    slot: &mut Option<W>,
+) -> Option<Box<dyn Write + Send>> {
+    slot.take().map(|w| Box::new(w) as Box<dyn Write + Send>)
+}
+
+/// Process-tree kill for a Unix child that leads its own process group — the
+/// in-tree backends arrange this via `setsid()` (Seatbelt) or
+/// `process_group(0)` (Bubblewrap), so the child's pgid equals its pid: a
+/// graceful `SIGTERM` to the whole group, then a `SIGKILL` sweep after `grace`.
+/// Signalling the negative pgid targets only that group — never the host's —
+/// and is a no-op once the child has exited.
+///
+/// The final `SIGKILL` is sent unconditionally so a descendant forked around
+/// the `SIGTERM` (and thus never signalled) can't survive and leave a later
+/// `wait()` blocking for its full runtime; while such a descendant exists it
+/// keeps the group alive (pgid still valid), and if none remains the sweep is a
+/// harmless `ESRCH`. Shared by the Unix backends' streaming `kill()` and their
+/// run-to-completion timeout branches.
+#[cfg(unix)]
+pub fn group_kill(
+    child: &mut std::process::Child,
+    grace: std::time::Duration,
+) -> std::io::Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    let pgid = child.id() as i32;
+    // SAFETY: `kill(2)` with a negative pgid signals the child's own process
+    // group; the arguments are plain integers with no memory safety concerns.
+    unsafe {
+        libc::kill(-pgid, libc::SIGTERM);
+    }
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        if child.try_wait()?.is_some() || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // SAFETY: as above.
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+    Ok(())
+}
+
 /// A backend that can spawn a [`SandboxProcess`] handle.
 ///
 /// The streaming analogue of [`ScriptRunner`](crate::script_runner::ScriptRunner).

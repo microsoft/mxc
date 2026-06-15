@@ -52,7 +52,9 @@ use wxc_common::models::{
 use wxc_common::process_util::{
     create_std_pipes, OwnedHandle, PipeReader, PipeWriter, SendOwnedHandle,
 };
-use wxc_common::sandbox_process::{join_discard, spawn_discard, SandboxProcess, StreamingRunner};
+use wxc_common::sandbox_process::{
+    join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxProcess, StreamingRunner,
+};
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 use wxc_common::string_util;
 
@@ -746,7 +748,7 @@ impl BaseContainerRunner {
             if capture {
                 let _ = writeln!(
                     logger,
-                    "STDIO mode: capture (piping child output into the response)"
+                    "STDIO mode: capture (piping child output to the streaming handle)"
                 );
             } else {
                 let _ = writeln!(
@@ -1315,21 +1317,15 @@ impl BaseContainerSandboxProcess {
 
 impl SandboxProcess for BaseContainerSandboxProcess {
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
-        self.stdin
-            .take()
-            .map(|w| Box::new(w) as Box<dyn std::io::Write + Send>)
+        take_boxed_write(&mut self.stdin)
     }
 
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
-        self.stdout
-            .take()
-            .map(|r| Box::new(r) as Box<dyn std::io::Read + Send>)
+        take_boxed_read(&mut self.stdout)
     }
 
     fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
-        self.stderr
-            .take()
-            .map(|r| Box::new(r) as Box<dyn std::io::Read + Send>)
+        take_boxed_read(&mut self.stderr)
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
