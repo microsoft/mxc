@@ -43,7 +43,7 @@ use dispatch::spawn_runner;
 pub use platform::{platform_support, PlatformSupport};
 pub use policy::{
     available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
-    Containment, FilesystemPolicyResult, SandboxPolicy,
+    FilesystemPolicyResult, SandboxPolicy,
 };
 
 // Re-export the wire/model types callers need so they don't have to depend

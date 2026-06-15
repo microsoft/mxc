@@ -489,18 +489,7 @@ pub struct SandboxPolicy {
     pub timeout_ms: Option<u32>,
 }
 
-/// Containment intent accepted by [`build_request`], restricted to the
-/// backends the `mxc` library can run. `Process` is the abstract intent that
-/// resolves per-host (Seatbelt on macOS, Bubblewrap on Linux, ProcessContainer
-/// on Windows); `Bubblewrap` forces the Linux Bubblewrap backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Containment {
-    #[default]
-    Process,
-    Bubblewrap,
-}
-
-/// Build an [`ExecutionRequest`] from a [`SandboxPolicy`] for a supported
+/// Build an [`ExecutionRequest`] from a [`SandboxPolicy`], resolving the host's
 /// containment backend — the Rust port of the SDK's `createConfigFromPolicy`.
 ///
 /// The returned request has an empty command line; callers set `script_code`
@@ -513,7 +502,6 @@ pub enum Containment {
 /// config parser, so validation and the wire→model mapping match production.
 pub fn build_request(
     policy: &SandboxPolicy,
-    containment: Containment,
     container_name: Option<&str>,
 ) -> Result<ExecutionRequest, MxcError> {
     // The shared parser tolerates an empty schema version (treats it as
@@ -521,7 +509,7 @@ pub fn build_request(
     if policy.version.is_empty() {
         return Err(MxcError::malformed_request("Policy version is required"));
     }
-    let config = build_wire_config(policy, containment, container_name)?;
+    let config = build_wire_config(policy, container_name)?;
     let json = serde_json::to_string(&config)
         .map_err(|e| MxcError::malformed_request(format!("failed to serialise config: {e}")))?;
     let encoded = wxc_common::encoding::base64_encode(json.as_bytes());
@@ -541,7 +529,6 @@ pub fn build_request(
 /// backends, mirroring `createConfigFromPolicy` + the per-backend builders.
 fn build_wire_config(
     policy: &SandboxPolicy,
-    containment: Containment,
     container_name: Option<&str>,
 ) -> Result<serde_json::Value, MxcError> {
     use serde_json::json;
@@ -570,22 +557,13 @@ fn build_wire_config(
         },
     });
 
-    let targets_host_filtering_backend = matches!(containment, Containment::Bubblewrap)
-        || (matches!(containment, Containment::Process)
-            && (cfg!(target_os = "linux") || cfg!(target_os = "macos")));
+    let targets_host_filtering_backend = cfg!(target_os = "linux") || cfg!(target_os = "macos");
 
     if let Some(net) = &policy.network {
-        if net.proxy.is_some() {
-            if cfg!(target_os = "macos") {
-                return Err(MxcError::malformed_request(
-                    "Proxy configuration is not supported on macOS",
-                ));
-            }
-            if cfg!(target_os = "linux") && !targets_host_filtering_backend {
-                return Err(MxcError::malformed_request(
-                    "Proxy configuration on Linux requires containment 'bubblewrap' or 'process'",
-                ));
-            }
+        if net.proxy.is_some() && cfg!(target_os = "macos") {
+            return Err(MxcError::malformed_request(
+                "Proxy configuration is not supported on macOS",
+            ));
         }
 
         if !targets_host_filtering_backend
@@ -611,7 +589,7 @@ fn build_wire_config(
         config["network"] = json!({ "defaultPolicy": "block" });
     }
 
-    apply_backend(&mut config, policy, containment, &container_id);
+    apply_backend(&mut config, policy, &container_id);
     Ok(config)
 }
 
@@ -627,21 +605,10 @@ fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
 /// Apply backend-specific fields, resolving the abstract `Process` intent the
 /// same way the SDK does (Bubblewrap on Linux, Seatbelt on macOS,
 /// BaseContainer on Windows).
-fn apply_backend(
-    config: &mut serde_json::Value,
-    policy: &SandboxPolicy,
-    containment: Containment,
-    container_id: &str,
-) {
+fn apply_backend(config: &mut serde_json::Value, policy: &SandboxPolicy, container_id: &str) {
     use serde_json::json;
 
-    if matches!(containment, Containment::Bubblewrap) {
-        config["containment"] = json!("bubblewrap");
-        apply_linux_network_policy(config);
-        return;
-    }
-
-    // Containment::Process — resolve per host.
+    // Resolve the abstract Process intent per host.
     config["containment"] = json!("process");
 
     #[cfg(target_os = "linux")]
@@ -709,6 +676,7 @@ fn apply_backend(
 /// Promote network enforcement to `firewall` when host rules are present and
 /// no cooperative proxy is configured — the Linux counterpart of the SDK's
 /// `applyLinuxNetworkPolicy`.
+#[cfg(target_os = "linux")]
 fn apply_linux_network_policy(config: &mut serde_json::Value) {
     use serde_json::json;
     let Some(network) = config.get_mut("network") else {

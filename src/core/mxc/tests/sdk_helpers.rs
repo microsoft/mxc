@@ -6,7 +6,7 @@
 
 use mxc::{
     available_tools_policy, build_request, platform_support, temporary_files_policy,
-    user_profile_policy, Containment, SandboxPolicy,
+    user_profile_policy, SandboxPolicy,
 };
 
 #[cfg(target_os = "macos")]
@@ -129,8 +129,7 @@ fn build_request_rejects_empty_version() {
         timeout_ms: None,
     };
 
-    let err = build_request(&policy, Containment::Process, None)
-        .expect_err("an empty policy version must be rejected");
+    let err = build_request(&policy, None).expect_err("an empty policy version must be rejected");
     assert_eq!(err.code, mxc::MxcErrorCode::MalformedRequest);
 }
 
@@ -149,8 +148,8 @@ fn build_request_maps_filesystem_and_timeout() {
         timeout_ms: Some(5000),
     };
 
-    let request = build_request(&policy, Containment::Process, Some("test-container"))
-        .expect("build_request should succeed");
+    let request =
+        build_request(&policy, Some("test-container")).expect("build_request should succeed");
 
     assert_eq!(request.script_timeout, 5000);
     assert!(request.policy.readwrite_paths.contains(&"/tmp".to_string()));
@@ -176,7 +175,7 @@ fn build_request_host_rules_require_outbound() {
     // On macOS/Linux the abstract Process backend supports host filtering, so
     // this is accepted; on Windows it must be rejected. Either way it must not
     // panic and the result must be consistent with the platform.
-    let result = build_request(&policy, Containment::Process, None);
+    let result = build_request(&policy, None);
     if cfg!(target_os = "windows") {
         assert!(
             result.is_err(),
@@ -203,8 +202,7 @@ fn build_request_then_run_seatbelt() {
         timeout_ms: Some(10000),
     };
 
-    let mut request =
-        build_request(&policy, Containment::Process, None).expect("build_request should succeed");
+    let mut request = build_request(&policy, None).expect("build_request should succeed");
     request.script_code = "echo built-from-policy".to_string();
 
     let mut proc = spawn_streaming_from_request(request).expect("spawn should succeed");
@@ -239,8 +237,7 @@ fn build_request_preserves_clipboard_policy() {
             }),
             timeout_ms: None,
         };
-        let request = build_request(&policy, Containment::Process, None)
-            .expect("build_request should succeed");
+        let request = build_request(&policy, None).expect("build_request should succeed");
         assert_eq!(
             request.policy.ui.clipboard, expected,
             "clipboard {input:?} should map to {expected:?}"
@@ -286,7 +283,7 @@ fn build_request_maps_network_hosts() {
         timeout_ms: None,
     };
 
-    let request = build_request(&policy, Containment::Process, None)
+    let request = build_request(&policy, None)
         .expect("build_request should accept host rules with allowOutbound");
 
     assert!(
