@@ -2,7 +2,9 @@
 
 ## 1. Executive Summary
 
-MXC now includes a **Denied Resource Detection & Approval** system that identifies exactly which resources a sandboxed process was denied access to, presents them to the user for interactive approval, regenerates sandbox policy with approved resources, and re-runs the workload. The system supports **file**, **network**, **registry**, and **COM** resource types.
+MXC now includes a **Denied Resource Detection & Approval** system that identifies exactly which resources a sandboxed process was denied access to, presents them to the user for interactive approval, regenerates sandbox policy with approved resources, and re-runs the workload. The system currently supports **file** and **network** resource types.
+
+> **Not implemented (future work):** registry and COM resource types appear throughout this document as part of the original design. They are **not** detected or auto-resolved by the shipped code. The Rust `ResourceType` enum exposes only `File`, `Network`, and `Other` (`src/tools/mxc_diagnostic_console/src/denial_event.rs`), and the SDK denial types use the union `'file' | 'network'` (`sdk/src/denied-resources.ts`, `sdk/src/denial-service.ts`). Sections that reference registry/COM describe the aspirational design and are called out as future work where they appear.
 
 Detection uses a tiered strategy with graceful fallback:
 
@@ -36,6 +38,8 @@ This trial-and-error cycle is time-consuming, error-prone, and discouraging — 
 
 ![High-level architecture](diagrams/denied-resource-architecture.svg)
 
+> **Diagram caveat:** the diagrams in this document (here and in §5–§9) depict the original, aspirational design. Where they show registry/COM resource types, learning-mode (Event ID 27) forwarding, or network denials flowing from the ETW tier, those elements are **not** present in the shipped code — see the per-section "Not implemented" callouts for the actual behavior.
+
 The system is organized into three layers:
 
 ### Sandbox Execution Layer (Rust)
@@ -63,19 +67,21 @@ The system employs two detection tiers, each providing different trade-offs betw
 
 ### Tier 1: ETW Diagnostic Service
 
-**Accuracy:** Kernel-accurate (captures ALL denials)  
-**Coverage:** File, registry, network, COM  
+**Accuracy:** Kernel-accurate (captures all forwarded denials)  
+**Coverage:** File only — the ETW path forwards `ObjectType="File"` denials exclusively  
 **Requirements:** `MxcDiagnosticService` running as `NT AUTHORITY\LocalService`
 
-The ETW service subscribes to kernel-level access-check events and sandbox learning-mode violations. It captures every denial — including those where the process handles the error silently without printing anything to stderr. This is the only tier that can detect denials that produce no process output.
+The ETW service subscribes to kernel-level access-check events. It captures file denials — including those where the process handles the error silently without printing anything to stderr. This is the only tier that can detect denials that produce no process output.
+
+> **Implementation note:** Although the service decodes every AccessCheckLog event, `build_denial_from_access_check` (`src/tools/mxc_diagnostic_console/src/etw.rs`) emits **only** `ResourceType::File` events to the denial pipe. Network and registry (`Key`) object types are mapped to `ResourceType::Other` and dropped, so the ETW tier does **not** surface network, registry, or COM denials. Network detection is available **only** via Tier 2 output parsing.
 
 ### Tier 2: Output Parsing
 
 **Accuracy:** ~70% (depends on the process printing recognizable error messages)  
-**Coverage:** File, network, registry, COM  
+**Coverage:** File, network  
 **Requirements:** None (always available)
 
-The output parser applies 21 regex patterns against process stdout/stderr, covering error messages from Python, Node.js, PowerShell, .NET, Rust, Go, C/C++, Java, and Ruby runtimes. This tier is always available with zero dependencies but can only detect denials that result in recognizable error output.
+The output parser applies 17 regex patterns (12 filesystem + 5 network) against process stdout/stderr, covering error messages from Python, Node.js, PowerShell, .NET, and Rust runtimes, plus generic Windows/Linux path heuristics. This tier is always available with zero dependencies but can only detect denials that result in recognizable error output.
 
 ### Deduplication
 
@@ -111,7 +117,7 @@ The service subscribes to two ETW providers:
 | Provider | GUID | Purpose |
 |----------|------|---------|
 | Tessera TraceLogging | `{f6ec123e-314e-400b-9e0a-151365e23083}` | Sandbox lifecycle events (container create/destroy) |
-| Microsoft-Windows-Kernel-General | `{a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}` | `AccessCheckLog` (Event ID 4907), `LearningModeViolation` (Event ID 27) |
+| Microsoft-Windows-Kernel-General | `{a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}` | `AccessCheckLog` (Event ID 4907). `LearningModeViolation` (Event ID 27) is decoded for the console/collect display path only and is **not** forwarded to the denial pipe. |
 
 ### 5.3 learningModeLogging
 
@@ -122,22 +128,22 @@ The `wxc-exec` binary **always** injects `learningModeLogging: true` into the sa
 
 ### 5.4 Event Extraction
 
-Two extraction functions map raw ETW events to `DenialEvent` structs:
+A single extraction function maps raw ETW events to `DenialEvent` structs:
 
-**`build_denial_from_access_check()`** — Event ID 4907 (AccessCheckLog):
+**`build_denial_from_access_check()`** (`src/tools/mxc_diagnostic_console/src/etw.rs`) — Event ID 4907 (AccessCheckLog):
 
-Maps the `ObjectType` field to a `ResourceType`:
+Maps the `ObjectType` field to a `ResourceType` via `ResourceType::from_object_type` (`src/tools/mxc_diagnostic_console/src/denial_event.rs`):
 
-| ObjectType Value | ResourceType |
-|-----------------|--------------|
-| `"File"` | `ResourceType::File` |
-| `"Key"` | `ResourceType::Registry` |
-| `""` (empty string) | `ResourceType::Network` |
-| anything else | `ResourceType::Other` |
+| ObjectType Value | ResourceType | Forwarded to pipe? |
+|-----------------|--------------|--------------------|
+| `"File"` | `ResourceType::File` | ✅ Yes |
+| `"Key"` | `ResourceType::Other` (registry not actionable via policy) | ❌ Dropped |
+| `""` (empty string) | `ResourceType::Network` | ❌ Dropped |
+| anything else | `ResourceType::Other` | ❌ Dropped |
 
-**`build_denial_from_learning_mode()`** — Event ID 27 (LearningModeViolation):
+Only `ResourceType::File` events are emitted; every other mapping is computed and then discarded. As a result the ETW tier yields **file denials only** — the `"Key"` → registry and empty-string → network rows above are never surfaced to SDK consumers.
 
-Extracts the violated resource directly from the learning-mode event payload.
+> **Not implemented (future work):** there is no `build_denial_from_learning_mode()` function. LearningModeViolation events (Event ID 27) are explicitly **not** forwarded to the denial pipe — `try_send_denial_event` returns early for Event ID 27 (`src/tools/mxc_diagnostic_console/src/etw.rs`). These events are visible only on the interactive console/collect display path.
 
 ### 5.5 Threading Model
 
@@ -146,7 +152,7 @@ The service uses a multi-threaded architecture:
 ![Threading model](diagrams/threading-model.svg)
 
 - **ETW Consumer Thread**: Calls `ProcessTrace` (blocking Win32 API), delivers raw events via `CallbackContext` to the receiver.
-- **Event Receiver Thread**: Buffers events in a `HashMap<BufferKey, Vec<DenialEvent>>`. Each key (container name + PID) holds at most 1024 events with ring-buffer eviction (oldest events dropped when full).
+- **Event Receiver Thread**: Buffers events in a `HashMap<BufferKey, BufferEntry>`. The buffer key is the **PID only** (`BufferKey { pid }` in `src/tools/mxc_diagnostic_console/src/denial_pipe.rs`) — PID is the primary correlation key per the wire contract, and the container name is only a secondary label, so it is not part of the key. Each key holds at most 1024 events with ring-buffer eviction (oldest events dropped when full).
 - **Pipe Accept Thread**: Listens on the named pipe, creates new instances, and spawns a dedicated handler thread for each connecting client.
 - **Per-Client Handler Threads**: Serve either snapshot queries (read events, respond, disconnect) or streaming subscriptions (push events as they arrive until client disconnects).
 
@@ -175,7 +181,7 @@ In service mode, the binary operates headlessly — ETW events are consumed and 
 | Property | Value | Rationale |
 |----------|-------|-----------|
 | Naming | Per-user (SID appended) | Multi-user isolation |
-| Security | Restrictive SDDL | Denies AppContainer SIDs; allows Authenticated Users + SYSTEM |
+| Security | Restrictive SDDL | Denies `ALL_APPLICATION_PACKAGES` (`S-1-15-2-1`); grants the current-user SID, SYSTEM, and Administrators |
 | Mode | `PIPE_TYPE_MESSAGE \| PIPE_READMODE_MESSAGE` | Framed messages, no manual delimiting |
 | Buffer size | 64 KB | Sufficient for typical denial payloads |
 
@@ -203,7 +209,7 @@ Used by the SDK's `readDeniedResources()` function to retrieve all buffered even
       "resourceType": "file",
       "objectName": "C:\\Users\\dev\\.nuget\\packages",
       "accessRequested": "read",
-      "timestamp": "2026-05-23T16:30:00.000Z",
+      "timestamp": "2026-05-23T16:30:00Z",
       "eventId": 4907
     }
   ],
@@ -227,9 +233,11 @@ Used by the SDK's `subscribeToDenials()` function for real-time event streaming:
 
 **Server streams (newline-delimited JSON):**
 ```json
-{"containerName":"mxc-abc123","pid":4567,"resourceType":"file","objectName":"C:\\path\\to\\file.dll","accessRequested":"read","timestamp":"2026-05-23T16:30:01.000Z","eventId":4907}
-{"containerName":"mxc-abc123","pid":4567,"resourceType":"registry","objectName":"HKLM\\SOFTWARE\\Microsoft\\Cryptography","accessRequested":"read","timestamp":"2026-05-23T16:30:01.500Z","eventId":4907}
+{"containerName":"mxc-abc123","pid":4567,"resourceType":"file","objectName":"C:\\path\\to\\file.dll","accessRequested":"read","timestamp":"2026-05-23T16:30:01Z","eventId":4907}
+{"containerName":"mxc-abc123","pid":4567,"resourceType":"file","objectName":"C:\\Users\\dev\\.config\\settings.json","accessRequested":"write","timestamp":"2026-05-23T16:30:01Z","eventId":4907}
 ```
+
+> **Note:** The ETW tier streams `file` denials only (see §5.4). Timestamps use the fixed-width form `YYYY-MM-DDTHH:MM:SSZ` with no fractional seconds.
 
 The stream continues until the client disconnects.
 
@@ -239,13 +247,15 @@ The `DenialEvent` Rust struct serializes to camelCase JSON:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `containerName` | `string` | AppContainer profile name |
+| `containerName` | `string` | Best-effort AppContainer profile name; may be empty (PID is the primary correlation key) |
 | `pid` | `u32` | Process ID that triggered the denial |
-| `resourceType` | `enum` | `file`, `registry`, `network`, `com`, `other` |
-| `objectName` | `string` | Full path/name of the denied resource |
-| `accessRequested` | `enum` | `read`, `write`, `execute`, `unknown` |
-| `timestamp` | `string` | ISO 8601 timestamp of the denial |
-| `eventId` | `u16` | Original ETW event ID (4907 or 27) |
+| `resourceType` | `enum` | `file`, `network`, or `other`. In practice only `file` is forwarded over the pipe (see §5.4) |
+| `objectName` | `string` | Full path/name of the denied resource (serialized as `path`) |
+| `accessRequested` | `enum` | `read`, `write`, `execute`, `unknown` (serialized as `accessType`) |
+| `timestamp` | `string` | Fixed-width ISO 8601 timestamp `YYYY-MM-DDTHH:MM:SSZ` (no fractional seconds), validated strictly |
+| `eventId` | `u16` | Original ETW event ID (`4907`, AccessCheckLog) |
+
+> **Active wire type vs. reserved model:** the live detection path uses the `DenialEvent` struct shown above (`src/tools/mxc_diagnostic_console/src/denial_event.rs`). A separate `wxc_common::models::DeniedResource` struct (fields `path`, `resource_type`, `access_denied`, `confirmed`) exists in `src/core/wxc_common/src/models.rs` but is **currently defined-but-unused / reserved** — it is not part of the active pipe protocol.
 
 ### 6.5 Rust ↔ TypeScript Field Mapping
 
@@ -264,23 +274,25 @@ The SDK maps wire-format fields to its internal representation:
 
 ### 7.1 `denied-resources.ts` — Output Parsing Engine
 
-The output parser applies 21 regex patterns against captured process output:
+The output parser applies 17 regex patterns (12 filesystem + 5 network) against captured process output:
 
-**Supported runtimes:**
+**Supported filesystem runtimes/patterns:**
 
 | Runtime | Example Error Pattern |
 |---------|----------------------|
 | Python | `PermissionError: [Errno 13] Permission denied: '...'` |
-| Node.js | `Error: EACCES: permission denied, open '...'` |
+| Node.js | `Error: EACCES: permission denied, open '...'` (and `EPERM`) |
 | PowerShell | `Access to the path '...' is denied.` |
-| .NET | `System.UnauthorizedAccessException: Access to the path '...'` |
+| .NET | `System.UnauthorizedAccessException: Access to the path '...'` / `IOException` |
 | Rust | `Os { code: 5, kind: PermissionDenied, message: "Access is denied." }` |
-| Go | `open ...: Access is denied.` |
-| C/C++ | `fopen failed: Permission denied` |
-| Java | `java.nio.file.AccessDeniedException: ...` |
-| Ruby | `Errno::EACCES: Permission denied @ ...` |
+| Windows native | `C:\path - Access is denied` (path↔message in either order) |
+| Linux / generic | `permission denied: /path`, `cannot open/access/read/write '...'` |
 
-Each pattern extracts: `path`, `accessType`, and `resourceType`.
+**Supported network patterns:** Node.js `ECONNREFUSED`, Python `ConnectionRefusedError`, generic `Connection refused`, DNS `getaddrinfo ENOTFOUND` / lookup failed, and `WinHttpSendRequest` errors.
+
+> **Not implemented (future work):** there are no patterns for Go, C/C++, Java, or Ruby runtimes, and no registry or COM patterns.
+
+Each pattern extracts: `path`, `accessType`, and `resourceType` (`'file' | 'network'`).
 
 
 
@@ -323,7 +335,7 @@ generateUpdatedPolicyFromDetection(policy: SandboxPolicy, approved: DeniedResour
 
 **`deduplicateDenials()`** merges results by normalized path + resource type, preferring the source with highest priority (ETW > output parsing).
 
-**`generateUpdatedPolicyFromDetection()`** wraps `policy-regen.ts` with additional logic for network/registry/COM handling and managed policy checks.
+**`generateUpdatedPolicyFromDetection()`** wraps `policy-regen.ts` with additional logic for network handling and managed policy checks. (Registry/COM handling is future work — those types are never surfaced by the detection tiers.)
 
 ### 7.4 `policy-regen.ts` — Policy Regeneration
 
@@ -362,14 +374,16 @@ generateUpdatedPolicy(
 |--------------|:---:|:---:|:---:|---|
 | File (read) | ✅ | ✅ | ✅ | `filesystem.readonlyPaths` |
 | File (write) | ✅ | ✅ | ✅ | `filesystem.readwritePaths` |
-| Network | ✅ | ✅ | ✅ | `network.allowedHosts[]` |
-| Registry | ✅ | ✅ | ❌ Inform only | Not in schema |
-| COM | — | ✅ | ❌ Inform only | Not in schema |
+| Network | ❌ | ✅ | ✅ | `network.allowedHosts[]` |
+| Registry | ❌ | ❌ | ❌ Not implemented | Not in schema |
+| COM | ❌ | ❌ | ❌ Not implemented | Not in schema |
 
 **Legend:**
 - ✅ = Supported
-- — = Not applicable to this tier
-- ❌ Inform only = Detected and reported but cannot be auto-resolved (no policy schema field exists)
+- ❌ = Not supported by this tier
+- ❌ Not implemented = Not detected or auto-resolved by the shipped code (future work)
+
+> **Network detection caveat:** the ETW tier does **not** emit network denials (it forwards `file` only — see §5.4). Network denials are detected exclusively by Tier 2 output parsing. Registry and COM are not detected by either tier; the rows above record the original design intent.
 
 ### Network Access — Per-Host Approval
 
@@ -415,17 +429,18 @@ The denied resource system leverages this by adding only approved hosts to the f
 
 **HTTPS limitation:** TLS handshakes require access to the Windows certificate store (`HKLM\SOFTWARE\Microsoft\SystemCertificates`), which is in the registry. Since registry access is not yet in the policy schema, HTTPS connections may fail even when the host is in `allowedHosts`. Plain HTTP works without issue.
 
-**Example detection output for network denials:**
+**Example detection output for network denials** (all network denials come from Tier 2 output parsing — the ETW tier never emits network events):
 ```
 Detected denied resources:
-  [network] api.nuget.org:443
+  [network] api.nuget.org
     Source: output_parsing
-    Pattern: python_urllib_error
-    Raw: urllib.error.URLError: <urlopen error [WinError 10013] ...>
+    Pattern: dns_resolution_failed
+    Raw: getaddrinfo ENOTFOUND api.nuget.org
 
   [network] telemetry.example.com:443
-    Source: etw_service
-    ETW Event ID: 4907
+    Source: output_parsing
+    Pattern: generic_connection_refused
+    Raw: Connection refused: telemetry.example.com:443
 ```
 
 ---
@@ -453,8 +468,9 @@ Each detected denial is classified into one of three categories:
 | Category | Criteria | User Action |
 |----------|----------|-------------|
 | **Resolvable** | Resource type has a policy field (file, network) | User can approve/deny |
-| **Inform-only** | Resource type has no policy field (registry, COM) | Shown for awareness |
 | **Rejected** | System-critical path or managed policy | Cannot be approved |
+
+> **Not implemented (future work):** the original design also defined an **Inform-only** category for resource types with no policy field (registry, COM). Because registry/COM denials are never surfaced by the detection tiers in the shipped code, this category is not produced today.
 
 ### Step 4: User Approval Prompt
 
@@ -537,11 +553,15 @@ This is distinct from `permissiveLearningMode`, which would allow denied accesse
 
 ### Named Pipe Security
 
-The service pipe uses a restrictive SDDL security descriptor:
+The service pipe uses a restrictive SDDL security descriptor, built by `build_pipe_sddl()` in `src/tools/mxc_diagnostic_console/src/pipe_utils.rs`:
 
-- **Denies** all access to AppContainer SIDs (`S-1-15-2-1`) — prevents sandboxed processes from connecting
-- **Allows** Generic Read + Write for Authenticated Users — non-elevated SDK can connect
-- **Allows** full access for SYSTEM and Administrators
+```
+D:(D;;GA;;;S-1-15-2-1)(A;;GRGW;;;<current-user-SID>)(A;;GA;;;SY)(A;;GA;;;BA)
+```
+
+- **Denies** all access (`GA`) to `ALL_APPLICATION_PACKAGES` (`S-1-15-2-1`) — prevents sandboxed AppContainer processes from connecting
+- **Grants** Generic Read + Write (`GRGW`) to the **current user's SID** — the non-elevated SDK running as that user can connect
+- **Grants** full access (`GA`) to SYSTEM (`SY`) and Administrators (`BA`)
 
 This ensures the sandboxed (untrusted) process cannot inject fake denial events or read other containers' denial data.
 
@@ -565,7 +585,7 @@ Even if a user explicitly approves a resource, the policy regeneration engine re
 ### Managed Policy Protection
 
 Policies with `policyMode: 'managed'` are controlled by an external system (e.g., an enterprise policy server). The detection system:
-- **Detects** denials normally (all 3 tiers operate)
+- **Detects** denials normally (both tiers operate)
 - **Reports** denials to the user
 - **Refuses** to modify the policy (throws `MxcError` with code `policy_managed`)
 
