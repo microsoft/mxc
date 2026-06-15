@@ -423,13 +423,15 @@ impl AppContainerScriptRunner {
 
     /// Set up the AppContainer and create the sandboxed child **suspended**,
     /// returning a [`SpawnedChild`] the caller resumes and then either waits on
-    /// (run-to-completion) or wraps in a streaming handle. `stream` keeps the
-    /// child's stdin write-end for the caller instead of closing it for EOF.
+    /// (run-to-completion) or wraps in a streaming handle. When `capture` is set
+    /// the child's stdio is wired to pipes the caller drives (the streaming
+    /// path); otherwise the child inherits the parent's std handles / console
+    /// (the run-to-completion path).
     fn spawn_suspended(
         &self,
         request: &ExecutionRequest,
         logger: &mut Logger,
-        stream: bool,
+        capture: bool,
     ) -> Result<SpawnedChild, WxcError> {
         // --- Validate permissiveLearningMode ---
         for cap in &request.policy.capabilities {
@@ -510,7 +512,6 @@ impl AppContainerScriptRunner {
         // When streaming (the `spawn_streaming` path) we always take the pipe
         // path — but instead of forwarding our own std handles we wire the
         // child to capture pipes that the streaming handle reads from.
-        let capture = stream;
         let pipe_mode =
             capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
 
@@ -649,9 +650,8 @@ impl AppContainerScriptRunner {
         // read-ends observe EOF when the child exits.
         let mut capture_reads: Option<(OwnedHandle, OwnedHandle)> = None;
         let mut capture_child_ends: Vec<OwnedHandle> = Vec::new();
-        // Parent's stdin write-end, retained only in streaming mode so the
-        // caller can write to the child; in capture mode it is dropped to
-        // give the child EOF.
+        // Parent's stdin write-end; in capture mode it is handed to the caller
+        // so they can write to the child.
         let mut captured_stdin_write: Option<OwnedHandle> = None;
 
         if pipe_mode {
@@ -671,11 +671,7 @@ impl AppContainerScriptRunner {
                 capture_child_ends.push(stdin_read);
                 capture_child_ends.push(stdout_write);
                 capture_child_ends.push(stderr_write);
-                if stream {
-                    captured_stdin_write = Some(stdin_write);
-                }
-                // When not streaming, `stdin_write` drops here: the child's
-                // stdin sees EOF since the library forwards no input.
+                captured_stdin_write = Some(stdin_write);
                 capture_reads = Some((stdout_read, stderr_read));
             } else {
                 h_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
@@ -1260,7 +1256,7 @@ impl StreamingRunner for AppContainerScriptRunner {
 
         let mut prepared = self.prepare(request, logger)?;
 
-        // `stream = true` forces capture pipes (no console/pty path).
+        // `capture = true` forces capture pipes (no console/pty path).
         let child = match self.spawn_suspended(request, logger, true) {
             Ok(c) => c,
             Err(e) => {

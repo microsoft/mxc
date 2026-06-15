@@ -586,13 +586,15 @@ impl ScriptRunner for BaseContainerRunner {
 
 impl BaseContainerRunner {
     /// Set up and launch the BaseContainer child, returning a [`BaseChild`] the
-    /// caller runs to completion (blocking) or wraps in a streaming handle.
-    /// `stream` keeps the child's stdin write-end for the caller.
+    /// caller runs to completion (blocking) or wraps in a streaming handle. When
+    /// `capture` is set the child's stdio is wired to pipes the caller drives
+    /// (the streaming path); otherwise the child inherits the parent's std
+    /// handles / console (the run-to-completion path).
     fn spawn_base(
         &mut self,
         request: &ExecutionRequest,
         logger: &mut Logger,
-        stream: bool,
+        capture: bool,
     ) -> Result<BaseChild, ScriptResponse> {
         let _ = writeln!(
             logger,
@@ -740,7 +742,6 @@ impl BaseContainerRunner {
         // When streaming (the `spawn_streaming` path) we always take the pipe
         // path and wire the child to capture pipes that the streaming handle
         // reads from.
-        let capture = stream;
         let pipe_mode =
             capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
 
@@ -767,8 +768,8 @@ impl BaseContainerRunner {
         // child-side ends kept alive until after process creation.
         let mut capture_reads: Option<(OwnedHandle, OwnedHandle)> = None;
         let mut capture_child_ends: Vec<OwnedHandle> = Vec::new();
-        // Parent's stdin write-end, retained only for streaming so the caller
-        // can write to the child; otherwise dropped to give the child EOF.
+        // Parent's stdin write-end; in capture mode it is handed to the caller
+        // so they can write to the child.
         let mut captured_stdin_write: Option<OwnedHandle> = None;
 
         if pipe_mode {
@@ -793,10 +794,7 @@ impl BaseContainerRunner {
                 capture_child_ends.push(stdin_read);
                 capture_child_ends.push(stdout_write);
                 capture_child_ends.push(stderr_write);
-                if stream {
-                    captured_stdin_write = Some(stdin_write);
-                }
-                // When not streaming, `stdin_write` drops here: child sees EOF.
+                captured_stdin_write = Some(stdin_write);
                 capture_reads = Some((stdout_read, stderr_read));
             } else {
                 h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
@@ -1239,7 +1237,7 @@ impl StreamingRunner for BaseContainerRunner {
         validate_common(request)?;
         self.validate_runner(request)?;
 
-        // `stream = true` forces capture pipes (no console/pty path).
+        // `capture = true` forces capture pipes (no console/pty path).
         let child = self.spawn_base(request, logger, true)?;
         Ok(Box::new(BaseContainerSandboxProcess::from_child(child)))
     }
