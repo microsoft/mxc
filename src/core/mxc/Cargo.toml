@@ -3,7 +3,7 @@ name = "mxc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Importable library for starting MXC sandboxes in-process (no pty, captured output)."
+description = "Importable library for starting MXC sandboxes in-process (no pty, streaming stdio)."
 
 [lib]
 name = "mxc"

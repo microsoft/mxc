@@ -56,12 +56,12 @@ pub trait SandboxProcess: Send {
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>>;
 
     /// Take ownership of the child's stdout for live reading. Returns `None`
-    /// if already taken. A taken stream is **not** captured by
+    /// if already taken. A taken stream is **not** drained by
     /// [`wait`](SandboxProcess::wait).
     fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>>;
 
     /// Take ownership of the child's stderr for live reading. Returns `None`
-    /// if already taken. A taken stream is **not** captured by
+    /// if already taken. A taken stream is **not** drained by
     /// [`wait`](SandboxProcess::wait).
     fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>>;
 

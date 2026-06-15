@@ -101,7 +101,7 @@ pub struct SpawnOptions {
 /// (`take_stdin`), read from (`take_stdout` / `take_stderr`),
 /// [`wait`](SandboxProcess::wait) on, or [`kill`](SandboxProcess::kill) the
 /// child. No pty is allocated. Any stdout/stderr stream the caller does not
-/// take is captured by `wait()`.
+/// take is drained and discarded by `wait()`.
 ///
 /// Setting `options.dry_run` is rejected with
 /// [`MxcErrorCode::MalformedRequest`]: there is no process to stream.
