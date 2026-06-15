@@ -519,8 +519,8 @@ impl NanVixScriptRunner {
     ///   dropped because the guest filter is IPv4-only.
     /// - Entries that fail to parse or resolve contribute nothing.
     ///
-    /// Mirrors `lxc::network_iptables::resolve_host` so the two backends agree
-    /// on resolution semantics.
+    /// Mirrors `lxc::network_iptables::resolve_host` for hostname-to-IPv4 mapping,
+    /// and additionally preserves IPv4/CIDR literals for nanvixd.
     fn resolve_hosts(hosts: &[String]) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for host in hosts {
