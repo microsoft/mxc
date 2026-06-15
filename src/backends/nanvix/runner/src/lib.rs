@@ -37,9 +37,9 @@
 //!
 //! Host networking is **off by default** and is enabled per-run by passing
 //! `-allow-host-networking` to `nanvixd`. The runner adds that flag when the
-//! request sets `network.defaultPolicy = "allow"`. NanVix host networking is
-//! all-or-nothing: per-host filtering (`allowedHosts` / `blockedHosts`) and
-//! proxies are not supported and are rejected at validation time.
+//! request sets `network.defaultPolicy = "allow"`, or when `allowedHosts` /
+//! `blockedHosts` is present (forwarded as `-allow-host` / `-block-host`).
+//! Network proxies are not supported and are rejected at validation time.
 //!
 //! Auto-discovery
 //!
