@@ -7,9 +7,11 @@
 //! The sandbox is applied via `sandbox_init()` inside `Command::pre_exec`,
 //! then `/bin/sh` is exec'd directly. The child inherits the parent's
 //! Mach bootstrap namespace so both CLI commands and GUI applications
-//! (when `guiAccess = true`) work correctly. The exec path uses
-//! [`mxc_pty::run_with_pty`] so the inner shell sees a real TTY and the
-//! host can stream its output as it arrives.
+//! (when `guiAccess = true`) work correctly. The exec path returns a
+//! `SandboxProcess` whose stdio follows the requested `StdioMode`:
+//! `Inherit` gives the child the host's own stdio (a real TTY when the
+//! binary runs under a pty), while `Pipes` exposes stdout/stderr/stdin
+//! handles the caller can stream.
 //!
 //! For apps that require LaunchServices (`launchMethod: "open"`), the runner
 //! writes a sandbox helper script and launches the target app via `open -n -W`,
