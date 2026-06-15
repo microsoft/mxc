@@ -178,23 +178,6 @@ pub fn group_kill(
     Ok(())
 }
 
-/// A backend that can spawn a [`SandboxProcess`] handle.
-///
-/// The streaming analogue of [`ScriptRunner`](crate::script_runner::ScriptRunner).
-/// Implementors apply the same containment setup they would for a
-/// run-to-completion execution, but spawn with piped stdio and return the
-/// handle instead of waiting.
-pub trait StreamingRunner {
-    /// Spawn the sandboxed process and return a handle to it. On failure
-    /// (validation or spawn error) returns a [`ScriptResponse`] carrying the
-    /// error message, mirroring the `ScriptRunner` error convention.
-    fn spawn_streaming(
-        &mut self,
-        request: &ExecutionRequest,
-        logger: &mut Logger,
-    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse>;
-}
-
 /// How a [`SandboxBackend`] wires the sandboxed child's standard streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdioMode {
@@ -233,6 +216,14 @@ pub trait SandboxBackend {
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse>;
+
+    /// Optional post-exit diagnostics for the run-to-completion (binary) path:
+    /// when the child exits non-zero, return a more actionable error message
+    /// (e.g. a known AppContainer filesystem-permission failure). Default: none.
+    /// The streaming/library path does not call this.
+    fn diagnose_exit(&self, _request: &ExecutionRequest, _exit_code: i32) -> Option<String> {
+        None
+    }
 }
 
 /// The single run-to-completion bridge: adapts any [`SandboxBackend`] to the
@@ -268,15 +259,28 @@ impl<B: SandboxBackend> ScriptRunner for RtcRunner<B> {
             Err(response) => return response,
         };
         match child.wait() {
-            Ok(exit_code) => ScriptResponse {
-                exit_code,
-                failure_phase: if exit_code == 0 {
-                    FailurePhase::None
-                } else {
-                    FailurePhase::ProcessExited
-                },
-                ..Default::default()
-            },
+            Ok(exit_code) => {
+                let mut response = ScriptResponse {
+                    exit_code,
+                    failure_phase: if exit_code == 0 {
+                        FailurePhase::None
+                    } else {
+                        FailurePhase::ProcessExited
+                    },
+                    ..Default::default()
+                };
+                // Let the backend enrich a non-zero exit with an actionable
+                // message (the child streamed live, so the response is otherwise
+                // empty).
+                if exit_code != 0 {
+                    if let Some(msg) = self.0.diagnose_exit(request, exit_code) {
+                        logger.log_line(&format!("Error: Launch diagnostic: {msg}"));
+                        response.error_message = msg.clone();
+                        response.standard_err.push_str(&msg);
+                    }
+                }
+                response
+            }
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => ScriptResponse {
                 exit_code: -1,
                 error_message: format!("script timed out after {}ms", request.script_timeout),

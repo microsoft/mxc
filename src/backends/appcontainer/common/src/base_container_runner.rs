@@ -53,9 +53,10 @@ use wxc_common::process_util::{
     create_std_pipes, OwnedHandle, PipeReader, PipeWriter, SendOwnedHandle,
 };
 use wxc_common::sandbox_process::{
-    join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxProcess, StreamingRunner,
+    join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxBackend, SandboxProcess,
+    StdioMode,
 };
-use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
+use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::string_util;
 
 use windows::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
@@ -539,51 +540,6 @@ impl BaseContainerRunner {
     }
 }
 
-impl ScriptRunner for BaseContainerRunner {
-    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if !request.policy.denied_paths.is_empty() {
-            return Err(ScriptResponse::error(
-                wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
-            ));
-        }
-        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::error(
-                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
-            ));
-        }
-        Self::is_base_container_api_present().map_err(|e| {
-            let hint = if !request.experimental_enabled {
-                format!(
-                    "BaseContainer API unavailable: {e}\n\
-                     Hint: Config schema version '{}' requires the BaseContainer backend, \
-                     but this OS build does not support it. \
-                     Use schema version '0.4.0-alpha' to fall back to AppContainer.",
-                    request.schema_version
-                )
-            } else {
-                format!(
-                    "BaseContainer API unavailable: {e}\n\
-                     Hint: --experimental requested BaseContainer, but this OS build \
-                     does not support it. Remove --experimental to use the AppContainer \
-                     backend, or use an OS build with BaseContainer support."
-                )
-            };
-            ScriptResponse {
-                // Symbol absent: report BackendUnavailable, not a hard error.
-                failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(&hint)
-            }
-        })
-    }
-
-    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        match self.spawn_base(request, logger, false) {
-            Ok(child) => child.run_to_completion(logger),
-            Err(resp) => resp,
-        }
-    }
-}
-
 impl BaseContainerRunner {
     /// Set up and launch the BaseContainer child, returning a [`BaseChild`] the
     /// caller runs to completion (blocking) or wraps in a streaming handle. When
@@ -739,7 +695,7 @@ impl BaseContainerRunner {
         // we forward our own std handles to the child via STARTF_USESTDHANDLES so the
         // child's output streams directly to the SDK in real time.
         //
-        // When streaming (the `spawn_streaming` path) we always take the pipe
+        // In capture mode (`StdioMode::Pipes`) we always take the pipe
         // path and wire the child to capture pipes that the streaming handle
         // reads from.
         let pipe_mode =
@@ -1103,9 +1059,6 @@ impl BaseContainerRunner {
             identity,
             sid_string,
             proxy_coordinator: std::mem::take(&mut self.proxy_coordinator),
-            script_code: request.script_code.clone(),
-            readonly_paths: request.policy.readonly_paths.clone(),
-            readwrite_paths: request.policy.readwrite_paths.clone(),
         })
     }
 }
@@ -1129,117 +1082,71 @@ struct BaseChild {
     identity: String,
     sid_string: String,
     proxy_coordinator: ProxyCoordinator,
-    script_code: String,
-    readonly_paths: Vec<String>,
-    readwrite_paths: Vec<String>,
 }
 
-impl BaseChild {
-    /// Wait for exit (terminating on timeout); return the exit code (`-1` on
-    /// wait/exit-code failure) and whether the wait timed out.
-    fn wait_exit(&self) -> (i32, bool) {
-        match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
-            WAIT_OBJECT_0 => {}
-            WAIT_TIMEOUT => {
-                // Tree-kill via the job so descendants die too and release the
-                // captured stdout/stderr pipe write-ends; terminating only the
-                // root would leave the capture reader threads blocked forever.
-                if let Some(job) = &self.job {
-                    job.terminate(u32::MAX);
-                } else {
-                    unsafe {
-                        let _ = TerminateProcess(self.process.get(), u32::MAX);
-                    }
-                }
-                unsafe {
-                    let _ = WaitForSingleObject(self.process.get(), u32::MAX);
-                }
-                return (-1, true);
-            }
-            _ => return (-1, false),
+impl SandboxBackend for BaseContainerRunner {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if !request.policy.denied_paths.is_empty() {
+            return Err(ScriptResponse::error(
+                wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
+            ));
         }
-        let mut code: u32 = u32::MAX;
-        let _ = unsafe { GetExitCodeProcess(self.process.get(), &mut code) };
-        (code as i32, false)
-    }
-
-    /// Sandbox + proxy teardown, mirroring [`BaseContainerRunner::execute`]'s
-    /// exit path.
-    fn cleanup(&mut self, logger: &mut Logger) {
-        if self.destroy_on_exit {
-            run_sandbox_cleanup(&self.identity, &self.sid_string, self.proxy_enabled, logger);
-            sandbox_tracking::unregister_ctrl_c_cleanup();
+        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
+            return Err(ScriptResponse::error(
+                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+            ));
         }
-        self.proxy_coordinator.stop(logger);
-    }
-
-    /// Shape the final [`ScriptResponse`] (exit diagnostics + stderr merge),
-    /// mirroring `execute`'s tail.
-    fn collect(
-        &self,
-        exit_code: i32,
-        timed_out: bool,
-        captured_out: String,
-        captured_err: String,
-    ) -> ScriptResponse {
-        let (error_message, failure_phase) = if timed_out {
-            (
-                format!("script timed out after {}ms", self.timeout_ms),
-                FailurePhase::Timeout,
-            )
-        } else if exit_code != 0 {
-            if let Some(diag) = diagnose_process_exit(
-                &self.script_code,
-                &self.readonly_paths,
-                &self.readwrite_paths,
-                exit_code as u32,
-            ) {
-                (diag.message, FailurePhase::ProcessExited)
+        Self::is_base_container_api_present().map_err(|e| {
+            let hint = if !request.experimental_enabled {
+                format!(
+                    "BaseContainer API unavailable: {e}\n\
+                     Hint: Config schema version '{}' requires the BaseContainer backend, \
+                     but this OS build does not support it. \
+                     Use schema version '0.4.0-alpha' to fall back to AppContainer.",
+                    request.schema_version
+                )
             } else {
-                (String::new(), FailurePhase::ProcessExited)
+                format!(
+                    "BaseContainer API unavailable: {e}\n\
+                     Hint: --experimental requested BaseContainer, but this OS build \
+                     does not support it. Remove --experimental to use the AppContainer \
+                     backend, or use an OS build with BaseContainer support."
+                )
+            };
+            ScriptResponse {
+                // Symbol absent: report BackendUnavailable, not a hard error.
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(&hint)
             }
-        } else {
-            (String::new(), FailurePhase::None)
-        };
-        let final_stderr = match (captured_err.is_empty(), error_message.is_empty()) {
-            (_, true) => captured_err,
-            (true, false) => error_message.clone(),
-            (false, false) => format!("{captured_err}{error_message}"),
-        };
-        ScriptResponse {
-            exit_code,
-            standard_out: captured_out,
-            standard_err: final_stderr,
-            error_message,
-            failure_phase,
-            ..Default::default()
-        }
+        })
     }
 
-    /// Blocking run: wait for the child, tear down, and collect the result.
-    /// stdout/stderr stream live to the inherited handles (this path never
-    /// captures), so they are reported empty.
-    fn run_to_completion(mut self, logger: &mut Logger) -> ScriptResponse {
-        let (exit_code, timed_out) = self.wait_exit();
-        self.cleanup(logger);
-        self.collect(exit_code, timed_out, String::new(), String::new())
-    }
-}
-
-impl StreamingRunner for BaseContainerRunner {
-    fn spawn_streaming(
+    fn spawn(
         &mut self,
         request: &ExecutionRequest,
         logger: &mut Logger,
+        stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         use wxc_common::validator::validate_common;
 
         validate_common(request)?;
-        self.validate_runner(request)?;
+        self.validate(request)?;
 
-        // `capture = true` forces capture pipes (no console/pty path).
-        let child = self.spawn_base(request, logger, true)?;
+        // Pipes → capture pipes the caller drives; Inherit → the child inherits
+        // the binary's own std handles / console (a TTY when the binary has one).
+        let capture = stdio == StdioMode::Pipes;
+        let child = self.spawn_base(request, logger, capture)?;
         Ok(Box::new(BaseContainerSandboxProcess::from_child(child)))
+    }
+
+    fn diagnose_exit(&self, request: &ExecutionRequest, exit_code: i32) -> Option<String> {
+        diagnose_process_exit(
+            &request.script_code,
+            &request.policy.readonly_paths,
+            &request.policy.readwrite_paths,
+            exit_code as u32,
+        )
+        .map(|diag| diag.message)
     }
 }
 
@@ -1665,7 +1572,7 @@ mod tests {
 
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
-    use wxc_common::script_runner::ScriptRunner;
+    use wxc_common::sandbox_process::SandboxBackend;
 
     #[test]
     fn validate_runner_rejects_denied_paths() {
@@ -1674,7 +1581,7 @@ mod tests {
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         let err = runner
-            .validate_runner(&request)
+            .validate(&request)
             .expect_err("BaseContainer does not yet support deniedPaths");
         assert!(
             err.error_message.contains("deniedPaths"),
@@ -1690,7 +1597,7 @@ mod tests {
         request.policy.allowed_hosts = vec!["example.com".into()];
 
         let err = runner
-            .validate_runner(&request)
+            .validate(&request)
             .expect_err("allowedHosts is not yet supported");
         assert!(err.error_message.contains("allowedHosts"));
     }
@@ -1702,7 +1609,7 @@ mod tests {
         request.policy.blocked_hosts = vec!["bad.example.com".into()];
 
         let err = runner
-            .validate_runner(&request)
+            .validate(&request)
             .expect_err("blockedHosts is not yet supported");
         assert!(err.error_message.contains("blockedHosts"));
     }
@@ -1716,7 +1623,7 @@ mod tests {
         // the policy-field checks above don't fire. Skip when the host doesn't
         // expose the API.
         if BaseContainerRunner::is_base_container_api_present().is_ok() {
-            assert!(runner.validate_runner(&request).is_ok());
+            assert!(runner.validate(&request).is_ok());
         }
     }
 }

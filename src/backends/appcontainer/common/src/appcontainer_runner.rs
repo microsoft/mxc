@@ -40,9 +40,10 @@ use wxc_common::process_util::{
     SendOwnedHandle, SidAndAttributes,
 };
 use wxc_common::sandbox_process::{
-    join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxProcess, StreamingRunner,
+    join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxBackend, SandboxProcess,
+    StdioMode,
 };
-use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
+use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::{string_util, ui_policy};
 
 /// `UpdateProcThreadAttribute` value for
@@ -509,7 +510,7 @@ impl AppContainerScriptRunner {
         // child's output streams directly to the SDK in real time. Otherwise we use
         // console sharing (the ConPTY path).
         //
-        // When streaming (the `spawn_streaming` path) we always take the pipe
+        // In capture mode (`StdioMode::Pipes`) we always take the pipe
         // path — but instead of forwarding our own std handles we wire the
         // child to capture pipes that the streaming handle reads from.
         let pipe_mode =
@@ -926,14 +927,6 @@ impl AppContainerScriptRunner {
         }
         unsafe { string_util::sid_to_string(self.app_container_sid.0, "unknown-sid") }
     }
-
-    /// Execute the script inside the AppContainer, converting errors to ScriptResponse.
-    fn run_internal(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        match self.spawn_suspended(request, logger, false) {
-            Ok(child) => child.run_to_completion(),
-            Err(e) => ScriptResponse::error(&e.to_string()),
-        }
-    }
 }
 
 /// A sandboxed AppContainer child created **suspended** by
@@ -967,118 +960,11 @@ impl SpawnedChild {
         }
         Ok(())
     }
-
-    /// Wait for the child to exit (honouring `timeout_ms`, where `u32::MAX`
-    /// means infinite), terminating it on timeout. Returns the exit code (or
-    /// `-1` on wait/exit-code failure) and whether the wait timed out.
-    fn wait_exit(&self) -> (i32, bool) {
-        match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
-            WAIT_OBJECT_0 => {}
-            WAIT_TIMEOUT => {
-                // Tree-kill via the job so descendants die too; otherwise they
-                // keep the inherited pipe write-ends open and the capture
-                // reader threads block forever (timeout never enforced).
-                self.job.terminate(u32::MAX);
-                unsafe {
-                    let _ = WaitForSingleObject(self.process.get(), u32::MAX);
-                }
-                return (-1, true);
-            }
-            _ => return (-1, false),
-        }
-        let mut exit_code: u32 = 0;
-        if unsafe { GetExitCodeProcess(self.process.get(), &mut exit_code) }.is_err() {
-            return (-1, false);
-        }
-        (exit_code as i32, false)
-    }
-
-    /// Blocking run: resume, wait, and collect the exit code into a
-    /// [`ScriptResponse`]. stdout/stderr stream live to the inherited handles
-    /// (this path never captures), so they are left empty. `failure_phase` is
-    /// set by the caller (`execute`), which also adds exit diagnostics.
-    fn run_to_completion(self) -> ScriptResponse {
-        use wxc_common::models::FailurePhase;
-
-        if let Err(e) = self.resume() {
-            return ScriptResponse::error(&e.to_string());
-        }
-        let (exit_code, timed_out) = self.wait_exit();
-        let mut response = ScriptResponse {
-            exit_code,
-            ..Default::default()
-        };
-        if timed_out {
-            response.failure_phase = FailurePhase::Timeout;
-            response.error_message = format!("script timed out after {}ms", self.timeout_ms);
-        }
-        response
-    }
 }
 
 impl Default for AppContainerScriptRunner {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl ScriptRunner for AppContainerScriptRunner {
-    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
-            return Err(ScriptResponse::error(
-                wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
-            ));
-        }
-        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::error(
-                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
-            ));
-        }
-        Ok(())
-    }
-
-    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        use crate::launch_diagnostics::diagnose_process_exit;
-        use wxc_common::models::FailurePhase;
-
-        let mut prepared = match self.prepare(request, logger) {
-            Ok(p) => p,
-            Err(resp) => return resp,
-        };
-
-        let mut response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.run_internal(request, logger)
-        })) {
-            Ok(r) => r,
-            Err(_) => ScriptResponse::error("Unknown error during script execution."),
-        };
-
-        // Post-failure diagnostics: if the child failed, check for known
-        // environment issues and enrich the error message. A timeout is already
-        // classified by `run_to_completion`; don't relabel it as ProcessExited.
-        if response.exit_code != 0 && response.failure_phase != FailurePhase::Timeout {
-            response.failure_phase = FailurePhase::ProcessExited;
-            if let Some(diag) = diagnose_process_exit(
-                &request.script_code,
-                &request.policy.readonly_paths,
-                &request.policy.readwrite_paths,
-                response.exit_code as u32,
-            ) {
-                logger.log_line(&format!(
-                    "Error: Launch diagnostic [{}]: {}",
-                    diag.kind, diag.message
-                ));
-                if !response.error_message.is_empty() {
-                    response.extended_error = response.error_message.clone();
-                }
-                response.error_message = diag.message.clone();
-                response.standard_err.push_str(&diag.message);
-            }
-        }
-
-        self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
-
-        response
     }
 }
 
@@ -1140,9 +1026,8 @@ struct Prepared {
 
 impl AppContainerScriptRunner {
     /// Set up the AppContainer for a run: initialise the SID, configure BFS
-    /// filesystem policy, and start network enforcement. Shared by the
-    /// blocking [`ScriptRunner::execute`] and the streaming
-    /// [`StreamingRunner::spawn_streaming`] paths.
+    /// filesystem policy, and start network enforcement. Shared by both stdio
+    /// modes of [`SandboxBackend::spawn`].
     fn prepare(
         &mut self,
         request: &ExecutionRequest,
@@ -1243,21 +1128,38 @@ impl AppContainerScriptRunner {
     }
 }
 
-impl StreamingRunner for AppContainerScriptRunner {
-    fn spawn_streaming(
+impl SandboxBackend for AppContainerScriptRunner {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
+            return Err(ScriptResponse::error(
+                wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
+            return Err(ScriptResponse::error(
+                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        Ok(())
+    }
+
+    fn spawn(
         &mut self,
         request: &ExecutionRequest,
         logger: &mut Logger,
+        stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         use wxc_common::validator::validate_common;
 
         validate_common(request)?;
-        self.validate_runner(request)?;
+        self.validate(request)?;
 
         let mut prepared = self.prepare(request, logger)?;
 
-        // `capture = true` forces capture pipes (no console/pty path).
-        let child = match self.spawn_suspended(request, logger, true) {
+        // Pipes → capture pipes the caller drives; Inherit → the child inherits
+        // the binary's own std handles / console (a TTY when the binary has one).
+        let capture = stdio == StdioMode::Pipes;
+        let child = match self.spawn_suspended(request, logger, capture) {
             Ok(c) => c,
             Err(e) => {
                 self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
@@ -1275,6 +1177,16 @@ impl StreamingRunner for AppContainerScriptRunner {
             self.filesystem_mode,
             request,
         )))
+    }
+
+    fn diagnose_exit(&self, request: &ExecutionRequest, exit_code: i32) -> Option<String> {
+        crate::launch_diagnostics::diagnose_process_exit(
+            &request.script_code,
+            &request.policy.readonly_paths,
+            &request.policy.readwrite_paths,
+            exit_code as u32,
+        )
+        .map(|diag| diag.message)
     }
 }
 
@@ -1620,7 +1532,7 @@ mod tests {
 
     use super::{AppContainerScriptRunner, FilesystemMode};
     use wxc_common::models::ExecutionRequest;
-    use wxc_common::script_runner::ScriptRunner;
+    use wxc_common::sandbox_process::SandboxBackend;
 
     #[test]
     fn validate_runner_rejects_denied_paths_in_bfs_mode() {
@@ -1629,7 +1541,7 @@ mod tests {
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         let err = runner
-            .validate_runner(&request)
+            .validate(&request)
             .expect_err("BFS mode must reject deniedPaths");
         assert!(
             err.error_message.contains("deniedPaths"),
@@ -1645,7 +1557,7 @@ mod tests {
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         assert!(
-            runner.validate_runner(&request).is_ok(),
+            runner.validate(&request).is_ok(),
             "DACL mode supports deniedPaths and should not error"
         );
     }
@@ -1657,7 +1569,7 @@ mod tests {
         request.policy.allowed_hosts = vec!["example.com".into()];
 
         let err = runner
-            .validate_runner(&request)
+            .validate(&request)
             .expect_err("allowedHosts is not yet supported");
         assert!(err.error_message.contains("allowedHosts"));
     }
@@ -1669,7 +1581,7 @@ mod tests {
         request.policy.blocked_hosts = vec!["bad.example.com".into()];
 
         let err = runner
-            .validate_runner(&request)
+            .validate(&request)
             .expect_err("blockedHosts is not yet supported");
         assert!(err.error_message.contains("blockedHosts"));
     }
@@ -1678,6 +1590,6 @@ mod tests {
     fn validate_runner_accepts_empty_policy() {
         let runner = AppContainerScriptRunner::new();
         let request = ExecutionRequest::default();
-        assert!(runner.validate_runner(&request).is_ok());
+        assert!(runner.validate(&request).is_ok());
     }
 }

@@ -72,7 +72,7 @@ pub fn spawn_runner(
     }
 }
 
-/// Map a backend's `spawn_streaming` failure `ScriptResponse` to an
+/// Map a backend's `spawn` failure `ScriptResponse` to an
 /// [`MxcError`], preserving the `BackendUnavailable` phase (so callers can fall
 /// back to a lower tier) and folding any `extended_error` detail into the
 /// message — rather than flattening everything to a generic `BackendError`.
@@ -144,7 +144,7 @@ fn spawn_process_container(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     use appcontainer_common::appcontainer_runner::AppContainerScriptRunner;
     use wxc_common::config_parser::is_base_container_version;
-    use wxc_common::sandbox_process::StreamingRunner;
+    use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
 
     // The AppContainer fast path vs the native BaseContainer (OS sandbox API):
     // unlike the executor binaries' run-to-completion fallback, streaming does
@@ -166,13 +166,13 @@ fn spawn_process_container(
     if request.experimental_enabled || version_implies_base_container {
         let mut runner = appcontainer_common::base_container_runner::BaseContainerRunner::new();
         return runner
-            .spawn_streaming(request, logger)
+            .spawn(request, logger, StdioMode::Pipes)
             .map_err(map_spawn_error);
     }
 
     let mut runner = AppContainerScriptRunner::new();
     runner
-        .spawn_streaming(request, logger)
+        .spawn(request, logger, StdioMode::Pipes)
         .map_err(map_spawn_error)
 }
 
