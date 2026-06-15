@@ -1,25 +1,13 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-# Push trigger on `main` exists primarily to populate the Azure Pipelines
-# target-dir and CARGO_HOME cache scopes for the default branch. PR-triggered
-# runs are branch-scoped on writes and cannot populate `main`'s scope; they
-# can only *read* from it as a fallback. Without a `main` trigger, the
-# 1ES `cacheOptions.enableTargetCache: true` configuration in
-# `Rust.Build.Job.yml` runs every PR with a cold target dir — the
-# auto-generated wildcard restore key (visible in the `🎯 Cache target
-# directory` task log as `…|Rust=<ver>|**`) finds no prior entry in
-# main's scope, so each PR build does a fully cold cargo compile
-# (~14 min on x64 WXC).
+# Entry point for the unofficial (PR/CI validation) MXC build. Runs on pushes
+# to `main` and on PRs via the unsigned 1ES PipelineTemplate, delegating the
+# stage list to `1ES.Build.Stages.yml`.
 #
-# After this trigger is enabled, the first push to `main` populates the
-# cache; every subsequent PR's restore step finds it via that wildcard
-# fallback and the cargo build step drops to a few minutes.
-#
-# Docs-only commits to `main` don't need to rebuild the whole workspace,
-# so the path exclusion list here matches the one added to the `pr:`
-# trigger in PR #396 (kept in sync intentionally — if that PR lands and
-# the lists drift, reconcile them).
+# The `main` push trigger populates the Azure Pipelines target-dir and
+# CARGO_HOME cache scopes for the default branch so PR builds can read them
+# as a fallback; without it, every PR runs a cold cargo compile.
 trigger:
   branches:
     include:
@@ -43,10 +31,8 @@ pr:
     - main
     - feature/*
     - user/*
-  # Skip the full build pipeline when a PR only touches documentation /
-  # non-shipping content. Any change outside this exclusion list still
-  # triggers the pipeline as before. Keep this list conservative — exclude
-  # only paths that cannot possibly affect built artifacts or test behavior.
+  # Skip the pipeline for docs-only / non-shipping changes. Keep this list
+  # in sync with the `trigger:` exclusions above.
   paths:
     exclude:
     - 'docs/**'
@@ -66,42 +52,17 @@ resources:
     ref: refs/tags/release
 
 parameters:
-  - name: officialBuild
-    displayName: Build Official or Unofficial
-    type: string
-    default: Unofficial
-    values:
-      - Official
-      - Unofficial
-
   - name: debug
     displayName: Enable debug output for SDK tests
     type: boolean
     default: false
 
-  # Reused by Rust/Mac/NpmSdk templates. Values come from MXC-ESRP-Signing
-  # on Official runs; sign steps are gated, so missing values on Unofficial
-  # runs are harmless.
-  - name: ESRPInfo
-    type: object
-    default:
-      serviceName: $(serviceName)
-      tenantId: $(tenantId)
-      azureKeyVaultName: $(azureKeyVaultName)
-      authCertName: $(authCertName)
-      signCertName: $(signCertName)
-      clientId: $(clientId)
-
 variables:
-  # Prevents failure when no Rust tests are found; pipeline runs will still fail if present
-  # tests do not pass.
   - name: NEXTEST_NO_TESTS
     value: pass
-  - ${{ if eq(parameters.officialBuild, 'Official') }}:
-    - group: MXC-ESRP-Signing
 
 extends:
-  template: v1/1ES.${{parameters.officialBuild}}.PipelineTemplate.yml@1ESPipelineTemplates
+  template: v1/1ES.Unofficial.PipelineTemplate.yml@1ESPipelineTemplates
   parameters:
     pool:
       name: Azure-Pipelines-1ESPT-ExDShared
@@ -112,82 +73,7 @@ extends:
     - ES365AIMigrationTooling
 
     stages:
-    - stage: Build_Binaries
-      displayName: 'Build Executables'
-      jobs:
-
-        # Build Binaries for all targets in parallel
-        - template: .azure-pipelines/templates/Rust.Build.Job.yml@self
-          parameters:
-            isOfficialBuild: ${{ eq(parameters.officialBuild, 'Official') }}
-            matrix:
-              - name: windows_x64
-                os: windows
-                arch: x64
-                component: WXC
-              - name: windows_arm64
-                os: windows
-                arch: arm64
-                component: WXC
-              - name: linux_x64
-                os: linux
-                arch: x64
-                component: LXC
-              - name: linux_arm64
-                os: linux
-                arch: arm64
-                component: LXC
-
-            ESRPInfo: ${{ parameters.ESRPInfo }}
-
-        # macOS uses a separate template because it runs on a different
-        # pool (Microsoft-hosted). The produced artifact name follows the same
-        # scheme (mxc-binaries-<triplet>) so Package_MXC_NPM_SDK can consume it.
-        - template: .azure-pipelines/templates/Mac.Build.Job.yml@self
-          parameters:
-            isOfficialBuild: ${{ eq(parameters.officialBuild, 'Official') }}
-            ESRPInfo: ${{ parameters.ESRPInfo }}
-
-    - stage: Package_MXC
-      displayName: 'Package MXC'
-      dependsOn: Build_Binaries
-      jobs:
-      - template: .azure-pipelines/templates/Package.NpmSdk.Job.yml@self
-        parameters:
-          targets:
-            - artifact: wxc-binaries-x86_64-pc-windows-msvc
-              sdkArch: x64
-            - artifact: wxc-binaries-aarch64-pc-windows-msvc
-              sdkArch: arm64
-            - artifact: lxc-binaries-x86_64-unknown-linux-gnu
-              sdkArch: x64
-            - artifact: lxc-binaries-aarch64-unknown-linux-gnu
-              sdkArch: arm64
-            - artifact: mxc-binaries-aarch64-apple-darwin
-              sdkArch: arm64
-
-          ESRPInfo: ${{ parameters.ESRPInfo }}
-
-      - template: .azure-pipelines/templates/Mxc.Binary.Packaging.Job.yml@self
-
-    - stage: Lint
-      displayName: 'Lint'
-      dependsOn: []
-      jobs:
-      - template: .azure-pipelines/templates/Lint.Job.yml@self
-
-    - stage: SDK_Unit_Tests
-      displayName: 'SDK Unit Tests'
-      dependsOn: []
-      jobs:
-      - template: .azure-pipelines/templates/SDK.Unit.Test.Job.yml@self
-        parameters:
-          debug: ${{ parameters.debug }}
-
-    - stage: SDK_Integration_Tests
-      displayName: 'SDK Integration Tests'
-      dependsOn: Package_MXC
-      jobs:
-      - template: .azure-pipelines/templates/SDK.Integration.Test.Job.yml@self
-        parameters:
-          debug: ${{ parameters.debug }}
+    - template: templates/1ES.Build.Stages.yml@self
+      parameters:
+        isOfficialBuild: false
+        debug: ${{ parameters.debug }}

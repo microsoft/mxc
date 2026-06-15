@@ -33,6 +33,13 @@ steps:
   # blocks crates.io).
   - template: Cargo.Setup.Public.yml@self
 
+  # Pre-fetch deps via system git so build/test only do incremental downloads.
+  - script: cargo fetch --locked --target ${{ parameters.targetTriple }}
+    displayName: Fetch dependencies
+    workingDirectory: ${{ parameters.workingDirectory }}
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+
   - script: cargo build --locked --release --target ${{ parameters.targetTriple }} ${{ parameters.cargoArgs }}
     displayName: Build
     workingDirectory: ${{ parameters.workingDirectory }}

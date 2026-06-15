@@ -34,6 +34,26 @@ jobs:
     outputDirectory: $(Build.SourcesDirectory)/out
     artifactBaseName: mxc-binaries-$(targetTriple)
     workingDirectory: $(Build.SourcesDirectory)/src
+    configTomlPath: $(Build.SourcesDirectory)/.cargo/config.toml
+
+  ${{ if eq(parameters.isOfficialBuild, true) }}:
+    templateContext:
+      rust:
+        rustToolchain:
+          toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+          version: 'ms-prod-1.93'
+          additionalTargets: $(targetTriple)
+        workingDirectory: $(workingDirectory)
+        authenticateOptions:
+          configFile: $(configTomlPath)
+        installOptions:
+          configFile: $(configTomlPath)
+        cacheOptions:
+          enabled: true
+          enableTargetCache: true
+        setupOptions:
+          setupPython: true
+          pythonArtifactFeeds: Dart/Mxc-Azure-Feed
 
   steps:
     - checkout: self

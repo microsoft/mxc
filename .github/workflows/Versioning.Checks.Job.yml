@@ -1,0 +1,31 @@
+name: Versioning Checks
+
+on:
+  workflow_call:
+
+jobs:
+  versioning-checks:
+    name: Versioning Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check product version sync (Cargo == npm)
+        run: node scripts/check-version-sync.js
+
+      - name: Install tooling deps
+        working-directory: scripts/versioning
+        run: npm ci
+
+      - name: Check schema version sync
+        run: node scripts/versioning/check-schema-versions.js
+
+      - name: Check Rust toolchain sync (rust-toolchain.toml == ADO template)
+        run: node scripts/versioning/check-rust-toolchain-sync.js
+
+      - name: Validate config corpus against dev schema
+        run: node scripts/versioning/validate-configs.js

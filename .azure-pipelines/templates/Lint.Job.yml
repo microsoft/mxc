@@ -76,6 +76,13 @@ jobs:
         displayName: cargo fmt --check
         workingDirectory: $(workingDirectory)
 
+      # Pre-fetch deps via system git so clippy only does incremental downloads.
+      - script: cargo fetch --locked --target $(targetTriple)
+        displayName: Fetch dependencies
+        workingDirectory: $(workingDirectory)
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+
       - script: cargo clippy --target $(targetTriple) ${{ item.clippyArgs }} -- -D warnings
         displayName: cargo clippy
         workingDirectory: $(workingDirectory)

@@ -1,0 +1,62 @@
+# Entry point for GHA PR/CI validation. Mirrors the 1ES `1ES.Build.yml`
+# split: this file orchestrates, each stage lives in its own reusable.
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE.md'
+      - '.github/copilot-instructions.md'
+      - '.github/instructions/**'
+      - '**/*.md'
+      - '.editorconfig'
+  pull_request:
+    branches: [main, 'feature/*', 'user/*']
+    paths-ignore:
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE.md'
+      - '.github/copilot-instructions.md'
+      - '.github/instructions/**'
+      - '**/*.md'
+      - '.editorconfig'
+  workflow_call:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  versioning-checks:
+    uses: ./.github/workflows/Versioning.Checks.Job.yml
+
+  lint:
+    uses: ./.github/workflows/Lint.Job.yml
+
+  windows:
+    uses: ./.github/workflows/Build.Windows.Job.yml
+
+  linux:
+    uses: ./.github/workflows/Build.Linux.Job.yml
+
+  macos:
+    uses: ./.github/workflows/Build.MacOS.Job.yml
+
+  sdk-unit-tests:
+    uses: ./.github/workflows/SDK.Unit.Test.Job.yml
+
+  package-npm-sdk:
+    needs: [windows, linux, macos]
+    uses: ./.github/workflows/Package.NpmSdk.Job.yml
+
+  sdk-integration-tests:
+    needs: package-npm-sdk
+    uses: ./.github/workflows/SDK.Integration.Test.Job.yml
