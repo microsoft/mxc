@@ -199,7 +199,7 @@ pub enum StdioMode {
 /// drives the handle: stream it ([`StdioMode::Pipes`]) or just
 /// [`wait`](SandboxProcess::wait) ([`StdioMode::Inherit`]). The `mxc` library
 /// calls this directly with [`StdioMode::Pipes`]; the CLI executor binaries
-/// reach it through the [`RtcRunner`] bridge.
+/// reach it through the [`Runner`] bridge.
 pub trait SandboxBackend {
     /// Backend-specific validation, run before [`spawn`](SandboxBackend::spawn)
     /// and on dry-run. Override to reject unsupported policies; default accepts.
@@ -239,16 +239,16 @@ pub trait SandboxBackend {
 ///
 /// This is the *only* run-to-completion logic for these backends; the backends
 /// themselves expose just [`SandboxBackend::spawn`].
-pub struct RtcRunner<B>(pub B);
+pub struct Runner<B>(pub B);
 
-impl<B> RtcRunner<B> {
+impl<B> Runner<B> {
     /// Wrap a [`SandboxBackend`] so it can be dispatched as a [`ScriptRunner`].
     pub fn new(backend: B) -> Self {
         Self(backend)
     }
 }
 
-impl<B: SandboxBackend> ScriptRunner for RtcRunner<B> {
+impl<B: SandboxBackend> ScriptRunner for Runner<B> {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         self.0.validate(request)
     }
