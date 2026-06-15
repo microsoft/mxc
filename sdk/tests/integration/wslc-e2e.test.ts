@@ -16,6 +16,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import os from 'os';
 import { ChildProcess } from 'child_process';
@@ -24,6 +25,23 @@ import { sdk } from './test-helpers.js';
 // WSLC tests require a Windows machine with WSL2 and WSLC SDK installed.
 // Opt-in via MXC_ENABLE_WSLC_TESTS=1 since most CI agents lack the runtime.
 const isWslcAvailable = os.platform() === 'win32' && process.env.MXC_ENABLE_WSLC_TESTS === '1';
+
+// Probe a small range of host ports and return the first one we can
+// successfully bind to. Avoids both the fixed-port collision risk (any
+// other process on the dev box / runner may already own a hard-coded
+// port) AND the TOCTOU race that `listen(0) → close → reuse` would
+// introduce. Throws if every candidate in the range is busy.
+async function pickAvailableHostPort(start = 40000, end = 40099): Promise<number> {
+  for (let port = start; port <= end; port++) {
+    const ok = await new Promise<boolean>((resolve) => {
+      const srv = net.createServer();
+      srv.once('error', () => resolve(false));
+      srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
+    });
+    if (ok) return port;
+  }
+  throw new Error(`pickAvailableHostPort: no free port in [${start}, ${end}]`);
+}
 
 describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
   skip: !isWslcAvailable ? 'WSLC tests require MXC_ENABLE_WSLC_TESTS=1 on Windows with WSL2 and WSLC SDK' : undefined,
@@ -82,7 +100,10 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
 
   it('should forward a TCP port from host to container', { timeout: 120_000 }, async () => {
     const http = await import('node:http');
-    const HOST_PORT = 38080;
+    // Pick an available host port to avoid collisions on busy dev/CI hosts.
+    // The container port can stay fixed because the container's network
+    // namespace is isolated from the host.
+    const HOST_PORT = await pickAvailableHostPort();
     const CONTAINER_PORT = 8080;
 
     const policy = {
@@ -184,7 +205,9 @@ srv.handle_request()
     // WSLC SDK 2.8.1 declares WSLC_PORT_PROTOCOL_UDP in its header but its
     // runtime returns E_NOTIMPL (0x80004001) when UDP is actually requested.
     // The parser rejects UDP up front so SDK consumers get a clear error at
-    // spawn time rather than a cryptic HRESULT at container-create time.
+    // spawn time rather than a cryptic HRESULT at container-create time. The
+    // SDK type narrows `protocol` to `'tcp'`, so a cast is required here to
+    // exercise the parser path that rejects an out-of-type value at runtime.
     const policy = {
       version: '0.5.0-alpha',
       network: { allowOutbound: true },
@@ -194,7 +217,7 @@ srv.handle_request()
     config.process!.commandLine = 'echo unreachable';
     config.experimental!.wslc!.image = 'python:3.12-alpine';
     config.experimental!.wslc!.portMappings = [
-      { windowsPort: 39000, containerPort: 9000, protocol: 'udp' },
+      { windowsPort: 39000, containerPort: 9000, protocol: 'udp' as unknown as 'tcp' },
     ];
 
     const { exitCode, combined } = await new Promise<{ exitCode: number; combined: string }>((resolve, reject) => {

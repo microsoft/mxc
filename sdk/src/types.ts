@@ -250,7 +250,7 @@ export interface PortMapping {
    * (Microsoft.WSL.Containers 2.8.1) returns `E_NOTIMPL` for UDP even
    * though the header declares it. Defaults to `"tcp"` when omitted.
    */
-  protocol?: string;
+  protocol?: 'tcp';
 }
 
 /**
