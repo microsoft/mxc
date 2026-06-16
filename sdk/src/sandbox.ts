@@ -258,6 +258,14 @@ export function createConfigFromPolicy(
         },
     };
 
+    // captureDenials maps straight through to the top-level
+    // ContainerConfig field — the wire format and the SandboxPolicy
+    // both use the same name. No-op on platforms where the native
+    // binary can't honor it (Linux/macOS); the Rust side validates.
+    if (policy.captureDenials) {
+        config.captureDenials = true;
+    }
+
     // Microvm: delegate to dedicated builder
     if (containment === 'microvm') {
         diagLog(`createConfigFromPolicy: containment=microvm, id=${containerId}`);

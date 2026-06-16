@@ -281,6 +281,26 @@ export interface ContainerConfig {
   seatbelt?: SeatbeltConfig;
   /** Cross-platform UI configuration */
   ui?: UiConfig;
+
+  /**
+   * When true, the native binary attaches a per-process ETW collector
+   * to capture filesystem/registry access denials and streams them
+   * back on stderr as NDJSON lines (each prefixed with ASCII Record
+   * Separator, 0x1E) so the SDK can react to denials mid-run. The
+   * final summary line is also delivered through
+   * `ScriptResponse.deniedResources`.
+   *
+   * Windows only. Requires the `MxcDenialShim` service to be
+   * installed and running on the host (see
+   * `wxc-host-prep install-denial-shim`). On unsupported platforms or
+   * when the shim isn't reachable the flag is a no-op — the workload
+   * still runs, but no denials are captured.
+   *
+   * Default: false.
+   *
+   * See {@link parseDenialStream} for consuming the streamed output.
+   */
+  captureDenials?: boolean;
 }
 
 /**
@@ -331,6 +351,24 @@ export type SandboxPolicy = {
   };
   /** Execution timeout in milliseconds. Omitted = no timeout. */
   timeoutMs?: number;
+
+  /**
+   * When true, the native binary captures filesystem/registry access
+   * denials made by the sandboxed process and surfaces them through
+   * stderr (as a streamed NDJSON protocol) and through
+   * `ScriptResponse.deniedResources`. Use this to drive
+   * "ask the user to grant access and retry" UX flows on top of
+   * a default-deny policy.
+   *
+   * Windows only; requires the `MxcDenialShim` service on the host.
+   * On unsupported platforms or when the shim isn't reachable the
+   * flag is a no-op — the workload still runs, just without
+   * denial capture. Default: false.
+   *
+   * Note: capture is filesystem/registry only today. Network/WFP
+   * denials are intentionally out of scope for this iteration.
+   */
+  captureDenials?: boolean;
 }
 
 /**

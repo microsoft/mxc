@@ -54,6 +54,21 @@ export {
   SandboxSpawnOptions,
 } from './sandbox.js';
 
+// Export captureDenials streaming consumer
+export {
+  DENIAL_STREAM_MARKER,
+  DenialAccessType,
+  DenialResourceType,
+  DeniedResource,
+  DenialStreamSummary,
+  DenialFilter,
+  defaultDenialFilters,
+  stripNtPrefix,
+  DenialStreamResult,
+  ParseDenialStreamOptions,
+  parseDenialStream,
+} from './denial-stream.js';
+
 // Export policy discovery functions
 export {
   getAvailableToolsPolicy,
