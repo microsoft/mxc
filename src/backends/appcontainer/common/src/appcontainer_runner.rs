@@ -935,31 +935,44 @@ impl AppContainerScriptRunner {
         // exited so we capture everything the kernel emitted; doing it
         // before exit risks missing trailing events that haven't crossed
         // the user-mode boundary yet.
-        let (denied_resources, denied_resources_truncated) = if let Some(c) = collector {
-            let (events, truncated) = c.stop_and_drain();
-            logger.log_line(&format!(
-                "captureDenials: drained {} events (truncated={})",
-                events.len(),
-                truncated
-            ));
-            let resources: Vec<denial_capture::DeniedResource> =
-                events.into_iter().map(Into::into).collect();
-            (resources, truncated)
-        } else {
-            (Vec::new(), false)
-        };
+        let (denied_resources, denied_resources_truncated, raw_event_count) =
+            if let Some(c) = collector {
+                let (events, truncated) = c.stop_and_drain();
+                let raw_count = events.len();
+                logger.log_line(&format!(
+                    "captureDenials: drained {} events (truncated={})",
+                    raw_count, truncated
+                ));
+                // Dedupe by (path, accessType) — same key as the
+                // stream writer — so the field returned to the SDK
+                // matches what was streamed and `totalDenials` lines
+                // up across both. We pass the raw count into the
+                // summary separately for diagnostics.
+                let mut seen: std::collections::HashSet<(String, denial_capture::AccessType)> =
+                    std::collections::HashSet::new();
+                let resources: Vec<denial_capture::DeniedResource> = events
+                    .into_iter()
+                    .map(denial_capture::DeniedResource::from)
+                    .filter(|r| seen.insert((r.path.clone(), r.access_type)))
+                    .collect();
+                (resources, truncated, raw_count)
+            } else {
+                (Vec::new(), false, 0)
+            };
 
         // The collector dropped above closes the stream channel (it
         // owned the sender). Join the writer thread so per-event
         // NDJSON lines finish flushing before the summary marker.
-        if let Some(handle) = stream_writer {
-            let _ = handle.join();
-        }
+        // The writer returns the count of unique pairs it streamed.
+        let streamed_unique = stream_writer
+            .and_then(|h| h.join().ok())
+            .unwrap_or(denied_resources.len());
 
         // Emit the terminator marker for the captureDenials stream.
         emit_denial_summary_line(
             exit_code as i32,
-            denied_resources.len(),
+            streamed_unique,
+            raw_event_count,
             denied_resources_truncated,
         );
 

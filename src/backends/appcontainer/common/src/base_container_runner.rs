@@ -1146,33 +1146,48 @@ impl ScriptRunner for BaseContainerRunner {
         // DenialEvent -> public DeniedResource. Done after the child has
         // exited so trailing events that the kernel emits during process
         // teardown still get captured.
-        let (denied_resources, denied_resources_truncated) = if let Some(c) = collector {
-            let (events, truncated) = c.stop_and_drain();
-            let _ = writeln!(
-                logger,
-                "captureDenials: drained {} events (truncated={})",
-                events.len(),
-                truncated
-            );
-            (events.into_iter().map(Into::into).collect(), truncated)
-        } else {
-            (Vec::new(), false)
-        };
+        let (denied_resources, denied_resources_truncated, raw_event_count) =
+            if let Some(c) = collector {
+                let (events, truncated) = c.stop_and_drain();
+                let raw_count = events.len();
+                let _ = writeln!(
+                    logger,
+                    "captureDenials: drained {} events (truncated={})",
+                    raw_count, truncated
+                );
+                // Dedupe by (path, accessType) — same key as the
+                // stream writer — so the field returned to the SDK
+                // matches what was streamed and `totalDenials` lines
+                // up across both. The raw count goes into the
+                // summary line separately for diagnostics.
+                let mut seen: std::collections::HashSet<(String, denial_capture::AccessType)> =
+                    std::collections::HashSet::new();
+                let resources: Vec<denial_capture::DeniedResource> = events
+                    .into_iter()
+                    .map(denial_capture::DeniedResource::from)
+                    .filter(|r| seen.insert((r.path.clone(), r.access_type)))
+                    .collect();
+                (resources, truncated, raw_count)
+            } else {
+                (Vec::new(), false, 0)
+            };
 
         // The stream writer's mpsc channel is now closed (we dropped
         // the sender when `collector` was consumed above). Join the
         // writer thread so the per-event NDJSON lines finish flushing
-        // before we emit the summary marker.
-        if let Some(handle) = stream_writer {
-            let _ = handle.join();
-        }
+        // before we emit the summary marker. The writer returns the
+        // count of unique pairs it actually streamed.
+        let streamed_unique = stream_writer
+            .and_then(|h| h.join().ok())
+            .unwrap_or(denied_resources.len());
 
         // Emit the streaming-protocol summary line on stderr. SDK
         // consumers use this as the terminator marker for the
         // captureDenials stream of a given wxc-exec invocation.
         emit_denial_summary_line(
             exit_code as i32,
-            denied_resources.len(),
+            streamed_unique,
+            raw_event_count,
             denied_resources_truncated,
         );
 
