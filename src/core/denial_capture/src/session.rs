@@ -376,10 +376,14 @@ pub fn open_via_shim(
         .map_err(SessionError::PipeWrite)?;
     pipe.flush().map_err(SessionError::PipeWrite)?;
 
-    // Read until EOF (shim disconnects after writing the response).
-    let mut response_bytes = Vec::with_capacity(512);
-    pipe.read_to_end(&mut response_bytes)
-        .map_err(SessionError::PipeRead)?;
+    // The shim writes its response and immediately disconnects. The
+    // Win32 error codes for "the other end closed cleanly after
+    // sending data" are ERROR_BROKEN_PIPE (109) and
+    // ERROR_NO_PROCESS_IS_ON_OTHER_END_OF_THE_PIPE (233). std's
+    // `read_to_end` surfaces both as errors and discards any bytes
+    // read in that call, so we hand-roll a tolerant drain loop:
+    // accept bytes already in the buffer, treat 109/233 as EOF.
+    let response_bytes = read_until_eof_or_disconnect(&mut pipe)?;
 
     if response_bytes.is_empty() {
         return Err(SessionError::EmptyResponse);
@@ -416,6 +420,36 @@ fn open_pipe_with_retry(path: &str) -> Result<std::fs::File, SessionError> {
                 thread::sleep(Duration::from_millis(20));
             }
             Err(e) => return Err(SessionError::PipeConnect(path.to_string(), e)),
+        }
+    }
+}
+
+/// `ERROR_BROKEN_PIPE` and `ERROR_NO_PROCESS_IS_ON_OTHER_END_OF_THE_PIPE`.
+/// Both indicate the server side closed cleanly; for a one-shot RPC
+/// that's the expected post-response state and shouldn't be a failure.
+const ERROR_BROKEN_PIPE: i32 = 109;
+const ERROR_NO_PROCESS_IS_ON_PIPE: i32 = 233;
+
+/// Drains `pipe` until EOF or a clean-disconnect error code. Returns
+/// the bytes successfully read so far; only propagates errors that are
+/// *not* the server-side-closed-cleanly codes.
+fn read_until_eof_or_disconnect(pipe: &mut std::fs::File) -> Result<Vec<u8>, SessionError> {
+    let mut buf = Vec::with_capacity(512);
+    let mut chunk = [0u8; 1024];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => return Ok(buf),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) => {
+                let code = e.raw_os_error();
+                if matches!(
+                    code,
+                    Some(ERROR_BROKEN_PIPE) | Some(ERROR_NO_PROCESS_IS_ON_PIPE)
+                ) {
+                    return Ok(buf);
+                }
+                return Err(SessionError::PipeRead(e));
+            }
         }
     }
 }

@@ -25,6 +25,7 @@ members = [
     "host/wxc_host_prep",
     "host/wxc_winhttp_proxy_shim",
     "host/mxc_denial_shim",
+    "tools/denial_capture_test",
     "testing/wxc_e2e_tests",
     "testing/wxc_test_driver",
     "testing/wxc_test_proxy",

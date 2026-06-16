@@ -1,0 +1,20 @@
+[package]
+name = "denial_capture_test"
+version.workspace = true
+edition.workspace = true
+
+# End-to-end smoke harness for the per-PID denial-capture client.
+# Exercises `denial_capture::session::open_via_shim` +
+# `start_collector` + `stop_and_drain` against a running
+# `mxc-denial-shim` service. Standalone bin so it can be deployed
+# alongside the shim on a test VM without dragging in the rest of
+# the workspace.
+
+[[bin]]
+name = "denial-capture-test"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+denial_capture = { path = "../../core/denial_capture" }
+serde_json = { workspace = true }
+clap = { workspace = true }
