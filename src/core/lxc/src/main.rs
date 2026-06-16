@@ -8,8 +8,9 @@ use std::time::Instant;
 use clap::Parser;
 use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+use wxc_common::models::{ContainmentBackend, ExecutionRequest, FailurePhase, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use wxc_common::telemetry;
 
 #[cfg(target_os = "linux")]
 use bwrap_common::bwrap_runner::BubblewrapScriptRunner;
@@ -215,6 +216,18 @@ fn main() {
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
+    // ── Telemetry init (experimental) ───────────────────────────────
+    let telemetry_active = if request.experimental_enabled {
+        request
+            .experimental
+            .telemetry
+            .as_ref()
+            .map(telemetry::init)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
     log_request(&request, &mut logger);
 
     // Dispatch by containment backend. On Linux, Bubblewrap is now the
@@ -297,6 +310,62 @@ fn main() {
     }
 
     display_script_results(&response, &mut logger);
+
+    // ── Telemetry emit (experimental) ───────────────────────────────
+    if telemetry_active {
+        let backend_str = match request.containment {
+            ContainmentBackend::ProcessContainer => "processcontainer",
+            ContainmentBackend::Lxc => "lxc",
+            ContainmentBackend::MicroVm => "microvm",
+            ContainmentBackend::Wslc => "wslc",
+            ContainmentBackend::WindowsSandbox => "windows_sandbox",
+            ContainmentBackend::IsolationSession => "isolation_session",
+            ContainmentBackend::Seatbelt => "seatbelt",
+            ContainmentBackend::Bubblewrap => "bubblewrap",
+            ContainmentBackend::Hyperlight => "hyperlight",
+            ContainmentBackend::Vm => "vm",
+        };
+        let outcome = if response.exit_code == 0 {
+            "success"
+        } else {
+            "failure"
+        };
+        let failure_reason = if response.exit_code != 0 {
+            Some(match response.failure_phase {
+                FailurePhase::LaunchFailed | FailurePhase::BackendUnavailable => {
+                    telemetry::FailureReason::InitError
+                }
+                FailurePhase::ProcessExited | FailurePhase::None => {
+                    telemetry::FailureReason::ProcessError
+                }
+            })
+        } else {
+            None
+        };
+
+        let elapsed_ms = run_elapsed.as_millis() as u64;
+        telemetry::log_execution(&telemetry::ExecutionEvent {
+            backend: backend_str,
+            exit_code: response.exit_code,
+            outcome,
+            duration_ms: elapsed_ms,
+            failure_reason,
+        });
+
+        if response.exit_code != 0 && !response.error_message.is_empty() {
+            let error_reason = match response.failure_phase {
+                FailurePhase::LaunchFailed | FailurePhase::BackendUnavailable => {
+                    telemetry::FailureReason::InitError
+                }
+                FailurePhase::ProcessExited | FailurePhase::None => {
+                    telemetry::FailureReason::ProcessError
+                }
+            };
+            telemetry::log_error(backend_str, error_reason, &response.error_message);
+        }
+
+        telemetry::shutdown();
+    }
 
     print!("{}", response.standard_out);
     eprint!("{}", response.standard_err);
