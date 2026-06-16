@@ -154,18 +154,23 @@ fn build_explicit_entries(
         .collect();
 
     if let Some(addr) = proxy_address {
-        // Strip existing proxy vars before injecting ours.
-        entries.retain(|(key, _)| {
-            !PROXY_VAR_NAMES
-                .iter()
-                .any(|name| key.eq_ignore_ascii_case(name))
-        });
-        let proxy_url = addr.to_url();
-        entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
-        entries.push(("HTTPS_PROXY".to_string(), proxy_url));
+        inject_proxy_vars(&mut entries, addr);
     }
 
     entries
+}
+
+/// Strip any pre-existing proxy env vars from `entries`, then inject the
+/// configured proxy as `HTTP_PROXY` / `HTTPS_PROXY`.
+fn inject_proxy_vars(entries: &mut Vec<(String, String)>, addr: &wxc_common::models::ProxyAddress) {
+    entries.retain(|(key, _)| {
+        !PROXY_VAR_NAMES
+            .iter()
+            .any(|name| key.eq_ignore_ascii_case(name))
+    });
+    let proxy_url = addr.to_url();
+    entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
+    entries.push(("HTTPS_PROXY".to_string(), proxy_url));
 }
 
 /// RAII guard that frees capability SID pointers via `LocalFree` on drop.
@@ -783,16 +788,7 @@ impl AppContainerScriptRunner {
             // Get clean default user env without inheriting process env vars.
             let mut entries = create_default_env_entries()?;
             if let Some(addr) = self.proxy_address.as_ref() {
-                // Strip any pre-existing proxy vars from the default block
-                // and inject our configured proxy.
-                entries.retain(|(key, _)| {
-                    !PROXY_VAR_NAMES
-                        .iter()
-                        .any(|name| key.eq_ignore_ascii_case(name))
-                });
-                let proxy_url = addr.to_url();
-                entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
-                entries.push(("HTTPS_PROXY".to_string(), proxy_url));
+                inject_proxy_vars(&mut entries, addr);
             }
             encode_env_block(&entries)
         };

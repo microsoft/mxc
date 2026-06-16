@@ -109,7 +109,7 @@ const SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX: u64 = 0x0000_0000_0000_0001;
 
 /// True when a Win32 error code signals the BaseContainer feature is not
 /// enabled on this build (symbol present, capability gated off).
-pub(crate) fn is_api_not_implemented(err: u32) -> bool {
+fn is_api_not_implemented(err: u32) -> bool {
     err == ERROR_CALL_NOT_IMPLEMENTED.0 || err == E_NOTIMPL.0 as u32
 }
 
