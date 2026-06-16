@@ -30,6 +30,7 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
+use crate::denial_stream::{emit_denial_summary_line, stream_denials_to_stderr};
 use crate::launch_diagnostics::{
     diagnose_create_process_failure, diagnose_environment_not_supported, diagnose_process_exit,
     is_environment_not_supported,
@@ -994,9 +995,20 @@ impl ScriptRunner for BaseContainerRunner {
         // start the consumer thread, then resume. Failures here are
         // non-fatal -- the child still runs, just without capture. Logged
         // so the operator can see when capture degraded.
-        let collector = if request.capture_denials {
-            match denial_capture::session::open_via_shim(pi.dwProcessId, None) {
-                Ok(session) => match session.start_collector() {
+        //
+        // Streaming: when capture is on we also spawn a small writer
+        // thread that emits each captured denial to stderr as NDJSON
+        // prefixed with ASCII RS (0x1E). SDK callers split stderr on
+        // 0x1E and parse each segment as JSON, enabling mid-run prompts.
+        let (collector, stream_writer) = if request.capture_denials {
+            let (tx, rx) = std::sync::mpsc::channel::<denial_capture::DeniedResource>();
+            let writer = std::thread::Builder::new()
+                .name("denial-stream-writer".to_string())
+                .spawn(move || stream_denials_to_stderr(rx))
+                .ok();
+
+            let collector = match denial_capture::session::open_via_shim(pi.dwProcessId, None) {
+                Ok(session) => match session.start_collector_with_stream(Some(tx)) {
                     Ok(c) => {
                         let _ = writeln!(
                             logger,
@@ -1022,9 +1034,10 @@ impl ScriptRunner for BaseContainerRunner {
                     );
                     None
                 }
-            }
+            };
+            (collector, writer)
         } else {
-            None
+            (None, None)
         };
 
         if request.capture_denials {
@@ -1145,6 +1158,23 @@ impl ScriptRunner for BaseContainerRunner {
         } else {
             (Vec::new(), false)
         };
+
+        // The stream writer's mpsc channel is now closed (we dropped
+        // the sender when `collector` was consumed above). Join the
+        // writer thread so the per-event NDJSON lines finish flushing
+        // before we emit the summary marker.
+        if let Some(handle) = stream_writer {
+            let _ = handle.join();
+        }
+
+        // Emit the streaming-protocol summary line on stderr. SDK
+        // consumers use this as the terminator marker for the
+        // captureDenials stream of a given wxc-exec invocation.
+        emit_denial_summary_line(
+            exit_code as i32,
+            denied_resources.len(),
+            denied_resources_truncated,
+        );
 
         ScriptResponse {
             exit_code: exit_code as i32,

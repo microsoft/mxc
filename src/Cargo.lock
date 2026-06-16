@@ -97,6 +97,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "appcontainer_common"
 version = "0.6.1"
 dependencies = [
+ "denial_capture",
  "flatbuffers",
  "getrandom 0.2.17",
  "sandbox_spec",
@@ -475,6 +476,15 @@ dependencies = [
  "serde_json",
  "thiserror",
  "windows",
+]
+
+[[package]]
+name = "denial_capture_test"
+version = "0.6.1"
+dependencies = [
+ "clap",
+ "denial_capture",
+ "serde_json",
 ]
 
 [[package]]
@@ -2901,6 +2911,7 @@ name = "wxc_common"
 version = "0.6.1"
 dependencies = [
  "base64",
+ "denial_capture",
  "getrandom 0.2.17",
  "libc",
  "nanvix_common",

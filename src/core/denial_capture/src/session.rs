@@ -60,6 +60,13 @@ struct CallbackContext {
     target_pid: u32,
     events: Mutex<Vec<DenialEvent>>,
     truncated: AtomicBool,
+    /// Optional sender: when set, the callback also pushes a public
+    /// `DeniedResource` view of each captured event into this channel so
+    /// a consumer thread (e.g. the runner's stderr NDJSON writer) can
+    /// stream events to the caller in real time. `try_send` semantics --
+    /// a backed-up channel drops events rather than blocking the
+    /// callback (which would back-pressure ETW itself).
+    event_stream: Option<std::sync::mpsc::Sender<crate::model::DeniedResource>>,
 }
 
 /// Owns a running ETW consumer. Returned by
@@ -218,12 +225,27 @@ impl ScopedTraceSession {
     /// Returns a `CollectorHandle`. Call `stop_and_drain` on it when
     /// the workload exits to retrieve the captured events.
     pub fn start_collector(&self) -> Result<CollectorHandle, SessionError> {
+        self.start_collector_with_stream(None)
+    }
+
+    /// Like `start_collector` but additionally sends each captured
+    /// `DeniedResource` into the provided channel as it arrives. The
+    /// caller is responsible for running a consumer that reads the
+    /// `Receiver` end. When the returned `CollectorHandle` is dropped
+    /// (or `stop_and_drain` is called) the sender is dropped and the
+    /// consumer's `recv()` returns `Err` -- the consumer should exit
+    /// its loop on that signal.
+    pub fn start_collector_with_stream(
+        &self,
+        event_stream: Option<std::sync::mpsc::Sender<crate::model::DeniedResource>>,
+    ) -> Result<CollectorHandle, SessionError> {
         // Allocate the callback context. It MUST outlive all callbacks,
         // so we Box it and hand its raw pointer to ETW.
         let context = Box::new(CallbackContext {
             target_pid: self.target_pid,
             events: Mutex::new(Vec::new()),
             truncated: AtomicBool::new(false),
+            event_stream,
         });
         let context_ptr: *mut CallbackContext = Box::as_ref(&context) as *const _ as *mut _;
 
@@ -343,7 +365,16 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
         context.truncated.store(true, Ordering::SeqCst);
         return;
     }
-    events.push(denial);
+    events.push(denial.clone());
+    drop(events); // release the lock before the stream send
+
+    // Stream the public-form view to the caller's consumer thread,
+    // if one is attached. `send` returns `Err` only when the receiver
+    // is dropped -- we just discard those, since the consumer
+    // exiting cleanly is the normal teardown path.
+    if let Some(ref tx) = context.event_stream {
+        let _ = tx.send(denial.into_resource());
+    }
 }
 
 /// Opens a privileged ETW session via the `mxc-denial-shim` service.

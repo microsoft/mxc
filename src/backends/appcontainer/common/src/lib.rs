@@ -22,6 +22,8 @@ pub mod appcontainer_runner;
 #[cfg(target_os = "windows")]
 pub mod base_container_runner;
 #[cfg(target_os = "windows")]
+mod denial_stream;
+#[cfg(target_os = "windows")]
 pub mod dispatcher;
 #[cfg(target_os = "windows")]
 pub mod fallback_detector;

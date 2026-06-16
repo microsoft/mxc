@@ -30,6 +30,7 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::{PCWSTR, PWSTR};
 
+use crate::denial_stream::{emit_denial_summary_line, stream_denials_to_stderr};
 use crate::job_object::UiJobObject;
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
@@ -842,9 +843,21 @@ impl AppContainerScriptRunner {
         // logged but non-fatal -- the child still runs, just without
         // denial capture (this is the right call for a prototype: the
         // workload's primary purpose wins over the diagnostic add-on).
-        let collector = if request.capture_denials {
-            match denial_capture::session::open_via_shim(pi.dwProcessId, None) {
-                Ok(session) => match session.start_collector() {
+        // captureDenials streaming wiring (mirrors base_container_runner):
+        // an mpsc channel carries DeniedResource items from the ETW
+        // callback thread to a dedicated writer thread that emits each
+        // captured denial to stderr as NDJSON prefixed with ASCII RS
+        // (0x1E). SDK callers split stderr on 0x1E and parse each
+        // segment as JSON, enabling mid-run prompts.
+        let (collector, stream_writer) = if request.capture_denials {
+            let (tx, rx) = std::sync::mpsc::channel::<denial_capture::DeniedResource>();
+            let writer = std::thread::Builder::new()
+                .name("denial-stream-writer".to_string())
+                .spawn(move || stream_denials_to_stderr(rx))
+                .ok();
+
+            let collector = match denial_capture::session::open_via_shim(pi.dwProcessId, None) {
+                Ok(session) => match session.start_collector_with_stream(Some(tx)) {
                     Ok(c) => {
                         logger.log_line(&format!(
                             "captureDenials: ETW collector attached to PID {} via session {}",
@@ -867,9 +880,10 @@ impl AppContainerScriptRunner {
                     ));
                     None
                 }
-            }
+            };
+            (collector, writer)
         } else {
-            None
+            (None, None)
         };
 
         // Resume the child now that UI restrictions are in place.
@@ -928,10 +942,26 @@ impl AppContainerScriptRunner {
                 events.len(),
                 truncated
             ));
-            (events.into_iter().map(Into::into).collect(), truncated)
+            let resources: Vec<denial_capture::DeniedResource> =
+                events.into_iter().map(Into::into).collect();
+            (resources, truncated)
         } else {
             (Vec::new(), false)
         };
+
+        // The collector dropped above closes the stream channel (it
+        // owned the sender). Join the writer thread so per-event
+        // NDJSON lines finish flushing before the summary marker.
+        if let Some(handle) = stream_writer {
+            let _ = handle.join();
+        }
+
+        // Emit the terminator marker for the captureDenials stream.
+        emit_denial_summary_line(
+            exit_code as i32,
+            denied_resources.len(),
+            denied_resources_truncated,
+        );
 
         Ok(ScriptResponse {
             exit_code: exit_code as i32,
