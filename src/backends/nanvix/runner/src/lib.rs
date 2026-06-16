@@ -107,8 +107,28 @@ const ERR_HOSTS_UNRESOLVED: &str = concat!(
     "none of the specified allowedHosts/blockedHosts resolved to an IPv4 address -- ",
     "the NanVix guest filter is IPv4-only; use IPv4 literals/CIDR or hosts with A records",
 );
+const ERR_BLOCKED_HOST_UNRESOLVED: &str = concat!(
+    "a blockedHosts entry did not resolve to any IPv4 address -- ",
+    "the NanVix guest egress filter is static (resolved once at preflight) and IPv4-only, ",
+    "so an unresolvable blocked host cannot be enforced. Silently dropping it would let ",
+    "traffic the policy explicitly blocks flow freely, so the run is rejected (fail-closed). ",
+    "Use an IPv4 literal/CIDR or a host with A records",
+);
 const ERR_PROXY_POLICY: &str = "network proxy is not supported by the NanVix backend";
 const ERR_WORKDIR: &str = "workingDirectory is not supported by the NanVix backend -- guest has its own filesystem namespace";
+
+/// Outcome of resolving a request's egress host lists.
+///
+/// `allow`/`block` are the IPv4/CIDR literals handed to nanvixd; at most one is
+/// non-empty. `warnings` carries human-readable notices for allowlist entries
+/// that were dropped during resolution (blocklist drops are a hard error and
+/// never reach here).
+#[derive(Debug)]
+struct ResolvedHostLists {
+    allow: Vec<String>,
+    block: Vec<String>,
+    warnings: Vec<String>,
+}
 
 /// Maps a finished child's [`ExitStatus`] to a host-visible exit code.
 ///
@@ -512,22 +532,30 @@ impl NanVixScriptRunner {
     }
 
     /// Resolves a host entry list into IPv4/CIDR literals for nanvixd's
-    /// `-allow-host`/`-block-host` flags.
+    /// `-allow-host`/`-block-host` flags, alongside the entries that resolved
+    /// to nothing.
     ///
     /// - `a.b.c.d` and `a.b.c.d/n` literals pass through unchanged.
     /// - Hostnames resolve to their IPv4 (A-record) addresses; AAAA results are
     ///   dropped because the guest filter is IPv4-only.
-    /// - Entries that fail to parse or resolve contribute nothing.
+    /// - Entries that fail to parse or resolve to any IPv4 address contribute
+    ///   nothing to the resolved list and are collected into the second return
+    ///   value so callers can warn (allowlist) or reject (blocklist).
     ///
-    /// Mirrors `lxc::network_iptables::resolve_host` for hostname-to-IPv4 mapping,
-    /// and additionally preserves IPv4/CIDR literals for nanvixd.
-    fn resolve_hosts(hosts: &[String]) -> Vec<String> {
+    /// Mirrors `lxc::network_iptables::resolve_host` for the hostname-to-IPv4
+    /// mapping; unlike that helper this also preserves IPv4/CIDR literals.
+    ///
+    /// Returns `(resolved_ips, unresolved_entries)`. Empty/whitespace entries
+    /// are ignored entirely and appear in neither list.
+    fn resolve_hosts_detailed(hosts: &[String]) -> (Vec<String>, Vec<String>) {
         let mut out: Vec<String> = Vec::new();
+        let mut unresolved: Vec<String> = Vec::new();
         for host in hosts {
             let entry = host.trim();
             if entry.is_empty() {
                 continue;
             }
+            let before = out.len();
             // CIDR literal: pass through only when the address is IPv4 and the
             // prefix is in range. nanvixd parses CIDR directly.
             if let Some((addr, prefix)) = entry.split_once('/') {
@@ -540,45 +568,70 @@ impl NanVixScriptRunner {
                 if addr_ok && prefix_ok {
                     out.push(entry.to_string());
                 }
-                continue;
-            }
-            // Bare IP literal: keep IPv4, drop IPv6.
-            if let Ok(addr) = entry.parse::<std::net::IpAddr>() {
+            } else if let Ok(addr) = entry.parse::<std::net::IpAddr>() {
+                // Bare IP literal: keep IPv4, drop IPv6.
                 if addr.is_ipv4() {
                     out.push(entry.to_string());
                 }
-                continue;
-            }
-            // Hostname: resolve to IPv4 A records.
-            if let Ok(addrs) = format!("{}:0", entry).to_socket_addrs() {
+            } else if let Ok(addrs) = format!("{}:0", entry).to_socket_addrs() {
+                // Hostname: resolve to IPv4 A records.
                 for ip in addrs.map(|a| a.ip()).filter(|ip| ip.is_ipv4()) {
                     out.push(ip.to_string());
                 }
             }
+            if out.len() == before {
+                unresolved.push(entry.to_string());
+            }
         }
-        out
+        (out, unresolved)
     }
 
     /// Resolves the request's allow/block host lists, failing closed.
     ///
-    /// Returns `(resolved_allow, resolved_block)`. At most one list is non-empty
-    /// (the mutual-exclusion check in [`Self::validate_policies`] runs first). If
-    /// a user-supplied list resolves to nothing — e.g. an allowlist of names
-    /// that have no A records — this returns an error rather than silently
-    /// emitting `-allow-host-networking` with no filter (which nanvixd would
-    /// treat as allow-all), so an allowlist never fails open.
-    fn resolve_host_lists(
-        request: &ExecutionRequest,
-    ) -> Result<(Vec<String>, Vec<String>), NanVixError> {
-        let allow = Self::resolve_hosts(&request.policy.allowed_hosts);
+    /// Returns the resolved allow/block IPv4 lists plus human-readable
+    /// warnings for any allowlist entries that were dropped. At most one list
+    /// is non-empty (the mutual-exclusion check in [`Self::validate_policies`]
+    /// runs first).
+    ///
+    /// Fail-closed semantics differ by list direction:
+    /// - **Allowlist** (deny-by-default): a fully unresolvable allowlist is an
+    ///   error, because emitting `-allow-host-networking` with no filter would
+    ///   fail open (nanvixd treats no list as allow-all). Partially dropped
+    ///   entries only narrow access, so they are reported as warnings and the
+    ///   run continues.
+    /// - **Blocklist** (allow-by-default): *any* unresolvable entry is an
+    ///   error. Silently dropping a blocked host would let traffic the policy
+    ///   explicitly blocks flow freely (fail-open), and the static preflight
+    ///   filter cannot enforce a name that does not resolve.
+    fn resolve_host_lists(request: &ExecutionRequest) -> Result<ResolvedHostLists, NanVixError> {
+        let (allow, allow_unresolved) = Self::resolve_hosts_detailed(&request.policy.allowed_hosts);
         if !request.policy.allowed_hosts.is_empty() && allow.is_empty() {
             return Err(NanVixError::Preflight(ERR_HOSTS_UNRESOLVED.to_string()));
         }
-        let block = Self::resolve_hosts(&request.policy.blocked_hosts);
-        if !request.policy.blocked_hosts.is_empty() && block.is_empty() {
-            return Err(NanVixError::Preflight(ERR_HOSTS_UNRESOLVED.to_string()));
+
+        let (block, block_unresolved) = Self::resolve_hosts_detailed(&request.policy.blocked_hosts);
+        if let Some(first) = block_unresolved.first() {
+            return Err(NanVixError::Preflight(format!(
+                "{} (entry: '{}')",
+                ERR_BLOCKED_HOST_UNRESOLVED, first
+            )));
         }
-        Ok((allow, block))
+
+        let warnings = allow_unresolved
+            .iter()
+            .map(|h| {
+                format!(
+                    "Warning: could not resolve allowedHosts entry '{}' to an IPv4 address; skipping",
+                    h
+                )
+            })
+            .collect();
+
+        Ok(ResolvedHostLists {
+            allow,
+            block,
+            warnings,
+        })
     }
 
     fn validate_policies(request: &ExecutionRequest) -> Result<(), NanVixError> {
@@ -920,7 +973,12 @@ impl ScriptRunner for NanVixScriptRunner {
             let _ = writeln!(logger, "NanVix: host networking enabled");
         }
         let (allow_hosts, block_hosts) = match Self::resolve_host_lists(request) {
-            Ok(v) => v,
+            Ok(resolved) => {
+                for warning in &resolved.warnings {
+                    let _ = writeln!(logger, "NanVix: {}", warning);
+                }
+                (resolved.allow, resolved.block)
+            }
             Err(e) => {
                 let _ = writeln!(logger, "{}", e);
                 return e.to_response();
@@ -1125,8 +1183,9 @@ mod tests {
             "10.0.0.0/8".to_string(),
             "192.168.1.1/32".to_string(),
         ];
-        let resolved = NanVixScriptRunner::resolve_hosts(&hosts);
+        let (resolved, unresolved) = NanVixScriptRunner::resolve_hosts_detailed(&hosts);
         assert_eq!(resolved, vec!["1.2.3.4", "10.0.0.0/8", "192.168.1.1/32"]);
+        assert!(unresolved.is_empty());
     }
 
     #[test]
@@ -1138,7 +1197,7 @@ mod tests {
             "  ".to_string(),            // blank -> skipped
             "5.6.7.8".to_string(),       // valid -> kept
         ];
-        let resolved = NanVixScriptRunner::resolve_hosts(&hosts);
+        let (resolved, _) = NanVixScriptRunner::resolve_hosts_detailed(&hosts);
         assert_eq!(resolved, vec!["5.6.7.8"]);
     }
 
@@ -1151,9 +1210,10 @@ mod tests {
             },
             ..Default::default()
         };
-        let (allow, block) = NanVixScriptRunner::resolve_host_lists(&request).unwrap();
-        assert_eq!(allow, vec!["1.1.1.1", "8.8.8.8/32"]);
-        assert!(block.is_empty());
+        let resolved = NanVixScriptRunner::resolve_host_lists(&request).unwrap();
+        assert_eq!(resolved.allow, vec!["1.1.1.1", "8.8.8.8/32"]);
+        assert!(resolved.block.is_empty());
+        assert!(resolved.warnings.is_empty());
     }
 
     #[test]
@@ -1177,12 +1237,98 @@ mod tests {
     }
 
     #[test]
+    fn resolve_hosts_detailed_reports_unresolved_entries() {
+        // IPv4/CIDR pass through; IPv6 + malformed entries are reported as
+        // unresolved; blanks are ignored entirely.
+        let hosts = vec![
+            "5.6.7.8".to_string(),            // valid -> kept
+            "::1".to_string(),                // IPv6 literal -> unresolved
+            "2001:db8::/32".to_string(),      // IPv6 CIDR -> unresolved
+            "1.2.3.4/33".to_string(),         // out-of-range prefix -> unresolved
+            "not_a_host.invalid".to_string(), // no A record -> unresolved
+            "  ".to_string(),                 // blank -> ignored (neither list)
+        ];
+        let (resolved, unresolved) = NanVixScriptRunner::resolve_hosts_detailed(&hosts);
+        assert_eq!(resolved, vec!["5.6.7.8"]);
+        assert_eq!(
+            unresolved,
+            vec!["::1", "2001:db8::/32", "1.2.3.4/33", "not_a_host.invalid"]
+        );
+    }
+
+    #[test]
+    fn resolve_host_lists_warns_on_dropped_allowlist_entries() {
+        // A partially-resolvable allowlist narrows access (fail-safe): the run
+        // continues and each dropped entry produces a warning.
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                allowed_hosts: vec![
+                    "9.9.9.9".to_string(),
+                    "::1".to_string(),
+                    "dropme.invalid".to_string(),
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = NanVixScriptRunner::resolve_host_lists(&request).unwrap();
+        assert_eq!(resolved.allow, vec!["9.9.9.9"]);
+        assert!(resolved.block.is_empty());
+        assert_eq!(resolved.warnings.len(), 2, "two entries were dropped");
+        assert!(resolved.warnings.iter().any(|w| w.contains("::1")));
+        assert!(resolved
+            .warnings
+            .iter()
+            .any(|w| w.contains("dropme.invalid")));
+    }
+
+    #[test]
+    fn resolve_host_lists_fails_closed_on_unresolvable_blocklist_entry() {
+        // A blocklist (allow-by-default) must fail closed if ANY entry cannot
+        // be resolved -- silently dropping it would let blocked traffic flow.
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                blocked_hosts: vec!["10.0.0.1".to_string(), "::1".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = NanVixScriptRunner::resolve_host_lists(&request).unwrap_err();
+        assert!(
+            err.to_string().contains(ERR_BLOCKED_HOST_UNRESOLVED),
+            "unresolvable blocklist entry should fail closed, got: {}",
+            err
+        );
+        assert!(
+            err.to_string().contains("::1"),
+            "error should name the offending entry, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn resolve_host_lists_accepts_fully_resolved_blocklist() {
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                blocked_hosts: vec!["10.0.0.1".to_string(), "192.168.0.0/16".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = NanVixScriptRunner::resolve_host_lists(&request).unwrap();
+        assert!(resolved.allow.is_empty());
+        assert_eq!(resolved.block, vec!["10.0.0.1", "192.168.0.0/16"]);
+        assert!(resolved.warnings.is_empty());
+    }
+
+    #[test]
     fn default_block_no_lists_disables_host_networking() {
         // The default posture (block, no lists) keeps networking off.
         let request = ExecutionRequest::default();
         assert!(!NanVixScriptRunner::host_networking_enabled(&request));
-        let (allow, block) = NanVixScriptRunner::resolve_host_lists(&request).unwrap();
-        assert!(allow.is_empty() && block.is_empty());
+        let resolved = NanVixScriptRunner::resolve_host_lists(&request).unwrap();
+        assert!(resolved.allow.is_empty() && resolved.block.is_empty());
+        assert!(resolved.warnings.is_empty());
     }
 
     #[test]

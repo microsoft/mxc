@@ -179,9 +179,18 @@ is rejected at preflight). Presence of either list implies host networking, so
 Entries may be IPv4 literals (`93.184.216.34`), IPv4 CIDR blocks
 (`10.0.0.0/8`), or hostnames. Hostnames are resolved to their IPv4 (A-record)
 addresses at preflight; IPv6 (AAAA) results are dropped because the guest filter
-is IPv4-only. If a non-empty list resolves to **no** IPv4 address, the run is
-rejected at preflight rather than silently allowing all traffic — an allowlist
-never fails open.
+is IPv4-only. Resolution failures are handled per direction so neither list ever
+fails open:
+
+- **allowlist** (deny-by-default): each dropped entry is logged as a warning and
+  the run continues, since dropping an entry only *narrows* access. If the list
+  resolves to **no** IPv4 address at all, the run is rejected at preflight rather
+  than silently allowing all traffic.
+- **blocklist** (allow-by-default): **any** entry that resolves to no IPv4
+  address rejects the run at preflight. Silently dropping a blocked host would
+  let traffic the policy explicitly blocks flow freely, and the static preflight
+  filter cannot enforce a name that does not resolve — so the blocklist
+  fails closed.
 
 **DNS:** in allowlist mode the guest daemon automatically exempts the DNS port
 (53), so name resolution works without adding the resolver to `allowedHosts`.
