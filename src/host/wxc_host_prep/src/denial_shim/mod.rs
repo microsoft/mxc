@@ -14,8 +14,11 @@
 //!   binary itself uses with `start_dispatcher`).
 //! - **Display name**: `"MXC Denial Capture Shim"` (visible in
 //!   services.msc).
-//! - **Account**: `LocalSystem` — the shim needs `SeSystemProfilePrivilege`
-//!   to call `StartTraceW`.
+//! - **Account**: `NT AUTHORITY\LocalService` — least-privilege. The
+//!   account doesn't carry `SeSystemProfilePrivilege` by default, so
+//!   `install-denial-shim` grants it explicitly via the LSA
+//!   `LsaAddAccountRights` API before creating the service. See the
+//!   `privilege` submodule.
 //! - **Start type**: `Demand` (manual). SCM idle-shutdown stops it
 //!   ~60s after the last request; restart is automatic on the next
 //!   inbound pipe connection (well, on the next `wxc-exec` invocation
@@ -23,6 +26,8 @@
 //!   caller or by an explicit `Start-Service MxcDenialShim`).
 //! - **Default binary path**: same directory as `wxc-host-prep.exe`
 //!   (i.e. the SDK bin dir). Override with `--shim-path`.
+
+mod privilege;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -35,6 +40,11 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 const SERVICE_NAME: &str = "MxcDenialShim";
 const SERVICE_DISPLAY_NAME: &str = "MXC Denial Capture Shim";
 const SHIM_BINARY_FILENAME: &str = "mxc-denial-shim.exe";
+
+/// Service runs as `NT AUTHORITY\LocalService` (least-privilege).
+/// `SeSystemProfilePrivilege` is granted to this account at install
+/// time so the shim can call `StartTraceW`.
+const SERVICE_ACCOUNT: &str = "NT AUTHORITY\\LocalService";
 
 /// Default path: `<wxc-host-prep dir>\mxc-denial-shim.exe`.
 fn default_shim_binary_path() -> Result<PathBuf, String> {
@@ -74,6 +84,9 @@ fn resolve_shim_path(override_path: Option<&str>) -> Result<PathBuf, String> {
 /// Idempotent: if the service is already registered with the same
 /// binary path it returns success. Differing binary paths are an
 /// explicit conflict — caller must `uninstall-denial-shim` first.
+///
+/// Always re-applies the `SeSystemProfilePrivilege` grant to
+/// `LocalService` (no-op when already granted, per LSA semantics).
 pub fn run_install(shim_path_override: Option<&str>) -> i32 {
     let shim_path = match resolve_shim_path(shim_path_override) {
         Ok(p) => p,
@@ -82,6 +95,15 @@ pub fn run_install(shim_path_override: Option<&str>) -> i32 {
             return 1;
         }
     };
+
+    // 1. Grant SeSystemProfilePrivilege to LocalService BEFORE creating
+    //    the service. If the privilege grant fails the service is
+    //    useless anyway, so bail early without touching SCM.
+    if let Err(e) = privilege::grant_se_system_profile_to_local_service() {
+        eprintln!("error: could not grant SeSystemProfilePrivilege to LocalService: {e}");
+        return 3;
+    }
+    println!("granted SeSystemProfilePrivilege to NT AUTHORITY\\LocalService");
 
     let manager = match ServiceManager::local_computer(
         None::<&str>,
@@ -132,8 +154,8 @@ pub fn run_install(shim_path_override: Option<&str>) -> i32 {
         executable_path: shim_path.clone(),
         launch_arguments: vec![],
         dependencies: vec![],
-        // None == LocalSystem.
-        account_name: None,
+        // Least-privilege account; privilege grant happened above.
+        account_name: Some(OsString::from(SERVICE_ACCOUNT)),
         account_password: None,
     };
 
@@ -141,7 +163,7 @@ pub fn run_install(shim_path_override: Option<&str>) -> i32 {
         Ok(_svc) => {
             println!(
                 "installed service {SERVICE_NAME}\n  display: {SERVICE_DISPLAY_NAME}\n  \
-                 binary:  {}\n  account: LocalSystem (Manual start)",
+                 binary:  {}\n  account: {SERVICE_ACCOUNT} (Manual start, with SeSystemProfilePrivilege)",
                 shim_path.display()
             );
             0

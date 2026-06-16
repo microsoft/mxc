@@ -223,8 +223,17 @@ wxc-host-prep install-denial-shim [--shim-path <path>]
 Registers `mxc-denial-shim.exe` as a Windows service named
 `MxcDenialShim`:
 
-- **Account**: `LocalSystem` (needs `SeSystemProfilePrivilege`
-  to call `StartTraceW`).
+- **Account**: `NT AUTHORITY\LocalService` — least-privilege built-in
+  account. `LocalService` does **not** carry
+  `SeSystemProfilePrivilege` by default, so this subcommand first
+  grants the privilege explicitly via the LSA `LsaAddAccountRights`
+  API. The grant is persistent (survives reboots) and idempotent
+  (no-op when already granted). The grant is **not** revoked on
+  `uninstall-denial-shim`: another tool on the box may also have
+  granted the same privilege, and clobbering it would be
+  destructive. Operators who want a clean revert can run
+  `secedit` or `ntrights -u SeSystemProfilePrivilege -m \\.
+  -u "NT AUTHORITY\LocalService"` manually.
 - **Start type**: `Demand` / Manual. SCM idle-shutdown stops it
   after a short period of inactivity; the next inbound pipe
   request restarts it.

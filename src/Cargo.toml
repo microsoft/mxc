@@ -65,6 +65,7 @@ windows = { version = "0.62", features = [
     "Win32_Networking_WinSock",
     "Win32_Security_Credentials",
     "Win32_Security_Authorization",
+    "Win32_Security_Authentication_Identity",
     "Win32_System_Memory",
     "Win32_System_Diagnostics_Debug",
     "Win32_Security_Isolation",
