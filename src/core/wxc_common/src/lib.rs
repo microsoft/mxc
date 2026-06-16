@@ -5,6 +5,7 @@
 // and every backend crate).
 pub mod cmdline;
 pub mod config_parser;
+pub use config_parser::config;
 pub mod encoding;
 pub mod error;
 pub mod id;

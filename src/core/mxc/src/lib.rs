@@ -9,13 +9,18 @@
 //! live bidirectional stdio and termination.
 //!
 //! ```no_run
-//! use mxc::{spawn_sandbox, SpawnOptions};
+//! use mxc::{spawn_sandbox, Config, ProcessConfig, SpawnOptions};
 //!
-//! // `config` is the same JSON the SDK produces from a SandboxPolicy
-//! // (see `sdk/src` -> ContainerConfig). It can be a raw JSON string or a
-//! // base64-encoded blob (set `is_base64`).
-//! let config = r#"{ "version": "0.7.0-alpha", "process": { "commandLine": "echo hi" } }"#;
-//! let mut proc = spawn_sandbox(config, &SpawnOptions::default())?;
+//! // Build a typed config and spawn it.
+//! let config = Config {
+//!     version: Some("0.7.0-alpha".to_string()),
+//!     process: Some(ProcessConfig {
+//!         command_line: Some("echo hi".to_string()),
+//!         ..Default::default()
+//!     }),
+//!     ..Default::default()
+//! };
+//! let mut proc = spawn_sandbox(&config, &SpawnOptions::default())?;
 //! let exit_code = proc.wait().expect("wait for the sandboxed child");
 //! println!("exit={exit_code}");
 //! # Ok::<(), mxc::MxcError>(())
@@ -46,13 +51,20 @@ pub use policy::{
     FilesystemPolicyResult, SandboxPolicy,
 };
 
+// The typed wire config — a clean public mirror of the SDK's `ContainerConfig`
+// that maps 1:1 onto the parser's internal representation, so the library
+// converts straight to an `ExecutionRequest` with no JSON. Built programmatically.
+pub use wxc_common::config::{
+    Config, FallbackConfig, FilesystemConfig, LifecycleConfig, NetworkConfig, ProcessConfig,
+    ProcessContainerConfig, ProcessContainerUiConfig, SeatbeltConfig, UiConfig,
+};
 // Re-export the wire/model types callers need so they don't have to depend
 // on `wxc_common` directly.
 pub use wxc_common::models::ExecutionRequest;
 pub use wxc_common::mxc_error::{MxcError, MxcErrorCode};
 pub use wxc_common::sandbox_process::SandboxProcess;
 
-use wxc_common::config_parser::load_request;
+use wxc_common::config::execution_request_from_config;
 use wxc_common::logger::{Logger, Mode};
 
 /// Options controlling how a config is loaded and run.
@@ -62,11 +74,6 @@ use wxc_common::logger::{Logger, Mode};
 /// never uses a pty).
 #[derive(Debug, Clone, Default)]
 pub struct SpawnOptions {
-    /// Treat the `config` argument as a base64-encoded JSON blob (matching
-    /// the binaries' `--config-base64` mode and the SDK wire format). When
-    /// `false` (the default), `config` is parsed as a raw JSON string.
-    pub is_base64: bool,
-
     /// Enable experimental features (equivalent to the `--experimental`
     /// flag). Required for the Windows BaseContainer fallback and for any
     /// experimental policy fields.
@@ -92,12 +99,11 @@ pub struct SpawnOptions {
     pub env: Vec<(String, String)>,
 }
 
-/// Spawn a sandbox from a JSON config and return a handle to the running
-/// process for live bidirectional stdio and termination.
+/// Spawn a sandbox from a [`Config`] and return a handle to the
+/// running process for live bidirectional stdio and termination.
 ///
-/// `config` is the same JSON the SDK serialises from a `SandboxPolicy`
-/// (a `ContainerConfig`); pass `options.is_base64 = true` to supply it
-/// base64-encoded. The returned [`SandboxProcess`] lets the caller write to
+/// `config` is the typed mirror of the SDK's wire `ContainerConfig`, built
+/// programmatically. The returned [`SandboxProcess`] lets the caller write to
 /// (`take_stdin`), read from (`take_stdout` / `take_stderr`),
 /// [`wait`](SandboxProcess::wait) on, or [`kill`](SandboxProcess::kill) the
 /// child. No pty is allocated. Any stdout/stderr stream the caller does not
@@ -109,35 +115,14 @@ pub struct SpawnOptions {
 /// Diagnostic output from parsing/selection is buffered and surfaced on
 /// errors; it is not written to the process's stdio.
 pub fn spawn_sandbox(
-    config: &str,
+    config: &Config,
     options: &SpawnOptions,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    let (request, mut logger) = load_and_prepare(config, options)?;
-    spawn_runner(&request, &mut logger)
-}
-
-/// Parse a config string and apply [`SpawnOptions`], returning the prepared
-/// request and the diagnostic logger.
-fn load_and_prepare(
-    config: &str,
-    options: &SpawnOptions,
-) -> Result<(ExecutionRequest, Logger), MxcError> {
     let mut logger = Logger::new(Mode::Buffer);
 
-    // `load_request` interprets a non-base64 string as a *file path*; only
-    // base64 input is parsed as inline JSON. To accept a raw JSON config
-    // string (the natural analogue of the SDK's ContainerConfig object) we
-    // base64-encode it ourselves and always parse inline. Callers who already
-    // hold a base64 blob set `is_base64` and we pass it straight through.
-    let encoded;
-    let input: &str = if options.is_base64 {
-        config
-    } else {
-        encoded = wxc_common::encoding::base64_encode(config.as_bytes());
-        &encoded
-    };
-
-    let mut request = load_request(input, &mut logger, true)
+    // Convert the typed wire config straight to an ExecutionRequest — same
+    // validation and wire→model mapping as the executor binaries, no JSON.
+    let mut request = execution_request_from_config(config.clone(), &mut logger, false)
         .map_err(|e| MxcError::malformed_request(format!("failed to load config: {e}")))?;
 
     apply_options(&mut request, options);
@@ -149,7 +134,7 @@ fn load_and_prepare(
         ));
     }
 
-    Ok((request, logger))
+    spawn_runner(&request, &mut logger)
 }
 
 /// Spawn a streaming handle for a fully-built [`ExecutionRequest`].

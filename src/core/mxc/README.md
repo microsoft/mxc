@@ -12,18 +12,25 @@ stdio and termination.
 
 ```rust,no_run
 use std::io::Read;
-use mxc::{spawn_sandbox, SpawnOptions};
+use mxc::{spawn_sandbox, Config, FilesystemConfig, ProcessConfig, SpawnOptions};
 
-// `config` is the same JSON the SDK serialises from a SandboxPolicy
-// (a ContainerConfig). Pass `is_base64: true` to supply it base64-encoded.
-let config = r#"{
-    "version": "0.7.0-alpha",
-    "containment": "seatbelt",
-    "process": { "commandLine": "echo hello", "timeout": 10000 },
-    "filesystem": { "readwritePaths": ["/tmp"] }
-}"#;
+// Build a typed config and spawn it.
+let config = Config {
+    version: Some("0.7.0-alpha".to_string()),
+    containment: Some("seatbelt".to_string()),
+    process: Some(ProcessConfig {
+        command_line: Some("echo hello".to_string()),
+        timeout: Some(10000),
+        ..Default::default()
+    }),
+    filesystem: Some(FilesystemConfig {
+        readwrite_paths: Some(vec!["/tmp".to_string()]),
+        ..Default::default()
+    }),
+    ..Default::default()
+};
 
-let mut proc = spawn_sandbox(config, &SpawnOptions::default())?;
+let mut proc = spawn_sandbox(&config, &SpawnOptions::default())?;
 let mut stdout = proc.take_stdout().unwrap();
 let mut out = String::new();
 stdout.read_to_string(&mut out)?; // "hello\n"
@@ -33,8 +40,8 @@ assert_eq!(exit_code, 0);
 ```
 
 `SpawnOptions` mirrors the executor CLI knobs (minus anything pty-related):
-`is_base64`, `experimental`, `dry_run`, `working_directory`, `command`
-(override `process.commandLine`), and `env` (merged into `process.env`).
+`experimental`, `dry_run`, `working_directory`, `command` (override
+`process.commandLine`), and `env` (merged into `process.env`).
 
 For callers that already hold a parsed `ExecutionRequest`, use
 [`spawn_streaming_from_request`].

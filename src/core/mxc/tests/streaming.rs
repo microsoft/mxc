@@ -4,35 +4,52 @@
 //! Streaming (handle-based) API tests: live stdio, kill, and wait.
 //! Seatbelt-specific cases run only on macOS.
 
-use mxc::{spawn_sandbox, MxcErrorCode, SpawnOptions};
+use mxc::{spawn_sandbox, Config, MxcErrorCode, ProcessConfig, SpawnOptions};
+
+/// A minimal config for the given backend and command (error-path cases).
+fn config(containment: &str, command_line: &str) -> Config {
+    Config {
+        version: Some("0.7.0-alpha".to_string()),
+        containment: Some(containment.to_string()),
+        process: Some(ProcessConfig {
+            command_line: Some(command_line.to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// A Seatbelt streaming config (`/tmp` read-write) with the given command and
+/// timeout (ms; `0` == run until exit, required for interactive/long cases).
+#[cfg(target_os = "macos")]
+fn seatbelt_config_timeout(command_line: &str, timeout: u32) -> Config {
+    use mxc::{FilesystemConfig, SeatbeltConfig};
+    Config {
+        version: Some("0.7.0-alpha".to_string()),
+        containment: Some("seatbelt".to_string()),
+        filesystem: Some(FilesystemConfig {
+            readwrite_paths: Some(vec!["/tmp".to_string()]),
+            ..Default::default()
+        }),
+        seatbelt: Some(SeatbeltConfig::default()),
+        process: Some(ProcessConfig {
+            command_line: Some(command_line.to_string()),
+            timeout: Some(timeout),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
 
 #[cfg(target_os = "macos")]
-const SEATBELT_PREFIX: &str = r#"{
-    "version": "0.7.0-alpha",
-    "containment": "seatbelt",
-    "filesystem": { "readwritePaths": ["/tmp"] },
-    "seatbelt": { "mode": "exec" },
-    "process": "#;
-
-/// Build a seatbelt streaming config with the given commandLine and no timeout
-/// (timeout 0 == run until exit; required for interactive/long-running cases).
-#[cfg(target_os = "macos")]
-fn seatbelt_config(command_line: &str) -> String {
-    let escaped = command_line.replace('\\', "\\\\").replace('"', "\\\"");
-    format!(
-        "{SEATBELT_PREFIX}{{ \"commandLine\": \"{escaped}\", \"timeout\": 0 }} }}",
-        escaped = escaped
-    )
+fn seatbelt_config(command_line: &str) -> Config {
+    seatbelt_config_timeout(command_line, 0)
 }
 
 #[test]
 fn streaming_unsupported_backend_is_rejected() {
-    let config = r#"{
-        "version": "0.7.0-alpha",
-        "containment": "windows_sandbox",
-        "process": { "commandLine": "echo hi" }
-    }"#;
-    let err = match spawn_sandbox(config, &SpawnOptions::default()) {
+    let config = config("windows_sandbox", "echo hi");
+    let err = match spawn_sandbox(&config, &SpawnOptions::default()) {
         Ok(_) => panic!("windows_sandbox streaming must be unsupported"),
         Err(e) => e,
     };
@@ -41,16 +58,12 @@ fn streaming_unsupported_backend_is_rejected() {
 
 #[test]
 fn streaming_rejects_dry_run() {
-    let config = r#"{
-        "version": "0.7.0-alpha",
-        "containment": "seatbelt",
-        "process": { "commandLine": "echo hi" }
-    }"#;
+    let config = config("seatbelt", "echo hi");
     let options = SpawnOptions {
         dry_run: true,
         ..SpawnOptions::default()
     };
-    let err = match spawn_sandbox(config, &options) {
+    let err = match spawn_sandbox(&config, &options) {
         Ok(_) => panic!("dry_run streaming must be rejected"),
         Err(e) => e,
     };
@@ -63,14 +76,12 @@ fn streaming_rejects_gui_access() {
     // A windowed (guiAccess) app needs inherited stdio, so it cannot be streamed
     // over pipes; the library path must reject it rather than silently drop the
     // GUI capability.
-    let config = r#"{
-        "version": "0.7.0-alpha",
-        "containment": "seatbelt",
-        "filesystem": { "readwritePaths": ["/tmp"] },
-        "seatbelt": { "mode": "exec", "guiAccess": true },
-        "process": { "commandLine": "echo hi", "timeout": 0 }
-    }"#;
-    let err = match spawn_sandbox(config, &SpawnOptions::default()) {
+    let mut config = seatbelt_config("echo hi");
+    config.seatbelt = Some(mxc::SeatbeltConfig {
+        gui_access: Some(true),
+        ..Default::default()
+    });
+    let err = match spawn_sandbox(&config, &SpawnOptions::default()) {
         Ok(_) => panic!("guiAccess streaming must be rejected"),
         Err(e) => e,
     };
@@ -143,13 +154,21 @@ fn streaming_processcontainer_bidirectional_stdio() {
     use std::io::{Read, Write};
 
     // `cmd /c more` echoes stdin to stdout until EOF, then exits.
-    let config = r#"{
-        "version": "0.7.0-alpha",
-        "containment": "processcontainer",
-        "process": { "commandLine": "cmd /c more", "timeout": 0 },
-        "filesystem": { "readwritePaths": ["C:\\Windows\\Temp"] }
-    }"#;
-    let mut proc = spawn_sandbox(config, &SpawnOptions::default()).expect("spawn");
+    let config = Config {
+        version: Some("0.7.0-alpha".to_string()),
+        containment: Some("processcontainer".to_string()),
+        process: Some(ProcessConfig {
+            command_line: Some("cmd /c more".to_string()),
+            timeout: Some(0),
+            ..Default::default()
+        }),
+        filesystem: Some(mxc::FilesystemConfig {
+            readwrite_paths: Some(vec!["C:\\Windows\\Temp".to_string()]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut proc = spawn_sandbox(&config, &SpawnOptions::default()).expect("spawn");
 
     let mut stdin = proc.take_stdin().expect("stdin available");
     let mut stdout = proc.take_stdout().expect("stdout available");
@@ -313,9 +332,7 @@ fn streaming_timeout_kills_process_tree() {
     // 1s timeout; the shell backgrounds a long sleep (descendant), prints its
     // pid, then blocks past the timeout. wait()'s timeout branch must group-
     // kill, taking the descendant down too.
-    let config = format!(
-        "{SEATBELT_PREFIX}{{ \"commandLine\": \"sleep 300 & echo CHILD=$!; sleep 300\", \"timeout\": 1000 }} }}"
-    );
+    let config = seatbelt_config_timeout("sleep 300 & echo CHILD=$!; sleep 300", 1000);
     let mut proc = spawn_sandbox(&config, &SpawnOptions::default()).expect("spawn");
 
     let stdout = proc.take_stdout().expect("stdout");
