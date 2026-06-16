@@ -61,6 +61,18 @@ pub fn run_until_signal() -> Result<(), Box<dyn Error>> {
 }
 
 /// Runs the pipe accept loop until `stop_flag` is set.
+///
+/// Connections are handled **serially** in the same thread. The
+/// prototype's actual workload is one `OpenDenialSessionRequest` per
+/// `wxc-exec --capture-denials` invocation: there is no benefit to
+/// concurrent handling, and an earlier per-connection-thread design
+/// left the next pipe instance unable to accept new clients (the
+/// accept-loop iteration completed before the worker's
+/// `DisconnectNamedPipe` ran, and Windows wouldn't match a new client
+/// to the listening instance). Synchronous handling sidesteps that
+/// entirely. If we ever need to support concurrent requests we should
+/// move to overlapped I/O with a proper completion port, not naive
+/// thread-per-connection.
 pub fn run_until_stop_flag(stop_flag: Arc<AtomicBool>) -> Result<(), Box<dyn Error>> {
     let mut first = true;
 
@@ -68,45 +80,41 @@ pub fn run_until_stop_flag(stop_flag: Arc<AtomicBool>) -> Result<(), Box<dyn Err
         let pipe = create_pipe_instance(first)?;
         first = false;
 
-        // ConnectNamedPipe blocks until a client connects. The stop flag
-        // is checked between iterations; for graceful shutdown we'd pair
-        // this with overlapped IO + a wait-with-cancel, but for the
-        // prototype a single accept-then-check pattern is acceptable.
-        let connected = unsafe { ConnectNamedPipe(pipe, None) };
-        if connected.is_err() {
-            let last = unsafe { GetLastError() };
-            if last != ERROR_PIPE_CONNECTED {
+        // ConnectNamedPipe blocks until a client connects. For graceful
+        // shutdown we'd pair this with overlapped IO + a wait-with-cancel,
+        // but for the prototype a single accept-then-check pattern is
+        // acceptable.
+        let connect_result = unsafe { ConnectNamedPipe(pipe, None) };
+
+        // Successful connection: Ok(()) OR Err(ERROR_PIPE_CONNECTED)
+        // (client raced us between create and connect — still a valid
+        // connection).
+        let connected = match connect_result {
+            Ok(()) => true,
+            Err(e) if e.code() == ERROR_PIPE_CONNECTED.to_hresult() => true,
+            Err(e) => {
+                eprintln!("[mxc-denial-shim] ConnectNamedPipe failed: {e}");
                 unsafe {
                     let _ = CloseHandle(pipe);
                 }
                 if stop_flag.load(Ordering::SeqCst) {
                     break;
                 }
-                // Transient error -- log and retry.
-                eprintln!("[mxc-denial-shim] ConnectNamedPipe failed: {last:?}");
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
-        }
+        };
+        debug_assert!(connected);
 
-        // Each connection is handled on its own thread so a slow / hung
-        // client can't block subsequent requests. The accept loop owns
-        // pipe creation; the per-connection thread owns disconnect +
-        // close. We transport the handle as a `usize` since `HANDLE`
-        // (a raw pointer wrapper) is `!Send` — the kernel object itself
-        // is not thread-affine, so reconstituting it on the other side
-        // is sound.
-        let pipe_bits: usize = pipe.0 as usize;
-        thread::spawn(move || {
-            let pipe = HANDLE(pipe_bits as *mut core::ffi::c_void);
-            if let Err(e) = handle_connection(pipe) {
-                eprintln!("[mxc-denial-shim] handler error: {e}");
-            }
-            unsafe {
-                let _ = DisconnectNamedPipe(pipe);
-                let _ = CloseHandle(pipe);
-            }
-        });
+        // Handle the request synchronously, then disconnect + close +
+        // loop back to create a fresh instance.
+        if let Err(e) = handle_connection(pipe) {
+            eprintln!("[mxc-denial-shim] handler error: {e}");
+        }
+        unsafe {
+            let _ = DisconnectNamedPipe(pipe);
+            let _ = CloseHandle(pipe);
+        }
     }
 
     Ok(())
