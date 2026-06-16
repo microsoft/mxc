@@ -5,6 +5,11 @@ use crate::models::{ExecutionRequest, ScriptResponse};
 use crate::mxc_error::MxcError;
 
 /// Validates non-backend-specific parts of the request (e.g. non-empty script).
+///
+/// `Err` carries a `ScriptResponse` so the dispatch path can surface the
+/// failure directly to the SDK; allow the lint since the response is
+/// moved once into the response stream.
+#[allow(clippy::result_large_err)]
 pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
     if request.script_code.is_empty() {
         return Err(ScriptResponse::error("Script content must not be empty."));

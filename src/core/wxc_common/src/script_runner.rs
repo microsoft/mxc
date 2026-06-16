@@ -17,6 +17,13 @@ use crate::validator::validate_common;
 pub trait ScriptRunner {
     /// Validate the request before execution. Override to add
     /// runner-specific checks. Default accepts all requests.
+    ///
+    /// `Result<_, ScriptResponse>` carries a relatively large Err
+    /// variant (ScriptResponse holds `Vec<DeniedResource>`), but the
+    /// return is moved once into the dispatch path and then
+    /// serialised, so the boxing transformation clippy normally
+    /// recommends doesn't buy anything here.
+    #[allow(clippy::result_large_err)]
     fn validate_runner(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         Ok(())
     }

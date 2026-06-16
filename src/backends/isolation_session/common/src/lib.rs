@@ -1,6 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// ScriptResponse carries a Vec<DeniedResource>; Result<_, ScriptResponse>
+// trips clippy::result_large_err. The response is moved once into the
+// dispatch path and serialised, so boxing the Err variant doesn't buy
+// anything here.
+#![allow(clippy::result_large_err)]
+
 //! IsolationSession backend — executes scripts in an isolated Windows
 //! session via the in-proc `Windows.AI.IsolationSession` `IsoSessionOps`
 //! API. `IsolationSessionRunner` is the only externally-reachable type;

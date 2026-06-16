@@ -231,6 +231,10 @@ struct RawConfig {
     /// Top-level seatbelt config.
     #[serde(alias = "macos_sandbox")]
     seatbelt: Option<RawSeatbelt>,
+    /// Per-PID denial capture. See `ExecutionRequest::capture_denials`.
+    /// Default: false (no capture, identical to today's behavior).
+    #[serde(rename = "captureDenials", default)]
+    capture_denials: Option<bool>,
 }
 
 // State-aware request shape. `phase` is required (no `#[serde(default)]` on
@@ -746,6 +750,7 @@ fn convert_raw_config_inner(
     let schema_version = raw.version.unwrap_or_default();
     let container_id = raw.container_id.unwrap_or_default();
     let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
+    let capture_denials = raw.capture_denials.unwrap_or(false);
 
     // Process section: required for one-shot and for state-aware exec; absent
     // is allowed for state-aware non-exec phases (require_process == false)
@@ -1259,6 +1264,7 @@ fn convert_raw_config_inner(
         experimental_enabled: false,
         experimental,
         dry_run: false,
+        capture_denials,
     })
 }
 
@@ -1300,6 +1306,12 @@ fn convert_raw_state_aware(
         // ParsedStateAwareRequest as raw JSON.
         experimental: None,
         seatbelt: None,
+        // captureDenials is a one-shot-only switch today; state-aware
+        // sessions inherit denial-capture posture from their provision
+        // call rather than per-exec. Surfacing on RawConfig keeps the
+        // shape uniform; pass None here so the parsed request gets the
+        // default `false`.
+        capture_denials: None,
     };
 
     let require_process = phase == Phase::Exec;

@@ -1,6 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// ScriptResponse carries a Vec<DeniedResource>; Result<_, ScriptResponse>
+// trips clippy::result_large_err. The response is moved once into the
+// dispatch path and serialised, so boxing the Err variant doesn't buy
+// anything here.
+#![allow(clippy::result_large_err)]
 // The Hyperlight + Unikraft micro-VM host library is x86_64-only (KVM
 // on Linux, WHP on Windows) AND is an optional dependency gated by the
 // `hyperlight` cargo feature. On other targets, or when the feature is

@@ -1,6 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// ScriptResponse carries a Vec<DeniedResource>; Result<_, ScriptResponse>
+// trips clippy::result_large_err. The response is moved once into the
+// dispatch path and serialised, so boxing the Err variant doesn't buy
+// anything here.
+#![allow(clippy::result_large_err)]
+
 //! `NanVixScriptRunner` -- executes code inside a NanVix micro-VM.
 //!
 //! The initial runtime is CPython 3.12 with a trimmed FAT32 stdlib filesystem.
