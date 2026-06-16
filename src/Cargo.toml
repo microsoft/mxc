@@ -30,6 +30,7 @@ members = [
     "testing/linux_test_proxy",
     "testing/wxc_ui_probe",
     "tools/mxc_diagnostic_console",
+    "mxc_telemetry",
 ]
 exclude = ["testing/fuzz"]
 resolver = "3"
@@ -105,6 +106,7 @@ isolation_session_bindings = { path = "backends/isolation_session/bindings" }
 mxc_pty = { path = "core/mxc_pty" }
 flatbuffers = "25"
 sandbox_spec = { path = "core/generated/base_container_specification" }
+mxc_telemetry = { path = "mxc_telemetry" }
 widestring = "1"
 url = "2"
 winreg = "0.55"
