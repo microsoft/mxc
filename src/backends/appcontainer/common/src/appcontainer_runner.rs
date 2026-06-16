@@ -445,6 +445,21 @@ impl AppContainerScriptRunner {
         let mut capabilities_to_add: Vec<String> = request.policy.capabilities.clone();
         capabilities_to_add.push("AgenticAppContainer".to_string());
 
+        // Per-PID denial capture (request.capture_denials == true) requires
+        // the `learningModeLogging` capability so the kernel emits
+        // AccessCheckLog / LearningModeViolation events for sandbox-policy
+        // denials. Without this the ETW session attached below would see
+        // zero events. The capability is *observability only* -- the
+        // sandbox is still fully enforced (denials still get blocked).
+        if request.capture_denials
+            && !capabilities_to_add
+                .iter()
+                .any(|c| c == "learningModeLogging")
+        {
+            capabilities_to_add.push("learningModeLogging".to_string());
+            logger.log_line("captureDenials: injected learningModeLogging capability");
+        }
+
         let use_capabilities_for_network = matches!(
             request.policy.network_enforcement_mode,
             NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
@@ -817,6 +832,46 @@ impl AppContainerScriptRunner {
             }
         };
 
+        // Per-PID denial capture: now that the child PID is fixed and the
+        // process is still suspended, ask the mxc-denial-shim service for
+        // a privileged ETW session scoped to that PID, then start the
+        // ProcessTrace consumer worker. The kernel begins emitting
+        // AccessCheckLog / LearningModeViolation events as soon as the
+        // child resumes; the consumer thread captures them into a bounded
+        // buffer until we drain at exit. A failed open or start is
+        // logged but non-fatal -- the child still runs, just without
+        // denial capture (this is the right call for a prototype: the
+        // workload's primary purpose wins over the diagnostic add-on).
+        let collector = if request.capture_denials {
+            match denial_capture::session::open_via_shim(pi.dwProcessId, None) {
+                Ok(session) => match session.start_collector() {
+                    Ok(c) => {
+                        logger.log_line(&format!(
+                            "captureDenials: ETW collector attached to PID {} via session {}",
+                            pi.dwProcessId, session.session_name
+                        ));
+                        Some(c)
+                    }
+                    Err(e) => {
+                        logger.log_line(&format!(
+                            "captureDenials: start_collector failed (continuing without capture): {}",
+                            e
+                        ));
+                        None
+                    }
+                },
+                Err(e) => {
+                    logger.log_line(&format!(
+                        "captureDenials: open_via_shim failed (continuing without capture): {}",
+                        e
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Resume the child now that UI restrictions are in place.
         // ResumeThread returns the previous suspend count (or u32::MAX on failure).
         let resume_result = unsafe { ResumeThread(thread_handle.get()) };
@@ -861,11 +916,30 @@ impl AppContainerScriptRunner {
                 .map_err(|_| WxcError::Process("GetExitCodeProcess failed".into()))?;
         }
 
+        // Drain the denial collector (if any) and convert internal
+        // DenialEvent -> public DeniedResource. Done after the child has
+        // exited so we capture everything the kernel emitted; doing it
+        // before exit risks missing trailing events that haven't crossed
+        // the user-mode boundary yet.
+        let (denied_resources, denied_resources_truncated) = if let Some(c) = collector {
+            let (events, truncated) = c.stop_and_drain();
+            logger.log_line(&format!(
+                "captureDenials: drained {} events (truncated={})",
+                events.len(),
+                truncated
+            ));
+            (events.into_iter().map(Into::into).collect(), truncated)
+        } else {
+            (Vec::new(), false)
+        };
+
         Ok(ScriptResponse {
             exit_code: exit_code as i32,
             standard_out: String::new(),
             standard_err: String::new(),
             error_message: String::new(),
+            denied_resources,
+            denied_resources_truncated,
             ..Default::default()
         })
     }
