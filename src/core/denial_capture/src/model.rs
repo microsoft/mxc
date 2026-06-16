@@ -73,8 +73,19 @@ pub struct DenialEvent {
     pub object_name: String,
     /// Access type the workload was attempting.
     pub access_requested: AccessType,
-    /// ISO 8601 timestamp.
-    pub timestamp: String,
+    /// Kernel FILETIME copied from `EVENT_RECORD.EventHeader.TimeStamp`:
+    /// 100-nanosecond intervals since 1601-01-01 UTC.
+    ///
+    /// Stored as `u64` rather than a formatted string to (1) skip a
+    /// time-crate dependency, (2) avoid losing precision in transit,
+    /// (3) defer all locale/format choices to the SDK consumer. The
+    /// SDK side can convert to a JS `Date` via the standard
+    /// `(filetime / 10000) - 11644473600000` formula. Values exceed
+    /// `Number.MAX_SAFE_INTEGER` (~9e15) by roughly 15× as of 2026,
+    /// so consumers that need sub-microsecond precision should
+    /// deserialize as a string or BigInt; ordering at microsecond
+    /// granularity round-trips through a JS double fine.
+    pub filetime: u64,
     /// Originating ETW event ID (4907 = AccessCheckLog, 27 = LearningModeViolation).
     pub event_id: u16,
 }
@@ -99,8 +110,9 @@ pub struct DeniedResource {
     pub access_type: AccessType,
     /// Process ID that triggered the denial.
     pub pid: u32,
-    /// ISO 8601 timestamp of the denial.
-    pub timestamp: String,
+    /// Kernel FILETIME of the denial (100ns intervals since 1601-01-01 UTC).
+    /// See `DenialEvent::filetime` for SDK-side conversion notes.
+    pub filetime: u64,
 }
 
 impl DenialEvent {
@@ -112,7 +124,7 @@ impl DenialEvent {
         resource_type: ResourceType,
         object_name: String,
         access_requested: AccessType,
-        timestamp: String,
+        filetime: u64,
         event_id: u16,
     ) -> Self {
         Self {
@@ -121,7 +133,7 @@ impl DenialEvent {
             resource_type,
             object_name,
             access_requested,
-            timestamp,
+            filetime,
             event_id,
         }
     }
@@ -144,7 +156,7 @@ impl DenialEvent {
             resource_type: self.resource_type,
             access_type: self.access_requested,
             pid: self.pid,
-            timestamp: self.timestamp,
+            filetime: self.filetime,
         }
     }
 }
@@ -167,7 +179,7 @@ mod tests {
             ResourceType::File,
             r"\Device\HarddiskVolume3\Users\test\file.txt".to_string(),
             AccessType::Read,
-            "2026-06-12T17:30:00Z".to_string(),
+            132_847_890_123_456_789,
             4907,
         );
 
@@ -194,11 +206,15 @@ mod tests {
             resource_type: ResourceType::File,
             access_type: AccessType::Read,
             pid: 1234,
-            timestamp: "2026-06-12T17:30:00Z".to_string(),
+            filetime: 132_847_890_123_456_789,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"resourceType\":\"file\""), "got {json}");
         assert!(json.contains("\"accessType\":\"read\""), "got {json}");
+        assert!(
+            json.contains("\"filetime\":132847890123456789"),
+            "got {json}"
+        );
     }
 
     #[test]
@@ -207,12 +223,9 @@ mod tests {
             "lb-123".to_string(),
             4321,
             ResourceType::File,
-            // On non-Windows this string is preserved as-is; on Windows it
-            // would be canonicalized but only for *real* volumes -- a fake
-            // path that doesn't map will also fall through unchanged.
             r"\Device\HarddiskVolumeFake999\not\a\real\path".to_string(),
             AccessType::Write,
-            "2026-06-12T17:30:00Z".to_string(),
+            999_888_777,
             4907,
         );
 
@@ -220,7 +233,7 @@ mod tests {
         assert_eq!(resource.pid, 4321);
         assert_eq!(resource.resource_type, ResourceType::File);
         assert_eq!(resource.access_type, AccessType::Write);
-        assert_eq!(resource.timestamp, "2026-06-12T17:30:00Z");
+        assert_eq!(resource.filetime, 999_888_777);
         assert!(!resource.path.is_empty());
     }
 }

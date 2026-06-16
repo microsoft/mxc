@@ -37,7 +37,7 @@ pub struct DecodedEventParts {
 pub fn build_denial_from_access_check(
     parts: &DecodedEventParts,
     pid: u32,
-    now_iso8601: impl FnOnce() -> String,
+    filetime: u64,
 ) -> Option<DenialEvent> {
     let object_type = find_prop(&parts.props, "ObjectType")?;
     let object_type_str = object_type.trim_matches('"');
@@ -61,7 +61,7 @@ pub fn build_denial_from_access_check(
         resource_type,
         object_name,
         AccessType::Unknown,
-        now_iso8601(),
+        filetime,
         parts.event_id,
     ))
 }
@@ -75,7 +75,7 @@ pub fn build_denial_from_access_check(
 pub fn build_denial_from_learning_mode(
     parts: &DecodedEventParts,
     pid: u32,
-    now_iso8601: impl FnOnce() -> String,
+    filetime: u64,
 ) -> Option<DenialEvent> {
     let object_name = find_prop(&parts.props, "ProcessName")
         .map(|v| v.trim_matches('"').to_string())
@@ -90,7 +90,7 @@ pub fn build_denial_from_learning_mode(
         ResourceType::Other,
         object_name,
         AccessType::Unknown,
-        now_iso8601(),
+        filetime,
         parts.event_id,
     ))
 }
@@ -103,9 +103,7 @@ fn find_prop<'a>(props: &'a [(String, String)], name: &str) -> Option<&'a String
 mod tests {
     use super::*;
 
-    fn fixed_ts() -> String {
-        "2026-06-12T17:30:00Z".to_string()
-    }
+    const FIXED_FILETIME: u64 = 132_847_890_123_456_789;
 
     fn parts(event_id: u16, kv: &[(&str, &str)]) -> DecodedEventParts {
         DecodedEventParts {
@@ -130,12 +128,13 @@ mod tests {
                 ("LowBoxNumber", "\"123\""),
             ],
         );
-        let ev = build_denial_from_access_check(&p, 7777, fixed_ts).expect("should extract");
+        let ev = build_denial_from_access_check(&p, 7777, FIXED_FILETIME).expect("should extract");
         assert_eq!(ev.event_id, 4907);
         assert_eq!(ev.pid, 7777);
         assert_eq!(ev.resource_type, ResourceType::File);
         assert_eq!(ev.object_name, r"\Device\HarddiskVolume3\Users\x\f.txt");
         assert_eq!(ev.container_name, "123");
+        assert_eq!(ev.filetime, FIXED_FILETIME);
     }
 
     #[test]
@@ -147,20 +146,20 @@ mod tests {
                 ("ObjectName", "\"\\Registry\\Machine\\SOFTWARE\\Foo\""),
             ],
         );
-        let ev = build_denial_from_access_check(&p, 1, fixed_ts).expect("should extract");
+        let ev = build_denial_from_access_check(&p, 1, FIXED_FILETIME).expect("should extract");
         assert_eq!(ev.resource_type, ResourceType::Other);
     }
 
     #[test]
     fn access_check_unknown_object_type_dropped() {
         let p = parts(4907, &[("ObjectType", "\"Section\"")]);
-        assert!(build_denial_from_access_check(&p, 1, fixed_ts).is_none());
+        assert!(build_denial_from_access_check(&p, 1, FIXED_FILETIME).is_none());
     }
 
     #[test]
     fn access_check_missing_object_type_dropped() {
         let p = parts(4907, &[("ObjectName", "\"x\"")]);
-        assert!(build_denial_from_access_check(&p, 1, fixed_ts).is_none());
+        assert!(build_denial_from_access_check(&p, 1, FIXED_FILETIME).is_none());
     }
 
     #[test]
@@ -169,7 +168,7 @@ mod tests {
             4907,
             &[("ObjectType", "\"File\""), ("ObjectName", "\"c:\\x\"")],
         );
-        let ev = build_denial_from_access_check(&p, 1, fixed_ts).unwrap();
+        let ev = build_denial_from_access_check(&p, 1, FIXED_FILETIME).unwrap();
         assert_eq!(ev.container_name, "unknown");
     }
 
@@ -182,11 +181,12 @@ mod tests {
                 ("LowBoxNumber", "\"42\""),
             ],
         );
-        let ev = build_denial_from_learning_mode(&p, 9999, fixed_ts).expect("should extract");
+        let ev = build_denial_from_learning_mode(&p, 9999, FIXED_FILETIME).expect("should extract");
         assert_eq!(ev.event_id, 27);
         assert_eq!(ev.pid, 9999);
         assert_eq!(ev.resource_type, ResourceType::Other);
         assert_eq!(ev.object_name, "python.exe");
         assert_eq!(ev.container_name, "42");
+        assert_eq!(ev.filetime, FIXED_FILETIME);
     }
 }

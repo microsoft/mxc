@@ -28,6 +28,9 @@ pub mod path_norm;
 #[cfg(target_os = "windows")]
 pub mod session;
 
+#[cfg(target_os = "windows")]
+pub mod tdh_decode;
+
 pub use extractors::{
     build_denial_from_access_check, build_denial_from_learning_mode, DecodedEventParts,
 };
