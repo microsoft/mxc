@@ -169,25 +169,48 @@ fn format_property_value(
             (v.to_string(), 1)
         }
         TDH_INTYPE_BOOLEAN if available >= 4 => {
-            let v = unsafe { *(data.cast::<u32>()) };
+            // SAFETY: data points to >=4 valid bytes; read_unaligned because
+            // ETW payload alignment is not guaranteed.
+            let v = unsafe { (data.cast::<u32>()).read_unaligned() };
             (if v != 0 { "true" } else { "false" }.to_string(), 4)
         }
-        TDH_INTYPE_INT16 if available >= 2 => (unsafe { (*(data.cast::<i16>())).to_string() }, 2),
-        TDH_INTYPE_UINT16 if available >= 2 => (unsafe { (*(data.cast::<u16>())).to_string() }, 2),
-        TDH_INTYPE_INT32 if available >= 4 => (unsafe { (*(data.cast::<i32>())).to_string() }, 4),
-        TDH_INTYPE_UINT32 if available >= 4 => (unsafe { (*(data.cast::<u32>())).to_string() }, 4),
-        TDH_INTYPE_HEXINT32 if available >= 4 => {
-            (format!("{:#x}", unsafe { *(data.cast::<u32>()) }), 4)
-        }
-        TDH_INTYPE_INT64 if available >= 8 => (unsafe { (*(data.cast::<i64>())).to_string() }, 8),
-        TDH_INTYPE_UINT64 if available >= 8 => (unsafe { (*(data.cast::<u64>())).to_string() }, 8),
-        TDH_INTYPE_HEXINT64 if available >= 8 => {
-            (format!("{:#x}", unsafe { *(data.cast::<u64>()) }), 8)
-        }
+        TDH_INTYPE_INT16 if available >= 2 => (
+            unsafe { (data.cast::<i16>()).read_unaligned() }.to_string(),
+            2,
+        ),
+        TDH_INTYPE_UINT16 if available >= 2 => (
+            unsafe { (data.cast::<u16>()).read_unaligned() }.to_string(),
+            2,
+        ),
+        TDH_INTYPE_INT32 if available >= 4 => (
+            unsafe { (data.cast::<i32>()).read_unaligned() }.to_string(),
+            4,
+        ),
+        TDH_INTYPE_UINT32 if available >= 4 => (
+            unsafe { (data.cast::<u32>()).read_unaligned() }.to_string(),
+            4,
+        ),
+        TDH_INTYPE_HEXINT32 if available >= 4 => (
+            format!("{:#x}", unsafe { (data.cast::<u32>()).read_unaligned() }),
+            4,
+        ),
+        TDH_INTYPE_INT64 if available >= 8 => (
+            unsafe { (data.cast::<i64>()).read_unaligned() }.to_string(),
+            8,
+        ),
+        TDH_INTYPE_UINT64 if available >= 8 => (
+            unsafe { (data.cast::<u64>()).read_unaligned() }.to_string(),
+            8,
+        ),
+        TDH_INTYPE_HEXINT64 if available >= 8 => (
+            format!("{:#x}", unsafe { (data.cast::<u64>()).read_unaligned() }),
+            8,
+        ),
         TDH_INTYPE_POINTER if available >= 8 => (
             // 64-bit pointer; on 32-bit hosts this would be 4 bytes but
-            // we only target x64.
-            format!("{:#x}", unsafe { *(data.cast::<u64>()) }),
+            // we only target x64. Unaligned read because ETW payload
+            // alignment is not guaranteed.
+            format!("{:#x}", unsafe { (data.cast::<u64>()).read_unaligned() }),
             8,
         ),
         // Unknown / unsupported InType: emit a placeholder. Consume the

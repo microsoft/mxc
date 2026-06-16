@@ -25,8 +25,8 @@ use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
 use windows::Win32::System::Threading::{
-    GetExitCodeProcess, TerminateProcess, WaitForSingleObject, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOW,
+    GetExitCodeProcess, ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED,
+    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW,
 };
 use windows_core::PCWSTR;
 
@@ -288,6 +288,14 @@ impl BaseContainerRunner {
             && !caps.iter().any(|c| c == "internetClient")
         {
             caps.push("internetClient".to_string());
+        }
+
+        // Per-PID denial capture (request.capture_denials == true) requires
+        // the `learningModeLogging` capability so the kernel emits
+        // AccessCheckLog / LearningModeViolation events for sandbox-policy
+        // denials. Observability-only -- enforcement is unchanged.
+        if request.capture_denials && !caps.iter().any(|c| c == "learningModeLogging") {
+            caps.push("learningModeLogging".to_string());
         }
 
         let capabilities = if caps.is_empty() {
@@ -811,6 +819,15 @@ impl ScriptRunner for BaseContainerRunner {
             0
         };
 
+        // Per-PID denial capture needs to attach the ETW session BEFORE the
+        // child runs any code. Spawn suspended so we can grab the PID, open
+        // the shim session, start the collector, then resume.
+        let creation_flags = if request.capture_denials {
+            creation_flags | CREATE_SUSPENDED.0
+        } else {
+            creation_flags
+        };
+
         let _ = writeln!(logger, "launching: {}", request.script_code);
         let _ = writeln!(logger, "identity: {identity}");
 
@@ -972,6 +989,65 @@ impl ScriptRunner for BaseContainerRunner {
 
         let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
 
+        // Per-PID denial capture: child is suspended (we set CREATE_SUSPENDED
+        // when capture_denials is true). Open the shim session for this PID,
+        // start the consumer thread, then resume. Failures here are
+        // non-fatal -- the child still runs, just without capture. Logged
+        // so the operator can see when capture degraded.
+        let collector = if request.capture_denials {
+            match denial_capture::session::open_via_shim(pi.dwProcessId, None) {
+                Ok(session) => match session.start_collector() {
+                    Ok(c) => {
+                        let _ = writeln!(
+                            logger,
+                            "captureDenials: ETW collector attached to PID {} via session {}",
+                            pi.dwProcessId, session.session_name
+                        );
+                        Some(c)
+                    }
+                    Err(e) => {
+                        let _ = writeln!(
+                            logger,
+                            "captureDenials: start_collector failed (continuing without capture): {}",
+                            e
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    let _ = writeln!(
+                        logger,
+                        "captureDenials: open_via_shim failed (continuing without capture): {}",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if request.capture_denials {
+            // SAFETY: pi.hThread is a valid suspended thread handle from the
+            // create call above. ResumeThread returns the previous suspend
+            // count or u32::MAX on failure.
+            let prev = unsafe { ResumeThread(pi.hThread) };
+            if prev == u32::MAX {
+                let err = unsafe { GetLastError() };
+                let _ = writeln!(
+                    logger,
+                    "{EMOJI_WARNING} ResumeThread failed after capture setup: {err:?}; \
+                     terminating child",
+                );
+                unsafe {
+                    let _ = TerminateProcess(pi.hProcess, u32::MAX);
+                    let _ = CloseHandle(pi.hProcess);
+                    let _ = CloseHandle(pi.hThread);
+                }
+                return ScriptResponse::error(&format!("ResumeThread failed: {err:?}"));
+            }
+        }
+
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Wait for exit");
 
         // 5. Wait for the child process to exit.
@@ -1053,12 +1129,31 @@ impl ScriptRunner for BaseContainerRunner {
             error_message.clone()
         };
 
+        // Drain the denial collector (if any) and convert internal
+        // DenialEvent -> public DeniedResource. Done after the child has
+        // exited so trailing events that the kernel emits during process
+        // teardown still get captured.
+        let (denied_resources, denied_resources_truncated) = if let Some(c) = collector {
+            let (events, truncated) = c.stop_and_drain();
+            let _ = writeln!(
+                logger,
+                "captureDenials: drained {} events (truncated={})",
+                events.len(),
+                truncated
+            );
+            (events.into_iter().map(Into::into).collect(), truncated)
+        } else {
+            (Vec::new(), false)
+        };
+
         ScriptResponse {
             exit_code: exit_code as i32,
             standard_out: String::new(),
             standard_err: final_stderr,
             error_message,
             failure_phase,
+            denied_resources,
+            denied_resources_truncated,
             ..Default::default()
         }
     }
