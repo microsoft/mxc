@@ -12,6 +12,7 @@
 //!   crate supports (Seatbelt, Bubblewrap, ProcessContainer) — so callers no
 //!   longer need the TypeScript SDK to build a spawnable config.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -200,6 +201,15 @@ fn env_get<'a>(env: &'a [(String, String)], name: &str) -> Option<&'a str> {
     env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }
 
+/// Borrow the caller-supplied env, or snapshot the process environment when
+/// `None`.
+fn env_or_process(env: Option<&[(String, String)]>) -> Cow<'_, [(String, String)]> {
+    match env {
+        Some(e) => Cow::Borrowed(e),
+        None => Cow::Owned(std::env::vars().collect()),
+    }
+}
+
 /// PowerShell-specific policy: when `pwsh.exe` is found on `path_dirs`
 /// (Windows only), expose the drive root read-only and the PSReadLine history
 /// dir read-write. Mirrors the SDK's `getPowerShellPolicy`.
@@ -253,14 +263,8 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
 /// (The SDK's `processcontainer` AAP-ACL filter is Windows-runtime-specific and
 /// is applied server-side; it is not replicated here.)
 pub fn available_tools_policy(env: Option<&[(String, String)]>) -> FilesystemPolicyResult {
-    let owned_env;
-    let env: &[(String, String)] = match env {
-        Some(e) => e,
-        None => {
-            owned_env = std::env::vars().collect::<Vec<_>>();
-            &owned_env
-        }
-    };
+    let env = env_or_process(env);
+    let env: &[(String, String)] = &env;
 
     let mut collected = Vec::new();
     let path_value = env_get(env, "PATH")
@@ -339,14 +343,8 @@ pub fn user_profile_policy() -> FilesystemPolicyResult {
 /// empty fragment when the resolved directory does not exist. The Rust port of
 /// `getTemporaryFilesPolicy`.
 pub fn temporary_files_policy(env: Option<&[(String, String)]>) -> FilesystemPolicyResult {
-    let owned_env;
-    let env: &[(String, String)] = match env {
-        Some(e) => e,
-        None => {
-            owned_env = std::env::vars().collect::<Vec<_>>();
-            &owned_env
-        }
-    };
+    let env = env_or_process(env);
+    let env: &[(String, String)] = &env;
 
     let temp_root = if is_windows() {
         env_get(env, "TEMP").or_else(|| env_get(env, "TMP"))
