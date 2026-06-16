@@ -4,7 +4,7 @@
 //! Shared captureDenials stderr-streaming protocol used by both the
 //! AppContainer and BaseContainer runners.
 //!
-//! Wire format on stderr (one denial per line):
+//! Wire format on stderr (one line per *unique* `(path, accessType)`):
 //!
 //! ```text
 //! \x1e{"type":"denial","path":"...","resourceType":"...","accessType":"...","pid":N,"filetime":N}\n
@@ -16,15 +16,30 @@
 //! byte effectively never appears in legitimate workload stderr, so
 //! SDK consumers can split stderr on it to reliably separate MXC
 //! envelopes from the workload's own stderr writes. The summary line
-//! terminates the stream for a given `wxc-exec` invocation.
+//! terminates the stream for a given `wxc-exec` invocation; its
+//! `totalDenials` is the raw count *before* dedupe (so callers can
+//! see when a workload was unusually chatty even though the streamed
+//! lines are deduped).
 
 /// ASCII Record Separator (0x1E). Prefixed to every captureDenials
 /// streaming line.
 pub(crate) const DENIAL_STREAM_MARKER: u8 = 0x1E;
 
 /// Drains `rx` until the channel closes, writing one
-/// `\x1e<ndjson>\n` line to stderr per captured DeniedResource. Runs
-/// on its own thread so the ETW callback never blocks on stderr I/O.
+/// `\x1e<ndjson>\n` line to stderr per *newly-seen*
+/// `(path, accessType)` pair. Runs on its own thread so the ETW
+/// callback never blocks on stderr I/O.
+///
+/// Stream-time dedupe rationale: in practice a single process run
+/// can trigger the same denial hundreds of times in a tight loop
+/// (e.g. locale-aware code re-reading
+/// `\REGISTRY\USER\.DEFAULT\Control Panel\International` on every
+/// `printf`). For the SDK's prompt-the-user UX every duplicate is
+/// pure noise — the user has already been asked about that resource
+/// — and emitting them all balloons stderr by ~100x. The dedupe set
+/// is per-invocation (lives only as long as this writer thread) so
+/// the SDK still sees the full unique-path set; the final summary
+/// line carries the raw total for diagnostic visibility.
 ///
 /// The channel closes when the `CollectorHandle` is dropped (the
 /// sender lives inside its `CallbackContext`). Receiving `Err` is
@@ -32,9 +47,18 @@ pub(crate) const DENIAL_STREAM_MARKER: u8 = 0x1E;
 pub(crate) fn stream_denials_to_stderr(
     rx: std::sync::mpsc::Receiver<denial_capture::DeniedResource>,
 ) {
+    use std::collections::HashSet;
     use std::io::Write;
     let mut stderr = std::io::stderr().lock();
+    let mut seen: HashSet<(String, denial_capture::AccessType)> = HashSet::new();
     while let Ok(resource) = rx.recv() {
+        // Dedupe on (path, accessType). `resourceType` and `pid`
+        // are deterministic given path; `filetime` would defeat
+        // dedupe entirely if included.
+        let key = (resource.path.clone(), resource.access_type);
+        if !seen.insert(key) {
+            continue;
+        }
         let envelope = serde_json::json!({
             "type": "denial",
             "path": resource.path,
