@@ -10,13 +10,11 @@
 
 /// Platform support information — the Rust analogue of the SDK
 /// `PlatformSupport` type.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default)]
 pub struct PlatformSupport {
     /// Whether MXC is supported on the current host.
     pub is_supported: bool,
     /// Why the platform is unsupported, when `is_supported` is false.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Containment backends available on this host, by wire name
     /// (e.g. `"seatbelt"`, `"bubblewrap"`, `"processcontainer"`).

@@ -3,34 +3,29 @@
 An importable Rust library for starting [MXC](../../../README.md) sandboxes
 **in-process**, without ever allocating a pty.
 
-It takes the same JSON config the executor binaries (`wxc-exec`, `lxc-exec`,
-`mxc-exec-mac`) consume, selects the right containment backend for the host,
-and spawns the sandboxed process — returning a handle for live bidirectional
-stdio and termination.
+Build an `ExecutionRequest` from a [`SandboxPolicy`] (or construct one
+directly), then hand it to [`spawn_sandbox`]: it selects the
+right containment backend for the host and spawns the sandboxed process —
+returning a handle for live bidirectional stdio and termination.
 
 ## Usage
 
 ```rust,no_run
 use std::io::Read;
-use mxc::{spawn_sandbox, Config, FilesystemConfig, ProcessConfig, SpawnOptions};
+use mxc::{build_request, spawn_sandbox, SandboxPolicy};
 
-// Build a typed config and spawn it.
-let config = Config {
-    version: Some("0.7.0-alpha".to_string()),
-    containment: Some("seatbelt".to_string()),
-    process: Some(ProcessConfig {
-        command_line: Some("echo hello".to_string()),
-        timeout: Some(10000),
-        ..Default::default()
-    }),
-    filesystem: Some(FilesystemConfig {
-        readwrite_paths: Some(vec!["/tmp".to_string()]),
-        ..Default::default()
-    }),
-    ..Default::default()
+// Describe what to restrict, turn it into a request, fill in the command.
+let policy = SandboxPolicy {
+    version: "0.7.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: None,
+    timeout_ms: Some(10_000),
 };
+let mut request = build_request(&policy, None)?;
+request.script_code = "echo hello".to_string();
 
-let mut proc = spawn_sandbox(&config, &SpawnOptions::default())?;
+let mut proc = spawn_sandbox(request)?;
 let mut stdout = proc.take_stdout().unwrap();
 let mut out = String::new();
 stdout.read_to_string(&mut out)?; // "hello\n"
@@ -39,40 +34,13 @@ assert_eq!(exit_code, 0);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`SpawnOptions` mirrors the executor CLI knobs (minus anything pty-related):
-`experimental`, `dry_run`, `working_directory`, `command` (override
-`process.commandLine`), and `env` (merged into `process.env`).
-
-For callers that already hold a parsed `ExecutionRequest`, use
-[`spawn_streaming_from_request`].
-
-## Building a config from a policy (no TypeScript SDK needed)
-
-Instead of constructing the wire config in the `@microsoft/mxc-sdk` TypeScript
-module, build it in Rust from a [`SandboxPolicy`]:
-
-```rust,no_run
-use mxc::{build_request, spawn_streaming_from_request, SandboxPolicy};
-
-let policy = SandboxPolicy {
-    version: "0.7.0-alpha".to_string(),
-    filesystem: None,
-    network: None,
-    ui: None,
-    timeout_ms: Some(10_000),
-};
-
-let mut request = build_request(&policy, None)?;
-request.script_code = "echo hi".to_string();
-let mut proc = spawn_streaming_from_request(request)?;
-# Ok::<(), mxc::MxcError>(())
-```
-
 [`build_request`] is the Rust port of the SDK's `createConfigFromPolicy`. It
 resolves the host's containment backend (Seatbelt on macOS, Bubblewrap on
 Linux, ProcessContainer on Windows) and mirrors the SDK's field mapping and
 network validation, building the same wire config internally and running it
-through the shared parser.
+through the shared parser. The returned [`ExecutionRequest`] has an empty
+command line — set `script_code` (and any `working_directory` / `env`) before
+spawning.
 
 Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
@@ -83,23 +51,25 @@ support and the available containment backends.
 
 ## Live stdio + kill (streaming)
 
-`spawn_sandbox` is the handle-based counterpart: instead of running to
-completion it returns a [`SandboxProcess`] you can drive while it runs —
-persistent bidirectional stdio plus termination. No pty is allocated; the
-streams are ordinary pipes.
+[`spawn_sandbox`] returns a [`SandboxProcess`] you can drive
+while it runs — persistent bidirectional stdio plus termination. No pty is
+allocated; the streams are ordinary pipes.
 
 ```rust,no_run
 use std::io::{Read, Write};
-use mxc::{spawn_sandbox, SpawnOptions};
+use mxc::{build_request, spawn_sandbox, SandboxPolicy};
 
-let config = r#"{
-    "version": "0.7.0-alpha",
-    "containment": "seatbelt",
-    "process": { "commandLine": "cat", "timeout": 0 },
-    "filesystem": { "readwritePaths": ["/tmp"] }
-}"#;
+let policy = SandboxPolicy {
+    version: "0.7.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: None,
+    timeout_ms: None,
+};
+let mut request = build_request(&policy, None)?;
+request.script_code = "cat".to_string(); // echoes stdin until EOF
 
-let mut proc = spawn_sandbox(config, &SpawnOptions::default())?;
+let mut proc = spawn_sandbox(request)?;
 let mut stdin = proc.take_stdin().unwrap();
 let mut stdout = proc.take_stdout().unwrap();
 
@@ -136,12 +106,12 @@ backend the library supports.
 > **Windows note:** streaming does not use the AppContainer-BFS /
 > AppContainer-DACL fallback. Experimental / newer-schema configs that select
 > BaseContainer require the native BaseContainer API; on a host without it,
-> `spawn_sandbox` fails closed with a clear error rather than falling back to
-> an AppContainer tier.
+> `spawn_sandbox` fails closed with a clear error rather than
+> falling back to an AppContainer tier.
 
 ## Supported backends
 
-The backend is chosen by the `containment` field in the config (or the host
+The backend is chosen by the `containment` field in the request (or the host
 default):
 
 | Host    | Backend(s)                                             |
@@ -163,7 +133,7 @@ take is drained and discarded by `wait()`.
 
 ## Relationship to the executor binaries
 
-This crate is purely additive: the `wxc-exec`, `lxc-exec`, and `mxc-exec-mac`
-binaries do not depend on it. It reuses the same backend crates they do (and,
-on Windows, the shared `appcontainer_common::dispatcher::dispatch_with_fallback`
-primitive), but spawns its own streaming handles.
+The `wxc-exec`, `lxc-exec`, and `mxc-exec-mac` binaries do not depend on this
+crate. It reuses the same backend crates they do (and, on Windows, the shared
+`appcontainer_common::dispatcher::dispatch_with_fallback` primitive), but
+spawns its own streaming handles.

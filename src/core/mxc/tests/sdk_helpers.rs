@@ -10,7 +10,7 @@ use mxc::{
 };
 
 #[cfg(target_os = "macos")]
-use mxc::spawn_streaming_from_request;
+use mxc::spawn_sandbox;
 
 fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
@@ -205,7 +205,7 @@ fn build_request_then_run_seatbelt() {
     let mut request = build_request(&policy, None).expect("build_request should succeed");
     request.script_code = "echo built-from-policy".to_string();
 
-    let mut proc = spawn_streaming_from_request(request).expect("spawn should succeed");
+    let mut proc = spawn_sandbox(request).expect("spawn should succeed");
     let mut out = String::new();
     if let Some(mut stdout) = proc.take_stdout() {
         let _ = std::io::Read::read_to_string(&mut stdout, &mut out);

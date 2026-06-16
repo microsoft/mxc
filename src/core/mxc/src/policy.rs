@@ -492,7 +492,7 @@ pub struct SandboxPolicy {
 ///
 /// The returned request has an empty command line; callers set `script_code`
 /// (and `working_directory` / `env`) before streaming it via
-/// [`crate::spawn_streaming_from_request`].
+/// [`crate::spawn_sandbox`].
 ///
 /// Mirrors the SDK field mapping and validation (network proxy/host-filtering
 /// constraints) for the supported backends. Internally it builds the same

@@ -20,11 +20,6 @@ use crate::models::{
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 
-/// Typed public config (`Config`) + its conversion. Lives as a child module so
-/// it can map onto the internal `Raw*` types and call the converter below
-/// without those needing crate-wide visibility.
-pub mod config;
-
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
 /// variant to choose the failure-output convention: state-aware failures
 /// emit a JSON `{"error": ...}` envelope on stdout, while one-shot and
