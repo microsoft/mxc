@@ -31,13 +31,12 @@ use wxc_common::models::{ClipboardPolicy, ExecutionRequest, NetworkPolicy};
 
 /// Build a complete sandbox profile string from the given request.
 ///
-/// If `request.experimental.seatbelt.profile_override` is set, that
+/// If `request.seatbelt.profile_override` is set, that
 /// string is returned verbatim and policy fields are ignored. This is the
 /// escape hatch for advanced/testing scenarios that need to hand-author a
 /// profile.
 pub fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
     if let Some(override_profile) = request
-        .experimental
         .seatbelt
         .as_ref()
         .and_then(|c| c.profile_override.as_ref())
@@ -238,11 +237,7 @@ fn write_local_network_rules(out: &mut String, allow_local_network: bool) {
 
 fn write_ui_rules(out: &mut String, request: &ExecutionRequest) {
     let ui = &request.policy.ui;
-    let gui_access = request
-        .experimental
-        .seatbelt
-        .as_ref()
-        .is_some_and(|c| c.gui_access);
+    let gui_access = request.seatbelt.as_ref().is_some_and(|c| c.gui_access);
 
     // The baseline profile uses `(deny default)`, so services are blocked
     // unless explicitly allowed. When UI is enabled, we allow the mach
@@ -321,7 +316,7 @@ fn write_ui_rules(out: &mut String, request: &ExecutionRequest) {
 /// its own pty. Skipped when `gui_access` (with UI enabled) already emits
 /// a strict superset.
 fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
-    let sb = request.experimental.seatbelt.as_ref();
+    let sb = request.seatbelt.as_ref();
     let enabled = sb.is_none_or(|c| c.nested_pty);
     let gui_block_emitted = sb.is_some_and(|c| c.gui_access) && !request.policy.ui.disable;
     if !enabled || gui_block_emitted {
@@ -338,7 +333,7 @@ fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
 
 /// Emit rules so `Security.framework` / `keytar` can reach `securityd`
 /// and read/write the user's Keychain. Off by default — opt in via
-/// `experimental.seatbelt.keychainAccess: true`.
+/// `seatbelt.keychainAccess: true`.
 ///
 /// Real-world Keychain access fans out across several daemons. At
 /// minimum we need:
@@ -360,11 +355,7 @@ fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
 /// are already covered by the baseline `/Library` and `/System`
 /// read-only allows, so we don't re-add them here.
 fn write_keychain_rules(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
-    let enabled = request
-        .experimental
-        .seatbelt
-        .as_ref()
-        .is_some_and(|c| c.keychain_access);
+    let enabled = request.seatbelt.as_ref().is_some_and(|c| c.keychain_access);
     if !enabled {
         return Ok(());
     }
@@ -414,7 +405,7 @@ fn write_keychain_rules(out: &mut String, request: &ExecutionRequest) -> Result<
 /// Emit caller-provided `extraMachLookups` rules: additional Mach service
 /// global-names the inner process may resolve. No-op when the list is empty.
 fn write_extra_seatbelt_rules(out: &mut String, request: &ExecutionRequest) {
-    let Some(sb) = request.experimental.seatbelt.as_ref() else {
+    let Some(sb) = request.seatbelt.as_ref() else {
         return;
     };
     if sb.extra_mach_lookups.is_empty() {
@@ -661,7 +652,7 @@ mod tests {
     fn profile_override_takes_precedence() {
         let mut r = req();
         r.policy.readonly_paths = vec!["/should/be/ignored".into()];
-        r.experimental.seatbelt = Some(SeatbeltConfig {
+        r.seatbelt = Some(SeatbeltConfig {
             profile_override: Some("(version 1)(allow default)".into()),
             gui_access: false,
             ..Default::default()
@@ -699,7 +690,7 @@ mod tests {
             clipboard: ClipboardPolicy::None,
             injection: true,
         };
-        r.experimental.seatbelt = Some(SeatbeltConfig {
+        r.seatbelt = Some(SeatbeltConfig {
             profile_override: None,
             gui_access: true,
             ..Default::default()
@@ -729,7 +720,7 @@ mod tests {
             clipboard: ClipboardPolicy::None,
             injection: true,
         };
-        r.experimental.seatbelt = Some(SeatbeltConfig {
+        r.seatbelt = Some(SeatbeltConfig {
             profile_override: None,
             gui_access: false,
             // Pin nested_pty off so this test stays focused on
@@ -749,7 +740,7 @@ mod tests {
     fn gui_access_requires_ui_enabled() {
         let mut r = req();
         // ui.disable = true (default) but gui_access = true
-        r.experimental.seatbelt = Some(SeatbeltConfig {
+        r.seatbelt = Some(SeatbeltConfig {
             profile_override: None,
             gui_access: true,
             // Pin nested_pty off so this test isolates the
@@ -767,10 +758,10 @@ mod tests {
 
     #[test]
     fn nested_pty_default_on_emits_pty_rules() {
-        // When experimental.seatbelt is absent the builder should still
+        // When seatbelt is absent the builder should still
         // emit nested_pty rules — that's the documented default behavior.
         let r = req();
-        assert!(r.experimental.seatbelt.is_none());
+        assert!(r.seatbelt.is_none());
         let p = build_profile(&r).unwrap();
         assert!(p.contains("nestedPty"), "nestedPty comment missing");
         assert!(p.contains("(allow pseudo-tty)"));
@@ -780,7 +771,7 @@ mod tests {
     #[test]
     fn nested_pty_explicit_true_emits_pty_rules() {
         let mut r = req();
-        r.experimental.seatbelt = Some(SeatbeltConfig {
+        r.seatbelt = Some(SeatbeltConfig {
             nested_pty: true,
             ..Default::default()
         });
@@ -792,7 +783,7 @@ mod tests {
     #[test]
     fn nested_pty_false_omits_pty_rules() {
         let mut r = req();
-        r.experimental.seatbelt = Some(SeatbeltConfig {
+        r.seatbelt = Some(SeatbeltConfig {
             nested_pty: false,
             ..Default::default()
         });
@@ -813,7 +804,7 @@ mod tests {
             clipboard: ClipboardPolicy::None,
             injection: true,
         };
-        r.experimental.seatbelt = Some(SeatbeltConfig {
+        r.seatbelt = Some(SeatbeltConfig {
             gui_access: true,
             nested_pty: true,
             ..Default::default()
@@ -835,7 +826,7 @@ mod tests {
             r.policy.ui.disable,
             "default ui.disable expected to be true"
         );
-        r.experimental.seatbelt = Some(SeatbeltConfig {
+        r.seatbelt = Some(SeatbeltConfig {
             gui_access: true,
             nested_pty: true,
             ..Default::default()
@@ -867,7 +858,7 @@ mod tests {
     #[test]
     fn keychain_access_true_allows_securityd_mach_services() {
         let mut r = req();
-        r.experimental.seatbelt = Some(SeatbeltConfig {
+        r.seatbelt = Some(SeatbeltConfig {
             keychain_access: true,
             ..Default::default()
         });
@@ -885,7 +876,7 @@ mod tests {
     #[test]
     fn keychain_access_true_allows_filesystem_paths() {
         let mut r = req();
-        r.experimental.seatbelt = Some(SeatbeltConfig {
+        r.seatbelt = Some(SeatbeltConfig {
             keychain_access: true,
             ..Default::default()
         });
@@ -907,7 +898,7 @@ mod tests {
     #[test]
     fn extra_mach_lookups_emits_grouped_allow_form() {
         let mut r = req();
-        r.experimental.seatbelt = Some(SeatbeltConfig {
+        r.seatbelt = Some(SeatbeltConfig {
             extra_mach_lookups: vec![
                 "com.apple.example.one".to_string(),
                 "com.apple.example.two".to_string(),
@@ -922,7 +913,7 @@ mod tests {
     #[test]
     fn extra_mach_lookups_omitted_when_empty() {
         let mut r = req();
-        r.experimental.seatbelt = Some(SeatbeltConfig::default());
+        r.seatbelt = Some(SeatbeltConfig::default());
         let p = build_profile(&r).unwrap();
         assert!(!p.contains("extraMachLookups"));
     }
@@ -930,7 +921,7 @@ mod tests {
     #[test]
     fn extra_mach_lookups_escape_embedded_quotes() {
         let mut r = req();
-        r.experimental.seatbelt = Some(SeatbeltConfig {
+        r.seatbelt = Some(SeatbeltConfig {
             extra_mach_lookups: vec!["weird\"name".to_string()],
             ..Default::default()
         });

@@ -1,5 +1,5 @@
 {
-    "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
+    "$schema": "../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
     "version": "0.7.0-alpha",
     "containment": "seatbelt",
     "process": {
@@ -7,15 +7,17 @@
         "timeout": 10000
     },
     "filesystem": {
-        "readwritePaths": ["/tmp"],
-        "deniedPaths": ["/Users"]
+        "readwritePaths": [
+            "/tmp"
+        ],
+        "deniedPaths": [
+            "/Users"
+        ]
     },
     "network": {
         "defaultPolicy": "block"
     },
-    "experimental": {
-        "seatbelt": {
-            "mode": "exec"
-        }
+    "seatbelt": {
+        "mode": "exec"
     }
 }

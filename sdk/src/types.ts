@@ -107,7 +107,7 @@ export type ContainmentBackend =
  * Containment values (abstract intent or concrete backend) that require
  * the `--experimental` flag.
  */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight', 'wslc', 'seatbelt', 'isolation_session'];
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight', 'wslc', 'isolation_session'];
 
 /**
  * Clipboard access policy levels
@@ -276,9 +276,9 @@ export interface ContainerConfig {
   experimental?: {
     /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
-    /** macOS sandbox configuration (macOS only) */
-    seatbelt?: SeatbeltConfig;
   };
+  /** macOS Seatbelt sandbox configuration (macOS only) */
+  seatbelt?: SeatbeltConfig;
   /** Cross-platform UI configuration */
   ui?: UiConfig;
 }
@@ -348,8 +348,8 @@ export interface LxcConfig {
 }
 
 /**
- * macOS Seatbelt sandbox configuration (experimental). Used under
- * `experimental.seatbelt` when containment is `'seatbelt'`.
+ * macOS Seatbelt sandbox configuration. Used under the top-level
+ * `seatbelt` key when `containment == "seatbelt"`.
  */
 export interface SeatbeltConfig {
   /**
@@ -408,6 +408,39 @@ export type IsolationTier =
   | 'appcontainer-dacl';
 
 /**
+ * Host support for enforcing sandbox UI restrictions.
+ *
+ * The fields describe platform-agnostic restriction intents, not the
+ * OS-specific primitive used to enforce them. For example, Windows derives
+ * these values from `JOB_OBJECT_UILIMIT_*` support. The SDK currently
+ * receives this object only from the Windows native probe; other platforms
+ * omit `PlatformSupport.uiCapabilities` until they expose equivalent probe
+ * data.
+ */
+export interface UiCapabilitySupport {
+  /** Whether the host can block reads from the clipboard. */
+  canBlockClipboardRead: boolean;
+  /** Whether the host can block writes to the clipboard. */
+  canBlockClipboardWrite: boolean;
+  /** Whether the host can block synthetic keyboard/mouse input. */
+  canBlockInputInjection: boolean;
+  /** Whether the host can block input method / IME changes. */
+  canBlockInputMethodChanges: boolean;
+  /** Whether the host can block access to external UI object handles. */
+  canBlockExternalUiObjects: boolean;
+  /** Whether the host can block access to global UI namespaces. */
+  canBlockGlobalUiNamespace: boolean;
+  /** Whether the host can block desktop switching. */
+  canBlockDesktopSwitching: boolean;
+  /** Whether the host can block logoff or shutdown requests. */
+  canBlockLogoffOrShutdown: boolean;
+  /** Whether the host can block system parameter changes. */
+  canBlockSystemParameterChanges: boolean;
+  /** Whether the host can block display settings changes. */
+  canBlockDisplaySettingsChanges: boolean;
+}
+
+/**
  * Platform support information
  */
 export interface PlatformSupport {
@@ -427,4 +460,9 @@ export interface PlatformSupport {
    * Omitted on non-Windows platforms or when the probe fails.
    */
   isolationWarnings?: string[];
+  /**
+   * Host UI-restriction capabilities. Omitted when the backend probe cannot
+   * determine them, including on Linux and macOS today.
+   */
+  uiCapabilities?: UiCapabilitySupport;
 }

@@ -15,12 +15,19 @@
 //! ## Environment variables
 //!
 //! - `GITHUB_TOKEN` / `GH_TOKEN` — optional; increases API rate limit
+//! - `NANVIX_BIN` — optional; path to a directory of pre-fetched NanVix
+//!   binaries. When set, the build uses that directory directly and performs
+//!   no network downloads, enabling fully offline builds where all dynamic
+//!   build inputs are pre-fetched. The directory must already contain the
+//!   required binaries (flat files plus the `bin/` subdirectory); checksums
+//!   are still verified against `checksums.json`.
 //!
 //! ## Caching
 //!
-//! Binaries are cached in OUT_DIR. Checksums are verified whenever this
-//! build script runs (triggered by changes to build.rs, versions.json,
-//! or checksums.json) to catch corrupted or truncated files.
+//! Binaries are cached in OUT_DIR (or read from `NANVIX_BIN` when set).
+//! Checksums are verified whenever this build script runs (triggered by
+//! changes to build.rs, versions.json, or checksums.json) to catch corrupted
+//! or truncated files.
 //!
 //! # TODO(security): NanVix binaries are not ESRP-signed. Before shipping in
 //! # official MXC releases, either extend ESRP to cover these binaries or
@@ -34,6 +41,30 @@ use std::process::Command;
 use nanvix_common::{github_download_url, load_checksums, load_json, ReleaseConfig, RepoConfig};
 
 fn main() {
+    // The build script's output (`NANVIX_BIN_DIR` and whether the download /
+    // verify path runs) depends on the `microvm` feature, surfaced here as the
+    // `CARGO_FEATURE_MICROVM` env var. Declare it as a rerun trigger so toggling
+    // the feature between builds re-runs this script instead of reusing stale
+    // output.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_MICROVM");
+
+    // The expensive work in this build script — downloading NanVix release
+    // assets and verifying their checksums via `certutil` — is only needed
+    // when the micro-VM backend is actually being built. Gate it behind this
+    // crate's `microvm` feature so that a default `cargo build` (which still
+    // compiles this crate as a workspace member) performs no network or hashing
+    // work. `wxc` and `lxc` enable `nanvix_binaries/microvm` through their own
+    // `microvm` features.
+    //
+    // `NANVIX_BIN_DIR` must still be emitted in every configuration because
+    // `lib.rs` references it via `env!`.
+    if std::env::var_os("CARGO_FEATURE_MICROVM").is_none() {
+        let out_dir = std::env::var("OUT_DIR").unwrap();
+        println!("cargo:rustc-env=NANVIX_BIN_DIR={}", out_dir);
+        println!("cargo:rerun-if-changed=build.rs");
+        return;
+    }
+
     // Check the TARGET platform (not host). NanVix binaries are only needed when
     // the output binary will run on Windows or Linux with KVM.
     let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -45,8 +76,12 @@ fn main() {
     }
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let bin_dir = out_dir.join("nanvix-binaries");
-    fs::create_dir_all(&bin_dir).expect("failed to create nanvix-binaries dir");
+
+    // When `NANVIX_BIN` is set, use the caller-provided directory of
+    // pre-fetched binaries and skip all network downloads (offline builds);
+    // otherwise download into a subdirectory of OUT_DIR as before. The
+    // resolution lives in the build-only `nanvix_build_common` crate.
+    let (bin_dir, use_prefetched_binaries) = nanvix_build_common::resolve_bin_dir(&out_dir);
 
     let versions: ReleaseConfig = load_json("versions.json");
     let checksums: HashMap<String, String> = load_checksums("checksums.json", &target);
@@ -65,19 +100,29 @@ fn main() {
             .map(|v| v.iter().map(|s| s.as_str()).collect())
             .unwrap_or_else(|| nanvix_common::REQUIRED_BINARIES.to_vec());
 
-        let needs_download = needs_download_linux(&binaries, &bin_dir, &checksums);
+        let needs_download =
+            !use_prefetched_binaries && needs_download_linux(&binaries, &bin_dir, &checksums);
         if needs_download {
             eprintln!(
                 "nanvix_binaries: downloading nanvix/nanvix-python {} (Linux)...",
                 versions.nanvix_python.tag
             );
             download_and_extract_linux(&versions.nanvix_python.tag, asset, &binaries, &bin_dir);
+        } else if use_prefetched_binaries {
+            eprintln!(
+                "nanvix_binaries: offline — verifying pre-fetched Linux binaries in '{}'",
+                bin_dir.display()
+            );
         } else {
             eprintln!("nanvix_binaries: all Linux binaries cached and verified");
         }
 
         verify_checksums_linux(&binaries, &bin_dir, &checksums);
         verify_bin_subdir_checksums_linux(&bin_dir, &checksums);
+
+        if use_prefetched_binaries {
+            nanvix_build_common::emit_rerun_for_copied_artifacts(&bin_dir);
+        }
     } else {
         // Windows: original logic
         let all_binaries: Vec<&str> = versions
@@ -87,7 +132,8 @@ fn main() {
             .map(|s| s.as_str())
             .collect();
 
-        let needs_nanvix_python = needs_download(&versions.nanvix_python, &bin_dir, &checksums);
+        let needs_nanvix_python = !use_prefetched_binaries
+            && needs_download(&versions.nanvix_python, &bin_dir, &checksums);
 
         if needs_nanvix_python {
             eprintln!(
@@ -95,12 +141,21 @@ fn main() {
                 versions.nanvix_python.tag
             );
             download_and_extract(&versions.nanvix_python, "nanvix/nanvix-python", &bin_dir);
+        } else if use_prefetched_binaries {
+            eprintln!(
+                "nanvix_binaries: offline — verifying pre-fetched binaries in '{}'",
+                bin_dir.display()
+            );
         } else {
             eprintln!("nanvix_binaries: all binaries cached and verified");
         }
 
         verify_checksums(&all_binaries, &bin_dir, &checksums);
         verify_bin_subdir_checksums(&bin_dir, &checksums);
+
+        if use_prefetched_binaries {
+            nanvix_build_common::emit_rerun_for_copied_artifacts(&bin_dir);
+        }
 
         // Generate host-local WHP snapshots at build time so even the first
         // runtime execution uses warm start. The runtime fallback in
@@ -125,23 +180,42 @@ fn main() {
             let snapshots_present = nanvix_common::SNAPSHOT_FILES
                 .iter()
                 .all(|name| snapshots_dir.join(name).exists());
-            if !snapshots_present {
+            if snapshots_present {
+                eprintln!("nanvix_binaries: host-local snapshots already present");
+            } else if use_prefetched_binaries {
+                // In offline mode the NANVIX_BIN directory is treated as an
+                // immutable, pre-fetched input — it may be a read-only or
+                // shared cache. Do not run nanvixd.exe to generate snapshots
+                // into it. The runtime fallback in nanvix_runner.rs cold-boots
+                // when snapshots are absent.
+                eprintln!(
+                    "nanvix_binaries: offline — snapshots absent in NANVIX_BIN; \
+                     skipping generation (runtime will cold-boot on first use)."
+                );
+            } else {
                 fs::create_dir_all(&snapshots_dir).expect("failed to create snapshots dir");
                 eprintln!("nanvix_binaries: generating host-local snapshots (cold boot)...");
                 generate_snapshots_locally(&bin_dir);
-            } else {
-                eprintln!("nanvix_binaries: host-local snapshots already present");
             }
         }
     }
 
     println!("cargo:rustc-env=NANVIX_BIN_DIR={}", bin_dir.display());
     println!("cargo:BIN_DIR={}", bin_dir.display());
+    // Propagate whether these binaries came from an externally supplied
+    // (prefetched) directory. Consumers read this as
+    // `DEP_NANVIX_BINARIES_PREFETCHED` and must not trust prefetched WHP
+    // snapshots (they are not covered by checksums.json).
+    println!(
+        "cargo:PREFETCHED={}",
+        if use_prefetched_binaries { "1" } else { "0" }
+    );
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=versions.json");
     println!("cargo:rerun-if-changed=checksums.json");
     println!("cargo:rerun-if-env-changed=GITHUB_TOKEN");
     println!("cargo:rerun-if-env-changed=GH_TOKEN");
+    println!("cargo:rerun-if-env-changed=NANVIX_BIN");
 }
 
 // -- Download logic ----------------------------------------------------------
@@ -436,14 +510,19 @@ fn certutil_sha256(path: &Path) -> String {
     //   SHA256 hash of <file>:
     //   <hex hash>
     //   CertUtil: -hashfile command completed successfully.
-    let stdout = String::from_utf8(output.stdout).expect("certutil output not UTF-8");
+    //
+    // Use a lossy conversion because the localized header/footer lines are
+    // emitted in the console's OEM code page (e.g. CP850 on French Windows),
+    // not UTF-8 -- a strict `from_utf8` would panic on those bytes. The hash
+    // line itself is pure ASCII hex, so it survives the lossy conversion. We
+    // locate the hash by scanning for a 64-character hex line rather than
+    // relying on a fixed line index, which keeps this locale-independent.
+    let stdout = String::from_utf8_lossy(&output.stdout);
     stdout
         .lines()
-        .nth(1)
+        .map(|line| line.trim().replace(' ', "").to_lowercase())
+        .find(|line| line.len() == 64 && line.bytes().all(|b| b.is_ascii_hexdigit()))
         .unwrap_or_else(|| panic!("nanvix_binaries: unexpected certutil output: {}", stdout))
-        .trim()
-        .replace(' ', "")
-        .to_lowercase()
 }
 
 fn verify_checksums(binaries: &[&str], bin_dir: &Path, checksums: &HashMap<String, String>) {

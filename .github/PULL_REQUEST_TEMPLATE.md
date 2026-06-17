@@ -23,5 +23,7 @@
 
 ---
 
-Microsoft reviewers: PR builds don't auto-run (ADO policy). Comment `/azp run`
-to start `MXC-PR-Build`. See [docs/pull-requests.md](../docs/pull-requests.md).
+GitHub Actions runs the PR validation build automatically. The ADO pipeline
+(`MXC-PR-Build`) is the official build pipeline that signs the binaries; it
+runs on merge to `main` and nightly, and Microsoft reviewers can trigger it
+on a PR with `/azp run`. See [docs/pull-requests.md](../docs/pull-requests.md).

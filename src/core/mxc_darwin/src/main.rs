@@ -113,15 +113,6 @@ fn main() {
 
     log_request(&request, &mut logger);
 
-    // The macOS sandbox backend is experimental — require the flag.
-    if !request.experimental_enabled {
-        eprintln!(
-            "Error: the macOS sandbox backend is experimental. \
-             Pass --experimental to enable it."
-        );
-        process::exit(1);
-    }
-
     // The SDK should always select Seatbelt on darwin. Be lenient and
     // log a note instead of failing — same behaviour as `lxc-exec`.
     if request.containment != ContainmentBackend::Seatbelt {

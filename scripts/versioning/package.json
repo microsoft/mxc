@@ -1,0 +1,13 @@
+{
+  "name": "@microsoft/mxc-repo-scripts",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Repository tooling: version-sync and config schema validation gates. Not published.",
+  "scripts": {
+    "check-schema-versions": "node check-schema-versions.js",
+    "validate-configs": "node validate-configs.js"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1"
+  }
+}

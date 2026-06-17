@@ -38,7 +38,7 @@ jobs:
         # Use the Microsoft-hosted 'Azure Pipelines' pool instead which
         # uses 'vmImage' (not 'image') per ADO hosted-pool schema.
         name: Azure Pipelines
-        vmImage: macOS-14-arm64
+        vmImage: macOS-15-arm64
         os: macOS
 
     variables:
@@ -75,6 +75,10 @@ jobs:
           SourceFolder: '$(Build.SourcesDirectory)/.azure-pipelines/.npm'
           Contents: '.npmrc'
           TargetFolder: '$(integrationDirectory)'
+          # Overwrite the repo's committed .npmrc (install-links=true) with the
+          # Azure feed/auth .npmrc. The integration job installs the SDK from a
+          # packed tarball, so it does not need install-links.
+          overWrite: true
 
       - task: NpmAuthenticate@0
         displayName: NPM Authenticate

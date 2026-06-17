@@ -1,9 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 
+use serde::de::IgnoredAny;
 use serde::Deserialize;
 
 use crate::encoding::base64_decode;
@@ -216,7 +218,6 @@ struct RawConfig {
     version: Option<String>,
     #[serde(rename = "containerId")]
     container_id: Option<String>,
-    platform: Option<String>,
     process: Option<RawProcess>,
     lifecycle: Option<RawLifecycle>,
     containment: Option<String>,
@@ -228,6 +229,17 @@ struct RawConfig {
     network: Option<RawNetwork>,
     ui: Option<RawUi>,
     experimental: Option<RawExperimental>,
+    /// Top-level seatbelt config.
+    #[serde(alias = "macos_sandbox")]
+    seatbelt: Option<RawSeatbelt>,
+    // Captures any top-level key not matched above so unrecognised fields can
+    // be rejected at the trust boundary instead of being silently dropped.
+    // `IgnoredAny` discards each value during deserialisation, so a large or
+    // complex unknown section costs nothing beyond its key. Allowed annotation
+    // keys ($schema, _comment) are filtered out in
+    // `reject_unknown_top_level_fields`.
+    #[serde(flatten)]
+    unknown: HashMap<String, IgnoredAny>,
 }
 
 // State-aware request shape. `phase` is required (no `#[serde(default)]` on
@@ -240,6 +252,8 @@ struct RawConfig {
 struct RawStateAwareRequest {
     #[serde(default)]
     version: Option<String>,
+    #[serde(rename = "containerId", default)]
+    container_id: Option<String>,
     #[serde(default)]
     containment: Option<String>,
     phase: String,
@@ -257,6 +271,10 @@ struct RawStateAwareRequest {
     ui: Option<RawUi>,
     #[serde(default)]
     experimental: Option<serde_json::Value>,
+    // See `RawConfig::unknown`. Mirrored here so unrecognised top-level keys are
+    // rejected on the state-aware path too.
+    #[serde(flatten)]
+    unknown: HashMap<String, IgnoredAny>,
 }
 
 // Untagged enum: serde tries `StateAware` first (requires `phase`), falls
@@ -498,12 +516,12 @@ pub fn decode_request_input(
 // ---------- Cross-field validation ----------
 
 /// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: &str = ">=0.4, <=0.7";
+const SUPPORTED_VERSION: &str = ">=0.4, <=0.8";
 
 /// Canonical "latest" schema version string used in samples and tests. Bump
 /// alongside `SUPPORTED_VERSION`'s upper bound when a new dev schema lands.
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: &str = "0.7.0-alpha";
+const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
 
 /// The minimum schema version that implies BaseContainer backend usage.
 const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
@@ -512,8 +530,7 @@ const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
 /// experimental backend sections that don't match the selected
 /// `containment`. Add a new entry when promoting a backend to a top-level
 /// section or graduating one from experimental.
-const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] =
-    &["windows_sandbox", "wslc", "seatbelt", "isolation_session"];
+const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
 
 /// Returns `true` if `version` is a BaseContainer-era schema version (>= 0.5.0).
 ///
@@ -598,6 +615,40 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
 
 // ---------- Conversion from raw JSON to domain model ----------
 
+/// Top-level keys that are permitted but carry no semantic meaning: `$schema`
+/// (editor hint) and `_comment` (human annotation). They are accepted at the
+/// trust boundary but ignored by the model.
+const ALLOWED_TOP_LEVEL_ANNOTATIONS: &[&str] = &["$schema", "_comment"];
+
+/// Rejects unrecognised top-level fields captured by a `#[serde(flatten)]` map.
+///
+/// This is the structural half of schema enforcement at the trust boundary:
+/// typos and silently-dropped fields (for example `fileSystem` instead of
+/// `filesystem`, or a stray `policy` block) now fail loudly with a precise
+/// error instead of being ignored, which previously meant the associated
+/// policy was never applied.
+fn reject_unknown_top_level_fields<V>(
+    unknown: &HashMap<String, V>,
+    logger: &mut Logger,
+) -> Result<(), WxcError> {
+    let mut keys: Vec<&str> = unknown
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !ALLOWED_TOP_LEVEL_ANNOTATIONS.contains(k))
+        .collect();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    keys.sort_unstable();
+    let msg = format!(
+        "Unknown top-level field(s) in config: {}. Remove them or check for typos \
+         (field names are case-sensitive, e.g. 'filesystem' not 'fileSystem').",
+        keys.join(", ")
+    );
+    logger.log_line(&msg);
+    Err(WxcError::ConfigParse(msg))
+}
+
 fn present_backend_sections(raw: &RawConfig) -> Vec<&'static str> {
     let mut sections: Vec<&'static str> = Vec::new();
     let mut push = |backend: ContainmentBackend| {
@@ -611,15 +662,15 @@ fn present_backend_sections(raw: &RawConfig) -> Vec<&'static str> {
     if raw.lxc.is_some() {
         push(ContainmentBackend::Lxc);
     }
+    if raw.seatbelt.is_some() {
+        push(ContainmentBackend::Seatbelt);
+    }
     if let Some(experimental) = raw.experimental.as_ref() {
         if experimental.windows_sandbox.is_some() {
             push(ContainmentBackend::WindowsSandbox);
         }
         if experimental.wslc.is_some() {
             push(ContainmentBackend::Wslc);
-        }
-        if experimental.seatbelt.is_some() {
-            push(ContainmentBackend::Seatbelt);
         }
         if experimental.isolation_session.is_some() {
             push(ContainmentBackend::IsolationSession);
@@ -715,6 +766,18 @@ fn validate_experimental_backend_keys(
 // `process` block entirely; those phases leave `script_code` / `working_directory`
 // / `script_timeout` / `env` at their defaults and never read them.
 //
+/// Convert a raw seatbelt JSON block into the validated domain struct.
+fn make_seatbelt_config(raw_sb: RawSeatbelt) -> SeatbeltConfig {
+    SeatbeltConfig {
+        profile_override: raw_sb.profile_override,
+        gui_access: raw_sb.gui_access.unwrap_or(false),
+        launch_method: raw_sb.launch_method.unwrap_or_default(),
+        nested_pty: raw_sb.nested_pty.unwrap_or(true),
+        keychain_access: raw_sb.keychain_access.unwrap_or(false),
+        extra_mach_lookups: raw_sb.extra_mach_lookups.unwrap_or_default(),
+    }
+}
+
 // `allow_missing_command` further relaxes the `require_process == true` arms
 // so that a CLI command-line override (provided by the driver after parsing)
 // can stand in for `process.commandLine`. When set, a missing or empty
@@ -725,13 +788,21 @@ fn convert_raw_config_inner(
     require_process: bool,
     allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
+    // Reject unrecognised top-level fields before anything else, so typos and
+    // stray sections fail loudly instead of being silently ignored.
+    reject_unknown_top_level_fields(&raw.unknown, logger)?;
+
     // Captured before `raw` fields are moved out below.
     let present_backend_sections = present_backend_sections(&raw);
 
     // New top-level fields
     let schema_version = raw.version.unwrap_or_default();
+
+    // Validate the schema version up front so an unsupported version fails fast,
+    // before any of the per-section conversion work below.
+    validate_schema_version(&schema_version, logger)?;
+
     let container_id = raw.container_id.unwrap_or_default();
-    let platform = raw.platform.unwrap_or_else(|| "windows".to_string());
 
     // Process section: required for one-shot and for state-aware exec; absent
     // is allowed for state-aware non-exec phases (require_process == false)
@@ -1112,9 +1183,6 @@ fn convert_raw_config_inner(
         }
     };
 
-    // Schema version check
-    validate_schema_version(&schema_version, logger)?;
-
     // Experimental section (parsed but only applied when --experimental flag is set)
     let experimental = if let Some(raw_exp) = raw.experimental {
         let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
@@ -1192,24 +1260,27 @@ fn convert_raw_config_inner(
             config.user = as_cfg.user;
             config
         });
-        let seatbelt = raw_exp.seatbelt.map(|raw_sb| SeatbeltConfig {
-            profile_override: raw_sb.profile_override,
-            gui_access: raw_sb.gui_access.unwrap_or(false),
-            launch_method: raw_sb.launch_method.unwrap_or_default(),
-            nested_pty: raw_sb.nested_pty.unwrap_or(true),
-            keychain_access: raw_sb.keychain_access.unwrap_or(false),
-            extra_mach_lookups: raw_sb.extra_mach_lookups.unwrap_or_default(),
-        });
+        let seatbelt = raw_exp.seatbelt;
+        if seatbelt.is_some() {
+            let msg = "'experimental.seatbelt' has moved to the stable section; \
+                       use top-level 'seatbelt' instead."
+                .to_string();
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
             isolation_session,
-            seatbelt,
         }
     } else {
         ExperimentalConfig::default()
     };
+
+    // Top-level `seatbelt` config. Configs using `experimental.seatbelt` are
+    // rejected above.
+    let seatbelt = raw.seatbelt.map(make_seatbelt_config);
 
     // UI section
     if let Some(raw_ui) = raw.ui {
@@ -1229,7 +1300,6 @@ fn convert_raw_config_inner(
     Ok(ExecutionRequest {
         schema_version,
         container_id,
-        platform,
         env,
         script_code,
         working_directory,
@@ -1238,6 +1308,7 @@ fn convert_raw_config_inner(
         lifecycle,
         policy,
         lxc_config,
+        seatbelt,
         experimental_enabled: false,
         experimental,
         dry_run: false,
@@ -1249,6 +1320,10 @@ fn convert_raw_state_aware(
     logger: &mut Logger,
     allow_missing_command: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
+    // Reject unrecognised top-level fields on the state-aware envelope before
+    // building the one-shot surrogate (whose `unknown` map is always empty).
+    reject_unknown_top_level_fields(&raw.unknown, logger)?;
+
     let phase = Phase::from_wire(&raw.phase).map_err(|e| {
         let msg = e.message.clone();
         logger.log_line(&msg);
@@ -1266,8 +1341,7 @@ fn convert_raw_state_aware(
     // same conversion path one-shot uses for cross-cutting wire fields.
     let surrogate = RawConfig {
         version: raw.version,
-        container_id: None,
-        platform: None,
+        container_id: raw.container_id,
         process: raw.process,
         lifecycle: None,
         containment: raw.containment,
@@ -1281,6 +1355,8 @@ fn convert_raw_state_aware(
         // one-shot RawExperimental; it is preserved separately on
         // ParsedStateAwareRequest as raw JSON.
         experimental: None,
+        seatbelt: None,
+        unknown: HashMap::new(),
     };
 
     let require_process = phase == Phase::Exec;
@@ -2408,7 +2484,6 @@ mod tests {
     fn proxy_accepted_with_bubblewrap() {
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {"proxy": {"builtinTestServer": true}}
@@ -2425,7 +2500,6 @@ mod tests {
     fn proxy_with_bubblewrap_and_firewall_enforcement_is_rejected() {
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2450,7 +2524,6 @@ mod tests {
     fn proxy_with_bubblewrap_and_both_enforcement_is_rejected() {
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2471,7 +2544,6 @@ mod tests {
         // proxy is fine and must NOT trigger the conflict guard.
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2495,7 +2567,6 @@ mod tests {
         // policy-weakening trap and must be rejected at parse time.
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2519,7 +2590,6 @@ mod tests {
     fn external_proxy_localhost_with_bubblewrap_and_blocked_hosts_is_rejected() {
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2541,7 +2611,6 @@ mod tests {
         // enforcement.
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2564,7 +2633,6 @@ mod tests {
         // into trusting the external proxy with full policy delegation.
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2586,7 +2654,6 @@ mod tests {
         // combining it with allowedHosts is fine.
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2610,7 +2677,6 @@ mod tests {
         // surface a warning (does not reject).
         let json = r#"{
             "version": "0.6.0-alpha",
-            "platform": "linux",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -2630,14 +2696,13 @@ mod tests {
 
     #[test]
     fn new_toplevel_fields_parsed() {
-        let json = r#"{"version": "0.4.0-alpha", "containerId": "abc-123", "platform": "linux", "containment": "lxc", "process": {"commandLine": "echo hi"}}"#;
+        let json = r#"{"version": "0.4.0-alpha", "containerId": "abc-123", "containment": "lxc", "process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "0.4.0-alpha");
         assert_eq!(req.container_id, "abc-123");
-        assert_eq!(req.platform, "linux");
     }
 
     #[test]
@@ -2649,7 +2714,6 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "");
         assert_eq!(req.container_id, "");
-        assert_eq!(req.platform, "windows");
     }
 
     #[test]
@@ -2709,7 +2773,7 @@ mod tests {
 
     #[test]
     fn schema_version_too_new_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.8.0"}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.9.0"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2725,6 +2789,92 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "0.7.0-alpha");
+    }
+
+    #[test]
+    fn unknown_top_level_field_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "bogusField": true}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(
+            result.is_err(),
+            "unknown top-level field should be rejected"
+        );
+    }
+
+    #[test]
+    fn filesystem_typo_rejected() {
+        // `fileSystem` (capital S) used to be silently dropped, so the policy
+        // never applied. It must now be rejected as an unknown field.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "fileSystem": {"readwritePaths": ["C:\\x"]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err(), "fileSystem typo should be rejected");
+    }
+
+    #[test]
+    fn top_level_annotations_allowed() {
+        // `$schema` and `_comment` are permitted but ignored.
+        let json = r#"{
+            "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
+            "_comment": "annotation that the parser ignores",
+            "version": "0.7.0-alpha",
+            "process": {"commandLine": "echo hi"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.script_code, "echo hi");
+    }
+
+    #[test]
+    fn state_aware_unknown_top_level_field_rejected() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "bogusField": true
+        }"#;
+        let result = load_mxc(json);
+        assert!(
+            result.is_err(),
+            "unknown top-level field on a state-aware request should be rejected"
+        );
+    }
+
+    #[test]
+    fn state_aware_top_level_annotation_allowed() {
+        let json = r#"{
+            "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
+            "phase": "provision",
+            "containment": "isolation_session"
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert_eq!(p.phase, Phase::Provision),
+            _ => panic!("expected state-aware request"),
+        }
+    }
+
+    #[test]
+    fn state_aware_forwards_container_id() {
+        // `containerId` is a documented top-level field and must be preserved
+        // into the inner ExecutionRequest for state-aware requests, not dropped.
+        let json = r#"{
+            "phase": "provision",
+            "containerId": "sa-container-1",
+            "containment": "isolation_session"
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => {
+                assert_eq!(p.phase, Phase::Provision);
+                assert_eq!(p.request.container_id, "sa-container-1");
+            }
+            _ => panic!("expected state-aware request"),
+        }
     }
 
     #[test]
@@ -3253,27 +3403,23 @@ mod tests {
 
     #[test]
     fn seatbelt_config_defaults() {
-        // When no experimental.seatbelt block is provided the parser
-        // leaves it unset (None) — runners should fall back to defaults.
+        // When no seatbelt block is provided the parser leaves it unset.
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.experimental.seatbelt.is_none());
+        assert!(req.seatbelt.is_none());
     }
 
     #[test]
     fn seatbelt_profile_override_passed_through() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"profileOverride": "(version 1)(deny default)"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"profileOverride": "(version 1)(deny default)"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("experimental.seatbelt should be populated");
+        let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert_eq!(
             cfg.profile_override.as_deref(),
             Some("(version 1)(deny default)")
@@ -3282,34 +3428,57 @@ mod tests {
 
     #[test]
     fn seatbelt_nested_pty_defaults_to_true_when_block_present_but_field_absent() {
-        // experimental.seatbelt is present but nestedPty is not specified;
+        // seatbelt block is present but nestedPty is not specified;
         // the parser should fill in true to match the schema default.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {}}}"#;
+        let json =
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("experimental.seatbelt should be populated");
+        let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert!(cfg.nested_pty);
         assert!(!cfg.keychain_access);
     }
 
     #[test]
     fn seatbelt_nested_pty_and_keychain_access_pass_through() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"nestedPty": false, "keychainAccess": true}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("experimental.seatbelt should be populated");
+        let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert!(!cfg.nested_pty);
         assert!(cfg.keychain_access);
+    }
+
+    #[test]
+    fn top_level_seatbelt_config_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.seatbelt.expect("seatbelt should be populated");
+        assert!(!cfg.nested_pty);
+        assert!(cfg.keychain_access);
+    }
+
+    #[test]
+    fn experimental_seatbelt_errors_with_migration_message() {
+        // After promotion, configs using experimental.seatbelt must error.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"nestedPty": true}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("has moved to the stable section"),
+            "expected migration error, got: {}",
+            msg
+        );
     }
 
     // Legacy wire-name aliases. The parser accepts the pre-0.6 wire vocabulary
@@ -3361,9 +3530,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_experimental_macos_sandbox_subblock_alias_accepted() {
-        // `experimental.macos_sandbox` is the pre-rename key; serde's alias
-        // routes it to the same `seatbelt` parsing path.
+    fn legacy_experimental_macos_sandbox_subblock_alias_rejected() {
+        // `experimental.macos_sandbox` is the pre-rename key; after promotion
+        // it should be rejected with a migration error.
         let json = r#"{
             "process": {"commandLine": "echo hi"},
             "containment": "macos_sandbox",
@@ -3372,14 +3541,12 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req
-            .experimental
-            .seatbelt
-            .expect("experimental.seatbelt should be populated (via macos_sandbox alias)");
-        assert_eq!(
-            cfg.profile_override.as_deref(),
-            Some("(version 1)(allow default)")
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("has moved to the stable section"),
+            "expected migration error, got: {}",
+            msg
         );
     }
 
@@ -3447,10 +3614,11 @@ mod tests {
     // check as top-level blocks.
     #[test]
     fn experimental_backend_section_for_other_containment_rejected() {
+        // seatbelt is now top-level, so use it to test cross-backend rejection
         assert_multi_backend_rejected(
             "processcontainer",
-            r#""experimental": {"seatbelt": {"guiAccess": true}}"#,
-            "experimental.seatbelt",
+            r#""seatbelt": {"guiAccess": true}"#,
+            "seatbelt",
         );
     }
 
@@ -3544,7 +3712,7 @@ mod tests {
         let json = r#"{
             "process": {"commandLine": "echo hi"},
             "containment": "process",
-            "experimental": {"seatbelt": {}}
+            "seatbelt": {}
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();

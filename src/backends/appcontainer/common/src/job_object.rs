@@ -141,12 +141,45 @@ fn supported_ui_limit_mask_for_build(build: u32) -> u32 {
     supported
 }
 
+#[inline(always)]
+fn has_ui_limit(mask: u32, flag: u32) -> bool {
+    (mask & flag) == flag
+}
+
+fn supported_ui_restrictions_for_build(build: u32) -> EffectiveUiRestrictions {
+    let supported = supported_ui_limit_mask_for_build(build);
+    EffectiveUiRestrictions {
+        block_clipboard_read: has_ui_limit(supported, JOB_OBJECT_UILIMIT_READCLIPBOARD.0),
+        block_clipboard_write: has_ui_limit(supported, JOB_OBJECT_UILIMIT_WRITECLIPBOARD.0),
+        block_input_injection: has_ui_limit(supported, JOB_OBJECT_UILIMIT_INJECTION),
+        block_input_method_changes: has_ui_limit(supported, JOB_OBJECT_UILIMIT_IME),
+        block_external_ui_objects: has_ui_limit(supported, JOB_OBJECT_UILIMIT_HANDLES.0),
+        block_global_ui_namespace: has_ui_limit(supported, JOB_OBJECT_UILIMIT_GLOBALATOMS.0),
+        block_desktop_switching: has_ui_limit(supported, JOB_OBJECT_UILIMIT_DESKTOP.0),
+        block_logoff_or_shutdown: has_ui_limit(supported, JOB_OBJECT_UILIMIT_EXITWINDOWS.0),
+        block_system_parameter_changes: has_ui_limit(
+            supported,
+            JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS.0,
+        ),
+        block_display_settings_changes: has_ui_limit(
+            supported,
+            JOB_OBJECT_UILIMIT_DISPLAYSETTINGS.0,
+        ),
+    }
+}
+
 /// Returns the subset of encoder-defined `JOB_OBJECT_UILIMIT_*` flags the
 /// current OS build can enforce. The effective restriction mask applied to a
 /// job is always `requested & supported`, so the kernel is never handed a
-/// flag it would reject. Reported to callers via `wxc-exec --probe`.
+/// flag it would reject.
 pub fn supported_ui_limit_mask() -> u32 {
     supported_ui_limit_mask_for_build(os_build_number())
+}
+
+/// Returns the platform-agnostic UI restrictions the current OS build can
+/// enforce. Reported to callers via `wxc-exec --probe`.
+pub fn supported_ui_restrictions() -> EffectiveUiRestrictions {
+    supported_ui_restrictions_for_build(os_build_number())
 }
 
 /// Encode platform-agnostic UI restrictions as the `JOB_OBJECT_UILIMIT_*`
@@ -380,6 +413,17 @@ mod tests {
             ALL_DEFINED_UI_LIMITS & !JOB_OBJECT_UILIMIT_IME & !JOB_OBJECT_UILIMIT_INJECTION
         );
         assert_eq!(mask, 0x00FF);
+    }
+
+    #[test]
+    fn supported_restrictions_match_downlevel_mask() {
+        let restrictions = supported_ui_restrictions_for_build(20348);
+        assert!(restrictions.block_clipboard_read);
+        assert!(restrictions.block_clipboard_write);
+        assert!(restrictions.block_external_ui_objects);
+        assert!(restrictions.block_display_settings_changes);
+        assert!(!restrictions.block_input_injection);
+        assert!(!restrictions.block_input_method_changes);
     }
 
     #[test]

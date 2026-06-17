@@ -1,5 +1,5 @@
 {
-    "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
+    "$schema": "../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
     "version": "0.7.0-alpha",
     "containment": "seatbelt",
     "process": {
@@ -8,11 +8,11 @@
     },
     "network": {
         "defaultPolicy": "allow",
-        "blockedHosts": ["evil.example.com"]
+        "blockedHosts": [
+            "evil.example.com"
+        ]
     },
-    "experimental": {
-        "seatbelt": {
-            "mode": "exec"
-        }
+    "seatbelt": {
+        "mode": "exec"
     }
 }

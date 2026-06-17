@@ -132,12 +132,11 @@ You should see sandbox profile generation output followed by
 
 The macOS sandbox backend uses the same JSON configuration schema as the
 other backends, with `containment` set to `"seatbelt"`. Backend-specific
-settings live under `experimental.seatbelt`, and the `--experimental`
-flag is required to enable the backend at runtime:
+settings live under a top-level `seatbelt` key:
 
 ```json
 {
-    "$schema": "./schemas/dev/mxc-config.schema.0.7.0-dev.json",
+    "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
     "containment": "seatbelt",
     "process": {
         "commandLine": "echo hi from seatbelt",
@@ -152,10 +151,8 @@ flag is required to enable the backend at runtime:
         "defaultPolicy": "block",
         "allowedHosts":  ["api.github.com"]
     },
-    "experimental": {
-        "seatbelt": {
-            "mode": "exec"
-        }
+    "seatbelt": {
+        "nestedPty": true
     }
 }
 ```
@@ -164,11 +161,11 @@ flag is required to enable the backend at runtime:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `experimental.seatbelt.profileOverride` | string | unset | Optional override of the generated TinyScheme sandbox profile. When set, the SDK-generated profile is replaced with this raw TinyScheme string verbatim — all `filesystem`/`network`/`ui` policy fields are ignored for profile generation (they are still type-checked). Use this only when the auto-generated profile is insufficient. |
-| `experimental.seatbelt.guiAccess` | boolean | `false` | When `true`, adds wildcard Mach service and IOKit rules so GUI applications can create windows and render via WindowServer. Requires `ui.disable: false`. Native AppKit apps (e.g. Terminal.app) work well; Electron-based apps may escape the sandbox via re-launch patterns. |
-| `experimental.seatbelt.launchMethod` | `"exec"` \| `"open"` | `"exec"` | How to launch the sandboxed process. `"exec"` (default) uses the `sandbox_init()` API in `pre_exec` then execs the command directly — works for third-party GUI apps (Alacritty, etc.) and all CLI commands. `"open"` launches Terminal.app via LaunchServices (`open -n -W -a Terminal`) then applies the sandbox to the inner shell via the `sandbox-exec` CLI tool. This is required because Terminal.app enforces Apple Launch Constraints that kill it when exec'd by unauthorized parents. Currently only Terminal.app is supported with the `"open"` method — other Apple system apps (Calculator, TextEdit) cannot be sandboxed due to Launch Constraints and lack of an inner shell to constrain. |
-| `experimental.seatbelt.nestedPty` | boolean | `true` | When `true`, the inner process can allocate its own pseudo-terminals via `posix_openpt`. Required by anything that spawns a shell (test runners, `git`, `gh`, REPLs, agent tools that wrap commands in a pty). Adds `(allow pseudo-tty)` and read/write/ioctl on `/dev/ptmx` to the generated profile. Set to `false` for a tighter sandbox when the inner command does not need to allocate new ttys. |
-| `experimental.seatbelt.keychainAccess` | boolean | `false` | When `true`, opens the sandbox enough for `keytar` / `Security.framework` to reach the macOS Keychain end-to-end. Adds Mach lookup for `com.apple.SecurityServer`, `com.apple.securityd`, `com.apple.trustd`, `com.apple.ocspd`, `com.apple.cfprefsd.daemon`, `com.apple.xpcd`, and the `com.apple.lsd.*` family (regex); read access to `/private/var/db/mds` (Spotlight/MDS metadata) and `/private/var/protected/trustd` (trustd protected store); and read+write access to `~/Library/Keychains` (user keychain DB) and `/private/var/folders` (XPC cache and per-user containers). The system keychain stores under `/Library/Keychains` and `/System/Library/Keychains` are already covered by the baseline `/Library` and `/System` read-only allows. Off by default — opt in only when the inner workload genuinely needs Keychain access. |
+| `seatbelt.profileOverride` | string | unset | Optional override of the generated TinyScheme sandbox profile. When set, the SDK-generated profile is replaced with this raw TinyScheme string verbatim — all `filesystem`/`network`/`ui` policy fields are ignored for profile generation (they are still type-checked). Use this only when the auto-generated profile is insufficient. |
+| `seatbelt.guiAccess` | boolean | `false` | When `true`, adds wildcard Mach service and IOKit rules so GUI applications can create windows and render via WindowServer. Requires `ui.disable: false`. Native AppKit apps (e.g. Terminal.app) work well; Electron-based apps may escape the sandbox via re-launch patterns. |
+| `seatbelt.launchMethod` | `"exec"` \| `"open"` | `"exec"` | How to launch the sandboxed process. `"exec"` (default) uses the `sandbox_init()` API in `pre_exec` then execs the command directly — works for third-party GUI apps (Alacritty, etc.) and all CLI commands. `"open"` launches Terminal.app via LaunchServices (`open -n -W -a Terminal`) then applies the sandbox to the inner shell via the `sandbox-exec` CLI tool. This is required because Terminal.app enforces Apple Launch Constraints that kill it when exec'd by unauthorized parents. Currently only Terminal.app is supported with the `"open"` method — other Apple system apps (Calculator, TextEdit) cannot be sandboxed due to Launch Constraints and lack of an inner shell to constrain. |
+| `seatbelt.nestedPty` | boolean | `true` | When `true`, the inner process can allocate its own pseudo-terminals via `posix_openpt`. Required by anything that spawns a shell (test runners, `git`, `gh`, REPLs, agent tools that wrap commands in a pty). Adds `(allow pseudo-tty)` and read/write/ioctl on `/dev/ptmx` to the generated profile. Set to `false` for a tighter sandbox when the inner command does not need to allocate new ttys. |
+| `seatbelt.keychainAccess` | boolean | `false` | When `true`, opens the sandbox enough for `keytar` / `Security.framework` to reach the macOS Keychain end-to-end. Adds Mach lookup for `com.apple.SecurityServer`, `com.apple.securityd`, `com.apple.trustd`, `com.apple.ocspd`, `com.apple.cfprefsd.daemon`, `com.apple.xpcd`, and the `com.apple.lsd.*` family (regex); read access to `/private/var/db/mds` (Spotlight/MDS metadata) and `/private/var/protected/trustd` (trustd protected store); and read+write access to `~/Library/Keychains` (user keychain DB) and `/private/var/folders` (XPC cache and per-user containers). The system keychain stores under `/Library/Keychains` and `/System/Library/Keychains` are already covered by the baseline `/Library` and `/System` read-only allows. Off by default — opt in only when the inner workload genuinely needs Keychain access. |
 
 ### Filesystem policy
 
@@ -214,22 +211,18 @@ SDK rejects it with a clear error, mirroring the Linux behavior.
 
 ### Command line
 
-The `seatbelt` backend is currently experimental, so every invocation
-must include the `--experimental` flag. Without it, the binary refuses to
-run with a clear error.
-
 ```bash
 # Run with config file
-./mxc-exec-mac --experimental config.json
+./mxc-exec-mac config.json
 
 # Run with base64-encoded config
-./mxc-exec-mac --experimental --config-base64 <base64-string>
+./mxc-exec-mac --config-base64 <base64-string>
 
 # Validate the config and exit without executing
-./mxc-exec-mac --experimental --dry-run config.json
+./mxc-exec-mac --dry-run config.json
 
 # Diagnostic output to console + file
-./mxc-exec-mac --experimental --debug --log-file mxc.log config.json
+./mxc-exec-mac --debug --log-file mxc.log config.json
 ```
 
 ### SDK
@@ -248,9 +241,8 @@ const policy: SandboxPolicy = {
 };
 
 // On macOS, spawnSandbox automatically resolves to mxc-exec-mac and
-// builds a seatbelt config. The backend is experimental, so the
-// caller must opt in via SandboxSpawnOptions.experimental.
-const pty = spawnSandbox('echo hello', policy, { experimental: true });
+// builds a seatbelt config.
+const pty = spawnSandbox('echo hello', policy);
 pty.onData((data) => console.log(data));
 pty.onExit((e) => console.log('Exit:', e.exitCode));
 ```

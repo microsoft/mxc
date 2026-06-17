@@ -217,13 +217,11 @@ describe('macOS Seatbelt Container', {
     assert.notStrictEqual(result.exitCode, 0, 'Expected non-zero exit for timed-out script');
   });
 
-  it('should apply profile override from experimental config', { timeout: 30_000 }, async () => {
+  it('should apply profile override from seatbelt config', { timeout: 30_000 }, async () => {
     // Build a config with a custom seatbelt profile that allows everything
     const config = sdk.createConfigFromPolicy({ version: schemaVersion });
     config.process = { commandLine: "echo 'profile override works'" };
-    config.experimental = {
-      seatbelt: { profileOverride: '(version 1)\n(allow default)' },
-    };
+    config.seatbelt = { profileOverride: '(version 1)\n(allow default)' };
     config.containerId = 'seatbelt-profile-override';
 
     const result = await new Promise<{ exitCode: number; stdout: string }>((resolve, reject) => {

@@ -1,0 +1,71 @@
+name: Linux Build
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    name: ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: src/core/lxc
+    steps:
+      - uses: actions/checkout@v4
+
+      # actions-rust-lang/setup-rust-toolchain auto-reads rust-toolchain.toml
+      # from the repo root only. Surface src/rust-toolchain.toml there so the
+      # 1.93 pin is honored without duplicating the version in this workflow.
+      - name: Surface toolchain file at repo root
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          components: rustfmt, clippy
+          override: false
+          rustflags: ''
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src -> target
+            src/core/lxc -> target
+          key: ${{ matrix.target }}-v2
+          cache-on-failure: false
+
+      - name: Build lxc
+        run: cargo build --locked --release --target ${{ matrix.target }}
+             --no-default-features --features hyperlight
+
+      - name: Test lxc
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             --no-default-features --features hyperlight
+
+      # linux_test_proxy is a separate workspace member, not a dep of lxc.
+      - name: Build linux-test-proxy
+        working-directory: src
+        run: cargo build --locked --release --target ${{ matrix.target }}
+             -p linux_test_proxy
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: lxc-binaries-${{ matrix.target }}
+          path: |
+            src/target/${{ matrix.target }}/release/lxc-exec
+            src/target/${{ matrix.target }}/release/linux-test-proxy
+          if-no-files-found: error
+          retention-days: 1

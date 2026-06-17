@@ -1111,26 +1111,13 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       );
     });
 
-    it('should require experimental mode for "macos_sandbox" (mirrors seatbelt gating)', () => {
-      // Regression: pre-fix, ExperimentalBackends.includes('macos_sandbox') was
-      // false, so the legacy alias bypassed the experimental gate entirely.
-      // The gate must look at the resolved backend, not the raw wire value.
-      assert.throws(
-        () => resolveExecutableAndArgs(makeConfig('macos_sandbox'), { executablePath: fakeExe }),
-        { message: /experimental mode/ },
-      );
-    });
-
-    it('should accept "macos_sandbox" on macOS with the experimental flag set', function (this: { skip: (reason?: string) => void }) {
+    it('should accept "macos_sandbox" on macOS', function (this: { skip: (reason?: string) => void }) {
       if (process.platform !== 'darwin') {
         this.skip('seatbelt is macOS-only');
         return;
       }
       assert.doesNotThrow(() =>
-        resolveExecutableAndArgs(makeConfig('macos_sandbox'), {
-          executablePath: fakeExe,
-          experimental: true,
-        }),
+        resolveExecutableAndArgs(makeConfig('macos_sandbox'), { executablePath: fakeExe }),
       );
     });
 

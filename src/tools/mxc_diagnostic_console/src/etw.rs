@@ -430,6 +430,24 @@ fn learning_mode_category_name(category: &str) -> &str {
     }
 }
 
+/// Map a UIOperation integral value (JOB_OBJECT_UILIMIT_* constant) to its name.
+/// Returns `None` if the value does not match a known UIOperation.
+fn ui_operation_name(value: u64) -> Option<&'static str> {
+    match value {
+        0x001 => Some("Handles"),
+        0x002 => Some("ReadClipboard"),
+        0x004 => Some("WriteClipboard"),
+        0x008 => Some("SystemParameters"),
+        0x010 => Some("DisplaySettings"),
+        0x020 => Some("GlobalAtoms"),
+        0x040 => Some("Desktop"),
+        0x080 => Some("ExitWindows"),
+        0x100 => Some("IME"),
+        0x200 => Some("Injection"),
+        _ => None,
+    }
+}
+
 /// Format decoded event parts into a display string for the given mode.
 /// Returns `None` when the event should be suppressed (e.g. empty ObjectType in minified mode).
 fn format_event_output(parts: &DecodedEventParts, mode: DisplayMode) -> Option<String> {
@@ -465,7 +483,13 @@ fn format_learning_mode_violation(props: &[(String, String)], mode: DisplayMode)
     let orange = "\x1b[38;5;208m";
     let reset = "\x1b[0m";
 
-    // Replace the Category number with its human-readable name, colored orange.
+    // Determine if this is a UiOperation category so we can resolve Detail.
+    let is_ui_operation = props
+        .iter()
+        .any(|(k, v)| k == "Category" && v.trim_matches('"') == "2");
+
+    // Replace the Category number with its human-readable name (colored orange),
+    // and resolve the Detail integer to its UIOperation name when Category is UiOperation.
     let formatted_props: Vec<(String, String)> = props
         .iter()
         .map(|(k, v)| {
@@ -473,6 +497,14 @@ fn format_learning_mode_violation(props: &[(String, String)], mode: DisplayMode)
                 let raw = v.trim_matches('"');
                 let name = learning_mode_category_name(raw);
                 (k.clone(), format!("{orange}{name}{reset}"))
+            } else if k == "Detail" && is_ui_operation {
+                let raw = v.trim_matches('"');
+                if let Ok(val) = raw.parse::<u64>() {
+                    if let Some(name) = ui_operation_name(val) {
+                        return (k.clone(), format!("{orange}{name}{reset}"));
+                    }
+                }
+                (k.clone(), v.clone())
             } else {
                 (k.clone(), v.clone())
             }

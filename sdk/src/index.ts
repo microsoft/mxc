@@ -36,6 +36,7 @@ export {
   ExperimentalBackends,
   ContainerConfig,
   PlatformSupport,
+  UiCapabilitySupport,
 } from './types.js';
 
 // Export platform detection functions

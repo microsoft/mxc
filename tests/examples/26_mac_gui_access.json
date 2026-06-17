@@ -1,17 +1,15 @@
 {
-  "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
-  "version": "0.7.0-alpha",
-  "containment": "seatbelt",
-  "process": {
-    "commandLine": "echo 'GUI access enabled — custom GUI apps can create windows under this profile'"
-  },
-  "ui": {
-    "disable": false,
-    "clipboard": "all"
-  },
-  "experimental": {
+    "$schema": "../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo 'GUI access enabled \u2014 custom GUI apps can create windows under this profile'"
+    },
+    "ui": {
+        "disable": false,
+        "clipboard": "all"
+    },
     "seatbelt": {
-      "guiAccess": true
+        "guiAccess": true
     }
-  }
 }

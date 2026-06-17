@@ -1,0 +1,20 @@
+{
+  "_comment": "Smoke test: asserts config parses and payload runs. The destroyOnExit semantics are NOT externally verified -- WSLC's session teardown reaps session-scoped containers regardless of the AutoRemove flag, so `wslc list --all` shows the container as absent in both true/false cases. True verification requires a runner-side log assertion (follow-up).",
+  "version": "0.6.0-alpha",
+  "containerId": "wslc-destroy-on-exit-true",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo 'PASS: container ran (destroyOnExit=true)'"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "network": {
+    "defaultPolicy": "block"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "alpine:latest"
+    }
+  }
+}

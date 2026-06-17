@@ -30,11 +30,11 @@ isolation_session_bindings = { workspace = true, optional = true }
 mxc_build_common.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
-nanvix_common = { path = "../../backends/nanvix/common" }
+nanvix_build_common = { path = "../../backends/nanvix/build_common" }
 
 [features]
 default = []
-microvm = ["nanvix_binaries", "dep:nanvix_runner"]
+microvm = ["dep:nanvix_binaries", "nanvix_binaries/microvm", "dep:nanvix_runner"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
 isolation_session = [

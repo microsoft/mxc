@@ -1,0 +1,54 @@
+name: macOS Build
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    name: arm64
+    # macos-14 / macos-latest are Apple Silicon (arm64); older labels are Intel.
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+
+      # actions-rust-lang/setup-rust-toolchain auto-reads rust-toolchain.toml
+      # from the repo root only. Surface src/rust-toolchain.toml there so the
+      # 1.93 pin is honored without duplicating the version in this workflow.
+      - name: Surface toolchain file at repo root
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: aarch64-apple-darwin
+          components: rustfmt, clippy
+          override: false
+          rustflags: ''
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src -> target
+          key: aarch64-apple-darwin-v2
+          cache-on-failure: false
+
+      # Mac uses package selection rather than feature selection — the
+      # workspace has Windows-only crates that won't compile here.
+      - name: Build
+        run: cargo build --locked --release --target aarch64-apple-darwin
+             -p mxc_darwin -p seatbelt_common -p wxc_common
+
+      - name: Test
+        run: cargo test --locked --release --target aarch64-apple-darwin
+             -p mxc_darwin -p seatbelt_common -p wxc_common
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: mxc-binaries-aarch64-apple-darwin
+          path: src/target/aarch64-apple-darwin/release/mxc-exec-mac
+          if-no-files-found: error
+          retention-days: 1

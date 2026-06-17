@@ -18,6 +18,17 @@ import {
   spawnFromConfigAsync,
 } from './test-helpers.js';
 
+// MXC_SKIP_LXC_TESTS=1 skips the entire LXC describe block. Used by the GHA
+// PR pipeline because classic LXC is unreliable on the ubuntu-latest (24.04)
+// runner image; full LXC coverage runs in the ADO pipeline on merge to main
+// and nightly.
+const skipLxcTests = process.env.MXC_SKIP_LXC_TESTS === '1';
+const lxcSkipReason = !isLinuxRoot
+  ? 'Linux LXC Container tests require Linux with root privileges (sudo npm test)'
+  : skipLxcTests
+    ? 'Skipped: LXC tests disabled (MXC_SKIP_LXC_TESTS)'
+    : undefined;
+
 // Route through explicit `containment: 'lxc'` so these tests genuinely exercise
 // the LXC backend. spawnSandboxAsync internally routes through abstract
 // `containment: 'process'`, which on Linux resolves to a different backend
@@ -34,7 +45,7 @@ async function runLxc(
 
 for (const schemaVersion of supportedVersions) {
 describe(`Linux LXC Container (schema ${schemaVersion})`, {
-  skip: !isLinuxRoot ? 'Linux LXC Container tests require Linux with root privileges (sudo npm test)' : undefined,
+  skip: lxcSkipReason,
 }, () => {
   let tempDir = '';
 

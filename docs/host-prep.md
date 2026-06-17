@@ -37,9 +37,11 @@ running a debug build directly without `Run as Administrator`).
 
 The system-drive and null-device preparations matter for the
 **AppContainer + DACL** isolation tier (Tier 3), which MXC selects on
-hosts without the in-process BaseContainer API (and, for builds that
-ship without the `tier2_bfs` Cargo feature, without AppContainer + BFS
-either). To make the requirement discoverable, `wxc-exec --probe` (the
+hosts where the in-process BaseContainer API is absent *or present but
+not usable* (the symbol resolves yet the feature is disabled), and (for
+builds that ship without the `tier2_bfs` Cargo feature) without
+AppContainer + BFS either. To make the requirement discoverable,
+`wxc-exec --probe` (the
 detection-only path the SDK's `getPlatformSupport()` uses) emits an
 operator-visible warning recommending the relevant `wxc-host-prep`
 subcommand **whenever Tier 3 is selected and the corresponding prep is

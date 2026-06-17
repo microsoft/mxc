@@ -3,7 +3,7 @@
   "containerId": "wslc-filesystem-test",
   "containment": "wslc",
   "process": {
-    "commandLine": "ls -la /mnt/c/workspace && echo 'Filesystem test passed'",
+    "commandLine": "set -e; ls -la /mnt/c/workspace >/dev/null && echo 'PASS: filesystem mount visible' || { echo 'FAIL: /mnt/c/workspace not visible'; exit 1; }; cpus=$(nproc); echo \"CPU_COUNT=$cpus\"; [ \"$cpus\" = \"2\" ] && echo 'PASS: cpuCount enforced (nproc=2)' || { echo \"FAIL: expected nproc=2, got $cpus\"; exit 1; }; mem_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo); mem_mb=$((mem_kb/1024)); echo \"MEM_TOTAL_MB=$mem_mb\"; [ $mem_mb -ge 820 ] && [ $mem_mb -le 1075 ] && echo 'PASS: memoryMb enforced (~1024MB, kernel-visible 80-105%)' || { echo \"FAIL: expected 820-1075MB, got ${mem_mb}MB\"; exit 1; }",
     "cwd": "C:\\workspace"
   },
   "filesystem": {

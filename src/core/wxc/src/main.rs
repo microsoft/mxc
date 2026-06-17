@@ -134,7 +134,6 @@ fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
     if !request.container_id.is_empty() {
         let _ = writeln!(logger, "Container ID: {}", request.container_id);
     }
-    let _ = writeln!(logger, "Platform: {}", request.platform);
     let _ = writeln!(logger, "Script code length: {}", request.script_code.len());
     let _ = writeln!(logger, "Working directory: {}", request.working_directory);
     let _ = writeln!(logger, "Script timeout: {}", request.script_timeout);

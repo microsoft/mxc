@@ -112,7 +112,7 @@ Adding a feature may touch these files:
 
 | File | What to change |
 |------|----------------|
-| `schemas/dev/mxc-config.schema.0.7.0-dev.json` | Add `gpuIsolation` as a feature under `experimental` |
+| `schemas/dev/mxc-config.schema.0.8.0-dev.json` | Add `gpuIsolation` as a feature under `experimental` |
 | `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |
 | `src/core/wxc_common/src/config_parser.rs` | Add `gpuIsolation` field to `RawExperimental` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
@@ -120,7 +120,7 @@ Adding a feature may touch these files:
 
 ## Step 1: Update the schema
 
-In `schemas/dev/mxc-config.schema.0.7.0-dev.json`, the `experimental` section already
+In `schemas/dev/mxc-config.schema.0.8.0-dev.json`, the `experimental` section already
 exists with `compartments` as a feature. Add `gpuIsolation` as a new
 feature with its own typed schema:
 

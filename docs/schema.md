@@ -2,9 +2,9 @@
 ## Configuration Schema
 
 MXC uses a JSON configuration file. The current stable schema is at
-[`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](../schemas/stable/mxc-config.schema.0.4.0-alpha.json).
+[`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](../schemas/stable/mxc-config.schema.0.7.0-alpha.json).
 For development, the dev schema at
-[`schemas/dev/mxc-config.schema.0.7.0-dev.json`](../schemas/dev/mxc-config.schema.0.7.0-dev.json)
+[`schemas/dev/mxc-config.schema.0.8.0-dev.json`](../schemas/dev/mxc-config.schema.0.8.0-dev.json)
 includes experimental features and may change without notice.
 
 Editors that support JSON Schema will provide autocomplete and validation when
@@ -13,10 +13,10 @@ production configs and the dev schema when working on experimental features:
 
 ```json
 // Production
-"$schema": "./schemas/stable/mxc-config.schema.0.4.0-alpha.json"
+"$schema": "./schemas/stable/mxc-config.schema.0.7.0-alpha.json"
 
 // Development (experimental features)
-"$schema": "./schemas/dev/mxc-config.schema.0.7.0-dev.json"
+"$schema": "./schemas/dev/mxc-config.schema.0.8.0-dev.json"
 ```
 
 ### Full Schema
@@ -101,7 +101,7 @@ The `fallback` section gates the runner's host-impacting fallbacks. Each flag is
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `allowDaclMutation` | boolean | `true` | When neither the in-process BaseContainer API nor the OS-side filesystem broker helper is available, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). **⚠️ This modifies host filesystem security descriptors**; original DACLs are restored on exit. Set to `false` to refuse this fallback — the run will then fail on machines that require Tier 3 (e.g., Windows 11 builds below 26300 without the BaseContainer API). |
+| `allowDaclMutation` | boolean | `true` | When the BaseContainer feature and the OS-side filesystem broker helper are both unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). **⚠️ This modifies host filesystem security descriptors**; original DACLs are restored on exit. Set to `false` to refuse this fallback; the run will then fail on machines that require Tier 3. |
 
 ### Containment Backends
 
@@ -127,7 +127,7 @@ force a particular backend.
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
-| `"seatbelt"` | macOS sandbox isolation (Seatbelt; experimental) |
+| `"seatbelt"` | macOS sandbox isolation (Seatbelt) |
 | `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces (experimental) |
 
 Only the backend section matching the selected `containment` value is used;

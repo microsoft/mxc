@@ -2,7 +2,6 @@
   "version": "0.4.0-alpha",
   "containerId": "CLI-LXC-Network-Test",
   "containment": "lxc",
-  "platform": "linux",
   "process": {
     "commandLine": "wget -qO- https://api.github.com/zen"
   },

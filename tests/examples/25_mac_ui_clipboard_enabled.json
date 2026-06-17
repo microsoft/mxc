@@ -1,5 +1,5 @@
 {
-    "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
+    "$schema": "../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
     "version": "0.7.0-alpha",
     "containment": "seatbelt",
     "process": {
@@ -13,9 +13,7 @@
         "disable": false,
         "clipboard": "all"
     },
-    "experimental": {
-        "seatbelt": {
-            "mode": "exec"
-        }
+    "seatbelt": {
+        "mode": "exec"
     }
 }

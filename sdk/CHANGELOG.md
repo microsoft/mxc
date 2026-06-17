@@ -5,6 +5,13 @@ All notable changes to `@microsoft/mxc-sdk` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `getPlatformSupport()` now reports `uiCapabilities` on Windows when the
+  native probe can determine which UI restrictions the host can enforce.
+
 ## [0.3.0]
 
 ### ⚠️ Breaking changes

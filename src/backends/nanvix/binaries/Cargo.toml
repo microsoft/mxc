@@ -8,8 +8,17 @@ links = "nanvix_binaries"
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Gates the build script's expensive work (downloading NanVix release assets
+# and verifying their checksums). OFF by default so a plain `cargo build` —
+# which still compiles this crate as a workspace member — performs no network
+# or hashing work. Enabled transitively via the `microvm` feature of `wxc` and
+# `lxc`.
+microvm = []
+
 [dependencies]
 nanvix_common = { path = "../common" }
 
 [build-dependencies]
 nanvix_common = { path = "../common" }
+nanvix_build_common = { path = "../build_common" }

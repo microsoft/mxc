@@ -1,0 +1,71 @@
+name: Package NPM SDK
+
+on:
+  workflow_call:
+
+jobs:
+  package-npm-sdk:
+    name: Package NPM SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+
+      # Download all five build artifacts into the sdk/bin layout the SDK
+      # packager expects. Windows-x64 + Linux-x64 both land under bin/x64
+      # but the binaries have disjoint filenames so they don't collide.
+      - name: Download wxc-binaries x64
+        uses: actions/download-artifact@v4
+        with:
+          name: wxc-binaries-x86_64-pc-windows-msvc
+          path: sdk/bin/x64
+      - name: Download wxc-binaries arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: wxc-binaries-aarch64-pc-windows-msvc
+          path: sdk/bin/arm64
+      - name: Download lxc-binaries x64
+        uses: actions/download-artifact@v4
+        with:
+          name: lxc-binaries-x86_64-unknown-linux-gnu
+          path: sdk/bin/x64
+      - name: Download lxc-binaries arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: lxc-binaries-aarch64-unknown-linux-gnu
+          path: sdk/bin/arm64
+      - name: Download mxc-binaries arm64 (mac)
+        uses: actions/download-artifact@v4
+        with:
+          name: mxc-binaries-aarch64-apple-darwin
+          path: sdk/bin/arm64
+
+      # Artifact downloads strip Unix execute permissions. Restore +x.
+      # Path is `bin` (not `sdk/bin`) because of the job's working-directory default.
+      - name: Restore execute permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in lxc-exec linux-test-proxy mxc-exec-mac; do
+            find bin -name "$name" -exec chmod +x {} +
+          done
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm pack
+
+      - name: Upload SDK package
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages
+          path: sdk/*.tgz
+          if-no-files-found: error
+          retention-days: 1

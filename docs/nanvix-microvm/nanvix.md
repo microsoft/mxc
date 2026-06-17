@@ -29,6 +29,36 @@ via the Windows Hypervisor Platform (WHP) on Windows or KVM on Linux.
 > **Note:** On Linux, WHP snapshots are not used. Each invocation cold-boots
 > the VM via KVM. Snapshot-based warm-start is Windows-only.
 
+### Offline builds
+
+By default the `nanvix_binaries` build script downloads the NanVix release
+assets at compile time. For air-gapped or hermetic builds, pre-fetch the
+binaries and point the `NANVIX_BIN` environment variable at the directory
+containing them:
+
+```
+# Windows (PowerShell)
+$env:NANVIX_BIN = "C:\path\to\nanvix-binaries"
+
+# Linux / macOS
+export NANVIX_BIN=/path/to/nanvix-binaries
+```
+
+When `NANVIX_BIN` is set, the build performs no network downloads and uses the
+provided directory directly. The directory must contain the required binaries
+(the flat files plus the `bin/` subdirectory); their checksums are still
+verified against `checksums.json`. The easiest way to produce such a directory
+is to run a normal `--with-microvm` build once and copy the staged
+`nanvix-binaries` directory out of `OUT_DIR`.
+
+> **Snapshots are not trusted in offline mode.** WHP warm-start snapshots
+> (`snapshots/kernel.vmem`, `snapshots/kernel.whp.cbor`) are *not* covered by
+> `checksums.json` — in a normal build they are generated locally, not
+> downloaded. Any `snapshots/` directory inside `NANVIX_BIN` is therefore
+> ignored (never copied next to the executable), and the runtime cold-boots on
+> first use to regenerate a verified snapshot. This prevents an unverified VM
+> memory image from being warm-booted against otherwise-verified binaries.
+
 ## Quick Start
 
 ```json
@@ -122,11 +152,73 @@ Not supported for MicroVM. If `deniedPaths` is specified, the config is rejected
 | Symlinks/reparse points in source paths | Not supported (rejected at preflight)       |
 | Junctions for staging                   | Not used                                    |
 | `workingDirectory`                      | Not supported (guest CWD is `/`)            |
-| Network policy                          | Not supported (Nanvix has no network stack) |
+| Network policy                          | Host networking + per-host egress filtering |
+
+## Networking
+
+Host networking is **opt-in**. Set `network.defaultPolicy` to `"allow"` to
+enable unrestricted egress; the runner then passes `-allow-host-networking` to
+`nanvixd`. The default (`"block"`) leaves networking disabled, and a guest
+socket call fails with `OSError: [Errno 134]`.
+
+### Per-host egress filtering
+
+`allowedHosts` and `blockedHosts` are supported and forwarded to the guest's
+host-side socket proxy, which enforces egress at `connect()`. The guest filter
+is **allow-XOR-block**, so the two lists are mutually exclusive (specifying both
+is rejected at preflight). Presence of either list implies host networking, so
+`defaultPolicy` is ignored when a list is set:
+
+| `allowedHosts` | `blockedHosts` | Effect |
+| -------------- | -------------- | ------ |
+| _(empty)_      | _(empty)_      | follows `defaultPolicy` (`block` = no egress, `allow` = unrestricted) |
+| `[A, ...]`     | _(empty)_      | **allowlist** — only the listed destinations are reachable |
+| _(empty)_      | `[B, ...]`     | **blocklist** — everything except the listed destinations is reachable |
+| `[A, ...]`     | `[B, ...]`     | rejected at preflight (mutually exclusive) |
+
+Entries may be IPv4 literals (`93.184.216.34`), IPv4 CIDR blocks
+(`10.0.0.0/8`), or hostnames. Hostnames are resolved to their IPv4 (A-record)
+addresses at preflight; IPv6 (AAAA) results are dropped because the guest filter
+is IPv4-only. Resolution failures are handled per direction so neither list ever
+fails open:
+
+- **allowlist** (deny-by-default): each dropped entry is logged as a warning and
+  the run continues, since dropping an entry only *narrows* access. If the list
+  resolves to **no** IPv4 address at all, the run is rejected at preflight rather
+  than silently allowing all traffic.
+- **blocklist** (allow-by-default): **any** entry that resolves to no IPv4
+  address rejects the run at preflight. Silently dropping a blocked host would
+  let traffic the policy explicitly blocks flow freely, and the static preflight
+  filter cannot enforce a name that does not resolve — so the blocklist
+  fails closed.
+
+**DNS:** in allowlist mode the guest daemon automatically exempts the DNS port
+(53), so name resolution works without adding the resolver to `allowedHosts`.
+
+Network proxies (`network.proxy`) are not supported and are rejected at
+preflight.
+
+```jsonc
+{
+  "containment": "microvm",
+  "process": { "commandLine": "import urllib.request; ..." },
+  // Unrestricted egress:
+  "network": { "defaultPolicy": "allow" }
+}
+```
+
+```jsonc
+{
+  "containment": "microvm",
+  "process": { "commandLine": "import urllib.request; ..." },
+  // Allowlist: only example.com and the 10.0.0.0/8 block are reachable.
+  "network": { "allowedHosts": ["example.com", "10.0.0.0/8"] }
+}
+```
 
 ## Not Supported
 
 | Workload                        | Error                               |
 | ------------------------------- | ----------------------------------- |
-| Network I/O                     | `OSError: Function not implemented` |
+| Both `allowedHosts` + `blockedHosts` | Rejected at preflight (mutually exclusive) |
 | File writing outside `/mnt/rw/` | `OSError: Read-only file system`    |

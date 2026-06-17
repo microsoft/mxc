@@ -97,7 +97,9 @@ function Run-WslcTest {
     param(
         [string]$ConfigFile,
         [int]$ExpectedExit = 0,
-        [string]$OutputContains = ""
+        [string]$OutputContains = "",
+        [string]$OutputMatches = "",
+        [scriptblock]$PostExitCheck = $null
     )
 
     $configPath = Join-Path $TestConfigs $ConfigFile
@@ -153,6 +155,28 @@ function Run-WslcTest {
         $reason = "Output missing '$OutputContains'"
     }
 
+    # OutputMatches is a regex pattern (no escaping).
+    if ($pass -and $OutputMatches -and $output -notmatch $OutputMatches) {
+        $pass = $false
+        $reason = "Output did not match regex '$OutputMatches'"
+    }
+
+    # PostExitCheck runs after exit/output gates pass. Receives ($id, $output)
+    # and must return truthy. Use for externally-observable state assertions.
+    if ($pass -and $PostExitCheck) {
+        $containerId = $configJson.containerId
+        try {
+            $checkResult = & $PostExitCheck $containerId $output
+            if (-not $checkResult) {
+                $pass = $false
+                $reason = "PostExitCheck returned false"
+            }
+        } catch {
+            $pass = $false
+            $reason = "PostExitCheck threw: $_"
+        }
+    }
+
     if ($pass) {
         Write-Host "PASS" -ForegroundColor Green
     } else {
@@ -186,7 +210,9 @@ $null = $results.Add((Run-WslcTest "wslc_stderr.json" -OutputContains "stdout me
 $null = $results.Add((Run-WslcTest "wslc_large_output.json"))
 
 Write-Host "`n--- Filesystem Tests ---" -ForegroundColor Cyan
-$null = $results.Add((Run-WslcTest "wslc_filesystem.json" -OutputContains "Filesystem test passed"))
+# wslc_filesystem.json also asserts cpuCount + memoryMb enforcement via nproc and /proc/meminfo.
+$null = $results.Add((Run-WslcTest "wslc_filesystem.json" `
+    -OutputMatches "(?s)PASS: filesystem mount visible.*PASS: cpuCount enforced.*PASS: memoryMb enforced"))
 $null = $results.Add((Run-WslcTest "wslc_readonly_mount.json" -OutputContains "Read succeeded"))
 
 Write-Host "`n--- Network Tests ---" -ForegroundColor Cyan
@@ -203,6 +229,16 @@ $null = $results.Add((Run-WslcTest "wslc_tar_import_docker_save.json" -OutputCon
 
 Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -OutputContains "Starting long task"))
+
+Write-Host "`n--- Lifecycle Tests ---" -ForegroundColor Cyan
+# Smoke tests only: assert config parses and payload runs. WSLC's session
+# teardown reaps session-scoped containers regardless of AutoRemove, so
+# destroyOnExit has no externally observable effect via `wslc list`.
+# True semantic verification requires a runner-side log assertion (TODO).
+$null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_true.json" `
+    -OutputContains "PASS: container ran (destroyOnExit=true)"))
+$null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_false.json" `
+    -OutputContains "PASS: container ran (destroyOnExit=false)"))
 
 # Summary
 $passed = @($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count

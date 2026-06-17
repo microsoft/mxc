@@ -9,7 +9,9 @@
   "processContainer": {
     "capabilities": [ "registryRead" ]
   },
-  "fileSystem": {
-    "executablePath": "C:\\Users\\AdminUser\\AppData\\Local\\anaconda3\\python.exe"
+  "filesystem": {
+    "readonlyPaths": [
+      "C:\\Users\\AdminUser\\AppData\\Local\\anaconda3"
+    ]
   }
 }

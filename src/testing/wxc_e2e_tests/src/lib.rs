@@ -463,6 +463,25 @@ pub fn run_wxc_state_aware(
     run_executable(label, &exe, args)
 }
 
+/// Run `wxc-exec.exe` with a one-shot config supplied as an in-memory JSON
+/// value. The value is serialised, base64-encoded, and passed via
+/// `--config-base64`, so callers can build configs with values only known at
+/// test time (e.g. a dynamically discovered host IP or port).
+pub fn run_wxc_config_value(
+    label: &str,
+    config: &serde_json::Value,
+    extra_args: &[&str],
+) -> CommandResult {
+    let exe = find_binary("wxc-exec.exe").expect("wxc-exec.exe should be available");
+    let encoded = STANDARD.encode(config.to_string().as_bytes());
+
+    let mut args: Vec<String> = extra_args.iter().map(|s| (*s).to_string()).collect();
+    args.push("--config-base64".to_string());
+    args.push(encoded);
+
+    run_executable(label, &exe, args)
+}
+
 /// Run `wxc-test-driver.exe` against a directory or a single config file.
 pub fn run_test_driver(target: &Path, extra_args: &[&str]) -> CommandResult {
     let exe = find_binary("wxc-test-driver.exe").expect("wxc-test-driver.exe should be available");

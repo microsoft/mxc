@@ -33,7 +33,7 @@ pub enum ContainmentBackend {
     /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
     #[serde(rename = "isolation_session")]
     IsolationSession,
-    /// macOS Seatbelt — experimental sandbox backend (requires --experimental).
+    /// macOS Seatbelt sandbox backend.
     /// Implemented on top of the OS-bundled sandbox facility (Apple's
     /// internal codename for the App Sandbox / `sandbox-exec` machinery
     /// is "Seatbelt"); selected on the wire as `"seatbelt"`.
@@ -71,7 +71,7 @@ impl ContainmentBackend {
             ContainmentBackend::Lxc => Some("lxc"),
             ContainmentBackend::WindowsSandbox => Some("experimental.windows_sandbox"),
             ContainmentBackend::Wslc => Some("experimental.wslc"),
-            ContainmentBackend::Seatbelt => Some("experimental.seatbelt"),
+            ContainmentBackend::Seatbelt => Some("seatbelt"),
             ContainmentBackend::IsolationSession => Some("experimental.isolation_session"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::Hyperlight
@@ -81,8 +81,8 @@ impl ContainmentBackend {
     }
 }
 
-/// Configuration specific to the Seatbelt backend (experimental).
-/// Used under `experimental.seatbelt` when `containment == Seatbelt`.
+/// Configuration specific to the Seatbelt backend.
+/// Used under the top-level `seatbelt` key when `containment == Seatbelt`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SeatbeltConfig {
@@ -548,19 +548,15 @@ pub struct ExperimentalConfig {
     /// Isolation Session backend (experimental).
     #[serde(rename = "isolation_session")]
     pub isolation_session: Option<IsolationSessionConfig>,
-    /// Seatbelt (macOS) backend (experimental).
-    pub seatbelt: Option<SeatbeltConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExecutionRequest {
     /// Schema version for the config format.
     pub schema_version: String,
     /// Externally assigned container identifier.
     pub container_id: String,
-    /// Target platform: "linux" or "windows". Default: "windows".
-    pub platform: String,
     /// Environment variables as "KEY=VALUE" strings (from process.env).
     pub env: Vec<String>,
     pub script_code: String,
@@ -574,6 +570,8 @@ pub struct ExecutionRequest {
     pub policy: ContainerPolicy,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
+    /// Seatbelt (macOS) backend configuration (used when containment == Seatbelt).
+    pub seatbelt: Option<SeatbeltConfig>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
     /// Experimental feature configs (only applied when experimental_enabled is true).
@@ -581,27 +579,6 @@ pub struct ExecutionRequest {
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
-}
-
-impl Default for ExecutionRequest {
-    fn default() -> Self {
-        Self {
-            schema_version: String::new(),
-            container_id: String::new(),
-            platform: "windows".to_string(),
-            env: Vec::new(),
-            script_code: String::new(),
-            working_directory: String::new(),
-            script_timeout: 0,
-            containment: ContainmentBackend::default(),
-            lifecycle: LifecycleConfig::default(),
-            policy: ContainerPolicy::default(),
-            lxc_config: LxcConfig::default(),
-            experimental_enabled: false,
-            experimental: ExperimentalConfig::default(),
-            dry_run: false,
-        }
-    }
 }
 
 /// Distinguishes whether an error occurred during process creation (launch)
@@ -615,6 +592,11 @@ pub enum FailurePhase {
     LaunchFailed,
     /// The process was created but exited with a non-zero code.
     ProcessExited,
+    /// The selected containment backend is unavailable on this host: the API is
+    /// missing, or present but not usable (e.g. feature-disabled). Distinct from
+    /// [`LaunchFailed`] so callers can fall back to a lower tier rather than
+    /// hard-fail.
+    BackendUnavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -663,6 +645,20 @@ impl ScriptResponse {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn script_response_backend_unavailable_round_trips() {
+        let r = ScriptResponse {
+            failure_phase: FailurePhase::BackendUnavailable,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: ScriptResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.failure_phase, FailurePhase::BackendUnavailable);
+        // An omitted failure_phase still defaults to None.
+        let defaulted: ScriptResponse = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaulted.failure_phase, FailurePhase::None);
+    }
 
     #[test]
     fn isolation_session_user_serde_round_trips_camel_case() {
