@@ -150,7 +150,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 |---|---|---|---|
 | 5 | **State-aware lifecycle** | Implement `StatefulSandboxBackend`. WSLC bears the largest startup cost of the three (distro boot, image hydration), so session reuse is the highest-value win here. | L |
 | 6 | **Explicit `{ windowsPath, containerPath }` mount control** | Host paths are always mounted at `/mnt/<drive>`; let users specify the in-container mount point. `src/backends/wslc/common/src/policy_mapping.rs:23-60`. | M |
-| 7 | **Handle UNC / non-drive paths explicitly** | UNC paths in policy (e.g. `\\fileserver\team\report.docx`, `\\wsl$\Ubuntu\home\user`, `\\?\C:\very\long\path`) are silently dropped with only a warning; either map them or hard-error so users know. | S |
+| 7 | **Handle UNC / non-drive paths explicitly** | UNC paths in policy (e.g. `\\fileserver\team\report.docx`, `\\wsl$\Ubuntu\home\user`, `\\?\C:\very\long\path`) are silently dropped with only a warning; plan is to hard-error so users know the path cannot be mounted. `src/backends/wslc/common/src/policy_mapping.rs:23-60`. | S |
 | 8 | **Add a real `deniedPaths` primitive** | Today `deniedPaths` means "not mounted" — there's no overlay-based deny ACE, so a sibling mount could leak access. | M |
 | 9 | **Per-host filtering requires iptables-in-image** | Images without iptables silently fall back to coarse allow/deny; add a fallback (sidecar netns or host-side filter) so policy is honored regardless of image contents. | M |
 
