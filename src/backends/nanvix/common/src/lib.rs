@@ -20,16 +20,6 @@ pub const REQUIRED_BINARIES: &[&str] = &["nanvixd.exe", "nanvix_rootfs.img", "py
 #[cfg(target_os = "linux")]
 pub const REQUIRED_BINARIES: &[&str] = &["nanvixd.elf", "nanvix_rootfs.img", "python3.initrd"];
 
-/// Fallback for non-Windows/Linux hosts so the crate compiles when it is
-/// pulled in as a `[build-dependency]` from a macOS / BSD host that is
-/// cross-compiling to a supported target. NanVix only runs on Windows
-/// and Linux, so the empty slice is correct: any caller that iterates
-/// `REQUIRED_BINARIES` does nothing, and the higher-level Linux/Windows
-/// `target_os` cfg gates in the consuming binaries (e.g. `lxc/build.rs`)
-/// ensure the surrounding logic is only invoked on supported hosts.
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
-pub const REQUIRED_BINARIES: &[&str] = &[];
-
 /// NanVix daemon binary name (platform-conditional).
 #[cfg(target_os = "windows")]
 pub const NANVIXD_BINARY: &str = "nanvixd.exe";
@@ -37,14 +27,6 @@ pub const NANVIXD_BINARY: &str = "nanvixd.exe";
 /// NanVix daemon binary name (platform-conditional).
 #[cfg(target_os = "linux")]
 pub const NANVIXD_BINARY: &str = "nanvixd.elf";
-
-/// Fallback for non-Windows/Linux hosts. See `REQUIRED_BINARIES` above.
-/// A descriptive sentinel (rather than an empty string) so that if any
-/// code path ever does construct a `Command` from this on an unsupported
-/// host, the failure clearly names the cause instead of reporting an
-/// empty program name.
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
-pub const NANVIXD_BINARY: &str = "nanvixd-unsupported-host";
 
 /// Multi-binary initrd (daemons + CPython) loaded by NanVix at warm start.
 pub const INITRD_BINARY: &str = "python3.initrd";
