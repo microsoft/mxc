@@ -69,6 +69,22 @@ export {
   parseDenialStream,
 } from './denial-stream.js';
 
+// Export captureDenials retry orchestration
+export {
+  regenerateSandboxPolicy,
+  isSystemCritical,
+  RegenInput,
+  RegenResult,
+} from './policy-regen.js';
+export {
+  spawnSandboxWithRetry,
+  OnDeniedDecision,
+  OnDeniedCallback,
+  SpawnSandboxWithRetryOptions,
+  SpawnSandboxWithRetryResult,
+  RetryAttemptResult,
+} from './spawn-with-retry.js';
+
 // Export policy discovery functions
 export {
   getAvailableToolsPolicy,
