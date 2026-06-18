@@ -36,6 +36,68 @@ pub(crate) const DENIAL_STREAM_MARKER: u8 = 0x1E;
 /// Env var that opts into raw (pre-dedupe) event count in the summary.
 const VERBOSE_ENV_VAR: &str = "MXC_DENIAL_VERBOSE";
 
+/// Env var that redirects the captureDenials NDJSON stream from
+/// stderr to a named pipe.
+///
+/// When set, the value is the **base name** of a Windows named pipe
+/// (no `\\.\pipe\` prefix). The runner prepends the prefix and
+/// opens the pipe for writing. Both per-denial lines and the
+/// terminator summary go to the pipe instead of stderr.
+///
+/// Designed for the PTY-mode scenario: when the SDK consumer wants
+/// the workload to own a clean PTY (for color, REPL interactivity,
+/// `isatty()`-aware progress bars, etc.), the captureDenials stream
+/// can't share that PTY without corrupting the user's terminal.
+/// The SDK creates a named-pipe server and passes its name through
+/// this env var; wxc-exec writes denials to the pipe; the SDK reads
+/// from the pipe and runs `parseDenialStream` on it.
+///
+/// When unset (the common case), the runner writes to stderr as
+/// before.
+const PIPE_ENV_VAR: &str = "MXC_DENIALS_PIPE";
+
+/// Open the writer the captureDenials stream should drain into for
+/// this invocation. Returns a `Box<dyn Write>` so the call sites can
+/// share one code path between the stderr-default and the
+/// named-pipe-override transports.
+///
+/// On Windows, the named-pipe variant uses `std::fs::OpenOptions` to
+/// open `\\.\pipe\<name>` for writing -- Win32 exposes named pipes
+/// through the same NT object namespace as files, so the standard
+/// `File` works directly without any windows-rs detour.
+///
+/// If the env var is set but the pipe can't be opened (server isn't
+/// listening, name typo, etc.), we log the error and fall back to
+/// stderr. The captureDenials feature staying half-functional is
+/// strictly better than panicking the workload's runner.
+fn open_writer() -> Box<dyn std::io::Write + Send> {
+    match std::env::var(PIPE_ENV_VAR) {
+        Ok(name) if !name.trim().is_empty() => {
+            #[cfg(target_os = "windows")]
+            {
+                let full = format!(r"\\.\pipe\{}", name.trim());
+                match std::fs::OpenOptions::new().write(true).open(&full) {
+                    Ok(f) => return Box::new(f),
+                    Err(e) => {
+                        eprintln!(
+                            "[denial_capture] {PIPE_ENV_VAR}=\"{name}\" set but failed to \
+                             open pipe '{full}': {e}; falling back to stderr"
+                        );
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                eprintln!(
+                    "[denial_capture] {PIPE_ENV_VAR} is Windows-only; ignoring on this platform"
+                );
+            }
+            Box::new(std::io::stderr())
+        }
+        _ => Box::new(std::io::stderr()),
+    }
+}
+
 /// Drains `rx` until the channel closes, writing one
 /// `\x1e<ndjson>\n` line to stderr per *newly-seen*
 /// `(path, accessType)` pair. Runs on its own thread so the ETW
@@ -59,9 +121,12 @@ const VERBOSE_ENV_VAR: &str = "MXC_DENIAL_VERBOSE";
 pub(crate) fn stream_denials_to_stderr(
     rx: std::sync::mpsc::Receiver<denial_capture::DeniedResource>,
 ) -> usize {
-    let stderr = std::io::stderr();
-    let mut handle = stderr.lock();
-    stream_denials_to_writer(rx, &mut handle)
+    // Resolve the destination at thread start, not per-event. The
+    // env var is process-wide and never changes mid-run, so one
+    // lookup is enough. Tests inject a Vec<u8> via the
+    // `_to_writer` core directly and bypass this entirely.
+    let mut writer = open_writer();
+    stream_denials_to_writer(rx, &mut writer)
 }
 
 /// Test-friendly implementation of [`stream_denials_to_stderr`]. The
@@ -216,12 +281,15 @@ pub(crate) fn emit_denial_summary_line(
         Err(_) => return,
     };
     use std::io::Write;
-    let stderr = std::io::stderr();
-    let mut handle = stderr.lock();
-    let _ = handle.write_all(&[DENIAL_STREAM_MARKER]);
-    let _ = handle.write_all(json.as_bytes());
-    let _ = handle.write_all(b"\n");
-    let _ = handle.flush();
+    // Same routing as the per-event writer (open_writer respects
+    // MXC_DENIALS_PIPE). The summary is the wire-format terminator
+    // for the SDK consumer; it has to land on the same channel as
+    // the individual denial lines.
+    let mut writer = open_writer();
+    let _ = writer.write_all(&[DENIAL_STREAM_MARKER]);
+    let _ = writer.write_all(json.as_bytes());
+    let _ = writer.write_all(b"\n");
+    let _ = writer.flush();
 }
 
 #[cfg(test)]

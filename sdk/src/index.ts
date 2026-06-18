@@ -50,9 +50,17 @@ export {
   spawnSandbox,
   spawnSandboxAsync,
   spawnSandboxFromConfig,
+  spawnSandboxWithSideChannel,
+  SpawnWithSideChannelResult,
   buildSandboxPayload,
   SandboxSpawnOptions,
 } from './sandbox.js';
+
+// Export captureDenials side-channel transport
+export {
+  createDenialPipeServer,
+  DenialPipeServer,
+} from './denial-side-channel.js';
 
 // Export captureDenials streaming consumer
 export {

@@ -26,12 +26,15 @@
  */
 
 import type { ChildProcess } from 'child_process';
+import type pty from 'node-pty';
+import type { Socket } from 'net';
 import type { SandboxPolicy } from './types.js';
 import type { DeniedResource, DenialStreamSummary } from './denial-stream.js';
 import { parseDenialStream, defaultDenialFilters } from './denial-stream.js';
 import {
   createConfigFromPolicy,
   spawnSandboxFromConfig,
+  spawnSandboxWithSideChannel,
   type SandboxSpawnOptions,
 } from './sandbox.js';
 import { regenerateSandboxPolicy, type RegenResult } from './policy-regen.js';
@@ -98,11 +101,29 @@ export interface SpawnSandboxWithRetryOptions {
 
   /**
    * Optional. Forwarded into `spawnSandboxFromConfig` for each
-   * attempt. `usePty` is always set to `false` regardless of what
-   * the caller passes here — PTY mode merges stdout+stderr and
-   * would corrupt the captureDenials wire format.
+   * attempt. The wrapper picks the right `usePty` value based on
+   * its top-level `usePty` option (see below) -- callers that try
+   * to override it via `spawnOptions.usePty` are silently
+   * disregarded.
    */
   spawnOptions?: Omit<SandboxSpawnOptions, 'usePty'>;
+
+  /**
+   * When true, the workload runs in PTY mode (interactive terminal,
+   * color, `isatty()` returns true) and the captureDenials stream
+   * is routed through a private named-pipe side channel so it
+   * doesn't corrupt the workload's terminal. Returns the IPty
+   * handle on `RetryAttemptResult.pty` so the caller can wire it
+   * up to a host terminal.
+   *
+   * When false (the default), the workload runs in non-PTY mode
+   * (stdout/stderr are separate pipes) and captureDenials uses
+   * stderr as the transport.
+   *
+   * Windows-only when true (named pipes are Windows-only and
+   * captureDenials itself is Windows-only).
+   */
+  usePty?: boolean;
 
   /**
    * Optional working directory; forwarded to spawn.
@@ -145,18 +166,41 @@ export interface RetryAttemptResult {
   index: number;
   /** Workload exit code from this attempt (or -1 if the child died). */
   exitCode: number;
-  /** All bytes the workload wrote to stdout, decoded as UTF-8. */
+  /**
+   * Workload stdout for the attempt, decoded as UTF-8.
+   *
+   * In non-PTY mode (the default), this is the child's stdout pipe.
+   * In PTY mode (`options.usePty: true`), the workload's stdout
+   * and stderr are merged onto the PTY -- this field accumulates
+   * the merged terminal bytes so callers that don't want to wire
+   * up the live `pty` handle can still read what the workload
+   * printed.
+   */
   stdout: string;
   /**
-   * All bytes the *workload* wrote to stderr (not the captureDenials
-   * envelopes, which the demuxer pulls out separately). Decoded as
-   * UTF-8.
+   * Workload stderr (the bytes that fall through the
+   * captureDenials demuxer's passthrough).
+   *
+   * In non-PTY mode this is the child's stderr pipe with the 0x1E
+   * envelopes already peeled off. In PTY mode this is always empty
+   * (PTY merges stdout+stderr, so the bytes land in `stdout`
+   * instead).
    */
   stderr: string;
   /** Unique denials that survived the SDK noise filters. */
   denials: readonly DeniedResource[];
   /** Terminator summary line, if present. */
   summary: DenialStreamSummary | undefined;
+  /**
+   * Live IPty handle when the attempt ran in PTY mode, undefined
+   * otherwise. Consumers wire this up to a host terminal for
+   * interactive workloads (`pty.onData(d => write(d))`,
+   * `pty.write(stdin)`, etc.). Already torn down by the time the
+   * attempt result is returned -- exposed for symmetry with the
+   * non-PTY ChildProcess case and for callers that captured the
+   * handle live during the run.
+   */
+  pty?: pty.IPty;
 }
 
 /**
@@ -387,9 +431,23 @@ async function runOnce(
   config.captureDenials = true;
   config.process = { ...(config.process ?? { commandLine: '' }), commandLine: options.script };
 
-  // PTY mode merges stdout+stderr — we need them split so the
-  // captureDenials demuxer can split stderr on 0x1E without seeing
-  // the workload's own stdout interleaved into the segments.
+  if (options.usePty) {
+    return runOncePty(config, options, attemptIndex);
+  }
+  return runOnceChild(config, options, attemptIndex);
+}
+
+/**
+ * Non-PTY single-attempt runner. Workload runs with separate
+ * stdin/stdout/stderr; captureDenials uses stderr as the transport
+ * (the 0x1E demuxer + workload-stderr passthrough split the bytes
+ * downstream).
+ */
+async function runOnceChild(
+  config: ReturnType<typeof createConfigFromPolicy>,
+  options: SpawnSandboxWithRetryOptions,
+  attemptIndex: number,
+): Promise<RetryAttemptResult> {
   const child = spawnSandboxFromConfig(
     config,
     { ...(options.spawnOptions ?? {}), usePty: false },
@@ -428,5 +486,66 @@ async function runOnce(
     stderr: Buffer.concat(stderrChunks).toString('utf8'),
     denials,
     summary,
+  };
+}
+
+/**
+ * PTY single-attempt runner. Workload runs with a real PTY (color,
+ * `isatty()` true, interactive); captureDenials uses a private
+ * named-pipe side channel so the user's terminal stays clean.
+ *
+ * Windows-only -- the side channel uses Windows named pipes, and
+ * captureDenials itself is Windows-only.
+ */
+async function runOncePty(
+  config: ReturnType<typeof createConfigFromPolicy>,
+  options: SpawnSandboxWithRetryOptions,
+  attemptIndex: number,
+): Promise<RetryAttemptResult> {
+  const sideChannel = spawnSandboxWithSideChannel(
+    config,
+    { ...(options.spawnOptions ?? {}), usePty: true },
+    options.workingDirectory,
+  );
+
+  // Cast: usePty: true guarantees IPty.
+  const ptyProcess = sideChannel.process as pty.IPty;
+
+  const stdoutChunks: Buffer[] = [];
+  // Accumulate the PTY's merged output. Consumers that want live
+  // rendering should also wire their own onData listener -- both
+  // can coexist because node-pty's onData is multicast.
+  ptyProcess.onData((data: string) => {
+    stdoutChunks.push(Buffer.from(data, 'utf8'));
+  });
+
+  const denials: DeniedResource[] = [];
+  let summary: DenialStreamSummary | undefined;
+
+  const streamP = sideChannel.denialStream.then((socket: Socket) =>
+    parseDenialStream(socket, {
+      filters: defaultDenialFilters,
+      onDenial: (r) => denials.push(r),
+      onSummary: (s) => { summary = s; },
+      // No passthrough channel in PTY mode -- the workload's stderr
+      // is merged into stdout (the PTY). Nothing should land here.
+    }),
+  );
+
+  const exitP = new Promise<number>((resolve) => {
+    ptyProcess.onExit(({ exitCode }) => resolve(exitCode));
+  });
+
+  const [, exitCode] = await Promise.all([streamP, exitP]);
+  sideChannel.close();
+
+  return {
+    index: attemptIndex,
+    exitCode,
+    stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+    stderr: '',
+    denials,
+    summary,
+    pty: ptyProcess,
   };
 }

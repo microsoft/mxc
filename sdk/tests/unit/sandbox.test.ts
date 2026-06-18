@@ -1169,4 +1169,21 @@ describe('spawnSandboxFromConfig captureDenials + PTY guard', () => {
       /captureDenials requires usePty: false/,
     );
   });
+
+  it('error message mentions the side-channel escape hatch', () => {
+    // Consumers hitting this guard need to know the way out:
+    // spawnSandboxWithSideChannel reroutes denials over a private
+    // named pipe so PTY mode becomes safe. The error must point
+    // them there or they'll resort to giving up captureDenials.
+    const config: ContainerConfig = {
+      version: '0.5.0-alpha',
+      containment: 'processcontainer',
+      captureDenials: true,
+      process: { commandLine: 'cmd /c echo hi' },
+    };
+    assert.throws(
+      () => spawnSandboxFromConfig(config, {}),
+      /spawnSandboxWithSideChannel/,
+    );
+  });
 });
