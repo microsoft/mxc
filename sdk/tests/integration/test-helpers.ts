@@ -145,10 +145,17 @@ export const debugSpawnOptions = {
 export const NETWORK_TEST_URL =
   'https://pkgs.dev.azure.com/shine-oss/mxc/_packaging/MxcDependencies/npm/registry/@types/json-schema';
 
-// TODO: Investigate LXC container networking on CI agents. Containers lack
-// network bridge/NAT config on hosted Ubuntu runners, causing outbound
-// requests to fail. Needs lxcbr0 bridge + IP forwarding + DNS setup.
-// Set MXC_SKIP_LXC_NETWORK_TESTS=1 to skip network-dependent LXC tests.
+// Set MXC_SKIP_LXC_NETWORK_TESTS=1 to skip network-dependent LXC tests
+// (e.g. environments without an `lxcbr0` bridge / IP forwarding /
+// outbound network access). Both CI lanes currently set this env var:
+// GHA sets it in `.github/workflows/SDK.Integration.Test.Job.yml`
+// because the alpine download template doesn't acquire a DHCP-issued
+// IPv4 lease within the test window on the runner images, so
+// container-side DNS lookups fail; ADO sets it in
+// `.azure-pipelines/templates/SDK.Integration.Test.Job.yml` because
+// the 1ES Hosted Pool's egress firewall blocks lxcbr0-NAT'd traffic.
+// Both CIs still run the non-network LXC paths
+// (create/start/attach/mount/exit-code/multi-command) end-to-end.
 const skipLxcNetworkTests = process.env.MXC_SKIP_LXC_NETWORK_TESTS === '1';
 export const lxcNetworkSkipReason = skipLxcNetworkTests
   ? 'Skipped: LXC network not available in this environment (MXC_SKIP_LXC_NETWORK_TESTS)'

@@ -18,10 +18,13 @@ import {
   spawnFromConfigAsync,
 } from './test-helpers.js';
 
-// MXC_SKIP_LXC_TESTS=1 skips the entire LXC describe block. Used by the GHA
-// PR pipeline because classic LXC is unreliable on the ubuntu-latest (24.04)
-// runner image; full LXC coverage runs in the ADO pipeline on merge to main
-// and nightly.
+// MXC_SKIP_LXC_TESTS=1 skips the entire LXC describe block. Provided as
+// an escape hatch for local dev or for CI hosts that genuinely lack the
+// LXC substrate. Both GHA and ADO Linux jobs install LXC, so the
+// non-network LXC cases run on both CI surfaces; the network-dependent
+// LXC cases are gated separately on both surfaces via
+// MXC_SKIP_LXC_NETWORK_TESTS=1 (see lxcNetworkSkipReason in
+// test-helpers.ts for the per-CI rationale).
 const skipLxcTests = process.env.MXC_SKIP_LXC_TESTS === '1';
 const lxcSkipReason = !isLinuxRoot
   ? 'Linux LXC Container tests require Linux with root privileges (sudo npm test)'

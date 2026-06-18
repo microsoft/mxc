@@ -165,7 +165,7 @@
             "block"
           ],
           "default": "block",
-          "description": "Default network posture. Deny-by-default."
+          "description": "Default network posture. Deny-by-default. For the 'microvm' (NanVix) backend this enables host networking when set to 'allow' (nanvixd '-allow-host-networking'); 'block' disables it. When 'allowedHosts' or 'blockedHosts' is set on the 'microvm' backend, host networking is implied and this field is ignored."
         },
         "enforcementMode": {
           "type": "string",
@@ -182,14 +182,14 @@
           "items": {
             "type": "string"
           },
-          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Enforced by 'lxc', 'processcontainer', 'bubblewrap', 'wslc', and 'hyperlight' containment backends."
+          "description": "Hostnames or IP/CIDR blocks to allow (when defaultPolicy is 'block'). Enforced by 'lxc', 'processcontainer', 'bubblewrap', 'wslc', 'hyperlight', and 'microvm' containment backends. On 'microvm' this is mutually exclusive with 'blockedHosts'; hostnames are resolved to IPv4 (A records) at preflight and the guest auto-exempts DNS."
         },
         "blockedHosts": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc', 'processcontainer', 'bubblewrap', 'wslc', and 'hyperlight' containment backends."
+          "description": "Hostnames or IP addresses to block (when defaultPolicy is 'allow'). Enforced by 'lxc', 'processcontainer', 'bubblewrap', 'wslc', 'hyperlight', and 'microvm' containment backends. On 'microvm' this is mutually exclusive with 'allowedHosts'; hostnames are resolved to IPv4 (A records) at preflight."
         },
         "allowLocalNetwork": {
           "type": "boolean",

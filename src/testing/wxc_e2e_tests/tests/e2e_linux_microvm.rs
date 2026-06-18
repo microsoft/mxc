@@ -72,6 +72,34 @@ fn test_microvm_hello() {
     );
 }
 
+#[test]
+fn test_microvm_network() {
+    if !skip_unless_ready() {
+        return;
+    }
+    // Exercises the `-allow-host-networking` path on Linux/KVM: the guest runs
+    // a loopback TCP ping/pong round-trip and prints NET_OK. Without host
+    // networking the guest socket() fails (errno 134), so a clean exit plus
+    // the marker confirms the flag is wired through for the cold-boot path.
+    let result = run_lxc_config("microvm_network_linux.json", &["--debug", "--experimental"]);
+    assert_eq!(
+        result.code,
+        Some(0),
+        "expected exit 0, got {:?}\nstdout: {}\nstderr: {}",
+        result.code,
+        result.stdout,
+        result.stderr
+    );
+    assert!(
+        result
+            .combined_output_with_decoded_base64()
+            .contains("NET_OK"),
+        "guest network round-trip marker missing\nstdout: {}\nstderr: {}",
+        result.stdout,
+        result.stderr
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Full microvm suite (mirrors test_microvm_suite on Windows)
 // ---------------------------------------------------------------------------
