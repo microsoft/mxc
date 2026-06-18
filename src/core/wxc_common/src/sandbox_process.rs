@@ -205,17 +205,21 @@ pub fn boxed_closer<C: StreamCloser + Clone + 'static>(
         .map(|c| Box::new(c) as Box<dyn StreamCloser>)
 }
 
-/// EOF a *not-taken* stdout/stderr stream that [`wait`](SandboxProcess::wait) is
-/// draining, via its stored canceller, so a backgrounded descendant holding the
-/// pipe's write end open past the child's exit can't wedge the discard
-/// [`io::copy`](std::io::copy) — and thus `wait()` — under a wait-forever
-/// (`scriptTimeout == 0`) timeout. The drained output is discarded regardless,
-/// so cutting it short is harmless. No-op when the stream was taken by the
-/// caller (`drain` is `None`, so there is no discard thread) or has no canceller.
+/// Join a not-taken stdout/stderr discard thread from
+/// [`wait`](SandboxProcess::wait), first cancelling its read so the join can't
+/// block. When the stream was drained (a [`spawn_discard`] thread exists), fire
+/// `canceller` before joining: a backgrounded descendant holding the pipe's
+/// write end open past the foreground child's exit would otherwise keep the
+/// discard [`io::copy`](std::io::copy) — and thus `wait()` — from ever returning
+/// under a wait-forever (`scriptTimeout == 0`) timeout. The drained output is
+/// discarded regardless, so cutting it short is harmless.
 ///
-/// Call this *after* the child has exited and *before* joining `drain`.
-pub fn cancel_drained_stream<C: StreamCloser>(
-    drain: &Option<std::thread::JoinHandle<()>>,
+/// Call *after* the child has exited (so its own output has drained normally).
+/// A no-op when the caller took the stream (`drain` is `None`): there is no
+/// thread to join, and the canceller must not fire while the caller may still be
+/// reading.
+pub fn cancel_and_join_discard<C: StreamCloser>(
+    drain: Option<std::thread::JoinHandle<()>>,
     canceller: &Option<C>,
 ) {
     if drain.is_some() {
@@ -223,6 +227,7 @@ pub fn cancel_drained_stream<C: StreamCloser>(
             canceller.close();
         }
     }
+    join_discard(drain);
 }
 
 /// Process-tree kill for a Unix child that leads its own process group — the
