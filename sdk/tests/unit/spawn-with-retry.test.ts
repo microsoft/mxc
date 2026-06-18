@@ -117,6 +117,7 @@ describe('driveRetryLoop', () => {
   it('returns user-cancelled when the callback signals cancel', async () => {
     const result = await driveRetryLoop(
       baseOptions({
+        maxRetries: 1,
         onDenied: () => ({ cancel: true, approve: [] }),
       }),
       async (_p, i) => attempt(i, 1, [fileDenial('C:\\foo')]),
@@ -127,7 +128,10 @@ describe('driveRetryLoop', () => {
 
   it('returns no-approvals when the callback returns an empty approve list', async () => {
     const result = await driveRetryLoop(
-      baseOptions({ onDenied: () => ({ approve: [] }) }),
+      baseOptions({
+        maxRetries: 1,
+        onDenied: () => ({ approve: [] }),
+      }),
       async (_p, i) => attempt(i, 1, [fileDenial('C:\\foo')]),
     );
     assert.strictEqual(result.stopReason, 'no-approvals');
@@ -139,6 +143,7 @@ describe('driveRetryLoop', () => {
     let onDeniedCalls = 0;
     const result = await driveRetryLoop(
       baseOptions({
+        maxRetries: 1,
         onDenied: (denials) => {
           onDeniedCalls += 1;
           return { approve: [...denials] };
@@ -162,26 +167,94 @@ describe('driveRetryLoop', () => {
     assert.strictEqual(result.regen!.added.length, 1);
   });
 
-  it('returns still-denied when the retried run still produces denials', async () => {
+  it('returns still-denied-different when retry trips a fresh path the workload progressed onto', async () => {
     const result = await driveRetryLoop(
       baseOptions({
+        maxRetries: 1,
         onDenied: (denials) => ({ approve: [denials[0]] }),
       }),
       async (_p, i) => {
-        // Two attempts, both fail with denials. Caller only approves
-        // one but the workload reaches for another path on retry.
+        // First attempt: blocked on A. Caller approves A. Retry:
+        // workload gets past A but trips on B — that's *progress*,
+        // a re-prompt could continue. Distinct from "approved A,
+        // still blocked on A" (same).
         if (i === 0) return attempt(i, 1, [fileDenial('C:\\a.txt')]);
         return attempt(i, 1, [fileDenial('C:\\b.txt')]);
       },
     );
-    assert.strictEqual(result.stopReason, 'still-denied');
+    assert.strictEqual(result.stopReason, 'still-denied-different');
     assert.strictEqual(result.attempts.length, 2);
-    // The retried attempt's denial list is exposed so the caller
-    // knows *what* is still denied.
     assert.deepStrictEqual(
       result.attempts[1].denials.map((d) => d.path),
       ['C:\\b.txt'],
     );
+  });
+
+  it('returns still-denied-same when retry trips the exact same denials again', async () => {
+    // Useful failure mode to surface: regen no-op'd (e.g. the
+    // approval was for a path that's already a system-critical
+    // skip) so the policy didn't change, or the workload is
+    // re-tripping a path it had already triggered. Either way, no
+    // progress -- the wrapper signals "trying again won't help."
+    const samePath = 'C:\\persistent.txt';
+    const result = await driveRetryLoop(
+      baseOptions({
+        maxRetries: 1,
+        onDenied: (denials) => ({ approve: [...denials] }),
+      }),
+      async (_p, i) => attempt(i, 1, [fileDenial(samePath)]),
+    );
+    assert.strictEqual(result.stopReason, 'still-denied-same');
+    assert.strictEqual(result.attempts.length, 2);
+  });
+
+  it('returns still-denied-same when retry trips a subset of the original denials', async () => {
+    // Subset case: original had {A, B, C}, retry has just {B}.
+    // The workload made some progress (A, C are no longer denied)
+    // but B is the same denial we'd already seen. We label as
+    // "same" because the *retry's* denial set is a subset of the
+    // prior one -- no new prompt to surface, just B left over.
+    const result = await driveRetryLoop(
+      baseOptions({
+        maxRetries: 1,
+        onDenied: (denials) => ({ approve: [denials[0], denials[2]] }),
+      }),
+      async (_p, i) => {
+        if (i === 0) {
+          return attempt(i, 1, [
+            fileDenial('C:\\a.txt'),
+            fileDenial('C:\\b.txt'),
+            fileDenial('C:\\c.txt'),
+          ]);
+        }
+        return attempt(i, 1, [fileDenial('C:\\b.txt')]);
+      },
+    );
+    assert.strictEqual(result.stopReason, 'still-denied-same');
+  });
+
+  it('defaults maxRetries to 0 (single attempt, no retry)', async () => {
+    // Behavioral guard: changing the default back to 1 would
+    // silently auto-retry workloads that consumers expected to
+    // single-shot. The default is 0 by design (see file header).
+    let calls = 0;
+    let onDeniedFired = 0;
+    const result = await driveRetryLoop(
+      baseOptions({
+        // No maxRetries -> defaults to 0.
+        onDenied: () => {
+          onDeniedFired += 1;
+          return { approve: [] };
+        },
+      }),
+      async (_p, i) => {
+        calls += 1;
+        return attempt(i, 1, [fileDenial('C:\\foo')]);
+      },
+    );
+    assert.strictEqual(calls, 1, 'default must not retry');
+    assert.strictEqual(onDeniedFired, 0, 'onDenied must not fire when retry budget is 0');
+    assert.strictEqual(result.stopReason, 'retry-exhausted');
   });
 
   it('caps retries at maxRetries=0 (no retry budget)', async () => {
@@ -201,7 +274,7 @@ describe('driveRetryLoop', () => {
     assert.strictEqual(calls, 1, 'maxRetries=0 means a single attempt only');
   });
 
-  it('honors a custom maxRetries=2 (three attempts total)', async () => {
+  it('honors a custom maxRetries=2 (three attempts total, still-denied-different when each attempt trips a new path)', async () => {
     let calls = 0;
     const result = await driveRetryLoop(
       baseOptions({
@@ -215,7 +288,7 @@ describe('driveRetryLoop', () => {
       },
     );
     assert.strictEqual(calls, 3);
-    assert.strictEqual(result.stopReason, 'still-denied');
+    assert.strictEqual(result.stopReason, 'still-denied-different');
     assert.strictEqual(result.attempts.length, 3);
   });
 
@@ -254,6 +327,7 @@ describe('driveRetryLoop', () => {
     let captured: Parameters<NonNullable<SpawnSandboxWithRetryOptions['onDenied']>>[1] | undefined;
     await driveRetryLoop(
       baseOptions({
+        maxRetries: 1,
         onDenied: (_d, ctx) => {
           captured = ctx;
           return { cancel: true, approve: [] };
@@ -272,6 +346,7 @@ describe('driveRetryLoop', () => {
     let calls = 0;
     const result = await driveRetryLoop(
       baseOptions({
+        maxRetries: 1,
         onDenied: async (denials) => {
           await new Promise((r) => setTimeout(r, 5));
           calls += 1;

@@ -56,6 +56,57 @@ describe('isSystemCritical', () => {
     assert.ok(isSystemCritical('C:\\hiberfil.sys'));
   });
 
+  it('rejects per-volume system files on drives other than C:', () => {
+    // The pagefile/hiberfil/swapfile sit on whichever drive Windows
+    // chose, not always C:. Rule must be drive-letter-agnostic.
+    assert.ok(isSystemCritical('D:\\pagefile.sys'));
+    assert.ok(isSystemCritical('E:\\bootmgr'));
+  });
+
+  it('rejects extended Windows system directories', () => {
+    // Added by issue #7 follow-up: original list only covered
+    // System32/SysWOW64/WinSxS. These are also off-limits.
+    assert.ok(isSystemCritical('C:\\Windows\\Boot\\PCAT\\bootmgr'));
+    assert.ok(isSystemCritical('C:\\Windows\\Resources\\Themes\\aero.theme'));
+    assert.ok(isSystemCritical('C:\\Windows\\Fonts\\arial.ttf'));
+    assert.ok(isSystemCritical('C:\\Windows\\servicing\\Packages\\foo.cab'));
+    assert.ok(isSystemCritical('C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll'));
+  });
+
+  it('rejects more critical system files', () => {
+    for (const f of ['smss.exe', 'wininit.exe', 'services.exe', 'lsass.exe']) {
+      assert.ok(isSystemCritical(`C:\\Windows\\${f}`), `expected ${f} blocked`);
+    }
+  });
+
+  it('rejects per-volume Recycle Bin', () => {
+    assert.ok(isSystemCritical('C:\\$Recycle.Bin\\S-1-5-21-xyz\\$IFOOBAR.txt'));
+    assert.ok(isSystemCritical('D:\\$Recycle.Bin\\anything'));
+  });
+
+  it('rejects long-path (\\\\?\\) variants of System32', () => {
+    // Defense-in-depth: an approver who handed us
+    // `\\?\C:\Windows\System32\kernel32.dll` would otherwise
+    // bypass the `C:\Windows\System32\` rule.
+    assert.ok(isSystemCritical('\\\\?\\C:\\Windows\\System32\\kernel32.dll'));
+    assert.ok(isSystemCritical('\\\\?\\C:\\Windows\\WinSxS\\amd64_foo\\bar.dll'));
+  });
+
+  it('rejects the raw NT device namespace', () => {
+    // \Device\HarddiskVolume1\... bypasses drive-letter mapping.
+    // We refuse the whole namespace; legitimate consumers should
+    // normalise to drive-letter form before approving.
+    assert.ok(isSystemCritical('\\Device\\HarddiskVolume1\\Windows\\System32\\kernel32.dll'));
+    assert.ok(isSystemCritical('\\Device\\NamedPipe\\foo'));
+  });
+
+  it('rejects unstripped NT-DOS (\\??\\) System32 paths', () => {
+    // Belt and braces: the SDK reader strips \??\ before regen sees
+    // the path, but a caller that disabled stripping could still
+    // get here.
+    assert.ok(isSystemCritical('\\??\\C:\\Windows\\System32\\kernel32.dll'));
+  });
+
   it('accepts user-profile paths', () => {
     assert.ok(!isSystemCritical('C:\\Users\\Alice\\Documents\\report.txt'));
     assert.ok(!isSystemCritical('C:\\ProgramData\\MyApp\\config.json'));
@@ -241,6 +292,55 @@ describe('regenerateSandboxPolicy', () => {
       approvedDenials: [fileDenial('C:\\Users\\Jack\\new.txt')],
     });
     assert.strictEqual(JSON.stringify(base), baseSnapshot);
+  });
+
+  it('does not share array references with the base policy', () => {
+    // Issue #11: the previous implementation spread the filesystem
+    // object shallowly and shared references for fields it didn't
+    // overwrite (deniedPaths, network.allowedHosts, etc.). A
+    // downstream mutation of the result would silently corrupt the
+    // base policy. Guard against the regression.
+    const base: SandboxPolicy = {
+      version: '0.5.0-alpha',
+      filesystem: {
+        readonlyPaths: ['C:\\existing'],
+        deniedPaths: ['C:\\secret'],
+      },
+      network: {
+        allowOutbound: true,
+        allowedHosts: ['example.com'],
+      },
+    };
+    const result = regenerateSandboxPolicy({
+      basePolicy: base,
+      approvedDenials: [fileDenial('C:\\Users\\new\\file.txt')],
+    });
+    assert.notStrictEqual(result.policy, base, 'top-level object must be a new instance');
+    assert.notStrictEqual(
+      result.policy.filesystem,
+      base.filesystem,
+      'filesystem object must be a new instance',
+    );
+    assert.notStrictEqual(
+      result.policy.filesystem!.deniedPaths,
+      base.filesystem!.deniedPaths,
+      'deniedPaths array must be a new instance',
+    );
+    assert.notStrictEqual(
+      result.policy.network,
+      base.network,
+      'network object must be a new instance',
+    );
+    assert.notStrictEqual(
+      result.policy.network!.allowedHosts,
+      base.network!.allowedHosts,
+      'allowedHosts array must be a new instance',
+    );
+    // And mutating result fields must not bleed back into base.
+    result.policy.filesystem!.deniedPaths!.push('C:\\new-denied');
+    result.policy.network!.allowedHosts!.push('attacker.com');
+    assert.deepStrictEqual(base.filesystem!.deniedPaths, ['C:\\secret']);
+    assert.deepStrictEqual(base.network!.allowedHosts, ['example.com']);
   });
 
   it('rejects empty-path denials as invalid', () => {

@@ -93,10 +93,27 @@ impl CollectorHandle {
     /// session shuts down and ProcessTrace can return cleanly, then
     /// `CloseTrace` to release our consumer handle, then join the
     /// worker thread. Finally we drain the shared event buffer.
+    ///
+    /// The returned `truncated` flag is the OR of three signals:
+    ///   1. The in-process callback buffer cap was hit (workload
+    ///      generated more denials than `MAX_BUFFERED_DENIALS`).
+    ///   2. The ETW kernel buffer lost events between providers and
+    ///      our consumer (`EVENT_TRACE_PROPERTIES.EventsLost`).
+    ///   3. The kernel dropped whole real-time buffers under
+    ///      pressure (`LogBuffersLost` / `RealTimeBuffersLost`).
+    ///
+    /// SDK consumers see the truncation flag on the summary line
+    /// and treat it as "the denial list may be incomplete." Without
+    /// the kernel-side checks, a workload that exploded faster than
+    /// our consumer could drain the kernel buffer would silently
+    /// report a partial list with `truncated: false` -- worse than
+    /// useless because the consumer would treat the partial list
+    /// as the full story.
     pub fn stop_and_drain(mut self) -> (Vec<DenialEvent>, bool) {
         // Stop the controller-side session. This triggers RUNDOWN +
-        // makes ProcessTrace return.
-        stop_session_by_name(&self.session_name);
+        // makes ProcessTrace return. The returned stats tell us how
+        // many events the kernel dropped before we saw them.
+        let kernel_stats = stop_session_by_name(&self.session_name);
 
         // Close the consumer side. Safe to call even if ProcessTrace
         // already returned; idempotent in practice.
@@ -109,8 +126,24 @@ impl CollectorHandle {
         }
 
         // Now no more callbacks can fire — context is exclusive to us.
-        let truncated = self.context.truncated.load(Ordering::SeqCst);
+        let callback_truncated = self.context.truncated.load(Ordering::SeqCst);
         let events = std::mem::take(&mut *self.context.events.lock().unwrap());
+
+        let kernel_lost_any =
+            kernel_stats.events_lost > 0 || kernel_stats.buffers_lost > 0;
+        let truncated = callback_truncated || kernel_lost_any;
+
+        if kernel_lost_any {
+            eprintln!(
+                "[denial_capture] ETW kernel buffer loss: events_lost={}, buffers_lost={} \
+                 (session={}, callback_truncated={}); SDK summary will report truncated=true",
+                kernel_stats.events_lost,
+                kernel_stats.buffers_lost,
+                self.session_name,
+                callback_truncated,
+            );
+        }
+
         (events, truncated)
     }
 }
@@ -119,8 +152,10 @@ impl Drop for CollectorHandle {
     fn drop(&mut self) {
         // If stop_and_drain wasn't called (panic path, etc.) we still
         // need to tear down the ETW session and reclaim the worker.
+        // Lifetime stats are discarded here -- the caller bailed
+        // out, there's no longer anyone to report truncation to.
         if self.worker.is_some() {
-            stop_session_by_name(&self.session_name);
+            let _ = stop_session_by_name(&self.session_name);
             unsafe {
                 let _ = CloseTrace(self.trace_handle);
             }
@@ -131,9 +166,30 @@ impl Drop for CollectorHandle {
     }
 }
 
-/// Issues `ControlTraceW(STOP)` for a session by name. Best-effort;
-/// errors are logged and swallowed.
-fn stop_session_by_name(name: &str) {
+/// Lifetime stats reported by `ControlTraceW(STOP)`. We track the
+/// two fields that indicate the kernel dropped denial events before
+/// we saw them — surfaced through `CollectorHandle::stop_and_drain`'s
+/// `truncated` flag so the SDK consumer can warn the user "your
+/// list of denials is incomplete."
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct SessionStopStats {
+    /// `EVENT_TRACE_PROPERTIES.EventsLost`: events the provider
+    /// generated but couldn't deliver to any consumer (free-buffer
+    /// pool exhausted, etc.).
+    pub events_lost: u32,
+    /// `EVENT_TRACE_PROPERTIES.LogBuffersLost +
+    ///  RealTimeBuffersLost`: whole buffers the kernel had to drop
+    /// because our consumer fell behind under load. Summed because
+    /// either form represents data we can never see.
+    pub buffers_lost: u32,
+}
+
+/// Issues `ControlTraceW(STOP)` for a session by name and returns
+/// the kernel-side loss counters from the populated properties
+/// block. Best-effort; errors are logged and the stats default to
+/// zero (the conservative answer: "no known loss" rather than
+/// "loss happened" since we couldn't confirm either way).
+fn stop_session_by_name(name: &str) -> SessionStopStats {
     let mut name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
 
     // Minimal stop-only properties block. The control API requires a
@@ -165,6 +221,20 @@ fn stop_session_by_name(name: &str) {
             "[denial_capture] ControlTraceW(STOP) for {name} returned {:#X}",
             status.0
         );
+        return SessionStopStats::default();
+    }
+
+    // ControlTraceW(STOP) populates EVENT_TRACE_PROPERTIES with the
+    // session's lifetime stats. `LogBuffersLost` covers file-mode
+    // sessions; `RealTimeBuffersLost` covers real-time sessions
+    // (which we use). Reading both is harmless and future-proofs
+    // against a future code change that flips the session mode.
+    SessionStopStats {
+        events_lost: props.base.EventsLost,
+        buffers_lost: props
+            .base
+            .LogBuffersLost
+            .saturating_add(props.base.RealTimeBuffersLost),
     }
 }
 

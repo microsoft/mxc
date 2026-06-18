@@ -115,8 +115,24 @@ export interface SpawnSandboxWithRetryOptions {
   containerName?: string;
 
   /**
-   * Maximum number of retries. Defaults to 1 (so up to 2 attempts
-   * total). Hard-capped — see file header for the rationale.
+   * Maximum number of retries beyond the first attempt. Defaults to
+   * **0** — i.e. a single attempt, no retry. Set to `1` to enable
+   * one retry (two attempts total), or higher for more.
+   *
+   * The default was changed from `1` to `0` after experience showed
+   * that consumers usually want to drive the prompt-and-retry loop
+   * themselves (e.g. to persist approvals across runs, dedupe
+   * prompts the user has already seen, or step through approvals
+   * one at a time). When the wrapper retries automatically, those
+   * UX behaviors have to be reimplemented inside `onDenied`, which
+   * is awkward. Defaulting to 0 makes the simple
+   * "spawn → collect → return to caller" path the path of least
+   * resistance; consumers that want auto-retry opt in explicitly.
+   *
+   * Setting `maxRetries` higher than 1 is allowed but discouraged:
+   * "the workload keeps tripping new denials" is usually a sign of
+   * a noisy workload that the application should surface to the
+   * user rather than approve through.
    */
   maxRetries?: number;
 }
@@ -151,16 +167,21 @@ export interface SpawnSandboxWithRetryResult {
   attempts: RetryAttemptResult[];
   /** Reason the retry loop stopped. */
   stopReason:
-    | 'success'             // workload exited 0 (with or without denials)
-    | 'no-denials-no-retry' // workload failed but produced no actionable denials
-    | 'user-cancelled'      // onDenied returned cancel=true
-    | 'no-approvals'        // onDenied returned an empty approve list
-    | 'still-denied'        // retried, workload still produced denials
-    | 'retry-exhausted'     // hit maxRetries
-    | 'capture-inactive';   // captureDenials requested but couldn't be activated
-                            // (shim missing/unreachable on host) -- nothing the
-                            // retry loop could do, application should surface
-                            // the host-prep step to the user
+    | 'success'                // workload exited 0 (with or without denials)
+    | 'no-denials-no-retry'    // workload failed but produced no actionable denials
+    | 'user-cancelled'         // onDenied returned cancel=true
+    | 'no-approvals'           // onDenied returned an empty approve list
+    | 'still-denied-same'      // retried, same denials tripped again -- approvals
+                               // didn't take effect (regen no-op'd, or workload
+                               // re-tried the same path before policy reload)
+    | 'still-denied-different' // retried, workload made progress past the
+                               // approved denials but tripped on new ones --
+                               // a re-prompt + another retry could continue
+    | 'retry-exhausted'        // hit maxRetries (no retry budget left)
+    | 'capture-inactive';      // captureDenials requested but couldn't be
+                               // activated (shim missing/unreachable on host)
+                               // -- nothing the retry loop could do, app
+                               // should surface the host-prep step to the user
   /**
    * Net policy used for the final attempt. Equal to the input
    * policy when no retry happened, otherwise the regenerated one.
@@ -213,7 +234,9 @@ export async function driveRetryLoop(
   options: SpawnSandboxWithRetryOptions,
   runner: (policy: SandboxPolicy, attemptIndex: number) => Promise<RetryAttemptResult>,
 ): Promise<SpawnSandboxWithRetryResult> {
-  const maxRetries = options.maxRetries ?? 1;
+  // Default to **zero** retries (a single attempt). See
+  // SpawnSandboxWithRetryOptions.maxRetries doc for the rationale.
+  const maxRetries = options.maxRetries ?? 0;
   if (maxRetries < 0) {
     throw new TypeError('maxRetries must be >= 0');
   }
@@ -262,16 +285,33 @@ export async function driveRetryLoop(
       };
     }
 
-    // Out of retry budget. If we made any retry attempts, label the
-    // outcome as "still-denied" to make the failure mode obvious;
-    // otherwise (maxRetries === 0) call it "retry-exhausted".
+    // Out of retry budget. Differentiate why we're stopping:
+    //
+    //   - maxRetries === 0 (the default): no retry was budgeted
+    //     in the first place -> `retry-exhausted`. The wrapper is
+    //     handing the denials to the application; the app drives
+    //     the next loop iteration itself.
+    //
+    //   - attempt > 0 (we ran out *after* retrying): differentiate
+    //     "the retry tripped the same denials" (regen didn't
+    //     help -- usually a non-actionable denial like a registry
+    //     key the user can't grant) from "the retry tripped new
+    //     denials" (real progress, the workload could in principle
+    //     finish after another approval round).
     if (attempt === maxRetries) {
-      return {
-        attempts,
-        stopReason: attempt > 0 ? 'still-denied' : 'retry-exhausted',
-        finalPolicy: currentPolicy,
-        regen,
-      };
+      if (attempt === 0) {
+        return {
+          attempts,
+          stopReason: 'retry-exhausted',
+          finalPolicy: currentPolicy,
+          regen,
+        };
+      }
+      const prior = attempts[attempt - 1];
+      const stopReason = denialsAreSubsetOfPrior(result.denials, prior.denials)
+        ? 'still-denied-same'
+        : 'still-denied-different';
+      return { attempts, stopReason, finalPolicy: currentPolicy, regen };
     }
 
     // Ask the caller what to do.
@@ -303,10 +343,31 @@ export async function driveRetryLoop(
   /* c8 ignore next 6 */
   return {
     attempts,
-    stopReason: 'still-denied',
+    stopReason: 'still-denied-same',
     finalPolicy: currentPolicy,
     regen,
   };
+}
+
+/**
+ * True when every denial in `current` was also in `prior` (compared
+ * by `(path, accessType)`). Used by {@link driveRetryLoop} to
+ * decide between `still-denied-same` (no progress: retry tripped
+ * a subset of what we'd already seen) and `still-denied-different`
+ * (made progress: at least one new denial means the workload got
+ * past the approved ones and is now reaching for something else).
+ *
+ * Empty `current` returns true vacuously, but the call sites never
+ * hit that branch -- the `denials.length === 0` check upstream
+ * returns `no-denials-no-retry` first.
+ */
+function denialsAreSubsetOfPrior(
+  current: readonly DeniedResource[],
+  prior: readonly DeniedResource[],
+): boolean {
+  if (current.length === 0) return true;
+  const priorKeys = new Set(prior.map((d) => `${d.path}\u0000${d.accessType}`));
+  return current.every((d) => priorKeys.has(`${d.path}\u0000${d.accessType}`));
 }
 
 /**

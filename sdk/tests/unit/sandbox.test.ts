@@ -1141,3 +1141,32 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     });
   });
 });
+
+describe('spawnSandboxFromConfig captureDenials + PTY guard', () => {
+  it('throws when captureDenials is on and usePty defaults to true', () => {
+    const config: ContainerConfig = {
+      version: '0.5.0-alpha',
+      containment: 'processcontainer',
+      captureDenials: true,
+      process: { commandLine: 'cmd /c echo hi' },
+    };
+    assert.throws(
+      // No usePty in options -> defaults to true (PTY mode) -> must throw.
+      () => spawnSandboxFromConfig(config, {}),
+      /captureDenials requires usePty: false/,
+    );
+  });
+
+  it('throws when captureDenials is on and usePty is explicitly true', () => {
+    const config: ContainerConfig = {
+      version: '0.5.0-alpha',
+      containment: 'processcontainer',
+      captureDenials: true,
+      process: { commandLine: 'cmd /c echo hi' },
+    };
+    assert.throws(
+      () => spawnSandboxFromConfig(config, { usePty: true } as never),
+      /captureDenials requires usePty: false/,
+    );
+  });
+});

@@ -43,14 +43,31 @@ import { stripNtPrefix } from './denial-stream.js';
  *   clicked approve. Defense-in-depth.
  */
 const SYSTEM_CRITICAL_PATTERNS: readonly RegExp[] = [
-  // Windows registry hives.
+  // Windows registry hives (NT object-manager namespace).
   /^\\REGISTRY\\/i,
-  // Windows system directories (System32, SysWOW64, WinSxS).
-  /^C:\\Windows\\(?:System32|SysWOW64|WinSxS)\\/i,
+  // Windows system directories.
+  /^C:\\Windows\\(?:System32|SysWOW64|WinSxS|Boot|Resources|Fonts|servicing|Microsoft\.NET)\\/i,
   // Critical system files at the root of C:\Windows.
-  /^C:\\Windows\\(?:ntoskrnl|hal|win32k|csrss)\.exe$/i,
-  // Boot files.
-  /^C:\\(?:bootmgr|BOOTNXT|pagefile\.sys|hiberfil\.sys|swapfile\.sys)$/i,
+  /^C:\\Windows\\(?:ntoskrnl|hal|win32k|csrss|smss|wininit|services|lsass)\.exe$/i,
+  // Boot files + page/swap/hibernate at drive root.
+  /^[A-Z]:\\(?:bootmgr|BOOTNXT|pagefile\.sys|hiberfil\.sys|swapfile\.sys)$/i,
+  // Recycle bin (per-volume).
+  /^[A-Z]:\\\$Recycle\.Bin\\/i,
+  // Long-path-prefixed forms (`\\?\C:\Windows\System32\…`). Without
+  // this, an approver could bypass the System32 rule just by
+  // submitting the long-path form. Match both `\\?\C:\...` and
+  // `\\?\UNC\server\share\...`.
+  /^\\\\\?\\C:\\Windows\\(?:System32|SysWOW64|WinSxS|Boot|Resources|Fonts|servicing|Microsoft\.NET)\\/i,
+  // Raw NT device namespace (`\Device\HarddiskVolume1\…`). Approving
+  // these would bypass the C:\ → \Device\HarddiskVolumeN mapping
+  // check. We refuse the whole namespace; legitimate consumers
+  // should normalise to drive-letter form before approving.
+  /^\\Device\\/i,
+  // NT-DOS-device namespace (`\??\C:\Windows\System32\…`). The SDK
+  // reader strips this prefix by default before regen sees the
+  // path, but a caller that disabled stripping could still get
+  // here -- belt and braces.
+  /^\\\?\?\\C:\\Windows\\(?:System32|SysWOW64|WinSxS|Boot|Resources|Fonts|servicing|Microsoft\.NET)\\/i,
 ];
 
 /**
@@ -130,20 +147,32 @@ export interface RegenResult {
 export function regenerateSandboxPolicy(input: RegenInput): RegenResult {
   const { basePolicy, approvedDenials, upgradeWritesToReadwrite = false } = input;
 
+  // Deep-clone the base policy up front so the returned policy
+  // never shares array/object references with the caller's input.
+  // Without this, the result's `filesystem.deniedPaths`, `network`,
+  // `ui`, etc. would alias the base policy's, and a downstream
+  // mutation of the result (e.g. `result.policy.network.allowedHosts
+  // .push(...)`) would silently mutate the base.
+  //
+  // structuredClone is built-in in Node >=18 (the SDK's minimum
+  // engine), handles all the JSON-shape SandboxPolicy carries, and
+  // is faster than the JSON parse/stringify dance.
+  const cloned: SandboxPolicy = structuredClone(basePolicy);
+
   // Snapshot existing grants for both idempotence checks and as the
   // starting point for the new arrays. We deduplicate using sets,
   // keyed on the case-insensitive normalised path so the same path
   // approved twice (or already in the base policy) doesn't appear
   // twice in the result.
   const existingReadonly = new Set(
-    (basePolicy.filesystem?.readonlyPaths ?? []).map(normaliseKey),
+    (cloned.filesystem?.readonlyPaths ?? []).map(normaliseKey),
   );
   const existingReadwrite = new Set(
-    (basePolicy.filesystem?.readwritePaths ?? []).map(normaliseKey),
+    (cloned.filesystem?.readwritePaths ?? []).map(normaliseKey),
   );
 
-  const newReadonly: string[] = [...(basePolicy.filesystem?.readonlyPaths ?? [])];
-  const newReadwrite: string[] = [...(basePolicy.filesystem?.readwritePaths ?? [])];
+  const newReadonly: string[] = [...(cloned.filesystem?.readonlyPaths ?? [])];
+  const newReadwrite: string[] = [...(cloned.filesystem?.readwritePaths ?? [])];
 
   const added: { kind: 'readonly' | 'readwrite'; path: string }[] = [];
   const skipped: RegenResult['skipped'][number][] = [];
@@ -204,9 +233,9 @@ export function regenerateSandboxPolicy(input: RegenInput): RegenResult {
   }
 
   const policy: SandboxPolicy = {
-    ...basePolicy,
+    ...cloned,
     filesystem: {
-      ...(basePolicy.filesystem ?? {}),
+      ...(cloned.filesystem ?? {}),
       readonlyPaths: newReadonly,
       readwritePaths: newReadwrite,
     },

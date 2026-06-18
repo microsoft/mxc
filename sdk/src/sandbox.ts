@@ -619,6 +619,21 @@ export function spawnSandboxFromConfig(
   workingDirectory?: string,
   env?: { [key: string]: string | undefined }
 ): pty.IPty | ChildProcess {
+  // captureDenials and PTY mode are mutually exclusive: the
+  // captureDenials NDJSON protocol lives on stderr, and PTY mode
+  // merges stdout+stderr into a single channel where 0x1E sentinel
+  // bytes would interleave with workload output and corrupt the
+  // demuxer. Fail loudly so consumers fix the call site instead of
+  // wondering why their `onDenial` callback never fires.
+  if (config.captureDenials && options.usePty !== false) {
+    throw new TypeError(
+      'spawnSandboxFromConfig: captureDenials requires usePty: false. ' +
+        'PTY mode merges stdout+stderr and corrupts the NDJSON denial stream. ' +
+        'Either pass `{ usePty: false }` here, or use the spawnSandboxWithRetry ' +
+        'wrapper which handles this for you.',
+    );
+  }
+
   if (options.usePty === false) {
     // Inject env vars into config.process.env so they are passed explicitly to
     // the sandboxed child via the JSON config (not via process inheritance).
