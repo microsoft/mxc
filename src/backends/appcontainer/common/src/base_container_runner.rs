@@ -836,6 +836,48 @@ impl ScriptRunner for BaseContainerRunner {
         let ac_sid_str = derive_sid_string_from_name(&identity);
         let _ = writeln!(logger, "AppContainerSID: {ac_sid_str}");
 
+        // Optional pre-launch dump for PTY/sandbox diagnostics. Gated by
+        // `MXC_LAUNCH_VERBOSE=1` so it's a no-op for normal runs. Used to
+        // diagnose `Experimental_CreateProcessInSandbox` failures (e.g.
+        // the PTY + captureDenials error-203 investigation). Output goes
+        // to the same logger as the rest of the runner; consumers see it
+        // on stderr / in the diagnostic log file.
+        if std::env::var_os("MXC_LAUNCH_VERBOSE").is_some() {
+            let _ = writeln!(
+                logger,
+                "[launch-verbose] capture_denials={} creation_flags=0x{:08X} env_block_present={} env_block_u16_len={}",
+                request.capture_denials,
+                creation_flags,
+                env_block.is_some(),
+                env_block.as_ref().map(|b| b.len()).unwrap_or(0),
+            );
+            let _ = writeln!(
+                logger,
+                "[launch-verbose] command_line={:?}",
+                request.script_code,
+            );
+            let _ = writeln!(
+                logger,
+                "[launch-verbose] working_directory={:?}",
+                request.working_directory,
+            );
+            let _ = writeln!(
+                logger,
+                "[launch-verbose] request.env (count={}):",
+                request.env.len(),
+            );
+            for kv in &request.env {
+                let _ = writeln!(logger, "[launch-verbose]   {kv}");
+            }
+            let _ = writeln!(
+                logger,
+                "[launch-verbose] wxc-exec own env (PTY-vs-non-PTY diff target):",
+            );
+            for (k, v) in std::env::vars() {
+                let _ = writeln!(logger, "[launch-verbose]   own:{k}={v}");
+            }
+        }
+
         // Pre-launch check: abort if policy paths are on ReFS (Dev Drive) volumes
         // where BFS cannot enforce filesystem policy.
         if let Some(diag) = crate::launch_diagnostics::check_refs_volumes(
